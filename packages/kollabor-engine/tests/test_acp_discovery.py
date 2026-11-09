@@ -600,7 +600,7 @@ async def test_choices_route_returns_discovery_status_and_uses_only_fresh_option
     received = {}
 
     class FakeManager:
-        def __init__(self, _profile_manager, *, config):
+        def __init__(self, _profile_manager, *, config=None):
             self.config = config
 
         def provider_profiles(self):
@@ -618,7 +618,7 @@ async def test_choices_route_returns_discovery_status_and_uses_only_fresh_option
 
     monkeypatch.setattr(profiles_route, "_get_profile_manager", lambda: object())
     monkeypatch.setattr(loadout_manager_module, "LoadoutManager", FakeManager)
-    # the route reads saved loadouts from the config files, not a polling service (#966)
+    # the route reads no config file; this stub keeps a stray read off the developer's config (#966)
     empty_config = SimpleNamespace(get=lambda key, default=None: default)
     monkeypatch.setattr(
         profiles_route, "_loadout_config", lambda workspace="": empty_config

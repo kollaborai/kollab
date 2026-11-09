@@ -317,7 +317,8 @@ async def list_choices():
     in a short-lived, isolated session when a harness has no fresh options."""
     from kollabor_ai.loadout_manager import LoadoutManager
 
-    manager = LoadoutManager(_get_profile_manager(), config=_loadout_config())
+    # no config handle: the picker lists no saved loadouts, so the route reads no config file (#966)
+    manager = LoadoutManager(_get_profile_manager())
     profiles = manager.provider_profiles()
 
     async def refresh_catalogs() -> None:
