@@ -165,6 +165,35 @@ test("a Retry pressed while another harness is still loading rides on the next p
   assert.deepEqual(calls, [undefined, true]);
 });
 
+test("a Retry pressed during a final request still runs after that request settles", async () => {
+  let release!: (answer: Answer) => void;
+  const calls: Array<boolean | undefined> = [];
+  const api = {
+    listModelChoices: vi.fn((retry?: boolean) => {
+      calls.push(retry);
+      if (retry) return Promise.resolve({ choices: [row("p", "fresh")], discovery: { p: ready } });
+      return new Promise<Answer>((resolve) => { release = resolve; });
+    }),
+  } as unknown as EngineApi;
+
+  const running = loadModelChoices(api);
+  const retry = loadModelChoices(api, { retry: true });
+  release({ choices: [row("p", "old")], discovery: { p: { status: "partial" } } });
+  await Promise.all([running, retry]);
+
+  assert.deepEqual(calls, [undefined, true]);
+  assert.deepEqual(getModelChoices(api).choices, [row("p", "fresh")]);
+});
+
+test("profile warm key follows the engine's opaque launch fingerprint", async () => {
+  const { profileChoicesKey } = await import("../src/components/shell/model-choices.ts");
+  const base = [{ name: "p", provider: "acp", choices_fingerprint: "first" }];
+  assert.notEqual(
+    profileChoicesKey(base),
+    profileChoicesKey([{ ...base[0], choices_fingerprint: "edited-launch" }]),
+  );
+});
+
 test("an engine restarted with the page open does not blank a harness the page already lists", async () => {
   const { api } = fakeApi(
     { choices: [row("p", "a"), row("p", "b"), row("p", "c"), row("n", "m")], discovery: { p: ready, n: ready } },

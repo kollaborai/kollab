@@ -687,6 +687,29 @@ async def warm(monkeypatch):
         task.cancel()
 
 
+@pytest.mark.asyncio
+async def test_known_outcomes_marks_a_retrying_incomplete_profile_as_loading(warm):
+    profile = FakeProfile("retrying")
+    fingerprint = acp_discovery.launch_fingerprint(profile)
+    cached = acp_discovery._outcome(
+        "partial", models=["alpha"], efforts_by_model={"alpha": []},
+        unknown_effort_models=["alpha"], message="retry this", more=False,
+    )
+    acp_discovery._warm[profile.name] = acp_discovery._Warm(
+        fingerprint=fingerprint, outcome=cached, tried=warm.value, failures=1,
+    )
+    blocker = asyncio.Event()
+    task = asyncio.create_task(blocker.wait())
+    acp_discovery._warm_tasks[profile.name] = acp_discovery._WarmTask(task, fingerprint)
+
+    outcome = acp_discovery.known_outcomes([profile])[profile.name]
+
+    assert outcome.options == cached.options
+    assert outcome.more is True
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
 def _harness(monkeypatch, models, efforts=None):
     """Patch ACPRunner with a scripted harness; return its dials and counters."""
     h = SimpleNamespace(
