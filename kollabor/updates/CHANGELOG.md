@@ -192,10 +192,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PhoneLink carries microphone input and spoken replies through the phone while the computer's LiveKit signaling and media stay on loopback (#440).
 - The Web UI Agents sidebar shows a small type glyph after local-session and offline names (coder `▸`, research `◈`, default `●`); rows without type metadata and all remote rows stay unmarked (#655).
 - Hub messages addressed to the operator are delivered through ntfy as well as the terminal, so operator pings reach you even when no session is watching (#626).
-- Model fallback: `/llm fallback <loadout or profile>` picks what an agent switches to when its
-  model can't serve a turn (a usage limit, a quota, a rate limit after the retries, an expired
-  login). The agent says so in the chat, switches once and runs the turn again; `/llm fallback off`
-  turns it off. In the web UI it is Settings → Loadouts → Fallback Model (#548).
 - Team launches now support member selection or exclusions across the CLI,
   TUI and Web UI. The launch sheet sets the workspace, profile, lead and
   mission, validates the effective reporting tree, and saves choices per team
