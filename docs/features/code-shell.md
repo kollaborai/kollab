@@ -81,7 +81,7 @@ A refusal names the setting that caused it. Examples:
 
 ## The terminal's hidden variables
 
-A new shell gets only the environment the filters allow. The Terminal view's header shows "env: N hidden". Hover it to
+A new shell gets only the environment the filters allow. The Terminal view's header shows "Env: N Hidden". Hover it to
 see the names, one line per reason: "Secret names", "Kollab names" or "Denied by setting". Only names are shown, never
 values. The same list comes from `GET /sessions/{id}/code/terminal/env`.
 

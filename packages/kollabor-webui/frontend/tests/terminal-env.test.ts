@@ -19,7 +19,7 @@ const report: TerminalEnvReport = {
 };
 
 test("the header label counts the hidden variables and is empty when none are hidden", () => {
-  expect(envHiddenLabel(report)).toBe("env: 6 hidden");
+  expect(envHiddenLabel(report)).toBe("Env: 6 Hidden");
   expect(envHiddenLabel({ count: 0, hidden: { secret: [], kollab: [], denied: [] } })).toBe("");
   expect(envHiddenLabel(null)).toBe("");
 });

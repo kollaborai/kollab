@@ -21,10 +21,10 @@ const HIDDEN_REASONS: ReadonlyArray<readonly [keyof TerminalEnvReport["hidden"],
   ["denied", "Denied by setting"],
 ];
 
-/** "env: 5 hidden" for the header; "" when nothing is hidden or the report did not load. */
+/** "Env: 5 Hidden" for the header; "" when nothing is hidden or the report did not load. */
 export function envHiddenLabel(report: TerminalEnvReport | null): string {
   if (!report || report.count <= 0) return "";
-  return `env: ${report.count} hidden`;
+  return `Env: ${report.count} Hidden`;
 }
 
 /** One line per reason that hid something, then where to change it. "" when nothing is hidden. */

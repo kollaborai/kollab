@@ -48,7 +48,7 @@ Names are looked up exactly; the env filters compare case-insensitively on the n
 
 ## What the UI must show
 
-- Terminal header: how many variables were hidden ("env: 5 hidden") with the names on hover, from the daemon op
+- Terminal header: how many variables were hidden ("Env: 5 Hidden") with the names on hover, from the daemon op
   `terminal.env_report` (names only, never values), plus the shell name and the machine (`device:folder`).
 - A refusal says which setting caused it ("Read only is on for this agent. Setting: kollabor.code.read_only").
 - A daemon older than this feature (`RpcMethodNotFound` -> 502): a plain notice, "This agent runs older code. Restart it

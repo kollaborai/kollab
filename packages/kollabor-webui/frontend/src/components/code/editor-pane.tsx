@@ -427,7 +427,7 @@ export function EditorPane({ paneId, rootPath }: EditorPaneProps) {
           </div>
         )}
         {!saving && saveError && (
-          <div className={`absolute top-2 z-10 flex items-center gap-2 font-mono text-[10px] text-destructive ${statusRight}`}>
+          <div className={`absolute top-2 z-10 flex items-center gap-3 font-mono text-[10px] text-destructive ${statusRight}`}>
             <button
               type="button"
               title={saveError}
@@ -440,7 +440,7 @@ export function EditorPane({ paneId, rootPath }: EditorPaneProps) {
               ✕ {saveStale ? "Changed on disk" : saveError.length > 40 ? saveError.slice(0, 40) + "…" : saveError}
             </button>
             {saveStale && (
-              <button type="button" onClick={() => void handleSave(true)} className="cursor-pointer underline">
+              <button type="button" onClick={() => void handleSave(true)} className="cursor-pointer text-foreground underline">
                 Overwrite
               </button>
             )}
