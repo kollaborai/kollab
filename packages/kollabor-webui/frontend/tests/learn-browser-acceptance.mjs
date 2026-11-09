@@ -117,6 +117,16 @@ export function makeFixtures(options = {}) {
   let remoteSessionOpened = false;
   // A number: that many profile switches fail, then they work. true: every one fails.
   let pickFailuresLeft = options.pickFails === true ? Infinity : (options.pickFails ?? 0);
+  // Once held, profile switches wait until released, so a test can act while one is in flight.
+  let pickHold = null;
+  const holdPicks = () => {
+    let release;
+    pickHold = { promise: new Promise((resolve) => { release = resolve; }), release };
+  };
+  const releasePicks = () => {
+    pickHold?.release();
+    pickHold = null;
+  };
   const session = () => {
     const sessions = createdSession ? [createdSession] : initialSessions;
     return {
@@ -193,6 +203,7 @@ export function makeFixtures(options = {}) {
       return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
     }
     if (method === "POST" && endpoint.endsWith("/profile")) {
+      if (pickHold) await pickHold.promise;
       if (pickFailuresLeft > 0) {
         pickFailuresLeft -= 1;
         return json(route, { detail: "The agent could not switch models." }, 502);
@@ -227,6 +238,8 @@ export function makeFixtures(options = {}) {
     requests,
     respond,
     session,
+    holdPicks,
+    releasePicks,
   };
 }
 
@@ -505,6 +518,62 @@ async function main() {
     await updateNotice.getByRole("button", { name: "Dismiss", exact: true }).click();
     await updateNotice.waitFor({ state: "hidden", timeout: 5_000 });
     await updating.context.close();
+
+    // A Try Again still in flight when its notice is dismissed must not bring the notice back when it fails
+    // (the clean-room review of #959).
+    const heldRetry = makeFixtures({ pickFails: true });
+    const heldView = await openPage(browser, baseUrl, heldRetry);
+    await heldView.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await heldView.page.getByTestId("new-session-options").click();
+    await heldView.page.locator("#new-session-model").click();
+    await heldView.page.getByRole("group", { name: "review", exact: true })
+      .getByRole("option", { name: /claude-haiku/ }).click();
+    await heldView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
+    const heldNotice = heldView.page.getByRole("alert").filter({ hasText: "Couldn't switch to claude-haiku" });
+    await heldNotice.waitFor({ state: "visible", timeout: 15_000 });
+    heldRetry.holdPicks();
+    await heldNotice.getByRole("button", { name: "Try Again", exact: true }).click();
+    await heldNotice.getByRole("button", { name: "Trying…", exact: true }).waitFor({ state: "visible", timeout: 5_000 });
+    await heldNotice.getByRole("button", { name: "Dismiss", exact: true }).click();
+    await heldNotice.waitFor({ state: "hidden", timeout: 5_000 });
+    // The held switch now fails. The page reloads the sessions right after it handles that failure.
+    const heldReload = heldView.page.waitForRequest(
+      (request) => request.method() === "GET" && new URL(request.url()).pathname.endsWith("/sessions"),
+    );
+    heldRetry.releasePicks();
+    await heldReload;
+    await heldView.page.waitForTimeout(300);
+    assert.equal(
+      await heldView.page.getByRole("alert").filter({ hasText: "Couldn't switch to" }).count(),
+      0,
+      "a dismissed notice came back when its retry failed",
+    );
+    await heldView.context.close();
+
+    // A model change made by hand that fails leaves the chat on the model it runs, so the notice for the failed
+    // New Session pick stays: it and Try Again are the way back to that pick (the clean-room review of #959).
+    const manualChange = makeFixtures({ pickFails: true });
+    const manualView = await openPage(browser, baseUrl, manualChange);
+    await manualView.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await manualView.page.getByTestId("new-session-options").click();
+    await manualView.page.locator("#new-session-model").click();
+    await manualView.page.getByRole("group", { name: "review", exact: true })
+      .getByRole("option", { name: /claude-haiku/ }).click();
+    await manualView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
+    const manualNotice = manualView.page.getByRole("alert").filter({ hasText: "Couldn't switch to claude-haiku" });
+    await manualNotice.waitFor({ state: "visible", timeout: 15_000 });
+    const manualPanel = manualView.page.getByRole("complementary", { name: "Session Controls", exact: true });
+    await manualPanel.getByRole("button", { name: "Model", exact: true }).click();
+    const manualAnswer = manualView.page.waitForResponse(
+      (response) => response.request().method() === "POST" && new URL(response.url()).pathname.endsWith("/profile"),
+    );
+    await manualView.page.getByRole("group", { name: "default", exact: true })
+      .getByRole("option", { name: /gpt-6-luna/ }).click();
+    assert.equal((await manualAnswer).status(), 502, "the model change made by hand was meant to fail");
+    await manualView.page.waitForTimeout(400);
+    await manualNotice.waitFor({ state: "visible", timeout: 5_000 });
+    await manualNotice.getByRole("button", { name: "Try Again", exact: true }).waitFor({ state: "visible", timeout: 5_000 });
+    await manualView.context.close();
 
     if (process.env.LEARN_CAPTURE_SCREENSHOTS !== "0") {
       const captures = [
