@@ -665,3 +665,36 @@ async def test_the_same_daemon_image_replaying_after_a_reattach_is_still_fenced(
     replay = [_done("a", 1), _done("a", 2), _done("b", 3)]
     seen = await _events_across_images([("image-one", first), ("image-one", replay)], 3)
     assert seen == [("a", 1), ("a", 2), ("b", 3)]
+
+
+@pytest.mark.asyncio
+async def test_a_restart_announcement_is_for_terminal_windows_only():
+    # The daemon tells its attached windows a restart is coming (#968) so a terminal
+    # window waits and attaches again. The engine reattaches by itself and its chats
+    # say it their own way: the web UI never receives the announcement.
+    announcement = {"type": "daemon_restarting", "identity": "citrine", "seq": 1}
+    after = {"type": "tool_start", "request_id": "r1", "seq": 2}
+
+    async def daemon(reader, writer):
+        await reader.readline()
+        writer.write(b'{"type": "attach_ack"}\n')
+        for event in (announcement, after):
+            writer.write((json.dumps(event) + "\n").encode())
+        await writer.drain()
+        await reader.read()
+
+    path = os.path.join(tempfile.mkdtemp(dir="/tmp"), "citrine.sock")
+    server = await asyncio.start_unix_server(daemon, path)
+    handle = DaemonHandle("s8", "citrine", launcher=None)
+    handle.pid = os.getpid()
+    queue = handle.subscribe()
+    try:
+        await handle.connect(path)
+        seen = await asyncio.wait_for(queue.get(), timeout=5)
+        assert seen["type"] == "tool_start"  # the announcement was dropped at the boundary
+        await asyncio.sleep(0.05)
+        assert queue.empty()
+    finally:
+        handle._closed = True
+        handle._read_task.cancel()
+        server.close()
