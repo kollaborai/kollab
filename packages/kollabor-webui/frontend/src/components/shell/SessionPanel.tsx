@@ -61,6 +61,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { CliBadge } from "@/components/shell/CliBadge";
+import { TodoCard } from "@/components/shell/TodoCard";
 import { SIDEBAR_BREAKPOINT, useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { cliHarness } from "@/utils/cli-harness";
@@ -126,6 +127,7 @@ export function SessionPanel({
   onSessionUpdated,
   onOpenSettings,
   onHistoryCleared,
+  todo = "",
   view,
   onViewChange,
   sheetOpen,
@@ -145,6 +147,8 @@ export function SessionPanel({
   onOpenSettings: () => void;
   /** Called once the engine has cleared the history; resets the open thread. */
   onHistoryCleared: () => Promise<void>;
+  /** The agent's latest todo block (`latestTodoBlock`), shown as a card under the panel; empty when it has none. */
+  todo?: string;
   view: SessionView;
   onViewChange: (view: SessionView) => void;
   /** The phone sheet, opened from the chat header. */
@@ -485,16 +489,20 @@ export function SessionPanel({
             <SheetTitle className="sr-only">Session Controls</SheetTitle>
             <SheetDescription className="sr-only">{sessionLabel}</SheetDescription>
             {body(null)}
+            {todo ? <TodoCard block={todo} className="bg-sidebar-accent mt-3 shadow-none" /> : null}
           </SheetContent>
         </Sheet>
       ) : open ? (
-        <aside aria-label="Session Controls" className="bg-sidebar text-sidebar-foreground m-2 ml-0 flex max-h-[calc(100%-1rem)] w-60 shrink-0 flex-col self-start overflow-y-auto rounded-xl p-3 shadow-lg">
-          {body(
-            <TooltipIconButton tooltip="Hide Session Panel" side="left" className="text-muted-foreground size-7 shrink-0 p-1.5" onClick={() => toggle(false)}>
-              <PanelRightClose className="size-4" />
-            </TooltipIconButton>,
-          )}
-        </aside>
+        <div className="m-2 ml-0 flex max-h-[calc(100%-1rem)] w-60 shrink-0 flex-col gap-2 self-start">
+          <aside aria-label="Session Controls" className="bg-sidebar text-sidebar-foreground flex min-h-0 flex-col overflow-y-auto rounded-xl p-3 shadow-lg">
+            {body(
+              <TooltipIconButton tooltip="Hide Session Panel" side="left" className="text-muted-foreground size-7 shrink-0 p-1.5" onClick={() => toggle(false)}>
+                <PanelRightClose className="size-4" />
+              </TooltipIconButton>,
+            )}
+          </aside>
+          {todo ? <TodoCard block={todo} /> : null}
+        </div>
       ) : (
         <aside aria-label="Session Controls" className="bg-sidebar text-sidebar-foreground m-2 ml-0 flex max-h-[calc(100%-1rem)] w-10 shrink-0 flex-col items-center gap-1 self-start overflow-y-auto rounded-xl py-2 shadow-lg">
           <TooltipIconButton tooltip="Show Session Panel" side="left" className="size-7 p-1.5" onClick={() => toggle(true)}>
