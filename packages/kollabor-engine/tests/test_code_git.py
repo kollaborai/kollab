@@ -252,3 +252,51 @@ async def test_bad_json_and_an_unknown_action_are_400(client, machine):
     assert _error_code(not_json) == "invalid_body"
     assert unknown.status_code == 400
     assert _error_code(unknown) == "unknown_action"
+
+
+@pytest.fixture
+def subfolder(machine):
+    """The same repository, with the workspace one folder down: ``repo/app`` holds a change, ``repo`` has another."""
+    app = machine.repo / "app"
+    app.mkdir()
+    (app / "inside.txt").write_text("inside\n")
+    _git(machine.repo, "add", "app/inside.txt")
+    _git(machine.repo, "commit", "-m", "app")
+    (app / "inside.txt").write_text("inside edited\n")
+    (machine.repo / "tracked.txt").write_text("hello edited\n")  # a change outside the workspace
+    machine.app = app
+    return machine
+
+
+@pytest.mark.asyncio
+async def test_status_in_a_subfolder_lists_workspace_paths_only(client, subfolder):
+    body = {"action": "status", "workspace": str(subfolder.app)}
+
+    files = (await client.post("/code/git", json=body)).json()["data"]["files"]
+
+    assert [f["path"] for f in files] == ["inside.txt"]
+
+
+@pytest.mark.asyncio
+async def test_a_path_from_a_subfolder_status_can_be_staged_and_diffed(client, subfolder):
+    workspace = str(subfolder.app)
+    await client.post("/code/git", json={"action": "stage", "workspace": workspace, "paths": ["inside.txt"]})
+
+    staged = (await client.post("/code/git", json={"action": "status", "workspace": workspace})).json()["data"]["files"]
+    diff = (
+        await client.post("/code/git", json={"action": "diff", "workspace": workspace, "path": "inside.txt", "staged": True})
+    ).json()["data"]["diff"]
+
+    assert [(f["path"], f["staged"]) for f in staged] == [("inside.txt", True)]
+    assert "+inside edited" in diff
+
+
+@pytest.mark.asyncio
+async def test_stage_all_in_a_subfolder_leaves_changes_outside_it_alone(client, subfolder):
+    await client.post("/code/git", json={"action": "stage_all", "workspace": str(subfolder.app)})
+
+    cached = subprocess.run(
+        ["git", "-C", str(subfolder.repo), "diff", "--cached", "--name-only"], capture_output=True, text=True, check=True
+    ).stdout.split()
+
+    assert cached == ["app/inside.txt"]
