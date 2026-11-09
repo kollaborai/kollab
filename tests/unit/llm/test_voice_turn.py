@@ -202,3 +202,206 @@ def test_ordinary_and_spoken_user_messages_are_never_hidden(published):
         assert published == ["user_message"] * 3
     finally:
         revoke_voice_admission_context(spoken)
+
+
+class ModelProfile:
+    """A profile the real /model setter can edit, as ProfileManager hands it out."""
+
+    def __init__(self, name: str, model: str) -> None:
+        self.name = name
+        self.model = model
+
+    def get_model(self) -> str:
+        return self.model
+
+    def get_provider(self) -> str:
+        return "fake"
+
+
+class ModelProfiles:
+    """Just enough ProfileManager for the setter: edit a model, get the active profile back."""
+
+    def __init__(self, active: ModelProfile) -> None:
+        self.active = active
+
+    def get_active_profile(self) -> ModelProfile:
+        return self.active
+
+    def update_profile(self, name: str, model: str, **_) -> bool:
+        # A fresh profile object per edit, like a config reload
+        self.active = ModelProfile(name, model)
+        return True
+
+
+class ModelApi(FakeApi):
+    """FakeApi whose provider remembers the model its profile chose."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._profile = ModelProfile("chat", "original")
+        self._provider = SimpleNamespace(config=Config("high"), model="original")
+
+    async def reinitialize_provider(self, profile) -> bool:
+        self.reinitialized.append(f"{profile.name}:{profile.get_model()}")
+        self._profile = profile
+        self._provider = SimpleNamespace(config=Config("high"), model=profile.get_model())
+        return True
+
+
+def model_setter(api, profiles):
+    from kollabor.commands.system_commands.handlers.model import ModelCommandHandler
+
+    async def no_tools() -> None:
+        return None
+
+    llm = SimpleNamespace(api_service=api, _load_native_tools=no_tools)
+    return ModelCommandHandler(None, None, profile_manager=profiles, llm_service=llm)
+
+
+@pytest.mark.asyncio
+async def test_voice_cleanup_does_not_restore_over_a_model_choice_made_mid_turn():
+    """#584: /model alpha finishes while a voice turn is paused before cleanup."""
+    api = ModelApi()
+    profiles = ModelProfiles(api._profile)
+    setter = model_setter(api, profiles)
+    in_turn, resume = asyncio.Event(), asyncio.Event()
+
+    async def voice_turn() -> None:
+        voice = {"voice_provider_profile_id": "fast-voice"}
+        pm = SimpleNamespace(get_profile=lambda name: ModelProfile(name, "voice-model"))
+        async with voice_provider(api, pm, voice):
+            in_turn.set()
+            await resume.wait()  # paused before cleanup
+
+    turn = asyncio.create_task(voice_turn())
+    await in_turn.wait()
+    result = await setter._set_active_profile_model("alpha")
+    assert result.success
+    assert (api._profile.get_model(), api._provider.model) == ("alpha", "alpha")
+
+    resume.set()
+    await turn
+
+    # the selected model and the request provider still agree
+    assert api._profile.get_model() == "alpha"
+    assert api._provider.model == "alpha"
+
+
+@pytest.mark.asyncio
+async def test_voice_cleanup_still_restores_chat_when_nothing_changed_mid_turn():
+    api = ModelApi()
+    original = api._profile
+    pm = SimpleNamespace(get_profile=lambda name: ModelProfile(name, "voice-model"))
+    async with voice_provider(api, pm, {"voice_provider_profile_id": "fast-voice"}):
+        assert api._provider.model == "voice-model"
+    assert api._profile is original
+    assert api._provider.model == "original"
+
+
+def real_api_service(tmp_path, chat, monkeypatch):
+    """The real APICommunicationService; only the provider registry is faked, and it
+    caches one provider per profile, as ProviderRegistry.get_provider does per config."""
+    from unittest.mock import MagicMock
+
+    from kollabor_ai import api_communication_service as service_module
+
+    config = MagicMock()
+    config.get = lambda key, default=None: default
+    cache: dict[str, SimpleNamespace] = {}
+
+    async def get_provider(provider_config):
+        name = provider_config["name"]
+        if name not in cache:
+            cache[name] = SimpleNamespace(
+                provider_name=name, model=name, config=Config("high")
+            )
+        return cache[name]
+
+    monkeypatch.setattr(service_module, "create_config_from_profile", lambda data: data)
+    monkeypatch.setattr(
+        service_module.ProviderRegistry, "get_provider", staticmethod(get_provider)
+    )
+    api = service_module.APICommunicationService(config, tmp_path, chat)
+    api._profile = chat
+    api._provider = cache.setdefault(
+        chat.name, SimpleNamespace(provider_name=chat.name, model=chat.name, config=Config("high"))
+    )
+    return api
+
+
+def stored_profile(name: str):
+    from unittest.mock import MagicMock
+
+    profile = MagicMock()
+    profile.name = name
+    profile.provider = "openai"
+    profile.auth_type = "api_key"
+    profile.get_provider.return_value = "openai"
+    profile.to_dict.return_value = {"name": name}
+    return profile
+
+
+@pytest.mark.asyncio
+async def test_voice_cleanup_keeps_a_switch_to_the_profile_the_turn_runs_on(tmp_path, monkeypatch):
+    """#584: /llm fast-voice mid-turn hands the service the very objects the turn installed."""
+    chat, fast = stored_profile("chat"), stored_profile("fast-voice")
+    api = real_api_service(tmp_path, chat, monkeypatch)
+    profiles = SimpleNamespace(get_profile=lambda name: {"fast-voice": fast}.get(name))
+    in_turn, resume = asyncio.Event(), asyncio.Event()
+
+    async def voice_turn() -> None:
+        async with voice_provider(api, profiles, {"voice_provider_profile_id": "fast-voice"}):
+            in_turn.set()
+            await resume.wait()
+
+    turn = asyncio.create_task(voice_turn())
+    await in_turn.wait()
+    assert api._profile is fast
+    before = api._provider
+    assert await api.reinitialize_provider(fast)  # the user's switch, as switch_profile does
+    assert api._provider is before  # same profile, same cached provider: nothing to tell it apart
+
+    resume.set()
+    await turn
+
+    assert api._profile is fast
+    assert api._provider.provider_name == "fast-voice"
+
+
+@pytest.mark.asyncio
+async def test_voice_cleanup_restores_chat_after_an_oauth_rebuild_mid_turn(tmp_path, monkeypatch):
+    """A 401 refresh rebuilds the provider on its own; the user chose nothing, so chat returns."""
+    from kollabor_ai import api_communication_service as service_module
+
+    chat, fast = stored_profile("chat"), stored_profile("fast-voice")
+    fast.auth_type = "oauth"
+    fast.api_key = "old"
+    api = real_api_service(tmp_path, chat, monkeypatch)
+    built = []
+
+    async def new_provider(provider_config):  # a new token builds a new provider
+        provider = SimpleNamespace(
+            provider_name=provider_config["name"], model="rebuilt", config=Config("high")
+        )
+        built.append(provider)
+        return provider
+
+    monkeypatch.setattr(
+        service_module.ProviderRegistry, "get_provider", staticmethod(new_provider)
+    )
+
+    async def refresh() -> None:
+        fast.api_key = f"token-{len(built)}-{fast.api_key}"  # every refresh rotates the key
+
+    monkeypatch.setattr(api, "_refresh_oauth_token", refresh)
+    profiles = SimpleNamespace(get_profile=lambda name: {"fast-voice": fast}.get(name))
+
+    async with voice_provider(api, profiles, {"voice_provider_profile_id": "fast-voice"}):
+        assert api._profile is fast
+        built.clear()
+        rejected = fast.api_key
+        assert await api._refresh_oauth_after_401(rejected)  # the 401 path, not a user choice
+        assert api._provider is built[-1]
+
+    assert api._profile is chat
+    assert api._provider.provider_name == "chat"

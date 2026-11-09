@@ -1,0 +1,43 @@
+name: PR Gates DoD
+
+# Definition-of-done check (#724). Controlled by .github/pr-gates.toml
+# (pr_gates.dod.enabled): when false, the job exits 0 and posts nothing. When true, the script posts exactly ONE check run
+# (pr_gates.dod.check_name, default dod/ready-for-review) whose summary
+# names every failed item. It never posts comments.
+
+# pull_request_target runs the base branch's copy of this workflow and script, so a
+# PR cannot change its own grade or reach the token. The script reads the PR only
+# through the API; this workflow never checks out or runs PR code.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main, "release/**", "integration/**"]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+
+jobs:
+  dod:
+    name: definition-of-done
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Run pr-gates definition-of-done check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/pr_gates_dod.py \
+            --config .github/pr-gates.toml \
+            --repo "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number }}" \
+            --head-sha "${{ github.event.pull_request.head.sha }}" \
+            --post

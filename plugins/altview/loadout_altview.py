@@ -45,7 +45,7 @@ import time
 from typing import Any, List, Optional, Tuple
 
 from kollabor.panels.llm import (  # isort: skip
-    EFFORT_OPTIONS as _EFFORT_OPTIONS,
+    effort_options as _effort_options,
     build_active_profile_base,
     build_sections,
     default_max_tokens as _default_max_tokens,
@@ -792,9 +792,6 @@ class LoadoutFormAltView(AltView):
         temperature = (
             base.temperature if (base and base.temperature is not None) else 0.7
         )
-        effort = (base.effort if base else "") or "default"
-        if effort not in _EFFORT_OPTIONS:
-            effort = "default"
         max_tokens = (
             base.max_tokens
             if (base and base.max_tokens)
@@ -803,6 +800,10 @@ class LoadoutFormAltView(AltView):
         description = (base.description if base else "") or ""
 
         provider_type = _resolve_provider_type(self._profile_manager, provider_profile)
+        effort_options = list(_effort_options(provider_type))
+        effort = (base.effort if base else "") or "default"
+        if effort not in effort_options:
+            effort = "default"
         provider_display = _provider_display(provider_type)
         provider_value = (
             f"{provider_display} ({provider_profile})"
@@ -833,7 +834,7 @@ class LoadoutFormAltView(AltView):
             "",
         )
         self._effort_widget = DropdownWidget(
-            {"label": "Effort", "options": list(_EFFORT_OPTIONS), "value": effort}, ""
+            {"label": "Effort", "options": effort_options, "value": effort}, ""
         )
         self._max_tokens_supported = not _is_chatgpt_codex_profile(
             self._profile_manager, provider_profile

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import psutil
@@ -116,6 +117,33 @@ def test_halt_file_round_trip_on_windows(tmp_path):
     store = nh.HaltFile(tmp_path)
     store.write({"networks": {}, "stopped": [], "marker": "kept"})
     assert store.read()["marker"] == "kept"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows refuses to replace a file another handle holds open")
+def test_halt_file_write_waits_for_a_real_reader_on_windows(tmp_path):
+    """#573: a plain open() of halt.json (no share-delete) blocks os.replace, which is not patched here."""
+    store = nh.HaltFile(tmp_path)
+    store.write({"networks": {}, "stopped": [], "marker": "old"})
+    opened, release = threading.Event(), threading.Event()
+
+    def hold_open():
+        with open(store.path, "rb"):
+            opened.set()
+            release.wait(5)
+
+    reader = threading.Thread(target=hold_open)
+    reader.start()
+    try:
+        assert opened.wait(5)
+        with pytest.raises(PermissionError):  # the refusal this test is about: nothing waits, nothing is patched
+            os.replace(store.path, store.path.with_name("halt.moved"))
+        threading.Timer(0.1, release.set).start()  # the reader lets go inside the write's retry window
+        store.write({"networks": {}, "stopped": [], "marker": "new"})
+    finally:
+        release.set()
+        reader.join()
+    assert store.read()["marker"] == "new"
+    assert not list(store.dir.glob(".halt.*"))
 
 
 @pytest.mark.skipif(os.name != "nt", reason="console check is Windows only")

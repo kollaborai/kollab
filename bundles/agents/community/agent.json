@@ -3,6 +3,7 @@
   "tools": [
     "terminal",
     "terminal-output",
+    "terminal-send",
     "terminal-status",
     "file-read",
     "file-grep",

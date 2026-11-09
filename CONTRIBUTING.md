@@ -72,6 +72,12 @@ regular local branch when no other writer shares that checkout.
    Do not add AI attribution, generated-by, or Co-Authored-By footers unless
    explicitly requested.
 4. Update docs when behavior, setup, commands, config, or public APIs change.
+   Record a user-visible change in `changes/<issue>.<section>.md`, where
+   `<section>` is one of added, changed, deprecated, removed, fixed, or
+   security. Do not edit `CHANGELOG.md` or `kollabor/updates/CHANGELOG.md`:
+   CI's standards-check refuses direct edits outside `release/` and
+   `changelog/` branches. `changes/README.md` shows the format; the release
+   folds every entry into both changelogs.
 5. Push normally and open a DRAFT pull request against `main`. Keep review and
    CI tied to the exact head; merge current `main` into the branch when needed.
    Never rebase or force-push.
@@ -166,6 +172,15 @@ Useful starting points:
 - [docs/architecture/README.md](docs/architecture/README.md)
 - [docs/release-process.md](docs/release-process.md)
 - [AGENTS.md](AGENTS.md)
+
+## Productization
+
+Every enhancement ships as an opt-in, default off, repo-agnostic product surface:
+a skill, extension, agent, or plugin. Its toggle defaults to off, and its repo,
+check names, identities, schedules, and paths come from config or provider
+discovery, never from a literal `kollaborai/kollab`. Flag anything that is
+inherently Kollab-internal. The full rule, checklist, and surface mapping for
+#711-#730 are in [docs/productization.md](docs/productization.md).
 
 ## Reporting Bugs
 

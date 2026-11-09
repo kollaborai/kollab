@@ -3,7 +3,7 @@ title: Unified Config Panels for the Web UI (/config, /llm, /model, /setup, /con
 created: 2026-10-02
 status: implemented (in progress)
 author: maintainers
-updated: 2026-10-02
+updated: 2026-11-05
 ---
 
 the web ui (`kollab --web-ui`) can't change settings. the terminal's
@@ -206,8 +206,8 @@ every `act()` returns
 |-------|------------|-------|
 | config | `ConfigWidgetDefinitions.get_config_modal_definition()` + loadout rows + managed overlay. **extract** `build_config_sections()` from `ConfigAltView._load_widgets`, `_with_loadout_rows` and `_managed_label` (`plugins/altview/config_altview.py:177-311`) | `save {changes, target}` → **extract** `apply_config_changes()` from `ConfigAltView._do_save` (`:823`): per change `config_service.set` → `save_key(path, v, save_target)`, then `_notify_reload_callbacks()`. drop `_do_save`'s `kollabor.llm.active_profile` → `llm.switch_profile` branch; that path is a read-only label now, so the branch is dead. `ConfigAltView._do_save` calls the same function |
 | llm | **extract** `_build_sections` (incl. zero-row groups), `_empty_note`, `_suggest_name`, `_default_max_tokens`, `build_active_profile_base` from `plugins/altview/loadout_altview.py` (`:181-446`, `:788`) on top of `LoadoutManager.list_loadouts()` | `activate` → `LoadoutManager.activate(name, event_bus)`; `new` / `edit` → form → `create` / `update`; `delete`; `set_default(name, level)`; `refresh` → `refresh_catalogs()` |
-| model | the active provider's models from the same source as `ModelPickerAltView`: models.json seed + `list_provider_models()` (`_fetch_catalog`, `model_picker_altview.py:127`). **extract** that list builder; the AltView calls it | `select {model}` → `_set_active_profile_model`; `effort {level}` → `_handle_effort` |
-| setup | `PROVIDERS` (`setup_altview.py:60`) and `_STEPS` (`:147`) | `test` → **extract** `test_connection()` from `SetupAltView._run_test` (`:487`; 25 s bound). `finish` → **extract** `create_and_activate_profile()` from `_run_save` (`:549`): unique name, `pm.create_profile(..., save_to_config=True)`, `set_active_profile(name, persist=True, reload_profile=True)`. provider error text goes through the redactor in `kollabor_ai/providers/security.py` |
+| model | the active provider's models from the same source as `ModelPickerAltView`: models.json seed + `list_provider_models()` (`_fetch_catalog`, `model_picker_altview.py:127`). **extract** that list builder; the AltView calls it | `select {model}` → `_set_active_profile_model`; `effort {level}` → `_handle_effort`; `pick {model, level}` (ACP) sets both as one change, putting the model back when the level is refused; changes run one at a time, and each refuses a `profile` other than the active one (#553) |
+| setup | `PROVIDERS` (`setup_altview.py:60`) and `_STEPS` (`:147`) | `test` → **extract** `test_connection()` from `SetupAltView._run_test` (`:487`; 25 s bound). `finish` → **extract** `create_and_activate_profile()` from `_run_save` (`:549`): unique name, `pm.create_profile(..., save_to_config=True)`, `set_active_profile(name, persist=True, reload_profile=True)`. provider error text goes through the redactor in `kollabor_ai/providers/security.py`. A false, raised, or timed-out `llm_service.switch_profile()` fails visibly without changing the previous active profile; manager-only activation is used only when no LLM service exists. |
 
 "extract" means the logic moves into `kollabor/panels/` and the AltView calls
 it. the terminal and the browser then run the same code.

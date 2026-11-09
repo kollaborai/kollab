@@ -240,6 +240,13 @@ class TestInternalTypeBypass:
         executor = self._make_scoped_executor()
         assert executor._check_bundle_scope("terminal_output") is None
 
+    def test_terminal_send_requires_an_explicit_bundle_grant(self):
+        executor = self._make_scoped_executor()
+        assert executor._check_bundle_scope("terminal_send") is not None
+
+        executor.set_bundle_scope(["terminal", "terminal-send"])
+        assert executor._check_bundle_scope("terminal_send") is None
+
     def test_terminal_kill_bypasses_scope(self):
         executor = self._make_scoped_executor()
         assert executor._check_bundle_scope("terminal_kill") is None

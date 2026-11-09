@@ -18,7 +18,7 @@ import logging
 import re
 from typing import Any
 
-from .interface import enrollment_result, offer_failure
+from .interface import ProfileActivationError, enrollment_result, offer_failure
 from .local import LocalStateService
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,10 @@ def _error_result(exc: Exception) -> dict[str, Any]:
     instead of surfacing a bare error string.
     """
     result: dict[str, Any] = {"error": str(exc)}
+
+    if isinstance(exc, ProfileActivationError):
+        result["error_code"] = ProfileActivationError.ERROR_CODE
+        result["previous_profile_restored"] = exc.previous_profile_restored
     if isinstance(exc, ModuleNotFoundError):
         result["reload_needed"] = True
     return result
@@ -200,7 +204,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         persist_local = bool(params.get("persist_local", False))
         reload_profile = bool(params.get("reload_profile", False))
         model = params.get("model") or None
-        effort = params.get("effort") or None
+        effort = params.get("effort")  # "" is the model's own default: it clears an earlier pick
         try:
             snapshot = await state_service.set_active_profile(
                 name.strip(),
@@ -208,8 +212,10 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
                 persist_local=persist_local,
                 reload_profile=reload_profile,
                 model=str(model) if model else None,
-                effort=str(effort) if effort else None,
+                effort=None if effort is None else str(effort),
             )
+        except ProfileActivationError as e:
+            return _error_result(e)
         except ValueError as e:
             return {"error": str(e)}
         return snapshot.to_dict()

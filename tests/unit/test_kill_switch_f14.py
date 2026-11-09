@@ -347,6 +347,45 @@ def test_shell_fixture_cleans_up_if_launch_or_sweep_raises(tmp_path, monkeypatch
         outsider.wait(timeout=5)
 
 
+@posix_only
+def test_sweep_survives_a_ps_start_drift(tmp_path):
+    """#710: ps reads a start a second or two off the agent's clock; the leftovers are still swept."""
+    mark = f"6{os.getpid():07d}"
+    cmds = [f"nohup sleep {mark}1 >/dev/null 2>&1 &", f"( sleep {mark}2 ) >/dev/null 2>&1 &",
+            f"sh -c 'sleep {mark}3; :' >/dev/null 2>&1 &"]
+    se.TOOL_SHELLS.clear()
+
+    async def run_all():
+        ex = se.ShellExecutor()
+        for cmd in cmds:
+            await ex.run(cmd, timeout=5)
+
+    asyncio.run(run_all())
+    time.sleep(0.5)
+
+    def ours() -> set[int]:
+        return {p for p, c in _ps().items() if mark in c} - {os.getpid()}
+
+    left = ours()
+    try:
+        assert len(left) >= len(cmds)
+        tree, info = hr.process_tree(), hr.process_info()
+        drifted = {p: (v[0] - 2.0, *v[1:]) for p, v in info.items()}
+        protect = nh.ancestors(os.getpid()) | {os.getpid()}
+        known = {p.pid: p for p in (nh.read_process(x, with_cwd=False) for x in left) if p is not None}
+        rows = nh.shell_rows([list(r) for r in se.TOOL_SHELLS], os.getpid())
+        picked = nh._backgrounded({os.getpid()}, tree, drifted, protect, rows, known)
+        assert left <= picked, sorted(left - picked)
+        assert not picked & protect
+    finally:
+        for pid in ours() | left:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        se.TOOL_SHELLS.clear()
+
+
 # ------------------------------------------------------------------ 2. fallback_stop
 
 

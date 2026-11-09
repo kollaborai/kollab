@@ -10,6 +10,8 @@ import asyncio
 import logging
 from typing import Any, List, Optional, Tuple
 
+from kollabor_ai.profile_manager import ANTHROPIC_UNSUPPORTED_EFFORT, EFFORT_LEVELS
+
 from .base import PanelError, error_result, make_field, ok_result, unknown_action
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,14 @@ def provider_display(provider: str) -> str:
     return PROVIDER_LABELS.get(provider.lower(), provider.replace("_", " ").title())
 
 
+def effort_provider(profile: Any) -> Any:
+    """The profile's provider with ``auto`` resolved to what requests use."""
+    for getter in ("get_effort_provider", "get_provider"):
+        if hasattr(profile, getter):
+            return getattr(profile, getter)()
+    return getattr(profile, "provider", "")
+
+
 def resolve_provider_type(profile_manager: Any, provider_profile: str) -> str:
     """Best-effort provider type (e.g. ``anthropic``) for a profile name."""
     if not profile_manager or not provider_profile:
@@ -42,7 +52,9 @@ def resolve_provider_type(profile_manager: Any, provider_profile: str) -> str:
         return provider_profile
     if profile is not None and hasattr(profile, "get_provider"):
         try:
-            return profile.get_provider() or provider_profile
+            # ``auto`` resolved, so the pickers see Anthropic where requests do
+            resolve = getattr(profile, "get_effort_provider", profile.get_provider)
+            return resolve() or provider_profile
         except Exception:
             return provider_profile
     return provider_profile
@@ -280,7 +292,15 @@ def empty_note(
 
 # -- the panel ----------------------------------------------------------------
 
-EFFORT_OPTIONS = ("default", "low", "medium", "high", "xhigh", "max", "ultra")
+EFFORT_OPTIONS = ("default", *EFFORT_LEVELS)
+
+
+def effort_options(provider: str = "") -> tuple[str, ...]:
+    """Effort choices for a loadout on ``provider``: ``default`` plus what it sends."""
+    if str(provider or "").lower() == "anthropic":
+        return ("default", *(x for x in EFFORT_LEVELS if x not in ANTHROPIC_UNSUPPORTED_EFFORT))
+    return EFFORT_OPTIONS
+
 SCOPE_NOTE = "Saved to the provider profile; applies to every session using it."
 _ACTIVATE_TIMEOUT = 20.0
 _CATALOG_TIMEOUT = 8.0
@@ -333,7 +353,7 @@ def _form(ctx: Any, manager: Any, base: Any, mode: str, style: str) -> dict:
     profile = pm.get_profile(base.provider_profile)
     existing = {entry.name for entry in manager.list_loadouts()}
     codex = is_chatgpt_codex_profile(pm, base.provider_profile)
-    provider = profile.get_provider() if hasattr(profile, "get_provider") else getattr(profile, "provider", "")
+    provider = effort_provider(profile)
     is_acp = str(provider or "").lower() == "acp"
     command = tuple(getattr(profile, "command", ()) or ())
     model_value = "" if is_acp and base.implicit and command and base.model == command[0] else base.model
@@ -360,7 +380,7 @@ def _form(ctx: Any, manager: Any, base: Any, mode: str, style: str) -> dict:
         ),
         make_field(
             "effort", "dropdown", "Reasoning Effort",
-            value=base.effort or "default", options=list(EFFORT_OPTIONS),
+            value=base.effort or "default", options=list(effort_options(provider)),
         ),
         make_field(
             "max_tokens", "text_input", "Max Output Tokens",
@@ -388,7 +408,9 @@ def _form(ctx: Any, manager: Any, base: Any, mode: str, style: str) -> dict:
     }
 
 
-def _loadout_values(payload: dict, codex: bool, model: str, *, is_acp: bool = False) -> tuple[dict, dict]:
+def _loadout_values(
+    payload: dict, codex: bool, model: str, *, is_acp: bool = False, provider: str = ""
+) -> tuple[dict, dict]:
     """(values, errors) from a save payload; the same rules as the terminal form."""
     values: dict = {}
     errors: dict = {}
@@ -406,6 +428,8 @@ def _loadout_values(payload: dict, codex: bool, model: str, *, is_acp: bool = Fa
     effort = str(payload.get("effort") or "default")
     if effort not in EFFORT_OPTIONS:
         errors["effort"] = "Unknown effort level."
+    elif effort not in effort_options(provider):
+        errors["effort"] = f"{provider.title()} has no effort level {effort!r}."
     values["effort"] = "" if effort == "default" else effort
     values["max_tokens"] = None
     raw = str(payload.get("max_tokens") or "").strip()
@@ -550,10 +574,12 @@ class LlmPanel:
         name = base.name if mode == "edit" else str(changes.get("name") or "").strip()
         codex = is_chatgpt_codex_profile(ctx._profile_manager, base.provider_profile)
         profile = ctx._profile_manager.get_profile(base.provider_profile)
-        provider = profile.get_provider() if hasattr(profile, "get_provider") else getattr(profile, "provider", "")
+        provider = effort_provider(profile)
         is_acp = str(provider or "").lower() == "acp"
         model = str(changes.get("model", base.model) or "").strip() if is_acp else base.model
-        values, errors = _loadout_values(changes, codex, model, is_acp=is_acp)
+        values, errors = _loadout_values(
+            changes, codex, model, is_acp=is_acp, provider=str(provider or "")
+        )
         if is_acp and (not model or len(model) > 200 or not model.isprintable() or any(c.isspace() for c in model)):
             errors["model"] = "Enter a model advertised by the ACP harness."
         if not name:

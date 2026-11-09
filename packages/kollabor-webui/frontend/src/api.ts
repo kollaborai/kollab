@@ -201,6 +201,8 @@ export type PermissionPrompt = {
 /** Reasoning effort levels (kollabor_ai EFFORT_LEVELS, cheapest first).
  * Empty/undefined means the model default (no effort is sent). */
 export const EFFORT_LEVELS = [
+  "none",
+  "minimal",
   "low",
   "medium",
   "high",
@@ -221,9 +223,31 @@ export type Profile = {
   extra_header_names?: string[];
   temperature?: number;
   effort?: string | null;
+  /** The provider requests use: an "auto" profile resolved from its key, then its endpoint. */
+  effort_provider?: string;
   streaming?: boolean;
   supports_tools?: boolean;
   supports_vision?: boolean;
+};
+
+/** One provider profile x model x effort a session can run on (`GET /profiles/choices`). */
+export type ModelChoice = {
+  profile: string;
+  /** The profile's provider; "acp" is a harness (Codex CLI, Claude Code) that owns its model and effort. */
+  provider: string;
+  /** Empty: the profile's or harness's own model. */
+  model: string;
+  /** Empty: none sent, so the model's (or harness's current) effort applies. */
+  effort: string;
+};
+
+/** The loadout the terminal starts on (`kollabor.llm.default_loadout`), as `GET /profiles` reports it. */
+export type DefaultLoadout = {
+  name: string;
+  profile: string;
+  provider: string;
+  model: string;
+  effort: string;
 };
 
 export type ProfileWrite = {
@@ -1370,7 +1394,15 @@ export class EngineApi {
     );
   }
 
-  listProfiles() {
+  listModelChoices() {
+    return this.json<{
+      choices: ModelChoice[];
+      discovery?: Record<string, { status: "ready" | "partial" | "unavailable"; message?: string; more?: boolean }>;
+    }>("/profiles/choices");
+  }
+
+  /** The profiles, and the default loadout of `workspace` (empty: the engine's own folder). */
+  listProfiles(workspace = "") {
     return this.json<{
       profiles: Profile[];
       active?: string;
@@ -1378,7 +1410,9 @@ export class EngineApi {
       providers?: string[];
       /** Invalid user profiles skipped while loading; names map to safe diagnostics. */
       invalid_profiles?: Record<string, string>;
-    }>("/profiles");
+      /** What New Session starts on; null when no default loadout is set. */
+      default_loadout?: DefaultLoadout | null;
+    }>(workspace ? `/profiles?workspace=${encodeURIComponent(workspace)}` : "/profiles");
   }
 
   createProfile(body: ProfileWrite) {
@@ -1562,10 +1596,10 @@ export class EngineApi {
     );
   }
 
-  sendHubMessage(target: string, content: string, fromIdentity = "webui") {
+  sendHubMessage(target: string, content: string, fromIdentity = "webui", agentId?: string) {
     return this.json<{ ok: boolean; target: string }>("/hub/messages", {
       method: "POST",
-      body: JSON.stringify({ target, content, from_identity: fromIdentity }),
+      body: JSON.stringify({ target, content, from_identity: fromIdentity, agent_id: agentId }),
     });
   }
 }

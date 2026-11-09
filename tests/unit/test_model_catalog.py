@@ -8,6 +8,15 @@ import pytest
 from kollabor_ai import model_catalog
 
 
+@pytest.fixture(autouse=True)
+def _clean_memory_cache():
+    """Tests here store catalogs under shared profile names; drop them so they
+    cannot leak into later modules that list loadouts."""
+    model_catalog._MEMORY_CACHE.clear()
+    yield
+    model_catalog._MEMORY_CACHE.clear()
+
+
 class _Profile:
     def __init__(self, provider="", auth_type=""):
         self._provider = provider
@@ -63,7 +72,7 @@ async def test_anthropic_dispatch(monkeypatch):
         async def __aexit__(self, *a):
             return False
 
-        async def get(self, url, headers=None):
+        async def get(self, url, headers=None, params=None):
             assert url == f"{model_catalog.ANTHROPIC_DEFAULT_BASE_URL}/v1/models"
             assert headers.get("x-api-key") == "sk-ant-xyz"
             return FakeResp()
@@ -308,11 +317,210 @@ def test_catalog_cache_v2_preserves_structured_oauth_context_window(
         }
     ]
 
-    model_catalog._store(profile, models)
+    monkeypatch.setattr(model_catalog, "_login_of", lambda profile: "acct-a")  # signed in
+    model_catalog._store(profile, models, "acct-a")
 
     cached = json.loads(cache_path.read_text(encoding="utf-8"))
     assert cached["version"] == 2
     assert model_catalog.cached_provider_models(profile) == models
+
+
+def test_a_chatgpt_catalog_is_used_only_while_its_account_is_signed_in(
+    tmp_path, monkeypatch
+):
+    # Amazonite on #553 round 6: a profile signed in again as another account
+    # was served the first account's cached models, fresh or stale, and so was
+    # a catalog cached before each profile asked with its own login.
+    from kollabor_ai.oauth import token_storage
+
+    (tmp_path / "oauth").mkdir()
+    login = tmp_path / "oauth" / "openai.json"
+    monkeypatch.setattr(token_storage, "get_config_directory_candidates", lambda: [tmp_path])
+    monkeypatch.setattr(model_catalog, "_cache_file", lambda: tmp_path / "model_catalog.cache")
+    model_catalog._MEMORY_CACHE.clear()
+    chatgpt = {"name": "openai-oauth", "provider": "openai_responses", "auth_type": "oauth"}
+    router = {"name": "router", "provider": "openrouter"}
+
+    login.write_text(json.dumps({"account_id": "acct-a"}), encoding="utf-8")
+    model_catalog._store(chatgpt, [{"id": "a-model"}], "acct-a")
+    model_catalog._store(router, [{"id": "r-model"}], None)
+    assert model_catalog.cached_provider_models(chatgpt) == [{"id": "a-model"}]
+
+    login.write_text(json.dumps({"account_id": "acct-b"}), encoding="utf-8")
+    assert model_catalog.cached_provider_models(chatgpt) == []
+    assert model_catalog.cached_provider_models(chatgpt, max_age=float("inf")) == []  # the stale fallback
+    model_catalog._MEMORY_CACHE.clear()  # a restart: only the disk cache is left
+    assert model_catalog.cached_provider_models(chatgpt) == []
+    assert model_catalog.cached_provider_models(router) == [{"id": "r-model"}]  # other profiles keep theirs
+
+    # An entry from before logins were recorded names none: it is never used.
+    cache = json.loads((tmp_path / "model_catalog.cache").read_text(encoding="utf-8"))
+    cache["entries"]["openai-oauth"] = {"timestamp": 9999999999, "models": [{"id": "old"}]}
+    (tmp_path / "model_catalog.cache").write_text(json.dumps(cache), encoding="utf-8")
+    model_catalog._MEMORY_CACHE.clear()
+    assert model_catalog.cached_provider_models(chatgpt) == []
+
+
+def _signed_in(tmp_path, monkeypatch, login_data):
+    """A ChatGPT login profile, its stored login, and an empty cache."""
+    from kollabor_ai.oauth import token_storage
+
+    (tmp_path / "oauth").mkdir()
+    login = tmp_path / "oauth" / "openai.json"
+    login.write_text(json.dumps(login_data), encoding="utf-8")
+    monkeypatch.setattr(token_storage, "get_config_directory_candidates", lambda: [tmp_path])
+    monkeypatch.setattr(model_catalog, "_cache_file", lambda: tmp_path / "model_catalog.cache")
+    model_catalog._MEMORY_CACHE.clear()
+    return SimpleNamespace(name="openai-oauth", provider="openai_responses", auth_type="oauth"), login
+
+
+def _asks_as(monkeypatch, account_id, while_asking=None, refresh_token=None):
+    """The ChatGPT fetch loads tokens naming ``account_id``; ``while_asking`` runs during its request."""
+
+    async def load_tokens(provider, auto_refresh=True, profile_name=None):
+        return SimpleNamespace(access_token="tok", refresh_token=refresh_token, account_id=account_id)
+
+    async def details(access_token, account_id=None):
+        if while_asking:
+            while_asking()
+        return [{"slug": f"model-of-{account_id or 'nobody'}"}]
+
+    storage = SimpleNamespace(load_tokens=load_tokens)
+    monkeypatch.setattr("kollabor_ai.oauth.OAuthTokenStorage", lambda: storage, raising=False)
+    monkeypatch.setattr("kollabor_ai.oauth.openai_oauth.query_codex_model_details", details, raising=False)
+
+
+@pytest.mark.asyncio
+async def test_a_catalog_fetched_while_another_account_signs_in_is_not_kept(tmp_path, monkeypatch):
+    # Fluorite on #553 round 7: a fetch asked as account A, B signed in before
+    # it answered, and A's models were kept and shown as B's.
+    chatgpt, login = _signed_in(tmp_path, monkeypatch, {"account_id": "acct-a"})
+    _asks_as(monkeypatch, "acct-a", lambda: login.write_text(json.dumps({"account_id": "acct-b"}), encoding="utf-8"))
+    assert await model_catalog.get_provider_models(chatgpt) == []
+    assert model_catalog.cached_provider_models(chatgpt, max_age=float("inf")) == []
+
+
+@pytest.mark.asyncio
+async def test_a_catalog_fetched_with_another_accounts_tokens_is_not_kept(tmp_path, monkeypatch):
+    # Petalite on #553 round 8: A was signed in before and after the fetch, but
+    # B signed in and out as it loaded its tokens, so it asked as B, and B's
+    # models were kept as A's.
+    chatgpt, _ = _signed_in(tmp_path, monkeypatch, {"account_id": "acct-a"})
+    _asks_as(monkeypatch, "acct-b")
+    assert await model_catalog.get_provider_models(chatgpt) == []
+    assert model_catalog.cached_provider_models(chatgpt, max_age=float("inf")) == []
+    _asks_as(monkeypatch, "acct-a")  # asked as the account signed in: kept
+    assert [m["id"] for m in await model_catalog.get_provider_models(chatgpt)] == ["model-of-acct-a"]
+    assert [m["id"] for m in model_catalog.cached_provider_models(chatgpt)] == ["model-of-acct-a"]
+
+
+@pytest.mark.asyncio
+async def test_a_login_with_no_account_id_keeps_its_catalog_in_memory_for_itself_only(tmp_path, monkeypatch):
+    # Fluorite on #553 round 7: such a login and no login at all named the same
+    # account, "", so its list stayed after signing out, or in as another one.
+    # Rutile on round 9: none was kept then, so the picker lost it. Ametrine on
+    # round 10: the list the loadout manager carried instead reached the next
+    # login. Such a login is now known by a digest of its token.
+    chatgpt, login = _signed_in(tmp_path, monkeypatch, {"access_token": "tok", "refresh_token": "first"})
+    _asks_as(monkeypatch, None, refresh_token="first")
+    assert [m["id"] for m in await model_catalog.get_provider_models(chatgpt)] == ["model-of-nobody"]
+    assert [m["id"] for m in model_catalog.cached_provider_models(chatgpt)] == ["model-of-nobody"]  # kept
+    cache = tmp_path / "model_catalog.cache"
+    assert "token:" not in (cache.read_text(encoding="utf-8") if cache.exists() else "")  # never on disk
+    login.write_text(json.dumps({"access_token": "tok2", "refresh_token": "second"}), encoding="utf-8")
+    assert model_catalog.cached_provider_models(chatgpt, max_age=float("inf")) == []  # another login
+    login.unlink()  # signed out
+    assert model_catalog.cached_provider_models(chatgpt, max_age=float("inf")) == []
+
+
+def test_source_less_v2_catalog_cache_is_a_cold_miss(tmp_path, monkeypatch):
+    cache_path = tmp_path / "model_catalog.cache"
+    profile = {
+        "name": "local",
+        "provider": "custom",
+        "endpoint": "http://127.0.0.1:9/api/v1/",
+    }
+    cache_path.write_text(
+        json.dumps(
+            {
+                "version": model_catalog.CACHE_VERSION,
+                "entries": {
+                    "local": {
+                        "timestamp": 9999999999,
+                        "models": [{"id": "legacy-only-model"}],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(model_catalog, "_cache_file", lambda: cache_path)
+
+    assert model_catalog.cached_provider_models(profile) == []
+
+
+@pytest.mark.parametrize("missing_field", ["provider", "endpoint_id"])
+def test_v2_catalog_cache_rejects_partial_source_metadata(
+    tmp_path, monkeypatch, missing_field
+):
+    cache_path = tmp_path / "model_catalog.cache"
+    profile = {
+        "name": "local",
+        "provider": "custom",
+        "endpoint": "http://127.0.0.1:9/api/v1/",
+    }
+    current_source = model_catalog._profile_source(profile)
+    partial_source = {
+        field: value
+        for field, value in current_source.items()
+        if field != missing_field
+    }
+    cache_path.write_text(
+        json.dumps(
+            {
+                "version": model_catalog.CACHE_VERSION,
+                "entries": {
+                    "local": {
+                        "timestamp": 9999999999,
+                        "models": [{"id": "partial-source-model"}],
+                        **partial_source,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(model_catalog, "_cache_file", lambda: cache_path)
+
+    assert model_catalog.cached_provider_models(profile) == []
+
+
+def test_sourceful_v2_cache_matches_normalized_endpoint_after_reload(
+    tmp_path, monkeypatch
+):
+    cache_path = tmp_path / "model_catalog.cache"
+    monkeypatch.setattr(model_catalog, "_cache_file", lambda: cache_path)
+    model_catalog._MEMORY_CACHE.clear()
+    stored_profile = {
+        "name": "local",
+        "provider": "custom",
+        "endpoint": "http://127.0.0.1:9/api/v1/",
+    }
+    current_profile = {
+        "name": "local",
+        "provider": "custom",
+        "endpoint": "http://127.0.0.1:9/api/v1",
+    }
+    models = [{"id": "current-endpoint-model", "note": "available"}]
+
+    model_catalog._store(stored_profile, models)
+    saved = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert saved["version"] == 2
+    assert saved["entries"]["local"]["provider"] == "custom"
+    assert saved["entries"]["local"]["endpoint_id"]
+
+    model_catalog._MEMORY_CACHE.clear()
+    assert model_catalog.cached_provider_models(current_profile) == models
 
 
 def test_catalog_cache_v1_is_ignored_after_structured_window_migration(
@@ -336,3 +544,99 @@ def test_catalog_cache_v1_is_ignored_after_structured_window_migration(
     monkeypatch.setattr(model_catalog, "_cache_file", lambda: cache_path)
 
     assert model_catalog._load_disk_cache() == {}
+
+
+def _anthropic_client(monkeypatch, pages):
+    """Mock GET /v1/models: ``pages`` maps ``after_id`` to a response body or
+    an exception to raise. Returns the list of ``after_id`` values requested."""
+    seen = []
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, params=None):
+            after_id = (params or {}).get("after_id")
+            seen.append(after_id)
+            page = pages[after_id]
+            if isinstance(page, Exception):
+                raise page
+            return FakeResp(page)
+
+    monkeypatch.setattr(model_catalog.httpx, "AsyncClient", FakeClient)
+    return seen
+
+
+class _AnthropicProfile:
+    def get_provider(self):
+        return "anthropic"
+
+    def get_api_key(self):
+        return "sk-ant-xyz"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_follows_has_more_to_the_last_page(monkeypatch):
+    seen = _anthropic_client(
+        monkeypatch,
+        {
+            None: {
+                "data": [{"id": "m1"}, {"id": "m2"}],
+                "has_more": True,
+                "last_id": "m2",
+            },
+            "m2": {"data": [{"id": "m3"}], "has_more": False, "last_id": "m3"},
+        },
+    )
+
+    out = await model_catalog.list_provider_models(_AnthropicProfile())
+
+    assert [m["id"] for m in out] == ["m1", "m2", "m3"]
+    assert seen == [None, "m2"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_incomplete_listing_is_empty_not_partial(monkeypatch):
+    """A page that fails mid-listing must not leave a partial list that the
+    loadout picker would treat as the provider's whole catalog."""
+    _anthropic_client(
+        monkeypatch,
+        {
+            None: {"data": [{"id": "m1"}], "has_more": True, "last_id": "m1"},
+            "m1": RuntimeError("boom"),
+        },
+    )
+
+    assert await model_catalog.list_provider_models(_AnthropicProfile()) == []
+
+
+@pytest.mark.asyncio
+async def test_anthropic_pagination_stops_on_a_repeated_cursor(monkeypatch):
+    """A server that keeps answering has_more with the same cursor must not
+    loop forever, and its list is not trusted as complete."""
+    seen = _anthropic_client(
+        monkeypatch,
+        {
+            None: {"data": [{"id": "m1"}], "has_more": True, "last_id": "m1"},
+            "m1": {"data": [{"id": "m1"}], "has_more": True, "last_id": "m1"},
+        },
+    )
+
+    assert await model_catalog.list_provider_models(_AnthropicProfile()) == []
+    assert seen == [None, "m1"]

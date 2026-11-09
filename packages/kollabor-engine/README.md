@@ -144,6 +144,7 @@ Profiles, MCP, and hub routes:
 |---|---|---|
 | `GET` | `/profiles` | list configured profiles |
 | `POST` | `/profiles` | create profile; `copy_from` duplicates eligible stored profiles server-side, including ACP runtime fields; environment-backed keys require target-profile or global env configuration, keyring references remain shared, and OAuth/provisioned profiles are rejected; supplied fields override |
+| `GET` | `/profiles/choices` | every profile × model × effort level the web UI's model picker offers: each level the model takes (live catalog, else its provider's); an ACP harness's come from what its sessions reported |
 | `GET` | `/profiles/{name}` | inspect profile |
 | `PUT` | `/profiles/{name}` | update or rename profile |
 | `DELETE` | `/profiles/{name}` | delete profile |

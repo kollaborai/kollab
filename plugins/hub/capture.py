@@ -107,6 +107,8 @@ def _record(raw: Any, seq: int) -> dict[str, Any]:
         "token": "text",
         "output": "text",
         "text": "text",
+        # A hub message box, published beside its rendered output (plugin.py).
+        "hub_display": "message",
     }
     kind = kind_map.get(
         source_type,
@@ -227,6 +229,7 @@ def plain_text(records: Iterable[dict[str, Any]]) -> str:
     return "\n".join(str(record.get("text", "")) for record in records)
 
 
+_HIDDEN_EVENT_TYPES = {"thinking", "reasoning", "analysis"}
 _DEFAULT_TRANSCRIPT_LINES = 100
 _DEFAULT_TRANSCRIPT_CHARS = 10_000
 _MAX_TRANSCRIPT_LINES = 1_000
@@ -302,7 +305,7 @@ def group_transcript_records(
     def is_token(record: dict[str, Any]) -> bool:
         if record.get("kind") != "text" or _transcript_role(record) != "assistant":
             return False
-        return record.get("event_type") not in {"thinking", "reasoning", "analysis"}
+        return record.get("event_type") not in _HIDDEN_EVENT_TYPES
 
     final_turns = set()
     for record in ordered:
@@ -351,6 +354,11 @@ def group_transcript_records(
         pending_key = None
 
     for record in ordered:
+        if record.get("event_type") in _HIDDEN_EVENT_TYPES:
+            # Reasoning chunks arrive between the answer's deltas but never
+            # render, so they must not end the run of deltas being merged.
+            grouped.append(record)
+            continue
         if is_token(record):
             turn_key = _transcript_turn_key(record)
             if pending and turn_key != pending_key:
@@ -369,12 +377,15 @@ def group_transcript_records(
         grouped.append(record)
 
     flush_pending()
+    # A merged block takes its last delta's seq, after reasoning records that
+    # were passed over while it was open; keep the list in seq order.
+    grouped.sort(key=_record_sequence)
     return grouped
 
 
 def _transcript_record_lines(record: dict[str, Any]) -> list[str]:
     event_type = str(record.get("event_type") or "")
-    if event_type in {"thinking", "reasoning", "analysis"}:
+    if event_type in _HIDDEN_EVENT_TYPES:
         return []
 
     kind = str(record.get("kind") or "text")

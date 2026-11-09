@@ -31,13 +31,87 @@ from ..history_paging import (
 )
 from ..hub_bridge import HubBridge, network_daemons
 from ..network_aggregate import merge_view_and_memberships
-from ..server import get_session_registry
+from ..server import get_session_registry, open_named_session
 from ..session import INLINE_PROFILE, EngineSession
 from .rosters import apply_persona
 from .workspaces import remember_workspace
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+
+
+async def _restore_mcp_settings(session: EngineSession, previous_settings: Dict[str, bool]) -> tuple[List[str], bool]:
+    """Restore MCP settings without letting request cancellation abort rollback.
+
+    Returns failed restore names and whether the request was canceled while the
+    rollback was running. Callers propagate that cancellation after cleanup.
+    """
+
+    async def restore() -> List[str]:
+        failures: List[str] = []
+        for name, was_enabled in previous_settings.items():
+            if was_enabled:
+                continue
+            try:
+                await session.state.disable_mcp_server(name)
+            except asyncio.CancelledError:
+                failures.append(name)
+                logger.error(
+                    "session %s: canceled while restoring MCP server %s to disabled",
+                    session.session_id,
+                    name,
+                )
+            except Exception as error:
+                failures.append(name)
+                logger.exception(
+                    "session %s: failed to restore MCP server %s to disabled after attach failure: %s",
+                    session.session_id,
+                    name,
+                    error,
+                )
+
+        try:
+            await session.state.reload_mcp_servers()
+        except asyncio.CancelledError:
+            failures.append("reload")
+            logger.error(
+                "session %s: canceled while reloading MCP servers after rollback",
+                session.session_id,
+            )
+        except Exception as error:
+            failures.append("reload")
+            logger.exception(
+                "session %s: failed to reload MCP servers after rollback: %s",
+                session.session_id,
+                error,
+            )
+        return failures
+
+    rollback_task = asyncio.create_task(restore(), name=f"mcp-rollback-{session.session_id}")
+    cancellation_during_rollback = False
+    while not rollback_task.done():
+        try:
+            await asyncio.shield(rollback_task)
+        except asyncio.CancelledError:
+            # Shield keeps the rollback task alive; defer propagation until all
+            # best-effort state restoration and its reload have finished.
+            cancellation_during_rollback = True
+
+    if rollback_task.cancelled():
+        logger.error(
+            "session %s: MCP rollback task was canceled before completion",
+            session.session_id,
+        )
+        return ["rollback"], cancellation_during_rollback
+    try:
+        return rollback_task.result(), cancellation_during_rollback
+    except Exception as error:
+        logger.exception(
+            "session %s: MCP rollback task failed unexpectedly: %s",
+            session.session_id,
+            error,
+        )
+        return ["rollback"], cancellation_during_rollback
 
 
 # The engine is a singleton process with a module-level session registry; its
@@ -273,6 +347,79 @@ async def create_session(body: CreateSessionRequest, request: Request):
         for s in agent_data.get("mcp_servers", []):
             if s not in effective_mcp_servers:
                 effective_mcp_servers.append(s)
+
+    # Proxy clients may supply the ID for an existing hub-spawned session.
+    # Resume it through the same adoption path as session-scoped web requests;
+    # never initialize a second daemon against the existing conversation log.
+    if body.session_id:
+        attached_session = await open_named_session(request, session_id=body.session_id)
+        if attached_session is not None:
+            if user_token:
+                attached_session.user_token = user_token
+
+            async with attached_session._mcp_lock:
+                existing_mcp_servers = list(attached_session.mcp_server_names or [])
+                new_mcp_servers = list(
+                    dict.fromkeys(name for name in effective_mcp_servers if name not in existing_mcp_servers)
+                )
+                if new_mcp_servers:
+                    previous_mcp_settings: dict[str, bool] = {}
+                    try:
+                        for name in new_mcp_servers:
+                            try:
+                                status = await attached_session.state.test_mcp_server(name)
+                            except ValueError:
+                                # Unconfigured servers are ignored by _apply_mcp_servers.
+                                continue
+                            previous_mcp_settings[name] = bool(status.get("enabled", False))
+                    except Exception as snapshot_error:
+                        logger.exception(
+                            "session %s: could not snapshot MCP settings before attaching %s",
+                            attached_session.session_id,
+                            new_mcp_servers,
+                        )
+                        raise HTTPException(
+                            status_code=503,
+                            detail=(
+                                "Existing session resumed, but current MCP server settings "
+                                "could not be read; retry the attach."
+                            ),
+                        ) from snapshot_error
+
+                    attached_session.mcp_server_names = existing_mcp_servers + new_mcp_servers
+                    try:
+                        await attached_session._apply_mcp_servers(new_mcp_servers)
+                    except asyncio.CancelledError:
+                        attached_session.mcp_server_names = existing_mcp_servers
+                        await _restore_mcp_settings(attached_session, previous_mcp_settings)
+                        raise
+                    except Exception as e:
+                        attached_session.mcp_server_names = existing_mcp_servers
+                        rollback_failures, cancellation_during_rollback = await _restore_mcp_settings(
+                            attached_session, previous_mcp_settings
+                        )
+                        if cancellation_during_rollback:
+                            raise asyncio.CancelledError from e
+
+                        logger.error(
+                            "session %s: could not apply MCP servers %s: %s",
+                            attached_session.session_id,
+                            new_mcp_servers,
+                            e,
+                        )
+                        if rollback_failures:
+                            detail = (
+                                "Existing session resumed, but requested MCP server attachment "
+                                "failed; MCP rollback was incomplete. Inspect engine logs before you "
+                                "retry the attach."
+                            )
+                        else:
+                            detail = (
+                                "Existing session resumed, but requested MCP server "
+                                "attachment failed; retry the attach."
+                            )
+                        raise HTTPException(status_code=503, detail=detail) from e
+            return attached_session.to_dict()
 
     # Load profile from credentials or ProfileManager
     profile: Optional[LLMProfile] = None
@@ -840,27 +987,42 @@ async def list_session_commands(session_id: str):
     return {"session_id": session_id, "commands": commands}
 
 
+def _live_model(snapshot: Any, fallback: Optional[str] = None) -> Optional[str]:
+    """The model a daemon snapshot reports for its session: a harness's own,
+    "" when it names none, never the saved one; a native profile's, else
+    ``fallback``. None: unreported."""
+    model = getattr(snapshot, "model", None)
+    if getattr(snapshot, "provider", "") == "acp":
+        return model
+    return model or fallback
+
+
 def apply_profile_mirror(
     session: Any,
     name: str,
     model: Optional[str] = None,
     effort: Optional[str] = None,
+    snapshot: Any = None,
 ) -> None:
     """Keep the engine list response in sync with the daemon's active profile.
 
     The profile manager here is only a redacted mirror; the daemon remains the
     authority for the active provider/model. Shared by ``POST /profile`` and the
     panel routes, so a model change made in a panel never leaves the toolbar or
-    the session list stale. Never raises.
+    the session list stale. A profile only the daemon has (its folder's own,
+    another computer's) mirrors the daemon's redacted ``snapshot`` (#553).
+    Never raises.
     """
     try:
         from kollabor_ai import ProfileManager
 
         selected = ProfileManager().get_profile(name)
+        if selected is None and getattr(snapshot, "name", None):
+            selected = snapshot
         if selected is not None:
             session.profile = selected
             session._profile_revision = getattr(session, "_profile_revision", 0) + 1
-            if model:
+            if model is not None:  # "" is a harness that names no model
                 selected.model = model
             if effort is not None:
                 selected.effort = effort
@@ -902,8 +1064,9 @@ async def set_session_profile(session_id: str, body: SetProfileRequest):
         # resolved provider profile so the response's session dict
         # cannot clobber it with the pre-switch profile (#605).
         getattr(snapshot, "name", None) or body.name,
-        getattr(snapshot, "model", None) or body.model,
+        _live_model(snapshot, body.model),
         getattr(snapshot, "effort", None),
+        snapshot=snapshot,
     )
 
     result = getattr(snapshot, "to_dict", None)
@@ -1372,31 +1535,37 @@ async def connect_server(session_id: str, server_name: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    snapshot = await _mcp_snapshot(session)
-    server = _find_server(snapshot, server_name)
-    if server is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"MCP server '{server_name}' not found in configuration",
-        )
-    if server.connected:
-        raise HTTPException(
-            status_code=409, detail=f"Server '{server_name}' is already connected"
-        )
+    async with session._mcp_lock:
+        snapshot = await _mcp_snapshot(session)
+        server = _find_server(snapshot, server_name)
+        if server is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"MCP server '{server_name}' not found in configuration",
+            )
+        if server.connected:
+            raise HTTPException(
+                status_code=409, detail=f"Server '{server_name}' is already connected"
+            )
 
-    await session.state.enable_mcp_server(server_name)
-    await session.state.reload_mcp_servers()
-    updated = await _mcp_snapshot(session)
-    server = _find_server(updated, server_name)
+        await session.state.enable_mcp_server(server_name)
+        await session.state.reload_mcp_servers()
+        names = list(session.mcp_server_names or [])
+        if server_name not in names:
+            names.append(server_name)
+        session.mcp_server_names = names
 
-    return {
-        "ok": True,
-        "server_name": server_name,
-        "status": "connected" if server and server.connected else "enabled",
-        "tool_count": server.tool_count if server else 0,
-        "tools": server.tools if server else [],
-        "session_id": session_id,
-    }
+        updated = await _mcp_snapshot(session)
+        server = _find_server(updated, server_name)
+
+        return {
+            "ok": True,
+            "server_name": server_name,
+            "status": "connected" if server and server.connected else "enabled",
+            "tool_count": server.tool_count if server else 0,
+            "tools": server.tools if server else [],
+            "session_id": session_id,
+        }
 
 
 @router.post("/{session_id}/mcp/{server_name}/disconnect")
@@ -1408,23 +1577,27 @@ async def disconnect_server(session_id: str, server_name: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    snapshot = await _mcp_snapshot(session)
-    server = _find_server(snapshot, server_name)
-    if server is None:
-        raise HTTPException(
-            status_code=404, detail=f"No such MCP server '{server_name}'"
-        )
+    async with session._mcp_lock:
+        snapshot = await _mcp_snapshot(session)
+        server = _find_server(snapshot, server_name)
+        if server is None:
+            raise HTTPException(
+                status_code=404, detail=f"No such MCP server '{server_name}'"
+            )
 
-    tools_removed = server.tool_count
-    await session.state.disable_mcp_server(server_name)
+        tools_removed = server.tool_count
+        await session.state.disable_mcp_server(server_name)
+        session.mcp_server_names = [
+            name for name in session.mcp_server_names or [] if name != server_name
+        ]
 
-    return {
-        "ok": True,
-        "server_name": server_name,
-        "status": "disconnected",
-        "tools_removed": tools_removed,
-        "session_id": session_id,
-    }
+        return {
+            "ok": True,
+            "server_name": server_name,
+            "status": "disconnected",
+            "tools_removed": tools_removed,
+            "session_id": session_id,
+        }
 
 
 @router.get("/{session_id}/mcp/{server_name}/tools")
