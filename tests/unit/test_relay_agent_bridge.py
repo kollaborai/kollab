@@ -67,7 +67,9 @@ class Directory:
     def agents(self, workspace=None):
         return self.rows
 
-    def publishable_agents(self, workspace, workspace_id, device_name=None):
+    def publishable_agents(
+        self, workspace, workspace_id, device_name=None, *, include_agent_type=True
+    ):
         return [
             {
                 "machine_id": row.machine_id,
@@ -77,6 +79,11 @@ class Directory:
                 "is_coordinator": row.is_coordinator,
                 "state": row.state,
                 "device": device_name or "test-device",
+                **(
+                    {"agent_type": row.agent_type}
+                    if include_agent_type and row.agent_type
+                    else {}
+                ),
             }
             for row in self.rows
         ]
@@ -2222,6 +2229,55 @@ async def test_remote_directory_row_carries_the_peers_agent_type(bridges):
     (row,) = [r for r in await left.remote_agents() if r["address"] == address(right)]
 
     assert row["agent_type"] == "research"
+
+
+@pytest.mark.asyncio
+async def test_directory_omits_agent_type_for_legacy_requesters(bridges):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    right.directory.rows[0] = replace(right.directory.rows[0], agent_type="coder")
+
+    result = await right._receive(
+        left.commands.client.public_key, "directory", {}, _secure=True
+    )
+
+    assert "agent_type" not in result["agents"][0]
+
+
+@pytest.mark.asyncio
+async def test_directory_includes_agent_type_for_opted_in_requesters(bridges):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    right.directory.rows[0] = replace(right.directory.rows[0], agent_type="coder")
+
+    result = await right._receive(
+        left.commands.client.public_key,
+        "directory",
+        {"agent_type": True},
+        _secure=True,
+    )
+
+    assert result["agents"][0]["agent_type"] == "coder"
+
+
+@pytest.mark.asyncio
+async def test_remote_directory_falls_back_for_older_peer(bridges):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    requests = []
+
+    async def old_peer(_peer, method, payload, *, timeout=10):
+        requests.append(payload)
+        if payload:
+            raise RelayError("invalid directory request")
+        return _directory_reply(right)
+
+    left.secure_transport.request = old_peer
+
+    await left._rpc_directory({"peer": right.commands.client.public_key})
+
+    assert requests == [{"agent_type": True}, {}]
+    assert [r for r in await left.remote_agents() if r["address"] == address(right)]
 
 
 @pytest.mark.asyncio
