@@ -29,10 +29,13 @@ import type {
   EngineApi,
   HubAgent,
   McpServerConfig,
+  ModelChoice,
   Profile,
   Session,
   SessionMcp,
 } from "@/api";
+import { applyModelChoice, PickError } from "@/components/shell/model-choice";
+import { ModelPicker } from "@/components/shell/ModelPicker";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -137,6 +140,7 @@ export function SessionPanel({
   status?: string | null;
   statusError?: boolean;
   onStatus: (message: string) => void;
+  /** `failed`: the session is read back after a change that did not apply; it still runs what it ran. */
   onSessionUpdated: (session: Session) => void;
   onOpenSettings: () => void;
   /** Called once the engine has cleared the history; resets the open thread. */
@@ -305,12 +309,14 @@ export function SessionPanel({
     }
   };
 
-  const changeProfile = async (name: string) => {
+  const changeProfile = async (choice: ModelChoice) => {
     try {
-      const updated = await api.setSessionProfile(session.session_id, name);
+      const updated = await applyModelChoice(api, session, choice);
       onSessionUpdated(updated);
-      onStatus(`Model: ${updated.model || name}`);
+      onStatus(`Model: ${[updated.model || choice.profile, updated.effort].filter(Boolean).join(" · ")}`);
     } catch (error) {
+      // What runs now: shown, and the notice of a failed New Session pick follows it.
+      if (error instanceof PickError && error.session) onSessionUpdated(error.session);
       fail(error);
     }
   };
@@ -337,9 +343,6 @@ export function SessionPanel({
     ([, info]) => info.status === "connected",
   ).length;
 
-  const activeProfile = profiles.find(
-    (profile) => profile.name === (session.profile || profiles[0]?.name),
-  );
   const toggle = (next: boolean) => {
     setOpen(next);
     storeOpen(next);
@@ -395,40 +398,18 @@ export function SessionPanel({
       <Separator />
       <div className="flex min-w-0 flex-col gap-1">
         <p className="text-muted-foreground font-medium">Model and Profile</p>
-        <Select
-          value={session.profile || profiles[0]?.name || "default"}
-          onValueChange={(next) => void changeProfile(next)}
+        <ModelPicker
+          api={api}
+          profiles={profiles}
+          value={{
+            profile: session.profile || profiles[0]?.name || "default",
+            model: session.model || "",
+            effort: session.effort || "",
+          }}
+          onPick={(choice) => void changeProfile(choice)}
           disabled={!profiles.length}
-        >
-          <SelectTrigger
-            size="sm"
-            className="h-7 w-full min-w-0 text-xs"
-            aria-label="Model"
-          >
-            <SelectValue placeholder="Model" className="min-w-0 flex-1">
-              {activeProfile ? (
-                <span className="min-w-0 truncate">
-                  {activeProfile.model || activeProfile.name}
-                  {activeProfile.model && activeProfile.name !== activeProfile.model ? (
-                    <span className="text-muted-foreground"> · {activeProfile.name}</span>
-                  ) : null}
-                </span>
-              ) : undefined}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent className="max-w-[calc(100vw-1.5rem)]">
-            {profiles.map((profile) => (
-              <SelectItem key={profile.name} value={profile.name}>
-                <span className="min-w-0 truncate">
-                  {profile.model || profile.name}
-                  {profile.model && profile.name !== profile.model ? (
-                    <span className="text-muted-foreground"> · {profile.name}</span>
-                  ) : null}
-                </span>
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+          className="h-7 text-xs"
+        />
       </div>
       <div className="flex min-w-0 flex-col gap-1">
         <p className="text-muted-foreground font-medium">Approval Mode</p>

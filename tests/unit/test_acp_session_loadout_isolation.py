@@ -9,6 +9,23 @@ from tests.unit.test_acp_effort_restore import _options, _orchestrator
 
 
 @pytest.mark.asyncio
+async def test_id_only_effort_option_can_be_selected():
+    # F5: the same option recognized by discovery must be writable in-session.
+    options = [{"id": "effort_level", "currentValue": "low", "options": [
+        {"value": "low"}, {"value": "high"},
+    ]}]
+    calls = []
+
+    async def set_option(option_id, value, persist):
+        calls.append((option_id, value, persist))
+        return [{**options[0], "currentValue": value}]
+
+    orch = SimpleNamespace(advertised_config_options=lambda: options, set_config_option=set_option)
+    await LocalStateService._apply_acp_effort(orch, "high")
+    assert calls == [("effort_level", "high", False)]
+
+
+@pytest.mark.asyncio
 async def test_session_effort_does_not_change_saved_options_or_another_daemon(tmp_path):
     saved = {"model": "sonnet", "effort": "xhigh"}
     first_options = _options()
