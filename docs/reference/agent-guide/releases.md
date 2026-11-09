@@ -3,7 +3,7 @@
 Part of the agent guide. `CLAUDE.md` holds the rules for every change and links here;
 this page holds the reference for one area. Read it before you change that area.
 
-### Version Management
+## Version Management
 Version managed centrally in `pyproject.toml`:
 - **Development mode** (`python main.py`): Reads from `pyproject.toml` at runtime
 - **Production mode** (pip install): Uses `importlib.metadata.version("kollab")`
@@ -21,7 +21,7 @@ line. A detached checkout reports branch `unknown` while retaining its SHA
 when HEAD is resolvable; unavailable fields are `unknown`. Installed artifacts
 do not need runtime Git access.
 
-### Cutting a Release
+## Cutting a Release
 
 `main` is branch-protected: source and version-preparation changes land through
 a dedicated writer worktree and DRAFT PR, with the three required CI checks
@@ -69,7 +69,7 @@ update separately.
 Canonical checklist: `docs/release-process.md`. Full agent playbook:
 `bundles/skills/release-manager/SKILL.md`.
 
-### Release Binaries
+## Release Binaries
 
 Every release also ships `kollab` as one executable per platform
 (`kollab-macos-aarch64`, `kollab-macos-x86_64`, `kollab-linux-x86_64`,

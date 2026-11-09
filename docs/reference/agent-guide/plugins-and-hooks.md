@@ -3,7 +3,7 @@
 Part of the agent guide. `CLAUDE.md` holds the rules for every change and links here;
 this page holds the reference for one area. Read it before you change that area.
 
-### Plugin Architecture
+## Plugin Architecture
 - Plugin discovery from `plugins/` directory
 - Dynamic instantiation with dependency injection
 - Hook registration for event interception

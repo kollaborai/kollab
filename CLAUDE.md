@@ -26,8 +26,8 @@ Monorepo with extracted packages:
 ## Reference pages
 
 This file holds the rules that apply to every change. The reference for each area lives in
-`docs/reference/agent-guide/`. Read the page before you touch its area, and update that page
-(not this file) when the area changes.
+`docs/reference/agent-guide/`. Read the page before you touch its area. When an area changes, update its page; a rule every
+change must follow goes in this file.
 
 | Before you touch | Read |
 |---|---|
@@ -46,7 +46,9 @@ These three live in the reference pages and are easy to break without reading th
 - `kollab --hub msg <name> <text>` reaches every online agent and wakes only the named one; send one message per agent you need to act (`hub.md`).
 - An engine route that takes a folder calls `folder_or_400` first and uses what it returns (`components.md`).
 
-#### CRITICAL: Render State Management Rules
+## Terminal UI rules
+
+### CRITICAL: Render State Management Rules
 
 **NEVER directly manipulate these `terminal_renderer` properties:**
 - `input_line_written`, `last_line_count`, `_last_render_content`, `writing_messages`
@@ -425,7 +427,7 @@ Use sub agents for parallel checks when possible.
 - [ ] Existing test suite still green? (`python -m pytest tests/unit/ -x -q`)
 
 **Documentation + Discoverability:**
-- [ ] `CLAUDE.md` updated for new components/patterns?
+- [ ] `CLAUDE.md` (a rule for every change) or its `docs/reference/agent-guide/` page (reference for one area) updated for new components/patterns?
 - [ ] `README.md` updated if user-facing feature?
 - [ ] `docs/` page created or updated? (features/, guides/, specs/)
 - [ ] Related docs cross-linked?

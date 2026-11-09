@@ -3,7 +3,7 @@
 Part of the agent guide. `CLAUDE.md` holds the rules for every change and links here;
 this page holds the reference for one area. Read it before you change that area.
 
-### Hub System (`plugins/hub/`)
+## Hub System (`plugins/hub/`)
 
 Peer-to-peer agent mesh with persistent identity.
 
