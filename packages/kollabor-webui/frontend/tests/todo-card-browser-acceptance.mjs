@@ -1,7 +1,7 @@
 // Real-browser coverage for the Todo card under the Session Controls panel (issue #973): the card shows the
 // agent's latest `todo:` list, opens and closes from its header, remembers the choice, sits on a filled surface
 // with no line borders, never shows another agent's list, is absent when the chat has none, and in a short window
-// keeps the panel's controls and the whole list within a person's reach.
+// keeps the panel's controls and the whole list within a person's reach, and its scroll box does not cut off the shadows.
 // Run after `npm ci` and `npx playwright-core install chromium`:
 //   npm run test:e2e:todo-card
 // Browser resolution: CHROME_PATH if set, else the Chrome app on macOS, else playwright's own chromium.
@@ -142,6 +142,23 @@ async function wheelTo(page, over, target) {
   return shown(target);
 }
 
+// How many pixels of two PNG screenshots of one clip differ by at least `floor` (of 255) in some color channel, read through a canvas.
+const differingPixels = (page, a, b, floor) =>
+  page.evaluate(async ([first, second, least]) => {
+    const read = async (data) => {
+      const bitmap = await createImageBitmap(await (await fetch(`data:image/png;base64,${data}`)).blob());
+      const context = new OffscreenCanvas(bitmap.width, bitmap.height).getContext("2d");
+      context.drawImage(bitmap, 0, 0);
+      return context.getImageData(0, 0, bitmap.width, bitmap.height).data;
+    };
+    const [x, y] = await Promise.all([read(first), read(second)]);
+    let count = 0;
+    for (let i = 0; i < x.length; i += 4) {
+      if (Math.max(Math.abs(x[i] - y[i]), Math.abs(x[i + 1] - y[i + 1]), Math.abs(x[i + 2] - y[i + 2])) >= least) count += 1;
+    }
+    return count;
+  }, [a, b, floor]);
+
 async function main() {
   const { server, baseUrl } = await openVite();
   let browser;
@@ -281,6 +298,29 @@ async function main() {
       }
     }
     assert.deepEqual(problems, [], "a long list in a short window leaves something out of reach");
+    // 5. The column's scroll box leaves the panel's and the card's shadows room. A box that hugs them cuts the shadow off at
+    // its edge, which the light theme (not shipped, but in the tokens) shows: compare the column with and without the clip.
+    const lit = await openChat(browser, baseUrl, withLists(), { width: 1280, height: 900 });
+    try {
+      await openControls(lit.page, 1280);
+      await waitForCard(lit.page);
+      await lit.page.evaluate(() => document.documentElement.classList.remove("dark"));
+      const column = lit.page.locator('aside[aria-label="Session Controls"]').locator("xpath=..");
+      const box = await column.boundingBox();
+      const clip = { x: Math.max(box.x - 40, 0), y: Math.max(box.y - 40, 0), width: Math.min(box.width + 80, 1280 - Math.max(box.x - 40, 0)), height: box.height + 80 };
+      const shoot = async (overflowY) => {
+        await column.evaluate((node, value) => { node.style.overflowY = value; }, overflowY);
+        await lit.page.waitForTimeout(150);
+        return (await lit.page.screenshot({ clip })).toString("base64");
+      };
+      const clipped = await shoot("");
+      const free = await shoot("visible");
+      // A cut shadow is thousands of pixels along the column's edges; antialiasing at an icon's edge can move a couple.
+      const cut = await differingPixels(lit.page, clipped, free, 4);
+      assert.ok(cut <= 8, `the column's scroll box cuts the shadows off in the light theme: ${cut} pixels differ by 4 of 255 or more from an unclipped column`);
+    } finally {
+      await lit.context.close();
+    }
     console.log("todo card browser acceptance: ok");
   } finally {
     await browser?.close();
