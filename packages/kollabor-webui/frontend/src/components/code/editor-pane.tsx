@@ -415,7 +415,7 @@ export function EditorPane({ paneId, rootPath }: EditorPaneProps) {
         )}
 
         {/* floating save indicator - offset right when md toggle is present */}
-        {isDirty(file) && (
+        {isDirty(file) && !saveError && (
           <div className={`absolute top-2 z-10 flex items-center gap-1.5 font-mono text-[10px] text-muted-foreground animate-in fade-in duration-300 ${statusRight}`}>
             <span className="size-1 animate-pulse rounded-full bg-foreground/60" />
             unsaved
@@ -437,7 +437,7 @@ export function EditorPane({ paneId, rootPath }: EditorPaneProps) {
               }}
               className="cursor-pointer"
             >
-              ✕ {saveError.length > 40 ? saveError.slice(0, 40) + "…" : saveError}
+              ✕ {saveStale ? "Changed on disk" : saveError.length > 40 ? saveError.slice(0, 40) + "…" : saveError}
             </button>
             {saveStale && (
               <button type="button" onClick={() => void handleSave(true)} className="cursor-pointer underline">
