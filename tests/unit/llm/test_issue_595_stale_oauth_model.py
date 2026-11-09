@@ -51,7 +51,10 @@ def manager(monkeypatch):
         profile_manager_module, "get_global_config_path_candidates", lambda: []
     )
     monkeypatch.setattr(
-        profile_manager_module, "get_local_config_path_candidates", lambda: []
+        # the manager reads another folder's local layer by passing its path (#972)
+        profile_manager_module,
+        "get_local_config_path_candidates",
+        lambda project_path=None: [],
     )
     pm = ProfileManager()
     assert pm.add_profile(

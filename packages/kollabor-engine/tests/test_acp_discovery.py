@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -620,8 +621,9 @@ async def test_choices_route_returns_discovery_status_and_uses_only_fresh_option
 
     monkeypatch.setattr(profiles_route, "_get_profile_manager", lambda: object())
     monkeypatch.setattr(loadout_manager_module, "LoadoutManager", FakeManager)
-    monkeypatch.setattr(kollabor_config, "ConfigService", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(config_utils, "get_global_config_path", lambda: "/tmp/config.json")
+    # the layered loadout read goes through config_utils paths: a real Path is
+    # required there (a plain str broke .exists() in loader)
+    monkeypatch.setattr(config_utils, "get_global_config_path", lambda: Path("/tmp/config.json"))
     monkeypatch.setattr(acp_discovery, "discover_profiles", discover)
 
     response = await profiles_route.list_choices()
