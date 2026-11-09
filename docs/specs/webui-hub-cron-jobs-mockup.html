@@ -1,98 +1,250 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MOCKUP — Hub cron jobs (#612)</title>
+<title>Mockup: Cron Jobs settings tab (#612)</title>
 <style>
-  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#e6edf3; --dim:#8b949e; --accent:#58a6ff; --err:#f85149; --ok:#3fb950; }
-  * { box-sizing:border-box; margin:0; padding:0; }
-  body { background:var(--bg); color:var(--fg); font:14px/1.45 -apple-system, "Segoe UI", sans-serif; padding:16px; }
-  .banner { background:#1f2937; border:1px dashed var(--accent); color:var(--accent); padding:8px 12px; border-radius:6px; margin-bottom:16px; font-size:12px; }
-  header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
-  h1 { font-size:16px; font-weight:600; }
-  .meta { color:var(--dim); font-size:12px; }
-  button.refresh { background:var(--panel); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:6px 12px; font-size:12px; cursor:pointer; }
-  button.refresh:hover { border-color:var(--accent); }
-  .panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
-  table { width:100%; border-collapse:collapse; }
-  th { text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--dim); padding:10px 12px; border-bottom:1px solid var(--border); }
-  td { padding:10px 12px; border-bottom:1px solid var(--border); vertical-align:top; }
-  tr:last-child td { border-bottom:none; }
-  .agent { color:var(--accent); font-weight:600; white-space:nowrap; }
-  .jobid { color:var(--dim); font-size:12px; font-family:ui-monospace, monospace; }
-  .target { white-space:nowrap; }
-  .msg { max-width:320px; }
-  .next { color:var(--ok); white-space:nowrap; }
-  .err { color:var(--err); max-width:220px; }
-  .mode { color:var(--dim); font-size:12px; }
-  .empty { padding:32px; text-align:center; color:var(--dim); }
-  .empty strong { color:var(--fg); display:block; margin-bottom:4px; }
-  .hint { color:var(--dim); font-size:12px; margin-top:10px; }
-  @media (max-width: 560px) {
-    table, thead, tbody, tr, td { display:block; }
-    thead { display:none; }
-    tr { border-bottom:1px solid var(--border); padding:8px 12px; }
-    td { border:none; padding:3px 0; }
-    td::before { content:attr(data-l); color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.05em; display:block; }
-    .agent::before { content:"agent"; }
-    .msg { max-width:none; }
-    .err { max-width:none; }
+  /* Tokens and type scale copied from packages/kollabor-webui/frontend/src/styles.css:
+     the .dark tokens, the pointer-fine 90% root size, and border = transparent.
+     Sample data only. Nothing here is built. */
+  :root {
+    color-scheme: dark;
+    --background: oklch(0.145 0 0);
+    --foreground: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.708 0 0);
+    --destructive: oklch(0.704 0.191 22.216);
+    --input: oklch(1 0 0 / 18%);
+    --highlight: #78be21;
+    --radius: 0.625rem;
+  }
+  @media (pointer: fine) {
+    :root { font-size: 90%; }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    padding: 1rem;
+    background: oklch(0.1 0 0);
+    color: var(--foreground);
+    font-family: -apple-system, "system-ui", "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif;
+    font-size: 1rem;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .wrap { max-width: 72rem; margin: 0 auto; }
+  .note { font-size: 0.75rem; color: var(--muted-foreground); margin-bottom: 0.75rem; }
+  .caption { margin: 1.5rem 0 0.5rem; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.025em; color: var(--muted-foreground); }
+  .dialog {
+    position: relative;
+    background: var(--background);
+    border-radius: var(--radius);
+    box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+    padding-bottom: 1rem;
+  }
+  .inset { padding-left: 1rem; padding-right: 1rem; }
+  .dlg-head { padding: 1rem 3rem 0 1rem; }
+  .dlg-title { font-size: 1.125rem; line-height: 1; font-weight: 600; }
+  .dlg-desc { margin-top: 0.375rem; font-size: 0.875rem; color: var(--muted-foreground); }
+  .close {
+    position: absolute; top: 1rem; right: 1rem; width: 2rem; height: 2rem;
+    display: grid; place-items: center; border: 0; background: none; cursor: pointer;
+    color: var(--muted-foreground); border-radius: calc(var(--radius) - 2px);
+  }
+  .close svg, .btn svg { width: 1rem; height: 1rem; flex: none; }
+  .tabs { display: flex; flex-wrap: wrap; margin-top: 0.75rem; }
+  .tab {
+    position: relative; display: inline-flex; align-items: center; height: 2.25rem;
+    padding: 0 0.625rem; font-size: 0.875rem; font-weight: 500; white-space: nowrap;
+    color: var(--muted-foreground);
+  }
+  .tab.on { color: var(--foreground); }
+  .tab.on::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+    background: var(--highlight);
+  }
+  .panel { padding-top: 0.75rem; }
+  .bar { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+  .summary { font-size: 0.875rem; color: var(--muted-foreground); }
+  .btn {
+    display: inline-flex; align-items: center; gap: 0.375rem; height: 2rem; padding: 0 0.75rem;
+    border: 1px solid var(--input); border-radius: calc(var(--radius) - 2px);
+    background: oklch(1 0 0 / 5.4%); color: var(--foreground);
+    font: inherit; font-size: 0.875rem; font-weight: 500; cursor: pointer;
+  }
+  .btn:hover { background: oklch(1 0 0 / 9%); }
+  .table-wrap { margin-top: 0.5rem; overflow-x: auto; }
+  table { border-collapse: collapse; font-size: 0.875rem; line-height: 1.25rem; text-align: left; }
+  th { padding: 0.5rem 0.75rem 0.5rem 0; font-weight: 500; color: var(--muted-foreground); white-space: nowrap; }
+  td { padding: 0.5rem 0.75rem 0.5rem 0; vertical-align: top; }
+  th:last-child, td:last-child { padding-right: 0; }
+  .nw { white-space: nowrap; }
+  .msg { max-width: 14rem; overflow-wrap: anywhere; }
+  .id { font-size: 0.75rem; color: var(--muted-foreground); }
+  .err { color: var(--destructive); }
+  .cards { display: none; flex-direction: column; gap: 0.75rem; margin-top: 0.5rem; }
+  .card { padding: 0.75rem; border-radius: var(--radius); background: oklch(0.269 0 0 / 0.3); font-size: 0.875rem; }
+  .card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
+  .card-mode { font-size: 0.75rem; color: var(--muted-foreground); }
+  .card dl { display: grid; grid-template-columns: auto 1fr; column-gap: 0.75rem; row-gap: 0.25rem; margin-top: 0.5rem; }
+  .card dt { color: var(--muted-foreground); }
+  .card dd { overflow-wrap: anywhere; }
+  .card .err { color: var(--destructive); }
+  .hint { margin-top: 0.75rem; font-size: 0.75rem; color: var(--muted-foreground); }
+  .empty {
+    margin-top: 0.5rem; padding: 1.5rem 0.75rem; border-radius: var(--radius);
+    background: oklch(0.269 0 0 / 0.3); text-align: center; font-size: 0.875rem; color: var(--muted-foreground);
+  }
+  .empty strong { display: block; margin-bottom: 0.25rem; font-weight: 500; color: var(--foreground); }
+  @media (min-width: 640px) {
+    .dlg-head { padding: 1.25rem 3rem 0 1.5rem; }
+    .inset { padding-left: 1.5rem; padding-right: 1.5rem; }
+    .tab { padding: 0 0.75rem; }
+  }
+  @media (min-width: 768px) {
+    .tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  }
+  @media (max-width: 767px) {
+    .table-wrap { display: none; }
+    .cards { display: flex; }
   }
 </style>
 </head>
 <body>
-<div class="banner">MOCKUP — sample data only. Placement: Settings tab, panel "Hub cron jobs". Read-only; delete stays in the owning agent's terminal. No production code until this mockup is approved (issue #612).</div>
+<div class="wrap">
+  <p class="note">Mockup for #612 · sample data · not built</p>
 
-<header>
-  <div>
-    <h1>Hub cron jobs</h1>
-    <div class="meta">3 jobs across 3 live agents &middot; synced just now</div>
-  </div>
-  <button class="refresh">Refresh</button>
-</header>
+  <section class="dialog" aria-label="Settings">
+    <button class="close" type="button" aria-label="Close settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
 
-<div class="panel">
-<table>
-  <thead>
-    <tr><th>Agent</th><th>Job</th><th>Schedule</th><th>Target</th><th>Message</th><th>Next fire</th><th>Last error</th></tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td class="agent" data-l="agent">moonstone <span class="jobid">ab12cd34</span></td>
-      <td class="mode">recurring</td>
-      <td class="mode" data-l="schedule">every 1h</td>
-      <td class="target" data-l="target">lapis</td>
-      <td class="msg" data-l="message">report the pulse</td>
-      <td class="next" data-l="next fire">in 30m</td>
-      <td class="err"></td>
-    </tr>
-    <tr>
-      <td class="agent" data-l="agent">moonstone <span class="jobid">9876fedc</span></td>
-      <td class="mode">one-shot</td>
-      <td class="mode" data-l="schedule">every 1m 30s</td>
-      <td class="target" data-l="target">infra@home-server</td>
-      <td class="msg" data-l="message">check the tunnel</td>
-      <td class="next" data-l="next fire">in 1m 10s</td>
-      <td class="err">peer has no conversation grant for this agent</td>
-    </tr>
-    <tr>
-      <td class="agent" data-l="agent">koordinator <span class="jobid">5a5b5c5d</span></td>
-      <td class="mode">recurring</td>
-      <td class="mode" data-l="schedule">every 6h</td>
-      <td class="target" data-l="target">all</td>
-      <td class="msg" data-l="message">standup: one-line status</td>
-      <td class="next" data-l="next fire">in 2h 14m</td>
-      <td class="err"></td>
-    </tr>
-  </tbody>
-</table>
+    <div class="dlg-head">
+      <h2 class="dlg-title">Settings</h2>
+      <p class="dlg-desc">Every live agent's scheduled hub jobs; read-only</p>
+    </div>
+
+    <nav class="tabs inset" aria-label="Settings sections">
+      <span class="tab">Session</span>
+      <span class="tab">Configuration</span>
+      <span class="tab">Loadouts</span>
+      <span class="tab">Model</span>
+      <span class="tab">Setup</span>
+      <span class="tab">Network</span>
+      <span class="tab">PhoneLink</span>
+      <span class="tab">Voice</span>
+      <span class="tab">Prompts</span>
+      <span class="tab on" aria-current="page">Cron Jobs</span>
+    </nav>
+
+    <div class="panel inset">
+      <div class="bar">
+        <p class="summary">3 jobs across 2 live agents</p>
+        <button class="btn" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
+          Refresh
+        </button>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Agent</th><th>Job</th><th>Schedule</th><th>Target</th><th>Message</th><th>Next fire</th><th>Last error</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="nw">moonstone <span class="id mono">ab12cd34</span></td>
+              <td class="nw">recurring</td>
+              <td class="nw">1h</td>
+              <td>lapis</td>
+              <td><div class="msg">report the pulse</div></td>
+              <td class="nw">in 30m</td>
+              <td class="err">peer has no conversation grant for this agent</td>
+            </tr>
+            <tr>
+              <td class="nw">moonstone <span class="id mono">9876fedc</span></td>
+              <td class="nw">one-shot</td>
+              <td class="nw">1m30s</td>
+              <td>infra@devbox</td>
+              <td><div class="msg">check the tunnel</div></td>
+              <td class="nw">in 1m 10s</td>
+              <td></td>
+            </tr>
+            <tr>
+              <td class="nw">koordinator <span class="id mono">5a5b5c5d</span></td>
+              <td class="nw">recurring</td>
+              <td class="nw">6h</td>
+              <td>all</td>
+              <td><div class="msg">standup: one-line status</div></td>
+              <td class="nw">in 2h 14m</td>
+              <td></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="cards">
+        <article class="card">
+          <div class="card-head">
+            <span>moonstone <span class="id mono">ab12cd34</span></span>
+            <span class="card-mode">recurring</span>
+          </div>
+          <dl>
+            <dt>Schedule</dt><dd>1h</dd>
+            <dt>Target</dt><dd>lapis</dd>
+            <dt>Message</dt><dd>report the pulse</dd>
+            <dt>Next fire</dt><dd>in 30m</dd>
+            <dt class="err">Error</dt><dd class="err">peer has no conversation grant for this agent</dd>
+          </dl>
+        </article>
+        <article class="card">
+          <div class="card-head">
+            <span>moonstone <span class="id mono">9876fedc</span></span>
+            <span class="card-mode">one-shot</span>
+          </div>
+          <dl>
+            <dt>Schedule</dt><dd>1m30s</dd>
+            <dt>Target</dt><dd>infra@devbox</dd>
+            <dt>Message</dt><dd>check the tunnel</dd>
+            <dt>Next fire</dt><dd>in 1m 10s</dd>
+          </dl>
+        </article>
+        <article class="card">
+          <div class="card-head">
+            <span>koordinator <span class="id mono">5a5b5c5d</span></span>
+            <span class="card-mode">recurring</span>
+          </div>
+          <dl>
+            <dt>Schedule</dt><dd>6h</dd>
+            <dt>Target</dt><dd>all</dd>
+            <dt>Message</dt><dd>standup: one-line status</dd>
+            <dt>Next fire</dt><dd>in 2h 14m</dd>
+          </dl>
+        </article>
+      </div>
+
+      <p class="hint">Read-only. Deleting a job happens in the owning agent's terminal (/hub cron delete); the row disappears here on refresh.</p>
+    </div>
+  </section>
+
+  <p class="caption">Empty state</p>
+  <section class="dialog" aria-label="Settings, no jobs">
+    <div class="panel inset">
+      <div class="bar">
+        <p class="summary">0 jobs across 2 live agents</p>
+        <button class="btn" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
+          Refresh
+        </button>
+      </div>
+      <div class="empty">
+        <strong>No scheduled jobs</strong>
+        No live agent on this machine has a hub cron job. Schedule one from an agent's terminal: /hub cron add
+      </div>
+    </div>
+  </section>
 </div>
-
-<div class="panel" style="margin-top:16px; display:none;">
-  <div class="empty"><strong>No scheduled jobs</strong>No live agent on this machine has a hub cron job. Schedule one from an agent's terminal: /hub cron add</div>
-</div>
-
-<p class="hint">Rows are read-only. Deleting a job happens in the owning agent's terminal (/hub cron delete) and the row disappears here on refresh.</p>
 </body>
 </html>
