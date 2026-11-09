@@ -229,6 +229,36 @@ async def test_listing_choices_leaves_no_config_poller_running(monkeypatch, save
     assert _pollers() == []
 
 
+@pytest.mark.asyncio
+async def test_choices_reads_no_config_file_per_request(monkeypatch, saved_default):
+    # The picker lists no saved loadouts, so a request has no reason to read the config layers at all.
+    import kollabor_engine.routes.profiles as profile_routes
+
+    import kollabor_ai.loadout_manager as loadout_manager_module
+    import kollabor_config.loader as config_loader
+
+    reads = []
+    real_load = config_loader.load_layered_user_config
+
+    def counting_load(*args, **kwargs):
+        reads.append(args)
+        return real_load(*args, **kwargs)
+
+    async def no_catalog_refresh(self):
+        return {}
+
+    monkeypatch.setattr(config_loader, "load_layered_user_config", counting_load)
+    monkeypatch.setattr(profile_routes, "_get_profile_manager", lambda: _Manager())
+    monkeypatch.setattr(
+        loadout_manager_module.LoadoutManager, "refresh_catalogs", no_catalog_refresh
+    )
+
+    responses = await _fetch_choices_five_times()
+
+    assert [response.status_code for response in responses] == [200] * 5
+    assert reads == []
+
+
 # --- the default of the folder New Session starts in, not of the folder the engine runs in ---
 
 
