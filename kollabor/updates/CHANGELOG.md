@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-11-08
+
+### Fixed
+- New Session in the web UI now starts on your default loadout (the model and level you set as the default), as the
+  terminal does. Before, it started on the active profile's own saved model, so a default such as Luna at max was
+  skipped and a saved model the provider no longer serves could be used instead. A default loadout that sets no
+  level keeps its profile's own, and a default whose saved name matches no loadout is ignored instead of being
+  matched to a similarly named one. The default is the one of the folder the session starts in, so a folder
+  whose own config sets a different default starts on that one, whichever folder the engine runs in (#957).
+- New Session now says so in the chat when the model you picked did not apply and the session runs another one, with a
+  Try Again button; before, the message was kept but only shown on the empty screen with no session open. The notices
+  above the chat (failed pick, page and engine on different versions, update available, context compaction) are now one
+  compact, muted line each with a button for the way out, and the versions no longer show in the line (#956).
+
 ## [0.21.0] - 2026-11-08
 
 ### Added
