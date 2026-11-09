@@ -71,6 +71,34 @@ const todoCard = (page) => page.getByTestId("session-todo");
 const todoToggle = (page) => todoCard(page).getByRole("button", { name: /^Todo/ });
 const todoItems = (page) => todoCard(page).getByTestId("session-todo-item");
 
+// How far an unchecked box stands out from the card surface it sits on, as the WCAG contrast ratio of the two sRGB
+// colors. The canvas turns any CSS color (the oklch tokens, alpha mixes) into sRGB, laid over the card's own surface.
+// With no border to draw it, a box the same shade as the card reads as a missing marker.
+const boxContrast = (page) =>
+  page.evaluate(() => {
+    const card = document.querySelector('[data-testid="session-todo"]');
+    const box = card.querySelector('[role="img"][aria-label="Open"]');
+    const context = Object.assign(document.createElement("canvas"), { width: 1, height: 1 }).getContext("2d", { willReadFrequently: true });
+    const paint = (color) => {
+      context.fillStyle = color;
+      context.fillRect(0, 0, 1, 1);
+    };
+    const read = () => [...context.getImageData(0, 0, 1, 1).data].slice(0, 3);
+    paint(getComputedStyle(document.body).backgroundColor);
+    paint(getComputedStyle(card).backgroundColor);
+    const surface = read();
+    paint(getComputedStyle(box).backgroundColor);
+    const boxed = read();
+    const luminance = ([r, g, b]) => {
+      const linear = (value) => ((value /= 255) <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+      return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+    };
+    const [lighter, darker] = [luminance(surface), luminance(boxed)].sort((a, b) => b - a);
+    return { ratio: (lighter + 0.05) / (darker + 0.05), surface, boxed };
+  });
+// The thread's own unchecked task box measures 1.66 against the page (dark theme); anything under 1.5 is hard to see.
+const MIN_BOX_CONTRAST = 1.5;
+
 async function waitForCard(page) {
   try {
     await todoCard(page).waitFor({ state: "visible", timeout: 8_000 });
@@ -132,6 +160,8 @@ async function main() {
       assert.deepEqual(look.lines, [], "the card draws a line border");
       assert.ok(look.struck.length === 3 && look.struck.every((line) => line.includes("line-through")), "done items are not struck through");
       assert.ok(Math.abs(look.width[0] - look.width[1]) <= 1, `the card is not as wide as the panel: ${look.width}`);
+      const wideBox = await boxContrast(wide.page);
+      assert.ok(wideBox.ratio >= MIN_BOX_CONTRAST, `unchecked boxes do not stand out from the card: ${JSON.stringify(wideBox)}`);
 
       // The header opens and closes it, and the choice is remembered.
       await todoToggle(wide.page).click();
@@ -185,6 +215,8 @@ async function main() {
         });
         assert.ok(fits.overflow <= 0, `${width}px: the page overflows: ${JSON.stringify(fits)}`);
         assert.ok(fits.left >= 0 && fits.right <= fits.width, `${width}px: the card leaves the window: ${JSON.stringify(fits)}`);
+        const sheetBox = await boxContrast(narrow.page);
+        assert.ok(sheetBox.ratio >= MIN_BOX_CONTRAST, `${width}px: unchecked boxes do not stand out from the card: ${JSON.stringify(sheetBox)}`);
       } finally {
         await narrow.context.close();
       }
