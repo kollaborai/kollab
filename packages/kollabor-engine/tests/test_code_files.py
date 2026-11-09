@@ -346,6 +346,18 @@ def test_git_status_maps_porcelain_codes_inside_a_repository(client, ws):
     assert data == {"status": {"a.txt": "A", "b.txt": "?"}}
 
 
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_git_status_in_a_subfolder_keys_workspace_paths_and_skips_the_rest(client, ws):
+    repo = ws.root
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    _write(repo / "top.txt")
+    _write(repo / "app" / "inside.txt")
+    # the workspace is the subfolder: top.txt is outside it and must not show, inside.txt keys as "inside.txt"
+    data = _get(client, "git-status", repo / "app").json()["data"]
+
+    assert data == {"status": {"inside.txt": "?"}}
+
+
 def test_git_status_outside_a_repository_says_so(client, ws):
     response = _get(client, "git-status", ws.root)
 

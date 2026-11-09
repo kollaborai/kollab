@@ -299,3 +299,23 @@ async def test_stage_all_in_a_subfolder_leaves_changes_outside_it_alone(client, 
     cached = subprocess.run(command, capture_output=True, text=True, check=True).stdout.split()
 
     assert cached == ["app/inside.txt"]
+
+
+@pytest.mark.asyncio
+async def test_commit_refuses_when_staged_files_lie_outside_the_workspace(client, subfolder):
+    """The panel shows only the workspace's changes, so a commit must not take in staged files it cannot show."""
+    _git(subfolder.repo, "add", "tracked.txt")  # staged, outside repo/app
+    await client.post("/code/git", json={"action": "stage_all", "workspace": str(subfolder.app)})
+    before = subprocess.run(
+        ["git", "-C", str(subfolder.repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout
+
+    response = await client.post(
+        "/code/git", json={"action": "commit", "workspace": str(subfolder.app), "message": "app change"}
+    )
+
+    after = subprocess.run(
+        ["git", "-C", str(subfolder.repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout
+    assert response.status_code == 409
+    assert before == after
