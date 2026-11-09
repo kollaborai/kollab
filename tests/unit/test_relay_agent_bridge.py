@@ -2261,6 +2261,28 @@ async def test_directory_includes_agent_type_for_opted_in_requesters(bridges):
 
 
 @pytest.mark.asyncio
+async def test_directory_opt_in_keeps_legacy_local_export_call_shape(bridges):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    right.directory.rows[0] = replace(right.directory.rows[0], agent_type="coder")
+    original = right.directory.publishable_agents
+
+    def legacy_export(workspace, workspace_id, device_name=None):
+        return original(workspace, workspace_id, device_name)
+
+    right.directory.publishable_agents = legacy_export
+
+    result = await right._receive(
+        left.commands.client.public_key,
+        "directory",
+        {"agent_type": True},
+        _secure=True,
+    )
+
+    assert result["agents"][0]["agent_type"] == "coder"
+
+
+@pytest.mark.asyncio
 async def test_remote_directory_falls_back_for_older_peer(bridges):
     members, _ = bridges
     (left, _, _, _), (right, _, _, _) = members
