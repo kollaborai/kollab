@@ -59,6 +59,7 @@ import {
   type NetworkAgent,
   DEFAULT_SLASH_COMMANDS,
   errorText,
+  isAgentTooOld,
   type ModelChoice,
   type Profile,
   type SlashCommand,
@@ -1211,7 +1212,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   // The engine's own version (GET /version): what a chat's agent is compared with.
   const [engineVersion, setEngineVersion] = useState("");
   // One restart asked for from a chat's notice, until that agent publishes the engine's version.
-  const [agentRestart, setAgentRestart] = useState<{ sessionId: string; waiting: boolean; failure: string } | null>(null);
+  const [agentRestart, setAgentRestart] = useState<{ sessionId: string; waiting: boolean; failure: string; tooOld: boolean } | null>(null);
   // Notices put away for this page load, by chat and agent process.
   const [dismissedVersionNotices, setDismissedVersionNotices] = useState<ReadonlySet<string>>(() => new Set());
 
@@ -1243,12 +1244,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const restartActiveAgent = async () => {
     if (!activeSession) return;
     const sessionId = activeSession.session_id;
-    setAgentRestart({ sessionId, waiting: false, failure: "" });
+    setAgentRestart({ sessionId, waiting: false, failure: "", tooOld: false });
     try {
       const result = await api.restartAgent(sessionId);
-      setAgentRestart({ sessionId, waiting: result.waiting_for_turn, failure: "" });
+      setAgentRestart({ sessionId, waiting: result.waiting_for_turn, failure: "", tooOld: false });
     } catch (error) {
-      setAgentRestart({ sessionId, waiting: false, failure: errorText(error) });
+      setAgentRestart({ sessionId, waiting: false, failure: errorText(error), tooOld: isAgentTooOld(error) });
     }
   };
   // Once the agent runs the engine's version (or is gone from presence) the ask is over.
@@ -1771,6 +1772,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
               busy={Boolean(restartHere) && !restartHere?.failure}
               waiting={restartHere?.waiting ?? false}
               failure={restartHere?.failure ?? ""}
+              tooOld={restartHere?.tooOld ?? false}
               onRestart={() => void restartActiveAgent()}
               onDismiss={() => setDismissedVersionNotices((current) => new Set(current).add(versionNoticeKey))}
             />
