@@ -52,6 +52,19 @@ def test_host_process_scans_require_explicit_option_and_sanctioned_ci_metadata()
     assert not host_process_scans_allowed(False, CI_ENVIRONMENT)
 
 
+@pytest.mark.parametrize(
+    ("job", "event"),
+    [
+        ("tests", "merge_group"),
+        ("supporting_tests", "pull_request"),
+        ("supporting_tests", "merge_group"),
+    ],
+)
+def test_host_process_scans_allow_guarded_tests_in_each_ci_job(job, event):
+    environ = dict(CI_ENVIRONMENT, GITHUB_JOB=job, GITHUB_EVENT_NAME=event)
+    assert host_process_scans_allowed(True, environ)
+
+
 def test_runner_environment_alone_cannot_authorize_host_process_scans():
     assert not host_process_scans_allowed(True, {"RUNNER_ENVIRONMENT": "github-hosted"})
 
