@@ -198,7 +198,9 @@ def test_tree_refuses_large_directories_without_returning_partial_results(client
     for name in ("a.txt", "b.txt", "c.txt"):
         _write(ws.root / name, "x")
     _refused(_get(client, "tree", ws.root), 413, "tree_too_large")
-    _refused(_get(client, "search", ws.root, query="test"), 413, "search_too_large")
+    search = _get(client, "search", ws.root, query="test")
+    assert search.status_code == 200
+    assert search.json()["data"]["truncated"] is False
 
 
 def test_large_directory_can_be_listed_in_bounded_pages(client, ws, monkeypatch):

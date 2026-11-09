@@ -22,6 +22,7 @@ export function SearchPanel({ workspace }: SearchPanelProps) {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [truncated, setTruncated] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   // Bumped by every search and by a cleared query; a response that is no longer the latest is dropped.
   const searchSeq = useRef(0);
@@ -43,10 +44,11 @@ export function SearchPanel({ workspace }: SearchPanelProps) {
         const url = `/api/fs/search?workspace=${encodeURIComponent(workspace)}&query=${encodeURIComponent(q)}`;
         const res = await codeFetch(url);
         const raw: unknown = await res.json();
-        const data = unwrapCodeData<{ results?: SearchResult[] }>(raw);
+        const data = unwrapCodeData<{ results?: SearchResult[]; truncated?: boolean }>(raw);
         if (!res.ok) throw new Error("Search failed");
         if (seq === searchSeq.current) {
           setResults(data.results ?? []);
+          setTruncated(data.truncated === true);
         }
       } catch (e) {
         if (seq === searchSeq.current) {
@@ -64,6 +66,7 @@ export function SearchPanel({ workspace }: SearchPanelProps) {
   useEffect(() => {
     searchSeq.current += 1;
     setResults([]);
+    setTruncated(false);
     setError(null);
     if (!query || query.length < 2) {
       setLoading(false);
@@ -150,6 +153,7 @@ export function SearchPanel({ workspace }: SearchPanelProps) {
 
       {/* results */}
       <div className="flex-1 overflow-y-auto">
+        {truncated && <div role="status" className="px-3 py-2 text-xs text-muted-foreground">Some files or results could not be searched or displayed.</div>}
         {query.length < 2 ? (
           <div className="px-3 py-4 text-xs text-muted-foreground text-center">
             type at least 2 characters

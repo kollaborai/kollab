@@ -185,6 +185,37 @@ def test_search_max_files_sets_how_many_files_one_search_scans(ws):
     assert len(_search_hits(ws.root, CodeSettings(search_max_files=100))) == 100
 
 
+def test_search_reports_when_file_limit_is_reached(ws):
+    for index in range(150):
+        _write(ws.root / f"f{index:03}.txt", "needle")
+    result = _fs("search", ws.root, {"query": "needle"}, CodeSettings(search_max_files=100))
+    assert len(result.content["data"]["results"]) == 100
+    assert result.content["data"]["truncated"] is True
+
+
+def test_search_reports_unreadable_directories_and_files(ws, monkeypatch):
+    _write(ws.root / "sub" / "inside.txt", "needle")
+    _write(ws.root / "other.txt", "needle")
+    original_scandir = os.scandir
+    with monkeypatch.context() as scoped:
+        def fail_directory(path):
+            if os.fspath(path) == str(ws.root / "sub"):
+                raise PermissionError("denied")
+            return original_scandir(path)
+
+        scoped.setattr(code_files.os, "scandir", fail_directory)
+        assert _fs("search", ws.root, {"query": "needle"}).content["data"]["truncated"] is True
+    original_open = os.open
+    with monkeypatch.context() as scoped:
+        def fail_file(path, flags, *args, **kwargs):
+            if os.fspath(path) == str(ws.root / "other.txt"):
+                raise PermissionError("denied")
+            return original_open(path, flags, *args, **kwargs)
+
+        scoped.setattr(code_files.os, "open", fail_file)
+        assert _fs("search", ws.root, {"query": "needle"}).content["data"]["truncated"] is True
+
+
 # --- extra_roots ------------------------------------------------------------------------------------------
 
 

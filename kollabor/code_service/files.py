@@ -301,31 +301,53 @@ def _tree(
     return nodes
 
 
-def _search_files(root: str, settings: CodeSettings) -> Iterator[str]:
-    """The files search may read under ``root``: folder by folder, names in order, and at most
-    ``settings.search_max_files`` of them. ``root`` is a checked workspace."""
+def _search_files(root: str, settings: CodeSettings, state: dict[str, Any]) -> Iterator[str]:
+    """Stream files with bounded open directories and no materialized directory listings."""
     follow = settings.follow_symlinks
-    pending: list[tuple[str, frozenset[str]]] = [(root, _start_chain(root, settings))]
     scanned = 0
-    budget = [TREE_MAX_ENTRIES, TREE_MAX_PATH_BYTES]
-    while pending:
-        folder, chain = pending.pop()
-        folders: list[tuple[str, frozenset[str]]] = []
-        for entry in _entries(folder, budget):
+    visited = 0
+    max_entries = max(10000, settings.search_max_files * 5)
+    stack: list[tuple[Any, frozenset[str]]] = []
+    try:
+        stack.append((os.scandir(root), _start_chain(root, settings)))
+        while stack:
+            iterator, chain = stack[-1]
+            try:
+                entry = next(iterator)
+            except StopIteration:
+                iterator.close()
+                stack.pop()
+                continue
+            visited += 1
+            if visited > max_entries:
+                state["truncated"] = True
+                return
             kind = _kind(entry, follow)
             if kind == "dir" and _folder_listed(entry.name, settings.show_hidden):
                 below = _descend(entry, chain, follow)
                 if below is not None:
-                    folders.append((entry.path, below))
+                    if len(stack) >= 64:
+                        state["truncated"] = True
+                        continue
+                    try:
+                        stack.append((os.scandir(entry.path), below))
+                    except OSError:
+                        state["truncated"] = True
+                        continue
             elif kind == "file" and _search_file_listed(entry.name, settings.show_hidden):
                 scanned += 1
                 if scanned > settings.search_max_files:
+                    state["truncated"] = True
                     return
                 yield entry.path
-        pending.extend(reversed(folders))
+    except OSError:
+        state["truncated"] = True
+    finally:
+        for iterator, _ in stack:
+            iterator.close()
 
 
-def _search_text(path: str, follow: bool) -> str | None:
+def _search_text(path: str, follow: bool, state: dict[str, Any] | None = None) -> str | None:
     """A file's text when search may read it: at most 1 MB and no NUL byte. Never through a symlink unless follow."""
     flags = os.O_RDONLY | (0 if follow else getattr(os, "O_NOFOLLOW", 0))
     try:
@@ -333,6 +355,8 @@ def _search_text(path: str, follow: bool) -> str | None:
         with os.fdopen(fd, "rb") as handle:
             data = handle.read(SEARCH_MAX_FILE_BYTES + 1)
     except OSError:
+        if state is not None:
+            state["truncated"] = True
         return None
     if len(data) > SEARCH_MAX_FILE_BYTES or b"\0" in data:
         return None
@@ -856,12 +880,10 @@ def search_files(workspace: str, params: dict[str, Any], settings: CodeSettings 
         return _fail(400, "invalid_query", "query too long (max 200 chars)")
     root = os.path.realpath(folder)
     results: list[dict[str, Any]] = []
-    try:
-        paths = list(_search_files(root, cfg))
-    except _TreeTooLarge:
-        return _fail(413, "search_too_large", "This folder is too large to search. Choose a smaller subfolder.")
+    state: dict[str, Any] = {"truncated": False}
+    paths = _search_files(root, cfg, state)
     for path in paths:
-        text = _search_text(path, cfg.follow_symlinks)
+        text = _search_text(path, cfg.follow_symlinks, state)
         if text is None:
             continue
         for number, line in enumerate(text.split("\n"), 1):
@@ -878,8 +900,9 @@ def search_files(workspace: str, params: dict[str, Any], settings: CodeSettings 
                 }
             )
             if len(results) >= SEARCH_MAX_RESULTS:
-                return _ok({"results": results})
-    return _ok({"results": results})
+                paths.close()
+                return _ok({"results": results, "truncated": True})
+    return _ok({"results": results, "truncated": state["truncated"]})
 
 
 def git_status(workspace: str, params: dict[str, Any], settings: CodeSettings | None = None) -> Reply:

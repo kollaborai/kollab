@@ -4,6 +4,7 @@ import { codeFetch, unwrapCodeData } from "@/lib/code-fetch";
 import { cn } from "@/lib/utils";
 import { useEditorStore } from "@/components/code/editor-store";
 import { openWorkspaceFile } from "@/components/code/open-file";
+import { fuzzyMatch, scanQuickFiles, type DirectoryPage } from "@/components/code/paged-quick-open";
 
 interface TreeNode {
   name: string;
@@ -44,16 +45,6 @@ function flattenTree(nodes: TreeNode[], rootPath: string): FlatFile[] {
   return result;
 }
 
-function fuzzyMatch(query: string, text: string): boolean {
-  const q = query.toLowerCase();
-  const t = text.toLowerCase();
-  let qi = 0;
-  for (let ti = 0; ti < t.length && qi < q.length; ti++) {
-    if (t[ti] === q[qi]) qi++;
-  }
-  return qi === q.length;
-}
-
 interface QuickOpenProps {
   open: boolean;
   onClose: () => void;
@@ -65,6 +56,9 @@ export function QuickOpen({ open, onClose, workspace }: QuickOpenProps) {
   const [files, setFiles] = useState<FlatFile[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [error, setError] = useState("");
+  const [largeTree, setLargeTree] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const [partial, setPartial] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -75,11 +69,18 @@ export function QuickOpen({ open, onClose, workspace }: QuickOpenProps) {
     setQuery("");
     setFiles([]);
     setError("");
+    setLargeTree(false);
+    setPartial(false);
     setSelectedIndex(0);
     let cancelled = false;
     codeFetch(`/api/fs/tree?workspace=${encodeURIComponent(workspace)}`)
       .then((r) => r.json())
       .then((raw: unknown) => {
+        if (typeof raw === "object" && raw !== null && "error" in raw &&
+            typeof raw.error === "object" && raw.error !== null && "code" in raw.error && raw.error.code === "tree_too_large") {
+          if (!cancelled) setLargeTree(true);
+          return;
+        }
         const data = unwrapCodeData<{ tree?: TreeNode[] }>(raw);
         if (!cancelled && data.tree) setFiles(flattenTree(data.tree, workspace));
       })
@@ -87,6 +88,29 @@ export function QuickOpen({ open, onClose, workspace }: QuickOpenProps) {
     const timer = setTimeout(() => inputRef.current?.focus(), 50);
     return () => { cancelled = true; clearTimeout(timer); };
   }, [open, workspace]);
+
+  useEffect(() => {
+    if (!open || !largeTree) return;
+    let cancelled = false;
+    setFiles([]);
+    setError("");
+    setPartial(false);
+    setSearching(true);
+    const timer = setTimeout(() => {
+      void scanQuickFiles(workspace, query, async (path, after) => {
+        const suffix = after ? `&after=${encodeURIComponent(after)}` : "";
+        const response = await codeFetch(`/api/fs/list?path=${encodeURIComponent(path)}${suffix}`);
+        const data = unwrapCodeData<DirectoryPage>(await response.json());
+        if (!response.ok) throw new Error("Could not search this folder.");
+        return data;
+      }, () => cancelled).then((result) => {
+        if (!cancelled) { setFiles(result.files); setPartial(result.partial); }
+      }).catch((e: unknown) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : "Could not search files.");
+      }).finally(() => { if (!cancelled) setSearching(false); });
+    }, 150);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [open, largeTree, workspace, query]);
 
   const filtered = query
     ? files.filter((f) => fuzzyMatch(query, f.relativePath))
@@ -160,6 +184,8 @@ export function QuickOpen({ open, onClose, workspace }: QuickOpenProps) {
         />
         <div ref={listRef} className="flex-1 overflow-y-auto">
           {error && <div role="alert" className="px-4 py-3 text-xs text-destructive">{error}</div>}
+          {searching && <div role="status" className="px-4 py-3 text-xs text-muted-foreground">Searching files…</div>}
+          {partial && <div role="status" className="px-4 py-3 text-xs text-muted-foreground">Results are limited; refine your search.</div>}
           {filtered.slice(0, 50).map((file, i) => (
             <div
               key={file.path}
@@ -181,7 +207,7 @@ export function QuickOpen({ open, onClose, workspace }: QuickOpenProps) {
               </div>
             </div>
           ))}
-          {!error && filtered.length === 0 && (
+          {!error && !searching && filtered.length === 0 && (
             <div className="px-4 py-6 text-center text-xs text-foreground/30">
               No files found
             </div>
