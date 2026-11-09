@@ -7,6 +7,7 @@ import os
 from types import SimpleNamespace
 
 import kollabor_engine.routes.workspaces as workspaces  # type: ignore[import-not-found]
+import kollabor_engine.workspace_folder as workspace_folder  # type: ignore[import-not-found]
 import pytest
 from fastapi import HTTPException
 from kollabor_engine.hub_bridge import HubBridge  # type: ignore[import-not-found]
@@ -212,6 +213,105 @@ def test_a_folder_in_home_never_asks_which_agents_are_running(machine, monkeypat
 
     assert checked_folder(str(machine.proj)) == str(machine.proj)
     assert checked_folder(None) == str(machine.engine)
+
+
+# --- a remembered folder is the folder that was remembered --------------------------------------------
+# Every source of roots above records a real path: a recent folder is saved as one, a session runs in the checked
+# one, an agent reports its resolved project folder. If that text no longer leads to itself (a symlink now stands
+# in the folder's place, or in one of its parents), the folder that was remembered is not the one the pathname
+# reaches, so the remembered path grants nothing, not even what it leads to now.
+
+
+def _swap_for_link(folder, target):
+    """Move ``folder`` out of the way and put a symlink to ``target`` at its old pathname."""
+    folder.rename(folder.with_name(folder.name + "-moved"))
+    _link(folder, target)
+
+
+def test_a_recent_folder_swapped_for_a_symlink_grants_its_new_target_nothing(machine):
+    old, other = machine.root / "old-workspace", machine.root / "other"
+    old.mkdir()
+    other.mkdir()
+    workspaces.remember_workspace(str(old))
+    _swap_for_link(old, other)
+
+    _refuses(str(other), saying="outside")
+    _refuses(str(old), saying="outside")
+
+
+def test_a_recent_folder_whose_parent_was_swapped_for_a_symlink_grants_its_new_target_nothing(machine):
+    projects, other = machine.root / "projects", machine.root / "other-projects"
+    (projects / "app").mkdir(parents=True)
+    (other / "app").mkdir(parents=True)
+    workspaces.remember_workspace(str(projects / "app"))
+    _swap_for_link(projects, other)
+
+    _refuses(str(other / "app"), saying="outside")
+
+
+def test_a_running_agents_folder_swapped_for_a_symlink_grants_its_new_target_nothing(machine, monkeypatch):
+    old, other = machine.root / "agent-folder", machine.root / "other"
+    old.mkdir()
+    other.mkdir()
+    live = [{"identity": "lapis", "project": str(old)}]
+    monkeypatch.setattr(HubBridge, "get_agents", lambda self, use_cache=True: live)
+    _swap_for_link(old, other)
+
+    _refuses(str(other), saying="outside")
+
+
+def test_a_live_web_sessions_folder_swapped_for_a_symlink_grants_its_new_target_nothing(machine, monkeypatch):
+    old, other = machine.root / "session-folder", machine.root / "other"
+    old.mkdir()
+    other.mkdir()
+    registry = {"s1": SimpleNamespace(workspace=str(old), alive=True)}
+    monkeypatch.setattr("kollabor_engine.server.get_session_registry", lambda: registry)
+    _swap_for_link(old, other)
+
+    _refuses(str(other), saying="outside")
+
+
+def test_a_recent_folder_made_again_at_the_same_pathname_still_counts(machine):
+    old = machine.root / "old-workspace"
+    old.mkdir()
+    workspaces.remember_workspace(str(old))
+    old.rmdir()
+    old.mkdir()
+
+    assert checked_folder(str(old)) == str(old)
+
+
+def test_a_remembered_folder_written_with_a_trailing_separator_is_the_same_folder(machine, monkeypatch):
+    monkeypatch.setattr(workspaces, "_stored", lambda: [str(machine.elsewhere) + os.sep])
+
+    assert checked_folder(str(machine.elsewhere)) == str(machine.elsewhere)
+
+
+# --- case ---------------------------------------------------------------------------------------------
+# macOS and Windows volumes call /Users/me/Dev and /users/me/dev one folder, so a request in either spelling must
+# meet the same roots. A volume that tells them apart keeps them apart.
+
+
+def test_the_volume_decides_whether_a_folder_typed_in_another_case_is_the_same_folder(machine):
+    variant = str(machine.home).swapcase() + os.sep + "proj"
+
+    if os.path.isdir(variant):  # this volume ignores case: the same folder, so the same answer
+        assert checked_folder(variant) == str(machine.proj)
+    else:  # it tells the cases apart: another name, outside every root
+        _refuses(variant, saying="outside")
+
+
+def test_another_case_is_accepted_where_the_volume_ignores_case(machine, monkeypatch):
+    monkeypatch.setattr(workspace_folder, "_ignores_case", lambda root: True, raising=False)
+
+    assert checked_folder(str(machine.home).upper() + os.sep + "proj") == str(machine.proj)
+    assert checked_folder(str(machine.engine).upper()) == str(machine.engine)
+
+
+def test_another_case_is_refused_where_the_volume_tells_the_cases_apart(machine, monkeypatch):
+    monkeypatch.setattr(workspace_folder, "_ignores_case", lambda root: False, raising=False)
+
+    _refuses(str(machine.home).upper() + os.sep + "proj", saying="outside")
 
 
 # --- the HTTP face and the picker's Up button ---------------------------------------------------------
