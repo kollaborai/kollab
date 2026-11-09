@@ -9,7 +9,8 @@ import { makeFixtures, openPage, openVite } from "./learn-browser-acceptance.mjs
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = path.resolve(scriptDir, "..");
 const repoRoot = path.resolve(frontendRoot, "../../..");
-const screenshotDir = path.join(repoRoot, "docs/screenshots");
+const screenshotDir = process.env.AGENT_SIDEBAR_SCREENSHOT_DIR
+  ?? path.join(repoRoot, "docs/screenshots");
 const agentTypes = [
   "coder",
   "community",
@@ -127,13 +128,14 @@ async function main() {
     });
 
     const captures = [
-      { width: 390, height: 844, isMobile: true, file: "agent-sidebar-glyph-390.png" },
-      { width: 820, height: 1180, isMobile: false, file: "agent-sidebar-glyph-820.png" },
-      { width: 1280, height: 900, isMobile: false, file: "agent-sidebar-glyph-1280.png" },
+      { width: 390, height: 844, isMobile: true },
+      { width: 820, height: 1180, isMobile: false },
+      { width: 1440, height: 900, isMobile: false },
     ];
+    const themes = ["dark", "light"];
     let expectedOrder;
 
-    for (const capture of captures) {
+    for (const theme of themes) for (const capture of captures) {
       const view = await openPage(
         browser,
         baseUrl,
@@ -142,6 +144,9 @@ async function main() {
       );
       try {
         await view.page.goto(`${baseUrl}/`, { waitUntil: "domcontentloaded" });
+        if (theme === "light") {
+          await view.page.evaluate(() => document.documentElement.classList.remove("dark"));
+        }
         const trigger = view.page.locator('[data-sidebar="trigger"]');
         const glyphsLocator = view.page.locator("[data-agent-type-glyph]");
         if (capture.width < 1024) {
@@ -257,11 +262,12 @@ async function main() {
           await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         });
         fs.mkdirSync(screenshotDir, { recursive: true });
-        await view.page.screenshot({ path: path.join(screenshotDir, capture.file), animations: "disabled" });
+        const screenshot = `agent-sidebar-glyph-${theme}-${capture.width}.png`;
+        await view.page.screenshot({ path: path.join(screenshotDir, screenshot), animations: "disabled" });
         assert.deepEqual(view.pageErrors, [], view.pageErrors.join(" | "));
         assert.deepEqual(view.consoleErrors, [], view.consoleErrors.join(" | "));
         assert.equal(view.externalRequests.length, 0, "browser attempted an external API request");
-        console.log(`Captured ${capture.width}x${capture.height}: ${capture.file} (${glyphs.length} glyphs)`);
+        console.log(`Captured ${theme} ${capture.width}x${capture.height}: ${screenshot} (${glyphs.length} glyphs)`);
       } finally {
         await view.context.close();
       }

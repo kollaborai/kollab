@@ -2178,10 +2178,17 @@ class RelayAgentBridge:
                 raise RelayError("opening agents from the network is unavailable")
             return await self.network_attach.receive(peer, method, payload)
         if method == "directory":
-            if payload != {}:
+            if (
+                not isinstance(payload, dict)
+                or set(payload) not in (set(), {"agent_type"})
+                or type(payload.get("agent_type", False)) is not bool
+            ):
                 raise RelayError("invalid directory request")
             agents = self.directory.publishable_agents(
-                self.workspace, client.state.workspace_id, self.device_name()
+                self.workspace,
+                client.state.workspace_id,
+                self.device_name(),
+                include_agent_type=payload.get("agent_type", False),
             )
             if stranger:
                 # A stranger sees only the agents it may message.
@@ -2923,9 +2930,26 @@ class RelayAgentBridge:
                         continue
                     if self.secure_transport is None:
                         raise RelayError("secure directory transport is unavailable")
-                    result = await self.secure_transport.request(
-                        peer_key, "directory", {}, timeout=3
-                    )
+                    try:
+                        result = await self.secure_transport.request(
+                            peer_key, "directory", {"agent_type": True}, timeout=3
+                        )
+                    except RelayError as exc:
+                        # Older peers accept only the original empty request.
+                        # The secure transport sanitizes remote application
+                        # errors, so an old peer's rejection is also reported
+                        # as a generic transport failure. Directory reads are
+                        # idempotent; retry that legacy shape so the peer stays
+                        # visible. If the retry also fails, normal handling
+                        # below drops the unavailable peer for this refresh.
+                        if str(exc) not in {
+                            "invalid directory request",
+                            "secure conversation transport failed",
+                        }:
+                            raise
+                        result = await self.secure_transport.request(
+                            peer_key, "directory", {}, timeout=3
+                        )
                     agents = result.get("agents")
                     if not isinstance(agents, list) or len(agents) > MAX_DIRECTORY:
                         raise RelayError("invalid remote directory")

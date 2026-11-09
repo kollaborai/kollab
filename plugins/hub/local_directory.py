@@ -589,7 +589,12 @@ class LocalAgentDirectory:
                 os.close(root)
 
     def publishable_agents(
-        self, workspace: Path, workspace_id: str, device_name: str | None = None
+        self,
+        workspace: Path,
+        workspace_id: str,
+        device_name: str | None = None,
+        *,
+        include_agent_type: bool = True,
     ) -> list[dict]:
         """Explicitly scoped remote-safe roster; caller must enforce peer grants.
 
@@ -614,7 +619,11 @@ class LocalAgentDirectory:
                 "state": item.state,
                 **({"harness": item.harness, "acp_waiting": item.acp_waiting} if item.harness else {}),
                 # The bundle it runs: a peer's sidebar draws its type glyph (#662).
-                **({"agent_type": item.agent_type} if item.agent_type else {}),
+                **(
+                    {"agent_type": item.agent_type}
+                    if include_agent_type and item.agent_type
+                    else {}
+                ),
                 # The gem on other computers acts it out (presence's current_tool).
                 **(
                     {"current_tool": {"name": item.tool_name, "type": item.tool_type}}
