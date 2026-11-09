@@ -135,7 +135,7 @@ export function QuickOpen({ open, onClose, workspace }: QuickOpenProps) {
       }
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setSelectedIndex((i) => Math.min(i + 1, filtered.length - 1));
+        setSelectedIndex((i) => Math.max(0, Math.min(i + 1, filtered.length - 1)));
         return;
       }
       if (e.key === "ArrowUp") {
