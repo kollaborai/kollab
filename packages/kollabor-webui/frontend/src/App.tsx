@@ -1550,11 +1550,16 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     const failed = pickFailure;
     const session = sessions.find((item) => item.session_id === failed?.sessionId);
     if (!failed || !session || failed.retrying) return;
-    setPickFailure({ ...failed, retrying: true });
+    const trying = { ...failed, retrying: true };
+    setPickFailure(trying);
     try {
       handleSessionUpdated(await applyModelChoice(api, session, failed.pick)); // applied: the notice goes
     } catch (reason) {
-      setPickFailure({ ...failed, reason: errorText(reason), retrying: false });
+      // Only the notice this retry started takes its failure: one dismissed meanwhile stays gone, and a newer
+      // notice, raised for another chat, is left alone.
+      setPickFailure((current) =>
+        current === trying ? { ...failed, reason: errorText(reason), retrying: false } : current,
+      );
       void loadSessions(); // what runs may have changed
     }
   };
