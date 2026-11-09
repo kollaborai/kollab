@@ -211,8 +211,12 @@ def _loadout(model):
 
 @pytest.fixture
 def folders(monkeypatch, tmp_path):
-    """The engine runs in folder A; New Session can start in folder B. Both loadouts live in the global config."""
-    home, a, b = tmp_path / "home", tmp_path / "a", tmp_path / "b"
+    """The engine runs in folder A; New Session can start in folder B. Both loadouts live in the global config.
+
+    A is the engine's own folder and B is inside home: the two kinds of folder the engine's folder rule trusts.
+    """
+    home, a = tmp_path / "home", tmp_path / "a"
+    b = home / "b"
     for folder in (home, a, b):
         folder.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -276,15 +280,18 @@ async def test_the_project_config_of_a_folder_sets_its_default(monkeypatch, fold
 
 
 @pytest.mark.asyncio
-async def test_a_folder_that_does_not_exist_gets_the_global_default(monkeypatch, folders, tmp_path):
-    a, _ = folders
-    _write_json(a / ".kollab" / "config.json", _project_default("for-a"))
-    home_config = tmp_path / "home" / ".kollab" / "config.json"
-    saved = json.loads(home_config.read_text())
-    saved["kollabor"]["llm"]["default_loadout"] = {"name": "for-b", "level": "global"}
-    home_config.write_text(json.dumps(saved))
+async def test_a_folder_that_does_not_exist_is_refused(monkeypatch, folders, tmp_path):
+    """The engine's folder rule (#980): a folder that is gone answers 400, not the global default. The web UI keeps
+    the form it already has when a profile fetch for a chosen folder fails."""
+    import kollabor_engine.routes.profiles as profile_routes
+    from kollabor_engine.server import create_app  # type: ignore[import-not-found]
 
-    assert (await _default_of(monkeypatch, tmp_path / "gone"))["model"] == "model-b"
+    monkeypatch.setattr(profile_routes, "_get_profile_manager", lambda: _Manager())
+    async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
+        response = await client.get("/profiles", params={"workspace": str(tmp_path / "home" / "gone")})
+
+    assert response.status_code == 400
+    assert "does not exist" in response.json()["detail"]
 
 
 @pytest.mark.asyncio

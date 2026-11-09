@@ -165,6 +165,10 @@ Daemon-owned screens the web UI renders as Settings tabs (spec `docs/specs/webui
 - **Network panels** (`connect`, `connect-*`): one daemon per folder runs the network and the others describe it read-only (`read_only: true`). The engine (`routes/panels.py:_network_owner`) sends a read-only chat's network panel calls and actions to the live session in the same folder that runs it.
 - **Web commands**: a web-originated slash command that opens a fullscreen view (`AltViewStackManager.push`, `FullScreenManager.launch_plugin`) records the attempt in the `unavailable_attempts` ContextVar and raises `AltViewUnavailable`; `LocalStateService._run_web_slash_command` answers with one line and the turn ends. Pipe mode and `--detached` refuse the same way.
 
+### Engine routes and folders
+
+An engine route that takes a folder (`workspace`, `folder`, the picker's `path`) calls `folder_or_400` from `packages/kollabor-engine/src/kollabor_engine/workspace_folder.py` first and uses what it returns, never the request's own text: one rule (the folder exists, is a directory, and is inside home, the engine's folder, a folder an agent runs in or a recent web session folder), one place for CodeQL's `py/path-injection` sanitizer. Spec `docs/specs/engine-folder-rule.md`; new routes join `FOLDER_ROUTES` in `tests/test_workspace_folder_routes.py`.
+
 ### STDOUT IS SACRED
 
 **CRITICAL: Never use print() or sys.stdout.write() in plugin code.**
