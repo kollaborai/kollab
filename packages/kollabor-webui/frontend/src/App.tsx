@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
 import { Thread } from "./components/Thread";
+import { ComposerKeeper } from "./components/assistant-ui/composer-keeper";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { AppsDialog } from "@/components/apps/AppsDialog";
 import { SupervisorAlertBanner } from "@/components/SupervisorAlertBanner";
@@ -93,6 +94,7 @@ import { useHiddenAgents } from "@/hooks/use-hidden-agents";
 import { useSidebarOrder } from "@/hooks/use-sidebar-order";
 import { chatToRestore } from "@/restore-chat";
 import { useRosters } from "@/hooks/use-rosters";
+import { startingChoice } from "@/components/shell/starting-choice";
 import { LearnDialog } from "@/components/learn/LearnDialog";
 import { WhatsNewPage } from "@/components/updates/WhatsNewPage";
 import { navigateToLearn } from "@/learn/catalog";
@@ -275,6 +277,7 @@ function RuntimeShell({
 
   return (
     <>
+      <ComposerKeeper sessionId={session.session_id} />
       {/* Below the shared sidebar breakpoint the sidebar and the session panel are sheets. */}
       <ShellHeader className="bg-background flex min-h-12 shrink-0 items-center gap-2 px-3 py-1.5 lg:hidden">
         <SidebarTrigger className="-ml-1 shrink-0" />
@@ -385,6 +388,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     model: "",
     effort: "",
   });
+  // A model picked by hand. Until then New Session follows the default loadout of the folder it starts in (#957).
+  const pickedByHandRef = useRef(false);
+  // The folder (the Workspace field's value, "" for the engine's own) the form's starting model was read for;
+  // null until startup has read it.
+  const [startedFor, setStartedFor] = useState<string | null>(null);
   const [selectedIdentity, setSelectedIdentity] = useState("");
   const [workspacePath, setWorkspacePath] = useState("");
   const workspacePathRef = useRef(workspacePath);
@@ -1285,9 +1293,10 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       setBusy(true);
       setBusyMessage("Connecting to kollab…");
       await api.loadConfig();
+      const folder = workspacePathRef.current.trim();
       const [result, profileResult, agentResult] = await Promise.all([
         loadSessions(),
-        api.listProfiles().catch(() => ({ profiles: [], active: undefined })),
+        api.listProfiles(folder).catch(() => ({ profiles: [], active: undefined, default_loadout: undefined })),
         refreshAgentPool(),
       ]);
       if (!mounted || operation !== operationRef.current) return;
@@ -1295,9 +1304,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       setProfiles(nextProfiles);
       const nextAgents = agentResult || [];
       setAgents(nextAgents);
-      setSelectedProfile(
-        profileResult.active || nextProfiles[0]?.name || "default",
-      );
+      // New Session starts on the default loadout when there is one, else the active profile's own model.
+      const start = startingChoice(nextProfiles, profileResult.active, profileResult.default_loadout);
+      setSelectedProfile(start.profile);
+      setSelectedPick({ provider: start.provider, model: start.model, effort: start.effort });
+      setStartedFor(folder);
       // Restore this engine's newest chat unless the person has opened one.
       const first = chatToRestore(result, openedRef.current);
       if (first) {
@@ -1329,6 +1340,43 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     };
   }, [guardHistoryOpen, loadSessions, loadState, recoverPendingTurn, refreshAgentPool]);
 
+  // A default loadout belongs to the folder a session starts in: that folder's own project and local config can
+  // set one. Ask again when the Workspace field changes, unless a model was picked by hand (#957).
+  useEffect(() => {
+    const folder = workspacePath.trim();
+    if (startedFor === null || folder === startedFor || pickedByHandRef.current) return;
+    let stale = false;
+    api
+      .listProfiles(folder)
+      .then((result) => {
+        if (stale || pickedByHandRef.current) return;
+        const start = startingChoice(result.profiles || [], result.active, result.default_loadout);
+        setSelectedProfile(start.profile);
+        setSelectedPick({ provider: start.provider, model: start.model, effort: start.effort });
+        setStartedFor(folder);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [workspacePath, startedFor]);
+
+  /** What a session starting in `folder` runs on: the form's pick, else that folder's default loadout (#957). */
+  const startChoiceFor = async (folder: string): Promise<ModelChoice> => {
+    const shown = { profile: selectedProfile, ...selectedPick };
+    // The form shows this folder's default already, or a model picked by hand: that is what starts.
+    if (pickedByHandRef.current || folder === (startedFor ?? "")) return shown;
+    // This folder's answer is still on its way (or never came): ask now, so a session never starts on another
+    // folder's default.
+    try {
+      const result = await api.listProfiles(folder);
+      const start = startingChoice(result.profiles || [], result.active, result.default_loadout);
+      return { profile: start.profile, provider: start.provider, model: start.model, effort: start.effort };
+    } catch {
+      return shown;
+    }
+  };
+
   /** New Session's picks, or an offline agent's own (`pick`). Resolves true once its chat is open. */
   const createSession = async (pick: { identity?: string; agent?: string; workspace?: string } = {}): Promise<boolean> => {
     openedRef.current = true;
@@ -1342,8 +1390,10 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     setPickFailure(null);
     setCreationError(null);
     try {
+      const folder = pick.workspace || workspacePath.trim();
+      const start = await startChoiceFor(folder);
       const session = await api.createSession({
-        profile: selectedProfile || "default",
+        profile: start.profile || "default",
         // Pin what New Session shows. "default" is only a placeholder until
         // such a bundle exists (the first daemon start seeds it).
         agent: pick.identity
@@ -1353,11 +1403,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             : undefined,
         identity: pick.identity || selectedIdentity || undefined,
         approval_mode: "trust_all",
-        workspace: pick.workspace || workspacePath.trim() || undefined,
+        workspace: folder || undefined,
       });
-      if (selectedPick.model || selectedPick.effort) {
+      if (start.model || start.effort) {
         // A session starts on a profile; the picked model and effort go on next.
-        const pick = { ...selectedPick, profile: selectedProfile };
+        const pick = { ...start };
         await applyModelChoice(api, session, pick).catch((reason) =>
           setPickFailure({
             sessionId: session.session_id,
@@ -1646,6 +1696,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           selectedModel={selectedPick.model}
           selectedEffort={selectedPick.effort}
           onModelPick={(choice) => {
+            pickedByHandRef.current = true;
             setSelectedProfile(choice.profile);
             setSelectedPick(choice);
           }}

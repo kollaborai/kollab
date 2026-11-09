@@ -124,7 +124,9 @@ class ConfigService:
             app_version = "unknown"
 
         missing = object()
-        save_path = get_global_config_path()
+        # This service's own file: reading and rewriting the global one would stamp (or replace) the
+        # real config from a service built on some other path (#967).
+        save_path = self.config_manager.config_path
         try:
             if save_path.exists():
                 raw = json.loads(save_path.read_text(encoding="utf-8"))
