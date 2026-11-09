@@ -4,12 +4,30 @@ No engine, credentials, or user content live here. PhoneLink uses the normal
 room registration, backplane, admission limits, and opaque encrypted routing.
 """
 
+import os
 from pathlib import Path
 
 from aiohttp import web
 
 PHONE_ROOT = "/relay/v1/phone"
 PHONE_PROTOCOL = "kollab-phonelink/1"
+
+
+def _file_below(root: Path, name: str) -> Path | None:
+    """The file ``name`` names below ``root``, or None (#980).
+
+    None for text that leaves ``root`` (``..``, an absolute path, a symlink that points out), a NUL byte, a folder
+    and a path with nothing there. Same check as ``kollabor_webui.server._safe_asset``, kept here because the relay
+    build ships ``plugins/hub`` from an allowlist, without the web UI package;
+    ``tests/unit/test_contained_paths.py`` holds both to one contract.
+    """
+    if not name or "\0" in name:
+        return None
+    base = os.path.join(os.path.realpath(root), "")
+    candidate = os.path.realpath(os.path.join(base, name))
+    if not candidate.startswith(base):
+        return None
+    return Path(candidate) if os.path.isfile(candidate) else None
 
 
 def static_directory() -> Path | None:
@@ -52,8 +70,8 @@ async def phone_page(request: web.Request) -> web.StreamResponse:
     asset = request.match_info.get("asset", "") or "index.html"
     if asset == "learn":
         asset = "index.html"
-    candidate = (root / asset).resolve()
-    if not candidate.is_relative_to(root.resolve()) or not candidate.is_file():
+    candidate = _file_below(root, asset)
+    if candidate is None:
         raise web.HTTPNotFound()
     headers = {
         "Cache-Control": "no-store" if asset == "index.html" else "public, max-age=3600",
