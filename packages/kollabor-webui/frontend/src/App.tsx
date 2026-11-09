@@ -1691,7 +1691,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   return (
     <GemAppearanceProvider api={api} refreshKey={aliveKey}>
       <AvatarImageProvider api={api}>
-      <SidebarProvider className={`bg-muted/40 ${contained ? "h-full min-h-0" : ""}`}>
+      <SidebarProvider className={`bg-muted/40 dark:bg-black ${contained ? "h-full min-h-0" : ""}`}>
         <AppSidebar
           learnActive={learnRoute !== null}
           whatsNewActive={whatsNewActive}
