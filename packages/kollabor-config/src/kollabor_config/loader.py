@@ -798,7 +798,8 @@ class ConfigLoader:
         """Load user configuration with layered resolution.
 
         Priority order (new layered system):
-        1. Explicit config_manager.config_path (if provided and exists)
+        1. Explicit config_manager.config_path, when it is not one of the three layer files below: loaded alone,
+           or blank when it does not exist yet
         2. Global config (~/.kollab/config.json) - base layer
         3. Project config (~/.kollab/projects/<encoded>/config.json) - project defaults
         4. Local config (.kollab/config.json) - local override
@@ -812,9 +813,13 @@ class ConfigLoader:
 
         merged_config = {}
 
-        # A file of its own (e.g., for testing): if it exists, load only from it
+        # A file of its own (e.g., for testing): load only from it. One that is not there yet starts blank:
+        # falling through to the layers below would copy the user's settings, keys included, into it when
+        # it is created (#967).
         explicit_path = self._custom_config_path()
-        if explicit_path is not None and explicit_path.exists():
+        if explicit_path is not None:
+            if not explicit_path.exists():
+                return {}
             try:
                 with open(explicit_path, "r") as f:
                     return json.load(f) or {}
