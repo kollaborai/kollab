@@ -51,8 +51,9 @@ replay cannot recreate it, so use a new submission to send those images again.
   only the ID's receipt is gone. Use a fresh ID for each new submission.
 - Another conversation, or different input, with a saved ID is still refused
   inside the window and never sees its receipt; after the window the ID is free.
-- The binding holds only the hashed ID, the hashed input, the request id and
-  the settle time. Command text, image data and artifact paths are never in it.
+- The binding stores a hashed client request ID and input fingerprint, the
+  conversation ID, an internal request ID, and the settle time. It never stores
+  command text, image data or artifact paths.
 A replay's receipt is returned only to that response, without taking over or
 cancelling the original goal's private reply. A new goal checks a pre-admission
 cancellation before saving its images.
