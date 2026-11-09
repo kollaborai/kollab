@@ -5,6 +5,9 @@ on it. The service wrote its starting config to the layered save location instea
 given: the real ~/.kollab/config.json, which went from the user's profiles and loadouts to the fresh
 defaults. The same service saves through the same layers once it holds a change, so a service built on
 a file of its own must save to that file too. Only the real global config follows the layers.
+
+A file of its own that is not there yet starts blank: it never takes the user's layers (and their keys)
+into itself when it is created.
 """
 
 import json
@@ -12,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from kollabor_config.config_utils import get_project_data_dir
 from kollabor_config.service import ConfigService
 
 SAVED = {
@@ -121,3 +125,65 @@ def test_save_config_on_the_saved_config_still_follows_the_layers(real_config):
 
     assert real_config.read_bytes() == before
     assert json.loads(local.read_text())["kollabor"]["llm"]["marker"] == 1
+
+
+SECRETS = {
+    "global": "sk-synthetic-global-1111",
+    "project": "sk-synthetic-project-2222",
+    "local": "sk-synthetic-local-3333",
+}
+
+
+@pytest.fixture
+def secret_layers(tmp_path, monkeypatch):
+    """A synthetic key in each layer the user's config is read from: global, project and local."""
+    home, project = tmp_path / "home", tmp_path / "project"
+    (home / ".kollab").mkdir(parents=True)
+    project.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(project)
+    layers = {
+        "global": home / ".kollab" / "config.json",
+        "project": get_project_data_dir() / "config.json",
+        "local": project / ".kollab" / "config.json",
+    }
+    for name, path in layers.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        profile = {"provider": "custom", "model": "m", "api_key": SECRETS[name]}
+        path.write_text(json.dumps({"kollabor": {"llm": {"profiles": {f"{name}-profile": profile}}}}))
+    return layers
+
+
+def _copied_layers(text):
+    return [name for name, secret in SECRETS.items() if secret in text or f"{name}-profile" in text]
+
+
+@pytest.mark.parametrize("redirect_global_path", [False, True], ids=["plain", "probe-redirect"])
+def test_a_missing_custom_file_starts_blank_and_takes_nothing_from_the_layers(
+    secret_layers, tmp_path, monkeypatch, redirect_global_path
+):
+    blank = tmp_path / "isolated" / "config.json"
+    if redirect_global_path:  # how the review probe redirected the global path for itself
+        monkeypatch.setattr("kollabor_config.config_utils.get_global_config_path", lambda: blank)
+    before = {name: path.read_bytes() for name, path in secret_layers.items()}
+
+    service = ConfigService(blank, fast_mode=True)
+
+    assert blank.exists()
+    assert _copied_layers(blank.read_text()) == []  # no key of any layer landed in the new file
+    assert {name: path.read_bytes() for name, path in secret_layers.items()} == before
+    profiles = service.get("kollabor.llm.profiles", {}) or {}
+    assert [name for name in profiles if name.endswith("-profile")] == []  # a blank config is blank
+
+
+def test_a_blank_custom_file_still_takes_nothing_from_the_layers_when_it_saves(secret_layers, tmp_path):
+    blank = tmp_path / "isolated" / "config.json"
+    service = ConfigService(blank, fast_mode=True)
+    service.set("kollabor.llm.marker", 1)
+
+    assert service.save_config() is True
+    assert service.save_key("kollabor.llm.other", 2) is True
+
+    saved = json.loads(blank.read_text())
+    assert saved["kollabor"]["llm"]["marker"] == 1 and saved["kollabor"]["llm"]["other"] == 2
+    assert _copied_layers(blank.read_text()) == []
