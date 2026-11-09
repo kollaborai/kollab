@@ -118,14 +118,16 @@ class TestAgentPoolColor:
         assert by_name["lapis"]["solo"] is True
         assert by_name["ruby"]["solo"] is False
 
-    async def test_a_live_agent_names_its_folder(self, client, pool, monkeypatch):
-        there = live("a1", "lapis", project="/home/dev/kollab")
+    async def test_a_live_agent_names_its_folder(self, client, pool, monkeypatch, tmp_path):
+        folder = tmp_path / "dev" / "kollab"  # a real folder: the engine's folder rule refuses one that is not there
+        folder.mkdir(parents=True)
+        there = live("a1", "lapis", project=str(folder))
         monkeypatch.setattr(agents_routes, "_bridge", StubBridge([there]))
 
-        body = (await client.get("/agents", params={"workspace": "/home/dev/kollab"})).json()
+        body = (await client.get("/agents", params={"workspace": str(folder)})).json()
 
         by_name = {agent["name"]: agent for agent in body["agents"]}
-        assert by_name["lapis"]["project"] == "/home/dev/kollab"
+        assert by_name["lapis"]["project"] == str(folder)
         assert by_name["ruby"]["project"] == ""
 
     async def test_every_live_agent_is_listed_but_only_pool_gems_launch(self, client, pool, monkeypatch):
@@ -355,12 +357,13 @@ class TestAgentBundles:
 
     @pytest.fixture
     def folders(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HOME", str(tmp_path / "home"))  # no global tier: only bundled + local
-        mine = tmp_path / "mine"
+        home = tmp_path / "home"  # no global tier: only bundled + local; both folders are inside it (folder rule)
+        monkeypatch.setenv("HOME", str(home))
+        mine = home / "mine"
         agent = mine / ".kollab" / "agents" / "localonly"
         agent.mkdir(parents=True)
         (agent / "system_prompt.md").write_text("The project's own agent.")
-        other = tmp_path / "other"
+        other = home / "other"
         other.mkdir()
         return mine, other
 
