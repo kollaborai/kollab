@@ -3,6 +3,7 @@ import { File as FileIcon } from "lucide-react";
 import { codeFetch, unwrapCodeData } from "@/lib/code-fetch";
 import { cn } from "@/lib/utils";
 import { useEditorStore } from "@/components/code/editor-store";
+import { openWorkspaceFile } from "@/components/code/open-file";
 
 interface TreeNode {
   name: string;
@@ -67,9 +68,6 @@ export function QuickOpen({ open, onClose, workspace }: QuickOpenProps) {
   const listRef = useRef<HTMLDivElement>(null);
 
   const activePaneId = useEditorStore((s) => s.activePaneId);
-  const openFile = useEditorStore((s) => s.openFile);
-  const pinFile = useEditorStore((s) => s.pinFile);
-  const setFileLoading = useEditorStore((s) => s.setFileLoading);
 
   useEffect(() => {
     if (!open || !workspace) return;
@@ -93,23 +91,9 @@ export function QuickOpen({ open, onClose, workspace }: QuickOpenProps) {
     async (file: FlatFile) => {
       if (!activePaneId) return;
       onClose();
-      openFile(activePaneId, file.path, file.name, file.ext, "");
-      pinFile(file.path);
-      setFileLoading(file.path, true);
-      try {
-        const res = await codeFetch(`/api/fs/file?workspace=${encodeURIComponent(workspace)}&path=${encodeURIComponent(file.path)}`);
-        if (res.ok) {
-          const raw: unknown = await res.json();
-          const data = unwrapCodeData<{ content?: string }>(raw);
-          openFile(activePaneId, file.path, file.name, file.ext, data.content ?? "");
-        }
-      } catch {
-        // a failed read leaves the tab open with empty content, as in mentiko
-      } finally {
-        setFileLoading(file.path, false);
-      }
+      await openWorkspaceFile(workspace, file.path, { pin: true });
     },
-    [onClose, activePaneId, openFile, pinFile, setFileLoading]
+    [onClose, activePaneId, workspace]
   );
 
   const handleKeyDown = useCallback(

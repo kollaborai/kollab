@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { Files, Filter, GitBranch, PanelLeft, Search, Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { codeFetch, unwrapCodeData } from "@/lib/code-fetch";
+import { openWorkspaceFile, readFileContent, fileNameOf, extensionOf } from "@/components/code/open-file";
 import { cn } from "@/lib/utils";
 import { EditorConfigPanel } from "@/components/code/editor-config";
 import { type FileData, useEditorStore } from "@/components/code/editor-store";
@@ -47,55 +47,9 @@ function resetEditorTabs(): void {
   });
 }
 
-function fileNameOf(absPath: string): string {
-  return absPath.slice(absPath.lastIndexOf("/") + 1);
-}
-
-function extensionOf(name: string): string {
-  const dot = name.lastIndexOf(".");
-  return dot > 0 ? name.slice(dot).toLowerCase() : "";
-}
-
-/** The file's text, or null when it cannot be read. Same route quick open reads through. */
-async function readFileContent(workspace: string, absPath: string): Promise<string | null> {
-  try {
-    const res = await codeFetch(`/api/fs/file?workspace=${encodeURIComponent(workspace)}&path=${encodeURIComponent(absPath)}`);
-    if (!res.ok) return null;
-    const raw: unknown = await res.json();
-    return unwrapCodeData<{ content?: string }>(raw).content ?? "";
-  } catch {
-    return null;
-  }
-}
-
 /** Opens a file in the active pane (git panel's "open file"). */
 async function openFileInActivePane(workspace: string, absPath: string): Promise<void> {
-  const store = useEditorStore.getState();
-  const paneId = store.activePaneId;
-  const name = fileNameOf(absPath);
-  const ext = extensionOf(name);
-  const pane = store.panes.find((p) => p.id === paneId);
-  if (pane?.openPaths.includes(absPath)) {
-    store.setActiveFile(paneId, absPath);
-    return;
-  }
-  const cached = store.fileCache.get(absPath);
-  if (cached) {
-    // already loaded, maybe with unsaved edits: show that buffer, never reload over it
-    store.openFile(paneId, absPath, name, ext, cached.content);
-    return;
-  }
-  // the tab shows at once and fills in when the read lands, as quick open does
-  store.openFile(paneId, absPath, name, ext, "");
-  store.pinFile(absPath);
-  store.setFileLoading(absPath, true);
-  const content = await readFileContent(workspace, absPath);
-  if (content === null) {
-    // a failed read must not leave an empty tab, which a save would write over the file
-    useEditorStore.getState().closeFile(paneId, absPath);
-    return;
-  }
-  useEditorStore.getState().openFile(paneId, absPath, name, ext, content);
+  await openWorkspaceFile(workspace, absPath, { pin: true });
 }
 
 /** Opens a diff tab: working copy against the HEAD content the git panel passes (null = new file). */

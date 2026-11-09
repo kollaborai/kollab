@@ -199,6 +199,7 @@ const mainConfig = defineConfig({
       "tests/sidebar-breakpoint.test.ts",
       "tests/session-refresh-gate.test.ts",
       "tests/code-editor-store.test.ts",
+      "tests/code-open-file.test.ts",
 
       "tests/team-model.test.ts",
       "tests/team-selection.test.ts",

@@ -23,6 +23,7 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { FileTypeIcon } from "./quick-open";
+import { openWorkspaceFile } from "@/components/code/open-file";
 
 interface FileNode {
   name: string;
@@ -172,10 +173,8 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
 
   const activePaneId = useEditorStore((s) => s.activePaneId);
   const panes = useEditorStore((s) => s.panes);
-  const openFile = useEditorStore((s) => s.openFile);
   const pinFile = useEditorStore((s) => s.pinFile);
   const setActiveFile = useEditorStore((s) => s.setActiveFile);
-  const setFileLoading = useEditorStore((s) => s.setFileLoading);
 
   const activePane = panes.find((p) => p.id === activePaneId);
   const activeFilePath = activePane?.activePath ?? null;
@@ -263,26 +262,10 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
         return;
       }
 
-      openFile(activePaneId, node.path, node.name, node.ext || "", "");
-      setFileLoading(node.path, true);
       onFileSelect?.();
-
-      try {
-        const res = await codeFetch(
-          `/api/fs/file?path=${encodeURIComponent(node.path)}&workspace=${encodeURIComponent(workspace)}`
-        );
-        const raw: unknown = await res.json();
-        if (res.ok) {
-          const data = unwrapCodeData<{ content?: string }>(raw);
-          openFile(activePaneId, node.path, node.name, node.ext || "", data.content ?? "");
-        }
-      } catch {
-        // leave empty
-      } finally {
-        setFileLoading(node.path, false);
-      }
+      await openWorkspaceFile(workspace, node.path);
     },
-    [activePaneId, activePane, openFile, onFileSelect, setActiveFile, setFileLoading, toggleExpand, workspace]
+    [activePaneId, activePane, onFileSelect, setActiveFile, toggleExpand, workspace]
   );
 
   const handleFileDoubleClick = useCallback(

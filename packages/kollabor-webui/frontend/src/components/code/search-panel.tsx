@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { Loader2, Search } from "lucide-react";
 import { useEditorStore } from "@/components/code/editor-store";
 import { codeFetch, unwrapCodeData } from "@/lib/code-fetch";
+import { openWorkspaceFile } from "@/components/code/open-file";
 
 export interface SearchResult {
   path: string;
@@ -25,9 +26,6 @@ export function SearchPanel({ workspace }: SearchPanelProps) {
   const searchSeq = useRef(0);
 
   const activePaneId = useEditorStore((s) => s.activePaneId);
-  const openFile = useEditorStore((s) => s.openFile);
-  const pinFile = useEditorStore((s) => s.pinFile);
-  const setFileLoading = useEditorStore((s) => s.setFileLoading);
   const setPendingReveal = useEditorStore((s) => s.setPendingReveal);
 
   // auto-focus when opened
@@ -77,37 +75,16 @@ export function SearchPanel({ workspace }: SearchPanelProps) {
     async (result: SearchResult) => {
       if (!activePaneId) return;
 
-      const ext = result.name.includes(".")
-        ? result.name.slice(result.name.lastIndexOf("."))
-        : "";
-
       // construct full path from relative path
       const fullPath = result.path.startsWith("/")
         ? result.path
         : `${workspace}/${result.path}`;
 
-      // set loading state
-      openFile(activePaneId, fullPath, result.name, ext, "");
-      pinFile(fullPath);
-      setFileLoading(fullPath, true);
-
-      try {
-        const url = `/api/fs/file?workspace=${encodeURIComponent(workspace)}&path=${encodeURIComponent(fullPath)}`;
-        const res = await codeFetch(url);
-        const raw: unknown = await res.json();
-        if (res.ok) {
-          const data = unwrapCodeData<{ content?: string }>(raw);
-          openFile(activePaneId, fullPath, result.name, ext, data.content ?? "");
-          // trigger reveal after file loads
-          setPendingReveal({ path: fullPath, line: result.line, column: result.column });
-        }
-      } catch {
-        // silent
-      } finally {
-        setFileLoading(fullPath, false);
-      }
+      const opened = await openWorkspaceFile(workspace, fullPath, { pin: true });
+      // reveal the match once the file is open
+      if (opened) setPendingReveal({ path: fullPath, line: result.line, column: result.column });
     },
-    [activePaneId, workspace, openFile, pinFile, setFileLoading, setPendingReveal],
+    [activePaneId, workspace, setPendingReveal],
   );
 
   // group results by file
