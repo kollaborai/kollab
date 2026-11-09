@@ -1,4 +1,7 @@
-"""A restart in place tells the attached windows before it shuts down, and the attach ack names the image's version (#968)."""
+"""A restart in place tells the attached windows before it shuts down (#968).
+
+The attach ack also names the version the image runs.
+"""
 
 import asyncio
 import json
@@ -23,7 +26,9 @@ async def test_restart_tells_the_attached_windows_before_it_shuts_down(monkeypat
     order = []
     plugin = HubPlugin.__new__(HubPlugin)
     plugin._identity = SimpleNamespace(identity="sunstone")
-    tap = SimpleNamespace(publish=lambda event: order.append(("publish", event["type"], event.get("identity"), loop.time())))
+    tap = SimpleNamespace(
+        publish=lambda event: order.append(("publish", event["type"], event.get("identity"), loop.time()))
+    )
     plugin.event_bus = SimpleNamespace(get_service=lambda name: tap if name == "display_tap" else None)
     plugin.network_turn_open = lambda: False
 
@@ -37,7 +42,8 @@ async def test_restart_tells_the_attached_windows_before_it_shuts_down(monkeypat
     plugin._self_restart_watchdog = no_watchdog  # the real one execs this test process away after 8 s
     monkeypatch.setattr(sys, "argv", ["kollab", "--detached", "--as", "sunstone"])
     monkeypatch.setattr(os, "environ", dict(os.environ))
-    llm = SimpleNamespace(is_processing=False, conversation_manager=SimpleNamespace(current_session_id="s1", messages=[]))
+    conversation = SimpleNamespace(current_session_id="s1", messages=[])
+    llm = SimpleNamespace(is_processing=False, conversation_manager=conversation)
 
     await plugin._restart_when_idle(llm)
 

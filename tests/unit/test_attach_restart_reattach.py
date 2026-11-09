@@ -12,9 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from kollabor_config import local_ipc
-
 from kollabor.application import TerminalLLMChat
+from kollabor_config import local_ipc
 
 
 @pytest.fixture
@@ -65,7 +64,8 @@ class Image:
             if msg.get("type") == "input":
                 self.inputs.append(msg["text"])
             elif msg.get("action") == "rpc_request":
-                writer.write(_line({"action": "rpc_reply", "request_id": msg["request_id"], "result": {"image": self.agent_id}}))
+                reply = {"action": "rpc_reply", "request_id": msg["request_id"], "result": {"image": self.agent_id}}
+                writer.write(_line(reply))
                 await writer.drain()
 
     def send(self, event):
