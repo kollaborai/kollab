@@ -316,8 +316,11 @@ async def list_choices():
     on, for the web UI's searchable model picker. ACP choices are discovered
     in a short-lived, isolated session when a harness has no fresh options."""
     from kollabor_ai.loadout_manager import LoadoutManager
+    from kollabor_config import ConfigService
+    from kollabor_config.config_utils import get_global_config_path
 
-    manager = LoadoutManager(_get_profile_manager(), config=_loadout_config())
+    config = ConfigService(get_global_config_path(), fast_mode=True)  # saved loadouts live here
+    manager = LoadoutManager(_get_profile_manager(), config=config)
     profiles = manager.provider_profiles()
 
     async def refresh_catalogs() -> None:
