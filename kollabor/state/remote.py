@@ -1015,14 +1015,15 @@ class RemoteStateService(StateService):
         )
         return _panel_answer(result, "result")
 
-    # A git call on a large repository can take a while; every terminal call is quick.
+    # Git mutations can include a push followed by multiple status commands.
     CODE_CALL_TIMEOUT: float = 40.0
+    GIT_CODE_CALL_TIMEOUT: float = 240.0
 
     async def code_call(self, op: str, params: dict[str, Any]) -> dict[str, Any]:
         result = await self._rpc.call(
             "state.code_call",
             {"op": op, "params": params},
-            timeout=max(self._timeout, self.CODE_CALL_TIMEOUT),
+            timeout=max(self._timeout, self.GIT_CODE_CALL_TIMEOUT if op == "git" else self.CODE_CALL_TIMEOUT),
         )
         answer = result.get("answer") if isinstance(result, dict) else None
         if (

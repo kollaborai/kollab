@@ -311,7 +311,8 @@ export function GitPanel({ sessionId, workspace, onOpenFile, onOpenDiff }: GitPa
         if (result.status) setStatus(result.status);
         return result;
       } catch (e) {
-        setError(e instanceof Error ? e.message : failure);
+        const message = e instanceof Error ? e.message : failure;
+        setError(body.action === "push" ? `${message} Check the remote before retrying; the push may have completed.` : message);
         return null;
       } finally {
         setBusy(false);

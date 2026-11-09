@@ -193,8 +193,8 @@ async def test_delete_refuses_an_unmerged_branch_until_it_is_forced(client, mach
 
 
 @pytest.mark.asyncio
-async def test_switch_carries_uncommitted_changes_when_git_would_refuse(client, machine):
-    """git refuses a switch over a local edit to a file the branches differ in; mentiko's fallback carries it over."""
+async def test_switch_refuses_local_changes_when_git_would_refuse(client, machine):
+    """Do not implicitly merge local changes when Git refuses a switch."""
     repo = machine.repo
     (repo / "tracked.txt").write_text("a\nb\nc\n")
     _git(repo, "commit", "-am", "three lines")
@@ -207,13 +207,9 @@ async def test_switch_carries_uncommitted_changes_when_git_would_refuse(client, 
 
     response = await _act(client, machine, "switch_branch", branchName="feature")
 
-    assert response.json()["data"] == {
-        "ok": True,
-        "current": "feature",
-        "previous": "main",
-        "hasUncommittedChanges": True,
-    }
-    assert (repo / "tracked.txt").read_text() == "A\nb\nC\n"
+    assert response.status_code == 409
+    assert _git(repo, "branch", "--show-current").strip() == "main"
+    assert (repo / "tracked.txt").read_text() == "a\nb\nC\n"
 
 
 @pytest.mark.asyncio
@@ -342,3 +338,19 @@ async def test_stash_apply_uses_object_selected_before_reflog_moves(client, mach
     result = await _act(client, machine, "apply_stash", stashCommit=commit)
     assert result.status_code == 200
     assert (machine.repo / "tracked.txt").read_text() == "first stash\n"
+
+
+@pytest.mark.asyncio
+async def test_conflicting_branch_switch_does_not_change_branch_or_create_conflicts(client, machine):
+    repo = machine.repo
+    _git(repo, "branch", "feature")
+    _git(repo, "switch", "feature")
+    (repo / "tracked.txt").write_text("feature content\n")
+    _git(repo, "commit", "-am", "feature edit")
+    _git(repo, "switch", "main")
+    (repo / "tracked.txt").write_text("local edit\n")
+    response = await _act(client, machine, "switch_branch", branchName="feature")
+    assert response.status_code == 409
+    assert _git(repo, "branch", "--show-current").strip() == "main"
+    assert (repo / "tracked.txt").read_text() == "local edit\n"
+    assert _git(repo, "diff", "--name-only", "--diff-filter=U") == ""

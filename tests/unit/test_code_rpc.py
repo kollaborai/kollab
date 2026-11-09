@@ -186,3 +186,10 @@ def test_remote_folder_browser_and_selected_tree_use_daemon_files(wire, tmp_path
     assert str(folder) in [entry["path"] for entry in listing["body"]["data"]["folders"]]
     tree = run(remote.code_call("fs.tree", {"codeRoot": str(folder)}))
     assert [entry["name"] for entry in tree["body"]["data"]["tree"]] == ["remote.txt"]
+
+
+def test_code_rpc_timeout_exceeds_git_push_and_status_budget(wire):
+    from kollabor.code_service.git import PUSH_TIMEOUT
+    remote, rpc, _, _ = wire
+    run(remote.code_call("git", {"action": "status"}))
+    assert rpc.last_timeout > PUSH_TIMEOUT + 10

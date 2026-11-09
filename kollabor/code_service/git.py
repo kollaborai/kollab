@@ -502,15 +502,8 @@ async def _create_branch(root: str, body: dict[str, Any], settings: CodeSettings
 async def _switch_branch(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
     name = _branch_name(body)
     previous = await _head_name(root)
-    proc = await _git(root, ["switch", name], read=False)
-    carried = False
-    if proc.returncode != 0:
-        if not any(word in f"{proc.stderr}{proc.stdout}" for word in ("uncommitted", "working tree", "changes")):
-            raise GitRequestError(409, "git_failed", _reason(proc))
-        # mentiko's fallback: carry the uncommitted changes over (not a stash). A conflict still refuses, in `_write`.
-        await _write(root, ["switch", "-m", name])
-        carried = True
-    return {"ok": True, "current": await _head_name(root), "previous": previous, "hasUncommittedChanges": carried}
+    await _write(root, ["switch", name])
+    return {"ok": True, "current": await _head_name(root), "previous": previous, "hasUncommittedChanges": False}
 
 
 async def _delete_branch(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
