@@ -95,6 +95,13 @@ class ModelFallbackPlugin(BasePlugin):
         if self._tap is not None:
             self._tap.remove_listener(self._on_tap_event)
             self._tap = None
+        self._pending = None
+        self._failed_message = None
+        self._failed_runner = None
+        task = self._task
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         held, self._held = self._held, None
         if held is not None:
             held.release_observations(flush=False)  # no switch comes for what it kept
@@ -250,9 +257,11 @@ class ModelFallbackPlugin(BasePlugin):
         A native profile has them in its history already, and gets the turn
         that answers them (#548).
         """
-        if getattr(held, "active", False):
-            held.release_observations(flush=moved)
-        elif held.hand_over_observations() and self.event_bus is not None:
+        if not moved:
+            held.release_observations(flush=False)
+        elif getattr(held, "active", False):
+            held.release_observations(flush=True)
+        elif await held.hand_over_to_native() and self.event_bus is not None:
             await self.event_bus.emit_with_hooks(
                 EventType.TRIGGER_LLM_CONTINUE, {"source": "model_fallback"}, "model_fallback"
             )

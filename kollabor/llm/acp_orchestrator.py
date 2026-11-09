@@ -22,7 +22,6 @@ from typing import Any
 
 from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES
 from kollabor_ai.profile_manager import EFFORT_LEVELS, LLMProfile
-from kollabor_events import EventType
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import publish_semantic
 from kollabor_tui.terminal_state import TerminalMode
@@ -763,28 +762,6 @@ class ACPOrchestrator:
         if flush and not self.is_processing:
             self._flush_observations()
 
-    def hand_over_observations(self) -> int:
-        """A native profile runs now: the peer messages kept here are in the
-        conversation already, written as they came, so the native turn that
-        answers them reads them there. None is sent to a harness again.
-        Returns how many there were."""
-        self.observations_held = False
-        for entry in self._unwritten_observations:  # their arrival row failed
-            try:
-                self._record_user(
-                    f"observations-{uuid.uuid4().hex}", format_agent_hud([entry]), "observation", None
-                )
-            except Exception as error:
-                logger.warning("ACP observation history write failed again (%s)", type(error).__name__)
-        self._unwritten_observations.clear()
-        for row in self._observation_rows:
-            self._parents.pop(row, None)
-            self._user_history_tasks.pop(row, None)
-        self._observation_rows.clear()
-        count, self._observation_count = self._observation_count, 0
-        self._observations.clear()
-        return count
-
     def _requeue_observations(self, request_id: str) -> None:
         """An observation turn failed while a switch waits on that failure: the
         harness the switch starts gets its messages, under their written row."""
@@ -916,19 +893,18 @@ class ACPOrchestrator:
         self._observations.clear()
         self._observation_count = 0
 
-    async def hand_over_to_native(self) -> None:
+    async def hand_over_to_native(self) -> bool:
         """Give the peer messages still buffered for the harness to the native profile.
 
         Call it once a native profile is active after this harness closed. Each
         message is already in the conversation; this drops the buffer so no
-        harness is offered them again, and starts the one native turn that
-        answers them. A message that still has no history row is kept, and no
-        turn starts. Each history write is awaited first; one that fails is shown
-        to the user, and the turn starts anyway, since the message is in the
-        conversation.
+        harness is offered them again. A message that still has no history row
+        is kept, and no turn starts. Each history write is awaited first. True
+        means the native continuation can safely read every kept message.
         """
+        self.observations_held = False
         if not self._observation_count and not self._unwritten_observations:
-            return
+            return False
         # A message whose arrival row failed has no history row yet; the native
         # model reads history, so it gets one more try here.
         still_unwritten: list[tuple[str, AgentHudEntry]] = []
@@ -952,7 +928,7 @@ class ACPOrchestrator:
             batch_text = format_agent_hud([entry for _, entry in still_unwritten])
             if not self._write_history_row(batch_id, batch_text):
                 self._unwritten_observations.extend(still_unwritten)
-                return
+                return False
             self._parents.pop(batch_id, None)
             writes.append(self._user_history_tasks.pop(batch_id, None))
         # The native turn reads history, so it starts once these writes have settled.
@@ -960,11 +936,7 @@ class ACPOrchestrator:
         settled = [task for task in writes if task is not None]
         if settled:
             await asyncio.gather(*settled, return_exceptions=True)
-        await self.event_bus.emit_with_hooks(
-            EventType.TRIGGER_LLM_CONTINUE,
-            {"source": "acp_handover", "content": ""},
-            "acp_orchestrator",
-        )
+        return True
 
     def _write_history_row(self, row_id: str, text: str) -> bool:
         """Write one observation row. True when it is in history, even if the write raised.

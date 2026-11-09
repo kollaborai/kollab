@@ -202,7 +202,9 @@ another agent that the old harness never got, or got and failed, reaches the
 new one; a native fallback answers them in one turn. If you pick another
 profile before the switch, the switch is dropped, and that profile gets those
 messages. If nothing switches (the fallback is out of usage too), they wait
-for the agent's next prompt.
+for the agent's next prompt. If activation fails after closing ACP, those
+messages stay queued; no native turn starts until a successful switch can read
+them from conversation history.
 
 - `/llm fallback` shows the choice; `/llm fallback off` turns it off.
 - In the web UI: Settings → Loadouts → Fallback Model, a dropdown of every
