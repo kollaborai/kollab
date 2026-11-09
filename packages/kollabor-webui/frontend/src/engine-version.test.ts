@@ -1,6 +1,6 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
+import appSource from "./App.tsx?raw";
 import { sameVersionBase } from "./engine-version";
 
 describe("sameVersionBase", () => {
@@ -29,10 +29,9 @@ describe("sameVersionBase", () => {
 // pinned at its source: it must call sameVersionBase, not compare strings.
 describe("App version-mismatch guard", () => {
   it("flags a mismatch only after the base-version compare, not strict equality", () => {
-    const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
-    expect(app).toMatch(
+    expect(appSource).toMatch(
       /if \(!engine \|\| !bundle \|\| sameVersionBase\(engine, bundle\)\) return;/,
     );
-    expect(app).not.toMatch(/engine === bundle/);
+    expect(appSource).not.toMatch(/engine === bundle/);
   });
 });
