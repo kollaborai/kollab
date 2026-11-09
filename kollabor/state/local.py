@@ -670,15 +670,25 @@ class LocalStateService(StateService):
         snapshot = self._profile_to_snapshot(active, is_active=True)
         return self._overlay_acp_harness_state(snapshot)
 
+    def _acp_active(self) -> bool:
+        """Whether an ACP harness runs this session's turns."""
+        try:
+            acp = self._event_bus.get_service("acp_orchestrator") if self._event_bus else None
+            return getattr(acp, "active", False) is True
+        except Exception:
+            logger.debug("ACP state unavailable", exc_info=True)
+            return False
+
     def _acp_harness_model(self) -> str:
         """The active ACP harness's current model option, or "" when there is none."""
         try:
             acp = self._event_bus.get_service("acp_orchestrator") if self._event_bus else None
             if acp is None or getattr(acp, "active", False) is not True:
                 return ""
-            for option in acp.advertised_config_options():
-                if str(option.get("category") or option.get("id") or "").lower() == "model":
-                    return str(option.get("currentValue") or "")
+            from kollabor_ai.acp_options import find_option
+
+            option = find_option(acp.advertised_config_options(), "model")
+            return str((option or {}).get("currentValue") or "")
         except Exception:
             logger.debug("ACP harness model unavailable", exc_info=True)
         return ""
@@ -687,24 +697,28 @@ class LocalStateService(StateService):
         """Overlay the live ACP harness's model/effort onto a snapshot.
 
         The provider profile object keeps its saved fields; a running
-        harness is authoritative for the active options, so every
-        snapshot that leaves the daemon reports what the harness runs,
-        not the profile's stored blanks (#605).
+        harness is authoritative for its active options, so every
+        snapshot that leaves the daemon reports what the harness runs.
+        An option the harness does not advertise is reported as none,
+        never as the profile's stored value: the web UI's 3 s poll would
+        otherwise put a dropped pick back (#605, #553).
         """
-        harness_model = self._acp_harness_model()
-        if harness_model:
-            # The harness is authoritative for its active options.
-            snapshot.model = harness_model
         try:
             acp = self._event_bus.get_service("acp_orchestrator") if self._event_bus else None
-            if acp is not None and getattr(acp, "active", False) is True:
-                effort = next((o for o in acp.advertised_config_options()
-                               if o.get("id") == "effort"
-                               or str(o.get("category") or "").lower() in {"thought_level", "effort"}), None)
-                if effort and effort.get("currentValue") is not None:
-                    snapshot.effort = str(effort["currentValue"])
+            if acp is None or getattr(acp, "active", False) is not True:
+                return snapshot
+            from kollabor_ai.acp_options import find_option
+
+            harness_model = self._acp_harness_model()
+            options = acp.advertised_config_options()
+            effort = find_option(options, "thought_level") or find_option(options, "effort")
+            harness_effort = str(effort["currentValue"]) if (
+                effort is not None and effort.get("currentValue") is not None
+            ) else ""
+            snapshot.model = harness_model
+            snapshot.effort = harness_effort
         except Exception:
-            logger.debug("ACP harness effort unavailable", exc_info=True)
+            logger.debug("ACP harness state unavailable", exc_info=True)
         return snapshot
 
     async def list_profiles(self) -> ProfileListSnapshot:
@@ -1344,10 +1358,10 @@ class LocalStateService(StateService):
     async def _apply_acp_effort(orchestrator: Any, effort: str) -> None:
         """Send an effort the harness advertises; otherwise raise with the choices."""
         from kollabor.llm.acp_orchestrator import option_values
+        from kollabor_ai.acp_options import find_option
 
-        option = next((o for o in orchestrator.advertised_config_options()
-                       if o.get("id") == "effort"
-                       or str(o.get("category") or "").lower() in {"thought_level", "effort"}), None)
+        options = orchestrator.advertised_config_options()
+        option = find_option(options, "thought_level") or find_option(options, "effort")
         offered = option_values(option)
         if option is None or effort not in offered:
             raise ValueError(
@@ -1363,6 +1377,29 @@ class LocalStateService(StateService):
             raise ValueError(f"ACP harness accepted effort {effort!r} but reports {reported!r}")
 
     async def set_active_profile(
+        self,
+        name: str,
+        *,
+        persist: bool = False,
+        persist_local: bool = False,
+        reload_profile: bool = False,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> ProfileSnapshot:
+        """Activate a profile while no other activation changes the provider.
+
+        Shares the LLM service's provider transition with ``/model`` so the
+        selected profile and the request provider cannot end up on different
+        profiles when two activations overlap (#585).
+        """
+        transition = getattr(self._llm_service, "provider_transition", None)
+        async with transition() if callable(transition) else nullcontext():
+            return await self._set_active_profile_serialized(
+                name, persist=persist, persist_local=persist_local,
+                reload_profile=reload_profile, model=model, effort=effort,
+            )
+
+    async def _set_active_profile_serialized(
         self,
         name: str,
         *,
@@ -1665,8 +1702,12 @@ class LocalStateService(StateService):
                     if str(current_provider).lower() == "acp" and getattr(orchestrator, "active", False) is True
                     else None
                 )
-                prior_binding = orchestrator.runner.binding if previous is not None and orchestrator.runner else None
-                prior_conversation = orchestrator.binding_conversation_id if previous is not None else None
+                prior_runner = getattr(orchestrator, "runner", None) if previous is not None else None
+                prior_binding = prior_runner.binding if prior_runner else None
+                prior_conversation = (
+                    getattr(orchestrator, "binding_conversation_id", None)
+                    if previous is not None else None
+                )
                 prior_loadout = getattr(orchestrator, "_loadout_override", None)
 
                 async def restore_previous() -> bool:
@@ -1723,20 +1764,11 @@ class LocalStateService(StateService):
                     # actually applied the loadout before the provider
                     # profile is persisted.
                     try:
+                        from kollabor_ai.acp_options import find_option
+
                         options = orchestrator.advertised_config_options()
-                        model_opt = next(
-                            (o for o in options
-                             if str(o.get("category") or "").lower() == "model"
-                             or o.get("id") == "model"),
-                            None,
-                        )
-                        effort_opt = next(
-                            (o for o in options
-                             if str(o.get("category") or "").lower()
-                             in {"thought_level", "effort"}
-                             or o.get("id") == "effort"),
-                            None,
-                        )
+                        model_opt = find_option(options, "model")
+                        effort_opt = find_option(options, "thought_level") or find_option(options, "effort")
                         if loadout_model and (
                             not model_opt
                             or model_opt.get("currentValue") != loadout_model
@@ -1808,7 +1840,8 @@ class LocalStateService(StateService):
             overrides: dict[str, Any] = {"save_to_config": False}
             if model:
                 overrides["model"] = model
-            if effort:
+            if effort is not None:
+                # "" is the model's own default: it clears an earlier pick.
                 overrides["effort"] = effort
             try:
                 if not self._profile_manager.update_profile(name, **overrides):

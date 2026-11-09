@@ -1310,6 +1310,15 @@ async def test_issuer_offer_binds_one_human_action_and_revokes_it_on_close(tmp_p
     encrypted_decision = enrollment_client.encrypt_enrollment_envelope(offer.envelope_key, decision)
     assert enrollment_client.decrypt_enrollment_envelope(offer.envelope_key, encrypted_decision) == decision
 
+    relay.state.origin = "http://kollabor.ai"
+    insecure_discovery = SimpleNamespace(origin=relay.state.origin)
+    commands._discover.return_value = (insecure_discovery, "", (), False)
+    with pytest.raises(EnrollmentProtocolError, match="unavailable") as refused:
+        await issuer.create_offer("kollabor.ai")
+    assert refused.value.refusal == (
+        "This relay address is not https. Device codes only work on https port 443."
+    )
+
     relay.state.origin = "https://kollabor.ai:8443"
     relay._store.save()
     custom_port_discovery = SimpleNamespace(

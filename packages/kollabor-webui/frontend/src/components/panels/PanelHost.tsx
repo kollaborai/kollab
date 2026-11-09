@@ -180,6 +180,7 @@ export function PanelHost({
   intent,
   onChanged,
   onSessionUpdated,
+  onManageProfiles,
 }: {
   api: EngineApi;
   session: Session;
@@ -194,6 +195,8 @@ export function PanelHost({
   /** An action changed something other views show (profile, model, session). */
   onChanged: () => void;
   onSessionUpdated: (session: Session) => void;
+  /** Opens the profile editor, offered on the Loadouts tab. */
+  onManageProfiles?: () => void;
 }) {
   const isMobile = useIsMobile();
   const sessionId = session.session_id;
@@ -744,6 +747,11 @@ export function PanelHost({
         <DialogDescription className="mt-1.5 break-words">
           {top?.panel.scope_note || activeTab.scope}
         </DialogDescription>
+        {tab === "loadouts" && onManageProfiles ? (
+          <Button type="button" variant="ghost" size="sm" className="mt-1 -ml-2.5" onClick={onManageProfiles}>
+            Manage Profiles
+          </Button>
+        ) : null}
       </div>
       <Tabs
         value={tab}

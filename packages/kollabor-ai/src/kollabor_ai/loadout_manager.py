@@ -28,6 +28,7 @@ input; ``get()`` is the strict exact-name lookup for programmatic use.
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from difflib import get_close_matches
 from typing import Any, Dict, List, Optional, Tuple
@@ -45,6 +46,18 @@ _LOCAL_ENDPOINT_PROVIDERS = {"custom", "local"}
 # "openai_responses", but the registry tags those models "openai". Without the
 # alias, an OAuth-only setup synthesizes zero implicit loadouts.
 _REGISTRY_PROVIDER_ALIASES = {"openai_responses": "openai"}
+
+_NOTE_EFFORTS = re.compile(r"effort: ([a-z/]+)")
+
+
+def _catalog_efforts(entry: Dict[str, Any]) -> Optional[List[str]]:
+    """The levels a catalog entry names (older caches keep them only in its note):
+    ``[]`` when it lists none, None when it does not say."""
+    efforts = entry.get("efforts")
+    if isinstance(efforts, list):
+        return [str(e) for e in efforts]
+    match = _NOTE_EFFORTS.search(str(entry.get("note") or ""))
+    return match.group(1).split("/") if match else None
 
 
 @dataclass
@@ -276,31 +289,7 @@ class LoadoutManager:
                 )
                 seen.add(profile.name)
                 continue
-            registry_provider = _REGISTRY_PROVIDER_ALIASES.get(provider, provider)
-            # A live catalog with entries is the provider's list (#558): a
-            # registry model it omits is not offered, since picking it fails
-            # at the provider. The registry seeds only a cold or failed fetch,
-            # or a provider with no listing API. Registry "custom"/"local"
-            # entries are generic placeholders that match no real endpoint
-            # (#447), so those endpoints list only what their live catalog
-            # serves; cold or failed fetches leave the section empty, which
-            # renders the panel's existing "no models" note with its retry hint.
-            catalog = self._cached_catalog(profile)
-            if catalog or provider in _LOCAL_ENDPOINT_PROVIDERS:
-                model_names = []
-            else:
-                model_names = [
-                    name for name, _info in list_models_for_provider(registry_provider)
-                ]
-            model_names.extend(
-                str(entry.get("id") or "") for entry in catalog if entry.get("id")
-            )
-            if catalog:
-                get_model = getattr(profile, "get_model", None)
-                own_model = (get_model() if callable(get_model) else "") or ""
-                if own_model:
-                    model_names.append(own_model)
-            for model_name in model_names:
+            for model_name in self.models_for_profile(profile):
                 if model_name in seen:
                     continue
                 seen.add(model_name)
@@ -314,8 +303,95 @@ class LoadoutManager:
                 )
         return result
 
+    def models_for_profile(self, profile: Any) -> List[str]:
+        """The models a native provider profile serves: its registry models,
+        then its cached live catalog."""
+        provider = (profile.get_provider() or "").lower()
+        registry_provider = _REGISTRY_PROVIDER_ALIASES.get(provider, provider)
+        # A live catalog with entries is the provider's list (#558): a
+        # registry model it omits is not offered, since picking it fails
+        # at the provider. The registry seeds only a cold or failed fetch,
+        # or a provider with no listing API. Registry "custom"/"local"
+        # entries are generic placeholders that match no real endpoint
+        # (#447), so those endpoints list only what their live catalog
+        # serves; cold or failed fetches leave the section empty, which
+        # renders the panel's existing "no models" note with its retry hint.
+        catalog = self._cached_catalog(profile)
+        if catalog or provider in _LOCAL_ENDPOINT_PROVIDERS:
+            model_names = []
+        else:
+            model_names = [
+                name for name, _info in list_models_for_provider(registry_provider)
+            ]
+        model_names.extend(
+            str(entry.get("id") or "") for entry in catalog if entry.get("id")
+        )
+        if catalog:
+            get_model = getattr(profile, "get_model", None)
+            own_model = (get_model() if callable(get_model) else "") or ""
+            if own_model:
+                model_names.append(own_model)
+        return model_names
+
+    def list_choices(
+        self, acp_options: Optional[Dict[str, Dict[str, List[str]]]] = None
+    ) -> List[Dict[str, str]]:
+        """Every provider profile x model x effort a session can start on, for
+        the web UI's searchable model picker.
+
+        Each configured profile's models, each at its own default (a blank
+        effort: picking it clears an earlier level) and at every level a request
+        on it carries, by the request's own rule (``accepted_efforts``: the
+        registry's, none on Claude for a model it does not list). A model the
+        registry says nothing about takes what its own profile's live catalog
+        lists (Codex publishes them per model; an empty list is none), else
+        none: no level is guessed. One endpoint's catalog says nothing about
+        another's. An ACP harness offers the models its sessions last reported
+        (``acp_options[profile name]``), each at the levels it reported for that
+        model. An unobserved model has no advertised effort choices; another
+        model's capabilities do not prove what it supports. It keeps its own
+        default, so it gets a blank row only when it reports no levels. Saved
+        loadouts are not rows: one saves to its provider profile, which every
+        session on it shares, and a pick changes one session.
+        """
+        from kollabor_ai.profile_manager import EFFORT_LEVELS, accepted_efforts
+
+        profiles = self.provider_profiles()
+        # A model's levels barely change: an old catalog still names them.
+        catalogs: Dict[str, Dict[str, List[str]]] = {}
+        for profile in profiles:
+            catalogs[profile.name] = {}
+            for entry in self._cached_catalog(profile, max_age=float("inf")):
+                said = _catalog_efforts(entry)
+                if entry.get("id") and said is not None:
+                    catalogs[profile.name][str(entry["id"])] = said
+        rows: List[Dict[str, str]] = []
+        for profile in profiles:
+            provider = (profile.get_provider() or "").lower()
+            if provider == "acp":
+                reported = (acp_options or {}).get(profile.name) or {}
+                seen = reported.get("efforts_by_model") or {}
+                models = [str(m) for m in reported.get("models") or []] or [""]
+                levels = {m: [str(e) for e in seen.get(m, [])] for m in models}
+            else:
+                own = [profile.get_model()] if profile.get_model() else []
+                models = list(dict.fromkeys(own + self.models_for_profile(profile)))
+                found = catalogs[profile.name]
+                levels = {}
+                for m in models:
+                    accepted = accepted_efforts(provider, m)
+                    said = (found.get(m) or []) if accepted is None else accepted
+                    levels[m] = [e for e in said if e in EFFORT_LEVELS]
+            for model in models:
+                efforts = levels[model]
+                if provider != "acp" or not efforts:
+                    efforts = [""] + efforts
+                for effort in efforts:
+                    rows.append({"profile": profile.name, "provider": provider, "model": model, "effort": effort})
+        return rows
+
     @staticmethod
-    def _cached_catalog(profile: Any) -> List[Dict[str, Any]]:
+    def _cached_catalog(profile: Any, max_age: float = float("inf")) -> List[Dict[str, Any]]:
         """This profile's cached live catalog. Empty when cold or unavailable.
 
         Read with no TTL: an entry older than the cache's refresh interval is
@@ -327,7 +403,7 @@ class LoadoutManager:
         try:
             from kollabor_ai.model_catalog import cached_provider_models
 
-            return list(cached_provider_models(profile, max_age=float("inf")))
+            return list(cached_provider_models(profile, max_age=max_age))
         except Exception as exc:  # noqa: BLE001 -- catalog must never break listing
             logger.debug("cached catalog unavailable for %s: %s", profile, exc)
             return []
