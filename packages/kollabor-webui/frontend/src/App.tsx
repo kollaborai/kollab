@@ -63,7 +63,7 @@ import {
   type SlashCommand,
   type Session,
 } from "./api";
-import { applyModelChoice, startingChoice } from "@/components/shell/model-choice";
+import { applyModelChoice } from "@/components/shell/model-choice";
 import {
   EngineRuntimeProvider,
   buildInitialState,
@@ -90,6 +90,7 @@ import { useHiddenAgents } from "@/hooks/use-hidden-agents";
 import { useSidebarOrder } from "@/hooks/use-sidebar-order";
 import { chatToRestore } from "@/restore-chat";
 import { useRosters } from "@/hooks/use-rosters";
+import { startingChoice } from "@/components/shell/starting-choice";
 import { LearnDialog } from "@/components/learn/LearnDialog";
 import { WhatsNewPage } from "@/components/updates/WhatsNewPage";
 import { navigateToLearn } from "@/learn/catalog";

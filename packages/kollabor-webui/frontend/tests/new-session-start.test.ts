@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { startingChoice } from "../src/components/shell/model-choice.ts";
+import { startingChoice } from "../src/components/shell/starting-choice.ts";
 
 // The terminal starts on kollabor.llm.default_loadout. A web session always names a profile,
 // which makes the terminal skip that default, so the form has to start on it itself (#957).

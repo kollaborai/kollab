@@ -82,7 +82,6 @@ export function makeFixtures(options = {}) {
     ...(options.additionalOfflineAgents ?? []),
   ];
   const agents = { agents: poolEntries, live: [], active: [], available: poolEntries.map((entry) => entry.name) };
-  const profileSwitches = [];
   const profiles = {
     active: "default",
     providers: [],
@@ -135,7 +134,7 @@ export function makeFixtures(options = {}) {
     const url = new URL(request.url());
     const endpoint = url.pathname.replace(/^\/api(?=\/)/, "");
     const method = request.method();
-    requests.push({ method, endpoint });
+    requests.push({ method, endpoint, body: method === "POST" ? request.postData() : null });
 
     if (endpoint === "/sessions" && method === "POST") {
       createPayload = request.postDataJSON();
@@ -193,12 +192,6 @@ export function makeFixtures(options = {}) {
     if (endpoint.endsWith("/events")) {
       return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
     }
-    if (method === "POST" && endpoint.endsWith("/profile")) {
-      // A session put on a pick answers with what it now runs, as the engine does.
-      const body = request.postDataJSON();
-      profileSwitches.push(body);
-      return json(route, { ...(createdSession ?? {}), profile: body.name, model: body.model, effort: body.effort });
-    }
     if (endpoint.startsWith("/sessions/")) {
       const requestedId = endpoint.split("/")[2];
       if (requestedId === remoteAgent.handle) {
@@ -216,7 +209,11 @@ export function makeFixtures(options = {}) {
     discoveryRequests: () => discoveryRequests,
     createRequest,
     network,
-    profileSwitches: () => profileSwitches,
+    // The bodies of the profile switches a page asked for, in order.
+    profileSwitches: () =>
+      requests
+        .filter((request) => request.method === "POST" && request.endpoint.endsWith("/profile"))
+        .map((request) => JSON.parse(request.body)),
     profiles,
     remoteAgent,
     requests,
@@ -439,26 +436,6 @@ async function main() {
     await shell.page.getByRole("button", { name: "Close Learn", exact: true }).click();
     await shell.page.waitForFunction(() => location.pathname === "/");
 
-    // Release updates have their own route, close control, and retry path.
-    await shell.page.getByRole("button", { name: "What’s New", exact: true }).click();
-    await shell.page.waitForFunction(() => location.pathname === "/whats-new");
-    await shell.page.getByRole("heading", { level: 1, name: "What’s New", exact: true }).waitFor();
-    // The first release section: "Unreleased" between releases, "Kollab X.Y.Z" right after one (#887).
-    await shell.page.getByRole("heading", { level: 2 }).first().waitFor({ state: "visible" });
-    await shell.page.getByRole("button", { name: "Close What’s New", exact: true }).click();
-    await shell.page.waitForFunction(() => location.pathname === "/" && document.activeElement?.id === "app-main-pane");
-    const changelogFailure = await openPage(browser, baseUrl, makeFixtures(), { failChangelogOnce: true });
-    await changelogFailure.page.goto(`${baseUrl}/whats-new`, { waitUntil: "domcontentloaded" });
-    await changelogFailure.page.getByRole("button", { name: "Retry", exact: true }).click();
-    await changelogFailure.page.getByRole("heading", { level: 2 }).first().waitFor({ state: "visible" });
-    await changelogFailure.context.close();
-
-    const delayed = await openPage(browser, baseUrl, makeFixtures(), { delayChangelogMs: 900, viewport: { width: 390, height: 844 }, isMobile: true });
-    await delayed.page.goto(`${baseUrl}/whats-new`, { waitUntil: "domcontentloaded" });
-    await delayed.page.getByRole("status").getByText("Loading release notes…").waitFor({ state: "visible" });
-    await delayed.page.getByRole("heading", { level: 2 }).first().waitFor({ state: "visible" });
-    await delayed.context.close();
-
     // New Session starts on the default loadout, not on the active profile's own saved model (#957).
     const defaultLoadout = { name: "haiku-low", profile: "review", provider: "anthropic", model: "claude-haiku", effort: "low" };
     const onDefault = makeFixtures({ defaultLoadout });
@@ -485,6 +462,26 @@ async function main() {
     await stale.page.getByTestId("new-session-options").click();
     await stale.page.locator("#new-session-model", { hasText: "gpt-6-luna" }).waitFor({ state: "visible", timeout: 5000 });
     await stale.context.close();
+
+    // Release updates have their own route, close control, and retry path.
+    await shell.page.getByRole("button", { name: "What’s New", exact: true }).click();
+    await shell.page.waitForFunction(() => location.pathname === "/whats-new");
+    await shell.page.getByRole("heading", { level: 1, name: "What’s New", exact: true }).waitFor();
+    // The first release section: "Unreleased" between releases, "Kollab X.Y.Z" right after one (#887).
+    await shell.page.getByRole("heading", { level: 2 }).first().waitFor({ state: "visible" });
+    await shell.page.getByRole("button", { name: "Close What’s New", exact: true }).click();
+    await shell.page.waitForFunction(() => location.pathname === "/" && document.activeElement?.id === "app-main-pane");
+    const changelogFailure = await openPage(browser, baseUrl, makeFixtures(), { failChangelogOnce: true });
+    await changelogFailure.page.goto(`${baseUrl}/whats-new`, { waitUntil: "domcontentloaded" });
+    await changelogFailure.page.getByRole("button", { name: "Retry", exact: true }).click();
+    await changelogFailure.page.getByRole("heading", { level: 2 }).first().waitFor({ state: "visible" });
+    await changelogFailure.context.close();
+
+    const delayed = await openPage(browser, baseUrl, makeFixtures(), { delayChangelogMs: 900, viewport: { width: 390, height: 844 }, isMobile: true });
+    await delayed.page.goto(`${baseUrl}/whats-new`, { waitUntil: "domcontentloaded" });
+    await delayed.page.getByRole("status").getByText("Loading release notes…").waitFor({ state: "visible" });
+    await delayed.page.getByRole("heading", { level: 2 }).first().waitFor({ state: "visible" });
+    await delayed.context.close();
 
     if (process.env.LEARN_CAPTURE_SCREENSHOTS !== "0") {
       const captures = [
