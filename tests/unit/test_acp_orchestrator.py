@@ -288,7 +288,7 @@ async def test_peer_messages_kept_for_a_switch_wait_or_go_to_a_native_profile(tm
         assert runner._updates == []  # it waits for the harness's next prompt
         orchestrator.hold_observations()  # the next failure's switch
         await orchestrator.close()  # it goes to a native profile
-        assert orchestrator.hand_over_observations() == 1
+        assert await orchestrator.hand_over_to_native() is True
         rows = [m.content for m in llm.conversation_history if m.role == "user"]
         assert len(rows) == 1 and "KEPT" in rows[0]  # the native turn reads it there
         await orchestrator.start(LLMProfile(name="codex", provider="acp", command=("fake",)))
