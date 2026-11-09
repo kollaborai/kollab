@@ -45,6 +45,16 @@ def test_non_git_folder_and_invalid_selection(tmp_path):
     assert bad["status"] == 400
 
 
+def test_worktree_discovery_surfaces_oversized_output(tmp_path, monkeypatch):
+    from kollabor.code_service import git
+
+    run("init", "-q", cwd=tmp_path)
+    monkeypatch.setattr(git, "MAX_GIT_OUTPUT_BYTES", 1)
+    listing = asyncio.run(code_service.call("folders", {}, root=str(tmp_path)))
+    assert listing["status"] == 413
+    assert listing["body"]["error"]["code"] == "git_output_too_large"
+
+
 def test_browse_rejects_missing_and_relative_directories(tmp_path):
     for path in ("relative", str(tmp_path / "missing"), "\0"):
         answer = asyncio.run(code_service.call("folders.browse", {"path": path}, root=str(tmp_path)))

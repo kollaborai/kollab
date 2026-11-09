@@ -21,12 +21,12 @@ import os
 import secrets
 import shutil
 import stat
-import subprocess
 import sys
 import threading
 from collections.abc import Iterator
 from typing import Any
 
+from . import git
 from .reply import Reply
 from .settings import DEFAULTS, PREFIX, CodeSettings
 
@@ -814,27 +814,21 @@ def git_status(workspace: str, params: dict[str, Any], settings: CodeSettings | 
     root = os.path.realpath(folder)
     # A repository's own GIT_* variables would send git elsewhere; the workspace may also sit below the repository's
     # top, where porcelain paths are relative to the top: scope the status to the workspace and key it relative to it.
-    repo_env = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
-    env = {k: v for k, v in os.environ.items() if k not in repo_env}
-    env["GIT_OPTIONAL_LOCKS"] = "0"
     try:
-        done = subprocess.run(
-            ["git", "-C", root, "status", "--porcelain=v1", "-z", "--", "."],
-            timeout=10,
-            capture_output=True,
-            env=env,
-        )
-        top = subprocess.run(
-            ["git", "-C", root, "rev-parse", "--show-prefix"], timeout=10, capture_output=True, text=True, env=env
-        )
-    except OSError, subprocess.SubprocessError:
+        done = git._run_git(root, ["status", "--porcelain=v1", "-z", "--", "."], True, timeout=10)
+        top = git._run_git(root, ["rev-parse", "--show-prefix"], True, timeout=10)
+    except git.GitRequestError as exc:
+        if exc.code == "git_output_too_large":
+            return _fail(exc.status, exc.code, exc.message)
         return _fail(500, "git_failed", "Failed to get git status.")
     if done.returncode != 0:
-        if b"not a git repository" in done.stderr.lower():
+        if "not a git repository" in done.stderr.lower():
             return _ok({"error": "Not a git repository", "status": {}})
         return _fail(500, "git_failed", "Failed to get git status.")
     prefix = top.stdout.strip() if top.returncode == 0 else ""
-    status = _parse_status(done.stdout)
+    status = _parse_status(done.stdout.encode("utf-8"))
+    if len(status) > git.MAX_STATUS_ENTRIES:
+        return _fail(413, "git_output_too_large", "Git status has too many entries to display.")
     if prefix:
         status = {(key[len(prefix) :] if key.startswith(prefix) else key): code for key, code in status.items()}
     return _ok({"status": status})

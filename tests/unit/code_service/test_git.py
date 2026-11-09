@@ -6,11 +6,48 @@ kollabor/code_service/git.py: option-like values, control characters, and paths 
 
 import os
 import subprocess
+import sys
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from tests.unit.code_service.daemon_client import AsyncDaemonClient
+
+
+def test_git_output_is_bounded_without_deadlocking_either_pipe(tmp_path, monkeypatch):
+    from kollabor.code_service import git
+
+    fake_git = tmp_path / "git"
+    fake_git.write_text(
+        f"#!{sys.executable}\nimport sys\nsys.stdout.write('a' * 200000)\nsys.stderr.write('b' * 200000)\n"
+    )
+    fake_git.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(git, "MAX_GIT_OUTPUT_BYTES", 1024)
+    with pytest.raises(git.GitRequestError) as exc:
+        git._run_git(str(tmp_path), ["status"], True)
+    assert exc.value.code == "git_output_too_large"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
+def test_git_timeout_stops_its_child_with_inherited_pipes(tmp_path, monkeypatch):
+    from kollabor.code_service import git
+
+    marker = tmp_path / "child-finished"
+    fake_git = tmp_path / "git"
+    child = f"import time,pathlib; time.sleep(2); pathlib.Path({str(marker)!r}).touch()"
+    fake_git.write_text(
+        f"#!{sys.executable}\nimport subprocess,sys,time\n"
+        f"subprocess.Popen([sys.executable, '-c', {child!r}])\ntime.sleep(10)\n"
+    )
+    fake_git.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    with pytest.raises(git.GitRequestError) as exc:
+        git._run_git(str(tmp_path), ["status"], True, timeout=1)
+    assert exc.value.code == "git_timeout"
+    time.sleep(2.2)
+    assert not marker.exists()
 
 
 @pytest.fixture
@@ -56,6 +93,21 @@ def _error_code(response):
     assert payload["success"] is False
     assert set(payload["error"]) == {"code", "message"}
     return payload["error"]["code"]
+
+
+@pytest.mark.asyncio
+async def test_both_status_surfaces_refuse_too_many_entries(client, machine, monkeypatch):
+    from kollabor.code_service import git
+
+    monkeypatch.setattr(git, "MAX_STATUS_ENTRIES", 2)
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (machine.repo / name).write_text("x")
+    response = await client.post("/code/git", json=_body(machine, "status"))
+    assert response.status_code == 413
+    assert _error_code(response) == "git_output_too_large"
+    response = await client.get("/code/fs/git-status", params={"workspace": str(machine.repo)})
+    assert response.status_code == 413
+    assert _error_code(response) == "git_output_too_large"
 
 
 @pytest.mark.asyncio

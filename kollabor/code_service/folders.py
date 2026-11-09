@@ -1,24 +1,24 @@
 """Discover linked Git worktrees on the session daemon's machine."""
 
 import os
-import subprocess
+
+from . import git
 
 
 def linked_folders(root: str) -> list[dict[str, str]]:
     root = os.path.realpath(root)
     folders = [{"path": root, "branch": ""}]
-    excluded = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
-    env = {k: v for k, v in os.environ.items() if k not in excluded}
     try:
-        result = subprocess.run(
-            ["git", "-C", root, "worktree", "list", "--porcelain", "-z"],
-            capture_output=True, timeout=10, env=env, check=False,
+        result = git._run_git(
+            root, ["worktree", "list", "--porcelain", "-z"], True, timeout=10, errors="surrogateescape"
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except git.GitRequestError as exc:
+        if exc.code == "git_output_too_large":
+            raise
         return folders
     if result.returncode:
         return folders
-    entries = result.stdout.decode("utf-8", errors="surrogateescape").split("\0\0")
+    entries = result.stdout.split("\0\0")
     seen = {root}
     for entry in entries:
         fields = entry.strip("\0").split("\0")

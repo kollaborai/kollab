@@ -12,7 +12,9 @@ followed) inside the folder.
 import asyncio
 import os
 import re
+import signal
 import subprocess
+import threading
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -25,6 +27,8 @@ MAX_PATH = 4096  # characters in a file path
 Handler = Callable[[str, dict[str, Any], CodeSettings | None], Awaitable[dict[str, Any]]]
 
 GIT_TIMEOUT = 30  # seconds for one git call
+MAX_GIT_OUTPUT_BYTES = 512 * 1024  # per stream; leave room for JSON and RPC framing
+MAX_STATUS_ENTRIES = 5000
 LOG_LIMIT = 20
 LOG_SEP = "||GITSEP||"
 LOG_FORMAT = f"%H{LOG_SEP}%h{LOG_SEP}%s{LOG_SEP}%an{LOG_SEP}%ar{LOG_SEP}%D"
@@ -55,25 +59,94 @@ def _fail(status: int, code: str, message: str) -> Reply:
     return Reply(body, status_code=status)
 
 
-def _run_git(root: str, args: list[str], read: bool, timeout: int = GIT_TIMEOUT) -> subprocess.CompletedProcess[str]:
+def _run_git(
+    root: str, args: list[str], read: bool, timeout: int = GIT_TIMEOUT, *, errors: str = "replace"
+) -> subprocess.CompletedProcess[str]:
     env = {key: value for key, value in os.environ.items() if key not in REPO_ENV}
     env["GIT_TERMINAL_PROMPT"] = "0"
     if read:
         env["GIT_OPTIONAL_LOCKS"] = "0"  # a read never takes an index lock
     try:
-        return subprocess.run(
+        proc = subprocess.Popen(
             ["git", "-C", root, *args],
-            timeout=timeout,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
             env=env,
-            check=False,
+            start_new_session=os.name == "posix",
+        )
+        output = [bytearray(), bytearray()]
+        overflow = [False, False]
+        failures = [False, False]
+        stop = threading.Event()
+
+        def stop_process() -> None:
+            try:
+                if os.name == "posix":
+                    os.killpg(proc.pid, signal.SIGKILL)
+                elif proc.poll() is None:
+                    proc.kill()
+            except ProcessLookupError:
+                pass
+
+        def drain(stream: Any, index: int) -> None:
+            try:
+                os.set_blocking(stream.fileno(), False)
+                while not stop.is_set():
+                    try:
+                        chunk = os.read(stream.fileno(), 65536)
+                    except BlockingIOError:
+                        stop.wait(0.01)
+                        continue
+                    if not chunk:
+                        break
+                    remaining = MAX_GIT_OUTPUT_BYTES - len(output[index])
+                    output[index].extend(chunk[:remaining])
+                    if len(chunk) > remaining:
+                        overflow[index] = True
+            except OSError:
+                failures[index] = True
+            finally:
+                stream.close()
+
+        readers = [
+            threading.Thread(target=drain, args=(stream, i), daemon=True)
+            for i, stream in enumerate((proc.stdout, proc.stderr))
+        ]
+        for reader in readers:
+            reader.start()
+        incomplete = False
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            stop_process()
+            proc.wait()
+            raise
+        finally:
+            for reader in readers:
+                reader.join(timeout=1)
+            if any(reader.is_alive() for reader in readers):
+                incomplete = True
+                stop_process()
+                stop.set()
+                for reader in readers:
+                    reader.join()
+        if incomplete or any(failures):
+            raise GitRequestError(
+                502, "git_output_incomplete", "Git output did not close; the operation may have completed."
+            )
+        if any(overflow):
+            raise GitRequestError(
+                413, "git_output_too_large",
+                "Git output exceeded the limit; the operation may have completed. Check its result before retrying.",
+            )
+        return subprocess.CompletedProcess(
+            proc.args, proc.returncode, *(data.decode("utf-8", errors=errors) for data in output)
         )
     except subprocess.TimeoutExpired as exc:
-        raise GitRequestError(504, "git_timeout", "git did not finish in time.") from exc
+        raise GitRequestError(
+            504, "git_timeout", "Git timed out; the operation may have completed. Check its result before retrying."
+        ) from exc
     except OSError as exc:
         raise GitRequestError(500, "git_unavailable", "git could not be started.") from exc
 
@@ -176,6 +249,8 @@ async def _status(root: str, body: dict[str, Any], settings: CodeSettings | None
                 "statusCode": code,
             }
         )
+        if len(files) > MAX_STATUS_ENTRIES:
+            raise GitRequestError(413, "git_output_too_large", "Git status has too many entries to display.")
     return {"branch": branch, "upstream": upstream, "ahead": ahead, "behind": behind, "files": files}
 
 

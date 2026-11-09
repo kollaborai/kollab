@@ -98,7 +98,10 @@ async def call(
         data = {"path": path, "parent": os.path.dirname(path), "folders": entries}
         return Reply({"success": True, "data": data}).as_wire()
     if kind == "folders":
-        entries = await asyncio.to_thread(folders.linked_folders, folder)
+        try:
+            entries = await asyncio.to_thread(folders.linked_folders, folder)
+        except git.GitRequestError as exc:
+            return _bad(exc.status, exc.code, exc.message).as_wire()
         return Reply({"success": True, "data": {"folders": entries, "default": folder}}).as_wire()
     selected = params.get("codeRoot")
     if kind in ("fs", "git") and selected is not None:
