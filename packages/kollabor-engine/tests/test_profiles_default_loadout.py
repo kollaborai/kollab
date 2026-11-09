@@ -285,3 +285,17 @@ async def test_a_folder_that_does_not_exist_gets_the_global_default(monkeypatch,
     home_config.write_text(json.dumps(saved))
 
     assert (await _default_of(monkeypatch, tmp_path / "gone"))["model"] == "model-b"
+
+
+@pytest.mark.asyncio
+async def test_listing_profiles_creates_no_project_state_where_windows_claims_it(monkeypatch, folders, tmp_path):
+    # Windows creates and claims a folder's project state directory the first time it looks it up. The open web UI
+    # lists profiles every few seconds, with a folder named or not, and that must never leave one behind.
+    monkeypatch.setattr("kollabor_config.config_utils.IS_WINDOWS", True)
+    _, b = folders
+
+    await _default_of(monkeypatch)  # no folder named: the engine's own
+    await _default_of(monkeypatch, b)
+
+    projects = tmp_path / "home" / ".kollab" / "projects"
+    assert not projects.exists(), list(projects.glob("*"))
