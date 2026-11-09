@@ -96,6 +96,7 @@ Restart the agent to fix it. The Code Editor and Git views do not show the notic
 - Delete and rename act on a symlink itself, never on the file or folder it points to.
 - A file that is not UTF-8 opens as Latin-1 and saves back byte for byte. If the new text holds a character Latin-1
   cannot hold, the save is refused (`encoding_unsafe`) instead of rewriting every other byte; save under another name.
+- Guarded commits from a subfolder are unavailable because another Git process can change the index after the scope check. Open the repository root to commit, or explicitly enable `git.allow_outside_workspace`.
 - Stash deletion from the UI is unavailable: Git selects a positional entry, which can change during a concurrent stash operation. List, create, and apply remain available.
 - The git stash button stashes this folder only. Applying a stash that includes paths outside the folder is refused unless `git.allow_outside_workspace` is enabled.
 - A save checks for a file changed or deleted since it was opened and offers an explicit overwrite when it detects a conflict. An external writer can still race the final replacement. Unsaved tabs kept after switching folders or devices can only be saved from their original workspace.

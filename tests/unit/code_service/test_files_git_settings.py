@@ -609,3 +609,20 @@ def test_applying_stash_cannot_modify_sibling_folder(repo):
     assert reply.status_code == 409
     assert (repo / "outside.txt").read_text() == "base"
     assert not (repo / "untracked.txt").exists()
+
+
+@needs_git
+def test_subfolder_commit_refuses_when_scope_cannot_be_guaranteed(repo):
+    app = repo / "app"
+    _write(repo / "outside.txt", "base")
+    _write(app / "inside.txt", "base")
+    _cli(repo, "add", "-A")
+    _cli(repo, "commit", "-q", "-m", "base")
+    before = _cli(repo, "rev-parse", "HEAD").strip()
+    _write(app / "inside.txt", "change")
+    _cli(repo, "add", "app/inside.txt")
+    result = _git(app, {"action": "commit", "message": "inside"})
+    assert result.status_code == 409
+    assert result.content["error"]["code"] == "subfolder_commit_unavailable"
+    assert _cli(repo, "rev-parse", "HEAD").strip() == before
+    assert _cli(repo, "diff", "--cached", "--name-only").splitlines() == ["app/inside.txt"]

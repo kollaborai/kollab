@@ -86,7 +86,7 @@ Mentiko's request and response shapes are kept, so its callers port unchanged.
 
 File reads return an opaque revision token. Saves send that token and refuse a changed or deleted file detected before the replacement unless the user explicitly overwrites it. External writers are not serialized by this check and can still race the replacement. Dirty buffers retained when switching devices or folders remain owned by their original workspace and can only be saved there. The tab-bar save control reports failures.
 
-Stash deletion is refused because Git's positional reflog deletion cannot be guarded by the selected object identity against concurrent writers. Applying a stash from a workspace inside a repository checks tracked and untracked stash paths and refuses one that reaches outside the workspace unless `git.allow_outside_workspace` is enabled.
+When `git.allow_outside_workspace` is false, commits from a subfolder are refused: a separate Git process or hook can change the checked index before commit. Commit from the repository root, or explicitly opt in to outside-workspace changes. Stash deletion is refused because Git's positional reflog deletion cannot be guarded by the selected object identity against concurrent writers. Applying a stash from a workspace inside a repository checks tracked and untracked stash paths and refuses one that reaches outside the workspace unless `git.allow_outside_workspace` is enabled.
 
 ## Folder selection
 

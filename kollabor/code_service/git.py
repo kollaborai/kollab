@@ -461,6 +461,17 @@ async def _commit(root: str, body: dict[str, Any], settings: CodeSettings | None
                 "staged_outside_workspace",
                 f"{named} Setting: {PREFIX}git.allow_outside_workspace",
             )
+    if not cfg.git_allow_outside_workspace:
+        prefix = await _git(root, ["rev-parse", "--show-prefix"])
+        if prefix.returncode != 0:
+            raise GitRequestError(409, "git_failed", "Could not check the repository folder, so nothing was committed.")
+        if prefix.stdout.removesuffix("\n"):
+            raise GitRequestError(
+                409,
+                "subfolder_commit_unavailable",
+                f"Committing from a subfolder is unavailable while Git can change the index concurrently. "
+                f"Open the repository root, or opt in with {PREFIX}git.allow_outside_workspace.",
+            )
     proc = await _write(root, ["commit", "-m", message])
     return {"ok": True, "output": proc.stdout, "status": await _status(root, {})}
 
