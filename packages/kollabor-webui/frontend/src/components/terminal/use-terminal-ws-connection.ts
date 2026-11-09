@@ -87,7 +87,8 @@ const DEFAULT_ROWS = 24;
 
 export type ServerMessage =
   | { type: "ready"; sessionId: string }
-  | { type: "output"; data: string }
+  | { type: "output"; data: string; seq: number | null }
+  | { type: "gap"; nextSeq: number }
   | { type: "exit" }
   | { type: "error"; message: string; code: string | null };
 
@@ -104,7 +105,9 @@ export function parseServerMessage(raw: string): ServerMessage | null {
     case "ready":
       return typeof record.sessionId === "string" ? { type: "ready", sessionId: record.sessionId } : null;
     case "output":
-      return typeof record.data === "string" ? { type: "output", data: record.data } : null;
+      return typeof record.data === "string" ? { type: "output", data: record.data, seq: Number.isSafeInteger(record.seq) && (record.seq as number) >= 0 ? record.seq as number : null } : null;
+    case "gap":
+      return Number.isSafeInteger(record.nextSeq) && (record.nextSeq as number) >= 0 ? { type: "gap", nextSeq: record.nextSeq as number } : null;
     case "exit":
       return { type: "exit" };
     case "error":
@@ -131,6 +134,7 @@ export function createTerminalWsClient(options: TerminalWsClientOptions): Termin
   let socket: WebSocket | null = null;
   let ready = false;
   let sessionId: string | null = null;
+  let cursor: number | null = null;
   let attempts = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let reconnecting = false;
@@ -196,6 +200,7 @@ export function createTerminalWsClient(options: TerminalWsClientOptions): Termin
           type: "open",
           ...size,
           ...(sessionId ? { sessionId } : {}),
+          ...(sessionId && cursor !== null ? { cursor } : {}),
         }),
       );
     };
@@ -206,7 +211,15 @@ export function createTerminalWsClient(options: TerminalWsClientOptions): Termin
       if (!message) return;
       switch (message.type) {
         case "output":
+          if (message.seq !== null && cursor !== null && message.seq < cursor) return;
           onOutput(message.data);
+          if (message.seq !== null) cursor = message.seq + 1;
+          return;
+        case "gap":
+          if (cursor === null || message.nextSeq > cursor) {
+            onOutput("\r\n[Terminal output was truncated before it could be displayed.]\r\n");
+            cursor = message.nextSeq;
+          }
           return;
         case "ready":
           attempts = 0;

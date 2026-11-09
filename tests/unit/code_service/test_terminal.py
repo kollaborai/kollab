@@ -111,6 +111,37 @@ async def test_a_reattach_replays_the_output_and_the_shell_keeps_running(tmp_pat
     await again.until("kollab-after-7")
 
 
+async def test_reattach_with_cursor_skips_already_received_output(tmp_path):
+    first = Link(tmp_path)
+    session_id = await first.open()
+    await first.send(type="input", data="echo old-marker-1''26\n")
+    await first.until("old-marker-126")
+    cursor = first.ack
+    await first.call("detach")
+
+    again = Link(tmp_path)
+    await again.open(sessionId=session_id, cursor=cursor)
+    await again.send(type="input", data="echo new-marker-1''27\n")
+    output = await again.until("new-marker-127")
+    assert "old-marker-126" not in output
+
+
+async def test_reattach_reports_a_gap_when_the_ring_has_wrapped(tmp_path):
+    first = Link(tmp_path)
+    session_id = await first.open()
+    session = terminal._SESSIONS[session_id]
+    session._ring_limit = 4
+    session._publish("old!")
+    session._publish("new!")
+    link = terminal._Link()
+    link.attach(session, 0)
+    messages, _ = link.pending()
+    assert messages[0] == {"type": "gap", "nextSeq": session.first_seq}
+    assert messages[1]["data"] == "new!"
+    assert messages[1]["seq"] == session.first_seq
+    link.detach()
+
+
 async def test_a_poll_whose_answer_was_lost_is_sent_again(tmp_path):
     link = Link(tmp_path)
     await link.open()

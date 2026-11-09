@@ -260,10 +260,10 @@ class _Link:
         """Wake the poll in flight: a message changed what this link has to say."""
         self._kicked.set()
 
-    def attach(self, session: _Session) -> None:
+    def attach(self, session: _Session, cursor: int | None = None) -> None:
         self.detach()
         self.session = session
-        self.seq = session.first_seq  # a new or reattaching link starts at the oldest text kept
+        self.seq = min(cursor, session.next_seq) if cursor is not None else session.first_seq
         session.attached += 1
         session.cancel_reap()
 
@@ -298,7 +298,11 @@ class _Link:
         if session is None:
             return [], self.seq
         texts, nxt = session.chunks_from(self.seq)
-        messages: list[dict[str, Any]] = [{"type": "output", "data": text} for text in texts]
+        start = max(self.seq, session.first_seq)
+        messages: list[dict[str, Any]] = []
+        if self.seq < session.first_seq:
+            messages.append({"type": "gap", "nextSeq": session.first_seq})
+        messages.extend({"type": "output", "data": text, "seq": start + i} for i, text in enumerate(texts))
         if not texts and (session.exited or session.closed):
             messages.append({"type": "exit", "code": session.exit_code})
         return messages, nxt
@@ -436,7 +440,10 @@ def _open_session(
         session = _SESSIONS.get(session_id) if isinstance(session_id, str) else None
         if session is None or session.closed:
             return [_error("That terminal session is no longer running.")]
-        link.attach(session)
+        cursor = msg.get("cursor")
+        if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
+            cursor = None
+        link.attach(session, cursor)
         return [{"type": "ready", "sessionId": session.sid}]
     if not settings.terminal_enabled:
         return [_error("Terminals are turned off for this agent. Setting: kollabor.code.terminal.enabled")]

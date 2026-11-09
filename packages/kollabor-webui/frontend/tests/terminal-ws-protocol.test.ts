@@ -166,6 +166,26 @@ test("a dropped socket reconnects after 1s and resumes the saved session", async
   expect(JSON.parse(second.sent[1]) as unknown).toMatchObject({ type: "open", sessionId: "sess-1" });
 });
 
+test("reconnect resumes after the last displayed output and reports a gap", async () => {
+  const { outputs } = start();
+  await settle();
+  const first = lastSocket();
+  first.serverOpen();
+  first.serverSend({ type: "ready", sessionId: "sess-1" });
+  first.serverSend({ type: "output", data: "old", seq: 0 });
+  first.serverClose(1006);
+  await vi.advanceTimersByTimeAsync(1000);
+  await settle();
+  const second = lastSocket();
+  second.serverOpen();
+  expect(JSON.parse(second.sent[1]) as unknown).toMatchObject({ sessionId: "sess-1", cursor: 1 });
+  second.serverSend({ type: "ready", sessionId: "sess-1" });
+  second.serverSend({ type: "output", data: "old", seq: 0 });
+  second.serverSend({ type: "gap", nextSeq: 3 });
+  second.serverSend({ type: "output", data: "new", seq: 3 });
+  expect(outputs).toEqual(["old", "\r\n[Terminal output was truncated before it could be displayed.]\r\n", "new"]);
+});
+
 test("close ends the shell on the server; dispose only drops the socket", async () => {
   const ended = start();
   await settle();
