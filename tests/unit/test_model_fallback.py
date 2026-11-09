@@ -286,6 +286,66 @@ async def test_a_native_fallback_answers_the_peer_messages_kept_for_it(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_a_failed_switch_after_closing_acp_keeps_its_observations(monkeypatch):
+    # Round 7: closing ACP is not proof that native profile activation worked.
+    plugin, bus, tap, profiles = await _agent(
+        monkeypatch, {"plugins.model_fallback.loadout": "codex"}
+    )
+    harness = _Harness(kept=1)
+    bus.register_service("acp_orchestrator", harness)
+
+    async def closes_then_fails(self, loadout, event_bus=None):
+        harness.active = False
+        return None
+
+    monkeypatch.setattr(_Loadouts, "activate", closes_then_fails)
+    await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
+
+    assert profiles.active == "glm"
+    assert harness.handed == 0 and harness.released == [("", False)]
+    assert not _continues(bus)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_settles_an_inflight_fallback_before_returning(monkeypatch):
+    # Round 7: shutdown must not let a gated activation change profiles later.
+    plugin, bus, tap, profiles = await _agent(
+        monkeypatch, {"plugins.model_fallback.loadout": "codex"}
+    )
+    harness = _Harness(kept=1)
+    bus.register_service("acp_orchestrator", harness)
+    entered, release = asyncio.Event(), asyncio.Event()
+    activate = _Loadouts.activate
+
+    async def gated(self, loadout, event_bus=None):
+        entered.set()
+        await release.wait()
+        return await activate(self, loadout, event_bus)
+
+    monkeypatch.setattr(_Loadouts, "activate", gated)
+    try:
+        tap.publish({
+            "type": "error",
+            "message": "claude-code: Claude AI usage limit reached",
+            "generation": 1,
+        })
+        tap.publish({"type": "turn_complete"})
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        task = plugin._task
+
+        await plugin.shutdown()
+
+        assert task.done()
+        assert profiles.active == "glm"
+        assert harness.handed == 0 and harness.released == [("", False)]
+        assert not _continues(bus)
+    finally:
+        release.set()
+        if plugin._task is not None:
+            await asyncio.gather(plugin._task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_a_switch_that_moves_nothing_sends_the_kept_messages_nowhere(monkeypatch):
     # Selenite on #549 round 6: the fallback was out of usage too, so nothing
     # switched, and the kept messages went straight back to the harness that

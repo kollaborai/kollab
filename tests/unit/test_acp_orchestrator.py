@@ -297,6 +297,28 @@ async def test_peer_messages_kept_for_a_switch_wait_or_go_to_a_native_profile(tm
         await orchestrator.close()
 
 
+def test_native_handover_keeps_an_observation_when_its_history_retry_fails(
+    tmp_path, monkeypatch
+):
+    # Round 7: a failed retry leaves the native continuation with no copy.
+    orchestrator, llm, peer = _observing(tmp_path)
+
+    def fail_write(*args, **kwargs):
+        raise OSError("history unavailable")
+
+    monkeypatch.setattr(orchestrator, "_record_user", fail_write)
+    orchestrator.hold_observations()
+    assert orchestrator.observe_notification(peer("MUST_REMAIN")) is True
+    assert len(orchestrator._unwritten_observations) == 1
+
+    handed_over = orchestrator.hand_over_observations()
+
+    assert handed_over == 0
+    assert len(orchestrator._unwritten_observations) == 1
+    assert orchestrator._unwritten_observations[0][1].content.endswith("MUST_REMAIN")
+    assert not [message for message in llm.conversation_history if message.role == "user"]
+
+
 @pytest.mark.asyncio
 async def test_busy_observation_is_written_on_arrival_and_sent_once(
     tmp_path, monkeypatch
