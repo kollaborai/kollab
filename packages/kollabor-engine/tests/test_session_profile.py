@@ -87,6 +87,28 @@ async def test_apply_reports_the_daemons_effort_and_model(
 
 
 @pytest.mark.asyncio
+async def test_a_profile_only_the_daemon_has_reports_the_daemons_snapshot(
+    client, live_session, monkeypatch
+):
+    # Fluorite on #553 round 7: a profile from the agent's folder or another
+    # computer is not in this engine's profiles, so the switch answered ok
+    # with the old profile and model.
+    monkeypatch.setattr(
+        kollabor_ai, "ProfileManager", lambda: SimpleNamespace(get_profile=lambda name: None)
+    )
+    live_session.state.set_active_profile.return_value = ProfileSnapshot(
+        name="remote", model="remote-model", provider="custom", effort="high"
+    )
+    revision = live_session._profile_revision
+
+    response = await client.post("/sessions/sess_profile/profile", json={"name": "remote"})
+
+    body = response.json()
+    assert (body["profile"], body["model"], body["effort"]) == ("remote", "remote-model", "high")
+    assert live_session._profile_revision == revision + 1
+
+
+@pytest.mark.asyncio
 async def test_switching_back_keeps_the_override_the_daemon_still_holds(
     client, live_session, monkeypatch
 ):

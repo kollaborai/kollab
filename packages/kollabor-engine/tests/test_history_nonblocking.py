@@ -764,3 +764,322 @@ async def test_stale_raises_covers_an_unjoinable_tail(registry, conversations):
     assert cached == []
     with pytest.raises(HistoryRefreshUnavailable):
         await session.refresh_history(stale_raises=True)
+
+
+class SlowRemoteState(SilentState):
+    """An agent on another computer: every answer crosses the relay.
+
+    It answers, but later than the open path waits for a busy local daemon
+    (HISTORY_REFRESH_TIMEOUT_SECONDS, cut to 0.02 s in these tests).
+    """
+
+    def __init__(self, *texts):
+        self.texts = texts
+        self.calls = 0
+
+    async def get_conversation(self, since=None, anchor=None, **kwargs):
+        self.calls += 1
+        await asyncio.sleep(0.2)
+        return _answer(*self.texts)
+
+
+def _remote_session(registry, conversations, state):
+    _, workspace_root = conversations
+    session = EngineSession(
+        session_id="koordinator@devbox", profile=None, workspace=workspace_root
+    )
+    session.device = "devbox"  # remote: no disk of its own to seed from
+    session.daemon = _daemon(state)
+    session._event_task = None
+    registry[session.session_id] = session
+    return session
+
+
+@pytest.mark.asyncio
+async def test_a_slow_remote_agent_history_reaches_the_page(
+    registry, conversations, monkeypatch
+):
+    """Switching back to a remote chat showed "No conversation messages yet"
+    (issue #927): every refresh gave up before the relay answered, and the
+    never-filled mirror was handed out as the agent's whole conversation."""
+    monkeypatch.setattr(session_module, "HISTORY_REFRESH_TIMEOUT_SECONDS", 0.02)
+    state = SlowRemoteState("check the servers", "all four are up")
+    session = _remote_session(registry, conversations, state)
+    emitted = []
+    session.daemon.fan_out = emitted.append
+
+    # Opening the chat waits only briefly, and the relay is slower.
+    assert await session.refresh_history() == []
+
+    first = await session.get_history_nonblocking()
+    assert first["history"] == []
+    assert first["stale"] is True, "an unconfirmed empty mirror is not an empty chat"
+
+    await asyncio.wait_for(session._history_refresh_task, timeout=2)
+    assert {"type": "history_updated"} in emitted
+    second = await session.get_history_nonblocking()
+    assert second["stale"] is False
+    assert [m["content"] for m in second["history"]] == [
+        "check the servers",
+        "all four are up",
+    ]
+    await asyncio.wait_for(session._history_refresh_task, timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_a_remote_agent_with_no_messages_settles_as_empty(
+    registry, conversations, monkeypatch
+):
+    """Once the daemon confirms an empty conversation the page leaves its
+    syncing state: the empty answer is announced and no longer stale."""
+    monkeypatch.setattr(session_module, "HISTORY_REFRESH_TIMEOUT_SECONDS", 0.02)
+    session = _remote_session(registry, conversations, SlowRemoteState())
+    emitted = []
+    session.daemon.fan_out = emitted.append
+
+    assert (await session.get_history_nonblocking())["stale"] is True
+    await asyncio.wait_for(session._history_refresh_task, timeout=2)
+    assert emitted == [{"type": "history_updated"}]
+    settled = await session.get_history_nonblocking()
+    assert (settled["history"], settled["stale"]) == ([], False)
+    await asyncio.wait_for(session._history_refresh_task, timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_caller_never_inherits_the_background_wait(
+    registry, conversations, monkeypatch
+):
+    """The background refresh may wait seconds on the relay with the history
+    lock held; opening the chat or ending a turn still returns within its
+    own short budget, with the cached mirror (#927)."""
+    from kollabor_engine.session import HistoryRefreshUnavailable
+
+    monkeypatch.setattr(session_module, "HISTORY_REFRESH_TIMEOUT_SECONDS", 0.02)
+    release = asyncio.Event()
+    state = SlowRemoteState("hello")
+
+    async def get_conversation(since=None, anchor=None, **kwargs):
+        await release.wait()
+        return _answer("hello")
+
+    state.get_conversation = get_conversation
+    session = _remote_session(registry, conversations, state)
+
+    await session.get_history_nonblocking()  # starts the background refresh
+    await asyncio.sleep(0.01)
+    started = time.monotonic()
+    assert await session.refresh_history() == []
+    with pytest.raises(HistoryRefreshUnavailable):
+        await session.refresh_history(stale_raises=True)
+    assert time.monotonic() - started < 0.5
+
+    release.set()
+    await asyncio.wait_for(session._history_refresh_task, timeout=2)
+    assert [m["content"] for m in session.history] == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_mirror_retries_until_the_remote_answers(
+    registry, conversations, monkeypatch
+):
+    """The relay can outlast the state client's own RPC timeout (an agent on
+    another computer took ~19 s live). The page polls the session list, not
+    history, so one failed background answer left it syncing forever; the
+    refresh tries again while the daemon has never answered (#927)."""
+    monkeypatch.setattr(session_module, "HISTORY_REFRESH_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr(
+        session_module,
+        "HISTORY_UNCONFIRMED_RETRY_DELAYS_SECONDS",
+        (0.01, 0.01, 0.01),
+        raising=False,
+    )
+    state = SlowRemoteState("check the servers", "all four are up")
+    answers = iter([asyncio.TimeoutError(), asyncio.TimeoutError()])
+
+    async def get_conversation(since=None, anchor=None, **kwargs):
+        state.calls += 1
+        failure = next(answers, None)
+        if failure is not None:
+            raise failure  # the state client's own 10 s RPC timeout
+        return _answer("check the servers", "all four are up")
+
+    state.get_conversation = get_conversation
+    session = _remote_session(registry, conversations, state)
+    emitted = []
+    session.daemon.fan_out = emitted.append
+
+    assert (await session.get_history_nonblocking())["stale"] is True  # one ask only
+    await _settled(session)
+    assert state.calls == 3
+    assert emitted == [{"type": "history_updated"}]
+    assert [m["content"] for m in session.history] == [
+        "check the servers",
+        "all four are up",
+    ]
+
+
+class TurnEndingState(SilentState):
+    """A daemon whose turn ends while an older history answer is in flight.
+
+    Each answer is the conversation as it stood when the call arrived; the
+    first call is held until ``release`` is set.
+    """
+
+    def __init__(self, *texts):
+        self.texts = list(texts)
+        self.calls = 0
+        self.release = asyncio.Event()
+        self.delay = 0.0
+
+    async def get_conversation(self, since=None, anchor=None, **kwargs):
+        self.calls += 1
+        snapshot = _answer(*self.texts)
+        if self.calls == 1:
+            await self.release.wait()
+        await asyncio.sleep(self.delay)
+        return snapshot
+
+
+@pytest.mark.asyncio
+async def test_a_turn_end_that_finds_the_lock_busy_is_announced_later(
+    registry, conversations, monkeypatch
+):
+    """Review finding on #960: an older background answer holding the lock
+    made turn_complete's notifying refresh give up after its short budget,
+    and nothing asked again, so the finished reply never reached the page."""
+    monkeypatch.setattr(session_module, "HISTORY_REFRESH_TIMEOUT_SECONDS", 0.02)
+    _, workspace_root = conversations
+    state = TurnEndingState("old")
+    session = EngineSession(session_id="lapis", profile=None, workspace=workspace_root)
+    session.daemon = _daemon(state)
+    session._event_task = None
+    registry[session.session_id] = session
+    emitted = []
+    session.daemon.fan_out = emitted.append
+
+    session._schedule_refresh(notify=False)  # a user_message warms the mirror
+    await asyncio.sleep(0.01)  # its answer is in flight, holding the lock
+    state.texts.append("new reply")  # the turn ends
+    assert await session.refresh_history(notify=True) == []  # lock busy
+    state.release.set()
+    await _settled(session)
+
+    assert [m["content"] for m in session.history] == ["old", "new reply"]
+    assert {"type": "history_updated"} in emitted
+
+
+@pytest.mark.asyncio
+async def test_a_turn_end_the_daemon_answers_late_is_announced_later(
+    registry, conversations, monkeypatch
+):
+    """A remote daemon answers the turn's notifying refresh after the short
+    budget; the reply still reaches the page once it lands (#927)."""
+    monkeypatch.setattr(session_module, "HISTORY_REFRESH_TIMEOUT_SECONDS", 0.02)
+    _, workspace_root = conversations
+    state = TurnEndingState("old")
+    state.release.set()
+    session = EngineSession(session_id="lapis", profile=None, workspace=workspace_root)
+    session.daemon = _daemon(state)
+    session._event_task = None
+    registry[session.session_id] = session
+    emitted = []
+    session.daemon.fan_out = emitted.append
+    assert [m["content"] for m in await session.refresh_history()] == ["old"]
+
+    state.texts.append("new reply")
+    state.delay = 0.2  # the relay is slower than the short budget
+    assert [m["content"] for m in await session.refresh_history(notify=True)] == ["old"]
+    await _settled(session)
+
+    assert [m["content"] for m in session.history] == ["old", "new reply"]
+    assert emitted == [{"type": "history_updated"}]
+
+
+class LateFirstAnswerState(SilentState):
+    """The first answer arrives late and already holds the finished turn."""
+
+    def __init__(self):
+        self.texts = ["old"]
+        self.calls = 0
+        self.first_delay = 0.0
+
+    async def get_conversation(self, since=None, anchor=None, **kwargs):
+        self.calls += 1
+        if self.calls == 2:
+            await asyncio.sleep(self.first_delay)
+        return _answer(*self.texts)
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_turn_end_is_announced_by_the_refresh_that_absorbs_it(
+    registry, conversations, monkeypatch
+):
+    """Review round 2 on #960: the in-flight background answer already held
+    the finished reply and stored it silently; the queued notifying refresh
+    then found nothing new against that mirror, so no history_updated ever
+    told the window, which still showed what it fetched at turn end."""
+    monkeypatch.setattr(session_module, "HISTORY_REFRESH_TIMEOUT_SECONDS", 0.02)
+    _, workspace_root = conversations
+    state = LateFirstAnswerState()
+    session = EngineSession(session_id="lapis", profile=None, workspace=workspace_root)
+    session.daemon = _daemon(state)
+    session._event_task = None
+    registry[session.session_id] = session
+    emitted = []
+    session.daemon.fan_out = emitted.append
+    assert [m["content"] for m in await session.refresh_history()] == ["old"]
+
+    state.texts.append("new reply")  # the turn ends on the daemon
+    state.first_delay = 0.08
+    session._schedule_refresh(notify=False)  # a user_message warms the mirror
+    await asyncio.sleep(0.01)
+    shown = await session.refresh_history(notify=True)  # turn_complete, lock busy
+    assert [m["content"] for m in shown] == ["old"]
+    await _settled(session)
+
+    assert [m["content"] for m in session.history] == ["old", "new reply"]
+    assert emitted == [{"type": "history_updated"}]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_end_that_lands_mid_publication_is_announced(
+    registry, conversations, monkeypatch
+):
+    """Review round 3 on #960: the raw mirror was replaced before the display
+    provenance lookup ran in a thread, so a turn end giving up during that
+    lookup recorded the new mirror as what its window holds while returning
+    the old chat, and no history_updated followed."""
+    import threading
+
+    monkeypatch.setattr(session_module, "HISTORY_REFRESH_TIMEOUT_SECONDS", 0.02)
+    gate = threading.Event()
+    gate.set()
+
+    def provenance(conversations_dir, native_session_id, first):
+        gate.wait(5)
+        return first
+
+    monkeypatch.setattr(session_module, "mark_system_initialization", provenance)
+    _, workspace_root = conversations
+    state = LateFirstAnswerState()
+    session = EngineSession(session_id="lapis", profile=None, workspace=workspace_root)
+    session.daemon = _daemon(state)
+    session._event_task = None
+    registry[session.session_id] = session
+    emitted = []
+    session.daemon.fan_out = emitted.append
+    assert [m["content"] for m in await session.refresh_history()] == ["old"]
+
+    state.texts.append("new reply")  # the turn ends on the daemon
+    gate.clear()  # the next publication waits in its provenance lookup
+    try:
+        session._schedule_refresh(notify=False)  # a user_message warms the mirror
+        await asyncio.sleep(0.05)
+        shown = await session.refresh_history(notify=True)  # turn_complete gives up
+    finally:
+        gate.set()
+    await _settled(session)
+
+    assert [m["content"] for m in shown] == ["old"]
+    assert [m["content"] for m in session.history] == ["old", "new reply"]
+    assert {"type": "history_updated"} in emitted

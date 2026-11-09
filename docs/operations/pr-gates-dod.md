@@ -39,8 +39,10 @@ still gates merge.
 
 ## Configuration
 
-This repository runs it with `enabled = true` and without `signed_commits`,
-which would fail every agent PR until agent commits are signed (#755).
+This repository runs it with `enabled = true`, names the two owner accounts as
+trusted annotation reviewers, and omits `signed_commits`, which would fail
+every agent PR until agent commits are signed (#755). Other repositories must
+configure their own trusted list; the code default is empty.
 
 Everything lives in `.github/pr-gates.toml`. The feature is disabled by
 default; `enabled = false` fully disables it (nothing posts, every exit
@@ -52,8 +54,9 @@ code is 0).
 | `pr_gates.dod.check_name` | `dod/ready-for-review` | Name of the posted check run. |
 | `pr_gates.dod.checks` | all seven checks | Which checks run. Remove an entry to toggle that check off. |
 | `pr_gates.dod.docs_paths` | `{}` | Maps a regex over changed paths to the doc files that must be updated in the same PR. |
-| `pr_gates.dod.regression_profile.finding_id_pattern` | `\bF\d+\b` | Generic finding-id shape searched for in review comments. |
+| `pr_gates.dod.regression_profile.finding_id_pattern` | `\bF\d+\b` | Generic finding-id shape used to identify review finding IDs. |
 | `pr_gates.dod.regression_profile.test_paths` | `["tests/"]` | Where regression tests live; a changed file here must mention the finding id. |
+| `pr_gates.dod.regression_profile.trusted_reviewers` | `[]` | Exact GitHub logins permitted to annotate incidental references; the PR author is never accepted. |
 
 Example:
 
@@ -69,6 +72,7 @@ checks = ["signed_commits", "conventional_title", "linked_issue"]
 [pr_gates.dod.regression_profile]
 finding_id_pattern = "\\bF\\d+\\b"
 test_paths = ["tests/"]
+trusted_reviewers = ["owner-login"]
 ```
 
 ## The checks
@@ -84,9 +88,45 @@ test_paths = ["tests/"]
 - `linked_issue`: the body contains `Fixes #N` / `Closes #N` /
   `References #N`.
 - `regression_test`: every finding id (per
-  `regression_profile.finding_id_pattern`) found in review comments must
-  appear in a changed test file under `test_paths` (#721). The profile is
-  generic; it is not tied to any one review convention.
+  `regression_profile.finding_id_pattern`) mentioned in review comments must
+  appear in a changed test file under `test_paths` (#721). Every occurrence is
+  gate-relevant by default, including free text and test summaries. There is no
+  prose heuristic. A trusted reviewer may suppress one exact incidental
+  occurrence by posting a marker-only PR issue comment while holding the latest
+  `APPROVED` review on the current head. The reviewer must be listed in
+  `trusted_reviewers` and must not be the PR author. The approval review stays
+  plain; the marker is a separate issue comment.
+
+  The collector reads changed test files as immutable GitHub blob data from
+  the PR head. The workflow executes only the trusted base-branch script and
+  configuration; it never checks out or executes PR code. A changed head or
+  unreadable test blob fails the collection rather than grading stale data.
+
+  The marker is an HTML comment containing one JSON object:
+
+  ```html
+  <!-- pr-gates-ignore-reference:v1
+  {"source_kind":"issue_comment","source_id":123456,
+   "source_body_sha256":"<sha256 of exact source body>",
+   "finding_id":"F11","occurrence":2,
+   "reason":"This occurrence names the F11 test suite in validation output."}
+  -->
+  ```
+
+  `source_kind` is `issue_comment` or `review_comment`; `source_id` is that
+  comment's GitHub ID. `occurrence` is 1-based among matches of that ID in that
+  exact comment. The body hash makes edits invalidate the annotation. A valid
+  marker masks only that one occurrence; duplicates, other comments, and other
+  occurrences of the same ID remain gate-relevant. Missing metadata, malformed
+  markers, an edited source, an untrusted or PR-author marker author, or a
+  missing, stale, dismissed, ambiguous, or non-approved current-head review
+  means no suppression. The configured regex defines the ID syntax and remains
+  generic. Accepted suppressions, including the source hash, reviewer, review
+  ID, occurrence, and reason, appear in the check summary and structured audit
+  output. The tool never creates the marker or changes a GitHub review. The
+  current workflow does not trigger on issue comments, so after posting a
+  marker-only comment, rerun the workflow or use an existing PR event trigger
+  before relying on the updated check result.
 
 ## Rollout and rollback
 
@@ -108,6 +148,10 @@ holds only `contents: read`, `pull-requests: read`, and `checks: write`.
 - Every posted check run writes a structured audit line (action, repo,
   check name, outcome) to stdout and, when `PR_GATES_DOD_AUDIT` names a
   file, appends there.
+- Every accepted incidental-reference annotation also writes its source
+  comment ID and body hash, finding ID and occurrence, trusted reviewer and
+  approval review ID, and reason to the check summary and audit log. An invalid
+  annotation never hides a finding mention.
 - Tokens are redacted before any log or error line; the script never
   prints `GITHUB_TOKEN` material.
 - One check run per evaluation, never comments: the check run for a head

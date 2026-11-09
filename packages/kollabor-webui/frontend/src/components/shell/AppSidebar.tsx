@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
 import { BookOpen, ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Newspaper, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
-import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, LiveAgent, OfflineAgent, Profile, Session } from "@/api";
+import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, LiveAgent, ModelChoice, OfflineAgent, Profile, Session } from "@/api";
+import { ModelPicker } from "@/components/shell/ModelPicker";
 import { AgentPicker, choiceLabel } from "@/components/agents/AgentPicker";
 import { Avatar } from "@/components/agents/Avatar";
 import type { LaunchChoice } from "@/components/agents/launch-choices";
@@ -146,7 +147,9 @@ export function AppSidebar({
   opening,
   busy,
   creationError,
-  onProfileChange,
+  selectedModel,
+  selectedEffort,
+  onModelPick,
   onIdentityChange,
   onBundleChange,
   onWorkspaceChange,
@@ -200,7 +203,10 @@ export function AppSidebar({
   opening?: { id: string; error?: string } | null;
   busy: boolean;
   creationError?: string | null;
-  onProfileChange: (profile: string) => void;
+  /** New Session's picked model and effort; empty is the profile's own. */
+  selectedModel: string;
+  selectedEffort: string;
+  onModelPick: (choice: ModelChoice) => void;
   onIdentityChange: (identity: string) => void;
   onBundleChange: (bundle: string) => void;
   onWorkspaceChange: (path: string) => void;
@@ -338,9 +344,12 @@ export function AppSidebar({
   const pickedAgent = launchChoices.find((choice) => choice.ref === selectedIdentity);
   const identityLabel = pickedAgent ? choiceLabel(pickedAgent) : "Next Free Agent";
   const modelLabel =
-    profiles.find((profile) => profile.name === selectedProfile)?.model ||
-    selectedProfile ||
-    "default";
+    [
+      selectedModel || profiles.find((profile) => profile.name === selectedProfile)?.model || selectedProfile,
+      selectedEffort,
+    ]
+      .filter(Boolean)
+      .join(" · ") || "default";
   // On a phone the sidebar is a sheet over the chat: close it when the chat changes.
   const create = async () => {
     if (await onCreate()) {
@@ -588,27 +597,14 @@ export function AppSidebar({
                 <Label htmlFor="new-session-model" className="text-muted-foreground text-xs font-normal">
                   Model
                 </Label>
-                <Select
-                  value={selectedProfile}
-                  onValueChange={onProfileChange}
+                <ModelPicker
+                  id="new-session-model"
+                  api={api}
+                  profiles={profiles}
+                  value={{ profile: selectedProfile, model: selectedModel, effort: selectedEffort }}
+                  onPick={onModelPick}
                   disabled={!profiles.length}
-                >
-                  <SelectTrigger id="new-session-model" size="sm" className="w-full">
-                    <SelectValue placeholder="default" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {profiles.map((profile) => (
-                      <SelectItem key={profile.name} value={profile.name}>
-                        <span className="min-w-0 truncate">
-                          {profile.model || profile.name}
-                          {profile.model && profile.name !== profile.model ? (
-                            <span className="text-muted-foreground"> · {profile.name}</span>
-                          ) : null}
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                />
                 <Label htmlFor="new-session-workspace" className="text-muted-foreground text-xs font-normal">
                   Workspace
                 </Label>

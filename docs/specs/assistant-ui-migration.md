@@ -244,6 +244,28 @@ Closing a dialog returns focus to the row that opened it. The sidebar has no
 hide button on a computer. On a phone a one-row header keeps the sidebar button,
 the session's name and a **Session** button that opens the panel as a sheet.
 
+A **Todo** card sits under the panel while the agent has a task list
+(`TodoCard.tsx`). Agents write the list as plain text, a `todo:` label with `[x]`
+and `[ ]` lines (`bundles/agents/_base/sections/meta/terminal-formatting.md`), and
+the card shows the latest one (`latestTodoBlock` in `utils/todo-list.ts`): a count
+("3 of 5") and the items, done ones dimmed and struck through, the next open one
+at full strength. Only the agent's own messages count; a hub note, another agent's
+text, never does. The header opens and closes the card and the browser remembers
+the choice (`kollab.session-panel.todo`); a list with every item done starts
+closed. A chat with no list has no card. Text the thread draws as code is never read
+as a list: a fenced block, also one that a list item or a quote holds, or an indented
+block. `codeLines` asks the same CommonMark parser the thread renders through
+(`mdast-util-from-markdown`), so no container rule is written twice, and skips it
+for a text with no fence mark and no line indented by four columns. The lookup runs on
+every update of the thread, so it keeps what the last lookup read, by whole text, and
+reads again only a text that is new or edited; it holds no more than the thread's own
+texts that say `todo:`, however many a lookup visits. The card's list
+stops at 18rem or half the window's height and scrolls
+inside the card; in a short window the docked column, panel and card together,
+scrolls as a whole, so no row of the panel is squeezed out of reach. On a phone
+the card is the last part of the Session sheet. The thread keeps showing the
+agent's text as written.
+
 Once a chat has messages, its agent's live gem docks immediately beside the input
 bar and stays visible while the conversation scrolls. It shares the selected
 session's real activity with the sidebar (thinking, tools, speaking and errors),
@@ -300,6 +322,28 @@ its incremental-sync anchor remain unchanged. Old ACP `Reply from â€¦ [thread:â€
 as individual peer messages only when persisted source is `observation`; human
 examples remain user text. Routing ids and raw prompt text stay in history without
 being printed in chat bubbles, and distinct replies are not deduplicated.
+
+Opening a chat answers from the engine's mirror at once (`GET
+/sessions/{id}/history`); a background refresh then asks the daemon. A caller
+that waits (opening the agent, a turn's end, the synced claim) gives the daemon
+`HISTORY_REFRESH_TIMEOUT_SECONDS` (0.75 s) for the history lock and again for
+the answer, and otherwise keeps the cached mirror; a notifying refresh that got
+no answer in that time (a turn's end behind an older answer, or a slow remote)
+is handed to the background refresh, so the finished turn is still announced. The background refresh has no
+caller waiting, so it lets the daemon answer (`HISTORY_BACKGROUND_REFRESH_TIMEOUT_SECONDS`,
+30 s, normally ended first by the state client's own RPC timeout): an agent on
+another computer answers over the relay in seconds. Until the daemon has answered
+once, an empty mirror is unknown, not an empty chat: the history answer says
+`stale`, the page shows that history is still syncing instead of "No conversation
+messages yet", and the first answer is announced with `history_updated` (#927).
+The page replaces what it built from the seed by rebuilding the thread (the runtime
+reads its initial state only on mount), which would empty the message box, so
+`ComposerKeeper` (`components/assistant-ui/composer-keeper.tsx`) keeps each chat's
+typed text in memory and puts it back when that chat's runtime mounts again (#976).
+The page polls the session list, not history, so while the daemon has never
+answered a failed background answer is tried again after
+`HISTORY_UNCONFIRMED_RETRY_DELAYS_SECONDS` (1, 2 and 4 s); after those the next
+history request starts a new refresh.
 
 Online notices are quiet, transparent activity rows with optional details, without
 a background or border. Markdown list-item containers use normal whitespace so

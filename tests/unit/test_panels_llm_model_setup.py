@@ -228,6 +228,19 @@ async def test_model_select_and_effort_call_the_terminal_functions(model_ctx):
     assert unknown.value.status == 404
 
 
+@pytest.mark.asyncio
+async def test_a_change_for_a_profile_that_is_not_active_is_refused(model_ctx):
+    # Rutile on #553 round 9: a pick's rollback, made for an ACP profile, landed
+    # on a native profile another window had switched to and saved the old
+    # pick's model there.
+    refused = await MODEL.act(model_ctx, "select", {"model": "m-b", "profile": "codex-cli"})
+    assert not refused["ok"] and refused["message"] == "The session now runs anthropic, not codex-cli."
+    assert not (await MODEL.act(model_ctx, "effort", {"level": "low", "profile": "codex-cli"}))["ok"]
+    assert model_ctx.handler.calls == []
+    assert (await MODEL.act(model_ctx, "select", {"model": "m-b", "profile": "anthropic"}))["ok"]
+    assert model_ctx.handler.calls == [("select", "m-b")]
+
+
 def test_model_handler_is_the_registered_one_or_an_equal_fresh_one():
     from kollabor.commands.system_commands.handlers.model import ModelCommandHandler
 
