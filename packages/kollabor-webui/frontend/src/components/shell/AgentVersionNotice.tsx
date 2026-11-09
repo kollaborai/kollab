@@ -3,11 +3,21 @@ import { NoticeAction, NoticeBar } from "@/components/shell/NoticeBar";
 
 /** What a chat says when its agent runs other code than the engine. */
 export type AgentVersionNoticeState = {
-  /** `button`: Restart Agent is on. `command`: it is off, so the line names /restart. */
-  kind: "button" | "command";
+  /**
+   * `too-old`: the agent publishes no version, so it started before Restart Agent existed and cannot
+   * restart itself. `button`: Restart Agent is on. `command`: it is off, so the line names /restart.
+   */
+  kind: "too-old" | "button" | "command";
   /** Both versions, for the hover: they never go in the line. */
   detail: string;
+  /** The agent's name, for the command in a too-old line. */
+  name: string;
 };
+
+/** The line for an agent that cannot restart itself: the stop-and-start command, in plain words (#968). */
+function tooOldLine(name: string): string {
+  return `This agent started before Restart Agent existed. Run kollab --hub stop ${name} in a terminal, then start it again.`;
+}
 
 /**
  * The notice for one chat, or null while its agent runs the engine's version. An agent that publishes
@@ -26,21 +36,24 @@ export function agentVersionNotice({
   if (!agent || !engineVersion) return null;
   const running = agent.version ?? "";
   if (running === engineVersion) return null;
-  return {
-    kind: restartAgents ? "button" : "command",
-    detail: `Agent ${running || "(version unknown)"} · engine ${engineVersion}`,
-  };
+  const detail = `Agent ${running || "(version unknown)"} · engine ${engineVersion}`;
+  // No version means a build from before /restart restarted in place. There /restart is an alias of /new,
+  // which wipes the conversation, so that agent gets the stop-and-start line and no button or /restart.
+  if (!running) return { kind: "too-old", detail, name: agent.name };
+  return { kind: restartAgents ? "button" : "command", detail, name: agent.name };
 }
 
 /**
  * One quiet line above the chat: this agent runs an older version of Kollab. With Restart Agent on,
- * the button restarts it where it stands (same chat, same history); off, the line names /restart.
+ * the button restarts it where it stands (same chat, same history); off, the line names /restart. An
+ * agent that cannot restart itself gets its stop-and-start command instead, with no button.
  */
 export function AgentVersionNotice({
   notice,
   busy,
   waiting = false,
   failure = "",
+  tooOld = false,
   onRestart,
   onDismiss,
 }: {
@@ -51,9 +64,18 @@ export function AgentVersionNotice({
   waiting?: boolean;
   /** Why the last ask failed. */
   failure?: string;
+  /** The engine refused the ask because the agent cannot restart itself (see `isAgentTooOld`). */
+  tooOld?: boolean;
   onRestart: () => void;
   onDismiss?: () => void;
 }) {
+  if (failure && tooOld) {
+    return (
+      <NoticeBar urgent detail={notice.detail} onDismiss={onDismiss}>
+        {tooOldLine(notice.name)}
+      </NoticeBar>
+    );
+  }
   if (failure) {
     return (
       <NoticeBar
@@ -70,6 +92,13 @@ export function AgentVersionNotice({
     return (
       <NoticeBar detail={notice.detail}>
         {waiting ? "This agent restarts when its turn ends." : "Restarting this agent…"}
+      </NoticeBar>
+    );
+  }
+  if (notice.kind === "too-old") {
+    return (
+      <NoticeBar detail={notice.detail} onDismiss={onDismiss}>
+        {tooOldLine(notice.name)}
       </NoticeBar>
     );
   }

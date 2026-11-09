@@ -841,6 +841,11 @@ export class ApiError extends Error {
   }
 }
 
+/** The engine's 409 for an agent that cannot restart itself: it started before Restart Agent existed (#968). */
+export function isAgentTooOld(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409 && error.message.includes("too old to restart itself");
+}
+
 /** A failure as a sentence for the page: no HTTP status, capitalized. */
 export function errorText(reason: unknown): string {
   const text = (reason instanceof Error ? reason.message : String(reason)).replace(/^\d{3}: /, "");

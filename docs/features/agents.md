@@ -359,6 +359,7 @@ agent that publishes no version started before agents did and counts as older.
 |---|---|---|
 | on | "This agent runs an older version of Kollab." with a **Restart Agent** button | Click it |
 | off (default) | "Run /restart to update the agent version running." | Type `/restart` in the chat |
+| either, when the agent publishes no version (it started before Restart Agent existed) | "This agent started before Restart Agent existed. Run kollab --hub stop <name> in a terminal, then start it again." No button | Stop the agent in a terminal, then start it again |
 
 Both versions are in the line's hover text, never in the line. The setting is in
 `/config` under Updates as "Restart Agent Button".
@@ -379,7 +380,9 @@ the state RPC `state.restart_agent`) restarts the agent in place:
 `/restart` no longer clears the conversation. `/new` (alias `/clear`) does that.
 A window started with `--no-daemon` has no daemon to replace: `/restart` there
 says so and changes nothing; quit and start Kollab again. An agent started
-before `/restart` existed answers that it is too old to restart itself.
+before `/restart` existed answers that it is too old to restart itself. The web chat
+shows that agent the stop-and-start line above, with no button. A failed ask gets
+Try Again, except the engine's too-old answer, which gets the same line with Dismiss only.
 
 
 ## Using Agents
