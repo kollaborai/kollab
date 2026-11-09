@@ -13,7 +13,6 @@ contents are never logged.
 import asyncio
 import contextlib
 import os
-import re
 import secrets
 import shutil
 import stat
@@ -60,10 +59,6 @@ BINARY_EXTENSIONS = frozenset(
         ".mov", ".avi", ".pyc", ".so", ".dylib", ".dll", ".exe",
     }
 )
-# mentiko's catastrophic-backtracking guards for regex search, ported as they are.
-NESTED_QUANTIFIER = re.compile(r"(\([^)]*[+*][^)]*\))[+*]")
-ALTERNATION_IN_QUANTIFIER = re.compile(r"\([^)]*\|[^)]*\)[+*]")
-
 
 def _ok(data: dict[str, Any]) -> JSONResponse:
     return JSONResponse({"success": True, "data": data})
@@ -74,17 +69,17 @@ def _fail(status: int, code: str, message: str) -> JSONResponse:
 
 
 def _disk_failure(exc: OSError) -> JSONResponse:
-    """A disk error in the envelope: the status follows the kind of error, the message is the system's own words."""
-    text = (exc.strerror or "The file system refused the change").rstrip(".") + "."
+    """A disk error in the envelope: the status follows the kind of error, the words are fixed, and the system's
+    own text (which can name paths) is never sent."""
     if isinstance(exc, FileNotFoundError):
-        return _fail(404, "not_found", text)
+        return _fail(404, "not_found", "Path not found.")
     if isinstance(exc, FileExistsError):
-        return _fail(409, "already_exists", text)
+        return _fail(409, "already_exists", "Path already exists.")
     if isinstance(exc, PermissionError):
-        return _fail(403, "permission_denied", text)
+        return _fail(403, "permission_denied", "Permission denied.")
     if isinstance(exc, (NotADirectoryError, IsADirectoryError)):
-        return _fail(400, "invalid_path", text)
-    return _fail(500, "io_error", text)
+        return _fail(400, "invalid_path", "That path cannot be used for this change.")
+    return _fail(500, "io_error", "The file system refused the change.")
 
 
 async def _body(request: Request) -> dict[str, Any] | JSONResponse:
@@ -278,12 +273,12 @@ def read_file(workspace: str = Query(""), path: str = Query("")) -> JSONResponse
         return folder
     if not path:
         return _fail(400, "missing_param", "path param required")
-    root = os.path.realpath(folder)
+    base = os.path.join(os.path.realpath(folder), "")
     try:
-        full = os.path.realpath(os.path.join(root, path))
+        full = os.path.realpath(os.path.join(base, path))
     except OSError, ValueError:
         return _fail(403, "outside_workspace", OUTSIDE)
-    if full != root and not full.startswith(os.path.join(root, "")):
+    if not full.startswith(base):
         return _fail(403, "outside_workspace", OUTSIDE)
     if not os.path.exists(full):
         return _fail(404, "not_found", "File not found.")
@@ -324,12 +319,12 @@ async def write_file(request: Request, path: str = Query("")) -> JSONResponse:
         return _fail(400, "invalid_content", "content must be valid text")
     if len(data) > MAX_FILE_BYTES:
         return _fail(400, "file_too_large", "Content too large (max 2MB).")
-    root = os.path.realpath(folder)
+    base = os.path.join(os.path.realpath(folder), "")
     try:
-        full = os.path.realpath(os.path.join(root, path))
+        full = os.path.realpath(os.path.join(base, path))
     except OSError, ValueError:
         return _fail(403, "outside_workspace", OUTSIDE)
-    if full != root and not full.startswith(os.path.join(root, "")):
+    if not full.startswith(base):
         return _fail(403, "outside_workspace", OUTSIDE)
     if os.path.isdir(full):
         return _fail(400, "not_a_file", "Not a file.")
@@ -355,12 +350,12 @@ async def create_path(request: Request) -> JSONResponse:
         return _fail(400, "missing_param", "path is required")
     if kind not in ("file", "dir"):
         return _fail(400, "invalid_type", 'type must be "file" or "dir"')
-    root = os.path.realpath(folder)
+    base = os.path.join(os.path.realpath(folder), "")
     try:
-        full = os.path.realpath(os.path.join(root, path))
+        full = os.path.realpath(os.path.join(base, path))
     except OSError, ValueError:
         return _fail(403, "outside_workspace", OUTSIDE)
-    if full != root and not full.startswith(os.path.join(root, "")):
+    if not full.startswith(base):
         return _fail(403, "outside_workspace", OUTSIDE)
     if os.path.lexists(full):
         return _fail(409, "already_exists", "Path already exists.")
@@ -391,12 +386,12 @@ async def make_folder(request: Request) -> JSONResponse:
         return _fail(400, "missing_param", "parent and name required")
     if name in (".", "..") or "/" in name or "\\" in name or ".." in name or "\0" in name:
         return _fail(400, "invalid_name", "invalid folder name")
-    root = os.path.realpath(folder)
+    base = os.path.join(os.path.realpath(folder), "")
     try:
-        full = os.path.realpath(os.path.join(root, parent, name))
+        full = os.path.realpath(os.path.join(base, parent, name))
     except OSError, ValueError:
         return _fail(403, "outside_workspace", OUTSIDE)
-    if full != root and not full.startswith(os.path.join(root, "")):
+    if not full.startswith(base):
         return _fail(403, "outside_workspace", OUTSIDE)
     if os.path.lexists(full):
         return _fail(409, "already_exists", "Folder already exists.")
@@ -422,22 +417,22 @@ async def rename_path(request: Request) -> JSONResponse:
         return _fail(400, "missing_param", "oldPath is required")
     if not new_path or not isinstance(new_path, str):
         return _fail(400, "missing_param", "newPath is required")
-    root = os.path.realpath(folder)
+    base = os.path.join(os.path.realpath(folder), "")
     try:
-        old_full = os.path.realpath(os.path.join(root, old_path))
+        old_full = os.path.realpath(os.path.join(base, old_path))
     except OSError, ValueError:
         return _fail(403, "outside_workspace", "The source path is outside the workspace.")
-    if old_full != root and not old_full.startswith(os.path.join(root, "")):
+    if not old_full.startswith(base):
+        if old_full + os.sep == base:
+            return _fail(403, "workspace_root", "Cannot rename the workspace root.")
         return _fail(403, "outside_workspace", "The source path is outside the workspace.")
-    if old_full == root:
-        return _fail(403, "workspace_root", "Cannot rename the workspace root.")
     if not os.path.lexists(old_full):
         return _fail(404, "not_found", "Source path not found.")
     try:
-        new_full = os.path.realpath(os.path.join(root, new_path))
+        new_full = os.path.realpath(os.path.join(base, new_path))
     except OSError, ValueError:
         return _fail(403, "outside_workspace", "The destination path is outside the workspace.")
-    if new_full != root and not new_full.startswith(os.path.join(root, "")):
+    if not new_full.startswith(base):
         return _fail(403, "outside_workspace", "The destination path is outside the workspace.")
     if os.path.lexists(new_full):
         return _fail(409, "already_exists", "Destination path already exists.")
@@ -464,15 +459,15 @@ async def delete_path(request: Request) -> JSONResponse:
     path = body.get("path")
     if not path or not isinstance(path, str):
         return _fail(400, "missing_param", "path is required")
-    root = os.path.realpath(folder)
+    base = os.path.join(os.path.realpath(folder), "")
     try:
-        full = os.path.realpath(os.path.join(root, path))
+        full = os.path.realpath(os.path.join(base, path))
     except OSError, ValueError:
         return _fail(403, "outside_workspace", OUTSIDE)
-    if full != root and not full.startswith(os.path.join(root, "")):
+    if not full.startswith(base):
+        if full + os.sep == base:
+            return _fail(403, "workspace_root", "Cannot delete a workspace root.")
         return _fail(403, "outside_workspace", OUTSIDE)
-    if full == root:
-        return _fail(403, "workspace_root", "Cannot delete a workspace root.")
     if not os.path.lexists(full):
         return _fail(404, "not_found", "File not found.")
     try:
@@ -490,10 +485,12 @@ async def delete_path(request: Request) -> JSONResponse:
 
 
 @router.get("/search")
-def search_files(workspace: str = Query(""), query: str = Query(""), regex: str = Query("")) -> JSONResponse:
-    """Lines of text files that contain ``query`` (a regex when ``regex`` is "true"), mentiko's /api/fs/search.
+def search_files(workspace: str = Query(""), query: str = Query("")) -> JSONResponse:
+    """Lines of text files that contain ``query`` as plain text, mentiko's /api/fs/search without its regex mode.
 
-    At most 200 results. Hidden, skipped and binary files are not read; neither are files over 1 MB or symlinks.
+    A user-supplied regular expression is not run: Python's ``re`` has no time limit, so a pattern could hold the
+    engine for good. At most 200 results. Hidden, skipped and binary files are not read; neither are files over
+    1 MB or symlinks.
     """
     folder = _checked_workspace(workspace)
     if isinstance(folder, JSONResponse):
@@ -502,16 +499,8 @@ def search_files(workspace: str = Query(""), query: str = Query(""), regex: str 
         return _fail(400, "missing_param", "query param required")
     if len(query) < 2:
         return _fail(400, "invalid_query", "query too short (min 2 chars)")
-    pattern: re.Pattern[str] | None = None
-    if regex == "true":
-        if len(query) > SEARCH_MAX_QUERY:
-            return _fail(400, "invalid_query", "regex pattern too long (max 200 chars)")
-        if NESTED_QUANTIFIER.search(query) or ALTERNATION_IN_QUANTIFIER.search(query):
-            return _fail(400, "invalid_query", "regex pattern has a shape prone to catastrophic backtracking")
-        try:
-            pattern = re.compile(query)
-        except re.error as exc:
-            return _fail(400, "invalid_query", f"invalid regex: {exc}")
+    if len(query) > SEARCH_MAX_QUERY:
+        return _fail(400, "invalid_query", "query too long (max 200 chars)")
     root = os.path.realpath(folder)
     results: list[dict[str, Any]] = []
     for path in _search_files(root):
@@ -519,8 +508,7 @@ def search_files(workspace: str = Query(""), query: str = Query(""), regex: str 
         if text is None:
             continue
         for number, line in enumerate(text.split("\n"), 1):
-            hit = pattern.search(line) is not None if pattern is not None else query in line
-            if not hit:
+            if query not in line:
                 continue
             results.append(
                 {

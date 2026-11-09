@@ -10,7 +10,6 @@ again with the ``sessionId`` gets the ring replayed, and a shell nobody is attac
 import asyncio
 import codecs
 import contextlib
-import fcntl
 import json
 import logging
 import os
@@ -19,7 +18,6 @@ import signal
 import struct
 import subprocess
 import sys
-import termios
 from collections import deque
 from itertools import islice
 from typing import Any
@@ -321,6 +319,10 @@ _SHELL_LAUNCHER = (
 
 
 def _set_winsize(fd: int, cols: int, rows: int) -> None:
+    # imported here, not at the top: both are Unix-only and the module must still import on Windows (#268)
+    import fcntl
+    import termios
+
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 

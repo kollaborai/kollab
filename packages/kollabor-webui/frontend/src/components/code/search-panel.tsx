@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { Loader2, Search } from "lucide-react";
 import { useEditorStore } from "@/components/code/editor-store";
 import { codeFetch, unwrapCodeData } from "@/lib/code-fetch";
-import { cn } from "@/lib/utils";
 
 export interface SearchResult {
   path: string;
@@ -21,7 +20,6 @@ export function SearchPanel({ workspace }: SearchPanelProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
-  const [regex, setRegex] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   // Bumped by every search and by a cleared query; a response that is no longer the latest is dropped.
   const searchSeq = useRef(0);
@@ -43,7 +41,7 @@ export function SearchPanel({ workspace }: SearchPanelProps) {
       const seq = ++searchSeq.current;
       setLoading(true);
       try {
-        const url = `/api/fs/search?workspace=${encodeURIComponent(workspace)}&query=${encodeURIComponent(q)}&regex=${regex}`;
+        const url = `/api/fs/search?workspace=${encodeURIComponent(workspace)}&query=${encodeURIComponent(q)}`;
         const res = await codeFetch(url);
         const raw: unknown = await res.json();
         if (res.ok && seq === searchSeq.current) {
@@ -56,7 +54,7 @@ export function SearchPanel({ workspace }: SearchPanelProps) {
         if (seq === searchSeq.current) setLoading(false);
       }
     },
-    [workspace, regex],
+    [workspace],
   );
 
   // debounce search
@@ -73,7 +71,7 @@ export function SearchPanel({ workspace }: SearchPanelProps) {
     }, 300);
 
     return () => clearTimeout(timer);
-  }, [query, regex, doSearch]);
+  }, [query, doSearch]);
 
   const handleResultClick = useCallback(
     async (result: SearchResult) => {
@@ -122,15 +120,10 @@ export function SearchPanel({ workspace }: SearchPanelProps) {
   const fileCount = Object.keys(grouped).length;
   const resultCount = results.length;
 
-  // highlight every match in the line; an invalid regex falls back to plain text
+  // highlight every match in the line; plain text, never a pattern
   const highlightMatch = (text: string, q: string): ReactNode => {
     if (!q) return text;
-    let pattern: RegExp;
-    try {
-      pattern = new RegExp(regex ? q : q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
-    } catch {
-      return text;
-    }
+    const pattern = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
     const nodes: ReactNode[] = [];
     let last = 0;
     for (const match of text.matchAll(pattern)) {
@@ -163,18 +156,6 @@ export function SearchPanel({ workspace }: SearchPanelProps) {
           onChange={(e) => setQuery(e.target.value)}
           className="flex-1 min-w-0 bg-muted text-xs text-foreground placeholder:text-muted-foreground outline-none font-mono"
         />
-        <button
-          type="button"
-          aria-label="Match as regular expression"
-          aria-pressed={regex}
-          onClick={() => setRegex((v) => !v)}
-          className={cn(
-            "text-[10px] px-1.5 py-0.5 rounded-sm transition-colors shrink-0 font-mono",
-            regex ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:text-foreground",
-          )}
-        >
-          .*
-        </button>
         {loading && (
           <Loader2 aria-label="Searching" className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
         )}

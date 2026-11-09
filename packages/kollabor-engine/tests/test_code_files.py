@@ -308,14 +308,13 @@ def test_search_stops_at_two_hundred_results(client, ws):
     assert len(results) == 200
 
 
-def test_regex_search_matches_and_refuses_catastrophic_shapes(client, ws):
-    _write(ws.root / "a.txt", "needle42\n")
+def test_search_reads_the_query_as_plain_text_even_when_it_looks_like_a_regex(client, ws):
+    _write(ws.root / "a.txt", "needle42\n(a+)+ here\n")
 
-    found = _get(client, "search", ws.root, query=r"needle\d+", regex="true").json()["data"]["results"]
-
-    assert [(hit["line"], hit["text"]) for hit in found] == [(1, "needle42")]
-    _refused(_get(client, "search", ws.root, query="(a+)+", regex="true"), 400, "invalid_query")
-    _refused(_get(client, "search", ws.root, query="(", regex="true"), 400, "invalid_query")
+    plain = _get(client, "search", ws.root, query="(a+)+", regex="true").json()["data"]["results"]
+    assert [(hit["line"], hit["text"]) for hit in plain] == [(2, "(a+)+ here")]
+    assert _get(client, "search", ws.root, query=r"needle\d+", regex="true").json()["data"]["results"] == []
+    _refused(_get(client, "search", ws.root, query="x" * 201), 400, "invalid_query")
 
 
 def test_search_needs_a_query_of_at_least_two_characters(client, ws):
