@@ -95,6 +95,8 @@ Daemon-owned screens the web UI renders as Settings tabs (spec `docs/specs/webui
 
 An engine route that takes a folder (`workspace`, `folder`, the picker's `path`) calls `folder_or_400` from `packages/kollabor-engine/src/kollabor_engine/workspace_folder.py` first and uses what it returns, never the request's own text: one rule (the folder exists, is a directory, and is inside home, the engine's folder, a folder an agent runs in or a recent web session folder), one place for CodeQL's `py/path-injection` sanitizer. Spec `docs/specs/engine-folder-rule.md`; new routes join `FOLDER_ROUTES` in `tests/test_workspace_folder_routes.py`.
 
+The authenticated Code routes are an exception for folders on a session's daemon, which may be on another computer: the engine proxies the selection and never opens that path locally. The daemon resolves and validates the selected absolute directory on its own machine before serving files or Git (`docs/specs/floating-code-shell.md`).
+
 ## Project Structure
 
 ```
