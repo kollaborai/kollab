@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/context-menu";
 import { FileTypeIcon } from "./quick-open";
 import { openWorkspaceFile } from "@/components/code/open-file";
+import { LazyFileList } from "@/components/code/lazy-file-list";
 
 interface FileNode {
   name: string;
@@ -164,6 +165,8 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
   const [tree, setTree] = useState<FileNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [largeTree, setLargeTree] = useState(false);
+  const [lazyRevision, setLazyRevision] = useState(0);
   const [actionError, setActionError] = useState("");
   const [mutationBusy, setMutationBusy] = useState(false);
   const mutationInFlight = useRef(false);
@@ -172,6 +175,8 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
   const [searchQuery, setSearchQuery] = useState("");
   const [panelHeights, setPanelHeights] = useState<Map<string, number>>(new Map());
   const [gitStatus, setGitStatus] = useState<Record<string, string>>({});
+  const [gitStatusError, setGitStatusError] = useState("");
+  const gitStatusSeq = useRef(0);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const filterRef = useRef<HTMLInputElement>(null);
   const treeRef = useRef<HTMLDivElement>(null);
@@ -199,10 +204,16 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
   const fetchTree = useCallback(async () => {
     setLoading(true);
     setError("");
+    setLargeTree(false);
     try {
       const res = await codeFetch(`/api/fs/tree?workspace=${encodeURIComponent(workspace)}`);
       const raw: unknown = await res.json();
       if (!res.ok) {
+        if (typeof raw === "object" && raw !== null && "error" in raw &&
+            typeof raw.error === "object" && raw.error !== null && "code" in raw.error && raw.error.code === "tree_too_large") {
+          setLargeTree(true);
+          return;
+        }
         setError(envelopeError(raw, "Failed to load"));
         return;
       }
@@ -389,18 +400,28 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
 
   const refreshGitStatus = useCallback(() => {
     if (!workspace) return;
+    const seq = ++gitStatusSeq.current;
     codeFetch(`/api/fs/git-status?workspace=${encodeURIComponent(workspace)}`)
       .then((r) => r.json())
       .then((raw: unknown) => {
         const data = unwrapCodeData<{ status?: Record<string, string> }>(raw);
-        if (data.status) setGitStatus(data.status);
+        if (seq !== gitStatusSeq.current) return;
+        setGitStatus(data.status ?? {});
+        setGitStatusError("");
       })
-      .catch(() => {});
+      .catch((reason: unknown) => {
+        if (seq !== gitStatusSeq.current) return;
+        setGitStatus({});
+        setGitStatusError(reason instanceof Error ? reason.message : "Git status is unavailable.");
+      });
   }, [workspace]);
 
   // fetch git status on mount
   useEffect(() => {
+    setGitStatus({});
+    setGitStatusError("");
     refreshGitStatus();
+    return () => { gitStatusSeq.current += 1; };
   }, [refreshGitStatus]);
 
   const commitInlineCreate = useCallback(async (name: string) => {
@@ -416,7 +437,7 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
     try {
       await mutateFileTree("create", { workspace, path, type: inlineCreate.type });
       setInlineCreate(null);
-      fetchTree();
+      if (largeTree) setLazyRevision((value) => value + 1); else fetchTree();
       refreshGitStatus();
     } catch (reason) {
       setActionError(reason instanceof Error ? reason.message : "Could not create the path.");
@@ -424,7 +445,7 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
       mutationInFlight.current = false;
       setMutationBusy(false);
     }
-  }, [inlineCreate, workspace, fetchTree, refreshGitStatus]);
+  }, [inlineCreate, workspace, fetchTree, refreshGitStatus, largeTree]);
 
   const handleCreateFile = useCallback((parentDir: string) => {
     if (mutationInFlight.current) return;
@@ -472,7 +493,7 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
     try {
       await mutateFileTree("rename", { workspace, oldPath: inlineRename.path, newPath });
       setInlineRename(null);
-      fetchTree();
+      if (largeTree) setLazyRevision((value) => value + 1); else fetchTree();
       refreshGitStatus();
     } catch (reason) {
       setActionError(reason instanceof Error ? reason.message : "Could not rename the path.");
@@ -480,7 +501,7 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
       mutationInFlight.current = false;
       setMutationBusy(false);
     }
-  }, [inlineRename, workspace, fetchTree, refreshGitStatus]);
+  }, [inlineRename, workspace, fetchTree, refreshGitStatus, largeTree]);
 
   const handleRename = useCallback((oldPath: string, currentName: string) => {
     if (mutationInFlight.current) return;
@@ -505,7 +526,7 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
     try {
       await mutateFileTree("delete", { workspace, path: deleteConfirm.path });
       setDeleteConfirm(null);
-      fetchTree();
+      if (largeTree) setLazyRevision((value) => value + 1); else fetchTree();
       refreshGitStatus();
     } catch (reason) {
       setActionError(reason instanceof Error ? reason.message : "Could not delete the path.");
@@ -513,7 +534,7 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
       mutationInFlight.current = false;
       setMutationBusy(false);
     }
-  }, [deleteConfirm, workspace, fetchTree, refreshGitStatus]);
+  }, [deleteConfirm, workspace, fetchTree, refreshGitStatus, largeTree]);
 
   const treeActions = useMemo<TreeActions>(
     () => ({
@@ -591,6 +612,7 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
         {/* accordion folders */}
         <div ref={treeRef} className="flex-1 overflow-y-auto px-1 pb-1">
           {actionError && <div role="alert" className="px-2 py-1 text-xs text-destructive">{actionError}</div>}
+          {gitStatusError && <div role="alert" className="px-2 py-1 text-xs text-destructive">Git status unavailable: {gitStatusError}</div>}
           {/* inline delete confirmation */}
           {deleteConfirm && (
             <div className="mb-0.5 flex items-center gap-1.5 rounded bg-destructive/10 px-2 py-1">
@@ -671,7 +693,10 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
             </div>
           )}
 
-          {dirs.map((dir) => (
+          {largeTree && <LazyFileList key={workspace} workspace={workspace} onFileSelect={onFileSelect}
+            revision={lazyRevision} gitStatus={gitStatus} filter={searchQuery} onCreateFile={handleCreateFile}
+            onCreateFolder={handleCreateFolder} onRename={handleRename} onDelete={handleDelete} />}
+          {!largeTree && dirs.map((dir) => (
             <AccordionFolder
               key={dir.path}
               node={dir}
@@ -690,7 +715,7 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
           ))}
 
           {/* root-level files */}
-          {files.length > 0 && (
+          {!largeTree && files.length > 0 && (
             <div className="mt-1">
               {files
                 .filter((f) => matchesSearch(f, searchQuery))

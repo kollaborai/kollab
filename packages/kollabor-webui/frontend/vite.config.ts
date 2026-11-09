@@ -178,6 +178,7 @@ const mainConfig = defineConfig({
     include: [
       "tests/prompts-page.test.ts",
       "tests/terminal-ws-protocol.test.ts",
+      "tests/lazy-file-list.test.ts",
       "tests/code-fetch-session.test.ts",
       "tests/terminal-env.test.ts",
       "tests/file-save.test.ts",

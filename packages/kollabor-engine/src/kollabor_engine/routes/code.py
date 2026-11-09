@@ -87,7 +87,10 @@ async def _run(session_id: str, op: str, params: dict[str, Any]) -> JSONResponse
 async def _body(request: Request) -> dict[str, Any] | JSONResponse:
     """The JSON object a POST, PUT or DELETE sends. Its text is never logged."""
     length = request.headers.get("content-length")
-    if length and length.isascii() and length.isdecimal() and (len(length.lstrip("0")) > 10 or int(length[-10:]) > MAX_BODY_BYTES):
+    if (
+        length and length.isascii() and length.isdecimal()
+        and (len(length.lstrip("0")) > 10 or int(length[-10:]) > MAX_BODY_BYTES)
+    ):
         return _fail(413, "body_too_large", "The request body is too large.")
     raw = bytearray()
     async for chunk in request.stream():
@@ -116,6 +119,11 @@ async def _with_body(session_id: str, op: str, request: Request) -> JSONResponse
 @router.get("/fs/tree")
 async def fs_tree(session_id: str, request: Request) -> JSONResponse:
     return await _run(session_id, "fs.tree", dict(request.query_params))
+
+
+@router.get("/fs/list")
+async def fs_list(session_id: str, request: Request) -> JSONResponse:
+    return await _run(session_id, "fs.list", dict(request.query_params))
 
 
 @router.get("/fs/file")

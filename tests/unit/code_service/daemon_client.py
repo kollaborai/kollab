@@ -10,7 +10,7 @@ from typing import Any
 
 from kollabor import code_service
 
-FILE_OPS = {"tree", "file", "write_file", "create", "mkdir", "rename", "delete", "search", "git-status"}
+FILE_OPS = {"tree", "list", "file", "write_file", "create", "mkdir", "rename", "delete", "search", "git-status"}
 
 
 class Response:

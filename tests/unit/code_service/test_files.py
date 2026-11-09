@@ -201,6 +201,20 @@ def test_tree_refuses_large_directories_without_returning_partial_results(client
     _refused(_get(client, "search", ws.root, query="test"), 413, "search_too_large")
 
 
+def test_large_directory_can_be_listed_in_bounded_pages(client, ws, monkeypatch):
+    monkeypatch.setattr(code_files, "DIRECTORY_PAGE_SIZE", 2)
+    (ws.root / "folder").mkdir()
+    for name in ("a.txt", "b.txt", "c.txt"):
+        _write(ws.root / name, "x")
+    first = _get(client, "list", ws.root, path=str(ws.root)).json()["data"]
+    second = _get(client, "list", ws.root, path=str(ws.root), after=first["next"]).json()["data"]
+    assert [item["name"] for item in first["entries"] + second["entries"]] == [
+        "folder", "a.txt", "b.txt", "c.txt"
+    ]
+    assert second["next"] is None
+    _refused(_get(client, "list", ws.root, path=str(ws.outside)), 403, "outside_workspace")
+
+
 def test_write_does_not_replace_an_oversized_existing_file(client, ws):
     path = ws.root / "big.txt"
     path.write_bytes(b"a" * (TWO_MB + 1))

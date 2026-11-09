@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import ctypes
 import errno
+import heapq
 import os
 import secrets
 import shutil
@@ -33,6 +34,7 @@ from .settings import DEFAULTS, PREFIX, CodeSettings
 TREE_MAX_DEPTH = 8
 TREE_MAX_ENTRIES = 10000
 TREE_MAX_PATH_BYTES = 1024 * 1024
+DIRECTORY_PAGE_SIZE = 200
 SEARCH_MAX_RESULTS = 200
 SEARCH_MAX_FILE_BYTES = 1024 * 1024
 SEARCH_MAX_QUERY = 200
@@ -525,6 +527,55 @@ def tree(workspace: str, params: dict[str, Any], settings: CodeSettings | None =
     return _ok({"path": root, "tree": nodes})
 
 
+def list_directory(workspace: str, params: dict[str, Any], settings: CodeSettings | None = None) -> Reply:
+    """List a single workspace directory in bounded, ordered pages."""
+    cfg = _config(settings)
+    folder = _checked_workspace(workspace)
+    if isinstance(folder, Reply):
+        return folder
+    root = os.path.realpath(folder)
+    path = params.get("path", root)
+    after = params.get("after", "")
+    if not isinstance(path, str) or not os.path.isabs(path) or "\0" in path:
+        return _fail(400, "invalid_path", "The folder path is invalid.")
+    if not isinstance(after, str) or "\0" in after or len(after) > 4098 or (after and after[:2] not in ("0:", "1:")):
+        return _fail(400, "invalid_cursor", "The folder cursor is invalid.")
+    lexical = os.path.normpath(path)
+    real = os.path.realpath(lexical)
+    try:
+        if os.path.commonpath((root, lexical)) != root:
+            return _outside()
+    except ValueError:
+        return _outside()
+    if not cfg.follow_symlinks and real != lexical:
+        return _outside()
+    cursor = (after[0], after[2:].casefold(), after[2:]) if after else None
+    try:
+        with os.scandir(lexical) as scan:
+            def entries():
+                for entry in scan:
+                    kind = _kind(entry, cfg.follow_symlinks)
+                    if kind == "dir" and _folder_listed(entry.name, cfg.show_hidden):
+                        rank = "0"
+                    elif kind == "file" and _tree_file_listed(entry.name, cfg.show_hidden):
+                        rank = "1"
+                    else:
+                        continue
+                    key = (rank, entry.name.casefold(), entry.name)
+                    if cursor is None or key > cursor:
+                        yield key
+
+            keys = heapq.nsmallest(DIRECTORY_PAGE_SIZE + 1, entries())
+    except OSError as exc:
+        return _disk_failure(exc)
+    more = len(keys) > DIRECTORY_PAGE_SIZE
+    keys = keys[:DIRECTORY_PAGE_SIZE]
+    nodes = [{"name": name, "path": os.path.join(lexical, name), "type": "dir" if rank == "0" else "file",
+              **({"ext": _extension(name)} if rank == "1" else {})} for rank, _, name in keys]
+    next_cursor = f"{keys[-1][0]}:{keys[-1][2]}" if more else None
+    return _ok({"path": lexical, "parent": os.path.dirname(lexical), "entries": nodes, "next": next_cursor})
+
+
 def read_file(workspace: str, params: dict[str, Any], settings: CodeSettings | None = None) -> Reply:
     """One text file in the workspace, at most ``max_file_kb`` (2 MB by default), mentiko's /api/fs/file."""
     cfg = _config(settings)
@@ -863,6 +914,7 @@ def git_status(workspace: str, params: dict[str, Any], settings: CodeSettings | 
 
 OPS: dict[str, Any] = {
     "tree": tree,
+    "list": list_directory,
     "file": read_file,
     "write_file": write_file,
     "create": create_path,

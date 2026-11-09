@@ -297,6 +297,16 @@ def test_follow_symlinks_lists_linked_folders_and_files_in_tree_and_search(ws):
     assert _search_paths(ws.root, settings) == {os.path.join("linkdir", "in.md"), "linkfile.md"}
 
 
+def test_paged_listing_honors_follow_symlinks(ws):
+    _write(ws.outside / "tree" / "in.md", "needle")
+    _link(ws.root / "linkdir", ws.outside / "tree")
+    params = {"path": str(ws.root / "linkdir")}
+    refused = _fs("list", ws.root, params)
+    listed = _fs("list", ws.root, params, CodeSettings(follow_symlinks=True))
+    assert refused.status_code == 403
+    assert [entry["name"] for entry in listed.content["data"]["entries"]] == ["in.md"]
+
+
 def test_follow_symlinks_stops_at_a_link_back_to_an_ancestor(ws):
     _write(ws.root / "a.txt", "needle")
     _link(ws.root / "loop", ws.root)
