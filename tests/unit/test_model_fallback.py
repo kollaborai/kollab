@@ -220,6 +220,10 @@ class _Harness:
         self.held, self.handed = False, self.handed + 1
         return self.kept
 
+    async def hand_over_to_native(self):
+        self.held, self.handed = False, self.handed + 1
+        return self.kept > 0
+
     def admit(self, text):
         if self.closing_reason:
             raise RuntimeError(self.closing_reason)
@@ -303,6 +307,25 @@ async def test_a_failed_switch_after_closing_acp_keeps_its_observations(monkeypa
 
     assert profiles.active == "glm"
     assert harness.handed == 0 and harness.released == [("", False)]
+    assert not _continues(bus)
+
+
+@pytest.mark.asyncio
+async def test_native_handover_does_not_wake_after_history_write_failure(monkeypatch):
+    # Round 7: only the orchestrator can tell whether its history is ready.
+    plugin, bus, _, _ = await _agent(
+        monkeypatch, {"plugins.model_fallback.loadout": "codex"}
+    )
+    harness = _Harness(kept=1)
+
+    async def no_history(self):
+        self.held = False
+        return False
+
+    harness.hand_over_to_native = no_history.__get__(harness)
+    await plugin._hand_over(harness, moved=True)
+
+    assert harness.handed == 0
     assert not _continues(bus)
 
 
