@@ -178,7 +178,7 @@ function RuntimeShell({
   liveAgents: LiveAgent[];
   /** Agents on the network's other computers (GET /sessions `network.remote`). */
   remoteAgents: NetworkAgent[];
-  onSessionUpdated: (session: Session) => void;
+  onSessionUpdated: (session: Session, options?: { failed?: boolean }) => void;
   onOpenSettings: (request?: PanelOpenRequest) => void;
   /** Reloads this session's conversation after the engine cleared it. */
   onHistoryCleared: () => Promise<void>;
@@ -1534,10 +1534,13 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     setStudioOpen(true);
   };
 
-  const handleSessionUpdated = useCallback((updated: Session) => {
+  const handleSessionUpdated = useCallback((updated: Session, options?: { failed?: boolean }) => {
     sessionGate.recordApply();
-    // The model was changed by hand since: the failed pick is no longer news.
-    setPickFailure((current) => (current?.sessionId === updated.session_id ? null : current));
+    // The model was changed by hand since: the failed pick is no longer news. A change that failed is not one:
+    // the chat still runs what it ran, so the notice and its Try Again stay.
+    if (!options?.failed) {
+      setPickFailure((current) => (current?.sessionId === updated.session_id ? null : current));
+    }
     setSessions((current) =>
       current.map((item) =>
         item.session_id === updated.session_id ? updated : item,
