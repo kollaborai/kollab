@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import zipfile
 from pathlib import Path
@@ -228,3 +229,27 @@ def test_run_with_retry_gives_up_and_raises_after_the_last_attempt(monkeypatch: 
     with pytest.raises(subprocess.CalledProcessError):
         build_binary.run_with_retry(["pex"], attempts=4)
     assert len(calls) == 4
+
+
+def test_floor_platform_retries_a_transient_inspect_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    inspected = {
+        "marker_environment": {"platform_system": "Darwin"},
+        "compatible_tags": ["cp314-cp314-macosx_11_0_arm64", "cp314-cp314-macosx_99_0_arm64"],
+    }
+    run, calls = _failing_run(1)
+
+    def inspect_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        run(cmd, **kwargs)
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(inspected))
+
+    monkeypatch.setattr(build_binary, "run", inspect_run)
+    monkeypatch.setattr(build_binary.time, "sleep", lambda seconds: None)
+
+    path = build_binary.floor_platform(tmp_path / "platform.json")
+
+    assert len(calls) == 2
+    assert calls[0][calls[0].index("pex3") : calls[0].index("pex3") + 2] == ["pex3", "interpreter"]
+    platform = json.loads(path.read_text())
+    assert platform["marker_environment"]["python_full_version"] == build_binary.PYTHON
+    assert "cp314-cp314-macosx_99_0_arm64" not in platform["compatible_tags"]
+    assert "cp314-cp314-macosx_11_0_arm64" in platform["compatible_tags"]
