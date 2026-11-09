@@ -33,6 +33,7 @@ from ..hub_bridge import HubBridge, network_daemons
 from ..network_aggregate import merge_view_and_memberships
 from ..server import get_session_registry, open_named_session
 from ..session import INLINE_PROFILE, EngineSession
+from ..workspace_folder import folder_or_400
 from .rosters import apply_persona
 from .workspaces import remember_workspace
 
@@ -310,13 +311,17 @@ async def create_session(body: CreateSessionRequest, request: Request):
     # Resolve user_token: body takes priority, header is fallback (proxy injects it)
     user_token = body.user_token or request.headers.get("x-mentiko-session-token")
 
+    # The one folder rule (workspace_folder.py) runs before anything starts. Everything below reads the
+    # checked folder, never the request's own text.
+    workspace = folder_or_400(body.workspace) if body.workspace else None
+
     # A persona names its own bundle and profile; what the caller set wins.
-    apply_persona(body)
+    apply_persona(body, workspace)
 
     # Resolve agent definition if requested
     agent_data = None
     if body.agent:
-        agent_data = _resolve_agent(body.agent, body.workspace)
+        agent_data = _resolve_agent(body.agent, workspace)
         if agent_data is None:
             raise HTTPException(
                 status_code=404, detail=f"Agent '{body.agent}' not found"
@@ -464,7 +469,7 @@ async def create_session(body: CreateSessionRequest, request: Request):
                 session_id=session_id,
                 profile=profile,
                 approval_mode=body.approval_mode,
-                workspace=body.workspace,
+                workspace=workspace,
                 system_prompt=safe_system_prompt,
                 mcp_server_names=effective_mcp_servers,
                 user_token=user_token,
@@ -987,27 +992,42 @@ async def list_session_commands(session_id: str):
     return {"session_id": session_id, "commands": commands}
 
 
+def _live_model(snapshot: Any, fallback: Optional[str] = None) -> Optional[str]:
+    """The model a daemon snapshot reports for its session: a harness's own,
+    "" when it names none, never the saved one; a native profile's, else
+    ``fallback``. None: unreported."""
+    model = getattr(snapshot, "model", None)
+    if getattr(snapshot, "provider", "") == "acp":
+        return model
+    return model or fallback
+
+
 def apply_profile_mirror(
     session: Any,
     name: str,
     model: Optional[str] = None,
     effort: Optional[str] = None,
+    snapshot: Any = None,
 ) -> None:
     """Keep the engine list response in sync with the daemon's active profile.
 
     The profile manager here is only a redacted mirror; the daemon remains the
     authority for the active provider/model. Shared by ``POST /profile`` and the
     panel routes, so a model change made in a panel never leaves the toolbar or
-    the session list stale. Never raises.
+    the session list stale. A profile only the daemon has (its folder's own,
+    another computer's) mirrors the daemon's redacted ``snapshot`` (#553).
+    Never raises.
     """
     try:
         from kollabor_ai import ProfileManager
 
         selected = ProfileManager().get_profile(name)
+        if selected is None and getattr(snapshot, "name", None):
+            selected = snapshot
         if selected is not None:
             session.profile = selected
             session._profile_revision = getattr(session, "_profile_revision", 0) + 1
-            if model:
+            if model is not None:  # "" is a harness that names no model
                 selected.model = model
             if effort is not None:
                 selected.effort = effort
@@ -1049,8 +1069,9 @@ async def set_session_profile(session_id: str, body: SetProfileRequest):
         # resolved provider profile so the response's session dict
         # cannot clobber it with the pre-switch profile (#605).
         getattr(snapshot, "name", None) or body.name,
-        getattr(snapshot, "model", None) or body.model,
+        _live_model(snapshot, body.model),
         getattr(snapshot, "effort", None),
+        snapshot=snapshot,
     )
 
     result = getattr(snapshot, "to_dict", None)

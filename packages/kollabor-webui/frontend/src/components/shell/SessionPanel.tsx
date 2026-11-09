@@ -29,10 +29,13 @@ import type {
   EngineApi,
   HubAgent,
   McpServerConfig,
+  ModelChoice,
   Profile,
   Session,
   SessionMcp,
 } from "@/api";
+import { applyModelChoice, PickError } from "@/components/shell/model-choice";
+import { ModelPicker } from "@/components/shell/ModelPicker";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -58,6 +61,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { CliBadge } from "@/components/shell/CliBadge";
+import { TodoCard } from "@/components/shell/TodoCard";
 import { SIDEBAR_BREAKPOINT, useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { cliHarness } from "@/utils/cli-harness";
@@ -123,6 +127,7 @@ export function SessionPanel({
   onSessionUpdated,
   onOpenSettings,
   onHistoryCleared,
+  todo = "",
   view,
   onViewChange,
   sheetOpen,
@@ -137,10 +142,13 @@ export function SessionPanel({
   status?: string | null;
   statusError?: boolean;
   onStatus: (message: string) => void;
+  /** `failed`: the session is read back after a change that did not apply; it still runs what it ran. */
   onSessionUpdated: (session: Session) => void;
   onOpenSettings: () => void;
   /** Called once the engine has cleared the history; resets the open thread. */
   onHistoryCleared: () => Promise<void>;
+  /** The agent's latest todo block (`latestTodoBlock`), shown as a card under the panel; empty when it has none. */
+  todo?: string;
   view: SessionView;
   onViewChange: (view: SessionView) => void;
   /** The phone sheet, opened from the chat header. */
@@ -305,12 +313,14 @@ export function SessionPanel({
     }
   };
 
-  const changeProfile = async (name: string) => {
+  const changeProfile = async (choice: ModelChoice) => {
     try {
-      const updated = await api.setSessionProfile(session.session_id, name);
+      const updated = await applyModelChoice(api, session, choice);
       onSessionUpdated(updated);
-      onStatus(`Model: ${updated.model || name}`);
+      onStatus(`Model: ${[updated.model || choice.profile, updated.effort].filter(Boolean).join(" · ")}`);
     } catch (error) {
+      // What runs now: shown, and the notice of a failed New Session pick follows it.
+      if (error instanceof PickError && error.session) onSessionUpdated(error.session);
       fail(error);
     }
   };
@@ -337,9 +347,6 @@ export function SessionPanel({
     ([, info]) => info.status === "connected",
   ).length;
 
-  const activeProfile = profiles.find(
-    (profile) => profile.name === (session.profile || profiles[0]?.name),
-  );
   const toggle = (next: boolean) => {
     setOpen(next);
     storeOpen(next);
@@ -395,40 +402,18 @@ export function SessionPanel({
       <Separator />
       <div className="flex min-w-0 flex-col gap-1">
         <p className="text-muted-foreground font-medium">Model and Profile</p>
-        <Select
-          value={session.profile || profiles[0]?.name || "default"}
-          onValueChange={(next) => void changeProfile(next)}
+        <ModelPicker
+          api={api}
+          profiles={profiles}
+          value={{
+            profile: session.profile || profiles[0]?.name || "default",
+            model: session.model || "",
+            effort: session.effort || "",
+          }}
+          onPick={(choice) => void changeProfile(choice)}
           disabled={!profiles.length}
-        >
-          <SelectTrigger
-            size="sm"
-            className="h-7 w-full min-w-0 text-xs"
-            aria-label="Model"
-          >
-            <SelectValue placeholder="Model" className="min-w-0 flex-1">
-              {activeProfile ? (
-                <span className="min-w-0 truncate">
-                  {activeProfile.model || activeProfile.name}
-                  {activeProfile.model && activeProfile.name !== activeProfile.model ? (
-                    <span className="text-muted-foreground"> · {activeProfile.name}</span>
-                  ) : null}
-                </span>
-              ) : undefined}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent className="max-w-[calc(100vw-1.5rem)]">
-            {profiles.map((profile) => (
-              <SelectItem key={profile.name} value={profile.name}>
-                <span className="min-w-0 truncate">
-                  {profile.model || profile.name}
-                  {profile.model && profile.name !== profile.model ? (
-                    <span className="text-muted-foreground"> · {profile.name}</span>
-                  ) : null}
-                </span>
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+          className="h-7 text-xs"
+        />
       </div>
       <div className="flex min-w-0 flex-col gap-1">
         <p className="text-muted-foreground font-medium">Approval Mode</p>
@@ -504,16 +489,25 @@ export function SessionPanel({
             <SheetTitle className="sr-only">Session Controls</SheetTitle>
             <SheetDescription className="sr-only">{sessionLabel}</SheetDescription>
             {body(null)}
+            {todo ? <TodoCard block={todo} className="bg-sidebar-accent mt-3 shadow-none" /> : null}
           </SheetContent>
         </Sheet>
       ) : open ? (
-        <aside aria-label="Session Controls" className="bg-sidebar text-sidebar-foreground m-2 ml-0 flex max-h-[calc(100%-1rem)] w-60 shrink-0 flex-col self-start overflow-y-auto rounded-xl p-3 shadow-lg">
-          {body(
-            <TooltipIconButton tooltip="Hide Session Panel" side="left" className="text-muted-foreground size-7 shrink-0 p-1.5" onClick={() => toggle(false)}>
-              <PanelRightClose className="size-4" />
-            </TooltipIconButton>,
-          )}
-        </aside>
+        // One column that scrolls as a whole when the window is short: the panel keeps its height, so no row is
+        // squeezed out of reach, and the card below it is reached by scrolling the column (#973). A scroll box cuts
+        // off what is drawn outside its edge, so this one carries padding for the shadows (8px at the sides, 24px
+        // below) and the negative margin that leaves the panel and the card where they were: the column still
+        // takes 248px beside the chat, 240px of it the panel's own width.
+        <div className="mt-2 -ml-2 flex max-h-[calc(100%-0.5rem)] w-64 shrink-0 flex-col gap-2 self-start overflow-y-auto px-2 pb-6">
+          <aside aria-label="Session Controls" className="bg-sidebar text-sidebar-foreground flex shrink-0 flex-col rounded-xl p-3 shadow-lg">
+            {body(
+              <TooltipIconButton tooltip="Hide Session Panel" side="left" className="text-muted-foreground size-7 shrink-0 p-1.5" onClick={() => toggle(false)}>
+                <PanelRightClose className="size-4" />
+              </TooltipIconButton>,
+            )}
+          </aside>
+          {todo ? <TodoCard block={todo} /> : null}
+        </div>
       ) : (
         <aside aria-label="Session Controls" className="bg-sidebar text-sidebar-foreground m-2 ml-0 flex max-h-[calc(100%-1rem)] w-10 shrink-0 flex-col items-center gap-1 self-start overflow-y-auto rounded-xl py-2 shadow-lg">
           <TooltipIconButton tooltip="Show Session Panel" side="left" className="size-7 p-1.5" onClick={() => toggle(true)}>

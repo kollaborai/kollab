@@ -74,12 +74,25 @@ def _screen_text(value: str) -> str:
     return "".join(char for char in value if char.isprintable())[:200]
 
 
+_UNREADABLE_PANEL_ANSWER = (
+    "This session's agent sent an answer this engine cannot read. "
+    "It may be running an older version; restart the session."
+)
+
+
 def _panel_answer(result: Any, key: str) -> dict[str, Any]:
-    """The daemon's panel answer, or the PanelError it reported."""
+    """The daemon's panel answer, or the PanelError it reported.
+
+    An answer in a shape this engine does not know is the daemon's code and the
+    engine's disagreeing (a daemon that outlived an update): a 502 that says so, not
+    a TypeError the route would show as "daemon unreachable" (#955).
+    """
     from kollabor.panels import PanelError
 
     if not isinstance(result, dict):
-        raise TypeError(f"panel rpc expected dict, got {type(result).__name__}")
+        # type name only: the daemon's words can carry a payload value
+        logger.warning("panel rpc answer unreadable: it is a %s", type(result).__name__)
+        raise PanelError(_UNREADABLE_PANEL_ANSWER, status=502)
     if result.get("error"):
         status = result.get("status")
         errors = result.get("errors")
@@ -92,7 +105,8 @@ def _panel_answer(result: Any, key: str) -> dict[str, Any]:
         )
     value = result.get(key)
     if not isinstance(value, dict):
-        raise TypeError(f"panel rpc result missing {key!r}")
+        logger.warning("panel rpc answer has no %r dict: it is a %s", key, type(value).__name__)
+        raise PanelError(_UNREADABLE_PANEL_ANSWER, status=502)
     return value
 
 
@@ -405,8 +419,8 @@ class RemoteStateService(StateService):
         # profiles instead of failing outright.
         if model:
             payload["model"] = model
-        if effort:
-            payload["effort"] = effort
+        if effort is not None:
+            payload["effort"] = effort  # "" is the model's own default: it clears an earlier pick
         result = await self._rpc.call(
             "state.set_active_profile",
             payload,

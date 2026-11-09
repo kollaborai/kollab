@@ -142,10 +142,11 @@ class ACPProfile:
             f"Install the ACP adapter for profile '{self.name}' and retry."
         )
 
-    def _cache_path(self) -> Path:
+    def _cache_path(self, *, create_parent: bool = True) -> Path:
         root = Path(os.environ.get("KOLLAB_CONFIG_DIR", "~/.kollab")).expanduser()
         path = root / "acp" / "resolved.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if create_parent:
+            path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
     def _login_shell_path(self) -> str:
@@ -215,8 +216,11 @@ class ACPProfile:
                     ("@agentclientprotocol/codex-acp", "2.5.0"),
                 })
 
-    def resolve(self) -> tuple[tuple[str, ...], dict[str, str], str]:
-        cache_path = self._cache_path()
+    def resolve(
+        self, *, persist_cache: bool = True
+    ) -> tuple[tuple[str, ...], dict[str, str], str]:
+        """Resolve the executable and environment, optionally without writing local state."""
+        cache_path = self._cache_path(create_parent=persist_cache)
         cache: dict[str, Any] = {}
         try:
             cache = json.loads(cache_path.read_text())
@@ -296,10 +300,11 @@ class ACPProfile:
             "directory": resolved_dir,
             "node": node_path,
         }
-        try:
-            cache_path.write_text(json.dumps(cache, indent=2, sort_keys=True) + "\n")
-        except OSError:
-            pass
+        if persist_cache:
+            try:
+                cache_path.write_text(json.dumps(cache, indent=2, sort_keys=True) + "\n")
+            except OSError:
+                pass
         path_prefix = [resolved_dir]
         if node_path:
             path_prefix.append(os.path.dirname(node_path))
@@ -615,17 +620,42 @@ class _Client(acp.Client):
 class ACPRunner:
     """One SDK-owned ACP process/session with FIFO prompt queue."""
 
+    @property
+    def config_options(self) -> list[dict[str, Any]]:
+        return self._config_options
+
+    @config_options.setter
+    def config_options(self, options: list[dict[str, Any]]) -> None:
+        self._config_options = options
+        profile = getattr(self, "profile", None)
+        if (
+            options and profile is not None
+            and getattr(self, "remember_options", True)
+        ):  # normal sessions remember options; discovery stays in-memory
+            from kollabor_ai import acp_options
+
+            acp_options.remember(profile.name, options)
+
     def __init__(
         self,
         profile: ACPProfile,
         permission_bridge: ACPPermissionBridge | None = None,
         update_callback: Callable[[dict[str, Any]], None] | None = None,
         lifecycle_callback: Callable[[str, "ACPRunner"], Awaitable[None]] | None = None,
+        *,
+        remember_options: bool = True,
+        operation_timeout: float | None = None,
+        startup_timeout: float | None = None,
+        persist_profile_resolution: bool = True,
     ):
         self.profile = profile
         self.permission_bridge = permission_bridge or ACPPermissionBridge()
         self.update_callback = update_callback
         self.lifecycle_callback = lifecycle_callback
+        self.remember_options = remember_options
+        self.operation_timeout = operation_timeout
+        self.startup_timeout = startup_timeout
+        self.persist_profile_resolution = persist_profile_resolution
         self.stderr_callback: Callable[[bytes], None] | None = None
         self.generation = 0
         self._next_turn_id = 0
@@ -733,7 +763,16 @@ class ACPRunner:
                             values.add(str(nested["value"]))
             if str(value) not in values:
                 raise ACPError(f"ACP config value is not advertised: {config_id}={value}")
-        result = await self._connection.set_config_option(config_id, self.session_id, value)
+        operation_timeout = getattr(self, "operation_timeout", None)
+        if operation_timeout is None:
+            result = await self._connection.set_config_option(
+                config_id, self.session_id, value
+            )
+        else:
+            result = await asyncio.wait_for(
+                self._connection.set_config_option(config_id, self.session_id, value),
+                timeout=operation_timeout,
+            )
         self.config_options = self._wire_config_options(result)
         return self.advertised_config_options()
 
@@ -744,7 +783,9 @@ class ACPRunner:
         self.state = "starting"
         if self.lifecycle_callback is not None:
             await self.lifecycle_callback("starting", self)
-        command, env, cwd = self.profile.resolve()
+        command, env, cwd = self.profile.resolve(
+            persist_cache=getattr(self, "persist_profile_resolution", True)
+        )
         self.resolved_command = tuple(command)
         self._prompt_usage_supported = _known_prompt_usage(command[0])
         self.workspace = cwd
@@ -788,7 +829,11 @@ class ACPRunner:
         initialized = await asyncio.wait_for(
             self._connection.initialize(
                 protocol_version=1, client_info=Implementation(name="kollab", version=__version__)
-            ), timeout=30,
+            ), timeout=(
+                getattr(self, "startup_timeout", None)
+                or getattr(self, "operation_timeout", None)
+                or 30
+            ),
         )
         wire = initialized.model_dump(by_alias=True) if hasattr(initialized, "model_dump") else {}
         if int(wire.get("protocolVersion", 1)) != 1:
@@ -807,14 +852,22 @@ class ACPRunner:
                     resumed = await asyncio.wait_for(self._connection.resume_session(
                         session_id=binding.session_id, cwd=cwd,
                         mcp_servers=self.profile.sdk_mcp_servers(),
-                    ), timeout=60)
+                    ), timeout=(
+                        getattr(self, "startup_timeout", None)
+                        or getattr(self, "operation_timeout", None)
+                        or 60
+                    ))
                     self.config_options = self._wire_config_options(resumed)
                     self.resume_mode = "resumed"
                 elif self.capabilities.get("loadSession"):
                     loaded = await asyncio.wait_for(self._connection.load_session(
                         session_id=binding.session_id, cwd=cwd,
                         mcp_servers=self.profile.sdk_mcp_servers(),
-                    ), timeout=60)
+                    ), timeout=(
+                        getattr(self, "startup_timeout", None)
+                        or getattr(self, "operation_timeout", None)
+                        or 60
+                    ))
                     self.config_options = self._wire_config_options(loaded)
                     self.resume_mode = "loaded"
                 elif managed_upgrade:
@@ -840,7 +893,11 @@ class ACPRunner:
         if self.resume_mode == "fresh":
             result = await asyncio.wait_for(self._connection.new_session(
                 cwd=cwd, mcp_servers=self.profile.sdk_mcp_servers(),
-            ), timeout=60)
+            ), timeout=(
+                getattr(self, "startup_timeout", None)
+                or getattr(self, "operation_timeout", None)
+                or 60
+            ))
             self.session_id = str(result.sessionId)
             self.config_options = self._wire_config_options(result)
         self._resume_binding = None

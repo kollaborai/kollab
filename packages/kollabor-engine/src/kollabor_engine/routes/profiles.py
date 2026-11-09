@@ -1,12 +1,13 @@
 """Profile management routes."""
 
+import asyncio
 import logging
 import time
 from dataclasses import replace
 from typing import Annotated, Any, Dict, Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException  # type: ignore
+from fastapi import APIRouter, HTTPException, Query  # type: ignore
 from pydantic import AfterValidator, BaseModel, Field
 
 from kollabor_ai import APICommunicationService, LLMProfile, ProfileManager
@@ -22,6 +23,8 @@ from kollabor_ai.providers import (
     ProviderType,
     RateLimitError,
 )
+
+from ..workspace_folder import folder_or_400
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/profiles", tags=["profiles"])
@@ -208,9 +211,92 @@ class _DictConfig:
         return self._data.get(key, default)
 
 
+class _LayeredConfig:
+    """A read-only dotted view (``get("kollabor.llm.loadouts")``) over a folder's user config layers."""
+
+    def __init__(self, data: Dict[str, Any]):
+        self._data = data
+
+    def get(self, key: str, default=None):
+        from kollabor_events.dict_utils import safe_get
+
+        return safe_get(self._data, key, default)
+
+
+def _loadout_config(workspace: str = ""):
+    """The saved config as the terminal reads it when started in ``workspace``: loadouts and the default
+    loadout live there. The global config, then that folder's project and local config; an empty
+    ``workspace`` is the engine's own folder.
+
+    Read from the files, not through a ConfigService: a service polls its file every second until it is
+    shut down, and the open web UI lists profiles every few seconds.
+    """
+    from pathlib import Path
+
+    from kollabor_config.loader import load_layered_user_config
+
+    # Always a concrete folder: with none, the reader behaves as the terminal starting up and, on Windows,
+    # claims the folder's project state directory. Listing profiles must never create one.
+    folder = Path(workspace).expanduser().resolve() if workspace else Path.cwd()
+    return _LayeredConfig(load_layered_user_config(folder))
+
+
+def _default_loadout(pm: ProfileManager, workspace: str = "") -> Optional[Dict[str, str]]:
+    """The loadout the terminal starts on (``kollabor.llm.default_loadout``) in ``workspace``.
+
+    A web session always names a profile, which makes the terminal skip its
+    default, so the form needs this to start on it (#957). The default belongs to
+    the folder the session starts in: its project and local config can set their
+    own, so it is read for ``workspace``, not for the engine's folder. ``None``
+    when none is set or its saved name is not a loadout. The name must match
+    exactly: the terminal's forgiving lookup would start on a similarly named
+    loadout nobody chose once the default is deleted. Never an error, the profile
+    list must still answer.
+    """
+    import dataclasses
+
+    from kollabor_ai.loadout_manager import (
+        LoadoutManager,
+        acp_loadout_model,
+        loadout_sendable_effort,
+    )
+
+    try:
+        manager = LoadoutManager(pm, config=_loadout_config(workspace))
+        name = manager.get_default()
+        loadout = manager.get(name) if name else None
+        profile = pm.get_profile(loadout.provider_profile) if loadout else None
+        if loadout is None or profile is None:
+            return None
+        harness = profile.get_provider() == "acp"
+        if harness:
+            effort = loadout.effort
+        else:
+            # A loadout with no level keeps its profile's own, as in the terminal. The form sends what it
+            # shows, and an empty level would clear the profile's saved one, so report the one that runs.
+            effort = loadout_sendable_effort(pm, loadout) or dataclasses.replace(
+                profile, model=loadout.model
+            ).get_effort()
+        return {
+            "name": loadout.name,
+            "profile": loadout.provider_profile,
+            "provider": profile.get_provider(),
+            "model": acp_loadout_model(loadout, profile) if harness else loadout.model,
+            "effort": effort,
+        }
+    except Exception as exc:  # noqa: BLE001 - a broken config must not hide the profiles
+        logger.warning("default loadout: could not read it: %s", type(exc).__name__)
+        return None
+
+
+# Annotated, not ``= Query(...)``: a direct call (the unit tests make them) then gets the real default "".
+_Workspace = Annotated[str, Query(description="Folder whose default loadout applies; empty is the engine's own")]
+
+
 @router.get("")
-async def list_profiles():
+async def list_profiles(workspace: _Workspace = ""):
     """List all available profiles."""
+    workspace = folder_or_400(workspace.strip())
     pm = _get_profile_manager()
     profiles = pm.list_profiles()
 
@@ -220,7 +306,51 @@ async def list_profiles():
         "count": len(profiles),
         "providers": [provider.value for provider in ProviderType],
         "invalid_profiles": getattr(pm, "get_invalid_profiles", lambda: {})(),
+        "default_loadout": _default_loadout(pm, workspace),
     }
+
+
+@router.get("/choices")
+async def list_choices():
+    """Every provider profile x model x effort to start or switch a session
+    on, for the web UI's searchable model picker. ACP choices are discovered
+    in a short-lived, isolated session when a harness has no fresh options."""
+    from kollabor_ai.loadout_manager import LoadoutManager
+    from kollabor_config import ConfigService
+    from kollabor_config.config_utils import get_global_config_path
+
+    config = ConfigService(get_global_config_path(), fast_mode=True)  # saved loadouts live here
+    manager = LoadoutManager(_get_profile_manager(), config=config)
+    profiles = manager.provider_profiles()
+
+    async def refresh_catalogs() -> None:
+        try:  # a cold or expired catalog lists only each profile's own model
+            await asyncio.wait_for(manager.refresh_catalogs(), 8.0)
+        except Exception as exc:  # noqa: BLE001 - cached and bundled models still list
+            logger.warning("model picker: catalog refresh failed: %s", type(exc).__name__)
+
+    from kollabor.llm.acp_discovery import discover_profiles
+
+    catalog_task = asyncio.create_task(refresh_catalogs())
+    discovery_task = asyncio.create_task(discover_profiles(profiles))
+    try:
+        _catalog_result, discovered = await asyncio.gather(catalog_task, discovery_task)
+    except asyncio.CancelledError:
+        catalog_task.cancel()
+        discovery_task.cancel()
+        await asyncio.gather(catalog_task, discovery_task, return_exceptions=True)
+        raise
+
+    acp_options = {name: outcome.options for name, outcome in discovered.items()}
+    discovery = {
+        name: {
+            "status": outcome.status,
+            "more": outcome.more,
+            **({"message": outcome.message} if outcome.message else {}),
+        }
+        for name, outcome in discovered.items()
+    }
+    return {"choices": manager.list_choices(acp_options), "discovery": discovery}
 
 
 @router.get("/{name}")

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
 import { Thread } from "./components/Thread";
+import { ComposerKeeper } from "./components/assistant-ui/composer-keeper";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 import { AppsDialog } from "@/components/apps/AppsDialog";
 import { SupervisorAlertBanner } from "@/components/SupervisorAlertBanner";
@@ -38,6 +39,7 @@ import type {
 import { ProfilesDialog } from "@/components/shell/ProfilesDialog";
 import { SetupGuide } from "@/setup/SetupGuide";
 import { SessionPanel, type SessionView } from "@/components/shell/SessionPanel";
+import { latestTodoBlock } from "@/utils/todo-list";
 import { ShellHeader } from "@/components/shell/ShellHeader";
 import { Button } from "@/components/ui/button";
 import {
@@ -58,10 +60,13 @@ import {
   type NetworkAgent,
   DEFAULT_SLASH_COMMANDS,
   errorText,
+  type ModelChoice,
   type Profile,
   type SlashCommand,
   type Session,
 } from "./api";
+import { applyModelChoice, pickLabel, runningKey, stateAfterPick } from "@/components/shell/model-choice";
+import { NoticeAction, NoticeBar } from "@/components/shell/NoticeBar";
 import {
   EngineRuntimeProvider,
   buildInitialState,
@@ -88,6 +93,7 @@ import { useHiddenAgents } from "@/hooks/use-hidden-agents";
 import { useSidebarOrder } from "@/hooks/use-sidebar-order";
 import { chatToRestore } from "@/restore-chat";
 import { useRosters } from "@/hooks/use-rosters";
+import { startingChoice } from "@/components/shell/starting-choice";
 import { LearnDialog } from "@/components/learn/LearnDialog";
 import { WhatsNewPage } from "@/components/updates/WhatsNewPage";
 import { navigateToLearn } from "@/learn/catalog";
@@ -227,6 +233,8 @@ function RuntimeShell({
       ?.parts.find((item) => item.type === "text");
     return part?.type === "text" ? part.text.trim() : "";
   });
+  // The agent's latest todo list, for the card under the session panel. A string, so the selector stays stable.
+  const todo = useAuiState((s) => latestTodoBlock(s.thread.messages));
   const wasRunning = useRef(false);
   useEffect(() => {
     if (wasRunning.current && !running && RESTART_COMMAND.test(lastPrompt)) {
@@ -270,6 +278,7 @@ function RuntimeShell({
 
   return (
     <>
+      <ComposerKeeper sessionId={session.session_id} />
       {/* Below the shared sidebar breakpoint the sidebar and the session panel are sheets. */}
       <ShellHeader className="bg-background flex min-h-12 shrink-0 items-center gap-2 px-3 py-1.5 lg:hidden">
         <SidebarTrigger className="-ml-1 shrink-0" />
@@ -343,6 +352,7 @@ function RuntimeShell({
           onSessionUpdated={onSessionUpdated}
           onOpenSettings={() => onOpenSettings()}
           onHistoryCleared={onHistoryCleared}
+          todo={todo}
           view={view}
           onViewChange={setView}
           sheetOpen={panelSheetOpen}
@@ -372,6 +382,17 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const sidebarOrder = useSidebarOrder(api);
   const [bundles, setBundles] = useState<AgentBundleEntry[]>([]);
   const [selectedProfile, setSelectedProfile] = useState("default");
+  // New Session's model and effort, picked with the profile; empty is the profile's own.
+  const [selectedPick, setSelectedPick] = useState<Pick<ModelChoice, "provider" | "model" | "effort">>({
+    provider: "",
+    model: "",
+    effort: "",
+  });
+  // A model picked by hand. Until then New Session follows the default loadout of the folder it starts in (#957).
+  const pickedByHandRef = useRef(false);
+  // The folder (the Workspace field's value, "" for the engine's own) the form's starting model was read for;
+  // null until startup has read it.
+  const [startedFor, setStartedFor] = useState<string | null>(null);
   const [selectedIdentity, setSelectedIdentity] = useState("");
   const [workspacePath, setWorkspacePath] = useState("");
   const workspacePathRef = useRef(workspacePath);
@@ -443,15 +464,27 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   // What New Session will use, for the empty state's greeting.
   const nextGem = pickedAgent;
   const selectedModelLabel =
-    profiles.find((profile) => profile.name === selectedProfile)?.model ||
-    selectedProfile ||
-    "default";
+    [
+      selectedPick.model || profiles.find((profile) => profile.name === selectedProfile)?.model || selectedProfile,
+      selectedPick.effort,
+    ]
+      .filter(Boolean)
+      .join(" · ") || "default";
   const [activeId, setActiveId] = useState<string | null>(null);
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
   const [busy, setBusy] = useState(true);
   const [busyMessage, setBusyMessage] = useState("Connecting to kollab…");
   const [error, setError] = useState<string | null>(null);
+  // New Session started this chat, but the model picked for it did not apply: it runs another one (#956).
+  const [pickFailure, setPickFailure] = useState<{
+    sessionId: string;
+    pick: ModelChoice;
+    reason: string;
+    /** What the chat ran when the notice was raised (`runningKey`): the notice describes that. */
+    ran: string;
+    retrying: boolean;
+  } | null>(null);
   const [creationError, setCreationError] = useState<string | null>(null);
   // The sidebar row being opened, and why it could not be: a failed open keeps
   // the chat that was open, so the reason shows under the row clicked.
@@ -1179,7 +1212,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
 
   // A page served from an older (or newer) bundle than the running engine can
   // hit renamed API fields. Warn instead of failing; reload clears it.
-  const [versionMismatch, setVersionMismatch] = useState<string | null>(null);
+  const [versionMismatch, setVersionMismatch] = useState<{ page: string; engine: string } | null>(null);
   const [updateInfo, setUpdateInfo] = useState<Awaited<ReturnType<EngineApi["checkForUpdate"]>> | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
 
@@ -1211,9 +1244,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         const bundle = __APP_VERSION__;
         const engine = (config?.engine_version || "").trim();
         if (!engine || !bundle || engine === bundle) return;
-        setVersionMismatch(
-          `This page (v${bundle}) does not match the running engine (v${engine}). Reload after the engine finishes updating.`,
-        );
+        setVersionMismatch({ page: bundle, engine });
       } catch {
         // The session bootstrap effect surfaces WebUI host/origin denials.
       }
@@ -1232,9 +1263,10 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       setBusy(true);
       setBusyMessage("Connecting to kollab…");
       await api.loadConfig();
+      const folder = workspacePathRef.current.trim();
       const [result, profileResult, agentResult] = await Promise.all([
         loadSessions(),
-        api.listProfiles().catch(() => ({ profiles: [], active: undefined })),
+        api.listProfiles(folder).catch(() => ({ profiles: [], active: undefined, default_loadout: undefined })),
         refreshAgentPool(),
       ]);
       if (!mounted || operation !== operationRef.current) return;
@@ -1242,9 +1274,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       setProfiles(nextProfiles);
       const nextAgents = agentResult || [];
       setAgents(nextAgents);
-      setSelectedProfile(
-        profileResult.active || nextProfiles[0]?.name || "default",
-      );
+      // New Session starts on the default loadout when there is one, else the active profile's own model.
+      const start = startingChoice(nextProfiles, profileResult.active, profileResult.default_loadout);
+      setSelectedProfile(start.profile);
+      setSelectedPick({ provider: start.provider, model: start.model, effort: start.effort });
+      setStartedFor(folder);
       // Restore this engine's newest chat unless the person has opened one.
       const first = chatToRestore(result, openedRef.current);
       if (first) {
@@ -1276,6 +1310,43 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     };
   }, [guardHistoryOpen, loadSessions, loadState, recoverPendingTurn, refreshAgentPool]);
 
+  // A default loadout belongs to the folder a session starts in: that folder's own project and local config can
+  // set one. Ask again when the Workspace field changes, unless a model was picked by hand (#957).
+  useEffect(() => {
+    const folder = workspacePath.trim();
+    if (startedFor === null || folder === startedFor || pickedByHandRef.current) return;
+    let stale = false;
+    api
+      .listProfiles(folder)
+      .then((result) => {
+        if (stale || pickedByHandRef.current) return;
+        const start = startingChoice(result.profiles || [], result.active, result.default_loadout);
+        setSelectedProfile(start.profile);
+        setSelectedPick({ provider: start.provider, model: start.model, effort: start.effort });
+        setStartedFor(folder);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [workspacePath, startedFor]);
+
+  /** What a session starting in `folder` runs on: the form's pick, else that folder's default loadout (#957). */
+  const startChoiceFor = async (folder: string): Promise<ModelChoice> => {
+    const shown = { profile: selectedProfile, ...selectedPick };
+    // The form shows this folder's default already, or a model picked by hand: that is what starts.
+    if (pickedByHandRef.current || folder === (startedFor ?? "")) return shown;
+    // This folder's answer is still on its way (or never came): ask now, so a session never starts on another
+    // folder's default.
+    try {
+      const result = await api.listProfiles(folder);
+      const start = startingChoice(result.profiles || [], result.active, result.default_loadout);
+      return { profile: start.profile, provider: start.provider, model: start.model, effort: start.effort };
+    } catch {
+      return shown;
+    }
+  };
+
   /** New Session's picks, or an offline agent's own (`pick`). Resolves true once its chat is open. */
   const createSession = async (pick: { identity?: string; agent?: string; workspace?: string } = {}): Promise<boolean> => {
     openedRef.current = true;
@@ -1286,10 +1357,13 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       "Starting kollab (first start can take ~10 seconds)…",
     );
     setError(null);
+    setPickFailure(null);
     setCreationError(null);
     try {
+      const folder = pick.workspace || workspacePath.trim();
+      const start = await startChoiceFor(folder);
       const session = await api.createSession({
-        profile: selectedProfile || "default",
+        profile: start.profile || "default",
         // Pin what New Session shows. "default" is only a placeholder until
         // such a bundle exists (the first daemon start seeds it).
         agent: pick.identity
@@ -1299,8 +1373,21 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             : undefined,
         identity: pick.identity || selectedIdentity || undefined,
         approval_mode: "trust_all",
-        workspace: pick.workspace || workspacePath.trim() || undefined,
+        workspace: folder || undefined,
       });
+      if (start.model || start.effort) {
+        // A session starts on a profile; the picked model and effort go on next.
+        const pick = { ...start };
+        await applyModelChoice(api, session, pick).catch((reason) =>
+          setPickFailure({
+            sessionId: session.session_id,
+            pick,
+            reason: errorText(reason),
+            ran: runningKey(stateAfterPick(reason, session)),
+            retrying: false,
+          }),
+        );
+      }
       const result = await loadSessions();
       await refreshAgentPool();
       if (operation !== operationRef.current) return false;
@@ -1511,12 +1598,40 @@ export default function App({ contained = false }: { contained?: boolean } = {})
 
   const handleSessionUpdated = useCallback((updated: Session) => {
     sessionGate.recordApply();
+    // The notice for a failed New Session pick describes what the chat ran then. Once it runs anything else (a
+    // change made by hand, even one that only partly applied) the notice is no longer news; a change that did not
+    // move it leaves the notice and its Try Again as they were.
+    setPickFailure((current) =>
+      current?.sessionId === updated.session_id && runningKey(updated) !== current.ran ? null : current,
+    );
     setSessions((current) =>
       current.map((item) =>
         item.session_id === updated.session_id ? updated : item,
       ),
     );
   }, [sessionGate]);
+
+  /** The failed New Session pick, tried again on the chat it was raised for. */
+  const retryPick = async () => {
+    const failed = pickFailure;
+    const session = sessions.find((item) => item.session_id === failed?.sessionId);
+    if (!failed || !session || failed.retrying) return;
+    const trying = { ...failed, retrying: true };
+    setPickFailure(trying);
+    try {
+      handleSessionUpdated(await applyModelChoice(api, session, failed.pick));
+      setPickFailure((current) => (current === trying ? null : current)); // applied: the notice goes
+    } catch (reason) {
+      // Only the notice this retry started takes its failure: one dismissed meanwhile stays gone, and a newer
+      // notice, raised for another chat, is left alone.
+      setPickFailure((current) =>
+        current === trying
+          ? { ...failed, reason: errorText(reason), ran: runningKey(stateAfterPick(reason, session)), retrying: false }
+          : current,
+      );
+      void loadSessions(); // what runs may have changed
+    }
+  };
 
   const aliveKey = agents.filter((agent) => agent.active).map((agent) => agent.name).join(",");
 
@@ -1548,7 +1663,13 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           opening={opening}
           busy={busy}
           creationError={creationError}
-          onProfileChange={setSelectedProfile}
+          selectedModel={selectedPick.model}
+          selectedEffort={selectedPick.effort}
+          onModelPick={(choice) => {
+            pickedByHandRef.current = true;
+            setSelectedProfile(choice.profile);
+            setSelectedPick(choice);
+          }}
           onIdentityChange={(ref) => {
             // A new pick brings its own Type along.
             setSelectedIdentity(ref);
@@ -1646,6 +1767,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             intent={settingsIntent}
             onChanged={() => void loadSessions()}
             onSessionUpdated={handleSessionUpdated}
+            onManageProfiles={() => setProfilesOpen(true)}
           />
         ) : null}
         {learnRoute ? <LearnDialog route={learnRoute} onNavigate={navigateToLearn} onExit={returnToChat} /> : null}
@@ -1657,42 +1779,57 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           {whatsNewActive ? <WhatsNewPage onExit={returnToChat} /> : null}
           <div className={whatsNewActive ? "hidden" : "contents"}>
           {versionMismatch ? (
-            <div
-              role="status"
-              className="bg-amber-500/10 text-amber-600 dark:text-amber-400 px-4 py-2 text-sm"
+            <NoticeBar
+              detail={`Page v${versionMismatch.page} · engine v${versionMismatch.engine}`}
+              actions={<NoticeAction onClick={() => window.location.reload()}>Reload</NoticeAction>}
+              onDismiss={() => setVersionMismatch(null)}
             >
-              {versionMismatch}
-            </div>
+              This page and Kollab are on different versions. Reload once the update finishes.
+            </NoticeBar>
+          ) : null}
+          {pickFailure && pickFailure.sessionId === activeId ? (
+            <NoticeBar
+              urgent
+              actions={
+                <NoticeAction disabled={pickFailure.retrying} onClick={() => void retryPick()}>
+                  {pickFailure.retrying ? "Trying…" : "Try Again"}
+                </NoticeAction>
+              }
+              onDismiss={() => setPickFailure(null)}
+            >
+              {`Couldn't switch to ${pickLabel(pickFailure.pick)}. ${pickFailure.reason}`}
+            </NoticeBar>
           ) : null}
           {updateInfo?.release ? (
-            <div role="status" className="bg-primary/5 flex flex-wrap items-center gap-2 px-4 py-2 text-sm">
-              <span>Update available: v{updateInfo.release.version}</span>
-              <a className="underline" href={updateInfo.release.url} target="_blank" rel="noreferrer">Release notes</a>
-              <button className="bg-primary/10 hover:bg-primary/20 rounded-md px-2 py-0.5 text-xs font-medium" disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>{updateBusy ? "Updating…" : "Update now"}</button>
-            </div>
+            <NoticeBar
+              actions={
+                <>
+                  <a className="text-foreground underline underline-offset-2" href={updateInfo.release.url} target="_blank" rel="noreferrer">
+                    Release notes
+                  </a>
+                  <NoticeAction disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>
+                    {updateBusy ? "Updating…" : "Update now"}
+                  </NoticeAction>
+                </>
+              }
+              onDismiss={() => setUpdateInfo(null)}
+            >
+              Kollab {updateInfo.release.version} is available.
+            </NoticeBar>
           ) : null}
           {contextCompactionStatus ? (
-            <div
-              role={
-                isUrgentContextCompactionStatus(contextCompactionStatus.status)
-                  ? "alert"
-                  : "status"
-              }
-              aria-live={
-                isUrgentContextCompactionStatus(contextCompactionStatus.status)
-                  ? "assertive"
-                  : "polite"
-              }
-              className="bg-amber-500/10 text-amber-700 dark:text-amber-300 flex flex-wrap items-baseline gap-x-2 gap-y-1 px-4 py-2 text-sm"
-            >
-              <strong>
+            <NoticeBar urgent={isUrgentContextCompactionStatus(contextCompactionStatus.status)}>
+              <strong className="text-foreground font-medium">
                 {contextCompactionStatusTitle(contextCompactionStatus.status)}
-              </strong>
-              <span>{contextCompactionStatus.message}</span>
+              </strong>{" "}
+              {contextCompactionStatus.message}
               {contextCompactionStatus.action ? (
-                <span className="font-medium">{contextCompactionStatus.action}</span>
+                <>
+                  {" "}
+                  <span className="text-foreground font-medium">{contextCompactionStatus.action}</span>
+                </>
               ) : null}
-            </div>
+            </NoticeBar>
           ) : null}
           {activeSession?.halted ? (
             <>
