@@ -378,6 +378,19 @@ async def test_a_pick_sets_the_model_and_level_as_one_change_or_puts_both_back()
 
 
 @pytest.mark.asyncio
+async def test_an_unknown_acp_action_raises_a_404_instead_of_returning_the_error():
+    # #955: the ACP branch returned unknown_action() where every other path raises it, so
+    # the PanelError object became the action's result and crossed the RPC wire as a string.
+    from kollabor.panels import PanelError
+    from kollabor.panels.model import ModelPanel
+
+    with pytest.raises(PanelError) as err:
+        await ModelPanel().act(_panel_ctx(_OfferedOnlyACP(_options())), "frobnicate", {})
+    assert err.value.status == 404
+    assert "frobnicate" in err.value.message
+
+
+@pytest.mark.asyncio
 async def test_a_pick_made_in_another_window_meanwhile_is_never_mixed_or_put_back():
     # Ametrine on #553 round 10: pick A's model applied, pick B's model and level
     # landed before A's level, and A's refused level then put A's old model back
