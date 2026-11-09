@@ -3,7 +3,9 @@
 Handles /model command - quick model selector.
 """
 
+import asyncio
 import logging
+from contextlib import nullcontext
 from typing import Any, Dict
 
 from kollabor_ai.profile_manager import redact_profile_endpoint
@@ -20,6 +22,7 @@ from kollabor_events.models import (
 from ..base import BaseCommandHandler
 
 logger = logging.getLogger(__name__)
+_ACP_OPTION_TIMEOUT = 10.0
 
 
 class ModelCommandHandler(BaseCommandHandler):
@@ -177,28 +180,34 @@ class ModelCommandHandler(BaseCommandHandler):
 
     @staticmethod
     def _acp_option(options: list[dict[str, Any]], category: str) -> dict[str, Any] | None:
-        category = category.lower()
-        for option in options:
-            if str(option.get("category") or "").lower() == category:
-                return option
-            if str(option.get("id") or "").lower() in {category, f"{category}_level"}:
-                return option
-        return None
+        from kollabor_ai.acp_options import find_option
+
+        return find_option(options, category)
 
     @staticmethod
     def _acp_option_values(option: dict[str, Any]) -> list[str]:
-        values: list[str] = []
-        for candidate in option.get("options") or []:
-            if not isinstance(candidate, dict):
-                continue
-            if "value" in candidate:
-                values.append(str(candidate["value"]))
-            for nested in candidate.get("options") or []:
-                if isinstance(nested, dict) and "value" in nested:
-                    values.append(str(nested["value"]))
-        return values
+        from kollabor_ai.acp_options import option_values
 
-    async def _set_acp_option(self, category: str, value: str | bool) -> CommandResult:
+        return option_values(option)
+
+    async def _set_acp_option(self, category: str, value: str | bool, *, persist: bool = True) -> CommandResult:
+        from kollabor.llm.acp_change_lock import change_lock
+
+        service = self._acp_service()
+        if service is None:
+            return CommandResult(success=False, message="ACP session is not active.", display_type="error")
+        try:
+            async with change_lock(service):
+                transition = getattr(service, "transition", None)
+                with transition() if callable(transition) else nullcontext():
+                    return await self._set_acp_option_locked(service, category, value, persist)
+        except Exception as exc:
+            logger.warning("ACP option transition failed (%s)", type(exc).__name__)
+            return CommandResult(
+                success=False, message="ACP session is changing; retry when ready.", display_type="error"
+            )
+
+    async def _set_acp_option_locked(self, service, category, value, persist):
         options = self._acp_options()
         option = self._acp_option(options, category)
         if option is None:
@@ -207,17 +216,37 @@ class ModelCommandHandler(BaseCommandHandler):
                 message=f"Active ACP harness does not advertise a {category} option.",
                 display_type="error",
             )
-        service = self._acp_service()
         label = "model" if category == "model" else "reasoning effort"
+        if option.get("type") == "select" and str(value) not in self._acp_option_values(option):
+            return CommandResult(success=False, message=f"ACP {label} value is not advertised.", display_type="error")
         try:
-            await service.set_config_option(str(option["id"]), value)
+            async with asyncio.timeout(_ACP_OPTION_TIMEOUT):
+                if persist:
+                    updated = await service.set_config_option(str(option["id"]), value)
+                else:
+                    updated = await service.set_config_option(str(option["id"]), value, persist=False)
+        except asyncio.CancelledError:
+            quarantine = getattr(service, "quarantine_config_options", None)
+            if callable(quarantine):
+                quarantine()
+            raise
         except Exception as exc:
-            logger.warning(
-                "ACP %s option update failed (%s)", label, type(exc).__name__
-            )
+            # The request may have reached the harness even when its reply is lost.
+            logger.warning("ACP %s option outcome unknown (%s)", label, type(exc).__name__)
+            quarantine = getattr(service, "quarantine_config_options", None)
+            if callable(quarantine):
+                quarantine()
             return CommandResult(
                 success=False,
-                message=f"Could not update ACP {label}; check the adapter settings and logs.",
+                message="ACP configuration is unknown after an update error; restart the harness session.",
+                data={"outcome_unknown": True},
+                display_type="error",
+            )
+        actual = next((o.get("currentValue") for o in updated if o.get("id") == option["id"]), None)
+        if actual != value:
+            return CommandResult(
+                success=False,
+                message=f"ACP harness did not apply the requested {label}.",
                 display_type="error",
             )
         return CommandResult(success=True, message=f"ACP {label} set to {value}.", display_type="success")
@@ -799,12 +828,14 @@ class ModelCommandHandler(BaseCommandHandler):
     async def _model_effort_levels(self, profile) -> list:
         """Effort levels the active model accepts, best-effort.
 
-        The codex backend publishes them per model; everything else gets the
-        canonical list, since no other provider exposes a capability endpoint.
+        The codex backend publishes them per model; any other model gets the
+        registry's levels for it, else what every effort API takes.
         """
+        from kollabor.panels.llm import effort_provider
         from kollabor_ai.profile_manager import EFFORT_LEVELS
 
-        if (profile.get_provider() or "").lower() == "openai_responses":
+        provider = (effort_provider(profile) or "").lower()
+        if provider == "openai_responses":
             try:
                 from kollabor_ai.oauth import OAuthTokenStorage
                 from kollabor_ai.oauth.openai_oauth import query_codex_model_details
@@ -827,10 +858,14 @@ class ModelCommandHandler(BaseCommandHandler):
                         ]
                         if levels:
                             return levels
-            except Exception as e:  # noqa: BLE001 - fall back to the canonical set
+            except Exception as e:  # noqa: BLE001 - fall back to the registry
                 self.logger.debug("codex effort levels unavailable: %s", e)
 
-        return list(EFFORT_LEVELS)
+        from kollabor_ai.profile_manager import accepted_efforts, effort_unsupported_reason
+
+        levels = accepted_efforts(provider, profile.get_model())
+        return [level for level in (levels if levels is not None else EFFORT_LEVELS)
+                if not effort_unsupported_reason(provider, level)]
 
     async def _handle_effort(self, level: str) -> CommandResult:
         """Show or set the active profile's reasoning effort.
@@ -847,9 +882,10 @@ class ModelCommandHandler(BaseCommandHandler):
                 display_type="error",
             )
 
+        from kollabor.panels.llm import effort_provider
         from kollabor_ai.providers.tuning import EFFORT_SUPPORTED_PROVIDERS
 
-        provider = (profile.get_provider() or "").lower()
+        provider = (effort_provider(profile) or "").lower()
         if provider == "acp":
             category = "thought_level"
             option = self._acp_option(self._acp_options(), category)
@@ -898,6 +934,7 @@ class ModelCommandHandler(BaseCommandHandler):
             )
 
         levels = await self._model_effort_levels(profile)
+        available = ", ".join(levels) or "no effort levels for this model"
         current = profile.get_effort() or "(model default)"
 
         if not level:
@@ -906,21 +943,24 @@ class ModelCommandHandler(BaseCommandHandler):
                 message=(
                     f"Reasoning effort: {current}\n"
                     f"  Model: {profile.get_model()}\n"
-                    f"  Available: {', '.join(levels)}\n"
+                    f"  Available: {available}\n"
                     f"  Set with: /model effort <level>  (or 'default' to clear)"
                 ),
                 display_type="info",
             )
 
         requested = level.strip().lower()
-        if requested in ("default", "none", "clear", "off"):
+        # none is a level wherever the provider takes it; elsewhere it still clears
+        if requested in ("default", "clear", "off") or (
+            requested == "none" and requested not in levels
+        ):
             requested = ""
         elif requested not in levels:
             return CommandResult(
                 success=False,
                 message=(
                     f"Unknown effort level: {level}\n"
-                    f"  Available: {', '.join(levels)}"
+                    f"  Available: {available}"
                 ),
                 display_type="error",
             )

@@ -4,16 +4,16 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kollabor-engine"
-version = "0.18.5"
+version = "0.21.1"
 description = "Kollab AI engine - HTTP/SSE server wrapping kollabor-ai and kollabor-agent"
 readme = "README.md"
 requires-python = ">=3.14"
 license = "Apache-2.0"
 dependencies = [
-    "kollabor-ai>=0.18.5",
-    "kollabor-agent>=0.18.5",
-    "kollabor-events>=0.18.5",
-    "kollabor-config>=0.18.5",
+    "kollabor-ai>=0.21.1",
+    "kollabor-agent>=0.21.1",
+    "kollabor-events>=0.21.1",
+    "kollabor-config>=0.21.1",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "sse-starlette>=2.1.0",
@@ -36,6 +36,14 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Pin the suite to this package's own source tree. Runs rooted at the repo
+# top get pythonpath from the root pyproject; a run rooted HERE (bare
+# `pytest packages/kollabor-engine/tests`, e.g. inside a worktree) reads
+# this ini instead, and without pythonpath the editable install silently
+# wins: the suite imports kollabor_engine from another checkout and can
+# report green against the wrong tree. "src" keeps kollabor_engine local;
+# ".." exposes repo-root plugins/ the way the root ini's "." does.
+pythonpath = ["src", ".."]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kollabor_engine"]

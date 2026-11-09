@@ -18,10 +18,12 @@ empty list so the picker still opens.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import time
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -33,7 +35,9 @@ DEFAULT_TIMEOUT = 8.0
 
 # Disk cache. Same shape as kollabor_agent.agent_manager's agent metadata
 # cache: versioned JSON, discarded whole on version mismatch or TTL expiry.
-# Bump CACHE_VERSION when the cached entry shape changes.
+# Bump CACHE_VERSION when the cached entry shape changes. Entries also carry
+# the provider and endpoint they were fetched from (#558); that is additive, so
+# an older entry without them still loads and is taken as a match.
 CACHE_VERSION = 2
 CACHE_TTL_SECONDS = 3600  # 1h -- provider catalogs move slowly
 _MEMORY_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -78,6 +82,56 @@ def _profile_key(profile: Any) -> str:
         return provider.lower()
 
 
+def _fingerprint(endpoint: str) -> str:
+    """SHA-256 of a normalized endpoint; "" for none.
+
+    An endpoint can carry a password, a query key or a path token, and may come
+    only from an env var that is kept off config.json. The cache file records
+    this digest, never the endpoint itself.
+    """
+    endpoint = endpoint.rstrip("/")
+    if not endpoint:
+        return ""
+    return hashlib.sha256(endpoint.encode("utf-8")).hexdigest()
+
+
+def _profile_source(profile: Any) -> Dict[str, str]:
+    """Which provider and endpoint a profile's catalog comes from.
+
+    The cache is keyed by profile name, and an edit can change a profile's
+    provider or endpoint in place. An entry fetched from the old source is
+    not this profile's catalog (#558). The endpoint is kept as a fingerprint.
+    """
+    if isinstance(profile, dict):
+        provider = str(profile.get("provider") or "")
+        endpoint = str(profile.get("base_url") or profile.get("endpoint") or "")
+    else:
+        provider = ""
+        endpoint = ""
+        try:
+            provider = str(profile.get_provider() or "")
+        except Exception:  # noqa: BLE001 -- identity is best-effort
+            provider = str(getattr(profile, "provider", "") or "")
+        try:
+            endpoint = str(profile.get_endpoint() or "")
+        except Exception:  # noqa: BLE001
+            endpoint = str(getattr(profile, "base_url", "") or "")
+    return {"provider": provider.lower(), "endpoint_id": _fingerprint(endpoint)}
+
+
+def _same_source(entry: Dict[str, Any], profile: Any) -> bool:
+    """Whether the complete recorded source matches this profile.
+
+    Legacy entries without both provider and endpoint metadata are cold misses:
+    their models cannot be attributed to the profile's current source.
+    """
+    source = _profile_source(profile)
+    for field, expected in source.items():
+        if field not in entry or str(entry[field] or "") != expected:
+            return False
+    return True
+
+
 def _load_disk_cache() -> Dict[str, Dict[str, Any]]:
     """Load the whole cache file. Returns {} on any problem."""
     path = _cache_file()
@@ -102,7 +156,16 @@ def _save_disk_cache(entries: Dict[str, Dict[str, Any]]) -> None:
         return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"version": CACHE_VERSION, "entries": entries}
+        # Drop the raw "endpoint" an earlier build wrote beside the models.
+        clean = {
+            key: (
+                {k: v for k, v in entry.items() if k != "endpoint"}
+                if isinstance(entry, dict)
+                else entry
+            )
+            for key, entry in entries.items()
+        }
+        payload = {"version": CACHE_VERSION, "entries": clean}
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except Exception as e:  # noqa: BLE001
         logger.warning("Failed to save model catalog cache: %s", e)
@@ -117,6 +180,31 @@ def _fresh(entry: Any, max_age: float) -> bool:
     return (time.time() - float(entry.get("timestamp", 0) or 0)) <= max_age
 
 
+def _login_of(profile: Any) -> Optional[str]:
+    """Who a ChatGPT login profile is signed in as (token_storage.login_mark):
+    two logins can serve different models, so a cached catalog is used only
+    while the login it was fetched with is still the one signed in (#553). ""
+    when none is: nothing is kept for it. None for other profiles."""
+    if profile is None:
+        return None
+    get = profile.get if isinstance(profile, dict) else (lambda key, default=None: getattr(profile, key, default))
+    try:
+        provider = str(profile.get_provider() or "").lower()
+    except Exception:
+        provider = str(get("provider", "") or "").lower()
+    if str(get("auth_type", "") or "").lower() != "oauth" and provider != "openai_responses":
+        return None
+    from kollabor_ai.oauth.token_storage import stored_login_mark
+
+    name = str(get("name", "") or "")
+    return stored_login_mark("openai", None if name in ("", "openai-oauth") else name)
+
+
+# The login a ChatGPT login fetch asked as, which its tokens name: the stored
+# login can change between reading it and loading them (#553).
+_ASKED_AS: ContextVar[Optional[List[str]]] = ContextVar("model_catalog_asked_as", default=None)
+
+
 def cached_provider_models(
     profile: Any, max_age: float = CACHE_TTL_SECONDS
 ) -> List[Dict[str, Any]]:
@@ -129,23 +217,33 @@ def cached_provider_models(
     if not key:
         return []
 
+    login = _login_of(profile)
+    if login == "":
+        return []  # no login: no list is known to be its
+
+    def usable(entry: Any) -> bool:
+        return _fresh(entry, max_age) and entry.get("login") == login and _same_source(entry, profile)
+
     entry = _MEMORY_CACHE.get(key)
-    if not _fresh(entry, max_age):
+    if not usable(entry):
         entry = _load_disk_cache().get(key)
-        if _fresh(entry, max_age):
+        if usable(entry):
             _MEMORY_CACHE[key] = entry  # type: ignore[assignment]
         else:
             return []
     return list(entry.get("models", []))  # type: ignore[union-attr]
 
 
-def _store(profile: Any, models: List[Dict[str, Any]]) -> None:
-    """Record a fetched catalog in both the memory and disk caches."""
+def _store(profile: Any, models: List[Dict[str, Any]], login: Optional[str] = None) -> None:
+    """Record a catalog fetched as ``login`` (_login_of) in both the memory and
+    disk caches."""
     key = _profile_key(profile)
-    if not key:
+    if not key or login == "":
         return
-    entry = {"timestamp": time.time(), "models": models}
+    entry = {"timestamp": time.time(), "models": models, "login": login, **_profile_source(profile)}
     _MEMORY_CACHE[key] = entry
+    if (login or "").startswith("token:"):
+        return  # a digest of a token stays in this process: the cache file never holds one
     entries = _load_disk_cache()
     entries[key] = entry
     _save_disk_cache(entries)
@@ -168,9 +266,18 @@ async def get_provider_models(
     if cached:
         return cached
 
-    models = await list_provider_models(profile, timeout=timeout)
+    asked: List[str] = []
+    reset = _ASKED_AS.set(asked)
+    try:
+        models = await list_provider_models(profile, timeout=timeout)
+    finally:
+        _ASKED_AS.reset(reset)
+    login = _login_of(profile)  # the account signed in now
+    if login is not None and asked != [login]:
+        # It asked as another login, or with no tokens: the list may be another login's.
+        return cached_provider_models(profile, max_age=float("inf"))
     if models:
-        _store(profile, models)
+        _store(profile, models, login)
         return models
 
     # Fetch failed or returned nothing -- serve a stale entry if we have one.
@@ -210,7 +317,7 @@ async def list_provider_models(
 
     try:
         if auth_type == "oauth" or provider == "openai_responses":
-            return await asyncio.wait_for(_openai_oauth_models(), timeout=timeout)
+            return await asyncio.wait_for(_openai_oauth_models(profile), timeout=timeout)
         if provider == "openrouter":
             return await asyncio.wait_for(_openrouter_models(), timeout=timeout)
         if provider == "anthropic":
@@ -227,19 +334,29 @@ async def list_provider_models(
     return []
 
 
-async def _openai_oauth_models() -> List[Dict[str, Any]]:
-    """Codex backend models for the OpenAI OAuth (ChatGPT) profile.
+async def _openai_oauth_models(profile: Any = None) -> List[Dict[str, Any]]:
+    """Codex backend models for an OpenAI OAuth (ChatGPT) profile, with its own login.
 
     The backend reports context window and supported effort levels per model,
-    so the picker can show both instead of a bare "codex" tag.
+    so the picker can show both instead of a bare "codex" tag. Two logins can
+    serve different models, so each profile asks with its own, as the provider
+    loads it at start (api_communication_service).
     """
     from kollabor_ai.oauth import OAuthTokenStorage
     from kollabor_ai.oauth.openai_oauth import query_codex_model_details
+    from kollabor_ai.oauth.token_storage import login_mark
 
     storage = OAuthTokenStorage()
-    tokens = await storage.load_tokens("openai", auto_refresh=True)
+    name = str(getattr(profile, "name", "") or "")
+    tokens = await storage.load_tokens(
+        "openai", auto_refresh=True, profile_name=name if name not in ("", "openai-oauth") else None
+    )
     if not tokens:
         return []
+    asked = _ASKED_AS.get()
+    if asked is not None:  # get_provider_models keeps the list only for this login
+        fields = ("account_id", "refresh_token", "access_token")
+        asked.append(login_mark({key: getattr(tokens, key, None) for key in fields}))
 
     details = await query_codex_model_details(tokens.access_token, tokens.account_id)
 
@@ -266,6 +383,8 @@ async def _openai_oauth_models() -> List[Dict[str, Any]]:
         }
         if has_context_window:
             catalog_entry["context_window"] = window
+        if efforts:
+            catalog_entry["efforts"] = efforts
         result.append(catalog_entry)
     return result
 
@@ -396,9 +515,11 @@ async def _openrouter_models() -> List[Dict[str, Any]]:
 
 
 # Anthropic models endpoint. Requires an API key; returns only models the
-# account can access. No standard pagination beyond a single page here.
+# account can access. Paged with ``limit`` / ``after_id``; every page is read.
 ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
 ANTHROPIC_API_VERSION = "2023-06-01"
+ANTHROPIC_PAGE_LIMIT = 1000  # the API maximum; the default is 20
+ANTHROPIC_MAX_PAGES = 20  # bound on a server that never stops saying has_more
 
 
 async def _anthropic_models(profile: Any) -> List[Dict[str, Any]]:
@@ -433,11 +554,32 @@ async def _anthropic_models(profile: Any) -> List[Dict[str, Any]]:
         "anthropic-version": ANTHROPIC_API_VERSION,
     }
 
+    # The endpoint pages (20 by default): read every page, since the loadout
+    # list treats this catalog as the account's whole list (#558). A listing
+    # that cannot be completed is empty, never partial, so the registry still
+    # seeds the picker instead of a truncated list hiding models.
+    pages: List[Dict[str, Any]] = []
+    after_id: Optional[str] = None
     try:
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-            response = await client.get(url, headers=headers)
-            response.raise_for_status()
-            data = response.json()
+            for _ in range(ANTHROPIC_MAX_PAGES):
+                params: Dict[str, Any] = {"limit": ANTHROPIC_PAGE_LIMIT}
+                if after_id:
+                    params["after_id"] = after_id
+                response = await client.get(url, headers=headers, params=params)
+                response.raise_for_status()
+                page = response.json()
+                pages.append(page)
+                if not page.get("has_more"):
+                    break
+                next_id = str(page.get("last_id") or "")
+                if not next_id or next_id == after_id:
+                    logger.warning("Anthropic model catalog paging did not advance")
+                    return []
+                after_id = next_id
+            else:
+                logger.warning("Anthropic model catalog has too many pages")
+                return []
     except httpx.HTTPStatusError as e:
         logger.warning(
             "Anthropic model catalog fetch failed (HTTP %s) at %s",
@@ -453,7 +595,7 @@ async def _anthropic_models(profile: Any) -> List[Dict[str, Any]]:
         return []
 
     result: List[Dict[str, Any]] = []
-    for model in data.get("data", []):
+    for model in (m for page in pages for m in page.get("data", [])):
         model_id = str(model.get("id") or "")
         if not model_id:
             continue

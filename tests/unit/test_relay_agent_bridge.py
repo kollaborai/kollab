@@ -151,6 +151,7 @@ class ModelRecorder:
 class RecordingTaskLedger:
     def __init__(self):
         self.assignments = []
+        self.dispatch_reports = []
 
     def get(self, _task_id):
         return None
@@ -168,6 +169,32 @@ class RecordingTaskLedger:
 
     def resolve_reply(self, **_kwargs):
         return None
+
+    def record_dispatch_report(
+        self,
+        *,
+        task_id: str = "",
+        assignee: str,
+        thread_id: str = "",
+        message_id: str,
+        report: str,
+        worktree: str = "",
+        commit: str = "",
+        reply_to: str = "",
+    ) -> bool:
+        # This fake has no persisted dispatches, so no report can correlate.
+        details = {
+            "task_id": task_id,
+            "assignee": assignee,
+            "thread_id": thread_id,
+            "message_id": message_id,
+            "report": report,
+            "worktree": worktree,
+            "commit": commit,
+            "reply_to": reply_to,
+        }
+        self.dispatch_reports.append((details, False))
+        return False
 
 
 @pytest_asyncio.fixture
@@ -412,10 +439,31 @@ async def test_relay_result_cannot_create_task_or_echo_to_external_bridge(bridge
             self._queue_processor = ContinuationQueue()
             self.scheduled = []
             self.contexts = []
+            self._turn_serial = 0
+            self._cursor_winner_serial = 0
+            self._continue_serial = None
+            self.current_parent_uuid = None
+
+        def claim_turn_serial(self):
+            self._turn_serial += 1
+            return self._turn_serial
+
+        def publish_cursor(self, uuid, serial):
+            if serial is None or serial < self._cursor_winner_serial:
+                return False
+            self._cursor_winner_serial = serial
+            self.current_parent_uuid = uuid
+            return True
 
         @property
         def is_processing(self):
             return self._queue_processor.is_processing
+
+        def _profile_selects_acp(self):
+            return False, False  # native profile
+
+        def _active_acp(self):
+            return None  # no ACP runner
 
         def create_background_task(self, factory, name=None):
             task = asyncio.create_task(factory(), name=name)
@@ -467,6 +515,8 @@ async def test_relay_result_cannot_create_task_or_echo_to_external_bridge(bridge
     assert returned.metadata["relay_event_kind"] == "result"
     assert returned.metadata["hub_message_id"] == returned.metadata["relay_event_id"]
     assert ledger.assignments == []
+    assert ledger.dispatch_reports
+    assert all(accepted is False for _details, accepted in ledger.dispatch_reports)
     assert external_bridge.send.await_count == 0
     grants = left.store.contacts(left.commands.client.state.room)
     assert len(grants) == 1 and grants[0]["state"] == "completed"
@@ -1239,6 +1289,177 @@ async def test_question_answer_resumes_same_granted_thread_once(bridges):
 
 
 @pytest.mark.asyncio
+async def test_refused_answer_stays_queued_until_the_receiver_accepts_it(
+    bridges, monkeypatch
+):
+    # ACP refuses an observation when its retry queue is full (#581). A refused
+    # answer must stay queued with the wait still open, so the next offer
+    # delivers it once. Consuming it first and then ignoring the refusal loses it.
+    members, _ = bridges
+    (left, left_hub, _, _), (right, right_hub, right_model, _) = members
+    allow(left, right)
+    authorize(left, right, "Create proof.txt")
+    await left.send(address(right), "Create proof.txt")
+    await right._tick()
+    task_id = right.active.record["id"]
+    asked = await in_turn(
+        right_model,
+        right_hub._handle_hub_msg_tool(
+            {
+                "id": "question",
+                "to": right.active.record["payload"]["from"],
+                "kind": "question",
+                "content": "Which existing directory should I use?",
+            }
+        ),
+    )
+    question_id = asked.metadata["relay_receipt"]["id"]
+    question_peer = left.store.event(question_id)["payload"]["from"]
+
+    offered = []
+    refusing = [True]
+
+    async def receive(message):
+        offered.append(message.id)
+        return False if refusing[0] else None
+
+    monkeypatch.setattr(right_hub, "_on_message_received", receive)
+    answered = await left_hub._handle_hub_msg_tool(
+        {
+            "id": "answer",
+            "to": question_peer,
+            "kind": "answer",
+            "thread_id": task_id,
+            "reply_to": question_id,
+            "content": "Use the workspace root.",
+        }
+    )
+    assert answered.success, answered.error
+    answer_id = answered.metadata["relay_receipt"]["id"]
+    assert offered == [answer_id]
+    assert right.store.event(answer_id)["state"] == "queued"
+    assert right.store.task(task_id)["state"] == "waiting_answer"
+    assert right.active.waiting_answer
+
+    refusing[0] = False
+    await right._rpc_event({"id": answer_id})
+    assert offered == [answer_id, answer_id]
+    assert right.store.event(answer_id)["state"] == "consumed"
+    assert right.store.task(task_id)["state"] == "running"
+
+    # Accepted once: another offer of the same answer is not delivered again.
+    await right._rpc_event({"id": answer_id})
+    assert offered == [answer_id, answer_id]
+
+
+@pytest.mark.asyncio
+async def test_a_later_answer_waits_behind_a_refused_earlier_answer(
+    bridges, monkeypatch
+):
+    # ACP refused the first answer (#581), so it stays queued and first in line.
+    # A later answer must not overtake it on its own wake: _tick offers the queue
+    # in order, and the wake path has to keep that order.
+    members, _ = bridges
+    (left, left_hub, _, _), (right, right_hub, right_model, _) = members
+    allow(left, right)
+    authorize(left, right, "Create proof.txt")
+    await left.send(address(right), "Create proof.txt")
+    await right._tick()
+    task_id = right.active.record["id"]
+
+    async def ask(content):
+        asked = await in_turn(
+            right_model,
+            right_hub._handle_hub_msg_tool(
+                {
+                    "id": "question",
+                    "to": right.active.record["payload"]["from"],
+                    "kind": "question",
+                    "content": content,
+                }
+            ),
+        )
+        return asked.metadata["relay_receipt"]["id"]
+
+    first_question = await ask("Which existing directory should I use?")
+
+    offered = []
+    refusing = [True]
+
+    async def receive(message):
+        offered.append(message.id)
+        return False if refusing[0] else None
+
+    monkeypatch.setattr(right_hub, "_on_message_received", receive)
+
+    async def answer(question_id, content):
+        answered = await left_hub._handle_hub_msg_tool(
+            {
+                "id": "answer",
+                "to": left.store.event(question_id)["payload"]["from"],
+                "kind": "answer",
+                "thread_id": task_id,
+                "reply_to": question_id,
+                "content": content,
+            }
+        )
+        assert answered.success, answered.error
+        return answered.metadata["relay_receipt"]["id"]
+
+    first_id = await answer(first_question, "Use the workspace root.")
+    assert offered == [first_id]
+    assert right.store.event(first_id)["state"] == "queued"
+    assert right.active.waiting_answer
+
+    # The first answer is refused and stays queued. A second question on the thread
+    # then gets its own answer, which must wait behind the first answer.
+    second_question = await ask("Which file name should I use?")
+    refusing[0] = False
+    second_id = await answer(second_question, "Use the second name.")
+    assert offered == [first_id]
+    assert right.store.event(second_id)["state"] == "queued"
+    assert right.store.task(task_id)["state"] == "waiting_answer"
+
+    # Offering the queue head delivers the first answer; the second stays queued.
+    await right._rpc_event({"id": first_id})
+    assert offered == [first_id, first_id]
+    assert right.store.event(first_id)["state"] == "consumed"
+    assert right.store.task(task_id)["state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_relay_task_that_stops_while_waiting_clears_its_wait(
+    bridges, monkeypatch
+):
+    # A question that outlives TASK_TIMEOUT stops its task, but the stopped task
+    # kept waiting_answer. _tick returns early while a task waits, so the
+    # finished task was never cleared and the bridge took no new work.
+    members, _ = bridges
+    (left, left_hub, _, _), (right, right_hub, right_model, _) = members
+    allow(left, right)
+    authorize(left, right, "Create proof.txt")
+    await left.send(address(right), "Create proof.txt")
+    await right._tick()
+    task_id = right.active.record["id"]
+    await in_turn(
+        right_model,
+        right_hub._handle_hub_msg_tool(
+            {
+                "id": "question",
+                "to": right.active.record["payload"]["from"],
+                "kind": "question",
+                "content": "Which existing directory should I use?",
+            }
+        ),
+    )
+    assert right.active.waiting_answer
+    monkeypatch.setattr("plugins.hub.relay_agent.TASK_TIMEOUT", -1)
+    await right._tick()
+    assert right.store.task(task_id)["state"] == "failed"
+    assert right.active is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["expired", "withdrawn"])
 async def test_hub_answer_rejects_expired_or_withdrawn_question_grant(bridges, mode):
     members, _ = bridges
@@ -1555,6 +1776,8 @@ def test_hub_msg_parser_preserves_question_kind():
         "kind": "answer",
         "notify_kind": "",
         "task_id": "",
+        "worktree": "",
+        "commit": "",
         "content": "Use the workspace root.",
     }
 

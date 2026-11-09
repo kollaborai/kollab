@@ -47,7 +47,12 @@ from .capture import (
     render_transcript,
 )
 from .change_feed import DEFAULT_FEED_MAX_AGE, ChangeFeed
-from .coordinator import CoordinatorElection, IdentityAssigner, WorkQueue
+from .coordinator import (
+    CoordinatorElection,
+    IdentityAssigner,
+    SweepScheduler,
+    WorkQueue,
+)
 from .crystal_store import CrystalStore, normalize_crystal_id
 from .delivery import DeliveryPolicy, DeliveryTrace, SenderContext
 from .device_names import DEFAULT_TRUST, format_handle, parse_handle
@@ -70,11 +75,13 @@ from .models import (
     AgentState,
     HubMessage,
     MessageScope,
+    WorkSlot,
     desired_bundle_for_identity,
 )
 from .notifier import HubNotifier, NtfyNotifier, load_ntfy_settings
 from .nudge_engine import NudgeEngine
-from .presence import PresenceManager, get_messages_dir, pid_alive
+from .presence import PresenceManager, get_messages_dir, pid_alive, wait_until_socket_answers
+from .recurring_jobs import RecurringJobs, default_job_config
 from .rosters import (
     DEFAULT_ROSTER,
     attach_persona_skills,
@@ -106,6 +113,7 @@ from .supervisor import (
 )
 from .task_ledger import TaskLedger
 from .vault import AgentVault, sanitize_rebirth_text
+from .wake_hooks import WakeAction, WakeEvent, WakeHookEngine, default_hook_config
 from .xml_tags import embedded_attrs, tag_attrs, tag_pattern
 
 # Agent DNS (discovery, identity, trust) — guarded: PyNaCl is optional
@@ -136,6 +144,20 @@ except ImportError as _dns_import_err:
     )
 
 logger = logging.getLogger(__name__)
+
+
+MAX_CRYSTAL_BODY_CHARS = 2000
+
+
+def _crystal_body_limit_error(tool_name: str, body: str) -> str | None:
+    if len(body) <= MAX_CRYSTAL_BODY_CHARS:
+        return None
+    return (
+        f"{tool_name} rejected: body has {len(body)} characters; "
+        f"maximum is {MAX_CRYSTAL_BODY_CHARS}. No changes were saved. "
+        "Reduce the body or split long notes across entries."
+    )
+
 
 _OPERATOR_NOTIFY_KINDS = frozenset({"decision", "blocker", "done"})
 _DEFAULT_OPERATOR_ALIASES = frozenset({"boss", "human", "operator"})
@@ -668,6 +690,9 @@ class HubPlugin(BasePlugin):
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._mailbox_task: Optional[asyncio.Task] = None
         self._dreaming_task: Optional[asyncio.Task] = None
+        # The insight write of the dream in progress, which a cancelled dream
+        # leaves running in its thread (#562); shutdown waits for it.
+        self._crystal_write: Optional[asyncio.Task] = None
         self._notify_task: Optional[asyncio.Task] = None
         self._notifier: Optional[HubNotifier] = None
 
@@ -681,6 +706,11 @@ class HubPlugin(BasePlugin):
         self._presence_sweep_task: Optional[asyncio.Task] = None
         self._supervisor_task: Optional[asyncio.Task] = None
         self._supervisor_state = SupervisorState()
+        self._wake_hooks = WakeHookEngine(
+            lambda path, default=None: (
+                self.config.get(path, default) if self.config else default
+            )
+        )
         # Bounded (timestamp, text) pairs surfaced in /hub status (issue #283).
         self._supervisor_alerts: List[Tuple[float, str]] = []
         # Bounded (timestamp, text) pairs for sends that did not reach their
@@ -697,6 +727,7 @@ class HubPlugin(BasePlugin):
         # (another session polls the shared token). See _messaging_bridge_loop.
         self._bridge_polling: bool = False
         self._hub_cron_jobs: List[HubCronJob] = []
+        self._recurring_jobs: Optional[RecurringJobs] = None
         self._recent_hub_msgs: Dict[str, float] = {}  # hash -> timestamp
         self._hub_wake_seen_ids: collections.OrderedDict[str, float] = (
             collections.OrderedDict()
@@ -739,6 +770,10 @@ class HubPlugin(BasePlugin):
 
         # Message deduplication (LRU via OrderedDict, capped at 1000)
         self._seen_messages: collections.OrderedDict = collections.OrderedDict()
+        # Messages the ACP retry queue refused (#581). Their dedup marks stay, so
+        # a retransmission skips display, vault and bridge effects it already
+        # had, and only asks the queue again.
+        self._refused_observations: collections.OrderedDict = collections.OrderedDict()
 
         # Content dedup: TTL dict keyed by MD5("from_identity:content").
         # Guards against verbatim duplicates produced by concurrent agent
@@ -764,12 +799,14 @@ class HubPlugin(BasePlugin):
                     "identity": "",
                     "roster": DEFAULT_ROSTER,
                     "auto_help": False,
+                    "dispatch_list_enabled": False,
                     "mailbox_poll_interval": 5,
                     "dreaming_enabled": True,
                     "dreaming_idle_threshold": 300,
                     "dreaming_interval": 900,
                     "dreaming_stream_depth": 100,
                     "dreaming_model": "",
+                    "hub_jobs": default_job_config(),
                     "supervisor_enabled": True,
                     "supervisor_poll_interval": 10,
                     "supervisor_stall_threshold": 900,
@@ -779,6 +816,7 @@ class HubPlugin(BasePlugin):
                     "supervisor_alert_cooldown": 900,
                     "supervisor_handoff_ack_timeout": 120,
                     "supervisor_handoff_resend": False,
+                    "hooks": default_hook_config(),
                     "notify_enabled": False,
                     "notify_channel": "",
                     "notify": {
@@ -867,6 +905,51 @@ class HubPlugin(BasePlugin):
                     "label": "Enabled",
                     "config_path": "plugins.hub.enabled",
                     "help": "Enable agent hub for multi-agent collaboration",
+                },
+                {
+                    "type": "checkbox",
+                    "label": "Koordinator Refresh Job",
+                    "config_path": "plugins.hub.hub_jobs.koordinator_refresh.enabled",
+                    "help": (
+                        "Coordinator sends this recurring job on its schedule "
+                        "(schedule, target and prompt: config.json). Off by default."
+                    ),
+                },
+                {
+                    "type": "checkbox",
+                    "label": "Idle Sweep Job",
+                    "config_path": "plugins.hub.hub_jobs.idle_sweep.enabled",
+                    "help": (
+                        "Coordinator sends this recurring job on its schedule "
+                        "(schedule, target and prompt: config.json). Off by default."
+                    ),
+                },
+                {
+                    "type": "checkbox",
+                    "label": "Re-review Job",
+                    "config_path": "plugins.hub.hub_jobs.re_review.enabled",
+                    "help": (
+                        "Coordinator sends this recurring job on its schedule "
+                        "(schedule, target and prompt: config.json). Off by default."
+                    ),
+                },
+                {
+                    "type": "checkbox",
+                    "label": "KPI Rebuild Job",
+                    "config_path": "plugins.hub.hub_jobs.kpi_rebuild.enabled",
+                    "help": (
+                        "Coordinator sends this recurring job on its schedule "
+                        "(schedule, target and prompt: config.json). Off by default."
+                    ),
+                },
+                {
+                    "type": "checkbox",
+                    "label": "Hub Heartbeat Job",
+                    "config_path": "plugins.hub.hub_jobs.hub_heartbeat.enabled",
+                    "help": (
+                        "Coordinator sends this recurring job on its schedule "
+                        "(schedule, target and prompt: config.json). Off by default."
+                    ),
                 },
                 {
                     "type": "checkbox",
@@ -1264,6 +1347,8 @@ class HubPlugin(BasePlugin):
             )
             or None,
             solo=hub_solo_by_env(),
+            parent_identity=os.environ.get("KOLLAB_PARENT_IDENTITY", "").strip(),
+            parent_agent_id=os.environ.get("KOLLAB_PARENT_AGENT_ID", "").strip(),
             # The model rides in presence, so a row reads the same before the
             # engine opens this agent as after.
             tags={"model": model} if model else {},
@@ -1287,6 +1372,7 @@ class HubPlugin(BasePlugin):
         from kollabor_tui.display_tap import DisplayTap
 
         self._display_tap = DisplayTap(history_size=200, on_event=self._follow_tool)
+        self._display_tap.conversation_source = self._live_conversation_uid
         if self.event_bus:
             self.event_bus.register_service("display_tap", self._display_tap)
 
@@ -1299,6 +1385,7 @@ class HubPlugin(BasePlugin):
 
         # Work queue
         self._work_queue = WorkQueue()
+        self._queue_sweep_scheduler = SweepScheduler()
 
         # Register slash commands
         if self.command_registry:
@@ -1351,13 +1438,16 @@ class HubPlugin(BasePlugin):
         #          <hub_msg to="x" kind="answer">msg</hub_msg>
         #          <hub_msg to="x">msg  (unclosed)
         # `to` is required; the rest are optional and may come in any order.
-        # task_id is optional: when present, the receiver's TaskLedger mint
-        # is deterministic (issue #211 addendum — handoffs were invisible to
-        # the tracker because nothing could carry an id).
+        # task_id, worktree, and commit are optional assignment metadata. The
+        # worktree and commit let a reborn coordinator inspect the assigned lane.
         hub_msg_pat = tag_pattern(
             "hub_msg",
             required={"to": "some"},
-            valid={"task_id": r"[0-9A-Za-z._:@-]+"},
+            valid={
+                "task_id": r"[0-9A-Za-z._:@-]+",
+                "worktree": r".+",
+                "commit": r"[0-9A-Za-z._/@:-]+",
+            },
             end="body?",
         )
 
@@ -1372,6 +1462,8 @@ class HubPlugin(BasePlugin):
                 "kind": attrs.get("kind", "").strip().lower(),
                 "notify_kind": attrs.get("notify_kind", "").strip().lower(),
                 "task_id": attrs.get("task_id", "").strip(),
+                "worktree": attrs.get("worktree", "").strip(),
+                "commit": attrs.get("commit", "").strip(),
                 "content": m.group(2).strip(),
             }
 
@@ -1382,6 +1474,81 @@ class HubPlugin(BasePlugin):
             _extract_hub_msg,
         )
         tool_executor.register_plugin_handler("hub_msg", self._handle_hub_msg_tool)
+
+
+        # Explicit coordinator-owned verification is intentionally separate from
+        # a worker's self-reported task completion.
+        hub_dispatch_verify_pat = tag_pattern(
+            "hub_dispatch_verify",
+            required={"dispatch_id": "some"},
+            valid={"dispatch_id": r"[0-9A-Za-z._:@-]+"},
+            end="body?",
+        )
+
+        def _extract_hub_dispatch_verify(m):
+            attrs = tag_attrs(m.group(1))
+            return {
+                "dispatch_id": attrs.get("dispatch_id", "").strip(),
+                "note": m.group(2).strip(),
+            }
+
+        response_parser.register_plugin_tag(
+            "hub_dispatch_verify",
+            hub_dispatch_verify_pat,
+            "hub_dispatch_verify",
+            _extract_hub_dispatch_verify,
+        )
+        tool_executor.register_plugin_handler(
+            "hub_dispatch_verify", self._handle_hub_dispatch_verify_tool
+        )
+
+        # Read-only paging over this coordinator's unresolved dispatches (#656).
+        # Opt-in: without plugins.hub.dispatch_list_enabled the tags are not
+        # registered, so the model never sees a tool that does not exist.
+        if self._dispatch_list_enabled():
+            hub_dispatch_list_pat = tag_pattern(
+                "hub_dispatch_list",
+                valid={"page": r"\d+", "per_page": r"\d+"},
+                end="/?>",
+            )
+
+            def _extract_hub_dispatch_list(m):
+                attrs = tag_attrs(m.group(1))
+                return {
+                    "page": attrs.get("page", ""),
+                    "per_page": attrs.get("per_page", ""),
+                }
+
+            response_parser.register_plugin_tag(
+                "hub_dispatch_list",
+                hub_dispatch_list_pat,
+                "hub_dispatch_list",
+                _extract_hub_dispatch_list,
+            )
+            tool_executor.register_plugin_handler(
+                "hub_dispatch_list", self._handle_hub_dispatch_list_tool
+            )
+
+            hub_dispatch_read_pat = tag_pattern(
+                "hub_dispatch_read",
+                required={"dispatch_id": "some"},
+                valid={"dispatch_id": r"[0-9A-Za-z._:@-]+"},
+                end="/?>",
+            )
+
+            def _extract_hub_dispatch_read(m):
+                attrs = tag_attrs(m.group(1))
+                return {"dispatch_id": attrs.get("dispatch_id", "").strip()}
+
+            response_parser.register_plugin_tag(
+                "hub_dispatch_read",
+                hub_dispatch_read_pat,
+                "hub_dispatch_read",
+                _extract_hub_dispatch_read,
+            )
+            tool_executor.register_plugin_handler(
+                "hub_dispatch_read", self._handle_hub_dispatch_read_tool
+            )
 
         # --- hub_reply ---
         # Shorthand for replying in-thread. The agent doesn't need to track
@@ -1809,13 +1976,20 @@ class HubPlugin(BasePlugin):
         )
         tool_executor.register_plugin_handler("hub_spawn", self._handle_hub_spawn_tool)
 
-        # hub_queue
+        # hub_queue: body-only remains valid; refs are explicit attributes.
         def _extract_hub_queue(m):
-            return {"task": m.group(1).strip()}
+            attrs = tag_attrs(m.group(1))
+            refs = attrs.get("upstream_refs", "")
+            return {
+                "task": m.group(2).strip(),
+                "upstream_refs": [
+                    ref.strip() for ref in refs.split(",") if ref.strip()
+                ],
+            }
 
-        queue_pat = _re.compile(
-            r"<hub_queue>(.*?)</hub_queue>",
-            _re.DOTALL | _re.IGNORECASE,
+        queue_pat = tag_pattern(
+            "hub_queue",
+            valid={"upstream_refs": r"#\d+(?:\s*,\s*#\d+)*"},
         )
         response_parser.register_plugin_tag(
             "hub_queue", queue_pat, "hub_queue", _extract_hub_queue
@@ -2590,6 +2764,15 @@ class HubPlugin(BasePlugin):
                 output="empty content, nothing saved",
             )
 
+        body_error = _crystal_body_limit_error("vault_write", content)
+        if body_error:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="vault_write",
+                success=False,
+                error=body_error,
+            )
+
         if not self._crystal_store:
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
@@ -2620,7 +2803,7 @@ class HubPlugin(BasePlugin):
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="vault_write",
                 success=False,
-                output=f"vault_write error: {e}",
+                error=f"vault_write error: {e}",
             )
 
     async def _handle_global_vault_write_tool(self, tool_data: dict[str, Any]):
@@ -2636,6 +2819,15 @@ class HubPlugin(BasePlugin):
                 tool_type="global_vault_write",
                 success=True,
                 output="empty content, nothing saved",
+            )
+
+        body_error = _crystal_body_limit_error("global_vault_write", content)
+        if body_error:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="global_vault_write",
+                success=False,
+                error=body_error,
             )
 
         if not self._global_crystal_store:
@@ -2667,7 +2859,7 @@ class HubPlugin(BasePlugin):
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="global_vault_write",
                 success=False,
-                output=f"global_vault_write error: {e}",
+                error=f"global_vault_write error: {e}",
             )
 
     async def _handle_crystal_search_tool(self, tool_data: dict[str, Any]):
@@ -2777,18 +2969,53 @@ class HubPlugin(BasePlugin):
             ]
             output = "\n".join(lines)
 
-            # Context limit: 3000 chars
-            if len(output) > 3000:
+            # Keep the tool response within the context budget while ensuring
+            # unbounded metadata cannot consume the space reserved for the body.
+            output_limit = 3000
+            header_limit = 600
+            if len(output) > output_limit:
                 body = entry.body
-                truncation_note = f"[truncated, {len(body)} chars total]"
-                header = (
-                    f"[{entry.id}] {entry.summary}\n"
-                    f"date: {entry.date}\n"
-                    f"keywords: {', '.join(entry.keywords)}\n"
-                    "---\n"
+                keywords = ", ".join(entry.keywords)
+
+                def _bounded_metadata(value: str, limit: int) -> Tuple[str, bool]:
+                    if len(value) <= limit:
+                        return value, False
+                    return value[: max(0, limit - 1)] + "…", True
+
+                summary_line, summary_truncated = _bounded_metadata(
+                    f"[{entry.id}] {entry.summary}  [{tier}]", 240
                 )
-                available = 3000 - len(header) - len(truncation_note) - 1
-                output = header + body[:available] + "\n" + truncation_note
+                date_line, date_truncated = _bounded_metadata(
+                    f"date: {entry.date}", 80
+                )
+                fixed_header = f"{summary_line}\n{date_line}\nkeywords: "
+                separator = "\n---\n"
+                metadata_note = "\n[metadata truncated]"
+                keyword_limit = max(
+                    0,
+                    header_limit
+                    - len(fixed_header)
+                    - len(separator)
+                    - len(metadata_note),
+                )
+                keyword_text, keywords_truncated = _bounded_metadata(
+                    keywords, keyword_limit
+                )
+                header = fixed_header + keyword_text
+                if summary_truncated or date_truncated or keywords_truncated:
+                    header += metadata_note
+                header += separator
+
+                available = output_limit - len(header)
+                if len(body) > available:
+                    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+                    body_note = (
+                        f"[body truncated, {len(body)} chars total; sha256={digest}]"
+                    )
+                    available = max(0, output_limit - len(header) - len(body_note) - 1)
+                    output = header + body[:available] + "\n" + body_note
+                else:
+                    output = header + body
 
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
@@ -2911,6 +3138,15 @@ class HubPlugin(BasePlugin):
                     output="empty body",
                 )
 
+            body_error = _crystal_body_limit_error("crystal_edit", body)
+            if body_error:
+                return ToolExecutionResult(
+                    tool_id=tool_data.get("id", "unknown"),
+                    tool_type="crystal_edit",
+                    success=False,
+                    error=body_error,
+                )
+
             summary = tool_data.get("summary")
             keywords = tool_data.get("keywords")
             entry = self._crystal_store.update_entry(
@@ -2946,7 +3182,7 @@ class HubPlugin(BasePlugin):
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="crystal_edit",
                 success=False,
-                output=f"crystal_edit error: {e}",
+                error=f"crystal_edit error: {e}",
             )
 
     async def _handle_crystal_delete_tool(self, tool_data: dict[str, Any]):
@@ -3084,6 +3320,39 @@ class HubPlugin(BasePlugin):
             turn.ended = True
             turn.failed = turn.failed or failed
         self._publish_idle_if_settled()
+
+    async def report_detached_chain_break(self, *, reason: str) -> bool:
+        """Tell the agent that started this detached process that work stopped."""
+        identity = getattr(self, "_identity", None)
+        parent = str(getattr(identity, "parent_identity", "") or "").strip()
+        if not identity or not parent or parent == getattr(identity, "identity", ""):
+            return False
+
+        task = redact_secrets(str(getattr(identity, "current_task", "") or "").strip())
+        task = task[:200] or "unknown task"
+        child = str(getattr(identity, "identity", "") or "detached agent")
+        message = HubMessage(
+            action="message",
+            from_agent=identity.agent_id,
+            from_identity=child,
+            to=parent,
+            content=(
+                f"Detached agent '{child}' stopped before completing its task "
+                f"after {reason}. Current task: {task}. "
+                "Please send a recovery instruction."
+            ),
+            scope=MessageScope.DIRECT.value,
+            force=True,
+            metadata={"task_report": True, "chain_break": True},
+        )
+        try:
+            rejections = await self._route_message(message)
+        except Exception:
+            logger.debug("detached chain-break report failed", exc_info=True)
+            return False
+        if rejections:
+            logger.debug("detached chain-break report rejected: %s", rejections)
+        return not rejections
 
     async def settle_network_turn(self, llm, now: Optional[float] = None) -> None:
         """Relay tick: send the end-of-turn frame of a request whose turn is over.
@@ -3320,6 +3589,180 @@ class HubPlugin(BasePlugin):
         return str(target or "").strip().casefold() in aliases
 
 
+    async def _handle_hub_dispatch_verify_tool(self, tool_data: dict):
+        """Mark an assignment verified only from its original assigner."""
+        from kollabor_agent.tool_executor import ToolExecutionResult
+
+        dispatch_id = str(tool_data.get("dispatch_id", "") or "").strip()
+        note = str(tool_data.get("note", tool_data.get("content", "")) or "").strip()
+        verified_by = str(
+            getattr(self._identity, "identity", "") if self._identity else ""
+        ).strip()
+        if not self._task_ledger or not verified_by:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_dispatch_verify",
+                success=False,
+                output="",
+                error="Dispatch verification is unavailable without an active identity and TaskLedger.",
+            )
+        if not dispatch_id or not note:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_dispatch_verify",
+                success=False,
+                output="",
+                error="Provide a dispatch_id and a concise verification note.",
+            )
+
+        try:
+            verified = await asyncio.to_thread(
+                self._task_ledger.mark_dispatch_verified,
+                dispatch_id,
+                verified_by=verified_by,
+                note=note,
+            )
+        except Exception as e:
+            logger.exception("failed to verify hub dispatch %s", dispatch_id)
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_dispatch_verify",
+                success=False,
+                output="",
+                error=f"Could not save dispatch verification: {e}",
+            )
+        if not verified:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_dispatch_verify",
+                success=False,
+                output="",
+                error=(
+                    "Dispatch was not marked verified. Only its original assigner can "
+                    "verify it, and only after a worker report is recorded."
+                ),
+            )
+        return ToolExecutionResult(
+            tool_id=tool_data.get("id", "unknown"),
+            tool_type="hub_dispatch_verify",
+            success=True,
+            output=f"Dispatch {dispatch_id} marked verified by {verified_by}.",
+        )
+
+
+    def _dispatch_list_enabled(self) -> bool:
+        """Whether the opt-in dispatch list/read tags are on (default off)."""
+        try:
+            return bool(
+                self.config and self.config.get("plugins.hub.dispatch_list_enabled", False)
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _dispatch_int_arg(value, default: int, maximum: int) -> int:
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError):
+            return default
+        return min(max(number, 1), maximum)
+
+    async def _handle_hub_dispatch_list_tool(self, tool_data: dict):
+        """List one page of this coordinator's unresolved dispatches (read-only)."""
+        from kollabor_agent.tool_executor import ToolExecutionResult
+
+        tool_id = tool_data.get("id", "unknown")
+        verified_by = str(
+            getattr(self._identity, "identity", "") if self._identity else ""
+        ).strip()
+        if not self._task_ledger or not verified_by:
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_list", success=False,
+                output="", error="Dispatch listing is unavailable without an active identity and TaskLedger.",
+            )
+        page = self._dispatch_int_arg(tool_data.get("page", 1), 1, 10_000)
+        per_page = self._dispatch_int_arg(tool_data.get("per_page", 10), 10, 50)
+        try:
+            items, total = await asyncio.to_thread(
+                self._task_ledger.get_dispatches_page,
+                verified_by,
+                page=page,
+                per_page=per_page,
+            )
+        except Exception as e:
+            logger.exception("failed to list hub dispatches")
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_list", success=False,
+                output="", error=f"Could not read dispatches: {e}",
+            )
+        if total == 0:
+            output = "no unresolved dispatches"
+        elif not items:
+            pages = -(-total // per_page)
+            output = (
+                f"no dispatches on page {page} ({total} unresolved; "
+                f"pages 1-{pages})"
+            )
+        else:
+            pages = -(-total // per_page)
+            lines = [
+                f"unresolved dispatches ({total} unresolved; page {page} of {pages}, "
+                "newest first):"
+            ]
+            for item in items:
+                lines.append(
+                    f"  [{item.get('status', 'unknown')}] dispatch "
+                    f"{item.get('dispatch_id', item.get('message_id', ''))} -> "
+                    f"{item.get('assignee', '')} (task {item.get('task_id', '')})"
+                )
+            output = "\n".join(lines)
+        return ToolExecutionResult(
+            tool_id=tool_id, tool_type="hub_dispatch_list", success=True, output=output,
+        )
+
+    async def _handle_hub_dispatch_read_tool(self, tool_data: dict):
+        """Return one full dispatch record this coordinator assigned (read-only)."""
+        from kollabor_agent.tool_executor import ToolExecutionResult
+
+        tool_id = tool_data.get("id", "unknown")
+        dispatch_id = str(tool_data.get("dispatch_id", "") or "").strip()
+        verified_by = str(
+            getattr(self._identity, "identity", "") if self._identity else ""
+        ).strip()
+        if not self._task_ledger or not verified_by or not dispatch_id:
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_read", success=False,
+                output="", error="Provide a dispatch_id; reading needs an active identity and TaskLedger.",
+            )
+        try:
+            record = await asyncio.to_thread(self._task_ledger.get_dispatch, dispatch_id)
+        except Exception as e:
+            logger.exception("failed to read hub dispatch %s", dispatch_id)
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_read", success=False,
+                output="", error=f"Could not read dispatch: {e}",
+            )
+        if not record or record.get("assigned_by") != verified_by:
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="hub_dispatch_read", success=False,
+                output="", error="No dispatch with that ID is assigned by you.",
+            )
+        fields = (
+            "dispatch_id", "status", "task_id", "assignee", "assigned_by",
+            "directive", "thread_id", "worktree", "commit", "reported_worktree",
+            "reported_commit", "report", "delivery_error", "verified_by",
+            "verification_note", "created_at", "updated_at",
+        )
+        lines = []
+        for name in fields:
+            value = record.get(name)
+            if value not in (None, ""):
+                lines.append(f"{name}: {value}")
+        return ToolExecutionResult(
+            tool_id=tool_id, tool_type="hub_dispatch_read", success=True,
+            output="\n".join(lines),
+        )
+
     async def _handle_hub_msg_tool(self, tool_data: dict):
         """Execute a hub_msg tool extracted by the pipeline."""
         from kollabor_agent.tool_executor import ToolExecutionResult
@@ -3349,12 +3792,22 @@ class HubPlugin(BasePlugin):
         target = str(target or "").strip()
         content = str(content or "").strip()
         attrs, embedded_content = embedded_attrs("hub_msg", target) or ({}, "")
-        # Only the attributes this recovery has always understood; anything else
-        # (kind, thread_id) stays a literal target and fails loudly.
-        if "to" in attrs and set(attrs) <= {"to", "wait", "force"}:
+        # Recover the attributes supported by the native hub_msg schema; relay
+        # control attributes still must be passed in their dedicated fields.
+        if "to" in attrs and set(attrs) <= {
+            "to",
+            "wait",
+            "force",
+            "task_id",
+            "worktree",
+            "commit",
+        }:
             target = attrs["to"].strip()
             wait_attr = str(wait_attr or attrs.get("wait", "")).lower()
             force_attr = str(force_attr or attrs.get("force", "")).lower()
+            for field in ("task_id", "worktree", "commit"):
+                if field in attrs and not tool_data.get(field):
+                    tool_data[field] = attrs[field]
             if not content and embedded_content:
                 content = embedded_content.strip()
 
@@ -3601,8 +4054,6 @@ class HubPlugin(BasePlugin):
                 ),
                 metadata={"end_turn": True} if any_wait else None,
             )
-        if not target.startswith("relay:") and not handle:
-            self._recent_hub_msgs[msg_hash] = now
 
         # Resolve thread context
         is_reply = tool_data.get("_is_reply", False)
@@ -3644,6 +4095,12 @@ class HubPlugin(BasePlugin):
         task_id = str(tool_data.get("task_id", "") or "").strip()
         if task_id:
             metadata["task_id"] = task_id
+        worktree = str(tool_data.get("worktree", "") or "").strip()
+        commit = str(tool_data.get("commit", "") or "").strip()
+        if worktree:
+            metadata["worktree"] = worktree
+        if commit:
+            metadata["commit"] = commit
         if relay_kind != "answer":
             if self._is_ack_only_content(
                 content, sender_has_active_task=sender_has_task
@@ -3665,28 +4122,6 @@ class HubPlugin(BasePlugin):
             ):
                 metadata["task_assignment"] = True
 
-        # A tagged handoff to a local agent is tracked on the ledger until
-        # the assignee acknowledges it (issue #283).
-        if (
-            metadata.get("task_assignment")
-            and task_id
-            and not handle
-            and not target.startswith("relay:")
-            and self._task_ledger
-            and self._identity
-            and target not in ("all", "*", "everyone", "team", "project")
-        ):
-            try:
-                begin_handoff(
-                    self._task_ledger,
-                    task_id,
-                    self._identity.identity,
-                    target,
-                    content,
-                )
-            except Exception as e:
-                logger.debug("failed to track handoff %s: %s", task_id, e)
-
         # Route the message
         msg = HubMessage(
             action="message",
@@ -3701,13 +4136,109 @@ class HubPlugin(BasePlugin):
             reply_to=reply_to,
             metadata=metadata,
         )
+
+        if metadata.get("task_assignment") and not metadata.get("task_id"):
+            # Use the stable outbound message ID as the task ID when callers do
+            # not provide one, so the receiver and dispatch ledger can correlate.
+            metadata["task_id"] = msg.id
+        task_id = str(metadata.get("task_id") or "").strip()
+
+        is_trackable_assignment = bool(
+            metadata.get("task_assignment")
+            and not handle
+            and not target.startswith("relay:")
+            and target not in ("all", "*", "everyone", "team", "project")
+        )
+        dispatch_id = ""
+        if is_trackable_assignment:
+            assigned_by = str(
+                getattr(self._identity, "identity", "") if self._identity else ""
+            ).strip()
+            if not self._task_ledger or not assigned_by:
+                return ToolExecutionResult(
+                    tool_id=tool_data.get("id", "unknown"),
+                    tool_type="hub_msg",
+                    success=False,
+                    output="",
+                    error=(
+                        "Task assignment was not sent: the durable dispatch ledger "
+                        "or coordinator identity is unavailable."
+                    ),
+                )
+            try:
+                dispatch_record = await asyncio.to_thread(
+                    self._task_ledger.record_dispatch,
+                    task_id=str(metadata.get("task_id") or msg.id),
+                    assigned_by=assigned_by,
+                    assignee=target,
+                    directive=content,
+                    message_id=msg.id,
+                    thread_id=msg.thread_id,
+                    worktree=worktree,
+                    commit=commit,
+                )
+            except Exception as e:
+                logger.exception("failed to persist hub dispatch to %s", target)
+                return ToolExecutionResult(
+                    tool_id=tool_data.get("id", "unknown"),
+                    tool_type="hub_msg",
+                    success=False,
+                    output="",
+                    error=(
+                        "Task assignment was not sent because its durable dispatch "
+                        f"record could not be saved: {e or type(e).__name__}"
+                    ),
+                )
+            dispatch_id = msg.id
+            dispatch_status = str(dispatch_record.get("status") or "dispatching")
+            if dispatch_status not in {"dispatching", "delivery_failed"}:
+                logger.info(
+                    "not rerouting dispatch %s already in status %s",
+                    dispatch_id,
+                    dispatch_status,
+                )
+                return ToolExecutionResult(
+                    tool_id=tool_data.get("id", "unknown"),
+                    tool_type="hub_msg",
+                    success=True,
+                    output=(
+                        f"Dispatch {dispatch_id} is already {dispatch_status}; "
+                        "not sent again."
+                    ),
+                    metadata={"end_turn": True} if any_wait else None,
+                )
+            metadata["dispatch_id"] = dispatch_id
+        # Apply the existing TaskLedger handoff hint only after the durable
+        # write-ahead record has been saved and before routing begins.
+        if (
+            metadata.get("task_assignment")
+            and task_id
+            and not handle
+            and not target.startswith("relay:")
+            and self._task_ledger
+            and self._identity
+            and target not in ("all", "*", "everyone", "team", "project")
+        ):
+            try:
+                await asyncio.to_thread(
+                    begin_handoff,
+                    self._task_ledger,
+                    task_id,
+                    self._identity.identity,
+                    target,
+                    content,
+                )
+            except Exception as e:
+                logger.debug("failed to track handoff %s: %s", task_id, e)
+
         if (
             metadata.get("task_assignment")
             and self._task_ledger
             and target not in ("all", "*", "everyone", "team", "project")
         ):
             try:
-                self._task_ledger.expect_reply(
+                await asyncio.to_thread(
+                    self._task_ledger.expect_reply,
                     task_id=str(metadata.get("task_id") or msg.id),
                     assignee=target,
                     requested_by=(
@@ -3718,7 +4249,53 @@ class HubPlugin(BasePlugin):
                 )
             except Exception as e:
                 logger.debug("failed to record expected hub reply: %s", e)
-        rejections = await self._route_message(msg)
+        try:
+            rejections = await self._route_message(msg)
+        except Exception as e:
+            if not dispatch_id:
+                raise
+            try:
+                updated = await asyncio.to_thread(
+                    self._task_ledger.update_dispatch,
+                    dispatch_id,
+                    status="delivery_failed",
+                    delivery_error=f"routing failed: {e or type(e).__name__}",
+                )
+                if not updated:
+                    logger.warning(
+                        "dispatch %s could not record route failure", dispatch_id
+                    )
+            except Exception:
+                logger.exception(
+                    "failed to persist route failure for dispatch %s", dispatch_id
+                )
+            logger.exception("failed to route task dispatch %s to %s", dispatch_id, target)
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_msg",
+                success=False,
+                output="",
+                error=(
+                    "Task assignment could not be routed: "
+                    f"{e or type(e).__name__}"
+                ),
+            )
+        if dispatch_id:
+            dispatch_status = "delivery_failed" if rejections else "in_flight"
+            dispatch_error = "; ".join(
+                f"{recipient}: {reason}" for recipient, reason in (rejections or [])
+            )
+            try:
+                updated = await asyncio.to_thread(
+                    self._task_ledger.update_dispatch,
+                    dispatch_id,
+                    status=dispatch_status,
+                    delivery_error=dispatch_error,
+                )
+                if not updated:
+                    logger.warning("dispatch %s could not transition to %s", dispatch_id, dispatch_status)
+            except Exception:
+                logger.exception("failed to update delivery state for %s", dispatch_id)
         if notify_kind and not relay_turn_active and not rejections:
             self._queue_operator_notification(content, notify_kind)
         self._display_outgoing_message(target, content)
@@ -3739,7 +4316,7 @@ class HubPlugin(BasePlugin):
         if rejections:
             parts = []
             for ident, reason in rejections:
-                parts.append(f"{ident}: {reason}")
+                parts.append(f"{ident}: {reason or 'refused with no reason given'}")
                 self._record_dispatch_failure(ident, reason)
             output = f"[hub_msg] rejected: {'; '.join(parts)}." + (
                 # The reason already says what to do; force means nothing here.
@@ -3815,8 +4392,11 @@ class HubPlugin(BasePlugin):
         else:
             output = f"delivered to {target}"
 
+        metadata["delivery"] = self._delivery_evidence(msg, target)
         if any_wait and not warned:
             metadata["end_turn"] = True
+        if not target.startswith("relay:") and not handle:
+            self._recent_hub_msgs[msg_hash] = time.time()
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="hub_msg",
@@ -3824,6 +4404,30 @@ class HubPlugin(BasePlugin):
             output=output,
             metadata=metadata,
         )
+
+    @staticmethod
+    def _delivery_evidence(msg: HubMessage, target: str) -> dict:
+        """How far a hub_msg got, for the sender to read.
+
+        ``confirmed``: a recipient's hub socket acked this message's id.
+        ``accepted``: a network peer accepted it (acceptance is not reading).
+        ``queued``: it sits in a mailbox; the recipient has not taken it.
+        ``unconfirmed``: nothing acked it and nothing queued it.
+        """
+        meta = msg.metadata or {}
+        acked = list(meta.get("_acked_by", []))
+        if meta.get("relay_receipt") or meta.get("network"):
+            state = "accepted"
+        elif meta.get("_queued_for") or meta.get("_socket_failed"):
+            state = "queued"
+        elif acked and (
+            target in acked or msg.scope != MessageScope.DIRECT.value
+        ):
+            state = "confirmed"
+        else:
+            state = "unconfirmed"
+        # Ids stay out: a tool result reaches attached clients and the model.
+        return {"state": state, "recipients": acked}
 
     async def _handle_hub_broadcast_tool(self, tool_data: dict):
         """Execute a hub_broadcast tool."""
@@ -4742,7 +5346,22 @@ class HubPlugin(BasePlugin):
                 error="task description required",
             )
 
-        result = self._handle_queue_command(task)
+        raw_upstream_refs = tool_data.get("upstream_refs", [])
+        if raw_upstream_refs is None:
+            raw_upstream_refs = []
+        if not isinstance(raw_upstream_refs, list) or any(
+            not isinstance(ref, str) or not re.fullmatch(r"#\d+", ref.strip())
+            for ref in raw_upstream_refs
+        ):
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="hub_queue",
+                success=False,
+                error="upstream_refs must be an array of GitHub refs like '#123'",
+            )
+        upstream_refs = [ref.strip() for ref in raw_upstream_refs]
+
+        result = self._handle_queue_command(task, upstream_refs=upstream_refs)
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="hub_queue",
@@ -5175,6 +5794,54 @@ class HubPlugin(BasePlugin):
                 f"(identity={identity}): {e}"
             )
 
+    # Deadline nesting (zircon REQUEST_CHANGES @1ce1fc92): this gate runs
+    # between bind and signal_daemon_ready, and the fork parent SIGKILLs a
+    # child that has not signaled within 15s (kollabor/daemon.py:115),
+    # while the app-level wait_until_ready allows 30s
+    # (kollabor/application.py:1611). The gate must finish strictly inside
+    # the parent budget: 10 < 15 < 30, so the degraded publish and the
+    # ready signal always land while the child is still alive, and the
+    # outer wait keeps margin over both.
+    SOCKET_ANSWER_DEADLINE_SECONDS = 10.0
+
+    async def _signal_ready_then_advertise(self, socket_path: str) -> None:
+        """Signal the fork parent, then gate presence advertisement (#692).
+
+        The ready pipe needs only the deterministic socket path, so the
+        signal goes first: the fork parent's 15s budget is mostly consumed
+        by plugin startup before this method runs, and holding the signal
+        behind a socket-answer wait can push it past the budget on any slow
+        start. Third-party presence stays gated inside the advertise step.
+        """
+        # Signal daemon-ready if running in fork-daemon mode
+        try:
+            from kollabor.daemon import signal_daemon_ready
+
+            signal_daemon_ready(socket_path)
+        except Exception:
+            pass  # Not in daemon mode, or import failed
+        await self._advertise_presence_when_socket_answers(socket_path)
+
+    async def _advertise_presence_when_socket_answers(
+        self, socket_path: str, timeout: float = SOCKET_ANSWER_DEADLINE_SECONDS
+    ) -> None:
+        """Publish presence once the endpoint answers a handshake (#692).
+
+        Bind-return is not serving: a busy startup loop can delay the first
+        handshake seconds past bind-return, and a record advertising a socket
+        that refuses breaks every client that trusts it. When the endpoint
+        never answers within the deadline the publish still goes out --
+        degraded, discoverable-but-refusing -- with an error logged so the
+        condition stays visible. The deadline nests inside the fork parent's
+        15s ready budget (see SOCKET_ANSWER_DEADLINE_SECONDS).
+        """
+        if not await wait_until_socket_answers(socket_path, timeout=timeout):
+            logger.error(
+                f"socket {socket_path} never answered a handshake within "
+                f"{timeout:.0f}s — publishing presence anyway; clients may see refusals"
+            )
+        self._presence.publish()
+
     async def _start_hub(self) -> None:
         """Start hub services (called after all plugins init)."""
         if self._started or self._starting or not self._identity:
@@ -5195,8 +5862,11 @@ class HubPlugin(BasePlugin):
             self._identity.is_coordinator = is_coordinator
 
             # Discover existing agents to get taken identities (solo ones
-            # too: their sockets are named by identity)
-            existing = self._presence.discover_agents(include_solo=True)
+            # too: their sockets are named by identity, and busy ones whose
+            # socket is silent for now still hold theirs, #673)
+            existing = self._presence.discover_agents(
+                include_solo=True, include_busy=True
+            )
             taken = [a.identity for a in existing]
 
             # Resolve active agent for identity and vault config
@@ -5266,9 +5936,13 @@ class HubPlugin(BasePlugin):
                     None,
                 )
                 if holder:
+                    from .presence import _owner_gone
+
+                    # A busy holder answers no ping but is not dead (#673): only an
+                    # owner that is provably gone frees the identity (#575).
                     still_alive = await AgentMessenger.ping_agent(
                         holder.socket_path, timeout=2.0
-                    )
+                    ) or not _owner_gone(holder)
                     if not still_alive:
                         logger.info(
                             f"Force-claiming '{preferred}': holder "
@@ -5524,17 +6198,10 @@ class HubPlugin(BasePlugin):
                     self._endpoint_setup_error = bind_err
                 self._endpoint_uri = ""
 
-            # The window that forked this daemon looks the agent up in presence
-            # the moment it hears "ready"; until now the record had no socket.
-            self._presence.publish()
-
-            # Signal daemon-ready if running in fork-daemon mode
-            try:
-                from kollabor.daemon import signal_daemon_ready
-
-                signal_daemon_ready(socket_path)
-            except Exception:
-                pass  # Not in daemon mode, or import failed
+            # The fork parent needs the ready signal early (its 15s budget is
+            # mostly consumed by plugin startup before this point); presence
+            # advertisement is gated separately inside the helper.
+            await self._signal_ready_then_advertise(socket_path)
 
             # Initialize vault for this identity (if enabled by agent config)
             _vault_enabled = True
@@ -5545,9 +6212,21 @@ class HubPlugin(BasePlugin):
                 self._vault = AgentVault(self._identity.identity)
                 self._vault.touch()
                 # Project-scoped crystal store: work done in this repo
-                self._crystal_store = CrystalStore(self._vault._vault_dir)
+                project_crystals = CrystalStore(self._vault._vault_dir)
                 # Global crystal store: cross-project personality + skills
-                self._global_crystal_store = CrystalStore(self._vault.global_vault_dir)
+                global_crystals = CrystalStore(self._vault.global_vault_dir)
+                # Parse both in a worker thread, and publish them only once loaded:
+                # a reader on the loop never parses a vault or waits on its lock (#562).
+                try:
+                    await asyncio.gather(
+                        asyncio.to_thread(project_crystals.load),
+                        asyncio.to_thread(global_crystals.load),
+                    )
+                except Exception as e:
+                    # Readers parse again on the loop and raise there, as before.
+                    logger.warning(f"crystal stores failed to load at startup: {e}")
+                self._crystal_store = project_crystals
+                self._global_crystal_store = global_crystals
             else:
                 logger.info(f"Vault disabled for agent {self._identity.identity}")
 
@@ -5685,6 +6364,7 @@ class HubPlugin(BasePlugin):
                     crystal_store=self._crystal_store,
                     global_crystal_store=self._global_crystal_store,
                     task_ledger=self._task_ledger,
+                    dispatch_paging=self._dispatch_list_enabled(),
                 )
 
                 # Release stale lane claims from previous session
@@ -5933,11 +6613,16 @@ class HubPlugin(BasePlugin):
         peer_names = [agent.identity for agent in peers]
         peer_list = ", ".join(peer_names) if peer_names else "none"
         new_features = "\n".join(f"  - {feature}" for feature in HUB_NEW_FEATURES)
-        operator_help = (
-            "To stop all agents, submit: /hub stop all\n"
-            f"Tip: {choose_startup_tip()}\n"
-            f"New features:\n{new_features}"
-        )
+        # Advertise stop all only to callers that actually started agents
+        # of their own (issue #669); agents with nothing of their own to
+        # stop get no mesh-wide stop hint.
+        started = self._locally_started_agent_count() > 0
+        help_lines = []
+        if started:
+            help_lines.append("To stop all agents you started, submit: /hub stop all")
+        help_lines.append(f"Tip: {choose_startup_tip(include_stop_all=started)}")
+        help_lines.append(f"New features:\n{new_features}")
+        operator_help = "\n".join(help_lines)
         try:
             renderer.message_coordinator.display_message_sequence(
                 [
@@ -6153,7 +6838,7 @@ class HubPlugin(BasePlugin):
                 if self._identity:
                     messages = AgentMessenger.read_mailboxes(
                         [self._identity.agent_id, self._identity.identity],
-                        max_replay=INBOX_MAX_REPLAY,
+                        max_replay=self._mailbox_replay_cap(INBOX_MAX_REPLAY),
                     )
                     if messages:
                         await self._deliver_inbox_batch(messages)
@@ -6161,6 +6846,24 @@ class HubPlugin(BasePlugin):
                 break
             except Exception as e:
                 logger.debug(f"Mailbox check error: {e}")
+
+    def _mailbox_replay_cap(self, cap: int) -> int:
+        """Return the per-poll cap on ordinary mailbox replay (0 = no cap).
+
+        An ACP agent's queue can refuse a message (#581), and a refused message
+        is only owned again once it is delivered one by one so it can be put
+        back. A capped replay deletes the overflow and coalesces the rest into
+        one block that never reaches the queue, so ACP polls without the cap.
+        The mailbox's own size prune (INBOX_MAX_SIZE) still bounds it.
+        """
+        llm = None
+        try:
+            llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+            if self._agent_dispatch_mode(llm) == "acp":
+                return 0
+        except Exception as exc:
+            logger.debug("mailbox replay cap check failed: %s", exc)
+        return cap
 
     async def _deliver_inbox_batch(self, messages: List[HubMessage]) -> None:
         """Deliver a batch of offline inbox messages.
@@ -6177,7 +6880,17 @@ class HubPlugin(BasePlugin):
             await self._inject_inbox_replay(messages)
         else:
             for msg in messages:
-                await self._on_message_received(msg)
+                await self._deliver_inbox_message(msg)
+
+    async def _deliver_inbox_message(self, msg: HubMessage) -> None:
+        """Deliver one mailbox message; a refusal puts its file back (#581).
+
+        The mailbox read already deleted the file, so a message the ACP retry
+        queue refused would be lost here. It goes back for the next poll, and
+        the mailbox's own age and size limits still apply to it.
+        """
+        if await self._on_message_received(msg) is False and self._identity:
+            await AgentMessenger.send_to_file(self._identity.identity, msg)
 
     async def _inject_inbox_replay(self, messages: List[HubMessage]) -> None:
         """Coalesce a bounded inbox replay into a single injected block.
@@ -6202,9 +6915,23 @@ class HubPlugin(BasePlugin):
         ]
         ordinary_msgs = [msg for msg in replay_msgs if msg not in control_msgs]
         for msg in control_msgs:
-            await self._on_message_received(msg)
+            await self._deliver_inbox_message(msg)
 
         if not ordinary_msgs:
+            return
+
+        llm = None
+        if self.event_bus is not None:
+            try:
+                llm = self.event_bus.get_service("llm_service")
+            except Exception:
+                pass
+
+        # An ACP agent's queue owns each message it admits and can refuse one
+        # (#581); a coalesced block would hide that from it. Deliver one by one.
+        if self._agent_dispatch_mode(llm) == "acp":
+            for msg in ordinary_msgs:
+                await self._deliver_inbox_message(msg)
             return
 
         lines: List[str] = [summary.content, ""]
@@ -6218,13 +6945,6 @@ class HubPlugin(BasePlugin):
             lines.append(f"[{ts}] {sender}: {content_preview}")
 
         block = "\n".join(lines)
-
-        llm = None
-        if self.event_bus is not None:
-            try:
-                llm = self.event_bus.get_service("llm_service")
-            except Exception:
-                pass
 
         if llm is not None and hasattr(llm, "inject_system_message"):
             try:
@@ -6241,7 +6961,7 @@ class HubPlugin(BasePlugin):
 
         # Fallback: individual delivery (no inject_system_message)
         for msg in ordinary_msgs:
-            await self._on_message_received(msg)
+            await self._deliver_inbox_message(msg)
 
     async def _dreaming_loop(self) -> None:
         """Periodically dream when agent is idle -- distill stream into insights.
@@ -6364,11 +7084,16 @@ class HubPlugin(BasePlugin):
                             logger.debug("dreaming: filtered preamble paragraph")
                             continue
                         paragraphs.append(p_stripped)
-                    # On the loop, like every reader of the vault: in a worker
-                    # thread a write outlived a cancelled dream and raced the
-                    # readers (#546).
-                    for paragraph in paragraphs:
-                        self._crystal_store.add_entry(paragraph)
+                    # One worker-thread call for the batch, in order: each add saves
+                    # the whole vault, which stalled the loop (#562). A cancelled
+                    # dream leaves this write running, so shutdown waits for it.
+                    store = self._crystal_store
+                    self._crystal_write = asyncio.create_task(
+                        asyncio.to_thread(
+                            lambda: [store.add_entry(p) for p in paragraphs]
+                        )
+                    )
+                    await asyncio.shield(self._crystal_write)
                     added = len(paragraphs)
                 else:
                     # Fallback to raw append if crystal_store unavailable
@@ -6433,6 +7158,21 @@ class HubPlugin(BasePlugin):
             # Restore previous state (unless something else changed it)
             if self._identity.state == AgentLifecycle.DREAMING.value:
                 self._identity.state = prev_state
+
+    async def _settle_crystal_write(self) -> None:
+        """Wait for an insight write that a cancelled dream left running in its thread.
+
+        The thread outlives the task that awaited it. A save landing after shutdown
+        would write over a newer one (#562), so shutdown calls this after it
+        cancels the dream.
+        """
+        write = getattr(self, "_crystal_write", None)
+        if write is None or write.done():
+            return
+        try:
+            await write
+        except Exception as e:
+            logger.warning(f"dreaming: insight write failed at shutdown: {e}")
 
     async def _vault_autosave_loop(self) -> None:
         """Periodically save working memory so crash != total loss.
@@ -6499,46 +7239,44 @@ class HubPlugin(BasePlugin):
                 projects_root = config_root / "projects"
                 removed = 0
 
+                # POSIX presence lives beside sockets in the HOME-independent
+                # root. Keep scanning per-HOME locations for older live agents.
+                from .presence import _shared_socket_dirs
+
+                presence_dirs = _shared_socket_dirs()
                 if projects_root.exists():
-                    for presence_dir in projects_root.glob("*/hub/presence/*.json"):
-                        try:
-                            with open(presence_dir) as f:
-                                data = json.load(f)
-                            pid = data.get("pid", 0)
-                            if not pid:
-                                continue
+                    presence_dirs.extend(
+                        sorted(projects_root.glob("*/hub/presence"), key=lambda p: str(p))
+                    )
+                presence_dirs.append(config_root / "hub" / "presence")
 
-                            # Check if PID is alive
-                            if not pid_alive(pid):
-                                # PID is dead — remove presence file
-                                identity = data.get("identity", "?")
-                                presence_dir.unlink(missing_ok=True)
-                                removed += 1
-                                logger.info(
-                                    f"presence sweep: removed dead agent "
-                                    f"{identity} (pid {pid}) from "
-                                    f"{presence_dir.parent.parent.parent.name}"
-                                )
-                        except (json.JSONDecodeError, Exception) as e:
-                            logger.debug(
-                                f"presence sweep: bad file {presence_dir}: {e}"
-                            )
-
-                # Also sweep the legacy global hub dir
-                global_presence = config_root / "hub" / "presence"
-                if global_presence.exists():
-                    for pf in global_presence.glob("*.json"):
-                        try:
-                            with open(pf) as f:
-                                data = json.load(f)
-                            pid = data.get("pid", 0)
-                            if not pid:
+                seen_files: set[Path] = set()
+                for presence_dir in presence_dirs:
+                    try:
+                        files = presence_dir.glob("*.json")
+                        for pf in files:
+                            if pf in seen_files:
                                 continue
-                            if not pid_alive(pid):
-                                pf.unlink(missing_ok=True)
-                                removed += 1
-                        except Exception:
-                            pass
+                            seen_files.add(pf)
+                            try:
+                                with open(pf) as f:
+                                    data = json.load(f)
+                                pid = data.get("pid", 0)
+                                if not pid:
+                                    continue
+
+                                if not pid_alive(pid):
+                                    identity = data.get("identity", "?")
+                                    pf.unlink(missing_ok=True)
+                                    removed += 1
+                                    logger.info(
+                                        f"presence sweep: removed dead agent "
+                                        f"{identity} (pid {pid}) from {presence_dir.name}"
+                                    )
+                            except Exception as e:
+                                logger.debug(f"presence sweep: bad file {pf}: {e}")
+                    except OSError as e:
+                        logger.debug(f"presence sweep: cannot scan {presence_dir}: {e}")
 
                 if removed:
                     logger.info(
@@ -7212,6 +7950,33 @@ class HubPlugin(BasePlugin):
         logger.info(f"hub cron fired: {job.id}" f" -> {job.target}")
         return False
 
+    async def _run_hub_jobs(self, now: Optional[float] = None) -> None:
+        """Send the configured recurring hub jobs that are due (coordinator only).
+
+        The jobs are opt-in (``plugins.hub.hub_jobs.<name>.enabled``); see
+        recurring_jobs.py for their guardrails.
+        """
+        if not self._identity or not self._identity.is_coordinator or not self.config:
+            return
+        if self._recurring_jobs is None:
+            from .presence import get_hub_dir
+
+            async def send(name: str, target: str, content: str) -> bool:
+                job = HubCronJob(
+                    id=name,
+                    target=target,
+                    message=content,
+                    interval_seconds=0,
+                    next_fire=0,
+                )
+                await self._fire_cron_job(job)
+                return not job.last_error
+
+            self._recurring_jobs = RecurringJobs(
+                self.config.get, send, get_hub_dir() / "hub_jobs_state.json"
+            )
+        await self._recurring_jobs.tick(time.time() if now is None else now)
+
     async def _cron_loop(self) -> None:
         """Check and fire hub cron jobs + task reminders every 10 seconds."""
         while True:
@@ -7219,6 +7984,8 @@ class HubPlugin(BasePlugin):
                 await asyncio.sleep(10)
                 if not self._identity:
                     continue
+
+                await self._run_hub_jobs()
 
                 has_cron_jobs = bool(self._hub_cron_jobs)
                 has_task_ledger = bool(self._task_ledger)
@@ -7475,6 +8242,97 @@ class HubPlugin(BasePlugin):
                 logger.info(
                     f"Reassigning work {slot_id}: agent {dead_agent} is dead"
                 )
+            # Retire dead work whose upstream already landed (gh
+            # subprocess calls run off the event loop). Throttled by
+            # SweepScheduler: boot + at most once per interval, never
+            # every heartbeat tick, and never fatal to the heartbeat.
+            if self._queue_sweep_scheduler.due(time.monotonic()):
+                try:
+                    await asyncio.to_thread(self._sweep_stale_work_queue)
+                except Exception as e:
+                    logger.warning(f"Work-queue sweep failed: {e}")
+
+    def _sweep_stale_work_queue(self) -> List[WorkSlot]:
+        """Retire stale slots and terminalize their paired ledger cards.
+
+        Active linked cards are preserved with their slot's status unchanged;
+        a claim that races the sweep is also preserved by the atomic ledger
+        terminalize guard and recorded on the slot for the next reader.
+        Retired linked slots are retried after transient ledger write failures.
+        """
+        if not self._work_queue:
+            return []
+
+        task_card_status_checker = None
+        if self._task_ledger:
+
+            def task_card_status_checker(task_card_id: str) -> Optional[str]:
+                try:
+                    card = self._task_ledger.get(task_card_id)
+                except Exception as e:
+                    logger.warning(
+                        "TaskLedger status read failed for card %s: %s",
+                        task_card_id,
+                        e,
+                    )
+                    return None
+                return card.status if card else None
+
+        retired = self._work_queue.sweep_stale(
+            task_card_status_checker=task_card_status_checker
+        )
+        if not self._task_ledger:
+            return retired
+
+        for slot in retired:
+            if not slot.task_card_id:
+                continue
+            reason = slot.retired_reason or "stale work queue slot retired"
+            try:
+                card = self._task_ledger.terminalize(
+                    slot.task_card_id,
+                    status="cancelled",
+                    reason=f"work queue slot [{slot.id}] retired: {reason}",
+                    actor="work-queue-sweep",
+                    preserve_active=True,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Could not cancel task card %s for retired work slot %s: %s",
+                    slot.task_card_id,
+                    slot.id,
+                    e,
+                )
+                continue
+            if card is None:
+                logger.warning(
+                    "Task card %s for retired work slot %s is missing",
+                    slot.task_card_id,
+                    slot.id,
+                )
+            elif card.status == "active":
+                logger.warning(
+                    "Leaving active task card %s for retired work slot %s "
+                    "unchanged; assigned to %s",
+                    slot.task_card_id,
+                    slot.id,
+                    card.assignee or "unknown",
+                )
+                if reason != "terminal slot (completed)":
+                    try:
+                        self._work_queue.record_stale_upstream_note(
+                            slot.id,
+                            f"terminal upstream: {reason}",
+                            restore_pending_reason=reason,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Could not preserve active task card %s work slot %s: %s",
+                            slot.task_card_id,
+                            slot.id,
+                            e,
+                        )
+        return retired
 
     async def _try_assign_work(self) -> None:
         """Try to assign pending work to idle agents using capability matching."""
@@ -8351,7 +9209,8 @@ class HubPlugin(BasePlugin):
         sender = message.from_identity or message.from_agent or ""
         acp = self.event_bus.get_service("acp_orchestrator")
         if acp is not None and acp.active and (message.reply_to or message.to in {"all", "*", "everyone", "team", "project"}):
-            acp.observe_notification(message)
+            if not acp.observe_notification(message):
+                return {"status": "refused", "request_id": message.id}
             return {"status": "queued", "request_id": message.id}
         turns[message.id] = _NetworkTurn(
             handle=sender,
@@ -8443,8 +9302,40 @@ class HubPlugin(BasePlugin):
                 )
         return result
 
-    async def _on_message_received(self, message: HubMessage) -> None:
-        """Handle an incoming message from another agent."""
+    _REFUSED_OBSERVATIONS_MAX = 256
+
+    def _remember_refused_message(self, msg_key: tuple) -> None:
+        """Keep a refused message's dedup marks and note it for a retry (#581).
+
+        The message was already shown, logged and mirrored; a retransmission
+        (socket resend, mailbox replay, relay retry) only asks the queue again.
+        """
+        refused = self._refused_observations
+        refused[msg_key] = None
+        while len(refused) > self._REFUSED_OBSERVATIONS_MAX:
+            # Forget the oldest one's dedup mark too, so its retransmission runs
+            # the whole path again instead of being acknowledged and dropped.
+            oldest, _ = refused.popitem(last=False)
+            self._seen_messages.pop(oldest, None)
+
+    def _retry_refused_observation(self, message: HubMessage, msg_key: tuple) -> bool | None:
+        """Ask the ACP queue again for a message it refused. False: still refused."""
+        acp = self.event_bus.get_service("acp_orchestrator") if self.event_bus else None
+        if acp is None or not getattr(acp, "active", False):
+            # No live session can admit it. It stays refused and unacknowledged,
+            # so a later session can still take it (#581).
+            logger.debug("refused observation kept: the ACP session is not running")
+            return False
+        if not acp.observe_notification(message):
+            return False
+        self._refused_observations.pop(msg_key, None)
+        return None
+
+    async def _on_message_received(self, message: HubMessage) -> bool | None:
+        """Handle an incoming message from another agent.
+
+        Returns False when the message was refused and must not be acknowledged.
+        """
         if self._solo:
             # Peers cannot discover a solo agent; this covers direct sends by
             # name (`kollab --hub send`) so nothing reaches its conversation.
@@ -8494,6 +9385,8 @@ class HubPlugin(BasePlugin):
         msg_id = getattr(message, "id", "") or ""
         msg_key = (message.from_identity or message.from_agent, msg_id, message.action)
         if msg_id and msg_key in self._seen_messages:
+            if msg_key in getattr(self, "_refused_observations", ()):
+                return self._retry_refused_observation(message, msg_key)
             logger.debug(f"Dedup: skipping already-seen {message.action} {msg_id}")
             return
         if msg_id and message.action != "turn_end":
@@ -8787,6 +9680,34 @@ class HubPlugin(BasePlugin):
         # Display the message visually in the UI
         self._display_hub_message(message)
 
+        # Persist correlated task reports even when no LLM service is attached
+        # or the coordinator is already busy and will queue the message.
+        my_name = self._identity.identity if self._identity else ""
+        is_intended = bool(my_name) and (
+            message.to == my_name
+            or message.to in ("*", "all", "everyone", "team", "project")
+        )
+        dispatch_metadata = message.metadata or {}
+        dispatch_task_id = str(dispatch_metadata.get("task_id") or "").strip()
+        if self._task_ledger and is_intended:
+            try:
+                await asyncio.to_thread(
+                    self._task_ledger.record_dispatch_report,
+                    task_id=dispatch_task_id,
+                    assignee=message.from_identity or message.from_agent,
+                    thread_id=getattr(message, "thread_id", "") or "",
+                    reply_to=getattr(message, "reply_to", "") or "",
+                    message_id=message.id,
+                    report=message.content,
+                    worktree=str(dispatch_metadata.get("worktree") or ""),
+                    commit=str(dispatch_metadata.get("commit") or ""),
+                )
+            except Exception:
+                logger.exception(
+                    "failed to reconcile durable dispatch report from %s",
+                    message.from_identity or message.from_agent,
+                )
+
         is_arrival = "just came online" in (message.content or "")
         is_departure = "is going offline" in (message.content or "")
         # Forward to bridge (skip system/cron noise)
@@ -8901,6 +9822,8 @@ class HubPlugin(BasePlugin):
                 is_human_elsewhere=is_human_elsewhere,
                 llm_service=llm_service,
             )
+            message_metadata = message.metadata or {}
+            task_id = str(message_metadata.get("task_id") or "").strip()
             dispatch_mode = self._agent_dispatch_mode(llm_service)
             if dispatch_mode == "acp" or (
                 dispatch_mode == "unavailable"
@@ -8920,7 +9843,9 @@ class HubPlugin(BasePlugin):
                         )
                 elif message.reply_to or message.to in {"*", "all", "everyone", "team", "project"}:
                     if dispatch_mode == "acp":
-                        acp.observe_notification(message)
+                        if not acp.observe_notification(message):
+                            self._remember_refused_message(msg_key)
+                            return False
                 elif wake_decision.should_trigger:
                     await self._submit_authenticated_agent_message(message, llm_service)
                 else:
@@ -8938,9 +9863,7 @@ class HubPlugin(BasePlugin):
                         assignee=message.from_identity,
                         evidence=message.content,
                         message_id=message.id,
-                        task_id=str(
-                            (message.metadata or {}).get("task_id") or ""
-                        ).strip(),
+                        task_id=task_id,
                     )
                 except Exception as e:
                     logger.debug("failed to resolve expected hub reply: %s", e)
@@ -9180,9 +10103,12 @@ class HubPlugin(BasePlugin):
                         if dispatch_mode in {"acp", "unavailable"} and hasattr(
                             llm_service, "submit_human_input"
                         ):
-                            await self._submit_authenticated_agent_message(
+                            admitted = await self._submit_authenticated_agent_message(
                                 message, llm_service
                             )
+                            if admitted.get("status") == "refused":
+                                self._remember_refused_message(msg_key)
+                                return False
                             return
                     await self.event_bus.emit_with_hooks(
                         EventType.TRIGGER_LLM_CONTINUE,
@@ -9210,6 +10136,26 @@ class HubPlugin(BasePlugin):
         """Get the persona color for an identity, or a stable palette fallback."""
         return persona_color(identity)
 
+    def _publish_hub_display(
+        self, from_name: str, to_name: str, content: str, observing: bool
+    ) -> None:
+        """Publish a hub message box as a semantic event for `kollab --hub capture`.
+
+        The box itself is rendered output, which the JSON capture drops whenever a
+        semantic event (a heartbeat's state_snapshot) is in the ring. This copy is
+        semantic, so the transcript keeps the message. Never raises.
+        """
+        from kollabor_tui.display_tap import publish_semantic
+
+        publish_semantic(
+            getattr(self, "_display_tap", None),
+            "hub_display",
+            sender=from_name,
+            target=to_name,
+            observing=observing,
+            text=f"{from_name} -> {to_name}\n{content}",
+        )
+
     def _render_hub_box(
         self, from_name: str, to_name: str, content: str, observing: bool = False
     ) -> None:
@@ -9221,6 +10167,7 @@ class HubPlugin(BasePlugin):
         Direct messages: bright colored ◆ marker
         Observed messages: dimmed colored ◇ marker
         """
+        self._publish_hub_display(from_name, to_name, content, observing)
         renderer = self.event_bus.get_service("renderer") if self.event_bus else None
         if not renderer or not hasattr(renderer, "message_coordinator"):
             return
@@ -9439,6 +10386,10 @@ class HubPlugin(BasePlugin):
         )
         lines.append("  <hub_work/>  -- view work queue")
         lines.append("  <hub_queue>task description</hub_queue>  -- add to queue")
+        lines.append(
+            '  <hub_queue upstream_refs="#123,#456">task description</hub_queue>'
+        )
+        lines.append("    -- optional explicit refs; never infer from task text")
         lines.append('  <hub_claim/>  or  <hub_claim id="slot-id"/>  -- claim work')
         lines.append('  <hub_vault name="identity"/>  -- read agent vault summary')
         lines.append("  <hub_vaults/>  -- list all vaults")
@@ -10270,6 +11221,12 @@ class HubPlugin(BasePlugin):
         except Exception:
             logger.debug("parked busy message retry failed", exc_info=True)
 
+    def _live_conversation_uid(self) -> Optional[str]:
+        """The live conversation's durable uid: the display tap's scope (#525)."""
+        llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+        manager = getattr(llm, "conversation_manager", None)
+        return getattr(manager, "conversation_uid", None)
+
     def _follow_tool(self, event: Dict[str, Any]) -> None:
         """Keep the running tool in presence, from the display tap's events.
 
@@ -10502,6 +11459,48 @@ class HubPlugin(BasePlugin):
             ago = max(1, int((now - ts) // 60))
             lines.append(f"  ({ago}m ago) {' '.join(text.split())[:110]}")
         return lines
+
+    async def dispatch_wake_event(self, event: WakeEvent) -> List[WakeAction]:
+        """Run one event through the opt-in wake hooks (issue #727).
+
+        The engine decides (dedupe, cooldown, hourly cap, no self-wakes, no
+        chaining); this delivers. A wake goes out as a hook-marked direct
+        message, so an event it causes arrives flagged and starts nothing.
+        Returns the actions that were delivered.
+        """
+        engine = getattr(self, "_wake_hooks", None)
+        if engine is None or not self._identity:
+            return []
+        actions = engine.handle(event, time.time())
+        delivered: List[WakeAction] = []
+        for action in actions:
+            logger.info(
+                "wake hook %s: %s -> %s", action.hook, action.kind, action.target or "log"
+            )
+            if action.kind == "alert":
+                self._record_supervisor_alert(action.text)
+                await self._notify_supervisor_alert(action.text)
+                delivered.append(action)
+                continue
+            message = HubMessage(
+                action="message",
+                from_agent=self._identity.agent_id,
+                from_identity=f"wake-hook:{action.hook}",
+                to=action.target,
+                content=action.text,
+                scope=MessageScope.DIRECT.value,
+                metadata={"wake_hook": action.hook},
+            )
+            if action.target == self._identity.identity:
+                await self._on_message_received(message)
+                delivered.append(action)
+                continue
+            rejections = await self._route_message(message)
+            for ident, reason in rejections or []:
+                self._record_dispatch_failure(ident, reason)
+            if not rejections:
+                delivered.append(action)
+        return delivered
 
     async def _notify_supervisor_alert(self, text: str) -> None:
         """Send the alert through the configured notifier channel, if any."""
@@ -11071,7 +12070,7 @@ class HubPlugin(BasePlugin):
                     **({"waiting": True} if (message.metadata or {}).get("acp_waiting") else {}),
                 )
             except RelayError as exc:
-                return [(message.to, str(exc))]
+                return [(message.to, str(exc) or type(exc).__name__)]
             refusal = _receipt_refusal(receipt)
             if refusal:
                 if receipt.get("reason") == "recipient_unavailable" or (
@@ -11228,6 +12227,13 @@ class HubPlugin(BasePlugin):
             if message.to not in queued_for:
                 message.metadata["_queued_for"] = [*queued_for, message.to]
             await AgentMessenger.send_to_file(message.to, message)
+            # A successful durable enqueue is accepted delivery; remove the
+            # waiting rejection so the dispatch ledger will not allow replay.
+            rejections = [
+                (recipient, reason)
+                for recipient, reason in rejections
+                if recipient != message.to
+            ]
             self._trace_delivery(
                 message,
                 "queued_identity_mailbox",
@@ -11502,6 +12508,12 @@ class HubPlugin(BasePlugin):
             target=agent.identity,
             detail=dial_target,
         )
+        if success:
+            # The receiver acked this message's id: it is the sender's proof
+            # of delivery (see _delivery_evidence).
+            acked = list(message.metadata.get("_acked_by", []))
+            if agent.identity not in acked:
+                message.metadata["_acked_by"] = [*acked, agent.identity]
         if not success:
             await AgentMessenger.send_to_file(agent.identity, message)
             # The sender has to hear that this was a mailbox drop, not a
@@ -12710,15 +13722,17 @@ class HubPlugin(BasePlugin):
         except Exception:
             return "connect: the knock screen is unavailable"
 
-    def _offer_failed(self) -> dict[str, str]:
-        """A failed offer, with the network's refusal line when that is why (#355).
+    def _offer_failed(self, refusal: str = "") -> dict[str, str]:
+        """A failed offer, with the reason it failed when we know it (#355, #693).
 
-        The line comes from this machine's state, never from exception text.
+        `refusal` is the issuer's own fixed line for a refusal made before any relay
+        request (#693). Otherwise the network's admit line is used (#355). Both come
+        from this machine's state, never from exception text.
         """
-        reason = ""
+        reason = refusal if isinstance(refusal, str) else ""
         try:
             commands = getattr(self._relay_agent, "commands", None)
-            if commands is not None:
+            if not reason and commands is not None:
                 reason = commands.client.control.admit_refusal()
         except Exception:
             reason = ""
@@ -12745,6 +13759,8 @@ class HubPlugin(BasePlugin):
             or any(ord(char) < 32 or ord(char) == 127 for char in domain)
         ):
             return {"error": "invalid connect offer request"}
+        from .enrollment_client import EnrollmentProtocolError
+
         try:
             if self._identity is None or self._rpc_server is None:
                 return {"error": "connect enrollment is unavailable"}
@@ -12753,6 +13769,10 @@ class HubPlugin(BasePlugin):
             if create is None:
                 return {"error": "connect enrollment is unavailable"}
             result = await create(domain)
+        except EnrollmentProtocolError as exc:
+            # The issuer refused before any relay request; say why (#693).
+            logger.warning("connect offer refused: %s", exc.refusal or exc.code)
+            return self._offer_failed(exc.refusal)
         except Exception:
             return self._offer_failed()
         if not isinstance(result, dict) or result.get("error"):
@@ -13162,6 +14182,83 @@ class HubPlugin(BasePlugin):
             return None
         return self.event_bus.get_service("agent_orchestrator")
 
+    def _locally_started_agent_count(self) -> int:
+        """How many agent subprocesses this process started itself."""
+        orch = self._get_orchestrator()
+        if orch is None:
+            return 0
+        try:
+            return len(orch.orchestrator.get_all_agents())
+        except Exception:
+            return 0
+
+    def _locally_managed_sessions(self) -> dict:
+        """Agent sessions this process started itself, keyed by PID.
+
+        The agent_orchestrator tracks every subprocess it launched; PID
+        matching bridges hub identities to those sessions (issue #669).
+        Values are the full session objects so callers can verify liveness
+        and process generation -- a PID alone is not a kill token (the OS
+        reuses PIDs and stale presence rows can share a PID number).
+        """
+        orch = self._get_orchestrator()
+        if orch is None:
+            return {}
+        try:
+            sessions = orch.orchestrator.get_all_agents()
+        except Exception:
+            return {}
+        return {
+            session.pid: session
+            for session in sessions.values()
+            if getattr(session, "pid", None)
+        }
+
+    def _presence_generation_matches(self, session, agent) -> bool:
+        """True when presence row and tracked session are the same process
+        generation (fail closed on missing or inconsistent process identity).
+
+        The tracked child PID and OS process creation time are compared with
+        the presence row. The Popen handle is a child-management reference,
+        not an atomic kernel identity token. Presence from an older PID
+        generation predates that process; there is no timestamp grace window
+        that can make it look current.
+        """
+        agent_pid = getattr(agent, "pid", None)
+        session_pid = getattr(session, "pid", None)
+        proc = getattr(session, "proc", None)
+        if (
+            not agent_pid
+            or agent_pid != session_pid
+            or proc is None
+            or getattr(proc, "pid", None) != session_pid
+            or not getattr(session, "is_alive", False)
+        ):
+            return False
+
+        started_at = getattr(agent, "started_at", None)
+        process_created_at = self._session_process_create_time(session)
+        if started_at is None or process_created_at is None:
+            return False
+        try:
+            return float(started_at) >= float(process_created_at)
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    @staticmethod
+    def _session_process_create_time(session) -> Optional[float]:
+        """Read the kernel creation time for a tracked Popen child."""
+        proc = getattr(session, "proc", None)
+        pid = getattr(session, "pid", None)
+        if proc is None or not pid or getattr(proc, "pid", None) != pid:
+            return None
+        try:
+            import psutil
+
+            return float(psutil.Process(pid).create_time())
+        except Exception:  # noqa: BLE001 - inability to prove generation fails closed
+            return None
+
     def _resolve_identity_to_agent_name(self, identity: str) -> Optional[str]:
         """Resolve a hub identity (gem name) to the orchestrator agent name.
 
@@ -13559,6 +14656,8 @@ class HubPlugin(BasePlugin):
             agent_type=effective_agent_type,
             identity=resolved_identity,
             profile=resolved_profile,
+            parent_identity=(self._identity.identity if self._identity else ""),
+            parent_agent_id=(getattr(self._identity, "agent_id", "") if self._identity else ""),
             **({"harness": True} if harness else {}),
         )
         if not result:
@@ -13858,9 +14957,11 @@ class HubPlugin(BasePlugin):
     async def _handle_stop_command(self, rest: str) -> str:
         """Handle /hub stop <name|all>.
 
-        Sends shutdown signals via hub sockets (works for org-launched
-        agents and any other peer on the mesh, not just orchestrator-
-        managed agents).
+        Sends shutdown signals via hub sockets. `stop all` is scoped to
+        the agents the CALLER started (agent_orchestrator-managed
+        sessions matched by PID, issue #669): peers launched by other
+        lanes or the operator are immune. The mesh-wide stop is the
+        operator CLI, `kollab --hub stop all`.
         """
         target = rest.strip()
         if not target:
@@ -13873,32 +14974,65 @@ class HubPlugin(BasePlugin):
             return "hub not active"
 
         if target.lower() == "all":
-            # Use scan_all_presence so we see agents even if they're
+            # Scan machine-wide so owned agents are found even if they're
             # mid-shutdown (discover_agents would clean them up first
             # and report "no peers" even though we just killed them).
-            peers = self._presence.scan_all_presence()
+            peers = self._presence.scan_machine_presence()
             if not peers:
                 return "no peers to stop"
 
             results = []
-            stop_targets = [
-                agent for agent in peers if agent.agent_id != self._identity.agent_id
-            ]
+            managed = self._locally_managed_sessions()
+            stop_targets = []
+            owned_sessions = []
+            immune = []
+            for agent in peers:
+                if agent.agent_id == self._identity.agent_id:
+                    continue
+                pid = getattr(agent, "pid", None)
+                session = managed.get(pid) if pid is not None else None
+                if (
+                    session is not None
+                    and getattr(session, "is_alive", True)
+                    and self._presence_generation_matches(session, agent)
+                ):
+                    stop_targets.append(agent)
+                    owned_sessions.append(session)
+                else:
+                    immune.append(agent.identity)
+            # Carry each target's session into the stop call. The sweep's
+            # ownership gate runs before dispatch, but the process may exit
+            # during the awaited shutdown window. Final escalation uses the
+            # session's shared process lock to serialize Popen polling,
+            # reaping, and signal dispatch (issue #669).
             stop_results = await asyncio.gather(
                 *[
                     self._stop_peer_agent(
                         agent,
                         reason=f"stopped by {self._identity.identity}",
+                        session=session,
                     )
-                    for agent in stop_targets
+                    for agent, session in zip(stop_targets, owned_sessions)
                 ]
             )
             for agent, result in zip(stop_targets, stop_results):
                 results.append(f"  {agent.identity}: {result}")
 
-            if not results:
+            if not stop_targets:
+                if immune:
+                    return (
+                        "no agents started by you to stop "
+                        f"(immune: {', '.join(immune)}); only the operator "
+                        "CLI or their launcher can stop them"
+                    )
                 return "no peers to stop (only you on mesh)"
-            return f"stopping {len(results)} agent(s):\n" + "\n".join(results)
+            summary = f"stopping {len(results)} agent(s):"
+            if immune:
+                summary += (
+                    f"\nskipped {len(immune)} agent(s) not started by you "
+                    f"(immune): {', '.join(immune)}"
+                )
+            return summary + "\n" + "\n".join(results)
         else:
             # Single agent
             if target == self._identity.identity:
@@ -13954,26 +15088,144 @@ class HubPlugin(BasePlugin):
             )
             return f"'{target}' {result}"
 
-    async def _stop_peer_agent(self, agent, reason: str) -> str:
+    @staticmethod
+    def _signal_allowed(session) -> bool:
+        """Advisory liveness recheck before escalation (issue #669).
+
+        This check does not make a later signal safe by itself. The final
+        Popen poll and signal operation must hold the session's shared process
+        lock. ``session=None`` is the operator single-stop path and retains
+        its existing raw-PID behavior.
+        """
+        return session is None or bool(getattr(session, "is_alive", False))
+
+    def _cleanup_stopped_peer(self, agent, session) -> bool:
+        """Clean up a stopped peer without crossing its selected generation.
+
+        Named operator stops have no tracked session and retain the existing
+        presence-plus-socket cleanup. Caller-owned stop-all defers cleanup to
+        normal presence discovery; it cannot atomically compare-and-unlink a
+        presence row or identity-named socket that may have been replaced.
+        """
+        if not self._presence:
+            return False
+        if session is None:
+            self._presence.cleanup_agent(agent)
+            return True
+        return False
+
+    def _signal_session(
+        self, session, sig, *, expected_pid=None, expected_started_at=None
+    ) -> bool:
+        """Signal a tracked child while serializing its Popen lifecycle calls.
+
+        On POSIX, Python's Popen.send_signal() polls and then signals by
+        numeric PID.
+        Hold the same session lock as AgentSession.is_alive and
+        AgentOrchestrator._kill_session across the final check and dispatch so
+        this process cannot reap the child between those operations. This is
+        process-local serialization, not an atomic kernel identity guarantee.
+        Returns False if the session, lock, or selected generation is missing.
+        """
+        proc = getattr(session, "proc", None) if session is not None else None
+        process_lock = (
+            getattr(session, "process_lock", None) if session is not None else None
+        )
+        if proc is None or process_lock is None:
+            return False
+        with process_lock:
+            if expected_pid is not None and (
+                getattr(session, "pid", None) != expected_pid
+                or getattr(proc, "pid", None) != expected_pid
+            ):
+                return False
+            if expected_started_at is not None:
+                process_created_at = self._session_process_create_time(session)
+                try:
+                    if (
+                        process_created_at is None
+                        or float(expected_started_at) < process_created_at
+                    ):
+                        return False
+                except (TypeError, ValueError, OverflowError):
+                    return False
+            if proc.poll() is not None:
+                return False
+            try:
+                proc.send_signal(sig)
+                return True
+            except (ProcessLookupError, OSError):
+                return False
+
+    def _escalate_agent(self, agent, session, sig) -> bool:
+        """Escalate a stop signal for ``agent`` under ``session`` ownership.
+
+        Caller-owned sweep targets use the serialized tracked-child path
+        (``_signal_session``); only the session-less operator
+        single-stop path falls back to raw ``os.kill`` by PID (issue #669 r3).
+        """
+        if session is not None:
+            return self._signal_session(
+                session,
+                sig,
+                expected_pid=getattr(agent, "pid", None),
+                expected_started_at=getattr(agent, "started_at", None),
+            )
+        if sig == signal.SIGKILL:
+            return self._hard_kill_agent(agent)
+        return self._force_kill_agent(agent)
+
+    async def _stop_peer_agent(self, agent, reason: str, session=None) -> str:
         """Stop a peer and only report success after the pid exits.
 
         A socket shutdown ack means "request received", not "process is gone".
         Wait briefly for graceful exit, then fall back to SIGTERM and verify
         that exit too. This avoids the first-run lie where status still sees
         the agent online and a second stop is needed.
+
+        ``session`` is the orchestrator's tracked child for caller-owned
+        agents; when present, escalation shares its process lock and fails
+        closed if that child has exited or cannot be checked.
         """
         if not self._presence:
             return "hub not active"
 
+        guard = (
+            "process exited during stop wait; fallback signals withheld "
+            "(tracked-process guard)"
+        )
+
+        # Revalidate the selected child generation before the first socket
+        # request. The receiver also checks this generation after the async
+        # connect, because a replacement may bind the identity socket while
+        # this task is waiting.
+        if session is not None and not self._presence_generation_matches(
+            session, agent
+        ):
+            self._cleanup_stopped_peer(agent, session)
+            return guard
+
         if not getattr(agent, "socket_path", ""):
-            self._presence.cleanup_agent(agent)
+            cleaned = self._cleanup_stopped_peer(agent, session)
+            if session is not None and not cleaned:
+                return "no socket; presence cleanup deferred"
             return "no socket, cleaned up"
 
         try:
+            generation = (
+                {
+                    "expected_agent_id": getattr(agent, "agent_id", None),
+                    "expected_pid": getattr(agent, "pid", None),
+                    "expected_started_at": getattr(agent, "started_at", None),
+                }
+                if session is not None
+                else {}
+            )
             success = await AgentMessenger.signal_shutdown(
                 agent.socket_path,
                 reason=reason,
                 timeout=3.0,
+                **generation,
             )
         except Exception as e:
             success = False
@@ -13981,35 +15233,69 @@ class HubPlugin(BasePlugin):
 
         if success:
             if await self._wait_for_agent_exit(agent, timeout=STOP_GRACE_SECONDS):
-                self._presence.cleanup_agent(agent)
+                self._cleanup_stopped_peer(agent, session)
                 return "stopped"
 
-            killed = self._force_kill_agent(agent)
+            if not self._signal_allowed(session):
+                self._cleanup_stopped_peer(agent, session)
+                return guard
+
+            killed = self._escalate_agent(agent, session, signal.SIGTERM)
+            if session is not None and not killed:
+                # Child is gone or cannot be checked; never fall back to raw
+                # os.kill for a caller-owned session.
+                self._cleanup_stopped_peer(agent, session)
+                return guard
             if killed and await self._wait_for_agent_exit(
                 agent, timeout=STOP_TERM_SECONDS
             ):
-                self._presence.cleanup_agent(agent)
+                self._cleanup_stopped_peer(agent, session)
                 return "killed (SIGTERM after graceful timeout)"
-            if self._hard_kill_agent(agent) and await self._wait_for_agent_exit(
+            if not self._signal_allowed(session):
+                self._cleanup_stopped_peer(agent, session)
+                return guard
+
+            killed = self._escalate_agent(agent, session, signal.SIGKILL)
+            if session is not None and not killed:
+                self._cleanup_stopped_peer(agent, session)
+                return guard
+            if killed and await self._wait_for_agent_exit(
                 agent, timeout=STOP_KILL_SECONDS
             ):
-                self._presence.cleanup_agent(agent)
+                self._cleanup_stopped_peer(agent, session)
                 return "killed (SIGKILL — was unresponsive)"
             return "stop timed out (pid survived SIGKILL)"
 
-        killed = self._force_kill_agent(agent)
+        if not self._signal_allowed(session):
+            self._cleanup_stopped_peer(agent, session)
+            return guard
+
+        killed = self._escalate_agent(agent, session, signal.SIGTERM)
+        if session is not None and not killed:
+            self._cleanup_stopped_peer(agent, session)
+            return guard
         if killed and await self._wait_for_agent_exit(agent, timeout=STOP_TERM_SECONDS):
-            self._presence.cleanup_agent(agent)
+            self._cleanup_stopped_peer(agent, session)
             return "killed (SIGTERM fallback)"
 
         if not self._agent_pid_alive(getattr(agent, "pid", 0)):
-            self._presence.cleanup_agent(agent)
+            cleaned = self._cleanup_stopped_peer(agent, session)
+            if session is not None and not cleaned:
+                return "already dead; presence cleanup deferred"
             return "already dead, cleaned up"
 
-        if self._hard_kill_agent(agent) and await self._wait_for_agent_exit(
+        if not self._signal_allowed(session):
+            self._cleanup_stopped_peer(agent, session)
+            return guard
+
+        killed = self._escalate_agent(agent, session, signal.SIGKILL)
+        if session is not None and not killed:
+            self._cleanup_stopped_peer(agent, session)
+            return guard
+        if killed and await self._wait_for_agent_exit(
             agent, timeout=STOP_KILL_SECONDS
         ):
-            self._presence.cleanup_agent(agent)
+            self._cleanup_stopped_peer(agent, session)
             return "killed (SIGKILL fallback)"
 
         return "failed (pid survived SIGKILL)"
@@ -15339,7 +16625,9 @@ class HubPlugin(BasePlugin):
             return "work queue: empty"
         return "\n".join(lines)
 
-    def _handle_queue_command(self, task: str) -> str:
+    def _handle_queue_command(
+        self, task: str, upstream_refs: Optional[List[str]] = None
+    ) -> str:
         if not task:
             return "usage: /hub queue <task description>"
         if not self._work_queue:
@@ -15348,12 +16636,14 @@ class HubPlugin(BasePlugin):
             task=task,
             project=self._identity.project if self._identity else "",
             queued_by=self._identity.identity if self._identity else "",
+            upstream_refs=upstream_refs or [],
         )
         # Dual-write to the durable open ledger queue (issue #211): open
         # cards are what the idle supervisor watches and what survives
-        # coordinator restarts. The WorkQueue slot keeps legacy claim
-        # behavior; the card's checkpoint cross-references the slot id.
+        # coordinator restarts. Persist both a human-readable checkpoint and
+        # a durable WorkSlot -> TaskLedger card id for stale-sweep cleanup.
         card = None
+        card_warning = None
         if self._task_ledger and self._identity:
             try:
                 card = self._task_ledger.enqueue(
@@ -15362,12 +16652,102 @@ class HubPlugin(BasePlugin):
                     report_to=self._identity.identity,
                     project=self._identity.project,
                 )
+            except Exception as e:
+                logger.warning("Open-card enqueue failed for slot %s: %s", slot.id, e)
+                card_warning = "TaskLedger card could not be created"
+
+        if card:
+            try:
                 card.add_checkpoint(f"queued as slot [{slot.id}]")
                 self._task_ledger._save(card)
             except Exception as e:
-                logger.debug(f"open-card enqueue failed for slot {slot.id}: {e}")
-        suffix = f" + open card [{card.id}]" if card else ""
+                logger.warning(
+                    "Could not save slot checkpoint for task card %s: %s", card.id, e
+                )
+                card_warning = "TaskLedger checkpoint could not be saved"
+
+            try:
+                linked_slot = self._work_queue.link_task_card(slot.id, card.id)
+            except Exception as e:
+                linked_slot = None
+                logger.warning(
+                    "Could not link task card %s to work slot %s: %s",
+                    card.id,
+                    slot.id,
+                    e,
+                )
+            if linked_slot is None:
+                card_warning = "work-slot link failed; card cancellation attempted"
+                try:
+                    card = (
+                        self._task_ledger.terminalize(
+                            card.id,
+                            status="cancelled",
+                            reason=f"work queue slot [{slot.id}] could not be linked",
+                            actor="work-queue-link",
+                        )
+                        or card
+                    )
+                except Exception as e:
+                    card_warning = "work-slot link and card cancellation failed"
+                    logger.error(
+                        "Could not cancel unlinked task card %s for work slot %s: %s",
+                        card.id,
+                        slot.id,
+                        e,
+                    )
+            elif linked_slot.status == "retired":
+                card_warning = (
+                    "slot retired before card link; card cancellation attempted"
+                )
+                try:
+                    card = (
+                        self._task_ledger.terminalize(
+                            card.id,
+                            status="cancelled",
+                            reason=(
+                                f"work queue slot [{slot.id}] was already retired: "
+                                f"{linked_slot.retired_reason or 'stale'}"
+                            ),
+                            actor="work-queue-sweep",
+                        )
+                        or card
+                    )
+                except Exception as e:
+                    card_warning = (
+                        "slot retired before link and card cancellation failed"
+                    )
+                    logger.error(
+                        "Could not cancel task card %s for already-retired slot %s: %s",
+                        card.id,
+                        slot.id,
+                        e,
+                    )
+
+        suffix = f" + {card.status} card [{card.id}]" if card else ""
+        if card_warning:
+            suffix += f" (warning: {card_warning})"
         return f"queued: [{slot.id}] {task[:60]}{suffix}"
+
+    def _sync_claimed_task_card_slot(self, card_id: str, identity: str) -> None:
+        try:
+            slot = self._work_queue.claim_task_card(card_id, identity)
+        except Exception as e:
+            logger.warning(
+                "Could not synchronize work slot for claimed task card %s: %s",
+                card_id,
+                e,
+            )
+            return
+        if slot and (slot.status != "assigned" or slot.assigned_to != identity):
+            logger.warning(
+                "Claimed task card %s has linked work slot %s in status %s "
+                "assigned to %s",
+                card_id,
+                slot.id,
+                slot.status,
+                slot.assigned_to or "nobody",
+            )
 
     async def _handle_claim_command(self, slot_id: str) -> str:
         if not self._work_queue or not self._identity:
@@ -15386,6 +16766,7 @@ class HubPlugin(BasePlugin):
                 rest, self._identity.identity, project=self._identity.project
             )
             if card:
+                self._sync_claimed_task_card_slot(card.id, self._identity.identity)
                 await self._supervisor_kick()
                 return f"claimed: [{card.id}] {card.directive[:60]}"
             return f"slot '{rest}' not found or not pending"
@@ -15399,6 +16780,7 @@ class HubPlugin(BasePlugin):
             self._identity.identity, project=self._identity.project
         )
         if card:
+            self._sync_claimed_task_card_slot(card.id, self._identity.identity)
             await self._supervisor_kick()
             return f"claimed: [{card.id}] {card.directive[:60]}"
         return "no available work to claim"
@@ -16568,6 +17950,7 @@ class HubPlugin(BasePlugin):
                 await self._dreaming_task
             except asyncio.CancelledError:
                 pass
+        await self._settle_crystal_write()
 
         if self._notify_task:
             self._notify_task.cancel()

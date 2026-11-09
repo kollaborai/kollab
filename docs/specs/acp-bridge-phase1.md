@@ -805,6 +805,11 @@ Source inspection and scoped diffs are the evidence for this ledger. The
   born, detached and orphaned wholly between polling observations remains
   unverified; this is not proof of complete
   live process containment.
+- #602: the orchestrator bounds a runner close at `RUNNER_CLOSE_TIMEOUT` (30 s). A close
+  still running then is set aside: the orchestrator stops owning that runner so the
+  transition releases and a successor can start, the close finishes on its own task, and
+  the set-aside runner's late updates are dropped. A close that raises still stays
+  reachable for retry. Nothing is signalled by the orchestrator.
 - R10 source fixed: `a85df02f`, `41f28c25`, `d6f02499`, `d27c07ac`;
   explicit resolution ownership, cancellation settlement in the Web transport,
   waiting state cleared at the owned turn boundary, and
@@ -878,7 +883,15 @@ Hub/relay paths. ACP turns bypass native provider execution and HUD injection.
 Inbound ACP submits into the daemon rather than introducing another model loop.
 
 landmines: outbound turn generations and Hub child credentials are distinct;
-process/session restart rotates the child binding. Native client turns inherit
+process/session restart rotates the child binding. Adapters serialize the
+`session/new` MCP config, env included, into child arguments (the Claude
+adapter's `--mcp-config`), so the `kollab-hub` entry carries only
+`KOLLAB_ACP_HUB_TOKEN_FILE`, the path of an owner-only file (private
+`<project data>/acp/hub-bindings/`, created exclusive, 0600 on POSIX, the
+folder's owner-only ACL on Windows). The token never enters an argument, env
+value, log or transcript; the file path and generation are visible and not
+secret. Each rotation replaces the file and teardown removes it; a killed
+daemon can leave one, but its token died with that daemon. Native client turns inherit
 correlation through `kollabor_tui.turn_context`; a request ID must remain on its
 permission and terminal events. Attached EOF closes the connection only; owned
 EOF stops its daemon. Relay fields `ask`, `waiting`, harness labels and terminal

@@ -30,6 +30,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
+from kollabor.daemon import DETACHED_CHILD_ENV
 from plugins.agent_orchestrator.orchestrator import AgentOrchestrator
 
 
@@ -50,13 +51,14 @@ class TestSpawnEnvStripsParentIdentity(unittest.TestCase):
         self.orch.project_name = "test-proj"
         self.orch.session_init_delay = 0.0
 
-    def _spawn(self, extra_env):
-        """Run _create_session with a fake Popen and return the child env."""
+    def _spawn(self, extra_env, **spawn_kwargs):
+        """Run _create_session with a fake detached child and capture its env."""
         captured = {}
 
-        def fake_popen(cmd, **kwargs):
+        def fake_start_child(cmd, **kwargs):
             captured["cmd"] = list(cmd)
             captured["env"] = dict(kwargs["env"])
+            captured["detached"] = kwargs["detached"]
             proc = MagicMock()
             proc.pid = 42424
             proc.stdin = MagicMock()
@@ -67,14 +69,16 @@ class TestSpawnEnvStripsParentIdentity(unittest.TestCase):
         base_env = dict(os.environ)
         base_env["KOLLAB_PARENT_PID"] = "999"
         base_env["KOLLAB_PARENT_CREATE_TIME"] = "12345.6"
+        base_env["KOLLAB_PARENT_IDENTITY"] = "grandparent"
+        base_env["KOLLAB_PARENT_AGENT_ID"] = "grandparent-1"
         # Control the root socket explicitly: the outer kollab process may
         # already export it, and spawn propagates it verbatim.
         base_env["KOLLAB_ROOT_SOCKET"] = "test-proj"
         with TemporaryDirectory() as tmp:
             with (
                 patch(
-                    "plugins.agent_orchestrator.orchestrator.subprocess.Popen",
-                    side_effect=fake_popen,
+                    "kollabor_config.proc_ctl.start_child",
+                    side_effect=fake_start_child,
                 ),
                 patch(
                     "plugins.agent_orchestrator.orchestrator.os.environ",
@@ -89,7 +93,9 @@ class TestSpawnEnvStripsParentIdentity(unittest.TestCase):
                     return_value=["kollab"],
                 ),
             ):
-                _run(self.orch._create_session("tester", "tester-id", ""))
+                _run(
+                    self.orch._create_session("tester", "tester-id", "", **spawn_kwargs)
+                )
 
         return captured
 
@@ -105,6 +111,8 @@ class TestSpawnEnvStripsParentIdentity(unittest.TestCase):
         env = captured["env"]
         self.assertNotIn("KOLLAB_PARENT_PID", env)
         self.assertNotIn("KOLLAB_PARENT_CREATE_TIME", env)
+        self.assertNotIn("KOLLAB_PARENT_IDENTITY", env)
+        self.assertNotIn("KOLLAB_PARENT_AGENT_ID", env)
 
     def test_spawn_strips_inherited_parent_create_time(self):
         """A stale KOLLAB_PARENT_CREATE_TIME must not leak into children either."""
@@ -116,6 +124,8 @@ class TestSpawnEnvStripsParentIdentity(unittest.TestCase):
         captured = self._spawn({})
         env = captured["env"]
         self.assertEqual(env.get("KOLLAB_AGENT_NAME"), "tester-id")
+        self.assertEqual(env.get(DETACHED_CHILD_ENV), "1")
+        self.assertTrue(captured["detached"])
         # Spawn propagates the ambient root socket (already "test-proj" in
         # the base env here) rather than inventing its own.
         self.assertEqual(env.get("KOLLAB_ROOT_SOCKET"), "test-proj")
@@ -124,6 +134,14 @@ class TestSpawnEnvStripsParentIdentity(unittest.TestCase):
         """The daemon shape itself is unchanged: still --detached."""
         captured = self._spawn({})
         self.assertIn("--detached", captured["cmd"])
+
+    def test_spawn_passes_detached_parent_identity(self):
+        captured = self._spawn(
+            {}, parent_identity="koordinator", parent_agent_id="koordinator-1"
+        )
+        env = captured["env"]
+        self.assertEqual(env.get("KOLLAB_PARENT_IDENTITY"), "koordinator")
+        self.assertEqual(env.get("KOLLAB_PARENT_AGENT_ID"), "koordinator-1")
 
 
 if __name__ == "__main__":

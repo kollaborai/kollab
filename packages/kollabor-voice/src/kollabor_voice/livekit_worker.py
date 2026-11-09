@@ -1,8 +1,9 @@
 """LiveKit voice worker: one livekit-agents AgentSession per voice session.
 
-Run by the Engine as `<voice runtime python> -m kollabor_voice.livekit_worker`
-with KOLLAB_VOICE_WORKER_CONFIG (JSON: livekit_url, worker_token, room,
-voice_session_id, generation, engine_url, engine_token).
+Run by the Engine with the prepared voice interpreter and Kollab's exact
+`kollabor_voice` package path. `KOLLAB_VOICE_WORKER_CONFIG` is JSON containing
+livekit_url, worker_token, room, voice_session_id, generation, engine_url and
+engine_token.
 
 The session mirrors ~/dev/livekit-demo: Silero VAD, the local v1-mini turn
 detector, VAD interruptions. Speech-to-text and text-to-speech are nodes over
@@ -31,6 +32,8 @@ from dataclasses import dataclass
 
 import aiohttp
 import numpy as np
+
+from kollabor_voice.turn_errors import rejected_detail
 from livekit import local_inference, rtc
 from livekit.agents import (
     Agent,
@@ -171,9 +174,14 @@ class TurnClient:
             raise TurnError("engine_unreachable", type(exc).__name__, True) from exc
         try:
             if response.status != 200:
+                body_text = await response.text()
+                detail = rejected_detail(body_text)
+                message = f"The Engine refused the turn ({response.status})"
+                if detail:
+                    message = f"{message}: {detail}"
                 raise TurnError(
                     "turn_rejected",
-                    f"The Engine refused the turn ({response.status})",
+                    message,
                     response.status >= 500,
                 )
             done = False

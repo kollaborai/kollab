@@ -16,41 +16,64 @@ do not invent V2 product tracks, legacy implementations, or compatibility obliga
 for nonexistent users. Preserve actual protocol contracts and private persistent
 state. Temporary rollback artifacts require an explicit retention/cleanup condition.
 
-## releases and the shared checkout
+## releases and writer worktrees
 
 We follow Trunk-Based Development with Conventional Commits and SemVer; see
-SOFTWARE_DEVELOPMENT_LIFECYCLE.md.
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md` for the canonical workflow.
 
-Every agent works in the one shared checkout, on `main`. Never create a git
-worktree (unless Marco asks for one), and never stash, reset, clean, restore,
-or switch branches in the checkout. Other agents edit the same tree at the
-same time: run `git status --short` first, leave their uncommitted edits
-alone, and commit only your own files with `git commit -- <paths>` (never
-`git add -A` or `git add .`).
+Each active writing lane owns one unique worktree, branch, and file scope.
+Read-only reviewers may inspect a shared checkout. The local `main` checkout is
+integration-only and its source files stay read-only: inspect them or
+fast-forward after already-merged changes. Repository fetch/worktree setup may
+use its Git metadata without changing those files. Do not edit, stage, commit,
+or push source there. Preserve dirty files and
+existing worktrees/branches; do not automatically clean up or delete them.
+Before creating a lane, inspect repository status and all worktrees, verify the
+new path and branch do not exist, fetch the intended base, and record its SHA.
+Avoid concurrent writers to the same paths.
 
-`main` is protected, so work lands through a draft PR pushed straight from the
-checkout, with no local branch:
+Source work lands through a DRAFT PR from the owning worktree. A PR's changelog
+entry is its own file, `changes/<issue>.<section>.md`; only release PRs edit
+`CHANGELOG.md` (see `changes/README.md`). Keep commits
+scoped to owned paths, use Conventional Commits, and require independent review
+and all configured checks on the exact PR head against current `main`. Update
+a PR branch with ordinary merges; never rebase or force-push. Marco authorizes
+a concrete plan or bounded PR batch (a class order in his own words, such as
+"merge as many ready PRs as you can tonight", counts; see
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`); within it, the designated integrator may
+mark ready and merge after its review/base/CI/thread gates pass, without
+repeating permission per listed PR. A different AI agent must review every PR's
+exact final head and record the required GitHub approval as whichever account,
+`kollaborai` or `maarco`, is not the PR author. Record reviewer identity and
+exact reviewed SHA in private maintainer audit evidence. Keep the GitHub
+approval plain, with no AI attribution or footer. GitHub prohibits authors
+from approving their own PRs; do not attempt self-approval. A new head
+requires fresh independent review and
+CI. A head moved only by merging `main` keeps its verdict only when an independent
+reviewer posts an addendum pinned to the new head and base, confirming the PR's own
+diff is unchanged apart from changelog lines and that nothing merged from `main`
+touches what the PR changes or relies on. All merges use `kollaborai` only, as merge commits; never use `--admin` or a
+ruleset bypass. GitHub's merge queue needs an organization-owned repo, so it is not on yet (#857); a PR behind `main`
+merges `main` into its branch before it lands. Verify that identity cannot bypass applicable protection and
+stop if identity, bypass status, or gate evidence is uncertain. An emergency
+ruleset change requires separate explicit authorization. Writers never review
+their own changes.
+After the code-owner gate is bootstrapped, every path including
+`.github/CODEOWNERS` is owned by `@maarco` and `@kollaborai`; external PRs need
+one of those accounts to approve, and PRs authored by either account need the
+other account's approval. GitHub enforces the owner-account approval, not the
+independence or identity of the AI reviewer; record that separately in private
+audit evidence. Follow the exact bootstrap sequence in
+`SOFTWARE_DEVELOPMENT_LIFECYCLE.md` before enabling the live rule.
+Anything outside the plan needs new authorization; release tags require
+separate explicit instruction. If local and remote state diverge, stop and
+report exact SHAs and PR state; never reset or force-push.
 
-    git log --oneline origin/main..HEAD               # every commit listed ships
-    git push origin HEAD:refs/heads/issue-<N>-<slug>
-    gh pr create --draft --head issue-<N>-<slug> --title "<type(scope): summary>" --body "Fixes #<N>"
-
-PRs merge with a merge commit, so once yours merges
-`git pull --ff-only origin main` brings `main` level. If that pull refuses,
-`main` has diverged from `origin/main`: stop and tell Marco, and never reset,
-rebase, or force-push to fix it. Never build a release from uncommitted files
-or a scratch clone.
-
-For every release, read `docs/release-process.md`. Releases are tagged
-whenever Marco decides, and agents may create a release tag ONLY when Marco
-explicitly instructs them to. Commit the release on local `main` by explicit
-paths (other people's edits stay uncommitted and out of it), push `HEAD` to
-`release/X.Y.Z`, merge with a merge commit, then `git pull --ff-only
-origin main` and tag the merge. Once it is published, run
-`uv sync --all-extras` and `KOLLAB_VERSION=X.Y.Z bash install.sh` (the
-release binary in `~/.local/bin`). The release is not done until `main`
-matches `origin/main`, `git status` lists none of the release's files, and
-`kollab --version` reports the new version.
+For every release, read `docs/release-process.md`. Author release-preparation
+changes in a worktree PR, then build/tag from the clean, synchronized merged
+`main` checkout. Releases are tagged whenever Marco decides, and agents may
+create a release tag ONLY when Marco explicitly instructs them to. Preserve the
+existing version, changelog, CI, packaging, and installation gates.
 
 ## project snapshot
 

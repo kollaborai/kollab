@@ -18,14 +18,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from kollabor_ai.conversation_logger import utc_stamp
+from kollabor_ai.generated_image_artifacts import (
+    GeneratedImageArtifactStore,
+    redact_generated_image_data,
+)
 from kollabor_ai.goal_image_scope import (
     current_goal_image_request_scope,
     goal_image_diagnostics_active,
     guard_goal_image_diagnostics,
-)
-from kollabor_ai.generated_image_artifacts import (
-    GeneratedImageArtifactStore,
-    redact_generated_image_data,
 )
 from kollabor_ai.message_content import (
     MessageContentError,
@@ -38,14 +38,13 @@ from kollabor_ai.message_content import (
 from kollabor_ai.model_registry import supports_vision
 from kollabor_ai.profile_manager import LLMProfile
 from kollabor_ai.providers.errors import (
-    APIConnectionError,
-    APITimeoutError,
     AuthenticationError,
     EmptyResponseError,
     ProviderError,
-    RateLimitError,
-    ServerError,
-    TransientHTTPError,
+    structured_error_info,
+)
+from kollabor_ai.providers.errors import (
+    is_context_overflow as is_context_overflow_info,
 )
 from kollabor_ai.providers.models import (
     GeneratedImageContent,
@@ -128,6 +127,10 @@ class APICommunicationService:
 
         # Provider-based communication
         self._provider: Any = None  # Initialized in initialize()
+        # Bumped by every reinitialize_provider call, so a caller that swapped the
+        # provider for a while can tell a later switch apart even when it hands
+        # back the same profile and the registry the same cached provider.
+        self._provider_generation = 0
         self._media_resolver: Optional[Callable[[str], Optional[str]]] = None
         self._operation_observer: Optional[Callable[..., Optional[int]]] = None
         self._provider_error: Optional[str] = (
@@ -474,7 +477,9 @@ class APICommunicationService:
             )
             return False
 
-    async def _initialize_provider(self) -> None:
+    async def _initialize_provider(
+        self, expected_generation: Optional[int] = None
+    ) -> None:
         """Initialize provider from profile configuration.
 
         Handles validation errors gracefully - logs warning and allows app
@@ -482,10 +487,16 @@ class APICommunicationService:
         For OAuth profiles, auto-refreshes expired tokens before creating
         the provider.
         """
+        if expected_generation is None:
+            expected_generation = getattr(self, "_provider_generation", 0)
+
         try:
             # Auto-refresh OAuth tokens before creating provider
             if self._profile.auth_type == "oauth":
                 await self._refresh_oauth_token()
+
+            if expected_generation != getattr(self, "_provider_generation", 0):
+                return
 
             # Convert profile to provider config
             provider_config = create_config_from_profile(
@@ -494,7 +505,11 @@ class APICommunicationService:
 
             # Get or create provider instance
             provider = await ProviderRegistry.get_provider(provider_config)
+            if expected_generation != getattr(self, "_provider_generation", 0):
+                return
+
             self._provider = provider
+            self._provider_error = None
             set_resolver = getattr(provider, "set_media_resolver", None)
             if callable(set_resolver):
                 set_resolver(self._media_resolver)
@@ -506,19 +521,30 @@ class APICommunicationService:
 
         except ValueError as e:
             # Config validation failed (e.g., wrong API key format for provider)
+            if expected_generation != getattr(self, "_provider_generation", 0):
+                return
+
             self._provider = None
             self._provider_error = str(e)
             logger.warning(
-                f"Profile '{self._profile.name}' has configuration error: {e}. Use /setup to fix the configuration."
+                "Profile '%s' has configuration error (%s). "
+                "Use /setup to fix the configuration.",
+                self._profile.name,
+                type(e).__name__,
             )
 
         except Exception as e:
             # Other errors (network, etc.)
+            if expected_generation != getattr(self, "_provider_generation", 0):
+                return
+
             self._provider = None
             self._provider_error = str(e)
             logger.warning(
-                f"Failed to initialize provider for profile '{self._profile.name}': {e}. "
-                f"Use /setup to check configuration."
+                "Failed to initialize provider for profile '%s' (%s). "
+                "Use /setup to check configuration.",
+                self._profile.name,
+                type(e).__name__,
             )
 
     async def _refresh_oauth_token(self) -> None:
@@ -579,10 +605,20 @@ class APICommunicationService:
                 query_codex_models,
             )
 
+            profile = self._profile
+            revision = profile.revision
             models = await query_codex_models(tokens.access_token, tokens.account_id)
+            # The lookup awaited: an edit or a profile swap made meanwhile wins.
+            if self._profile is not profile or profile.revision != revision:
+                logger.warning(
+                    "Profile %r was edited while its model was being resolved; "
+                    "keeping the newer settings",
+                    profile.name,
+                )
+                return
             resolved = pick_best_model(models)
             if resolved != "codex":
-                self._profile.model = resolved
+                profile.model = resolved
                 logger.info(f"Resolved OAuth model to: {resolved}")
         except Exception as e:
             logger.warning(f"Model resolution failed: {e}")
@@ -807,52 +843,20 @@ class APICommunicationService:
                 )
                 raise asyncio.CancelledError("API request cancelled by user")
             except Exception as e:
-                # Check if this is a retryable error
-                classification_text = str(e)
-                error_str = redact_error_media(classification_text)
-                status_code = getattr(e, "status_code", None)
-                error_code = getattr(e, "error_code", "")
-                is_typed_provider_error = isinstance(e, ProviderError)
-                is_rate_limit = (
-                    isinstance(e, RateLimitError)
-                    or error_code == "rate_limit_error"
-                    or status_code == 429
-                    or (
-                        not is_typed_provider_error
-                        and bool(re.search(r"\b429\b", classification_text))
-                    )
-                )
-                is_empty_response = isinstance(e, EmptyResponseError)
-                is_context_overflow = is_empty_response and (
-                    getattr(e, "error_code", "") == "context_window_exceeded"
-                )
+                # Classify by structured type and code only. Rendered text
+                # carries provider names, login hints, and redactions — none of
+                # it is classification signal (#549, #720).
+                info = structured_error_info(e)
+                error_str = redact_error_media(str(e))
+                error_code = getattr(e, "error_code", "") or info.error_code or ""
+                is_rate_limit = info.error_class == "rate_limit"
+                is_empty_response = info.error_class == "empty_response"
+                is_context_overflow = is_context_overflow_info(info)
 
                 # Server, connection, timeout, and network errors are transient.
-                is_server_error = (
-                    isinstance(e, ServerError)
-                    or (
-                        isinstance(error_code, str)
-                        and error_code.startswith("server_error")
-                    )
-                    or (isinstance(status_code, int) and 500 <= status_code < 600)
-                    or (
-                        not is_typed_provider_error
-                        and bool(re.search(r"\b5\d{2}\b", classification_text))
-                    )
-                    or (not is_typed_provider_error and "Network error" in classification_text)
-                )
-                is_transport_error = isinstance(
-                    e, (APIConnectionError, APITimeoutError)
-                ) or error_code in {
-                    "connection_error",
-                    "timeout",
-                }
-                is_transient_http = isinstance(
-                    e, TransientHTTPError
-                ) or status_code in {
-                    408,
-                    409,
-                }
+                is_server_error = info.error_class == "server"
+                is_transport_error = info.error_class in {"connection", "timeout"}
+                is_transient_http = info.error_class == "transient_http"
 
                 # A context overflow won't fix itself on retry — the request is
                 # the same size each time. Surface it at once so the user can
@@ -924,13 +928,10 @@ class APICommunicationService:
 
                     if is_rate_limit:
                         error_type = "Rate limited"
+                    elif info.error_class == "timeout":
+                        error_type = "Timeout"
                     elif is_transport_error:
-                        error_type = (
-                            "Timeout"
-                            if isinstance(e, APITimeoutError)
-                            or getattr(e, "error_code", "") == "timeout"
-                            else "Transport error"
-                        )
+                        error_type = "Transport error"
                     elif is_empty_response:
                         error_type = "Empty response"
                     else:
@@ -974,18 +975,12 @@ class APICommunicationService:
                     error=error_str,
                     duration=time.time() - request_start,
                 )
-                if goal_image_diagnostics_active():
-                    if any(phrase in classification_text.lower() for phrase in (
-                        "context window", "context_window", "context_length",
-                        "maximum context length", "too many tokens", "prompt is too long",
-                    )):
-                        error_code = "context_window_exceeded"
-                    if isinstance(e, ProviderError):
-                        raise e from None
-                    raise ProviderError(
-                        error_str, provider_name, error_code=error_code or None
-                    ) from None
-                if error_str != str(e):
+                # Typed provider errors keep their class so downstream
+                # classification survives to the event stream (#720); the
+                # boundary constructors already sanitize and redact them.
+                if isinstance(e, ProviderError):
+                    raise e from None
+                if goal_image_diagnostics_active() or error_str != str(e):
                     raise ProviderError(
                         error_str, provider_name, error_code=error_code or None
                     ) from None
@@ -1731,6 +1726,8 @@ class APICommunicationService:
         Returns:
             True if provider initialized successfully
         """
+        self._provider_generation += 1
+        expected_generation = self._provider_generation
         # Update stored profile
         self._profile = profile
         self._provider_error = None
@@ -1739,14 +1736,18 @@ class APICommunicationService:
         self.update_from_profile(profile)
 
         # Reinitialize provider
-        await self._initialize_provider()
+        await self._initialize_provider(expected_generation)
+
+        if expected_generation != getattr(self, "_provider_generation", 0):
+            return False
 
         if self._provider:
             logger.info(f"Provider reinitialized for profile '{profile.name}'")
             return True
         else:
             logger.warning(
-                f"Provider reinitialization failed for profile '{profile.name}': {self._provider_error}"
+                "Provider reinitialization failed. "
+                "Use /setup to check configuration."
             )
             return False
 

@@ -10,9 +10,10 @@ import logging
 import re
 import uuid
 from collections.abc import Mapping
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, cast
 
-from kollabor.user_input_source import UserInputSource
+from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES, UserInputSource
 from kollabor_agent import BackgroundTaskManager, NativeToolsHandler
 from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.mcp_integration import MCPIntegration
@@ -39,6 +40,7 @@ from kollabor_ai import (
 from kollabor_ai.api_communication_service import APICommunicationService
 from kollabor_ai.context_injection import ContextService as ContextInjectionService
 from kollabor_ai.context_service import ContextService
+from kollabor_ai.conversation_logger import utc_stamp
 from kollabor_ai.goal_image_scope import current_goal_image_scope
 from kollabor_ai.message_content import (
     EphemeralImageStore,
@@ -58,6 +60,7 @@ from kollabor_events.data_models import ConversationMessage
 from kollabor_tui import MessageDisplayService
 from kollabor_tui.display_tap import publish_semantic
 
+from .acp_bridge import ACPSteeringUnconfirmed
 from .agent_hud import (
     AgentHudEntry,
     format_agent_hud,
@@ -109,6 +112,21 @@ class LLMService:
     It manages conversation history, model communication, and intelligent
     conversation logging with memory features.
     """
+
+    # Admission-serial cursor protocol state (#676 r7) as class defaults:
+    # instances built via ``object.__new__`` (isolated tests, thin doubles)
+    # still carry the protocol, and each instance rebinds its own counter on
+    # first claim (ints are immutable, so no cross-instance sharing).
+    _turn_serial = 0
+    _cursor_winner_serial = -1
+    _continue_serial: int | None = None
+    # Chain-local tail (#676): the last row of the batch/continuation chain
+    # a tool loop is walking, kept separate from the shared cursor pointer
+    # a mid-run mention completion may advance. _batch_tail_serial applies
+    # the continue-ticket discipline: an older suspended batch completing
+    # late must not clobber a newer batch's tail.
+    _batch_tail_uuid: str | None = None
+    _batch_tail_serial: int | None = None
 
     def _is_hidden_voice_message(self, message) -> bool:
         """The user message that carries a hidden voice turn's instruction."""
@@ -213,11 +231,16 @@ class LLMService:
             and hasattr(self, "conversation_logger")
             and self.conversation_logger
         ):
-            await self.conversation_logger.log_system_message(
-                formatted_content,
-                parent_uuid=getattr(self, "current_parent_uuid", None),
-                subtype=normalized_subtype,
-            )
+            # The HUD entry is queued already: a history write failure must not
+            # stop the caller (grants, hub results) from completing.
+            try:
+                await self.conversation_logger.log_system_message(
+                    formatted_content,
+                    parent_uuid=getattr(self, "current_parent_uuid", None),
+                    subtype=normalized_subtype,
+                )
+            except Exception as exc:
+                logger.warning("HUD entry not written to history: %s", exc)
 
     async def inject_tool_grant(
         self,
@@ -884,6 +907,7 @@ class LLMService:
         self._provider_registry = ProviderRegistry
         self._tool_accumulator = ToolCallAccumulator(legacy_mode=True)
         self._provider_lock = asyncio.Lock()
+        self._provider_transition_owner = None
         self._current_provider = None
 
         # Queue overflow metrics counters (shared between task manager and queue processor)
@@ -1182,8 +1206,11 @@ class LLMService:
         # Set conversation context before logging start
         self._set_conversation_context()
 
-        # Log conversation start
-        await self.conversation_logger.log_conversation_start()
+        # Log conversation start; a history write failure must not stop startup
+        try:
+            await self.conversation_logger.log_conversation_start()
+        except Exception as exc:
+            logger.warning("Conversation start not written to history: %s", exc)
 
         # Start task monitoring
         if self.task_config.background_tasks.enable_monitoring:
@@ -1457,6 +1484,27 @@ class LLMService:
         except Exception:
             logger.debug("hub model-switch announcement failed", exc_info=True)
 
+    @asynccontextmanager
+    async def provider_transition(self):
+        """Hold the provider lock for a whole profile-selection transition.
+
+        ``/model`` (``switch_profile``) and the state service both pick a
+        profile and initialize the request provider; running them at once left
+        the selected profile and the request provider on different profiles.
+        A task that already holds the transition passes through, so an
+        activation nested in the same task does not wait on itself.
+        """
+        task = asyncio.current_task()
+        if getattr(self, "_provider_transition_owner", None) is task:
+            yield
+            return
+        async with self._provider_lock:
+            self._provider_transition_owner = task
+            try:
+                yield
+            finally:
+                self._provider_transition_owner = None
+
     async def switch_profile(self, profile_name: str, persist: bool = True) -> bool:
         """Switch to a different profile with thread-safe provider reinitialization.
 
@@ -1477,7 +1525,9 @@ class LLMService:
         Returns:
             True if switch successful, False otherwise
         """
-        async with self._provider_lock:
+        provider_touched = False
+        selected = False
+        async with LLMService.provider_transition(self):
             try:
                 if not self.profile_manager:
                     logger.error("Cannot switch profile: no profile manager")
@@ -1493,6 +1543,22 @@ class LLMService:
                 previous_model = (
                     active_profile.get_model() if active_profile is not None else None
                 )
+
+
+                previous_runtime_profile = getattr(
+                    self.api_service, "_profile", None
+                )
+                if (
+                    previous_runtime_profile is None
+                    and active_profile is not None
+                    and str(getattr(active_profile, "provider", "") or "").lower()
+                    != "acp"
+                ):
+                    previous_runtime_profile = active_profile
+                previous_provider = getattr(self, "_current_provider", None)
+                acp_orchestrator = None
+                acp_closed = False
+                acp_close_started = False
 
                 if str(getattr(profile, "provider", "") or "").lower() == "acp":
                     event_bus = getattr(self, "event_bus", None)
@@ -1569,9 +1635,24 @@ class LLMService:
                                     query_codex_models,
                                 )
 
+                                revision = profile.revision
                                 models = await query_codex_models(
                                     tokens.access_token, tokens.account_id
                                 )
+                                # The lookup awaited: an edit or replacement made
+                                # meanwhile wins, so this stale switch is refused.
+                                stale = (
+                                    profile.revision != revision
+                                    or self.profile_manager.get_profile(profile_name)
+                                    is not profile
+                                )
+                                if stale:
+                                    logger.warning(
+                                        "Profile %r was edited while its model was "
+                                        "being resolved; switch cancelled",
+                                        profile_name,
+                                    )
+                                    return False
                                 resolved = pick_best_model(models)
                                 if resolved != "codex":
                                     profile.model = resolved
@@ -1601,14 +1682,74 @@ class LLMService:
                 # ``_provider_error``), so the next turn can still report the
                 # previous profile's error.
                 provider_config = create_config_from_profile(profile.to_dict())
+                revision = profile.revision
+
+
+                def target_profile_is_stale() -> bool:
+                    return (
+                        profile.revision != revision
+                        or self.profile_manager.get_profile(profile_name) is not profile
+                    )
+
+                async def restore_previous_runtime(
+                    *, restart_acp: bool = False
+                ) -> None:
+                    self._current_provider = previous_provider
+                    if previous_runtime_profile is not None:
+                        previous_profile_name = getattr(
+                            previous_runtime_profile, "name", profile_name
+                        )
+                        try:
+                            restored = await self.api_service.reinitialize_provider(
+                                previous_runtime_profile
+                            )
+                            if restored is False:
+                                logger.error(
+                                    "Could not restore provider profile %r after "
+                                    "switch rollback",
+                                    previous_profile_name,
+                                )
+                        except Exception as exc:
+                            logger.error(
+                                "Could not restore provider profile %r after "
+                                "switch rollback (%s)",
+                                previous_profile_name,
+                                type(exc).__name__,
+                            )
+                    if (
+                        restart_acp
+                        and acp_orchestrator is not None
+                        and active_profile is not None
+                    ):
+                        try:
+                            await acp_orchestrator.start(active_profile)
+                        except Exception as exc:
+                            logger.error(
+                                "Could not restore ACP profile %r after switch rollback (%s)",
+                                active_profile.name,
+                                type(exc).__name__,
+                            )
+                provider_touched = True
                 api_reinitialized = await self.api_service.reinitialize_provider(
                     profile
                 )
+                # Re-initialization can look up the OAuth model (profile-scoped
+                # tokens skip the lookup above), so an edit or replacement made
+                # meanwhile refuses this switch and restores the previous provider.
+                if target_profile_is_stale():
+                    logger.warning(
+                        "Profile %r changed while its provider was being "
+                        "initialized; switch cancelled",
+                        profile_name,
+                    )
+                    await restore_previous_runtime()
+                    return False
                 if not api_reinitialized:
                     logger.warning(
                         "API service could not reinitialize for profile '%s'",
                         profile_name,
                     )
+                    await restore_previous_runtime()
                     return False
 
                 acp_orchestrator = None
@@ -1625,29 +1766,49 @@ class LLMService:
                     )
                     if acp_orchestrator is not None:
                         try:
+                            acp_close_started = True
                             await acp_orchestrator.close()
+
+                            acp_closed = True
+                            if target_profile_is_stale():
+                                logger.warning(
+                                    "Profile %r changed while stopping ACP; "
+                                    "switch cancelled",
+                                    profile_name,
+                                )
+                                await restore_previous_runtime(restart_acp=True)
+                                return False
                         except Exception as exc:
                             logger.error(
                                 "Could not stop ACP profile %r during native switch (%s)",
                                 active_profile.name,
                                 type(exc).__name__,
                             )
-                            try:
-                                await acp_orchestrator.start(active_profile)
-                            except Exception as restore_error:
-                                logger.error(
-                                    "Could not restore ACP profile %r after failed switch (%s)",
-                                    active_profile.name,
-                                    type(restore_error).__name__,
-                                )
+                            # The API runtime already moved to the target above: restore
+                            # it and restart ACP once, as one rollback.
+                            await restore_previous_runtime(restart_acp=True)
                             return False
 
                 # Keep the coordinator's provider reference in sync with the
                 # API service. ProviderRegistry caches matching configurations,
                 # so this normally returns the same instance.
-                self._current_provider = await self._provider_registry.get_provider(
-                    provider_config
-                )
+                try:
+                    current_provider = await self._provider_registry.get_provider(
+                        provider_config
+                    )
+                except Exception:
+                    # The API service already moved; undo both provider changes.
+                    await restore_previous_runtime(restart_acp=acp_closed)
+                    raise
+                if target_profile_is_stale():
+                    logger.warning(
+                        "Profile %r changed while its provider was being resolved; "
+                        "switch cancelled",
+                        profile_name,
+                    )
+                    await restore_previous_runtime(restart_acp=acp_closed)
+                    return False
+                self._current_provider = current_provider
 
                 # Keep profile_manager's active state (and optionally the
                 # persisted config) in sync with the runtime provider. Without
@@ -1684,7 +1845,20 @@ class LLMService:
                                 type(persist_error).__name__,
                             )
 
+                selected = True
                 self.conversation_logger.set_provider(profile.provider)
+
+                if acp_orchestrator is not None:
+                    # Peer messages the closed harness still held are in the
+                    # conversation; one native turn answers them.
+                    try:
+                        await acp_orchestrator.hand_over_to_native()
+                    except Exception as exc:
+                        logger.warning(
+                            "Could not hand buffered ACP messages to profile %r (%s)",
+                            profile_name,
+                            type(exc).__name__,
+                        )
 
                 # Keep this explicit class call compatible with the focused
                 # unbound-method test stand-in used for switch_profile.
@@ -1699,6 +1873,10 @@ class LLMService:
                 )
                 return True
 
+            except asyncio.CancelledError:
+                if provider_touched and not selected:
+                    await restore_previous_runtime(restart_acp=acp_close_started)
+                raise
             except Exception as e:
                 logger.error(
                     "Failed to switch profile %r (%s)",
@@ -1711,11 +1889,41 @@ class LLMService:
         """Set dynamic context on conversation logger before logging start."""
         self._session.set_conversation_context()
 
+    def claim_turn_serial(self) -> int:
+        """Claim this turn's admission ticket (#676 r7).
+
+        Called at the atomic admission point of every cursor-writing turn:
+        the mention spawn (same instant as its lineage capture) and the
+        ordinary pipeline's user-row log. Monotonic, so admission order is
+        total and comparable across turn kinds.
+        """
+        self._turn_serial += 1
+        return self._turn_serial
+
+    def publish_cursor(self, uuid: str | None, serial: int | None) -> bool:
+        """Advance the shared cursor for an admitted turn.
+
+        A strictly later-admitted turn that already completed wins and this
+        write is dropped. Same-serial writes (one turn advancing its own
+        chain: user row, HUD insert, batch output, tool-loop continuation)
+        all land. Only an explicitly untracked write (serial None) is
+        rejected: batches claim a ticket at batch start (#676), so every
+        batch that runs holds one.
+        """
+        if serial is None or serial < self._cursor_winner_serial:
+            return False
+        self._cursor_winner_serial = serial
+        self.current_parent_uuid = uuid
+        return True
+
     # --- QueueProcessor forwarding methods ---
 
-    async def _enqueue_with_overflow_strategy(self, message: MessageContent) -> None:
-        """Enqueue message with overflow strategy. Delegates to QueueProcessor."""
-        await self._queue_processor.enqueue(message)
+    async def _enqueue_with_overflow_strategy(self, message: MessageContent) -> bool:
+        """Enqueue message with overflow strategy. Delegates to QueueProcessor.
+
+        False when the message was dropped and will not run (#589).
+        """
+        return await self._queue_processor.enqueue(message)
 
     async def _process_queue(self):
         """Process queued messages. Delegates to QueueProcessor."""
@@ -1728,27 +1936,106 @@ class LLMService:
     async def _process_message_batch(self, messages: List[MessageContent]):
         """Process a batch of messages. Delegates to QueueProcessor."""
         request_ids = batch_request_ids(messages)
+        # Keep the admission-time capture through the rebatch (#676): the
+        # most recent capture, since the pointer today lands on the last row
+        # admitted into the batch. Read BEFORE the rebatch so the non-voice
+        # branch (bare combined payload, no capture on it) keeps the value
+        # for the queue-start read below; otherwise a detached completion
+        # that advanced the pointer mid-queue would mis-parent the turn.
+        admission_parent = next(
+            (
+                m.parent_uuid
+                for m in reversed(messages)
+                if getattr(m, "parent_uuid", None)
+            ),
+            None,
+        )
+        # The batch's admission serial (#676 r7): the newest ticket carried
+        # by any item in the batch, so the batch's cursor writes resolve by
+        # the admission order of what it contains. A batch with no ticket
+        # (system nudges, bare payloads) claims one at batch start (#676):
+        # the claim is strictly later than everything already admitted --
+        # the batch's true execution order -- so its output can advance the
+        # cursor instead of stranding it before the nudge rows.
+        batch_serial = max(
+            (
+                getattr(m, "admission_serial", None)
+                for m in messages
+                if getattr(m, "admission_serial", None) is not None
+            ),
+            default=None,
+        )
+        if batch_serial is None:
+            batch_serial = self.claim_turn_serial()
         if self._pending_agent_hud:
             voice_inputs = [m for m in messages if isinstance(m, QueuedInput)]
+            operator_inputs = tuple(
+                record
+                for item in messages
+                if isinstance(item, (QueuedInput, TaggedInput))
+                for record in item.operator_inputs
+            )
             merged_origin_context = merge_voice_origin_contexts(messages)
             combined = combine_message_contents(
                 [m.content if isinstance(m, (QueuedInput, TaggedInput)) else m for m in messages]
             )
             combined = self.merge_pending_agent_hud(combined)
-            messages = [
-                QueuedInput(
+            if voice_inputs:
+                merged_input = QueuedInput(
                     combined,
                     voice_inputs[-1].voice,
                     merged_origin_context,
+                    parent_uuid=admission_parent,
+                    admission_serial=batch_serial,
+                    operator_inputs=operator_inputs,
                 )
-                if voice_inputs
-                else combined
-            ]
-        self.current_parent_uuid = await self._queue_processor.process_message_batch(
+            elif operator_inputs:
+                merged_input = TaggedInput(
+                    combined,
+                    request_ids,
+                    parent_uuid=admission_parent,
+                    admission_serial=batch_serial,
+                    operator_inputs=operator_inputs,
+                )
+            else:
+                merged_input = combined
+            messages = [merged_input]
+        # Parent from the admission-time capture, not the pointer: a detached
+        # completion (hub mention, voice reply) may have advanced the pointer
+        # while this batch sat queued (#676). Items without a capture (system
+        # nudges, bare content) keep the pointer fallback.
+        batch_parent_uuid = next(
+            (
+                m.parent_uuid
+                for m in reversed(messages)
+                if getattr(m, "parent_uuid", None)
+            ),
+            admission_parent or self.current_parent_uuid,
+        )
+        # Expose this ticket while the admitted batch is running so callbacks
+        # caused by the turn can capture its serial before they yield. Do not
+        # assign it again after the await: an older batch must not restore its
+        # ticket over a later batch that started while it was suspended.
+        self._continue_serial = batch_serial
+        batch_uuid = await self._queue_processor.process_message_batch(
             messages=messages,
-            current_parent_uuid=self.current_parent_uuid,
+            current_parent_uuid=batch_parent_uuid,
             request_ids=request_ids,
         )
+        # Seed the chain-local tail for this batch's tool-loop continuations
+        # (#676), under the same discipline as the continue ticket: an older
+        # suspended batch completing late must not clobber a newer batch's
+        # tail.
+        if (
+            self._batch_tail_serial is None
+            or batch_serial >= self._batch_tail_serial
+        ):
+            self._batch_tail_uuid = batch_uuid
+            self._batch_tail_serial = batch_serial
+        # Completion publishes through the admission-serial protocol: a
+        # later-admitted mention that completed while this batch ran keeps
+        # the cursor; a same-turn tool-loop continuation below writes on.
+        self.publish_cursor(batch_uuid, batch_serial)
 
     async def _continue_conversation(self):
         """Continue an ongoing conversation. Delegates to QueueProcessor.
@@ -1783,12 +2070,43 @@ class LLMService:
                 ):
                     hud_message._goal_image_marker = image_scope.marker
                     image_scope.carrier = hud_message
-                self.current_parent_uuid = self._add_conversation_message(
+                hud_uuid = self._add_conversation_message(
                     hud_message, parent_uuid=self.current_parent_uuid
                 )
-        self.current_parent_uuid = await self._queue_processor.continue_conversation(
-            current_parent_uuid=self.current_parent_uuid,
+                # The HUD insert belongs to the turn draining the queue
+                # (#676 r7): it publishes on that turn's admission serial
+                # so a later-admitted mention completion still wins over it.
+                self.publish_cursor(hud_uuid, self._continue_serial)
+        # Chain-local parenting (#676): a tool-loop continuation follows
+        # this chain's own last row, not the shared pointer -- a
+        # later-admitted mention that completed mid-batch keeps the cursor
+        # while the chain stays contiguous. None = chain start: parent on
+        # the pointer.
+        # Capture the owning serial BEFORE the await (continue-ticket
+        # discipline, #676 r7): a newer batch admitted while this
+        # continuation is suspended owns the tail and the cursor, and the
+        # stale continuation must commit under its own captured serial, not
+        # the re-read ticket it would inherit on resume (bismuth #768
+        # verdict: the unguarded commits let the stale chain hijack both).
+        admission_serial = self._continue_serial
+        chain_parent = self._batch_tail_uuid or self.current_parent_uuid
+        cont_uuid = await self._queue_processor.continue_conversation(
+            current_parent_uuid=chain_parent,
         )
+        # Tail seeding mirrors the batch guard above: only a serial that
+        # still owns (or extends) the chain tail may advance it.
+        if admission_serial is not None and (
+            self._batch_tail_serial is None
+            or admission_serial >= self._batch_tail_serial
+        ):
+            self._batch_tail_uuid = cont_uuid
+            self._batch_tail_serial = admission_serial
+        # Same-turn handoff (batch -> tool-loop continuation): publishes on
+        # the captured serial so later-admitted mention completions still
+        # win over this chain, while the chain itself stays contiguous
+        # (#676 r7). A stale continuation's captured serial loses to the
+        # newer batch in publish_cursor's monotonic check.
+        self.publish_cursor(cont_uuid, admission_serial)
 
     def queue_agent_hud(
         self,
@@ -1940,6 +2258,7 @@ class LLMService:
         may_answer: bool = False,
         native_only: bool = False,
         request_id: str | None = None,
+        operator_source: str | None = None,
     ) -> Dict[str, Any]:
         """Process user input through the LLM.
 
@@ -1958,6 +2277,8 @@ class LLMService:
                 generation writes files); refused while ACP owns the chat.
             request_id: the client follows this turn by it (#551): its events
                 carry it in ``request_ids``, and the result echoes it.
+            operator_source: authenticated source of words spoken/written by the
+                human operator. Untrusted or absent sources are not preserved.
 
         Returns:
             Status information about processing
@@ -1989,6 +2310,20 @@ class LLMService:
                 "reason": self.image_input_rejection_reason(),
             }
 
+        input_source = getattr(operator_source, "value", operator_source)
+        operator_inputs: tuple[dict[str, str], ...] = ()
+        if (
+            isinstance(input_source, str)
+            and input_source in HUMAN_USER_INPUT_SOURCES
+        ):
+            operator_inputs = (
+                {
+                    "source": input_source,
+                    "timestamp": utc_stamp(),
+                    "text": message if isinstance(message, str) else display_text,
+                },
+            )
+
         # A LiveKit room's turn, or a /voice turn VoicePlugin.admit let in.
         claims_voice_origin = isinstance(origin_context, dict) and is_voice_origin(origin_context)
         if claims_voice_origin and not validate_voice_origin(origin_context):
@@ -2004,8 +2339,13 @@ class LLMService:
                 return _acp_unavailable_result(self._acp_service())
             return await self._admit_acp(
                 acp,
-                {"message": normalized_message, "voice": voice, "origin_context": origin_context},
-                UserInputSource.TUI.value,
+                {
+                    "message": normalized_message,
+                    "voice": voice,
+                    "origin_context": origin_context,
+                    "operator_inputs": operator_inputs,
+                },
+                input_source if operator_inputs else UserInputSource.TUI.value,
             )
 
         trusted_origin_context = (
@@ -2052,19 +2392,62 @@ class LLMService:
         self.cancel_processing = False
         self.cancellation_message_shown = False
 
-        # Log user message
-        self.current_parent_uuid = await self.conversation_logger.log_user_message(
-            display_text, parent_uuid=self.current_parent_uuid
-        )
+        # Log user message. Admission claims this turn's serial at the same
+        # atomic point its lineage capture rides, and the cursor advance is
+        # published through the admission-serial protocol so concurrent
+        # detached completions resolve by admission order, not wall clock
+        # (#676 r7). A failed write is logged and shown; the message still
+        # goes to the model.
+        turn_serial = self.claim_turn_serial()
+        admission_parent_uuid = self.current_parent_uuid
+        # A failed write has no row to point at: the cursor stays where it is
+        # (publishing None would cut the chain) and the queue item keeps the
+        # parent captured at admission.
+        admitted_parent_uuid = admission_parent_uuid
+        try:
+            user_uuid = await self.conversation_logger.log_user_message(
+                display_text, parent_uuid=admission_parent_uuid
+            )
+        except Exception as exc:
+            logger.error("User message not written to history: %s", exc)
+            self.message_display_service.display_system_message(
+                "Conversation history not saved for this message."
+            )
+        else:
+            self.publish_cursor(user_uuid, turn_serial)
+            # This queue item belongs under the user row created for its
+            # admission, even if another completion won the shared cursor
+            # during the logger await. Never re-read mutable
+            # current_parent_uuid after yielding.
+            admitted_parent_uuid = user_uuid
 
-        # Add to processing queue with overflow handling
-        await self._enqueue_with_overflow_strategy(
-            QueuedInput(normalized_message, voice or {}, trusted_origin_context)
-            if voice or trusted_origin_context
-            else TaggedInput(normalized_message, (request_id,))
-            if request_id
-            else normalized_message
-        )
+        # Add to processing queue with overflow handling. Plain input rides a
+        # zero-id TaggedInput so the capture travels with the item (#676); a
+        # bare string could not carry it, and an empty request_ids tuple
+        # behaves like bare content in every batch-pipeline consumer.
+        try:
+            admitted = await self._enqueue_with_overflow_strategy(
+                QueuedInput(
+                    normalized_message,
+                    voice or {},
+                    trusted_origin_context,
+                    parent_uuid=admitted_parent_uuid,
+                    admission_serial=turn_serial,
+                    operator_inputs=operator_inputs,
+                )
+                if voice or trusted_origin_context
+                else TaggedInput(
+                    normalized_message,
+                    (request_id,) if request_id else (),
+                    parent_uuid=admitted_parent_uuid,
+                    admission_serial=turn_serial,
+                    operator_inputs=operator_inputs,
+                )
+            )
+        except RuntimeError:
+            # The overflow strategy refused it, and the queue already ended its
+            # stream. Raising here would make the hook pipeline retry this turn.
+            admitted = False
 
         # Start processing if not already running
         if not self.is_processing:
@@ -2072,6 +2455,10 @@ class LLMService:
                 lambda: self._process_queue(), name="process_queue"
             )
 
+        if not admitted:
+            # Dropped, or swept by a Stop: its stream already ended, so it is not
+            # reported as queued (#589).
+            return {"status": "rejected", "reason": "input_not_queued"}
         if request_id and not (voice or trusted_origin_context):
             return {"status": "queued", "request_id": request_id}
         return {"status": "queued"}
@@ -2319,8 +2706,14 @@ class LLMService:
                     message, origin=origin, thread_id=data.get("thread_id"),
                     **({"images": images} if images else {}),
                 )
+            except ACPSteeringUnconfirmed:
+                # The harness may have accepted it; queueing it would send it twice.
+                return {"status": "rejected", "reason": "steering_unconfirmed"}
             except RuntimeError as exc:
-                if images and "can't take images" in str(exc):
+                if images and (
+                    getattr(exc, "error_class", None) == "images_unsupported"
+                    or "can't take images" in str(exc)
+                ):
                     return {"status": "rejected", "reason": "This harness can't take images."}
                 raise
             if steered:
@@ -2338,12 +2731,20 @@ class LLMService:
                 message, request_id=request_id, source=source,
                 thread_id=data.get("thread_id"),
                 origin=origin,
+                **(
+                    {"operator_inputs": data["operator_inputs"]}
+                    if data.get("operator_inputs")
+                    else {}
+                ),
                 **({"images": images} if images else {}),
             )
         except (RuntimeError, ValueError) as exc:
-            if "full" in str(exc).lower():
+            error_class = getattr(exc, "error_class", None)
+            if error_class == "queue_full" or "full" in str(exc).lower():
                 return {"status": "rejected", "reason": "acp_queue_full"}
-            if images and "can't take images" in str(exc):
+            if images and (
+                error_class == "images_unsupported" or "can't take images" in str(exc)
+            ):
                 return {"status": "rejected", "reason": "This harness can't take images."}
             return _acp_unavailable_result(acp)
         except Exception as exc:
@@ -2351,7 +2752,11 @@ class LLMService:
                 return {"status": "rejected", "reason": "acp_queue_full"}
             return {"status": "rejected", "reason": "acp_admission_failed"}
         if voice:
-            acp.voice_turns[admission.request_id] = voice
+            # Key includes the turn id: this admission's metadata must not
+            # be overwritten by a later admission that reuses the same
+            # caller request ID (#597), and the orchestrator pops by the
+            # same (request_id, turn_id) key when the turn finishes.
+            acp.voice_turns[(admission.request_id, admission.turn_id)] = voice
         return {
             "status": "queued",
             "request_id": admission.request_id,
@@ -2663,8 +3068,11 @@ class LLMService:
 
     async def shutdown(self):
         """Shutdown the LLM service."""
-        # Log conversation end
-        await self.conversation_logger.log_conversation_end()
+        # Log conversation end; a history write failure must not skip the cleanup below
+        try:
+            await self.conversation_logger.log_conversation_end()
+        except Exception as exc:
+            logger.warning("Conversation end not written to history: %s", exc)
 
         # Cancel all background tasks
         await self.cancel_all_tasks()

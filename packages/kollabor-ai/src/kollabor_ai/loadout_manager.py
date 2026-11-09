@@ -12,9 +12,10 @@ Two flavors:
     * implicit -- every model in the bundled registry
       (``model_registry.list_models_for_provider``) is automatically a
       usable loadout, named after the model, IF the user has a configured
-      provider profile for that model's provider. Nothing to create,
-      nothing saved to config -- synthesized on the fly from
-      ``provider_profiles()`` x the registry.
+      provider profile for that model's provider. A provider whose live
+      catalog is cached lists that catalog instead (#558). Nothing to
+      create, nothing saved to config -- synthesized on the fly from
+      ``provider_profiles()`` x the registry and catalog.
     * explicit -- saved under ``kollabor.llm.loadouts.<name>`` in config,
       for when a user wants overrides (a custom temperature/effort/
       max_tokens, or a name that doesn't match any model). An explicit
@@ -27,6 +28,7 @@ input; ``get()`` is the strict exact-name lookup for programmatic use.
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from difflib import get_close_matches
 from typing import Any, Dict, List, Optional, Tuple
@@ -44,6 +46,18 @@ _LOCAL_ENDPOINT_PROVIDERS = {"custom", "local"}
 # "openai_responses", but the registry tags those models "openai". Without the
 # alias, an OAuth-only setup synthesizes zero implicit loadouts.
 _REGISTRY_PROVIDER_ALIASES = {"openai_responses": "openai"}
+
+_NOTE_EFFORTS = re.compile(r"effort: ([a-z/]+)")
+
+
+def _catalog_efforts(entry: Dict[str, Any]) -> Optional[List[str]]:
+    """The levels a catalog entry names (older caches keep them only in its note):
+    ``[]`` when it lists none, None when it does not say."""
+    efforts = entry.get("efforts")
+    if isinstance(efforts, list):
+        return [str(e) for e in efforts]
+    match = _NOTE_EFFORTS.search(str(entry.get("note") or ""))
+    return match.group(1).split("/") if match else None
 
 
 @dataclass
@@ -87,6 +101,33 @@ def acp_loadout_model(loadout: Loadout, profile: Any) -> str:
             and command and loadout.model == command[0]):
         return ""
     return loadout.model
+
+
+
+def loadout_sendable_effort(profile_manager: Any, loadout: Loadout) -> str:
+    """A loadout's effort as its provider profile would send it.
+
+    ``none``/``minimal`` stored on a loadout whose profile is now Anthropic are
+    dropped (logged), so the model and other fields still apply.
+    """
+    if not loadout.effort:
+        return ""
+    from .profile_manager import sendable_effort
+
+    profile = profile_manager.get_profile(loadout.provider_profile)
+    get_provider = getattr(profile, "get_effort_provider", None) or getattr(
+        profile, "get_provider", None
+    )
+    provider = get_provider() if callable(get_provider) else getattr(profile, "provider", "")
+    kept = sendable_effort(provider, loadout.effort)
+    if not kept:
+        logger.warning(
+            "Loadout '%s': effort '%s' is not sent by provider '%s'; ignoring it",
+            loadout.name,
+            loadout.effort,
+            provider,
+        )
+    return kept
 
 
 class LoadoutManager:
@@ -212,15 +253,16 @@ class LoadoutManager:
     def list_loadouts(self) -> List[Loadout]:
         """Explicit loadouts (sorted by name), then implicit ones.
 
-        Implicit loadouts are synthesized from ``provider_profiles()`` x the
-        model registry, then x the provider's cached live catalog, in that
-        order (provider-profile order, then the registry's curated per-provider
-        order, then catalog order). An implicit loadout is dropped when its
-        name collides with an explicit loadout or with an implicit already
-        emitted for an earlier provider profile -- first provider profile wins.
+        Implicit loadouts are synthesized from ``provider_profiles()``, in
+        profile order. A provider's models are its cached live catalog when
+        that has entries, plus the profile's own model (#558); otherwise its
+        bundled registry models, in the registry's curated per-provider order.
+        An implicit loadout is dropped when its name collides with an explicit
+        loadout or with an implicit already emitted for an earlier provider
+        profile -- first provider profile wins.
 
-        The catalog half is read from cache only, so this stays synchronous and
-        never blocks. A provider whose catalog has not been fetched yet simply
+        The catalog is read from cache only, so this stays synchronous and
+        never blocks. A provider whose catalog has not been fetched yet
         contributes its registry models (possibly none) -- call
         ``refresh_catalogs()`` to warm it. This is what lets proxy providers
         with no bundled registry entries (OpenRouter) appear at all.
@@ -247,27 +289,7 @@ class LoadoutManager:
                 )
                 seen.add(profile.name)
                 continue
-            registry_provider = _REGISTRY_PROVIDER_ALIASES.get(provider, provider)
-            # Registry "custom"/"local" entries are generic placeholders that
-            # match no real endpoint (#447): grok-4.7 & co. appeared for any
-            # custom base_url no matter what its live /models catalog said,
-            # because the registry fallback ran unconditionally and the
-            # cached catalog was only ever appended after it. Only the live
-            # catalog describes such an endpoint; cold or failed fetches
-            # leave the section empty, which renders the panel's existing
-            # "no models" note with its retry hint.
-            if provider in _LOCAL_ENDPOINT_PROVIDERS:
-                model_names = []
-            else:
-                model_names = [
-                    name for name, _info in list_models_for_provider(registry_provider)
-                ]
-            model_names.extend(
-                str(entry.get("id") or "")
-                for entry in self._cached_catalog(profile)
-                if entry.get("id")
-            )
-            for model_name in model_names:
+            for model_name in self.models_for_profile(profile):
                 if model_name in seen:
                     continue
                 seen.add(model_name)
@@ -281,13 +303,107 @@ class LoadoutManager:
                 )
         return result
 
+    def models_for_profile(self, profile: Any) -> List[str]:
+        """The models a native provider profile serves: its registry models,
+        then its cached live catalog."""
+        provider = (profile.get_provider() or "").lower()
+        registry_provider = _REGISTRY_PROVIDER_ALIASES.get(provider, provider)
+        # A live catalog with entries is the provider's list (#558): a
+        # registry model it omits is not offered, since picking it fails
+        # at the provider. The registry seeds only a cold or failed fetch,
+        # or a provider with no listing API. Registry "custom"/"local"
+        # entries are generic placeholders that match no real endpoint
+        # (#447), so those endpoints list only what their live catalog
+        # serves; cold or failed fetches leave the section empty, which
+        # renders the panel's existing "no models" note with its retry hint.
+        catalog = self._cached_catalog(profile)
+        if catalog or provider in _LOCAL_ENDPOINT_PROVIDERS:
+            model_names = []
+        else:
+            model_names = [
+                name for name, _info in list_models_for_provider(registry_provider)
+            ]
+        model_names.extend(
+            str(entry.get("id") or "") for entry in catalog if entry.get("id")
+        )
+        if catalog:
+            get_model = getattr(profile, "get_model", None)
+            own_model = (get_model() if callable(get_model) else "") or ""
+            if own_model:
+                model_names.append(own_model)
+        return model_names
+
+    def list_choices(
+        self, acp_options: Optional[Dict[str, Dict[str, List[str]]]] = None
+    ) -> List[Dict[str, str]]:
+        """Every provider profile x model x effort a session can start on, for
+        the web UI's searchable model picker.
+
+        Each configured profile's models, each at its own default (a blank
+        effort: picking it clears an earlier level) and at every level a request
+        on it carries, by the request's own rule (``accepted_efforts``: the
+        registry's, none on Claude for a model it does not list). A model the
+        registry says nothing about takes what its own profile's live catalog
+        lists (Codex publishes them per model; an empty list is none), else
+        none: no level is guessed. One endpoint's catalog says nothing about
+        another's. An ACP harness offers the models its sessions last reported
+        (``acp_options[profile name]``), each at the levels it reported for that
+        model. An unobserved model has no advertised effort choices; another
+        model's capabilities do not prove what it supports. It keeps its own
+        default, so it gets a blank row only when it reports no levels. Saved
+        loadouts are not rows: one saves to its provider profile, which every
+        session on it shares, and a pick changes one session.
+        """
+        from kollabor_ai.profile_manager import EFFORT_LEVELS, accepted_efforts
+
+        profiles = self.provider_profiles()
+        # A model's levels barely change: an old catalog still names them.
+        catalogs: Dict[str, Dict[str, List[str]]] = {}
+        for profile in profiles:
+            catalogs[profile.name] = {}
+            for entry in self._cached_catalog(profile, max_age=float("inf")):
+                said = _catalog_efforts(entry)
+                if entry.get("id") and said is not None:
+                    catalogs[profile.name][str(entry["id"])] = said
+        rows: List[Dict[str, str]] = []
+        for profile in profiles:
+            provider = (profile.get_provider() or "").lower()
+            if provider == "acp":
+                reported = (acp_options or {}).get(profile.name) or {}
+                seen = reported.get("efforts_by_model") or {}
+                models = [str(m) for m in reported.get("models") or []] or [""]
+                levels = {m: [str(e) for e in seen.get(m, [])] for m in models}
+            else:
+                own = [profile.get_model()] if profile.get_model() else []
+                models = list(dict.fromkeys(own + self.models_for_profile(profile)))
+                found = catalogs[profile.name]
+                levels = {}
+                for m in models:
+                    accepted = accepted_efforts(provider, m)
+                    said = (found.get(m) or []) if accepted is None else accepted
+                    levels[m] = [e for e in said if e in EFFORT_LEVELS]
+            for model in models:
+                efforts = levels[model]
+                if provider != "acp" or not efforts:
+                    efforts = [""] + efforts
+                for effort in efforts:
+                    rows.append({"profile": profile.name, "provider": provider, "model": model, "effort": effort})
+        return rows
+
     @staticmethod
-    def _cached_catalog(profile: Any) -> List[Dict[str, Any]]:
-        """This profile's cached live catalog. Empty when cold or unavailable."""
+    def _cached_catalog(profile: Any, max_age: float = float("inf")) -> List[Dict[str, Any]]:
+        """This profile's cached live catalog. Empty when cold or unavailable.
+
+        Read with no TTL: an entry older than the cache's refresh interval is
+        still the last list the provider served. Launch paths (``kollab
+        --llm``, the startup default, ``/llm <name>``) never refresh it, and
+        treating it as cold would bring the registry back and offer a model
+        the account lacks (#558). The pickers refresh on open.
+        """
         try:
             from kollabor_ai.model_catalog import cached_provider_models
 
-            return list(cached_provider_models(profile))
+            return list(cached_provider_models(profile, max_age=max_age))
         except Exception as exc:  # noqa: BLE001 -- catalog must never break listing
             logger.debug("cached catalog unavailable for %s: %s", profile, exc)
             return []
@@ -529,6 +645,10 @@ class LoadoutManager:
         except Exception:
             logger.debug("hub model-switch announcement failed", exc_info=True)
 
+    def _sendable_effort(self, loadout: Loadout) -> str:
+        """The loadout's effort, or "" when its provider never sends that level."""
+        return loadout_sendable_effort(self.profile_manager, loadout)
+
     async def activate(
         self, loadout_or_name: Any, event_bus: Optional[Any] = None
     ) -> Optional[Loadout]:
@@ -632,8 +752,16 @@ class LoadoutManager:
             model_value = acp_loadout_model(loadout, selected_profile)
             harness_entry = bool(loadout.implicit and not model_value)
             previous = current_profile if str(current_provider).lower() == "acp" else None
-            prior_binding = orchestrator.runner.binding if previous is not None and orchestrator.runner else None
-            prior_conversation = orchestrator.binding_conversation_id if previous is not None else None
+            prior_binding = (
+                getattr(getattr(orchestrator, "runner", None), "binding", None)
+                if previous is not None
+                else None
+            )
+            prior_conversation = (
+                getattr(orchestrator, "binding_conversation_id", None)
+                if previous is not None
+                else None
+            )
             previous_loadout = getattr(orchestrator, "_loadout_override", None)
             previous_sessions = {
                 name: dict(picks) for name, picks in getattr(orchestrator, "_session_options", {}).items()
@@ -681,12 +809,17 @@ class LoadoutManager:
                         )
                 except Exception as restore_exc:
                     logger.error("Could not restore previous ACP session (%s)", type(restore_exc).__name__)
+                    notice = getattr(orchestrator, "_show_notice", None)
+                    if callable(notice):
+                        notice("the previous harness could not be restarted and none is running "
+                               f"({type(restore_exc).__name__})")
                 if not isinstance(exc, Exception):
                     raise
                 return None
             await self._announce_model_switch(event_bus, loadout, None)
             return loadout
 
+        closed_harness = None
         if str(current_provider).lower() == "acp" and orchestrator is not None:
             try:
                 if getattr(orchestrator, "active", False):
@@ -697,6 +830,7 @@ class LoadoutManager:
                     type(exc).__name__,
                 )
                 return None
+            closed_harness = orchestrator
 
         previous_model: Optional[str] = None
         get_profile = getattr(self.profile_manager, "get_profile", None)
@@ -715,8 +849,9 @@ class LoadoutManager:
         }
         if loadout.temperature is not None:
             update_kwargs["temperature"] = loadout.temperature
-        if loadout.effort:
-            update_kwargs["effort"] = loadout.effort
+        loadout_effort = self._sendable_effort(loadout)
+        if loadout_effort:
+            update_kwargs["effort"] = loadout_effort
         if loadout.max_tokens is not None:
             update_kwargs["max_tokens"] = loadout.max_tokens
 
@@ -755,6 +890,18 @@ class LoadoutManager:
                 profile = self.profile_manager.get_active_profile()
                 await llm_service.api_service.reinitialize_provider(profile)
                 await llm_service._load_native_tools()
+            if closed_harness is not None:
+                # Peer messages the closed harness still held are in the
+                # conversation; one native turn answers them. The state service
+                # path hands them over itself.
+                try:
+                    await closed_harness.hand_over_to_native()
+                except Exception as exc:
+                    logger.warning(
+                        "Could not hand buffered ACP messages to profile %r (%s)",
+                        loadout.provider_profile,
+                        type(exc).__name__,
+                    )
 
         await self._announce_model_switch(event_bus, loadout, previous_model)
         return loadout

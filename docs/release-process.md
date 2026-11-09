@@ -2,7 +2,7 @@
 title: "Release Process"
 doc_type: release-process
 created: 2026-05-04
-modified: 2026-10-26
+modified: 2026-11-03
 status: active
 ---
 # Release Process
@@ -34,52 +34,75 @@ Kollab uses SemVer-style versions:
 
 Use a `vX.Y.Z` Git tag for public releases.
 
-## Release From Main, in Place
+## Prepare a release in a writer worktree; tag merged main
 
-Releases run from the shared `main` checkout, where all work happens
-(`SOFTWARE_DEVELOPMENT_LIFECYCLE.md`). In it, never create a worktree, stash,
-reset, clean, restore, or switch branches, and never build a release from
-uncommitted files or a scratch clone: the checkout stays behind, dirty with
-work that already shipped. Commit the release on local `main` instead; the
-merge then fast-forwards it, so `main` ends clean and level by construction.
+Release preparation is source work and follows the normal isolated-writer PR
+workflow in `SOFTWARE_DEVELOPMENT_LIFECYCLE.md`. Do not commit release files
+on the integration checkout. The release build and tag use the exact merged
+`main` commit after the designated integrator has synchronized the
+integration checkout with `origin/main`.
 
-1. Commit the release's work on `main` by explicit paths
-   (`git commit -- <paths>`), never `git add -A` or `git add .`. Other agents'
-   uncommitted work stays uncommitted and out of the release.
-2. Commit the release prep the same way (every version, `uv.lock`, both
-   changelogs) as `chore: prepare release vX.Y.Z`.
-3. Everything committed on `main` ships: review `git log origin/main..HEAD`,
-   then push it and open the PR with
-   `git push origin "HEAD:refs/heads/release/X.Y.Z"`.
-4. Wait for the PR to merge: auto-merge (`.github/workflows/auto-merge.yml`)
-   merges it with a merge commit once the required checks pass. Never squash or
-   rebase it, so local `main` stays a parent of the merge.
-5. Bring `main` level and tag the merge:
+1. Inspect the current repository/worktree status and latest release tag. Create
+   a dedicated worktree and release branch from freshly fetched `origin/main`;
+   confirm both path and branch are unused. Keep the integration checkout
+   source-read-only.
+2. Prepare the release in that worktree, using explicit paths for commits:
+   - update the root version and every workspace package version to exactly
+     `X.Y.Z`;
+   - update all inter-package minimum-version constraints that are part of the
+     same release;
+   - update `uv.lock` using the supported lock command, then inspect the diff;
+   - run `python scripts/changelog.py build`, which folds every entry file in
+     `changes/` into `[Unreleased]` of both changelogs and deletes the files;
+   - move intended entries from `[Unreleased]` into
+     `## [X.Y.Z] - YYYY-MM-DD` in both changelogs, keeping them byte-identical;
+   - add migration notes for breaking CLI, config, plugin, package, or API
+     behavior;
+   - keep internal debugging notes, generated indexes, credentials, raw
+     transcripts, and speculative work out of release notes.
+3. Review the exact release diff and commit only the release scope. Push the
+   branch normally and open a DRAFT PR against `main`. A different AI agent
+   must review the exact final head and record the required GitHub approval as
+   whichever account, `kollaborai` or `maarco`, is not the PR author. Record
+   reviewer identity and exact reviewed SHA in private maintainer audit
+   evidence; keep the GitHub approval plain, with no AI attribution or footer.
+   GitHub prohibits author self-approval. Required
+   CI, resolved conversations, and current-base gates apply. When the
+   code-owner gate is enabled, one of `@maarco` or `@kollaborai` must approve;
+   when one account authored the PR, the other must approve. GitHub enforces
+   the owner-account approval, not independent AI-review identity, which stays
+   in private exact-head audit evidence.
+   If the base advances, merge `origin/main` into the writer branch and push normally;
+   never rebase or force-push.
+4. The designated integrator merges the release PR only when it is within
+   Marco's authorized release plan and all exact-head review, approval, CI,
+   resolved-conversation, and current-base gates pass. Merge as `kollaborai`
+   with a merge commit. Never use `--admin` or a ruleset bypass; stop if
+   identity, bypass, or gate evidence is uncertain. In the integration
+   checkout, run `git pull --ff-only origin main`, then verify its HEAD equals
+   `origin/main` and identifies the release merge commit. If this fast-forward
+   fails or the SHAs differ, stop and report the exact state; never reset,
+   rebase, or force-push.
+5. Only after the release gates below pass and Marco explicitly instructs the
+   agent to tag, create the annotated `vX.Y.Z` tag on that exact merged-main
+   commit and push that exact tag. Never tag the writer branch or push
+   `--tags` broadly.
+6. Once publishing is green, run `uv sync --all-extras` and
+   `KOLLAB_VERSION=X.Y.Z bash install.sh` (the release binary in
+   `~/.local/bin`). Do not build from uncommitted release changes or a scratch
+   clone.
 
-   ```bash
-   git pull --ff-only origin main
-   git tag -a vX.Y.Z -m "Release vX.Y.Z"
-   git push origin vX.Y.Z
-   ```
-
-6. Once publishing is green, install it:
-
-   ```bash
-   uv sync --all-extras                   # the checkout's own venv
-   KOLLAB_VERSION=X.Y.Z bash install.sh   # the release binary in ~/.local/bin
-   ```
-
-   The installer replaces a uv tool or pipx kollab at `~/.local/bin/kollab`, so
-   from then on `/upgrade` swaps the binary and never touches the checkout.
-
-Done means `main` matches `origin/main`, `git status` lists none of the
-release's files, and `kollab --version` prints `Build: <branch> @ <8-character
-SHA>` immediately before the unchanged final `kollab X.Y.Z` line inside and
-outside the repo. Build identity comes from the exact checkout used to build the
-artifact; a detached checkout reports branch `unknown` but still reports the
-short SHA when HEAD is resolvable. Each unavailable field displays as `unknown`. Any other dirty file is work
-outside the release: name it in the release report. Running agents
-keep the code they started with; list them and ask before restarting any.
+The integration checkout must match `origin/main` at the intended merge commit
+before build or tag actions. Classify any other dirty path instead of removing
+or carrying it into release scope. Verify the installed release's `kollab --version`
+prints `Build: <branch> @ <8-character SHA>` immediately before the unchanged
+final `kollab X.Y.Z` line. Report the source-checkout version separately if main
+advances after the tag. Build identity comes from the
+exact checkout used to build the artifact; detached checkouts report branch
+`unknown` while retaining a resolvable short SHA, and each unavailable field
+displays as `unknown`. Running agents keep the code they started with; list them
+and ask before restarting any. These proofs are required in addition to the
+existing package, artifact, tag, and publication gates below.
 
 ## Pre-Release Checklist
 
@@ -132,9 +155,11 @@ scripts/docker-runtime.sh smoke
 ## Publishing
 
 1. Confirm the release commit is clean and scanned.
-2. Create the annotated release tag on the merge commit (Release From Main, in
-   Place, step 5).
-3. Push that exact tag: `git push origin vX.Y.Z`, never `--tags`.
+2. Create the annotated release tag on the synchronized merge commit
+   (Prepare a release in a writer worktree; tag merged main, step 5).
+3. Push that exact tag: `git push origin vX.Y.Z`, never `--tags`. Tags do not
+   start publication. From reviewed `main`, dispatch the publishing controller:
+   `gh workflow run publish.yml --ref main -f tag=vX.Y.Z`.
 4. Let the publish workflow build and check the CLI binaries on all four
    existing platforms, unsigned Tauri desktop bundles for macOS arm64 and
    x86_64, and Linux x86_64 AppImage/Debian packages. Publish the packages, then
@@ -154,12 +179,22 @@ scripts/docker-runtime.sh smoke
    and the install path after publication. `scripts/desktop_release.py` enforces
    the exact 22-file manifest and verifies every payload from the flattened
    artifact download directory. Checksums contain basenames, not build paths.
-   The Binaries workflow builds and checks this set only for a `v*` tag
-   (publish.yml calls it) or a manual run; pull requests and branch pushes
-   build no packages. The only PR-time binary build is the `ci/binary-smoke`
+   The Binaries workflow builds and checks this set when the publishing
+   controller calls it with the resolved release source SHA, or during a
+   manual rehearsal; pull requests and branch pushes build no packages.
+   The only PR-time binary build is the `ci/binary-smoke`
    CI job (one quick Linux smoke build, no artifacts, not a required merge
-   check); full four-platform binaries and all desktop builds remain tag-only. To catch a packaging failure before tagging, run it on
-   the release branch: `gh workflow run binaries.yml --ref release/X.Y.Z`.
+   check). Check the live publishing workflow state before dispatching; a
+   manually disabled workflow does not execute. The controller's `head_sha`
+   identifies reviewed workflow code on `main`, and its `source_sha` output
+   identifies the tagged release source. These may differ when publishing an
+   existing tag after a workflow repair. Every build checks out that immutable
+   source SHA, while upload jobs check out the controller SHA. Record both
+   SHAs, the annotated tag object, run ID/URL and artifact digests in private
+   release evidence. Never move the tag to pick up publishing changes.
+   A direct `binaries.yml` dispatch is a rehearsal and builds its selected
+   workflow revision; it accepts no alternate source input. Use the publishing
+   controller for an existing tag, without changing or creating refs.
    Each platform stages a hash/version-checked native CLI from
    the same workflow; absent version inputs use `pyproject.toml`, while a
    supplied tag must match it. macOS and Linux desktop asset names therefore
@@ -167,20 +202,87 @@ scripts/docker-runtime.sh smoke
    Unsigned macOS users must use Finder's Control-click > Open flow on first
    launch (see `desktop/README.md`). Apple signing/notarization preparation
    remains available without changing the unsigned release default.
-   Windows is built by the `desktop-windows` job for every release tag: a
+   Windows is built by the `desktop-windows` job for every publishing run: a
    native runtime, an NSIS installer and its `.sha256`, unsigned (SmartScreen:
    More info, then Run anyway; the release notes say so). The installer ships
    only if the job passes its agent check (`build_binary.py --agent-smoke`), and
-   both workflows run `desktop_release.py verify --windows required`, so a
+   both the binary manifest job and the upload helper require the Windows
+   installer in `desktop_release.verify_manifest(..., windows="required")`, so a
    release without the installer, or with half the pair, fails.
 6. Re-run the secret scan on the exact public commit.
-7. Install it locally (Release From Main, in Place, step 6) and check
-   `kollab --version` inside and outside the repo.
+7. Install it locally (Prepare a release in a writer worktree; tag merged
+   main, step 6) and verify the installed release version. Report the source
+   checkout's version separately if main has since advanced.
+
+### Publishing authority and activation
+
+The workflow uploads all ten normal distributions with the existing GitHub
+repository Actions secret `PYPI_API_TOKEN`: `kollab` and the nine packages in
+`scripts/publish.py:PACKAGES`. `kollabor-voice` is not a separate normal
+distribution; its code remains bundled with `kollab`. The pinned PyPA upload
+action receives that secret only in its two upload steps, as user `__token__`
+and password, and disables attestations because PyPI attestations require
+Trusted Publishing. No browser sign-in or PyPI publisher setup is required.
+
+`PYPI_API_TOKEN` is a repository secret, so its Actions availability is
+repository-wide; the `pypi-publish` environment does not relocate or scope the
+secret. The workflow references it only in the package-upload job, which is
+protected by that environment. The job runs reviewed controller code from
+`main`, without executing tagged build hooks. Keep the token out of validation,
+source/build, binary, and GitHub Release jobs, command lines, logs, files,
+artifacts, and outputs. Never print its value. Confirm that the secret exists
+without reading or displaying it.
+
+Create and read back the GitHub `pypi-publish` and `github-release`
+environments. Each uses a custom deployment branch policy allowing only
+`main`. No additional human reviewer is required. Preserve the protected-main
+review/check gates and immutable `v*` tag rules. Do not remove the existing
+`PYPI_API_TOKEN` secret or change repository secrets as part of release setup.
+
+Build jobs have only `contents: read`, do not persist checkout credentials,
+and receive no PyPI credential. Release build jobs disable automatic uv and npm
+action caches; manual binary runs cannot select arbitrary source through a
+dispatch input. The GitHub metadata lookup receives a step-scoped read-only
+GitHub token. Only the GitHub Release job has `contents: write`. Repository
+write access already permits GitHub release writes; default read-only workflow
+permissions are a default, not a permission ceiling. The protected upload-job
+environment and the secret references in that job constrain where this
+workflow uses the PyPI token, but do not change the repository secret's scope.
+
+After the reviewed workflow merge, enable with `gh workflow enable publish.yml`
+if necessary, then dispatch from `main` with the existing tag. Verify the run's
+resolved source matches the recorded release commit before accepting its
+artifacts.
+
+### Partial publication and Homebrew
+
+The upload helper validates all twenty package archives before any PyPI
+upload, checks existing remote digests, then stages only missing files.
+Workspace publication is verified before uploading the root package. A
+different digest stops the run; `skip-existing` is not a recovery policy.
+GitHub assets are added only to a draft, checked against the exact 22-file
+manifest, and verified remotely before the draft becomes public. Existing
+assets with different bytes, unexpected names or an incomplete public release
+are rejected; the publisher never clobbers them.
+
+If a job fails after some writes, record the package/asset state and preserve
+that run's artifacts. After diagnosis, rerun the failed upload job using those
+same artifacts. A new full build can have different archive bytes and is not
+an automatic retry. Do not delete packages, replace assets or retag to bypass
+a mismatch.
+
+The Homebrew tap already reconciles PyPI releases hourly in
+`update-kollab-formula.yml`, including its own macOS installation/test gate.
+No cross-repository dispatch token is needed in this publisher. After PyPI
+verification, the release owner can request the existing manual path:
+`gh workflow run update-kollab-formula.yml --repo kollaborai/homebrew-tap --ref main -f version=X.Y.Z`.
+Check that run and the committed formula before reporting Homebrew complete.
 
 ## Post-Release
 
-- [ ] `main` matches `origin/main`, `git status` lists none of the release's
-      files, and `kollab --version` reports X.Y.Z inside and outside the repo.
+- [ ] `main` matches current `origin/main`, `git status` lists none of the release's
+      files, and the installed release binary reports X.Y.Z. The tag resolves to
+      the recorded release merge; any later main SHA and source version are reported.
 - [ ] Create follow-up issues for deferred work.
 - [ ] Confirm installation instructions still work from a fresh environment.
 - [ ] Confirm the changelog entry is visible and human-readable.

@@ -19,7 +19,12 @@ import re
 from typing import Any
 
 from .context import ContextListSnapshot, ConversationContext
-from .interface import StateService, enrollment_result, offer_failure
+from .interface import (
+    ProfileActivationError,
+    StateService,
+    enrollment_result,
+    offer_failure,
+)
 from .snapshots import (
     AgentListSnapshot,
     AgentSnapshot,
@@ -38,6 +43,30 @@ from .snapshots import (
 )
 
 logger = logging.getLogger(__name__)
+
+class ReloadNeededError(ValueError):
+    """The daemon failed because its code no longer matches the checkout.
+
+    A long-lived daemon lazy-imports modules on first use; when a module it
+    needs has left the checkout after the daemon started, every turn fails
+    until the agent restarts onto the current code (#571).
+    """
+
+
+def _raise_for_error(result: dict[str, Any]) -> None:
+    """Raise the RPC error result, preserving typed activation/reload failures."""
+    error = str(result.get("error") or "")
+
+    if result.get("error_code") == ProfileActivationError.ERROR_CODE:
+        raise ProfileActivationError(
+            previous_profile_restored=(
+                result.get("previous_profile_restored") is True
+            )
+        )
+    if result.get("reload_needed"):
+        raise ReloadNeededError(error)
+    raise ValueError(error)
+
 
 
 def _screen_text(value: str) -> str:
@@ -266,7 +295,7 @@ class RemoteStateService(StateService):
                 f"state.set_hub_participation expected dict, got {type(result).__name__}"
             )
         if result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return result
 
     # === Processing ===
@@ -326,7 +355,7 @@ class RemoteStateService(StateService):
                 f"got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return bool(result.get("opened", False))
 
     # === Writes (phase 4) ===
@@ -376,8 +405,8 @@ class RemoteStateService(StateService):
         # profiles instead of failing outright.
         if model:
             payload["model"] = model
-        if effort:
-            payload["effort"] = effort
+        if effort is not None:
+            payload["effort"] = effort  # "" is the model's own default: it clears an earlier pick
         result = await self._rpc.call(
             "state.set_active_profile",
             payload,
@@ -391,7 +420,7 @@ class RemoteStateService(StateService):
         # a {"error": "..."} envelope when the underlying ValueError is
         # caught (bad name). Honour the envelope by raising on the client.
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return ProfileSnapshot.from_dict(result)
 
     async def set_approval_mode(self, mode: str) -> PermissionSnapshot:
@@ -409,7 +438,7 @@ class RemoteStateService(StateService):
                 f"state.set_approval_mode expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return PermissionSnapshot.from_dict(result)
 
     # === Agents (phase 4.5) ===
@@ -447,7 +476,7 @@ class RemoteStateService(StateService):
                 f"state.set_agent expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return AgentSnapshot.from_dict(result)
 
     async def clear_agent(self) -> AgentSnapshot:
@@ -459,7 +488,7 @@ class RemoteStateService(StateService):
                 f"state.clear_agent expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return AgentSnapshot.from_dict(result)
 
     # === Skills (phase 4.5) ===
@@ -489,7 +518,7 @@ class RemoteStateService(StateService):
                 f"state.activate_skill expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return SkillListSnapshot.from_dict(result)
 
     async def deactivate_skill(self, name: str) -> SkillListSnapshot:
@@ -503,7 +532,7 @@ class RemoteStateService(StateService):
                 f"state.deactivate_skill expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return SkillListSnapshot.from_dict(result)
 
     # === System prompt (phase 4.5) ===
@@ -545,7 +574,7 @@ class RemoteStateService(StateService):
                 f"state.set_system_prompt expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return SystemPromptSnapshot.from_dict(result)
 
     # === Contexts (phase 4.5 step 6) ===
@@ -577,7 +606,7 @@ class RemoteStateService(StateService):
                 f"state.get_active_context expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return ConversationContext.from_dict(result)
 
     async def create_context(
@@ -605,7 +634,7 @@ class RemoteStateService(StateService):
                 f"state.create_context expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return ConversationContext.from_dict(result)
 
     async def attach_to_context(self, name: str) -> ConversationContext:
@@ -624,7 +653,7 @@ class RemoteStateService(StateService):
             # The daemon distinguishes "not found" from "turn in progress"
             # in the error string; the client just raises ValueError for
             # both. Callers that care can inspect the message.
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return ConversationContext.from_dict(result)
 
     async def archive_context(self, name: str) -> ConversationContext:
@@ -640,7 +669,7 @@ class RemoteStateService(StateService):
                 f"state.archive_context expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return ConversationContext.from_dict(result)
 
     # === Session management (phase 4.5 step 7) ===
@@ -656,7 +685,7 @@ class RemoteStateService(StateService):
                 f"state.restart_session expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return ConversationSnapshot.from_dict(result)
 
     # === MCP writes (phase 4.5 step 7) ===
@@ -672,7 +701,7 @@ class RemoteStateService(StateService):
                 f"state.enable_mcp_server expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return McpSnapshot.from_dict(result)
 
     async def disable_mcp_server(self, name: str) -> McpSnapshot:
@@ -686,7 +715,7 @@ class RemoteStateService(StateService):
                 f"state.disable_mcp_server expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return McpSnapshot.from_dict(result)
 
     async def test_mcp_server(self, name: str) -> dict[str, Any]:
@@ -710,7 +739,7 @@ class RemoteStateService(StateService):
             # key describing a connection problem, which the caller renders
             # as a diagnostic.
             if not result.get("found", True):
-                raise ValueError(str(result["error"]))
+                _raise_for_error(result)
         return result
 
     async def get_mcp_tools(
@@ -752,7 +781,7 @@ class RemoteStateService(StateService):
                 f"state.reload_mcp_servers expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return result
 
     # === Permission writes + project reads (phase 4.5 step 7) ===
@@ -768,7 +797,7 @@ class RemoteStateService(StateService):
                 f"state.clear_session_approvals expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return PermissionSnapshot.from_dict(result)
 
     async def clear_project_approvals(self) -> PermissionSnapshot:
@@ -782,7 +811,7 @@ class RemoteStateService(StateService):
                 f"state.clear_project_approvals expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return PermissionSnapshot.from_dict(result)
 
     async def list_project_approvals(self) -> list[str]:
@@ -796,7 +825,7 @@ class RemoteStateService(StateService):
                 f"state.list_project_approvals expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         approvals = result.get("approvals", [])
         if not isinstance(approvals, list):
             return []
@@ -815,7 +844,7 @@ class RemoteStateService(StateService):
                 f"state.get_hub_status_text expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         text = result.get("text", "")
         return str(text)
 
@@ -830,7 +859,7 @@ class RemoteStateService(StateService):
                 f"state.get_hub_whoami_text expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return str(result.get("text", ""))
 
     async def get_hub_work_text(self) -> str:
@@ -844,7 +873,7 @@ class RemoteStateService(StateService):
                 f"state.get_hub_work_text expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return str(result.get("text", ""))
 
     # === Hub writes (phase 4.6 — attach mode msg/broadcast) ===
@@ -1000,7 +1029,7 @@ class RemoteStateService(StateService):
                 f"state.hub_send_msg expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return str(result.get("text", ""))
 
     async def list_hub_agents(self) -> list[dict[str, Any]]:
@@ -1014,7 +1043,7 @@ class RemoteStateService(StateService):
                 f"state.list_hub_agents expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         agents = result.get("agents", [])
         return agents if isinstance(agents, list) else []
 
@@ -1031,7 +1060,7 @@ class RemoteStateService(StateService):
                 f"state.send_hub_user_message expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return str(result.get("text", ""))
 
     async def hub_broadcast(self, content: str, force: bool = False) -> str:
@@ -1047,7 +1076,7 @@ class RemoteStateService(StateService):
                 f"state.hub_broadcast expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return str(result.get("text", ""))
 
     # === Resume (phase 4.5 step 7) ===
@@ -1085,7 +1114,7 @@ class RemoteStateService(StateService):
                 f"state.send_message expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return result
 
     async def cancel_current_request(self, voice_turn_id: str | None = None) -> dict[str, Any]:
@@ -1102,7 +1131,7 @@ class RemoteStateService(StateService):
                 f"state.cancel_current_request expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return result
 
     async def resume_conversation(self, session_id: str) -> dict[str, Any]:
@@ -1123,5 +1152,5 @@ class RemoteStateService(StateService):
                 f"state.resume_conversation expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
-            raise ValueError(str(result["error"]))
+            _raise_for_error(result)
         return result

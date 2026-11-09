@@ -3,8 +3,8 @@
 Reads agent presence from disk and queries agent unix sockets
 to expose hub state through the engine REST API.
 
-Presence files: ~/.kollab/projects/<encoded>/hub/presence/{agent_id}.json
-Agent endpoints: <platform socket root>/<project-hash>/<identity>.sock
+Presence and agent endpoints share the platform socket root, scoped by
+project hash on POSIX. Windows keeps presence in the user's project state dir.
 """
 
 import asyncio
@@ -12,6 +12,8 @@ import glob as _glob
 import json
 import logging
 import os
+import re
+import stat
 import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Collection, Dict, List, Optional, Tuple
@@ -21,7 +23,7 @@ from kollabor_config.config_utils import (
     get_config_directory_candidates,
     get_project_data_dir_candidates,
 )
-from kollabor_config.hub_paths import hub_socket_root
+from kollabor_config.hub_paths import hub_project_socket_key, hub_socket_root
 
 logger = logging.getLogger(__name__)
 
@@ -69,61 +71,119 @@ def _pid_alive(pid: Any) -> bool:
     return True
 
 
-def _current_project_presence_dir() -> Optional[Path]:
-    """Return the presence dir for the current project, if it exists.
+def _current_project_root() -> Path:
+    """Resolve the workspace root using Hub's project-scope precedence."""
+    override = os.environ.get("KOLLAB_PROJECT_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
 
-    Uses git root or cwd to determine the project, matching the same
-    logic as plugins/hub/project_scope.py::resolve_project_root().
-    """
     import subprocess
 
     try:
-        r = subprocess.run(
+        result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
             capture_output=True, text=True, timeout=2.0, check=False,
         )
-        root = Path(r.stdout.strip()).resolve() if r.returncode == 0 else Path.cwd().resolve()
+        if result.returncode == 0 and result.stdout.strip():
+            return Path(result.stdout.strip()).resolve()
     except Exception:
-        root = Path.cwd().resolve()
+        pass
+    return Path.cwd().resolve()
 
-    for project_dir in get_project_data_dir_candidates(root):
-        d = project_dir / "hub" / "presence"
-        if d.is_dir():
-            return d
+
+def _project_scoped() -> bool:
+    raw = os.environ.get("KOLLAB_HUB_PROJECT_SCOPED")
+    return raw is None or raw == "" or raw.lower() in {"1", "true", "yes", "on"}
+
+
+def _private_runtime_directory(path: Path) -> bool:
+    """Reject unowned, permissive, and symlinked shared runtime directories."""
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and info.st_uid == os.getuid()
+        and not stat.S_IMODE(info.st_mode) & 0o077
+    )
+
+
+def _current_project_presence_dir() -> Optional[Path]:
+    """Return the current shared POSIX or per-user Windows presence dir."""
+    project_root = _current_project_root()
+    if os.name != "nt":
+        root = hub_socket_root()
+        if not _private_runtime_directory(root):
+            return None
+        directory = root / hub_project_socket_key(project_root) if _project_scoped() else root
+        return directory if _private_runtime_directory(directory) else None
+
+    for project_dir in get_project_data_dir_candidates(project_root):
+        directory = project_dir / "hub" / "presence"
+        if directory.is_dir():
+            return directory
+    return None
+
+
+def _legacy_current_project_presence_dir() -> Optional[Path]:
+    """Return current HOME's pre-shared-root records, when still present."""
+    for project_dir in get_project_data_dir_candidates(_current_project_root()):
+        directory = project_dir / "hub" / "presence"
+        if directory.is_dir():
+            return directory
     return None
 
 
 def _find_presence_dirs() -> List[Path]:
-    """Find all active presence directories.
+    """Find presence directories with current-project records first.
 
-    Returns current project's presence dir first (if resolvable), then
-    all other project-scoped dirs, then the legacy global dir.
-    This ordering ensures that when multiple projects have an agent with
-    the same identity, the current project's agent wins.
+    POSIX runtime files are read from the HOME-independent socket root. The
+    process's HOME tree remains a migration fallback for same-user agents that
+    were already running before the shared location was introduced.
     """
     dirs: List[Path] = []
 
-    # Current project first (highest priority)
     current = _current_project_presence_dir()
     if current is not None:
         dirs.append(current)
 
-    # All project-scoped dirs (skip current to avoid duplicate)
+    legacy_current = _legacy_current_project_presence_dir()
+    if legacy_current is not None and legacy_current not in dirs:
+        dirs.append(legacy_current)
+
+    if os.name != "nt":
+        socket_root = hub_socket_root()
+        if _private_runtime_directory(socket_root):
+            try:
+                children = sorted(socket_root.iterdir(), key=lambda item: item.name)
+            except OSError:
+                children = []
+            for directory in children:
+                if (
+                    re.fullmatch(r"[0-9a-f]{12}", directory.name)
+                    and _private_runtime_directory(directory)
+                    and directory not in dirs
+                ):
+                    dirs.append(directory)
+            if socket_root not in dirs:
+                dirs.append(socket_root)
+
+    # Legacy project-scoped dirs (skip paths already added above).
     for config_dir in get_config_directory_candidates():
         pattern = str(config_dir / "projects" / "*" / "hub" / "presence")
-        for d in sorted(_glob.glob(pattern)):
-            p = Path(d)
-            if p.is_dir() and p != current:
-                dirs.append(p)
+        for value in sorted(_glob.glob(pattern)):
+            directory = Path(value)
+            if directory.is_dir() and directory not in dirs:
+                dirs.append(directory)
 
-    # Legacy global fallback
+    # Legacy global fallback.
     for config_dir in get_config_directory_candidates():
-        global_presence = config_dir / "hub" / "presence"
-        if global_presence.is_dir():
-            dirs.append(global_presence)
+        directory = config_dir / "hub" / "presence"
+        if directory.is_dir() and directory not in dirs:
+            dirs.append(directory)
 
     return dirs
-
 
 class HubBridge:
     """Reads hub presence + queries agent sockets on demand."""
@@ -178,6 +238,17 @@ class HubBridge:
     ) -> Optional[Dict[str, Any]]:
         """Return a single agent's presence data."""
         for agent in self.get_agents(use_cache=use_cache):
+            if agent.get("agent_id") == agent_id:
+                return agent
+        return None
+
+    def _fresh_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        """This agent's record read from disk now, leaving the cached roster alone.
+
+        A fresh roster in the cache would let the next lookup by name find another
+        folder's namesake before the cache would have expired (#556).
+        """
+        for agent in self._read_presence_files():
             if agent.get("agent_id") == agent_id:
                 return agent
         return None
@@ -251,28 +322,14 @@ class HubBridge:
         return None
 
     def _socket_path_for_agent(self, agent_data: Dict[str, Any]) -> Optional[Path]:
-        """Return socket path for an agent from its presence data.
+        """Return the socket path an agent published in its presence record.
 
-        Prefers the socket_path field (written by the agent itself) over
-        any derived path — avoids the agent_id vs identity naming mismatch.
+        None until its socket server is up: its first record, written when it
+        picks its identity (#38), has none. A socket found by its name could
+        be a same-named agent's in another folder (#555).
         """
         sp = agent_data.get("socket_path")
-        if sp:
-            return Path(sp)
-        # Fallback: identity-named socket in the project socket dir
-        identity = agent_data.get("identity")
-        if identity:
-            # Try to infer the project hash from existing endpoints. Escape
-            # literal path characters such as brackets in a Windows username.
-            pattern = os.path.join(
-                _glob.escape(str(hub_socket_root())),
-                "**",
-                _glob.escape(str(identity)) + ".sock",
-            )
-            socks = _glob.glob(pattern, recursive=True)
-            if socks:
-                return Path(socks[0])
-        return None
+        return Path(sp) if sp else None
 
     async def query_socket(
         self,
@@ -287,12 +344,15 @@ class HubBridge:
         written by the agent, which is identity-named, not agent_id-named).
         Returns parsed response dict, or None on any failure.
         """
-        agent_data = self.get_agent(agent_id)
+        # The cached roster can predate the agent or its socket (an agent's first record has none, #555),
+        # and it can outlive the agent: a successor with the same identity binds the same identity-named
+        # socket path, even with the same pid when the process re-execs in place (#566). The agent id is
+        # per process image, so only a fresh read tells whether this id still holds the socket.
+        agent_data = self._fresh_agent(agent_id)
+        sock_path = self._socket_path_for_agent(agent_data) if agent_data is not None else None
         if agent_data is None:
             logger.debug(f"No presence data for agent {agent_id}")
             return None
-
-        sock_path = self._socket_path_for_agent(agent_data)
         if sock_path is None or not sock_path.exists():
             logger.debug(f"Socket not found for {agent_id}: {sock_path}")
             return None
@@ -307,12 +367,17 @@ class HubBridge:
         timeout: float = 5.0,
     ) -> Optional[Dict[str, Any]]:
         """Send a JSON action to an agent identified by its identity string."""
+        # A cached record can predate its socket: an agent's first record has none (#555). It is read
+        # again by its own id, and a name the cache lacks is refused: a name repeats across folders,
+        # so a fresh lookup by name could find another folder's agent (#556).
         agent_data = self.get_agent_by_identity(identity)
         if agent_data is None:
             logger.debug(f"No presence data for identity {identity}")
             return None
-
         sock_path = self._socket_path_for_agent(agent_data)
+        if sock_path is None or not sock_path.exists():
+            agent_data = self._fresh_agent(str(agent_data.get("agent_id") or ""))
+            sock_path = self._socket_path_for_agent(agent_data) if agent_data is not None else None
         if sock_path is None or not sock_path.exists():
             logger.debug(f"Socket not found for identity {identity}: {sock_path}")
             return None
@@ -414,7 +479,8 @@ class HubBridge:
         import time as _time
         import uuid
 
-        agent_data = self.get_agent(target_agent_id)
+        # The recipient wakes for a message to its identity: find its record as query_socket does (#556).
+        agent_data = self.get_agent(target_agent_id) or self._fresh_agent(target_agent_id)
         target_identity = agent_data.get("identity", target_agent_id) if agent_data else target_agent_id
 
         resp = await self.query_socket(

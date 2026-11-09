@@ -18,7 +18,7 @@ from kollabor.panels import PanelError
 
 from ..server import get_session_registry
 from ..session import EngineSession
-from .sessions import apply_profile_mirror
+from .sessions import _live_model, apply_profile_mirror
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["panels"])
@@ -89,12 +89,14 @@ async def _json_body(request: Request) -> Dict[str, Any]:
 
 
 async def _refresh_profile_mirror(session: EngineSession) -> None:
-    """Best effort: a model or profile change must not leave the list stale."""
+    """Best effort: a model or profile change must not leave the list stale.
+    A switch or profile event that lands while it reads is newer, and stays (#553)."""
     try:
+        revision = getattr(session, "_profile_revision", 0)
         snap = await session.state.get_active_profile()
-        if snap.name:
+        if snap.name and getattr(session, "_profile_revision", 0) == revision:
             apply_profile_mirror(
-                session, snap.name, snap.model or None, getattr(snap, "effort", None)
+                session, snap.name, _live_model(snap), getattr(snap, "effort", None), snapshot=snap
             )
     except Exception as exc:
         logger.debug(

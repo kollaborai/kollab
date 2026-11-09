@@ -17,14 +17,16 @@ import pytest
 
 from kollabor_ai import model_catalog as mc
 from kollabor_ai.loadout_manager import LoadoutManager
+from kollabor_ai.model_registry import list_models_for_provider
 
 
 class _Profile:
     """A configured provider profile with no bundled registry models."""
 
-    def __init__(self, name="openrouter", provider="openrouter"):
+    def __init__(self, name="openrouter", provider="openrouter", model=""):
         self.name = name
         self._provider = provider
+        self._model = model
         self.auth_type = ""
 
     def get_provider(self):
@@ -37,7 +39,7 @@ class _Profile:
         return ""
 
     def get_model(self):
-        return ""
+        return self._model
 
 
 class _ProfileManager:
@@ -58,15 +60,20 @@ class _ProfileManager:
 
 @pytest.fixture(autouse=True)
 def _isolated_cache(tmp_path):
-    """Keep every test off the real ~/.kollab cache."""
+    """Keep every test off the real ~/.kollab cache, signed in to ChatGPT: a
+    ChatGPT login's list is kept only while its account is signed in (#553)."""
+    from kollabor_ai.oauth import token_storage
+
     mc._MEMORY_CACHE.clear()
-    with patch.object(mc, "_cache_file", lambda: tmp_path / "model_catalog.cache"):
+    with patch.object(mc, "_cache_file", lambda: tmp_path / "model_catalog.cache"), patch.object(
+        token_storage, "stored_login_mark", lambda provider, profile_name=None: "acct-test"
+    ):
         yield
     mc._MEMORY_CACHE.clear()
 
 
 def _seed(profile, models):
-    mc._store(profile, [{"id": m, "note": ""} for m in models])
+    mc._store(profile, [{"id": m, "note": ""} for m in models], mc._login_of(profile))
 
 
 # -- the original bug -------------------------------------------------------
@@ -114,17 +121,15 @@ def test_catalog_model_is_resolvable_by_name():
 # -- merge semantics --------------------------------------------------------
 
 
-def test_registry_models_still_listed_before_catalog_models():
-    """The catalog augments the registry; it does not replace it."""
+def test_live_catalog_with_entries_replaces_the_registry():
+    """Cold, openai lists its registry; once the catalog has entries it is the
+    whole list (#558). The registry is a cold-cache seed, not a supplement."""
     openai = _Profile(name="openai-oauth", provider="openai_responses")
     manager = LoadoutManager(_ProfileManager([openai]))
-    registry_names = [lo.name for lo in manager.list_loadouts()]
-    assert registry_names, "openai should have bundled registry models"
+    assert manager.list_loadouts(), "openai should have bundled registry models"
 
     _seed(openai, ["gpt-brand-new"])
-    merged = [lo.name for lo in manager.list_loadouts()]
-    assert merged[: len(registry_names)] == registry_names
-    assert merged[-1] == "gpt-brand-new"
+    assert [lo.name for lo in manager.list_loadouts()] == ["gpt-brand-new"]
 
 
 def test_catalog_duplicate_of_registry_model_is_not_listed_twice():
@@ -165,6 +170,181 @@ def test_unconfigured_provider_contributes_nothing():
     manager = LoadoutManager(_ProfileManager([profile]))
     _seed(profile, ["anthropic/claude-opus-4.5"])
     assert manager.list_loadouts() == []
+
+
+# -- #558: a live catalog with entries is the list ---------------------------
+
+
+def test_live_catalog_hides_registry_models_it_omits():
+    """An account whose catalog lists only gpt-5.6-luna must not be offered
+    gpt-6-luna: picking it fails at the provider (#558)."""
+    profile = _Profile(name="openai-api", provider="openai", model="gpt-5.6-luna")
+    manager = LoadoutManager(_ProfileManager([profile]))
+    registry = [name for name, _info in list_models_for_provider("openai")]
+    assert "gpt-6-luna" in registry, "precondition: the registry offers gpt-6-luna"
+    _seed(profile, ["gpt-5.6-luna"])
+
+    assert [lo.name for lo in manager.list_loadouts()] == ["gpt-5.6-luna"]
+    assert manager.resolve("gpt-6-luna")[0] is None
+
+
+def test_profile_own_model_stays_listed_when_catalog_omits_it():
+    profile = _Profile(
+        name="openai-api", provider="openai", model="gpt-private-preview"
+    )
+    manager = LoadoutManager(_ProfileManager([profile]))
+    _seed(profile, ["gpt-5.6-luna"])
+
+    names = [lo.name for lo in manager.list_loadouts()]
+    assert names == ["gpt-5.6-luna", "gpt-private-preview"]
+
+
+def test_stale_catalog_is_still_the_provider_list():
+    """A catalog cached more than the 1 h TTL ago is still the provider's list.
+
+    Launch paths (``kollab --llm``, the startup default, ``/llm <name>``) never
+    refresh it, so reading it with the TTL brought the registry back and
+    offered gpt-6-luna again (#558)."""
+    profile = _Profile(name="openai-api", provider="openai", model="gpt-5.6-luna")
+    manager = LoadoutManager(_ProfileManager([profile]))
+    with patch.object(mc.time, "time", return_value=time.time() - 86400):
+        _seed(profile, ["gpt-5.6-luna"])
+    mc._MEMORY_CACHE.clear()  # a fresh process reads only the disk cache
+
+    assert [lo.name for lo in manager.list_loadouts()] == ["gpt-5.6-luna"]
+    assert manager.resolve("gpt-6-luna")[0] is None
+
+
+def test_catalog_cached_under_another_provider_is_not_this_profiles_list():
+    """A profile edited to a new provider keeps its name, and the cache is keyed
+    by name. The catalog it had under the old provider must not become its
+    list under the new one: a Claude id would be sent to Gemini (#558)."""
+    profile = _Profile(name="work", provider="anthropic", model="claude-opus-4-1")
+    manager = LoadoutManager(_ProfileManager([profile]))
+    with patch.object(mc.time, "time", return_value=time.time() - 7200):
+        _seed(profile, ["claude-sonnet-4-5", "claude-opus-4-1"])
+    mc._MEMORY_CACHE.clear()  # a fresh process reads only the disk cache
+
+    profile._provider = "gemini"  # edited in place: same name, new provider
+    profile._model = "gemini-2.5-pro"
+
+    names = [lo.name for lo in manager.list_loadouts()]
+    assert not any(n.startswith("claude-") for n in names)
+    assert set(names) >= {m for m, _ in list_models_for_provider("gemini")}
+    assert manager.resolve("claude-opus-4-1")[0] is None
+    assert manager.resolve("gemini-2.5-flash")[0] is not None
+
+    # Gemini has no listing API, so a refresh cannot repair it either.
+    assert asyncio.run(manager.refresh_catalogs()) == {"work": 0}
+    assert manager.resolve("claude-opus-4-1")[0] is None
+
+
+def test_catalog_cached_for_another_endpoint_is_not_this_profiles_list():
+    """Same name and provider, different endpoint: the old server's catalog is
+    not the new server's list."""
+
+    class _Endpoint(_Profile):
+        endpoint = "http://localhost:1234/v1"
+
+        def get_endpoint(self):
+            return self.endpoint
+
+    profile = _Endpoint(name="local", provider="custom")
+    manager = LoadoutManager(_ProfileManager([profile]))
+    _seed(profile, ["old-server-model"])
+    mc._MEMORY_CACHE.clear()
+    assert [lo.name for lo in manager.list_loadouts()] == ["old-server-model"]
+
+    profile.endpoint = "http://localhost:8080/v1"  # edited in place
+    assert manager.list_loadouts() == []
+
+    profile.endpoint = "http://localhost:1234/v1/"  # trailing slash: same server
+    assert [lo.name for lo in manager.list_loadouts()] == ["old-server-model"]
+
+
+def test_cache_file_never_holds_the_endpoint_credentials(tmp_path):
+    """An endpoint can carry a password, a query key or a path token (it may
+    come only from an env var, kept off config.json). The cache tells endpoints
+    apart without writing any of that to disk."""
+
+    class _Endpoint(_Profile):
+        endpoint = "https://user:hunter2@gw.example.test/v1/tok-9f3a?api-key=k-77e1"
+
+        def get_endpoint(self):
+            return self.endpoint
+
+    profile = _Endpoint(name="work", provider="custom")
+    _seed(profile, ["gateway-model"])
+    text = (tmp_path / "model_catalog.cache").read_text(encoding="utf-8")
+    for secret in ("hunter2", "k-77e1", "tok-9f3a", "gw.example.test"):
+        assert secret not in text
+
+    # Still this endpoint's catalog after a restart, and not another's.
+    mc._MEMORY_CACHE.clear()
+    manager = LoadoutManager(_ProfileManager([profile]))
+    assert [lo.name for lo in manager.list_loadouts()] == ["gateway-model"]
+    profile.endpoint = "https://user:hunter2@gw.example.test/v1/tok-0000?api-key=k-77e1"
+    assert manager.list_loadouts() == []
+
+
+def _anthropic_pages(monkeypatch, pages):
+    """Serve ``pages`` from a mocked GET /v1/models, keyed by ``after_id``."""
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, params=None):
+            return _Resp(pages[(params or {}).get("after_id")])
+
+    monkeypatch.setattr(mc.httpx, "AsyncClient", _Client)
+
+
+def test_truncated_anthropic_page_does_not_hide_registry_models(monkeypatch):
+    """The first /v1/models page is not the whole list (#558 review).
+
+    claude-haiku-4-5 sits on page 2; with only page 1 read, the catalog would
+    be the whole list and the model would drop out of /llm."""
+    profile = _Profile(name="anthropic-api", provider="anthropic")
+    manager = LoadoutManager(_ProfileManager([profile]))
+    registry = [name for name, _info in list_models_for_provider("anthropic")]
+    assert "claude-haiku-4-5" in registry, "precondition: registry has the model"
+    _anthropic_pages(
+        monkeypatch,
+        {
+            None: {
+                "data": [{"id": f"claude-page1-{i}"} for i in range(20)],
+                "has_more": True,
+                "last_id": "claude-page1-19",
+            },
+            "claude-page1-19": {
+                "data": [{"id": "claude-haiku-4-5"}],
+                "has_more": False,
+                "last_id": "claude-haiku-4-5",
+            },
+        },
+    )
+
+    asyncio.run(mc.get_provider_models(profile))
+
+    assert "claude-haiku-4-5" in [lo.name for lo in manager.list_loadouts()]
+    assert manager.resolve("claude-haiku-4-5")[0] is not None
 
 
 # -- failure modes ----------------------------------------------------------

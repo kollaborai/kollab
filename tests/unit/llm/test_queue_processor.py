@@ -958,6 +958,23 @@ class TestQueueProcessor(unittest.TestCase):
         self.loop.run_until_complete(self.processor.process_message_batch(["Typed input"], "parent"))
         self.assertIsNone(self.processor.active_voice)
 
+    def test_operator_input_provenance_survives_queue_batch(self):
+        self.processor._execute_llm_turn = AsyncMock(return_value="parent")
+        record = {
+            "source": "user",
+            "timestamp": "2026-11-05T00:00:00+00:00",
+            "text": "Approve PR #824 after checks pass.",
+        }
+        queued = QueuedInput("Approve PR #824 after checks pass.", {}, operator_inputs=(record,))
+
+        self.loop.run_until_complete(
+            self.processor.process_message_batch([queued], "parent")
+        )
+
+        user_message = self.add_message_fn.call_args.args[0]
+        self.assertEqual(user_message.metadata["operator_inputs"], [record])
+
+
     def test_the_users_yes_tells_the_model_what_it_approved(self):
         """The note rides on the yes itself, model-only, once."""
         from kollabor_agent.yes_approval import YesApprovals
@@ -1377,6 +1394,46 @@ class TestQueueProcessor(unittest.TestCase):
 
         self.message_display_service.display_complete_response.assert_not_called()
         self.message_display_service.display_tool_results.assert_called_once()
+
+    def test_failed_reply_write_keeps_the_reply_in_history_and_tells_the_user(self):
+        """Issue #580: a history write that fails must not drop the reply from the model's context."""
+        self.response_parser.parse_response.return_value = {
+            "content": "a plain answer",
+            "components": {},
+            "turn_completed": True,
+        }
+        self.response_parser.get_all_tools.return_value = []
+        self.renderer.pipe_mode = False
+        self.config.get = lambda key, default=None: 0 if key.endswith("delay") else default
+        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.get_last_tool_calls = MagicMock(return_value=[])
+        self.api_service.has_pending_tool_calls = MagicMock(return_value=False)
+        self.api_service.last_thinking_content = ""
+        self.api_service.last_stop_reason = ""
+        self.api_service.model = "test-model"
+        self.api_service.provider_type = "test"
+        self.conversation_logger.log_assistant_message = AsyncMock(
+            side_effect=OSError("disk full")
+        )
+        self.event_bus.emit_with_hooks = AsyncMock(return_value={})
+        self.processor._drain_env_block = MagicMock(return_value=None)
+        self.processor._emit_llm_response_and_handle = AsyncMock(
+            return_value=("a plain answer", False, False)
+        )
+
+        self.loop.run_until_complete(
+            self.processor._execute_llm_turn_inner(
+                user_message_provided=True,
+                current_parent_uuid="parent-uuid",
+            )
+        )
+
+        self.conversation_logger.log_assistant_message.assert_awaited_once()
+        self.message_display_service.display_system_message.assert_called_with(
+            "Conversation history not saved for this reply."
+        )
+        roles = [getattr(call.args[0], "role", None) for call in self.add_message_fn.call_args_list]
+        self.assertIn("assistant", roles)
 
     def test_xml_tool_turn_keeps_the_reply_and_adds_display_metadata(self):
         """The model keeps its own tags; the web gets display-only metadata.
@@ -1884,23 +1941,32 @@ class TestQueueProcessor(unittest.TestCase):
             ["hub_msg", "malformed_tool", "terminal"],
         )
 
-    def _truncated_turn(self, continuation_text, continuation_stop):
-        """Run one turn whose first reply is cut at the output limit."""
+    def _truncated_turn(self, continuation_text, continuation_stop, usages=None):
+        """Run one turn whose first reply is cut at the output limit.
+
+        `usages` is the token usage each call reports, in call order.
+        """
         replies = iter([("one two se", "length"), (continuation_text, continuation_stop)])
+        usage_by_call = iter(usages or [None, None])
+        current = {"usage": None}
 
         async def call_llm(**kwargs):
             text, stop = next(replies)
             self.api_service.last_stop_reason = stop
+            current["usage"] = next(usage_by_call)
             return text
 
         self.streaming_handler.call_llm = AsyncMock(side_effect=call_llm)
         self.native_tools_handler.tool_calling_enabled = False
         self.api_service.has_pending_tool_calls = MagicMock(return_value=False)
-        self.api_service.get_last_token_usage = MagicMock(return_value=None)
+        self.api_service.get_last_token_usage = MagicMock(
+            side_effect=lambda: current["usage"]
+        )
+        self.api_service.last_token_usage_is_estimated = False
         self.api_service.last_thinking_content = None
         self.api_service.last_stop_reason = ""
-        self.api_service.model = "test-model"
-        self.api_service.provider_type = "test"
+        self.api_service.model = "gpt-4o" if usages else "test-model"
+        self.api_service.provider_type = "openai" if usages else "test"
         self.tool_executor.take_executed_count.return_value = 0
         self.response_parser.parse_response.side_effect = lambda text: {
             "content": text,
@@ -1920,6 +1986,32 @@ class TestQueueProcessor(unittest.TestCase):
                 user_message_provided=True,
                 current_parent_uuid="parent-uuid",
             )
+        )
+
+    def test_a_cut_reply_is_priced_when_its_last_call_reports_no_usage(self):
+        """The cut call's usage is real and billed; a continuation that comes
+        back without a usage trailer must not drop it from the totals (#421)."""
+        from kollabor_ai.cost_calculator import calculate_cost
+
+        cut = {"prompt_tokens": 1000, "completion_tokens": 500}
+        self._truncated_turn("venteen", "stop", usages=[cut, None])
+        expected = calculate_cost("openai", "gpt-4o", 1000, 500, 0)
+        self.assertGreater(expected, 0)
+        self.assertEqual(self.session_stats["total_input_tokens"], 1000)
+        self.assertEqual(self.session_stats["total_output_tokens"], 500)
+        self.assertEqual(self.session_stats["total_cost_usd"], expected)
+
+    def test_a_cut_reply_is_priced_from_both_calls_when_both_report_usage(self):
+        """Unchanged path: both calls report usage and both are billed."""
+        from kollabor_ai.cost_calculator import calculate_cost
+
+        cut = {"prompt_tokens": 1000, "completion_tokens": 500}
+        last = {"prompt_tokens": 1200, "completion_tokens": 100}
+        self._truncated_turn("venteen", "stop", usages=[cut, last])
+        self.assertEqual(self.session_stats["total_input_tokens"], 2200)
+        self.assertEqual(
+            self.session_stats["total_cost_usd"],
+            calculate_cost("openai", "gpt-4o", 2200, 600, 0),
         )
 
     def test_empty_continuation_of_a_cut_reply_is_announced(self):
