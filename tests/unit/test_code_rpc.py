@@ -32,6 +32,7 @@ def wire(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)  # the daemon serves its working directory
     service = LocalStateService.__new__(LocalStateService)
+    service._llm_service = None  # no config: secrets stay out of the shell
     handlers = {}
     register_state_handlers(SimpleNamespace(register=lambda *a, **k: handlers.__setitem__(a[0], a[1])), service)
     rpc = _Rpc(handlers)
@@ -114,3 +115,39 @@ def test_a_failing_service_answers_500_without_the_exception_text(wire, monkeypa
     assert answer == {"error": "code service unavailable", "status": 500}
     with pytest.raises(ValueError):  # the remote side turns the refusal into one error
         run(remote.code_call("fs.tree", {}))
+
+
+def test_local_state_resolves_code_settings_from_config_and_the_agents_json(tmp_path):
+    """``kollabor.code.*`` in the config reaches the code service; the active agent's ``code`` object wins."""
+    from kollabor.state.local import LocalStateService
+
+    class Config:
+        def __init__(self, values):
+            self.values = values
+
+        def get(self, path, default=None):
+            return self.values.get(path, default)
+
+    class Llm:
+        def __init__(self, config):
+            self.config = config
+
+    class Agents:
+        def __init__(self, directory):
+            self.directory = directory
+
+        def get_active_agent(self):
+            return SimpleNamespace(directory=self.directory)
+
+    def settings(values, agents=None):
+        return LocalStateService(Llm(Config(values)), None, agent_manager=agents)._code_settings()
+
+    assert settings({"kollabor.code.terminal.pass_secret_env": True}).pass_secret_env is True
+    assert settings({"kollabor.code.terminal.pass_secret_env": "yes"}).pass_secret_env is False  # wrong type: default
+    assert settings({}).pass_secret_env is False
+    (tmp_path / "agent.json").write_text('{"code": {"terminal": {"pass_secret_env": true}, "read_only": true}}')
+    mine = settings({"kollabor.code.read_only": False}, Agents(tmp_path))
+    assert mine.pass_secret_env is True and mine.read_only is True
+    (tmp_path / "agent.json").write_text("{not json")
+    assert settings({}, Agents(tmp_path)).read_only is False  # a broken agent file never closes the door
+    assert LocalStateService(Llm(None), None)._code_settings().enabled is True

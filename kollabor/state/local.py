@@ -296,6 +296,22 @@ class LocalStateService(StateService):
         self._context_identity = context_identity
         self._startup_status = startup_status
 
+    def _code_settings(self) -> Any:
+        """The Code, Git and Terminal settings for this request: the active agent's ``agent.json`` ``code`` object,
+        then ``kollabor.code.*`` in the merged config (project over global), then the defaults
+        (``code_service/settings.py``). A broken config or agent file never closes the door: the default applies."""
+        from kollabor.code_service import settings as code_settings
+
+        config = getattr(self._llm_service, "config", None)
+        get = config.get if config is not None and hasattr(config, "get") else None
+        agent_code = None
+        try:
+            agent = self._agent_manager.get_active_agent() if self._agent_manager is not None else None
+            agent_code = code_settings.read_agent_code(getattr(agent, "directory", None))
+        except Exception:
+            agent_code = None
+        return code_settings.resolve(get, agent_code)
+
     def _mcp_enabled(self) -> bool:
         config = getattr(self._llm_service, "config", None)
         if config is not None and hasattr(config, "get"):
@@ -1348,7 +1364,7 @@ class LocalStateService(StateService):
         """Files, git and the terminal of this daemon's folder (``kollabor.code_service``)."""
         from kollabor import code_service
 
-        return await code_service.call(op, params)
+        return await code_service.call(op, params, settings=self._code_settings())
 
     async def open_generated_artifact(self, media_id: str) -> bool:
         """Open a generated image through the daemon-owned API service."""

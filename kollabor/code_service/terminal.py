@@ -24,6 +24,7 @@ from itertools import islice
 from typing import Any
 
 from .reply import Reply
+from .settings import DEFAULTS, CodeSettings
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,8 @@ MAX_DIMENSION = 500
 DEFAULT_COLS = 80
 DEFAULT_ROWS = 24
 _SECRET_MARKERS = ("TOKEN", "SECRET", "API_KEY", "PASSWORD")
+# Never passed on, whatever the setting says: the engine's and the daemon's own variables.
+_OWN_PREFIXES = ("KOLLAB_", "KOLLABOR_")
 
 _SESSIONS: dict[str, _Session] = {}
 
@@ -50,8 +53,17 @@ _SESSIONS: dict[str, _Session] = {}
 class _Session:
     """One shell on a PTY, held in ``_SESSIONS`` from open until it is reaped."""
 
-    def __init__(self, sid: str, proc: subprocess.Popen[bytes], fd: int) -> None:
+    def __init__(
+        self,
+        sid: str,
+        proc: subprocess.Popen[bytes],
+        fd: int,
+        ring_bytes: int = RING_BYTES,
+        reap_seconds: float = REAP_AFTER_SECONDS,
+    ) -> None:
         self.sid = sid
+        self._ring_limit = ring_bytes
+        self._reap_seconds = reap_seconds  # 0 = a shell nobody watches is never reaped
         self.pid = proc.pid
         self._proc = proc  # _watch reaps the child and sets its status here, so Popen never waits or warns
         self.fd: int | None = fd
@@ -145,7 +157,7 @@ class _Session:
         self._chunks.append((self._next_seq, text, size))
         self._next_seq += 1
         self._ring_bytes += size
-        while self._ring_bytes > RING_BYTES and len(self._chunks) > 1:
+        while self._ring_bytes > self._ring_limit and len(self._chunks) > 1:
             _, _, dropped = self._chunks.popleft()
             self._ring_bytes -= dropped
         self._wake()
@@ -203,7 +215,8 @@ class _Session:
 
     def schedule_reap(self) -> None:
         self.cancel_reap()
-        self._reap_handle = self._loop.call_later(REAP_AFTER_SECONDS, self._reap_idle)
+        if self._reap_seconds > 0:
+            self._reap_handle = self._loop.call_later(self._reap_seconds, self._reap_idle)
 
     def cancel_reap(self) -> None:
         if self._reap_handle is not None:
@@ -306,23 +319,52 @@ def _dimension(value: object) -> int | None:
     return max(1, min(MAX_DIMENSION, number))
 
 
-def _login_shell() -> str:
-    """The user's shell: $SHELL when it is executable, else zsh, else sh."""
-    for candidate in (os.environ.get("SHELL", ""), "/bin/zsh", "/bin/sh"):
+def _login_shell(configured: str = "") -> str:
+    """The shell program: the setting ``terminal.shell`` when it is executable, else $SHELL, else zsh, else sh."""
+    for candidate in (configured, os.environ.get("SHELL", ""), "/bin/zsh", "/bin/sh"):
         if candidate and os.access(candidate, os.X_OK):
             return candidate
     return "/bin/sh"
 
 
-def _shell_env() -> dict[str, str]:
-    """The engine's environment without KOLLAB_* names or names carrying a secret marker, with TERM set."""
-    env = {
-        name: value
-        for name, value in os.environ.items()
-        if not name.upper().startswith("KOLLAB_") and not any(marker in name.upper() for marker in _SECRET_MARKERS)
-    }
+def _env_verdict(name: str, settings: CodeSettings) -> str | None:
+    """Why a variable does not reach a new shell (``denied``, ``kollab`` or ``secret``), or None when it passes."""
+    upper = name.upper()
+    if upper in {item.upper() for item in settings.env_deny}:
+        return "denied"
+    if upper in {item.upper() for item in settings.env_allow}:
+        return None
+    if not settings.pass_kollab_env and upper.startswith(_OWN_PREFIXES):
+        return "kollab"
+    if not settings.pass_secret_env and any(marker in upper for marker in _SECRET_MARKERS):
+        return "secret"
+    return None
+
+
+def _shell_env(settings: CodeSettings = DEFAULTS) -> dict[str, str]:
+    """The daemon's environment for a shell, filtered by the settings, with TERM set and ``env_set`` laid on top.
+
+    Defaults: ``KOLLAB_*`` / ``KOLLABOR_*`` and names carrying a secret marker are dropped. Each has a switch
+    (``terminal.pass_kollab_env``, ``terminal.pass_secret_env``), and ``env_allow`` / ``env_deny`` decide by exact name.
+    """
+    env = {name: value for name, value in os.environ.items() if _env_verdict(name, settings) is None}
     env["TERM"] = "xterm-256color"
+    env.update(dict(settings.env_set))
     return env
+
+
+def env_report(settings: CodeSettings = DEFAULTS) -> dict[str, Any]:
+    """The names a new shell would not get, grouped by reason. Names only: values never leave the environment."""
+    hidden: dict[str, list[str]] = {"secret": [], "kollab": [], "denied": []}
+    for name in sorted(os.environ):
+        verdict = _env_verdict(name, settings)
+        if verdict is not None:
+            hidden[verdict].append(name)
+    return {
+        "hidden": hidden,
+        "count": sum(len(names) for names in hidden.values()),
+        "shell": os.path.basename(_login_shell(settings.shell)),
+    }
 
 
 # The shell starts from this one-line program, not from a fork inside the multi-threaded engine (a fork there can
@@ -334,7 +376,7 @@ _SHELL_LAUNCHER = (
     "os.login_tty(0)\n"
     "signal.signal(signal.SIGPIPE, signal.SIG_DFL)\n"
     "signal.signal(signal.SIGXFSZ, signal.SIG_DFL)\n"
-    "os.execv(sys.argv[1], [sys.argv[1], '-l'])\n"
+    "os.execv(sys.argv[1], [sys.argv[1]] + sys.argv[2:])\n"
 )
 
 
@@ -351,17 +393,17 @@ def _signal_group(pid: int, sig: int) -> None:
         os.killpg(pid, sig)
 
 
-def _spawn(cwd: str, cols: int, rows: int) -> _Session:
+def _spawn(cwd: str, cols: int, rows: int, settings: CodeSettings = DEFAULTS) -> _Session:
     """Start the shell on a new PTY. subprocess does the fork-and-exec, so no Python code runs in a forked child."""
-    shell = _login_shell()
-    env = _shell_env()
+    shell = _login_shell(settings.shell)
+    env = _shell_env(settings)
     env["PWD"] = cwd
     master, slave = os.openpty()
     try:
         _set_winsize(slave, cols, rows)
         # No start_new_session: os.login_tty calls setsid itself, and setsid fails in a process group leader.
         proc = subprocess.Popen(
-            [sys.executable, "-I", "-c", _SHELL_LAUNCHER, shell],
+            [sys.executable, "-I", "-c", _SHELL_LAUNCHER, shell, *(["-l"] if settings.login else [])],
             stdin=slave,
             stdout=slave,
             stderr=slave,
@@ -376,10 +418,18 @@ def _spawn(cwd: str, cols: int, rows: int) -> _Session:
         os.close(slave)  # the shell has its own copy; ours would keep the PTY open after the shell ends
     os.set_inheritable(master, False)
     os.set_blocking(master, False)
-    return _Session(secrets.token_urlsafe(16), proc, master)
+    return _Session(
+        secrets.token_urlsafe(16),
+        proc,
+        master,
+        ring_bytes=settings.scrollback_kb * 1024,
+        reap_seconds=settings.idle_reap_minutes * 60,
+    )
 
 
-def _open_session(msg: dict[str, Any], link: _Link, cwd: str) -> list[dict[str, Any]]:
+def _open_session(
+    msg: dict[str, Any], link: _Link, cwd: str, settings: CodeSettings = DEFAULTS
+) -> list[dict[str, Any]]:
     session_id = msg.get("sessionId")
     if session_id is not None:
         session = _SESSIONS.get(session_id) if isinstance(session_id, str) else None
@@ -387,21 +437,41 @@ def _open_session(msg: dict[str, Any], link: _Link, cwd: str) -> list[dict[str, 
             return [_error("That terminal session is no longer running.")]
         link.attach(session)
         return [{"type": "ready", "sessionId": session.sid}]
-    if sum(1 for live in _SESSIONS.values() if not (live.exited or live.closed)) >= MAX_SESSIONS:
-        return [_error(f"Too many terminals are open; the limit is {MAX_SESSIONS}.")]
+    if not settings.terminal_enabled:
+        return [_error("Terminals are turned off for this agent. Setting: kollabor.code.terminal.enabled")]
+    if not hasattr(os, "openpty"):  # Windows has no PTY; ConPTY is planned (docs/specs/code-shell-windows.md)
+        return [
+            _error(
+                "This computer cannot run a web terminal yet: it needs a Unix PTY. "
+                "Setting: kollabor.code.terminal.enabled turns the view off."
+            )
+        ]
+    if sum(1 for live in _SESSIONS.values() if not (live.exited or live.closed)) >= settings.max_shells:
+        return [
+            _error(
+                f"Too many terminals are open; the limit is {settings.max_shells}. "
+                "Setting: kollabor.code.terminal.max_shells"
+            )
+        ]
     cols = _dimension(msg.get("cols")) or DEFAULT_COLS
     rows = _dimension(msg.get("rows")) or DEFAULT_ROWS
     try:
-        session = _spawn(cwd, cols, rows)
+        session = _spawn(cwd, cols, rows, settings)
     except OSError:
         logger.exception("could not start a terminal shell")
         return [_error("The shell could not start.")]
     _SESSIONS[session.sid] = session
     link.attach(session)
+    if settings.start_command:
+        session.write_input((settings.start_command + "\n").encode("utf-8", errors="replace"))
     return [{"type": "ready", "sessionId": session.sid}]
 
 
-def _input_message(msg: dict[str, Any], link: _Link) -> list[dict[str, Any]]:
+def _input_message(msg: dict[str, Any], link: _Link, settings: CodeSettings = DEFAULTS) -> list[dict[str, Any]]:
+    if settings.read_only:
+        return [
+            _error("Read only is on for this agent, so the terminal takes no input. Setting: kollabor.code.read_only")
+        ]
     session = link.session
     if session is None:
         return [_error("No terminal is open.")]
@@ -428,7 +498,7 @@ def _resize_message(msg: dict[str, Any], link: _Link) -> None:
         _set_winsize(session.fd, cols, rows)
 
 
-def _on_message(raw: object, link: _Link, cwd: str) -> list[dict[str, Any]]:
+def _on_message(raw: object, link: _Link, cwd: str, settings: CodeSettings = DEFAULTS) -> list[dict[str, Any]]:
     if not isinstance(raw, str):
         return [_error("The message is not JSON.")]
     try:
@@ -439,9 +509,9 @@ def _on_message(raw: object, link: _Link, cwd: str) -> list[dict[str, Any]]:
         return [_error("The message is not an object.")]
     kind = msg.get("type")
     if kind == "open":
-        return _open_session(msg, link, cwd)
+        return _open_session(msg, link, cwd, settings)
     if kind == "input":
-        return _input_message(msg, link)
+        return _input_message(msg, link, settings)
     if kind == "resize":
         _resize_message(msg, link)
     elif kind == "close":
@@ -496,8 +566,11 @@ def _bad(message: str, status: int = 400) -> Reply:
     return Reply({"success": False, "error": {"code": "bad_request", "message": message}}, status)
 
 
-async def serve(op: str, cwd: str, params: dict[str, Any]) -> Reply:
-    """``message`` (one client message in, the immediate answers out), ``poll`` (wait for output) or ``detach``."""
+async def serve(op: str, cwd: str, params: dict[str, Any], settings: CodeSettings = DEFAULTS) -> Reply:
+    """``message`` (one client message in, the immediate answers out), ``poll`` (wait for output), ``detach`` or
+    ``env_report`` (the variable names a new shell would not get)."""
+    if op == "env_report":
+        return Reply({"success": True, "data": env_report(settings)})
     link = _link(params.get("link"), create=op != "detach")
     if op == "detach":
         if link is not None:
@@ -507,7 +580,7 @@ async def serve(op: str, cwd: str, params: dict[str, Any]) -> Reply:
     if link is None:
         return _bad("That terminal link is not valid, or too many are open.")
     if op == "message":
-        answers = _on_message(params.get("raw"), link, cwd)
+        answers = _on_message(params.get("raw"), link, cwd, settings)
         link.kick()
         return Reply({"success": True, "data": {"messages": answers}})
     if op == "poll":

@@ -15,6 +15,7 @@ import pytest_asyncio
 
 from kollabor import code_service
 from kollabor.code_service import terminal
+from kollabor.code_service.settings import CodeSettings
 
 pytestmark = pytest.mark.asyncio
 
@@ -30,13 +31,16 @@ async def _shells(tmp_path):
 class Link:
     """What the engine does for one browser socket, minus the socket."""
 
-    def __init__(self, cwd) -> None:
+    def __init__(self, cwd, settings: CodeSettings | None = None) -> None:
+        self.settings = settings
         self.id = uuid.uuid4().hex
         self.cwd = str(cwd)
         self.ack: int | None = None
 
     async def call(self, op: str, **params):
-        answer = await code_service.call(f"terminal.{op}", {"link": self.id, **params}, root=self.cwd)
+        answer = await code_service.call(
+            f"terminal.{op}", {"link": self.id, **params}, root=self.cwd, settings=self.settings
+        )
         assert answer["status"] == 200, answer
         return answer["body"]["data"]
 
@@ -185,6 +189,19 @@ async def test_the_shell_gets_no_kollab_or_secret_variables(tmp_path, monkeypatc
     assert "MY_TOKEN" not in output
 
 
+async def test_the_shell_sees_secret_named_variables_when_the_setting_is_on(tmp_path, monkeypatch):
+    monkeypatch.setenv("KOLLAB_X", "1")
+    monkeypatch.setenv("MY_TOKEN", "2")
+    link = Link(tmp_path, CodeSettings(pass_secret_env=True))
+    await link.open()
+    await link.send(type="input", data="env; echo kollab-end-$((40+2))\n")
+
+    output = await link.until("kollab-end-42")
+
+    assert "MY_TOKEN=2" in output
+    assert "KOLLAB_" not in output
+
+
 def test_shell_env_drops_kollab_and_secret_names(monkeypatch):
     monkeypatch.setenv("KOLLAB_X", "1")
     monkeypatch.setenv("MY_TOKEN", "2")
@@ -193,6 +210,17 @@ def test_shell_env_drops_kollab_and_secret_names(monkeypatch):
 
     assert "KOLLAB_X" not in env and "MY_TOKEN" not in env
     assert env["TERM"] == "xterm-256color"
+
+
+def test_shell_env_keeps_secret_names_when_the_setting_is_on_but_never_kollab_names(monkeypatch):
+    monkeypatch.setenv("KOLLAB_X", "1")
+    monkeypatch.setenv("KOLLABOR_HUB_BRIDGE_TOKEN", "3")
+    monkeypatch.setenv("MY_TOKEN", "2")
+
+    env = terminal._shell_env(CodeSettings(pass_secret_env=True))
+
+    assert env["MY_TOKEN"] == "2"
+    assert "KOLLAB_X" not in env and "KOLLABOR_HUB_BRIDGE_TOKEN" not in env
 
 
 async def test_the_shell_sits_on_a_real_terminal_and_leads_its_process_group(tmp_path):

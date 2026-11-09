@@ -8,20 +8,27 @@ it never reads a folder from a request.
 Spec: ``docs/specs/floating-code-shell.md``.
 """
 
+import dataclasses
 import os
 from typing import Any
 
 from . import files, git, terminal
 from .reply import Reply
+from .settings import DEFAULTS, CodeSettings, refusal
 
-__all__ = ["call", "shutdown", "OPS"]
+__all__ = ["call", "shutdown", "OPS", "CodeSettings"]
 
-# What a request may name: "fs.<operation>", "git" and "terminal.<operation>".
-TERMINAL_OPS = ("message", "poll", "detach")
+# What a request may name: "fs.<operation>", "git", "settings" and "terminal.<operation>".
+TERMINAL_OPS = ("message", "poll", "detach", "env_report")
 OPS = (
     tuple(f"fs.{name}" for name in files.OPS)
-    + ("git",)
+    + ("git", "settings")
     + tuple(f"terminal.{name}" for name in TERMINAL_OPS)
+)
+# The operations that change something. ``read_only`` refuses them; ``git.read_only`` refuses the git ones.
+FILE_WRITE_OPS = ("write_file", "create", "mkdir", "rename", "delete")
+GIT_READ_ACTIONS = (
+    "status", "log", "show", "show_commit", "diff", "list_branches", "current_branch", "list_stashes", "show_stash",
 )
 
 
@@ -29,22 +36,59 @@ def _bad(status: int, code: str, message: str) -> Reply:
     return Reply({"success": False, "error": {"code": code, "message": message}, "detail": message}, status)
 
 
-async def call(op: object, params: object, root: str | None = None) -> dict[str, Any]:
+def _refused(status: int, code: str, message: str, setting: str) -> dict[str, Any]:
+    return Reply(refusal(code, message, setting), status).as_wire()
+
+
+def settings_report(settings: CodeSettings) -> dict[str, Any]:
+    """The settings in effect, for the UI. ``env_set`` shows names only: its values may be secrets."""
+    data = dataclasses.asdict(settings)
+    data["env_set"] = [name for name, _ in settings.env_set]
+    return data
+
+
+def _gate(kind: str, name: str, params: dict[str, Any], settings: CodeSettings) -> dict[str, Any] | None:
+    """The refusal for an operation a setting closes, or None."""
+    if not settings.enabled and kind != "settings":
+        return _refused(404, "code_disabled", "Code, Git and Terminal are turned off for this agent.", "enabled")
+    if kind == "terminal" and not settings.terminal_enabled and name != "detach":
+        return _refused(403, "terminal_disabled", "Terminals are turned off for this agent.", "terminal.enabled")
+    writes_file = kind == "fs" and name in FILE_WRITE_OPS
+    action = params.get("action")
+    writes_git = kind == "git" and not (isinstance(action, str) and action in GIT_READ_ACTIONS)
+    if (writes_file or writes_git) and settings.read_only:
+        return _refused(403, "read_only", "Read only is on for this agent.", "read_only")
+    if writes_git and settings.git_read_only:
+        return _refused(403, "git_read_only", "Git is read only for this agent.", "git.read_only")
+    return None
+
+
+async def call(
+    op: object, params: object, root: str | None = None, settings: CodeSettings | None = None
+) -> dict[str, Any]:
     """Run one operation in the daemon's folder and return ``{"status": int, "body": dict}``.
 
     ``root`` is the folder to serve; the daemon passes none and gets its working directory, realpath'd. A test passes
-    its own.
+    its own. ``settings`` are the resolved Code settings (``settings.resolve``); None means the defaults. A setting
+    that closes an operation answers a refusal that names it. Shells already running keep the environment they
+    started with.
     """
     if not isinstance(op, str) or op not in OPS or not isinstance(params, dict):
         return _bad(400, "bad_request", "That code request is not valid.").as_wire()
-    folder = os.path.realpath(root or os.getcwd())
+    settings = settings or DEFAULTS
     kind, _, name = op.partition(".")
+    refusal_wire = _gate(kind, name, params, settings)
+    if refusal_wire is not None:
+        return refusal_wire
+    if kind == "settings":
+        return Reply({"success": True, "data": settings_report(settings)}).as_wire()
+    folder = os.path.realpath(root or os.getcwd())
     if kind == "fs":
         reply = await files.serve(name, folder, params)
     elif kind == "git":
         reply = await git.serve(folder, params)
     else:
-        reply = await terminal.serve(name, folder, params)
+        reply = await terminal.serve(name, folder, params, settings)
     return reply.as_wire()
 
 
