@@ -252,9 +252,12 @@ the card shows the latest one (`latestTodoBlock` in `utils/todo-list.ts`): a cou
 at full strength. Only the agent's own messages count; a hub note, another agent's
 text, never does. The header opens and closes the card and the browser remembers
 the choice (`kollab.session-panel.todo`); a list with every item done starts
-closed. A chat with no list has no card. Text inside a code fence is never read as
-a list; a fence closes only on the same character, at least as long, with nothing
-after it. The card's list stops at 18rem or half the window's height and scrolls
+closed. A chat with no list has no card. Text the thread draws as code is never read
+as a list: a fenced block, also one that a list item or a quote holds, or an indented
+block. `codeLines` asks the same CommonMark parser the thread renders through
+(`mdast-util-from-markdown`), so no container rule is written twice, and skips it
+for a text with no fence mark and no line indented by four columns. The card's list
+stops at 18rem or half the window's height and scrolls
 inside the card; in a short window the docked column, panel and card together,
 scrolls as a whole, so no row of the panel is squeezed out of reach. On a phone
 the card is the last part of the Session sheet. The thread keeps showing the

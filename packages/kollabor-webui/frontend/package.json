@@ -30,6 +30,7 @@
     "libsodium-wrappers": "^0.8.4",
     "livekit-client": "2.22.3",
     "lucide-react": "^1.55.0",
+    "mdast-util-from-markdown": "^2.0.3",
     "radix-ui": "^1.6.7",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
