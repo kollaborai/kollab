@@ -618,7 +618,7 @@ async def test_choices_route_returns_discovery_status_and_uses_only_fresh_option
 
     monkeypatch.setattr(profiles_route, "_get_profile_manager", lambda: object())
     monkeypatch.setattr(loadout_manager_module, "LoadoutManager", FakeManager)
-    # the route reads no config file; this stub keeps a stray read off the developer's config (#966)
+    # the route passes no config handle to LoadoutManager; this stub keeps a stray read off the real config (#966)
     empty_config = SimpleNamespace(get=lambda key, default=None: default)
     monkeypatch.setattr(
         profiles_route, "_loadout_config", lambda workspace="": empty_config
