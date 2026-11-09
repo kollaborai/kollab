@@ -2185,11 +2185,13 @@ class RelayAgentBridge:
             ):
                 raise RelayError("invalid directory request")
             agents = self.directory.publishable_agents(
-                self.workspace,
-                client.state.workspace_id,
-                self.device_name(),
-                include_agent_type=payload.get("agent_type", False),
+                self.workspace, client.state.workspace_id, self.device_name()
             )
+            if not payload.get("agent_type", False):
+                agents = [
+                    {key: value for key, value in row.items() if key != "agent_type"}
+                    for row in agents
+                ]
             if stranger:
                 # A stranger sees only the agents it may message.
                 granted = {
