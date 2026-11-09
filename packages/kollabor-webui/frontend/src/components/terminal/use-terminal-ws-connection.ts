@@ -222,6 +222,8 @@ export function createTerminalWsClient(options: TerminalWsClientOptions): Termin
           }
           return;
         case "ready":
+          // A new shell starts at sequence zero, even if it disconnects before its first output.
+          if (sessionId === null && cursor === null) cursor = 0;
           attempts = 0;
           ready = true;
           reconnecting = false;
