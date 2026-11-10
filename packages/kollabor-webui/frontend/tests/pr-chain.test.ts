@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PrChainItem } from "../src/api";
-import { describeEvent, itemUrl, latestOnly, shortTime, sortItems, statusLabel, statusTone, inFlight } from "../src/components/pr-chain/prChain";
+import { describeEvent, inOrder, itemUrl, shortTime, sortItems, statusLabel, statusTone, inFlight } from "../src/components/pr-chain/prChain";
 
 const item = (over: Partial<PrChainItem>): PrChainItem => ({ kind: "pr", number: 1, claimed: false, ...over });
 
@@ -52,15 +52,31 @@ describe("pr-chain helpers", () => {
   });
 });
 
-it("only the newest request counts, so a slow older poll cannot overwrite newer data", () => {
-  const next = latestOnly();
-  const first = next();
-  const second = next();
-  expect(first()).toBe(false);
-  expect(second()).toBe(true);
-  const third = next();
-  expect(second()).toBe(false);
-  expect(third()).toBe(true);
+describe("inOrder", () => {
+  it("drops an answer older than one already shown, so a slow poll cannot overwrite newer data", () => {
+    const next = inOrder();
+    const first = next();
+    const second = next();
+    expect(second()).toBe(true);
+    expect(first()).toBe(false);
+  });
+
+  it("shows every answer that arrives in order, even when each request started before the previous one finished", () => {
+    const next = inOrder();
+    const first = next();
+    const second = next();
+    const third = next();
+    expect(first()).toBe(true);
+    expect(second()).toBe(true);
+    expect(third()).toBe(true);
+  });
+
+  it("stays true when asked again by the request that was already shown", () => {
+    const next = inOrder();
+    const only = next();
+    expect(only()).toBe(true);
+    expect(only()).toBe(true);
+  });
 });
 
 describe("statusLabel with names that exist on every object", () => {
@@ -96,5 +112,17 @@ describe("inFlight with a request that never settles", () => {
     expect(requests.busy()).toBe(true);
     clock = 30_001;
     expect(requests.busy()).toBe(false);
+  });
+});
+
+describe("inFlight forgets what it gave up on", () => {
+  it("drops a request that outlived the limit when the next one begins, so none pile up", () => {
+    let clock = 0;
+    const requests = inFlight(30_000, () => clock);
+    for (let i = 0; i < 5; i += 1) {
+      requests.begin();
+      clock += 31_000;
+    }
+    expect(requests.pending()).toBe(1);
   });
 });
