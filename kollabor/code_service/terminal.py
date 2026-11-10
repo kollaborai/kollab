@@ -884,5 +884,11 @@ async def shutdown_terminals() -> None:
             tasks.append(task)
     tasks.extend(task for task in _TEARDOWNS if task not in tasks)
     if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+        limit = max(SUPERVISOR_WAIT_SECONDS, INITIAL_SCAN_WAIT_SECONDS + KILL_AFTER_SECONDS + REAP_WAIT_SECONDS) + 0.5
+        done, pending = await asyncio.wait(tasks, timeout=limit)
+        if pending:
+            logger.warning("Terminal shutdown timed out; %d cleanup task(s) may still be running", len(pending))
+        for task in done:
+            if not task.cancelled() and task.exception() is not None:
+                logger.error("Terminal cleanup failed: %s", task.exception())
     _SESSIONS.clear()
