@@ -10,7 +10,7 @@ router = APIRouter(prefix="/pr-chain", tags=["pr-chain"])
 
 
 @router.get("")
-async def list_pr_chain() -> Dict[str, Any]:
+def list_pr_chain() -> Dict[str, Any]:
     base = pr_chain.root()
     return {
         "root_found": base.is_dir(),
@@ -20,7 +20,7 @@ async def list_pr_chain() -> Dict[str, Any]:
 
 
 @router.get("/{kind}/{number}")
-async def pr_chain_item(kind: Literal["pr", "issue"], number: int) -> Dict[str, Any]:
+def pr_chain_item(kind: Literal["pr", "issue"], number: int) -> Dict[str, Any]:
     base = pr_chain.root()
     item = pr_chain.read_item(base, kind, number)
     if item is None:

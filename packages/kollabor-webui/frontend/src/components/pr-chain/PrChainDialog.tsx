@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import { describeEvent, itemUrl, shortTime, sortItems, statusLabel, statusTone, type StatusTone } from "./prChain";
+import { describeEvent, itemUrl, latestOnly, shortTime, sortItems, statusLabel, statusTone, type StatusTone } from "./prChain";
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -34,22 +34,24 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const epoch = useRef(0);
+  const newest = useRef(latestOnly());
 
   const load = useCallback((manual = false) => {
     const mine = epoch.current;
+    const isNewest = newest.current();
     if (manual) setBusy(true);
     api
       .getPrChain()
       .then((next) => {
-        if (mine !== epoch.current) return;
+        if (mine !== epoch.current || !isNewest()) return;
         setSnapshot(next);
         setLoadError(null);
       })
       .catch((error: unknown) => {
-        if (mine === epoch.current) setLoadError(errorText(error));
+        if (mine === epoch.current && isNewest()) setLoadError(errorText(error));
       })
       .finally(() => {
-        if (mine === epoch.current) setBusy(false);
+        if (mine === epoch.current && isNewest()) setBusy(false);
       });
   }, [api]);
 

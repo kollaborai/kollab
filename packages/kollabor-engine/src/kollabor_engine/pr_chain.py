@@ -11,7 +11,12 @@ from typing import Any, Dict, List, Optional
 
 DEFAULT_ROOT = "~/backups/pr-chain"
 KINDS = {"pr": "prs", "issue": "issues"}
-STATE_FIELDS = ("status", "started", "updated", "round", "head", "last_verdict", "why", "branch", "pr")
+TEXT_FIELDS = ("status", "started", "updated", "head", "last_verdict", "why", "branch")
+EVENT_TEXT_FIELDS = ("ts", "stage", "status", "verdict", "why")
+INT_FIELDS = ("round", "pr")
+EVENT_INT_FIELDS = ("pr", "issue", "round", "n")
+MAX_STATE_BYTES = 256 * 1024
+MAX_TEXT = 1000
 # The newest ledger lines are all a screen shows. The file grows without bound.
 LEDGER_TAIL_BYTES = 256 * 1024
 MAX_EVENTS = 200
@@ -21,17 +26,58 @@ def root() -> Path:
     return Path(os.environ.get("KOLLAB_PR_CHAIN_ROOT") or DEFAULT_ROOT).expanduser()
 
 
+def _text(value: Any) -> Optional[str]:
+    """Any JSON value as short text; None stays absent. The runner's files are not trusted to have types."""
+    return None if value is None else str(value)[:MAX_TEXT]
+
+
+def _number(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        return int(value)
+    return None
+
+
+def _clean(data: Dict[str, Any], text_fields: Any, int_fields: Any) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for key in text_fields:
+        if (text := _text(data.get(key))) is not None:
+            out[key] = text
+    for key in int_fields:
+        if (number := _number(data.get(key))) is not None:
+            out[key] = number
+    return out
+
+
+def _runner_alive(claim: Path) -> bool:
+    """A claim counts only while the process that wrote it is still running."""
+    try:
+        pid = int((claim / "pid").read_text().strip())
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def read_item(base: Path, kind: str, number: int) -> Optional[Dict[str, Any]]:
     """One item's STATE.json as a row, or None when it is missing or unreadable."""
+    path = base / KINDS[kind] / str(number) / "STATE.json"
     try:
-        data = json.loads((base / KINDS[kind] / str(number) / "STATE.json").read_text())
+        if path.stat().st_size > MAX_STATE_BYTES:
+            return None
+        data = json.loads(path.read_text())
     except OSError, ValueError:
         return None
     if not isinstance(data, dict):
         return None
     row: Dict[str, Any] = {"kind": kind, "number": number}
-    row.update({k: data[k] for k in STATE_FIELDS if k in data})
-    row["claimed"] = (base / "claims" / (str(number) if kind == "pr" else f"i{number}")).exists()
+    row.update(_clean(data, TEXT_FIELDS, INT_FIELDS))
+    row["claimed"] = _runner_alive(base / "claims" / (str(number) if kind == "pr" else f"i{number}"))
     return row
 
 
@@ -40,7 +86,7 @@ def list_items(base: Path) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for kind, sub in KINDS.items():
         try:
-            names = [p.name for p in (base / sub).iterdir() if p.name.isdigit()]
+            names = [p.name for p in (base / sub).iterdir() if p.name.isascii() and p.name.isdigit()]
         except OSError:
             continue
         for name in names:
@@ -73,6 +119,7 @@ def read_events(base: Path, kind: Optional[str] = None, number: Optional[int] = 
             continue
         if not isinstance(event, dict):
             continue
+        event = _clean(event, EVENT_TEXT_FIELDS, EVENT_INT_FIELDS)
         if number is not None and event.get(kind or "pr") != number:
             continue
         events.append(event)

@@ -70,3 +70,12 @@ export function describeEvent(event: PrChainEvent): string {
     .filter((label, index, all) => all.indexOf(label) === index);
   return [target, parts.join(": ")].filter(Boolean).join(" ");
 }
+
+/** Hands out one check per request; only the newest request's check stays true. */
+export function latestOnly(): () => () => boolean {
+  let latest = 0;
+  return () => {
+    const mine = ++latest;
+    return () => mine === latest;
+  };
+}
