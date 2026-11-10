@@ -36,7 +36,7 @@ describe("pr-chain helpers", () => {
     expect(shortTime(undefined)).toBe("");
     expect(describeEvent({ pr: 960, stage: "review", verdict: "PASS" })).toBe("PR 960 Review: Pass");
     expect(describeEvent({ issue: 893, stage: "issue-end", status: "BUILD-FAILED" })).toBe("Issue 893 Issue ended: Build failed");
-    expect(describeEvent({ pr: 7, stage: "human-gate", status: "AWAIT-HUMAN" })).toBe("PR 7 Waiting for you: Waiting for you");
+    expect(describeEvent({ pr: 7, stage: "human-gate", status: "AWAIT-HUMAN" })).toBe("PR 7 Waiting for you");
   });
 
   it("names workflow tokens in plain words", () => {
