@@ -524,3 +524,48 @@ async def test_without_dir_fd_the_list_is_still_bounded_and_marked(client, root,
         write_state(root, "prs", number, status="READY", updated="a")
     body = (await client.get("/pr-chain")).json()
     assert body["truncated"] is True and len(body["items"]) == 100
+
+
+@pytest.mark.asyncio
+async def test_on_windows_the_liveness_probe_never_sends_a_signal(client, root, monkeypatch):
+    """``os.kill(pid, 0)`` is a Ctrl+C to a process group on Windows, so a claim file must not trigger it."""
+    import os
+
+    from kollabor_engine import pr_chain
+
+    def no_signals(pid, sig):
+        raise AssertionError(f"os.kill({pid}, {sig}) would signal a process")
+
+    monkeypatch.setattr(pr_chain, "_WINDOWS", True)
+    monkeypatch.setattr(pr_chain, "_windows_pid_alive", lambda pid: pid == os.getpid())
+    monkeypatch.setattr(os, "kill", no_signals)
+    write_state(root, "prs", 1, status="REVIEWING", updated="a")
+    write_state(root, "issues", 2, status="BUILDING", updated="b")
+    (root / "claims" / "1").mkdir(parents=True)
+    (root / "claims" / "1" / "pid").write_text(str(os.getpid()))
+    (root / "claims" / "i2").mkdir(parents=True)
+    (root / "claims" / "i2" / "pid").write_text("999999999")
+    items = {(i["kind"], i["number"]): i["claimed"] for i in (await client.get("/pr-chain")).json()["items"]}
+    assert items == {("pr", 1): True, ("issue", 2): False}
+
+
+@pytest.mark.asyncio
+async def test_files_are_opened_in_binary_mode_where_the_platform_has_one(client, root, monkeypatch):
+    """Windows text mode stops a read at a 0x1a byte, which would hide the ledger lines after it."""
+    import os
+
+    fake_binary = 0x40000000
+    real_open = os.open
+    seen = {}
+
+    def record_flags(path, flags, *args, **kwargs):
+        if str(path) in ("ledger.jsonl", "STATE.json") or str(path).endswith(("ledger.jsonl", "STATE.json")):
+            seen[os.path.basename(str(path))] = bool(flags & fake_binary)
+        return real_open(path, flags & ~fake_binary, *args, **kwargs)
+
+    monkeypatch.setattr(os, "O_BINARY", fake_binary, raising=False)
+    monkeypatch.setattr(os, "open", record_flags)
+    write_state(root, "prs", 1, status="READY", updated="a")
+    (root / "ledger.jsonl").write_text(json.dumps({"pr": 1, "stage": "review"}) + "\n")
+    assert (await client.get("/pr-chain")).status_code == 200
+    assert seen == {"STATE.json": True, "ledger.jsonl": True}
