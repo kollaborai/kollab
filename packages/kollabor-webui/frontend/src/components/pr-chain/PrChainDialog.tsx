@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import { describeEvent, itemUrl, shortTime, sortItems, statusTone, type StatusTone } from "./prChain";
+import { describeEvent, itemUrl, shortTime, sortItems, statusLabel, statusTone, type StatusTone } from "./prChain";
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -19,8 +19,9 @@ const errorText = (error: unknown) => (error instanceof Error ? error.message : 
 const REFRESH_MS = 10_000;
 
 const TONE: Record<StatusTone, string> = {
-  attention: "text-amber-700 dark:text-amber-300",
-  active: "text-emerald-700 dark:text-emerald-300",
+  failed: "text-destructive",
+  attention: "text-highlight",
+  active: "text-foreground",
   idle: "text-foreground",
   done: "text-muted-foreground",
 };
@@ -34,9 +35,9 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
   const [busy, setBusy] = useState(false);
   const epoch = useRef(0);
 
-  const load = useCallback(() => {
+  const load = useCallback((manual = false) => {
     const mine = epoch.current;
-    setBusy(true);
+    if (manual) setBusy(true);
     api
       .getPrChain()
       .then((next) => {
@@ -69,6 +70,7 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         showCloseButton={false}
+        onOpenAutoFocus={(event) => event.preventDefault()}
         className="flex max-h-[min(40rem,90dvh)] w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(52rem,calc(100%-2rem))]"
       >
         <header className="flex items-start gap-3 px-4 pt-4 pb-3 sm:px-6">
@@ -78,19 +80,22 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
               Every PR and issue the review workflow is working on.
             </DialogDescription>
           </div>
-          <Button type="button" size="icon-xs" variant="ghost" aria-label="Refresh" disabled={busy} onClick={load}>
+          <Button type="button" size="icon-sm" variant="ghost" aria-label="Refresh" className="max-sm:size-11" disabled={busy} onClick={() => load(true)}>
             {busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
           </Button>
-          <DialogClose className="text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:ring-ring/50 -mr-1.5 shrink-0 rounded-full p-1.5 outline-none focus-visible:ring-[3px]">
-            <X className="size-4" />
-            <span className="sr-only">Close</span>
+          <DialogClose asChild>
+            <Button type="button" size="icon-sm" variant="ghost" aria-label="Close" className="max-sm:size-11">
+              <X />
+            </Button>
           </DialogClose>
         </header>
 
         {loadError ? (
           <div role="alert" className="bg-destructive/10 text-destructive mx-4 mb-2 flex items-start gap-2 rounded-md px-3 py-2 text-sm sm:mx-6">
             <AlertCircle className="mt-0.5 size-4 shrink-0" />
-            <span className="min-w-0 flex-1 break-words">{loadError}</span>
+            <span className="min-w-0 flex-1 break-words" title={loadError}>
+              Couldn&apos;t load the PR chain. Press Refresh to try again.
+            </span>
           </div>
         ) : null}
 
@@ -103,9 +108,9 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
             </div>
           ) : !snapshot.root_found || items.length === 0 ? (
             <p className="text-muted-foreground py-8 text-center text-sm">
-              {snapshot.root_found
-                ? "Nothing is tracked yet. Run pr-chain on a PR or an issue and it shows up here."
-                : "No pr-chain state on this machine. Run pr-chain once and it shows up here."}
+              {snapshot.root_found ? "Nothing is tracked yet. " : "No PR chain state on this machine. "}
+              Run <code className="text-foreground font-mono text-xs">pr-chain run &lt;pr number&gt;</code> or{" "}
+              <code className="text-foreground font-mono text-xs">pr-chain issue &lt;issue number&gt;</code> and it shows up here.
             </p>
           ) : (
             <>
@@ -113,7 +118,7 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
                 {items.map((item) => {
                   const tone = statusTone(item);
                   return (
-                    <li key={`${item.kind}-${item.number}`} className="grid grid-cols-[auto_1fr_auto] items-baseline gap-x-3 gap-y-0.5 py-2 text-sm">
+                    <li key={`${item.kind}-${item.number}`} className="grid grid-cols-[auto_1fr] items-baseline sm:grid-cols-[auto_1fr_auto] gap-x-3 gap-y-0.5 py-2 text-sm">
                       <a
                         href={itemUrl(item)}
                         target="_blank"
@@ -124,16 +129,16 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
                         <ExternalLink className="size-3" />
                       </a>
                       <span className={cn("min-w-0 break-words font-medium", TONE[tone])}>
-                        {item.status ?? "Unknown"}
-                        {item.claimed ? " (running)" : ""}
+                        {statusLabel(item.status)}
+                        {item.claimed ? <span className="text-muted-foreground ml-1.5 font-normal">Running</span> : null}
                       </span>
-                      <span className="text-muted-foreground font-mono text-xs whitespace-nowrap">
+                      <span className="text-muted-foreground col-span-2 font-mono text-xs sm:col-span-1 sm:whitespace-nowrap">
                         {item.round ? `Round ${item.round}` : ""}
                         {item.round && item.updated ? " · " : ""}
                         {shortTime(item.updated)}
                       </span>
                       {item.why || item.last_verdict ? (
-                        <span className="text-muted-foreground col-span-3 line-clamp-2 min-w-0 text-xs">
+                        <span className="text-muted-foreground col-span-2 min-w-0 break-words text-xs sm:col-span-3">
                           {[item.last_verdict, item.why].filter(Boolean).join(" · ")}
                         </span>
                       ) : null}
@@ -143,7 +148,7 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
               </ul>
               {events.length ? (
                 <section className="mt-4">
-                  <h3 className="text-muted-foreground mb-1 text-xs font-semibold uppercase">Recent Activity</h3>
+                  <h3 className="text-muted-foreground mb-1 text-xs font-medium">Recent activity</h3>
                   <ul className="space-y-0.5">
                     {events.map((event, index) => (
                       <li key={`${event.ts}-${index}`} className="flex gap-3 text-xs">
