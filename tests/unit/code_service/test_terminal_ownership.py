@@ -100,3 +100,39 @@ def test_darwin_libproc_finds_own_child_pty_descriptor(monkeypatch):
             child.wait(timeout=5)
         os.close(slave)
         os.close(master)
+
+
+def test_capture_does_not_rescan_process_tree_for_every_known_process(monkeypatch):
+    from kollabor.code_service import terminal
+
+    calls = []
+
+    class Process:
+        def __init__(self, pid, parent):
+            self.pid = pid
+            self.parent_pid = parent
+
+        def is_running(self):
+            return True
+
+        def ppid(self):
+            return self.parent_pid
+
+        def children(self, recursive=False):
+            calls.append(self.pid)
+            return []
+
+    shell = Process(1000, 1)
+    processes = [shell, *(Process(pid, 1000) for pid in range(1001, 1031))]
+    session = object.__new__(terminal._Session)
+    session._owned_processes = set(processes)
+    session._supervised = False
+    session._shell_process = shell
+    session._proc = SimpleNamespace(returncode=None)
+    session.pid = shell.pid
+    session._inspection_warnings = set()
+    session._pty_name = None
+    monkeypatch.setattr(terminal.psutil, "process_iter", lambda: iter(processes))
+    monkeypatch.setattr(terminal.os, "getsid", lambda _pid: shell.pid)
+    session._capture_processes()
+    assert len(calls) <= 1, f"capture recursively scanned the system {len(calls)} times"

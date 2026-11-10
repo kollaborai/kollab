@@ -456,7 +456,9 @@ async def test_closing_one_terminal_does_not_signal_another(tmp_path):
         task = first_session.destroy()
         if task is not None:
             await task
-        assert not terminal._SESSIONS[other_id].exited
+        other_session = terminal._SESSIONS[other_id]
+        assert other_session.pid not in {process.pid for process in first_session._owned_processes}
+        assert not other_session.exited
         await other.send(type="input", data="echo still-alive-91''23\n")
         assert "still-alive-9123" in await other.until("still-alive-9123")
 
