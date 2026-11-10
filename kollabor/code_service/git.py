@@ -37,7 +37,7 @@ STASH_SEP = "||STASHSEP||"
 STASH_FORMAT = f"%gd{STASH_SEP}%s{STASH_SEP}%cr{STASH_SEP}%H"
 BRANCH_FORMAT = "%(refname:short)|%(HEAD)|%(upstream:short)|%(objectname:short)|%(committerdate:relative)"
 REMOTE_FORMAT = "%(refname:short)|%(HEAD)|%(objectname:short)|%(committerdate:relative)"
-COMMIT_ID = re.compile(r"[0-9a-fA-F]{4,40}")
+COMMIT_ID = re.compile(r"[0-9a-fA-F]{4,64}")
 STASH_ID = re.compile(r"stash@\{(\d{1,6})\}|(\d{1,6})")
 # Variables that would point git at a repository other than the workspace's own.
 REPO_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")

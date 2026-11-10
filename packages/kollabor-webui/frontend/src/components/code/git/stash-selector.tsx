@@ -728,16 +728,16 @@ export function StashSelector({
   const [createLoading, setCreateLoading] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
-  // Pre-apply confirmation: stashId pending user confirmation before applying.
-  const [applyConfirmId, setApplyConfirmId] = useState<string | null>(null);
+  // Keep the selected object's immutable identity and label across list refreshes.
+  const [applyConfirm, setApplyConfirm] = useState<GitStash | null>(null);
   // Apply results dialog (conflicts / success / error).
-  const [showApplyDialog, setShowApplyDialog] = useState<string | null>(null);
+  const [showApplyDialog, setShowApplyDialog] = useState<GitStash | null>(null);
   const [applyLoading, setApplyLoading] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [applyConflicts, setApplyConflicts] = useState<string[] | null>(null);
   const [conflictCount, setConflictCount] = useState(0);
 
-  const [showDropDialog, setShowDropDialog] = useState<string | null>(null);
+  const [showDropDialog, setShowDropDialog] = useState<GitStash | null>(null);
   const [dropLoading, setDropLoading] = useState(false);
   const [dropError, setDropError] = useState<string | null>(null);
 
@@ -790,30 +790,28 @@ export function StashSelector({
   // ── apply stash ───────────────────────────────────────────────────────────
   // Opens a confirmation dialog first; the actual apply runs only after the
   // user confirms (see runApplyStash).
-  const requestApplyStash = useCallback((stashId: string) => {
-    setApplyConfirmId(stashId);
+  const requestApplyStash = useCallback((stash: GitStash) => {
+    if (!stash.commitHash || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(stash.commitHash)) {
+      setError("The stash identity is unavailable. Refresh the list before applying it.");
+      return;
+    }
+    setError(null);
+    setApplyConfirm({ ...stash });
   }, []);
 
   const runApplyStash = useCallback(
-    async (stashId: string) => {
+    async (stash: GitStash) => {
       // Confirmation done — close confirm dialog, open results dialog.
-      setApplyConfirmId(null);
-      setShowApplyDialog(stashId);
+      setApplyConfirm(null);
+      setShowApplyDialog(stash);
       setApplyLoading(true);
       setApplyError(null);
       setApplyConflicts(null);
       setConflictCount(0);
 
-      // Resolve the stash's stable commit SHA so the backend re-targets it even
-      // if the positional list has shifted since render (creating/dropping a
-      // stash renumbers every stash@{N}). Index-only targeting applies the
-      // wrong stash under that race.
-      const stash = stashes.find((s) => s.id === stashId);
-
       try {
         const result = await gitPost<GitStashApplyResult>(workspace, sessionId, "apply_stash", {
-          stashId: `stash@{${stashId}}`,
-          stashCommit: stash?.commitHash,
+          stashCommit: stash.commitHash,
         });
 
         if (!result.ok && result.conflicts && result.conflicts.length > 0) {
@@ -822,7 +820,7 @@ export function StashSelector({
         } else if (!result.ok) {
           setApplyError(result.error || "Failed to apply stash");
         } else {
-          onStashApplied?.(stashId);
+          onStashApplied?.(stash.id);
           await fetchStashes();
           setTimeout(() => {
             setShowApplyDialog(null);
@@ -834,23 +832,21 @@ export function StashSelector({
         setApplyLoading(false);
       }
     },
-    [workspace, fetchStashes, onStashApplied, stashes]
+    [workspace, sessionId, fetchStashes, onStashApplied]
   );
 
   // ── drop stash ────────────────────────────────────────────────────────────
   const handleDropStash = useCallback(
-    async (stashId: string) => {
+    async (stash: GitStash) => {
       setDropLoading(true);
       setDropError(null);
 
-      // Resolve the stable commit SHA — see runApplyStash. Dropping by
-      // positional index deletes the wrong stash if the list shifted.
-      const stash = stashes.find((s) => s.id === stashId);
-
       try {
+        if (!stash.commitHash || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(stash.commitHash)) {
+          throw new Error("The stash identity is unavailable. Refresh the list before deleting it.");
+        }
         const result = await gitPost<GitStashDropResult>(workspace, sessionId, "drop_stash", {
-          stashId: `stash@{${stashId}}`,
-          stashCommit: stash?.commitHash,
+          stashCommit: stash.commitHash,
         });
 
         if (!result.ok) {
@@ -866,7 +862,7 @@ export function StashSelector({
         setDropLoading(false);
       }
     },
-    [workspace, fetchStashes, stashes]
+    [workspace, sessionId, fetchStashes]
   );
 
   // ── effects ───────────────────────────────────────────────────────────────
@@ -976,8 +972,8 @@ export function StashSelector({
               <StashRow
                 key={stash.id}
                 stash={stash}
-                onApply={() => requestApplyStash(stash.id)}
-                onDrop={() => setShowDropDialog(stash.id)}
+                onApply={() => requestApplyStash(stash)}
+                onDrop={() => setShowDropDialog({ ...stash })}
               />
             ))}
           </div>
@@ -993,14 +989,14 @@ export function StashSelector({
         onOpenChange={setShowCreateDialog}
       />
 
-      {applyConfirmId && (
+      {applyConfirm && (
         <ApplyStashConfirmDialog
           open={true}
-          stashId={applyConfirmId}
-          stash={stashes.find((s) => s.id === applyConfirmId)}
-          onConfirm={() => runApplyStash(applyConfirmId)}
+          stashId={applyConfirm.id}
+          stash={applyConfirm}
+          onConfirm={() => runApplyStash(applyConfirm)}
           onOpenChange={(open) => {
-            if (!open) setApplyConfirmId(null);
+            if (!open) setApplyConfirm(null);
           }}
         />
       )}
@@ -1008,8 +1004,8 @@ export function StashSelector({
       {showApplyDialog && (
         <ApplyStashDialog
           open={true}
-          stashId={showApplyDialog}
-          stash={stashes.find((s) => s.id === showApplyDialog)}
+          stashId={showApplyDialog.id}
+          stash={showApplyDialog}
           loading={applyLoading}
           conflicts={applyConflicts}
           conflictCount={conflictCount}
@@ -1027,8 +1023,8 @@ export function StashSelector({
       {showDropDialog && (
         <DropStashConfirmDialog
           open={true}
-          stashId={showDropDialog}
-          stash={stashes.find((s) => s.id === showDropDialog)}
+          stashId={showDropDialog.id}
+          stash={showDropDialog}
           loading={dropLoading}
           error={dropError}
           onConfirm={() => handleDropStash(showDropDialog)}

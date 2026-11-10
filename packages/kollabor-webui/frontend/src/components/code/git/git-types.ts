@@ -102,7 +102,7 @@ export interface GitStash {
   message: string;
   /** ISO timestamp or a relative date. */
   date: string;
-  /** Abbreviated SHA of the stashed commit. */
+  /** Full object ID of the stashed commit. */
   commitHash?: string;
 }
 
