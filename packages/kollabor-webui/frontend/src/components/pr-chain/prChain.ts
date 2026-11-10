@@ -31,7 +31,7 @@ const LABELS: Record<string, string> = {
 /** Workflow tokens in plain words. Unknown tokens come out in sentence case. */
 export function statusLabel(token: string | undefined): string {
   if (!token) return "Unknown";
-  const known = LABELS[token];
+  const known = Object.hasOwn(LABELS, token) ? LABELS[token] : undefined;
   if (known) return known;
   const words = token.replace(/[-_]+/g, " ").trim().toLowerCase();
   return words ? words[0].toUpperCase() + words.slice(1) : "Unknown";
