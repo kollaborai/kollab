@@ -613,8 +613,9 @@ def test_a_stash_from_a_subfolder_leaves_the_rest_of_the_repository_alone(repo):
 
     stashed = _git(app, {"action": "create_stash"})
 
-    assert stashed.status_code == 200
-    assert (app / "in.txt").read_text() == "one\n"
+    assert stashed.status_code == 409
+    assert stashed.content["error"]["code"] == "stash_subfolder_unsupported"
+    assert (app / "in.txt").read_text() == "two\n"
     assert (repo / "top.txt").read_text() == "two\n"
 
 

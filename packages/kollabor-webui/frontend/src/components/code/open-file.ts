@@ -90,7 +90,7 @@ export async function openWorkspaceFile(
   const loading = (async () => {
     const read = await readFileContent(workspace, absPath, bufferId);
     const current = useEditorStore.getState().fileCache.get(absPath);
-    if (owner !== editorOwner() || epoch !== editorOwnerEpoch() || bufferId !== current?.bufferId) return false;
+    if (!current || owner !== editorOwner() || epoch !== editorOwnerEpoch() || bufferId !== current.bufferId) return false;
     if (read === null) {
       useEditorStore.getState().closeFile(paneId, absPath);
       return false;
