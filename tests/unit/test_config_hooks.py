@@ -664,6 +664,49 @@ class TestHookProcessReaping:
         await self._assert_gone(pid)
 
     @pytest.mark.asyncio
+    @pytest.mark.skipif(os.name == "nt", reason="SIGTERM is not catchable on Windows")
+    async def test_repeated_cancellation_does_not_interrupt_child_reaping(
+        self, loader, tmp_path, monkeypatch
+    ):
+        pid_path = tmp_path / "child.pid"
+        script = (
+            "import os, signal, sys, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "with open(sys.argv[1], 'w') as handle:\n"
+            "    handle.write(str(os.getpid()))\n"
+            "time.sleep(60)\n"
+        )
+        command = f"{sys.executable} -c {shlex.quote(script)} {shlex.quote(str(pid_path))}"
+        task = asyncio.create_task(loader._run_command(command, "{}", timeout=30))
+        for _ in range(100):
+            if pid_path.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert pid_path.exists(), "child never wrote its pid"
+        pid = int(pid_path.read_text())
+
+        reap_started = asyncio.Event()
+        reap_child = ConfigHookLoader._reap_child
+
+        async def observe_reap(proc):
+            reap_started.set()
+            return await reap_child(proc)
+
+        monkeypatch.setattr(
+            ConfigHookLoader, "_reap_child", staticmethod(observe_reap)
+        )
+        monkeypatch.setattr(ConfigHookLoader, "REAP_GRACE_SECONDS", 1)
+
+        task.cancel()
+        await asyncio.wait_for(reap_started.wait(), timeout=3)
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        await self._assert_gone(pid)
+
+    @pytest.mark.asyncio
     async def test_timed_out_hook_child_is_reaped(self, loader, tmp_path):
         command = f"{sys.executable} -c {shlex.quote(self.CHILD_SCRIPT)} {shlex.quote(str(tmp_path / 'child.pid'))}"
         task = asyncio.create_task(loader._run_command(command, "{}", timeout=1))
