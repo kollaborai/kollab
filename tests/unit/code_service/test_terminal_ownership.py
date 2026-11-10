@@ -5,6 +5,8 @@ import os
 import struct
 from types import SimpleNamespace
 
+import pytest
+
 from kollabor.code_service import _terminal_darwin, _terminal_supervisor
 
 
@@ -30,18 +32,20 @@ def test_supervisor_does_not_signal_unverified_pid(monkeypatch):
 
 def test_darwin_pty_holder_requires_matching_device_inode_and_start(monkeypatch):
     class Process:
-        def __init__(self, pid, started):
+        def __init__(self, pid, started, live=True, uid=None):
             self.pid = pid
             self.started = started
+            self.live = live
+            self.uid = os.getuid() if uid is None else uid
 
         def uids(self):
-            return SimpleNamespace(real=os.getuid())
+            return SimpleNamespace(real=self.uid)
 
         def create_time(self):
             return self.started
 
         def is_running(self):
-            return True
+            return self.live
 
     class Function:
         def __init__(self, fn):
@@ -60,17 +64,18 @@ def test_darwin_pty_holder_requires_matching_device_inode_and_start(monkeypatch)
     def fdinfo(pid, _fd, _kind, buf, _size):
         raw = bytearray(1200)
         struct.pack_into("=I", raw, 24, 12)
-        struct.pack_into("=Q", raw, 32, 44 if pid == 10001 else 45)
+        struct.pack_into("=Q", raw, 32, 44 if pid in (10001, 10004, 10005) else 45)
         raw[176:185] = b"/dev/ttyX"
         ctypes.memmove(buf, bytes(raw), len(raw))
         return len(raw)
 
     lib = SimpleNamespace(proc_pidinfo=Function(pidinfo), proc_pidfdinfo=Function(fdinfo))
     monkeypatch.setattr(_terminal_darwin.ctypes, "CDLL", lambda *_args, **_kw: lib)
-    monkeypatch.setattr(_terminal_darwin.psutil, "process_iter", lambda: [
+    processes = [
         Process(10001, 20), Process(10002, 20), Process(10003, 1),
-    ])
-    holders = list(_terminal_darwin.pty_holders("/dev/ttyX", (12, 44), 10))
+        Process(10004, 20, live=False), Process(10005, 20, uid=os.getuid() + 1),
+    ]
+    holders = list(_terminal_darwin.pty_holders("/dev/ttyX", (12, 44), 10, processes))
     assert [p.pid for p in holders] == [10001]
 
 
@@ -91,8 +96,7 @@ def test_darwin_libproc_finds_own_child_pty_descriptor(monkeypatch):
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
                                  stdin=slave, stdout=slave, stderr=slave)
         process = psutil.Process(child.pid)
-        monkeypatch.setattr(_terminal_darwin.psutil, "process_iter", lambda: [process])
-        holders = list(_terminal_darwin.pty_holders(path, (info.st_dev & 0xFFFFFFFF, info.st_ino), 0))
+        holders = list(_terminal_darwin.pty_holders(path, (info.st_dev & 0xFFFFFFFF, info.st_ino), 0, [process]))
         assert [holder.pid for holder in holders] == [child.pid]
     finally:
         if child is not None:
@@ -212,7 +216,8 @@ def test_capture_rejects_process_older_than_its_apparent_parent(monkeypatch):
     assert result == {shell}
 
 
-def test_capture_uses_pty_fallback_when_psutil_enumeration_denied(monkeypatch):
+@pytest.mark.parametrize("failure", ["access_denied", "os_error", "partial"])
+def test_capture_uses_pty_fallback_when_psutil_enumeration_denied(monkeypatch, failure):
     import psutil
 
     from kollabor.code_service import terminal
@@ -230,6 +235,13 @@ def test_capture_uses_pty_fallback_when_psutil_enumeration_denied(monkeypatch):
     calls = []
 
     def denied():
+        if failure == "os_error":
+            raise OSError("process listing failed")
+        if failure == "partial":
+            def interrupted():
+                yield object()
+                raise psutil.AccessDenied(pid=1)
+            return interrupted()
         raise psutil.AccessDenied(pid=1)
 
     def holders(path, identity, started, processes):
@@ -297,3 +309,104 @@ def test_darwin_pty_holders_enumerates_with_libproc_without_psutil_list(monkeypa
     monkeypatch.setattr(_terminal_darwin.psutil, "Process", Process)
     holders = list(_terminal_darwin.pty_holders("/dev/ttyX", (12, 44), 10))
     assert [p.pid for p in holders] == [10001]
+
+
+def test_libproc_pid_list_retries_a_full_buffer():
+    calls = []
+
+    class Function:
+        argtypes = None
+
+        def __call__(self, buf, size):
+            calls.append(size)
+            if buf is None:
+                return 3
+            if len(calls) == 2:
+                return size // ctypes.sizeof(ctypes.c_int)
+            ctypes.memmove(buf, struct.pack("=iii", 11, 12, 13), 12)
+            return 3
+
+    assert _terminal_darwin._libproc_pids(SimpleNamespace(proc_listallpids=Function())) == [11, 12, 13]
+    assert calls == [0, 256 * ctypes.sizeof(ctypes.c_int), 512 * ctypes.sizeof(ctypes.c_int)]
+
+
+def test_darwin_libproc_fallback_finds_own_child_when_psutil_listing_fails(monkeypatch):
+    import subprocess
+    import sys
+
+    import psutil
+
+    from kollabor.code_service import terminal
+
+    if sys.platform != "darwin":
+        pytest.skip("Darwin libproc is not available")
+    master, slave = os.openpty()
+    child = None
+    try:
+        info = os.fstat(slave)
+        path = os.ttyname(slave)
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                 stdin=slave, stdout=slave, stderr=slave)
+        process = psutil.Process(child.pid)
+        session = object.__new__(terminal._Session)
+        session._supervised = False
+        session._shell_process = process
+        session._inspection_warnings = set()
+        session._pty_name = path
+        session._pty_identity = (info.st_dev & 0xFFFFFFFF, info.st_ino)
+        session._pty_anchor = object()
+        session._shell_started = process.create_time()
+
+        def denied():
+            raise psutil.AccessDenied(pid=1)
+
+        monkeypatch.setattr(terminal.psutil, "process_iter", denied)
+        monkeypatch.setattr(_terminal_darwin, "_libproc_pids", lambda _lib: [child.pid])
+        assert session._collect_processes(set()) == {process}
+    finally:
+        if child is not None:
+            child.terminate()
+            child.wait(timeout=5)
+        os.close(slave)
+        os.close(master)
+
+
+def test_supervised_collect_never_uses_platform_process_enumeration(monkeypatch):
+    from kollabor.code_service import terminal
+
+    session = object.__new__(terminal._Session)
+    session._supervised = True
+    known = {object()}
+
+    def unexpected():
+        raise AssertionError("supervised terminals must not enumerate processes here")
+
+    monkeypatch.setattr(terminal.psutil, "process_iter", unexpected)
+    assert session._collect_processes(known) == known
+
+
+def test_denied_psutil_and_libproc_does_not_invent_owners(monkeypatch):
+    import psutil
+
+    from kollabor.code_service import terminal
+
+    shell = object()
+    session = object.__new__(terminal._Session)
+    session._supervised = False
+    session._shell_process = shell
+    session._inspection_warnings = set()
+    session._pty_name = "/dev/ttys-test"
+    session._pty_identity = (12, 44)
+    session._pty_anchor = object()
+    session._shell_started = 100.0
+
+    def denied():
+        raise psutil.AccessDenied(pid=1)
+
+    def unavailable(*_args):
+        raise OSError("libproc unavailable")
+
+    monkeypatch.setattr(terminal.psutil, "process_iter", denied)
+    monkeypatch.setattr(_terminal_darwin, "pty_holders", unavailable)
+    assert session._collect_processes({shell}) == {shell}
+    assert session._inspection_warnings == {"tree", "pty"}

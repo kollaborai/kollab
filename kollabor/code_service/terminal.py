@@ -234,48 +234,49 @@ class _Session:
         shell = self._shell_process
         if shell is None:
             return owned
+        processes = None
         try:
             processes = list(psutil.process_iter())
         except (psutil.Error, OSError) as exc:
             if "tree" not in self._inspection_warnings:
-                logger.warning("Cannot inspect terminal processes; terminal jobs may survive teardown: %s", exc)
+                logger.warning("Cannot enumerate terminal process tree; job discovery may be incomplete: %s", exc)
                 self._inspection_warnings.add("tree")
-            return owned
-        try:
-            # psutil's children(recursive=True) enumerates the system. Calling it for each known process makes
-            # a single scan quadratic and blocks the event loop while other terminals are trying to close.
-            shell_alive = shell.is_running() and self._proc.returncode is None
-            by_parent: dict[int, list[psutil.Process]] = {}
-            for process in processes:
-                try:
-                    parent = process.ppid()
-                    by_parent.setdefault(parent, []).append(process)
-                    if (shell_alive and self._shell_started is not None
-                            and process.create_time() >= self._shell_started
-                            and os.getsid(process.pid) == self.pid and process.is_running()):
-                        owned.add(process)
-                except (ProcessLookupError, PermissionError, psutil.Error):
-                    continue
-            # Walk the one snapshot from identity-checked previously owned processes, including detached ones.
-            pending = list(owned)
-            visited: set[int] = set()
-            while pending:
-                parent = pending.pop()
-                if parent.pid in visited or not parent.is_running():
-                    continue
-                visited.add(parent.pid)
-                for process in by_parent.get(parent.pid, []):
+        if processes is not None:
+            try:
+                # psutil's children(recursive=True) enumerates the system. Calling it for each known process makes
+                # a single scan quadratic and blocks the event loop while other terminals are trying to close.
+                shell_alive = shell.is_running() and self._proc.returncode is None
+                by_parent: dict[int, list[psutil.Process]] = {}
+                for process in processes:
                     try:
-                        if (process not in owned and parent.is_running() and process.is_running()
-                                and process.create_time() >= parent.create_time() and parent.is_running()):
+                        parent = process.ppid()
+                        by_parent.setdefault(parent, []).append(process)
+                        if (shell_alive and self._shell_started is not None
+                                and process.create_time() >= self._shell_started
+                                and os.getsid(process.pid) == self.pid and process.is_running()):
                             owned.add(process)
-                            pending.append(process)
-                    except psutil.Error:
+                    except (ProcessLookupError, PermissionError, psutil.Error):
                         continue
-        except (psutil.Error, OSError) as exc:
-            if "tree" not in self._inspection_warnings:
-                logger.warning("Cannot inspect terminal process tree; jobs may survive teardown: %s", exc)
-                self._inspection_warnings.add("tree")
+                # Walk the one snapshot from identity-checked previously owned processes, including detached ones.
+                pending = list(owned)
+                visited: set[int] = set()
+                while pending:
+                    parent = pending.pop()
+                    if parent.pid in visited or not parent.is_running():
+                        continue
+                    visited.add(parent.pid)
+                    for process in by_parent.get(parent.pid, []):
+                        try:
+                            if (process not in owned and parent.is_running() and process.is_running()
+                                    and process.create_time() >= parent.create_time() and parent.is_running()):
+                                owned.add(process)
+                                pending.append(process)
+                        except psutil.Error:
+                            continue
+            except (psutil.Error, OSError) as exc:
+                if "tree" not in self._inspection_warnings:
+                    logger.warning("Cannot inspect terminal process tree; jobs may survive teardown: %s", exc)
+                    self._inspection_warnings.add("tree")
         if (self._pty_name is not None and self._pty_identity is not None and self._pty_anchor is not None
                 and self._shell_started is not None):
             try:

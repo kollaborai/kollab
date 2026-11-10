@@ -1,6 +1,7 @@
 """Inspect open PTY slave descriptors with Darwin's libproc APIs."""
 
 import ctypes
+import errno
 import os
 import struct
 
@@ -11,12 +12,43 @@ class _FD(ctypes.Structure):
     _fields_ = [("fd", ctypes.c_int32), ("kind", ctypes.c_uint32)]
 
 
+def _libproc_pids(lib):
+    """List PIDs independently of psutil's process-table enumeration."""
+    lib.proc_listallpids.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    ctypes.set_errno(0)
+    count = lib.proc_listallpids(None, 0)
+    if count <= 0:
+        raise OSError(ctypes.get_errno() or errno.EIO, "libproc could not size the process list")
+    capacity = max(count + 64, 256)
+    for _ in range(5):
+        if capacity > 1_000_000:
+            break
+        buf = (ctypes.c_int * capacity)()
+        ctypes.set_errno(0)
+        used = lib.proc_listallpids(buf, ctypes.sizeof(buf))
+        if used <= 0:
+            raise OSError(ctypes.get_errno() or errno.EIO, "libproc could not list processes")
+        if used < capacity:
+            return [pid for pid in buf[:used] if pid > 0]
+        capacity *= 2
+    raise OSError(errno.EOVERFLOW, "libproc process list remained too large")
+
+
+def _libproc_processes(lib):
+    for pid in _libproc_pids(lib):
+        try:
+            # Process retains start time and refuses signals if a PID has been reused.
+            yield psutil.Process(pid)
+        except (psutil.Error, OSError):
+            continue
+
+
 def pty_holders(path: str, identity: tuple[int, int], earliest: float, processes=None):
     """Return identity-checked same-user processes holding the allocated slave vnode."""
     lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
     lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
     lib.proc_pidfdinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
-    for process in psutil.process_iter() if processes is None else processes:
+    for process in _libproc_processes(lib) if processes is None else processes:
         try:
             if process.pid == os.getpid() or process.uids().real != os.getuid() or process.create_time() < earliest:
                 continue
