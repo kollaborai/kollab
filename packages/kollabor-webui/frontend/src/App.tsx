@@ -1,12 +1,29 @@
 import { refreshesOnEvent, tracksStreamedRequest } from "./live-follow";
 import type { SessionEvent } from "./api";
 import { createHistoryReconciliation } from "./history-reconciliation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
 import { Thread } from "./components/Thread";
 import { ComposerKeeper } from "./components/assistant-ui/composer-keeper";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
+
+// Monaco and xterm are large: each view loads the first time it is opened, not with the main bundle.
+const CodeEditorView = lazy(() =>
+  import("./components/code/CodeEditorView").then((m) => ({ default: m.CodeEditorView })),
+);
+const TerminalView = lazy(() =>
+  import("./components/terminal/TerminalView").then((m) => ({ default: m.TerminalView })),
+);
+
+function ViewLoading() {
+  return (
+    <div className="text-muted-foreground flex flex-1 items-center justify-center gap-2 text-xs">
+      <Loader2 className="size-4 animate-spin" />
+      Loading
+    </div>
+  );
+}
 import { AppsDialog } from "@/components/apps/AppsDialog";
 import { PrChainDialog } from "@/components/pr-chain/PrChainDialog";
 import { SupervisorAlertBanner } from "@/components/SupervisorAlertBanner";
@@ -207,6 +224,27 @@ function RuntimeShell({
   const runtimeState = useEngineRuntimeState();
   const [status, setStatus] = useState<string | null>(null);
   const [panelSheetOpen, setPanelSheetOpen] = useState(false);
+  const workspace = session.workspace ?? "";
+  // Code Editor, Git and Terminal work in the chat's folder; a chat without one shows Chat.
+  const shown: SessionView = !workspace && (view === "code" || view === "git" || view === "terminal") ? "chat" : view;
+  const [visited, setVisited] = useState({ editor: false, terminal: false });
+  useEffect(() => {
+    // Code and Git are one editor (same tabs and panes) with a different sidebar
+    const key = shown === "code" || shown === "git" ? "editor" : shown === "terminal" ? "terminal" : null;
+    if (key) setVisited((seen) => (seen[key] ? seen : { ...seen, [key]: true }));
+  }, [shown]);
+  // Ctrl+` opens the terminal, and a second press goes back to Chat.
+  useEffect(() => {
+    if (!workspace) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.ctrlKey && !event.metaKey && !event.altKey && event.key === "`") {
+        event.preventDefault();
+        setView(shown === "terminal" ? "chat" : "terminal");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [workspace, shown, setView]);
   // An agent on another computer reads @names in that computer's mesh.
   // The #158 signature also narrows by network/workspace once rows carry them;
   // rows without those fields (pre-aggregate engines) ignore the filters.
@@ -315,7 +353,7 @@ function RuntimeShell({
           )}
           <SupervisorAlertBanner events={supervisorEvents} />
           <div className="flex min-h-0 flex-1 flex-col">
-            {view === "chat" ? (
+            {shown === "chat" ? (
               <Thread
                 agents={targets.agents}
                 commands={commands}
@@ -336,9 +374,34 @@ function RuntimeShell({
                 onRetryHistory={onRetryHistory}
                 historyStartIndex={historyStartIndex}
               />
-            ) : (
+            ) : shown === "trajectory" ? (
               <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
-            )}
+            ) : null}
+            {/* Opened once, then kept mounted and hidden, so open files and shells survive a switch to Chat. */}
+            {workspace && visited.editor ? (
+              <div className={shown === "code" || shown === "git" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+                <Suspense fallback={<ViewLoading />}>
+                  <CodeEditorView
+                    key={`${session.device ?? ""}:${workspace}`}
+                    sessionId={session.session_id}
+                    device={session.device ?? ""}
+                    workspace={workspace}
+                    mode={shown === "git" ? "git" : "code"} />
+                </Suspense>
+              </div>
+            ) : null}
+            {workspace && visited.terminal ? (
+              <div className={shown === "terminal" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+                <Suspense fallback={<ViewLoading />}>
+                  <TerminalView
+                    key={`${session.device ?? ""}:${workspace}`}
+                    sessionId={session.session_id}
+                    device={session.device ?? ""}
+                    workspace={workspace}
+                  />
+                </Suspense>
+              </div>
+            ) : null}
           </div>
         </div>
         <SessionPanel
@@ -1640,7 +1703,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   return (
     <GemAppearanceProvider api={api} refreshKey={aliveKey}>
       <AvatarImageProvider api={api}>
-      <SidebarProvider className={`bg-muted/40 ${contained ? "h-full min-h-0" : ""}`}>
+      <SidebarProvider className={`bg-muted/40 dark:bg-black ${contained ? "h-full min-h-0" : ""}`}>
         <AppSidebar
           learnActive={learnRoute !== null}
           whatsNewActive={whatsNewActive}

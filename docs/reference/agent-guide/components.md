@@ -95,6 +95,8 @@ Daemon-owned screens the web UI renders as Settings tabs (spec `docs/specs/webui
 
 An engine route that takes a folder (`workspace`, `folder`, the picker's `path`) calls `folder_or_400` from `packages/kollabor-engine/src/kollabor_engine/workspace_folder.py` first and uses what it returns, never the request's own text: one rule (the folder exists, is a directory, and is inside home, the engine's folder, a folder an agent runs in or a recent web session folder), one place for CodeQL's `py/path-injection` sanitizer. Spec `docs/specs/engine-folder-rule.md`; new routes join `FOLDER_ROUTES` in `tests/test_workspace_folder_routes.py`.
 
+The authenticated Code routes are an exception for folders on a session's daemon, which may be on another computer: the engine proxies the selection and never opens that path locally. The daemon resolves and validates the selected absolute directory on its own machine before serving files or Git (`docs/specs/floating-code-shell.md`).
+
 ### PR Chain dialog
 
 The sidebar footer's PR Chain button opens a read-only dialog (`PrChainDialog.tsx`, helpers in `prChain.ts`) fed by `GET /pr-chain` and `GET /pr-chain/{kind}/{number}` (`routes/pr_chain.py`). The routes read the state folder of an external runner through `kollabor_engine/pr_chain.py`: `KOLLAB_PR_CHAIN_ROOT`, default `~/backups/pr-chain`, holding `ledger.jsonl`, `prs/<n>/STATE.json`, `issues/<n>/STATE.json` and `claims/`. A missing folder answers `root_found: false`, never an error. The engine never writes there. Tests: `packages/kollabor-engine/tests/test_pr_chain_routes.py`, `frontend/tests/pr-chain.test.ts`.

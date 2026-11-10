@@ -908,6 +908,12 @@ export class EngineApi {
     return this.token;
   }
 
+  /** A ws:// or wss:// URL on the engine for `path` (e.g. "/code/terminal"), after the engine URL/token are known. */
+  async websocketUrl(path: string) {
+    await this.loadConfig();
+    return `${this.baseUrl.replace(/^http/, "ws")}${path}`;
+  }
+
   assistantUrl(sessionId: string) {
     return `${this.baseUrl}/sessions/${encodeURIComponent(sessionId)}/assistant`;
   }
