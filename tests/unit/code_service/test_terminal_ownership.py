@@ -210,3 +210,90 @@ def test_capture_rejects_process_older_than_its_apparent_parent(monkeypatch):
     monkeypatch.setattr(terminal.os, "getsid", lambda _pid: shell.pid)
     result = session._collect_processes(session._owned_processes)
     assert result == {shell}
+
+
+def test_capture_uses_pty_fallback_when_psutil_enumeration_denied(monkeypatch):
+    import psutil
+
+    from kollabor.code_service import terminal
+
+    shell = object()
+    holder = object()
+    session = object.__new__(terminal._Session)
+    session._supervised = False
+    session._shell_process = shell
+    session._inspection_warnings = set()
+    session._pty_name = "/dev/ttys-test"
+    session._pty_identity = (12, 44)
+    session._pty_anchor = object()
+    session._shell_started = 100.0
+    calls = []
+
+    def denied():
+        raise psutil.AccessDenied(pid=1)
+
+    def holders(path, identity, started, processes):
+        calls.append((path, identity, started, processes))
+        return [holder]
+
+    monkeypatch.setattr(terminal.psutil, "process_iter", denied)
+    monkeypatch.setattr(_terminal_darwin, "pty_holders", holders)
+    assert session._collect_processes({shell}) == {shell, holder}
+    assert calls == [("/dev/ttys-test", (12, 44), 100.0, None)]
+
+
+def test_darwin_pty_holders_enumerates_with_libproc_without_psutil_list(monkeypatch):
+    import psutil
+
+    class Process:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def uids(self):
+            return SimpleNamespace(real=os.getuid())
+
+        def create_time(self):
+            return 1 if self.pid == 10003 else 20
+
+        def is_running(self):
+            return True
+
+    class Function:
+        def __init__(self, fn):
+            self.fn = fn
+            self.argtypes = None
+
+        def __call__(self, *args):
+            return self.fn(*args)
+
+    def listall(buf, size):
+        if buf is None:
+            return 3
+        assert size >= 3 * ctypes.sizeof(ctypes.c_int)
+        ctypes.memmove(buf, struct.pack("=iii", 10001, 10002, 10003), 12)
+        return 3
+
+    def pidinfo(_pid, _kind, _arg, buf, _size):
+        if buf is None:
+            return 8
+        ctypes.memmove(buf, struct.pack("=iI", 4, 1), 8)
+        return 8
+
+    def fdinfo(pid, _fd, _kind, buf, _size):
+        raw = bytearray(1200)
+        struct.pack_into("=I", raw, 24, 12)
+        struct.pack_into("=Q", raw, 32, 44 if pid == 10001 else 45)
+        raw[176:185] = b"/dev/ttyX"
+        ctypes.memmove(buf, bytes(raw), len(raw))
+        return len(raw)
+
+    def denied():
+        raise psutil.AccessDenied(pid=1)
+
+    lib = SimpleNamespace(proc_listallpids=Function(listall), proc_pidinfo=Function(pidinfo),
+                          proc_pidfdinfo=Function(fdinfo))
+    monkeypatch.setattr(_terminal_darwin.ctypes, "CDLL", lambda *_args, **_kw: lib)
+    monkeypatch.setattr(_terminal_darwin.psutil, "process_iter", denied)
+    monkeypatch.setattr(_terminal_darwin.psutil, "Process", Process)
+    holders = list(_terminal_darwin.pty_holders("/dev/ttyX", (12, 44), 10))
+    assert [p.pid for p in holders] == [10001]
