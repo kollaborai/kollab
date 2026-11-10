@@ -529,6 +529,19 @@ async def test_without_dir_fd_a_folder_swapped_while_it_is_read_does_not_leak(
     assert swapped and "LEAKED" not in response.text, (swapped, response.text)
 
 
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="file owners are a POSIX notion")
+@pytest.mark.asyncio
+async def test_a_file_owned_by_someone_else_than_the_folder_owner_is_not_read(client, root, monkeypatch):
+    """A hard link can be unlinked after the open, so the opened inode's own owner is what is checked."""
+    write_state(root, "prs", 9, status="READY", updated="a")
+    (root / "ledger.jsonl").write_text(json.dumps({"pr": 9, "stage": "fold"}) + "\n")
+    assert (await client.get("/pr-chain/pr/9")).json()["item"]["status"] == "READY"
+    monkeypatch.setattr(pr_chain, "_trusted_owner", lambda base: os.getuid() + 1)
+    assert (await client.get("/pr-chain/pr/9")).status_code == 404
+    body = (await client.get("/pr-chain")).json()
+    assert body["items"] == [] and body["events"] == []
+
+
 def make_hard_link(link, target):
     import os
 
