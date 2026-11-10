@@ -1,0 +1,16 @@
+{
+  "name": "learn-web-workflows",
+  "description": "Exercise every Learn topic in the actual web app with staged API responses, including routing, keyboard navigation, media recovery, playback, reduced motion and adjacent session controls. No live engine is used.",
+  "config": {
+    "command": "sh -c 'exit 0'",
+    "show_captures": false
+  },
+  "steps": [
+    {
+      "action": "shell",
+      "description": "Run Learn browser acceptance in the harness's isolated HOME; set CHROME_PATH when Chromium is not discoverable",
+      "command": "node packages/kollabor-webui/frontend/tests/learn-browser-acceptance.mjs",
+      "assert_contains": "Learn browser acceptance passed; all API calls were mocked and no live engine was used\\."
+    }
+  ]
+}
