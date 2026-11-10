@@ -375,6 +375,14 @@ class TerminalLLMChat:
                             loadout.provider_profile, persist=False
                         )
                         logger.info("Applied default loadout '%s'", loadout.name)
+                    elif not loadout:
+                        # Exact-name miss (a deleted or re-cased default): the
+                        # terminal stays on the active profile; say why (#964).
+                        logger.warning(
+                            "Default loadout '%s' matches no saved loadout; "
+                            "starting on the active profile",
+                            default_loadout,
+                        )
             except InvalidACPLoadoutError:
                 raise
             except Exception as exc:
