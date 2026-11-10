@@ -140,3 +140,35 @@ test("a delayed save cannot cross sessions sharing a folder", async () => {
   finish(reply(200, { success: true, data: { version: "old-session" } }));
   expect((await saving).ok).toBe(false);
 });
+
+test("overlapping saves of the same path do not issue a second write", async () => {
+  let finish!: (response: Response) => void;
+  fetchMock.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  const first = saveWorkspaceFile("/w", "/w/a.txt", "first");
+  const second = await saveWorkspaceFile("/w", "/w/a.txt", "second");
+  expect(second).toEqual({ ok: false, stale: false, message: "Another save for this file is in progress." });
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  finish(reply(200, { success: true, data: {} }));
+  expect(await first).toEqual({ ok: true });
+  fetchMock.mockResolvedValue(reply(200, { success: true, data: {} }));
+  expect(await saveWorkspaceFile("/w", "/w/a.txt", "after")).toEqual({ ok: true });
+});
+
+test("different paths can save concurrently and failures release the guard", async () => {
+  let finish!: (response: Response) => void;
+  fetchMock.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  fetchMock.mockResolvedValueOnce(reply(200, { success: true, data: {} }));
+  const first = saveWorkspaceFile("/w", "/w/a.txt", "first");
+  expect(await saveWorkspaceFile("/w", "/w/b.txt", "other")).toEqual({ ok: true });
+  finish(reply(403, { success: false, error: { message: "Read-only." } }));
+  expect((await first).ok).toBe(false);
+  fetchMock.mockResolvedValueOnce(reply(200, { success: true, data: {} }));
+  expect(await saveWorkspaceFile("/w", "/w/a.txt", "retry")).toEqual({ ok: true });
+});
+
+test("a failed request releases the pending-save guard", async () => {
+  fetchMock.mockRejectedValueOnce(new Error("network"));
+  expect((await saveWorkspaceFile("/w", "/w/a.txt", "first")).ok).toBe(false);
+  fetchMock.mockResolvedValueOnce(reply(200, { success: true, data: {} }));
+  expect(await saveWorkspaceFile("/w", "/w/a.txt", "retry")).toEqual({ ok: true });
+});

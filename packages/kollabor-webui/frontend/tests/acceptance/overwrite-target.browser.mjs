@@ -185,6 +185,22 @@ try {
   await tabNotice.click();
   await tabNotice.waitFor({ state: "hidden" });
   assert.equal(await page.getByRole("alert").filter({ hasText: "save may have completed" }).count(), 0);
+  // Editor and tab saves of the same path must not send overlapping writes.
+  await page.reload();
+  await page.locator(".monaco-editor textarea").first().waitFor({ timeout: 30000 });
+  delayedStarted = new Promise((resolve) => { signalDelayed = resolve; });
+  delayedStatus = 502;
+  delayNext = true;
+  const beforeOverlap = writes.length;
+  await page.keyboard.press("Control+s");
+  await delayedStarted;
+  await page.locator('button[aria-label="Save file"]').first().click({ force: true });
+  await page.waitForTimeout(150);
+  assert.equal(writes.length, beforeOverlap + 1);
+  const pendingResponse = page.waitForResponse((response) => response.url().includes("/code/fs/file") && response.status() === 502);
+  releaseDelayed();
+  await pendingResponse;
+  await page.getByText("No reply. The save may have completed; check the file before retrying.").waitFor();
   await page.close();
   console.log(`overwrite stays bound to the conflicted buffer at ${width}px`);
   }

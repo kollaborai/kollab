@@ -9,6 +9,8 @@ import { codeFetch } from "@/lib/code-fetch";
  */
 const mtimes = new Map<string, number>();
 const versions = new Map<string, string>();
+// One browser must not send overlapping writes to the same path.
+const pendingSaves = new Set<string>();
 const keyFor = (path: string, owner = editorOwner()) => `${owner}\0${path}`;
 export function rememberVersion(path: string, version: unknown): void {
   if (typeof version === "string" && version) versions.set(keyFor(path), version);
@@ -49,6 +51,8 @@ export async function saveWorkspaceFile(
     return { ok: false, stale: false, message: "This view is read-only." };
   }
   if (!bufferBelongsHere(path)) return { ok: false, stale: false, message: "Switch back to the original device and folder to save this file." };
+  if (pendingSaves.has(path)) return { ok: false, stale: false, message: "Another save for this file is in progress." };
+  pendingSaves.add(path);
   const owner = editorOwner();
   const epoch = editorOwnerEpoch();
   const bufferId = useEditorStore.getState().fileCache.get(path)?.bufferId;
@@ -83,5 +87,7 @@ export async function saveWorkspaceFile(
       ? `${message} The save may have completed; check the file before retrying.` : message };
   } catch {
     return { ok: false, stale: false, message: "The save result is unknown; check the file before retrying." };
+  } finally {
+    pendingSaves.delete(path);
   }
 }
