@@ -118,6 +118,9 @@ def test_capture_does_not_rescan_process_tree_for_every_known_process(monkeypatc
         def ppid(self):
             return self.parent_pid
 
+        def create_time(self):
+            return 100.0
+
         def children(self, recursive=False):
             calls.append(self.pid)
             return []
@@ -131,6 +134,7 @@ def test_capture_does_not_rescan_process_tree_for_every_known_process(monkeypatc
     session._proc = SimpleNamespace(returncode=None)
     session.pid = shell.pid
     session._inspection_warnings = set()
+    session._shell_started = 100.0
     session._pty_name = None
     monkeypatch.setattr(terminal.psutil, "process_iter", lambda: iter(processes))
     monkeypatch.setattr(terminal.os, "getsid", lambda _pid: shell.pid)
@@ -173,3 +177,36 @@ def test_supervisor_stops_waiting_for_an_unreapable_child(monkeypatch):
     with pytest.raises(Exit) as outcome:
         _terminal_supervisor.main()
     assert outcome.value.args == (125,)
+
+
+def test_capture_rejects_process_older_than_its_apparent_parent(monkeypatch):
+    from kollabor.code_service import terminal
+
+    class Process:
+        def __init__(self, pid, parent, started):
+            self.pid, self.parent, self.started = pid, parent, started
+
+        def is_running(self):
+            return True
+
+        def ppid(self):
+            return self.parent
+
+        def create_time(self):
+            return self.started
+
+    shell = Process(1000, 1, 100.0)
+    unrelated = Process(1001, 1000, 50.0)
+    session = object.__new__(terminal._Session)
+    session._owned_processes = {shell}
+    session._supervised = False
+    session._shell_process = shell
+    session._proc = SimpleNamespace(returncode=None)
+    session.pid = shell.pid
+    session._inspection_warnings = set()
+    session._shell_started = shell.started
+    session._pty_name = None
+    monkeypatch.setattr(terminal.psutil, "process_iter", lambda: iter([shell, unrelated]))
+    monkeypatch.setattr(terminal.os, "getsid", lambda _pid: shell.pid)
+    session._capture_processes()
+    assert session._owned_processes == {shell}

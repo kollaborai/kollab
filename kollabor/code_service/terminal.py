@@ -250,7 +250,9 @@ class _Session:
                 try:
                     parent = process.ppid()
                     by_parent.setdefault(parent, []).append(process)
-                    if shell_alive and os.getsid(process.pid) == self.pid and process.is_running():
+                    if (shell_alive and self._shell_started is not None
+                            and process.create_time() >= self._shell_started
+                            and os.getsid(process.pid) == self.pid and process.is_running()):
                         owned.add(process)
                 except (ProcessLookupError, PermissionError, psutil.Error):
                     continue
@@ -263,9 +265,13 @@ class _Session:
                     continue
                 visited.add(parent.pid)
                 for process in by_parent.get(parent.pid, []):
-                    if parent.is_running() and process.is_running() and process not in owned:
-                        owned.add(process)
-                        pending.append(process)
+                    try:
+                        if (process not in owned and parent.is_running() and process.is_running()
+                                and process.create_time() >= parent.create_time() and parent.is_running()):
+                            owned.add(process)
+                            pending.append(process)
+                    except psutil.Error:
+                        continue
         except (psutil.Error, OSError) as exc:
             if "tree" not in self._inspection_warnings:
                 logger.warning("Cannot inspect terminal process tree; jobs may survive teardown: %s", exc)
