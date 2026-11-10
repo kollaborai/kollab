@@ -17,6 +17,8 @@ INT_FIELDS = ("round", "pr")
 EVENT_INT_FIELDS = ("pr", "issue", "round", "n")
 MAX_STATE_BYTES = 256 * 1024
 MAX_TEXT = 1000
+MAX_DIGITS = 12
+MAX_PID = 2**31 - 1
 # The newest ledger lines are all a screen shows. The file grows without bound.
 LEDGER_TAIL_BYTES = 256 * 1024
 MAX_EVENTS = 200
@@ -35,8 +37,8 @@ def _number(value: Any) -> Optional[int]:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.isascii() and value.isdigit():
+        return value if 0 <= value < 10**MAX_DIGITS else None
+    if isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= MAX_DIGITS:
         return int(value)
     return None
 
@@ -56,10 +58,12 @@ def _runner_alive(claim: Path) -> bool:
     """A claim counts only while the process that wrote it is still running."""
     try:
         pid = int((claim / "pid").read_text().strip())
+        if not 0 < pid <= MAX_PID:
+            return False
         os.kill(pid, 0)
     except PermissionError:
         return True
-    except (OSError, ValueError):
+    except (OSError, ValueError, OverflowError):
         return False
     return True
 
@@ -71,7 +75,7 @@ def read_item(base: Path, kind: str, number: int) -> Optional[Dict[str, Any]]:
         if path.stat().st_size > MAX_STATE_BYTES:
             return None
         data = json.loads(path.read_text())
-    except OSError, ValueError:
+    except OSError, ValueError, RecursionError:
         return None
     if not isinstance(data, dict):
         return None
@@ -115,7 +119,7 @@ def read_events(base: Path, kind: Optional[str] = None, number: Optional[int] = 
     for line in raw.splitlines():
         try:
             event = json.loads(line)
-        except ValueError:
+        except ValueError, RecursionError:
             continue
         if not isinstance(event, dict):
             continue
