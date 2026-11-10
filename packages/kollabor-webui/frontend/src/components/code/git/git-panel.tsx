@@ -1,4 +1,4 @@
-import { editorOwner } from "@/components/code/workspace-tabs";
+import { editorOwner, editorOwnerEpoch } from "@/components/code/workspace-tabs";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Archive, Clock, GitBranch, Loader2, Minus, Plus, RefreshCw } from "lucide-react";
 import { useEditorStore } from "@/components/code/editor-store";
@@ -368,11 +368,12 @@ export function GitPanel({ sessionId, workspace, onOpenFile, onOpenDiff }: GitPa
         return;
       }
       const owner = editorOwner();
+      const epoch = editorOwnerEpoch();
       try {
         const head = await gitPost<{ content: string }>({ action: "show", path: file.path });
-        if (owner === editorOwner()) onOpenDiff(absPath, head.content);
+        if (owner === editorOwner() && epoch === editorOwnerEpoch()) onOpenDiff(absPath, head.content);
       } catch {
-        if (owner === editorOwner()) onOpenFile(absPath);
+        if (owner === editorOwner() && epoch === editorOwnerEpoch()) onOpenFile(absPath);
       }
     },
     [gitPost, onOpenDiff, onOpenFile, workspace],
@@ -387,10 +388,12 @@ export function GitPanel({ sessionId, workspace, onOpenFile, onOpenDiff }: GitPa
       const name = `${entry.shortHash} ${entry.message}`.slice(0, 60);
 
       const owner = editorOwner();
+      const epoch = editorOwnerEpoch();
       openVirtualFile(activePaneId, virtualPath, name, "diff", "");
       setFileLoading(virtualPath, true);
       const bufferId = useEditorStore.getState().fileCache.get(virtualPath)?.bufferId;
-      const isCurrent = () => owner === editorOwner() && useEditorStore.getState().fileCache.get(virtualPath)?.bufferId === bufferId;
+      const isCurrent = () => owner === editorOwner() && epoch === editorOwnerEpoch() &&
+        useEditorStore.getState().fileCache.get(virtualPath)?.bufferId === bufferId;
       try {
         const data = await gitPost<{ content?: string }>({
           action: "show_commit",

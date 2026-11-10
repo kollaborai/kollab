@@ -7,8 +7,9 @@ vi.mock("../src/lib/code-fetch", () => ({
 }));
 
 import { isDirty, useEditorStore } from "../src/components/code/editor-store";
-import { openWorkspaceDiff, openWorkspaceFile } from "../src/components/code/open-file";
+import { openWorkspaceDiff, openWorkspaceFile, readFileContent } from "../src/components/code/open-file";
 import { mtimeOf } from "../src/components/code/file-save";
+import { setEditorOwner } from "../src/components/code/workspace-tabs";
 
 const PANE = "pane-test";
 const WS = "/work";
@@ -87,4 +88,26 @@ test("a delayed diff read cannot replace a newly opened buffer's revision", asyn
   await diff;
   expect(mtimeOf("/work/race.ts")).toBe(200);
   expect(useEditorStore.getState().fileCache.get("/work/race.ts")?.content).toBe("new");
+});
+
+test("a read from before an away-and-back switch cannot populate the returned owner", async () => {
+  setEditorOwner("a:/work");
+  let finish!: (value: ReturnType<typeof reply>) => void;
+  codeFetch.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  const reading = readFileContent(WS, "/work/a.ts");
+  setEditorOwner("b:/work");
+  setEditorOwner("a:/work");
+  finish(reply(true, "old content"));
+  expect(await reading).toBeNull();
+});
+
+test("a read cannot cross sessions sharing the same device and folder", async () => {
+  setEditorOwner("a:/work", "session-a");
+  let finish!: (value: ReturnType<typeof reply>) => void;
+  codeFetch.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  const reading = readFileContent(WS, "/work/a.ts");
+  setEditorOwner("a:/work", "session-b");
+  setEditorOwner("a:/work", "session-a");
+  finish(reply(true, "old session"));
+  expect(await reading).toBeNull();
 });

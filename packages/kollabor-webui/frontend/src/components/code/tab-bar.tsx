@@ -1,4 +1,4 @@
-import { editorOwner } from "@/components/code/workspace-tabs";
+import { editorOwner, editorOwnerEpoch } from "@/components/code/workspace-tabs";
 import { useState, useCallback, type DragEvent } from "react";
 import { ChevronRight, CircleX, Save } from "lucide-react";
 import { saveWorkspaceFile } from "@/components/code/file-save";
@@ -21,9 +21,11 @@ export function TabBar({ paneId, rootPath }: TabBarProps) {
   const [saveError, setSaveError] = useState("");
   const handleSave = useCallback(async (filePath: string, content: string) => {
     const owner = editorOwner();
+    const epoch = editorOwnerEpoch();
     const bufferId = useEditorStore.getState().fileCache.get(filePath)?.bufferId;
     const result = await saveWorkspaceFile(rootPath, filePath, content);
-    if (owner !== editorOwner() || useEditorStore.getState().fileCache.get(filePath)?.bufferId !== bufferId) return;
+    if (owner !== editorOwner() || epoch !== editorOwnerEpoch() ||
+        useEditorStore.getState().fileCache.get(filePath)?.bufferId !== bufferId) return;
     if (result.ok) {
       markSaved(filePath, content);
       setSaveError("");

@@ -1,7 +1,7 @@
 import { codeFetch, unwrapCodeData } from "@/lib/code-fetch";
 import { useEditorStore } from "@/components/code/editor-store";
 import { rememberMtime, rememberVersion } from "@/components/code/file-save";
-import { editorOwner, releaseClosedBufferOwner } from "@/components/code/workspace-tabs";
+import { editorOwner, editorOwnerEpoch, releaseClosedBufferOwner } from "@/components/code/workspace-tabs";
 
 export function fileNameOf(absPath: string): string {
   return absPath.slice(absPath.lastIndexOf("/") + 1);
@@ -20,11 +20,12 @@ export function rememberFileRead(path: string, data: FileRead): void {
 }
 export async function readFileContent(workspace: string, absPath: string, expectedBufferId?: number): Promise<FileRead | null> {
   const owner = editorOwner();
+  const epoch = editorOwnerEpoch();
   try {
     const res = await codeFetch(`/api/fs/file?workspace=${encodeURIComponent(workspace)}&path=${encodeURIComponent(absPath)}`);
     if (!res.ok) return null;
     const raw: unknown = await res.json();
-    if (owner !== editorOwner() || (expectedBufferId !== undefined &&
+    if (owner !== editorOwner() || epoch !== editorOwnerEpoch() || (expectedBufferId !== undefined &&
       useEditorStore.getState().fileCache.get(absPath)?.bufferId !== expectedBufferId)) return null;
     const data = unwrapCodeData<{ content?: string; mtime?: number; version?: string }>(raw);
     return { content: data.content ?? "", mtime: data.mtime, version: data.version };
@@ -67,9 +68,11 @@ export async function openWorkspaceFile(
   if (options.pin) store.pinFile(absPath);
   store.setFileLoading(absPath, true);
   const owner = editorOwner();
+  const epoch = editorOwnerEpoch();
   const bufferId = useEditorStore.getState().fileCache.get(absPath)?.bufferId;
   const read = await readFileContent(workspace, absPath, bufferId);
-  if (owner !== editorOwner() || bufferId !== useEditorStore.getState().fileCache.get(absPath)?.bufferId) return false;
+  if (owner !== editorOwner() || epoch !== editorOwnerEpoch() ||
+      bufferId !== useEditorStore.getState().fileCache.get(absPath)?.bufferId) return false;
   if (read === null) {
     useEditorStore.getState().closeFile(paneId, absPath);
     return false;
@@ -83,9 +86,10 @@ export async function openWorkspaceFile(
 export async function openWorkspaceDiff(workspace: string, absPath: string, headContent: string | null): Promise<void> {
   const name = fileNameOf(absPath);
   const owner = editorOwner();
+  const epoch = editorOwnerEpoch();
   const cached = useEditorStore.getState().fileCache.get(absPath);
   const read = cached ? null : await readFileContent(workspace, absPath);
-  if (owner !== editorOwner()) return;
+  if (owner !== editorOwner() || epoch !== editorOwnerEpoch()) return;
   const store = useEditorStore.getState();
   const current = store.fileCache.get(absPath);
   if (!current && !read) return;

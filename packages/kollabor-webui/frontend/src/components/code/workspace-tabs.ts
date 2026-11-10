@@ -2,10 +2,25 @@ import { type FileData, isDirty, useEditorStore } from "@/components/code/editor
 
 // Dirty buffers retain their original owner when another device or folder is selected.
 let activeOwner = "";
+let activeSession = "";
+let ownerEpoch = 0;
 let claimedOwner: string | null = null;
 const bufferOwners = new Map<string, string>();
-export function setEditorOwner(owner: string): void { activeOwner = owner; }
+export function setEditorSession(session: string): void {
+  if (session !== activeSession) { activeSession = session; ownerEpoch++; }
+}
+export function invalidateEditorSession(session: string): void {
+  if (session === activeSession) { activeSession = ""; ownerEpoch++; }
+}
+export function setEditorOwner(owner: string, session = activeSession): void {
+  if (owner !== activeOwner || session !== activeSession) {
+    activeOwner = owner;
+    activeSession = session;
+    ownerEpoch++;
+  }
+}
 export function editorOwner(): string { return activeOwner; }
+export function editorOwnerEpoch(): number { return ownerEpoch; }
 export function releaseClosedBufferOwner(path: string): void {
   if (!useEditorStore.getState().fileCache.has(path)) bufferOwners.delete(path);
 }

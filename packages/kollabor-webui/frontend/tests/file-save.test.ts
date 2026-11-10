@@ -110,3 +110,33 @@ test("a delayed save cannot update the version after the owner changes", async (
   const body = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string);
   expect(body.expectedVersion).toBe("b-version");
 });
+
+test("a delayed save cannot update a version after switching away and back", async () => {
+  const { setEditorOwner } = await import("../src/components/code/workspace-tabs");
+  setEditorOwner("device-a:/w");
+  rememberVersion("/w/a.txt", "before");
+  let finish!: (response: Response) => void;
+  fetchMock.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  const saving = saveWorkspaceFile("/w", "/w/a.txt", "a");
+  setEditorOwner("device-b:/w");
+  setEditorOwner("device-a:/w");
+  rememberVersion("/w/a.txt", "newer");
+  finish(reply(200, { success: true, data: { version: "old-response" } }));
+  expect((await saving).ok).toBe(false);
+  fetchMock.mockResolvedValue(reply(200, { success: true, data: {} }));
+  await saveWorkspaceFile("/w", "/w/a.txt", "b");
+  const body = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string);
+  expect(body.expectedVersion).toBe("newer");
+});
+
+test("a delayed save cannot cross sessions sharing a folder", async () => {
+  const { setEditorOwner } = await import("../src/components/code/workspace-tabs");
+  setEditorOwner("device-a:/w", "session-a");
+  let finish!: (response: Response) => void;
+  fetchMock.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  const saving = saveWorkspaceFile("/w", "/w/a.txt", "a");
+  setEditorOwner("device-a:/w", "session-b");
+  setEditorOwner("device-a:/w", "session-a");
+  finish(reply(200, { success: true, data: { version: "old-session" } }));
+  expect((await saving).ok).toBe(false);
+});

@@ -1,5 +1,5 @@
 import { editorShortcutEnabled } from "@/components/code/editor-shortcuts";
-import { editorOwner } from "@/components/code/workspace-tabs";
+import { editorOwner, editorOwnerEpoch } from "@/components/code/workspace-tabs";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import Markdown from "react-markdown";
@@ -207,9 +207,11 @@ export function EditorPane({ paneId, rootPath }: EditorPaneProps) {
     setSaveError("");
     setSaveStale(false);
     const owner = editorOwner();
+    const epoch = editorOwnerEpoch();
     const bufferId = file.bufferId;
     const result = await saveWorkspaceFile(rootPath, file.path, file.content, { force });
-    if (owner !== editorOwner() || useEditorStore.getState().fileCache.get(file.path)?.bufferId !== bufferId) {
+    if (owner !== editorOwner() || epoch !== editorOwnerEpoch() ||
+        useEditorStore.getState().fileCache.get(file.path)?.bufferId !== bufferId) {
       setSaving(false);
       return;
     }

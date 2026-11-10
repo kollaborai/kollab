@@ -1,10 +1,10 @@
 import { editorShortcutEnabled } from "@/components/code/editor-shortcuts";
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { Files, Filter, PanelLeft, Search, Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { openWorkspaceFile, readFileContent, rememberFileRead, fileNameOf, extensionOf } from "@/components/code/open-file";
 import { FolderBrowser } from "@/components/code/folder-browser";
-import { claimEditorWorkspace, setEditorOwner } from "@/components/code/workspace-tabs";
+import { claimEditorWorkspace, invalidateEditorSession, setEditorOwner, setEditorSession } from "@/components/code/workspace-tabs";
 import { codeFetch, setCodeRoot, setCodeSession, unwrapCodeData } from "@/lib/code-fetch";
 import { cn } from "@/lib/utils";
 import { GitPanel } from "@/components/code/git/GitPanel";
@@ -62,21 +62,30 @@ function SidebarToggle({
 /** The Code Editor view for one chat folder, docked in the chat column: file sidebar, split editor panes, quick open. */
 export function CodeEditorView(props: CodeEditorViewProps) {
   const [folders, setFolders] = useState<{ path: string; branch: string }[] | null>(null);
+  const [loadedContext, setLoadedContext] = useState("");
   const [selected, setSelected] = useState("");
   const [browsing, setBrowsing] = useState(false);
   const [error, setError] = useState("");
-  setCodeSession(props.sessionId);
+  const requestContext = JSON.stringify([props.device ?? "", props.sessionId]);
+  useLayoutEffect(() => {
+    setCodeSession(props.sessionId);
+    setEditorSession(requestContext);
+    return () => invalidateEditorSession(requestContext);
+  }, [props.sessionId, requestContext]);
   useEffect(() => {
     let cancelled = false;
     setFolders(null);
+    setLoadedContext("");
+    setBrowsing(false);
     setError("");
-    void codeFetch("/code/folders").then(async (response) => {
+    void codeFetch("/code/folders", {}, { sessionId: props.sessionId, root: "" }).then(async (response) => {
       if (!response.ok) throw new Error("Could not load folders from this agent.");
       const data = unwrapCodeData<{ folders: { path: string; branch: string }[]; default: string }>(await response.json());
-      if (!cancelled) { setFolders(data.folders); setSelected(data.default); }
+      if (!cancelled) { setFolders(data.folders); setSelected(data.default); setLoadedContext(requestContext); }
     }).catch(() => { if (!cancelled) setError("Could not load folders from this agent. Restart it and try again."); });
     return () => { cancelled = true; };
-  }, [props.sessionId]);
+  }, [props.sessionId, requestContext]);
+  if (loadedContext && loadedContext !== requestContext) return <div className="p-3 text-sm text-muted-foreground">Loading folders…</div>;
   if (error) return <div role="alert" className="p-3 text-sm text-destructive">{error}</div>;
   if (!folders || !selected) return <div className="p-3 text-sm text-muted-foreground">Loading folders…</div>;
   const choices = folders.some((folder) => folder.path === selected) ? folders : [...folders, { path: selected, branch: "" }];
@@ -89,10 +98,12 @@ export function CodeEditorView(props: CodeEditorViewProps) {
 function CodeEditorFolder({ sessionId, device = "", workspace, mode = "code", folders, onFolderChange, onBrowse }: CodeEditorViewProps & {
   folders: { path: string; branch: string }[]; onFolderChange: (path: string) => void; onBrowse: () => void;
 }) {
-  // Set while rendering, so it is in place before any child effect fetches (see lib/code-fetch.ts).
-  setCodeSession(sessionId);
-  setCodeRoot(workspace);
-  setEditorOwner(device ? `${device}:${workspace}` : workspace);
+  // Commit the context before passive effects in child views issue requests.
+  useLayoutEffect(() => {
+    setCodeSession(sessionId);
+    setCodeRoot(workspace);
+    setEditorOwner(device ? `${device}:${workspace}` : workspace, JSON.stringify([device, sessionId]));
+  }, [sessionId, device, workspace]);
   const sidebarView = useEditorStore((s) => s.sidebarView);
   const setSidebarView = useEditorStore((s) => s.setSidebarView);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);

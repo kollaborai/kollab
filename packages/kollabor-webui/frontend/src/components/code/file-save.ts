@@ -1,4 +1,4 @@
-import { bufferBelongsHere, editorOwner } from "@/components/code/workspace-tabs";
+import { bufferBelongsHere, editorOwner, editorOwnerEpoch } from "@/components/code/workspace-tabs";
 import { useEditorStore } from "@/components/code/editor-store";
 import { codeFetch } from "@/lib/code-fetch";
 
@@ -50,6 +50,7 @@ export async function saveWorkspaceFile(
   }
   if (!bufferBelongsHere(path)) return { ok: false, stale: false, message: "Switch back to the original device and folder to save this file." };
   const owner = editorOwner();
+  const epoch = editorOwnerEpoch();
   const bufferId = useEditorStore.getState().fileCache.get(path)?.bufferId;
   const body: Record<string, unknown> = { workspace, content };
   const version = versions.get(keyFor(path));
@@ -64,7 +65,8 @@ export async function saveWorkspaceFile(
       body: JSON.stringify(body),
     });
     const raw: unknown = await res.json().catch(() => null);
-    if (owner !== editorOwner() || bufferId !== useEditorStore.getState().fileCache.get(path)?.bufferId) {
+    if (owner !== editorOwner() || epoch !== editorOwnerEpoch() ||
+        bufferId !== useEditorStore.getState().fileCache.get(path)?.bufferId) {
       return { ok: false, stale: false, message: "The original file is no longer active." };
     }
     if (res.ok) {
