@@ -34,7 +34,9 @@ export function statusLabel(token: string | undefined): string {
   const known = Object.hasOwn(LABELS, token) ? LABELS[token] : undefined;
   if (known) return known;
   const words = token.replace(/[-_]+/g, " ").trim().toLowerCase();
-  return words ? words[0].toUpperCase() + words.slice(1) : "Unknown";
+  if (!words) return "Unknown";
+  const text = words.replace(/\b(pr|ci|ui|id)\b/g, (acronym) => acronym.toUpperCase());
+  return text[0].toUpperCase() + text.slice(1);
 }
 
 export function statusTone(item: PrChainItem): StatusTone {
@@ -56,9 +58,12 @@ export function sortItems(items: PrChainItem[]): PrChainItem[] {
 }
 
 /** "2026-11-09T17:27:03" to "17:27". Anything else is shown as given. */
-export function shortTime(stamp: string | undefined): string {
-  const match = /T(\d{2}:\d{2})/.exec(stamp ?? "");
-  return match ? match[1] : (stamp ?? "");
+export function shortTime(stamp: string | undefined, now: Date = new Date()): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2})/.exec(stamp ?? "");
+  if (!match) return stamp ?? "";
+  const [, year, month, day, time] = match;
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  return `${year}-${month}-${day}` === today ? time : `${month}-${day} ${time}`;
 }
 
 /** One plain line for a ledger event, e.g. "PR 960 review: PASS". */
@@ -87,23 +92,31 @@ export function inOrder(): () => () => boolean {
 }
 
 /** Counts requests that have started and not yet ended, so a timer can skip a tick while one is still running.
- * A request older than `limitMs` stops counting and is forgotten, so one that never settles cannot stop
- * refreshing for good or pile up. */
+ * A request older than `limitMs` is aborted and forgotten, so one that never settles cannot stop
+ * refreshing for good or pile up; `abortAll` cancels the rest when the dialog closes. */
 export function inFlight(
   limitMs = 30_000,
   now: () => number = Date.now,
-): { begin: () => () => void; busy: () => boolean; pending: () => number } {
-  const open = new Map<symbol, number>();
+): { begin: () => { signal: AbortSignal; end: () => void }; busy: () => boolean; pending: () => number; abortAll: () => void } {
+  const open = new Map<symbol, { startedAt: number; controller: AbortController }>();
   const forget = () => {
-    for (const [id, startedAt] of open) if (now() - startedAt >= limitMs) open.delete(id);
+    for (const [id, request] of open) {
+      if (now() - request.startedAt < limitMs) continue;
+      request.controller.abort();
+      open.delete(id);
+    }
   };
   return {
     begin: () => {
       forget();
       const id = Symbol("request");
-      open.set(id, now());
-      return () => {
-        open.delete(id);
+      const controller = new AbortController();
+      open.set(id, { startedAt: now(), controller });
+      return {
+        signal: controller.signal,
+        end: () => {
+          open.delete(id);
+        },
       };
     },
     busy: () => {
@@ -111,5 +124,9 @@ export function inFlight(
       return open.size > 0;
     },
     pending: () => open.size,
+    abortAll: () => {
+      for (const request of open.values()) request.controller.abort();
+      open.clear();
+    },
   };
 }

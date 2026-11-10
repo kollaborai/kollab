@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertCircle, ExternalLink, Loader2, RefreshCw, X } from "lucide-react";
+import { Loader2, RefreshCw, X } from "lucide-react";
 import type { EngineApi, PrChainSnapshot } from "@/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -9,6 +9,7 @@ import {
   DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { NoticeAction, NoticeBar } from "@/components/shell/NoticeBar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { describeEvent, inFlight, inOrder, itemUrl, shortTime, sortItems, statusLabel, statusTone, type StatusTone } from "./prChain";
@@ -40,16 +41,17 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
   const load = useCallback((manual = false) => {
     const mine = epoch.current;
     const isCurrent = order.current();
-    const end = requests.current.begin();
+    const { signal, end } = requests.current.begin();
     if (manual) setBusy(true);
     api
-      .getPrChain()
+      .getPrChain(signal)
       .then((next) => {
         if (mine !== epoch.current || !isCurrent()) return;
         setSnapshot(next);
         setLoadError(null);
       })
       .catch((error: unknown) => {
+        if (signal.aborted) return;
         if (mine === epoch.current && isCurrent()) setLoadError(errorText(error));
       })
       .finally(() => {
@@ -68,6 +70,8 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
     return () => {
       epoch.current += 1;
       window.clearInterval(timer);
+      requests.current.abortAll();
+      setBusy(false);
     };
   }, [open, load]);
 
@@ -88,31 +92,34 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
               Every PR and issue the review workflow is working on.
             </DialogDescription>
           </div>
-          <Button type="button" size="icon-sm" variant="ghost" aria-label="Refresh" className="shrink-0 max-sm:size-11" disabled={busy} onClick={() => load(true)}>
+          <Button type="button" size="icon-sm" variant="ghost" aria-label="Refresh" className="shrink-0 max-lg:size-11" disabled={busy} onClick={() => load(true)}>
             {busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
           </Button>
           <DialogClose asChild>
-            <Button type="button" size="icon-sm" variant="ghost" aria-label="Close" className="shrink-0 max-sm:size-11">
+            <Button type="button" size="icon-sm" variant="ghost" aria-label="Close" className="shrink-0 max-lg:size-11">
               <X />
             </Button>
           </DialogClose>
         </header>
 
         {loadError ? (
-          <div role="alert" className="bg-destructive/10 text-destructive mx-4 mb-2 flex items-start gap-2 rounded-md px-3 py-2 text-sm sm:mx-6">
-            <AlertCircle className="mt-0.5 size-4 shrink-0" />
-            <span className="min-w-0 flex-1 break-words" title={loadError}>
-              Couldn&apos;t load the PR Chain.
-            </span>
-            <Button type="button" size="sm" variant="ghost" className="-my-1 h-7 shrink-0 px-2 max-sm:h-11" disabled={busy} onClick={() => load(true)}>
-              Try again
-            </Button>
-          </div>
+          <NoticeBar
+            urgent
+            detail={loadError}
+            actions={
+              <NoticeAction className="text-foreground max-lg:h-11" disabled={busy} onClick={() => load(true)}>
+                Try again
+              </NoticeAction>
+            }
+          >
+            Couldn&apos;t load the PR Chain.
+          </NoticeBar>
         ) : null}
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 sm:px-6">
           {snapshot === null && loadError ? null : snapshot === null ? (
-            <div className="space-y-2" aria-label="Loading">
+            <div className="space-y-2" role="status">
+              <span className="sr-only">Loading PR Chain</span>
               <Skeleton className="h-8 w-full" />
               <Skeleton className="h-8 w-full" />
               <Skeleton className="h-8 w-full" />
@@ -134,14 +141,13 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
                         href={itemUrl(item)}
                         target="_blank"
                         rel="noreferrer"
-                        className="hover:text-primary flex items-center gap-1 font-mono text-xs max-sm:min-h-11"
+                        className="hover:text-primary flex items-center gap-1 font-mono text-xs max-lg:min-h-11"
                       >
                         {item.kind === "pr" ? "PR" : "Issue"} {item.number}
-                        <ExternalLink className="size-3" />
                       </a>
                       <span className={cn("min-w-0 break-words font-medium", TONE[tone])}>
                         {item.status ? statusLabel(item.status) : <span className="text-muted-foreground font-normal">No status yet</span>}
-                        {item.claimed ? <span className="text-muted-foreground ml-1.5 font-normal">Running</span> : null}
+                        {item.claimed ? <span className="text-muted-foreground font-normal"> · Running</span> : null}
                       </span>
                       <span className="text-muted-foreground col-span-2 font-mono text-xs sm:col-span-1 sm:whitespace-nowrap">
                         {item.round ? `Round ${item.round}` : ""}
@@ -150,8 +156,7 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
                       </span>
                       {item.why || item.last_verdict ? (
                         <span
-                          className="text-muted-foreground col-span-2 min-w-0 break-words text-xs sm:line-clamp-3 sm:col-span-3"
-                          title={[item.last_verdict ? statusLabel(item.last_verdict) : "", item.why].filter(Boolean).join(" · ")}
+                          className="text-muted-foreground col-span-2 min-w-0 break-words text-xs sm:col-span-3"
                         >
                           {[item.last_verdict ? statusLabel(item.last_verdict) : "", item.why].filter(Boolean).join(" · ")}
                         </span>
@@ -167,7 +172,7 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
                     {events.map((event, index) => (
                       <li key={`${event.ts}-${index}`} className="flex gap-3 text-xs">
                         <span className="text-muted-foreground shrink-0 font-mono">{shortTime(event.ts)}</span>
-                        <span className="min-w-0 break-words sm:truncate">{describeEvent(event)}</span>
+                        <span className="min-w-0 break-words">{describeEvent(event)}</span>
                       </li>
                     ))}
                   </ul>

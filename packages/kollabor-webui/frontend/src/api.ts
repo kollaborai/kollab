@@ -1082,8 +1082,8 @@ export class EngineApi {
   }
 
   /** Read the pr-chain workflow's state: every PR and issue it tracks, plus its latest ledger events. */
-  getPrChain() {
-    return this.json<PrChainSnapshot>("/pr-chain", { cache: "no-store" });
+  getPrChain(signal?: AbortSignal) {
+    return this.json<PrChainSnapshot>("/pr-chain", { cache: "no-store", signal });
   }
 
   /** Read the engine-owned sidebar order and any recovery warning. */
