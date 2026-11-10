@@ -176,7 +176,7 @@ async def test_a_huge_digit_string_is_dropped_not_a_500(client, root):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("pid", ["0", "-1", "9" * 30, "abc", ""])
+@pytest.mark.parametrize("pid", ["0", "1", "-1", "9" * 30, "abc", ""])
 async def test_a_bad_claim_pid_is_not_a_live_runner(client, root, pid):
     write_state(root, "prs", 1, status="REVIEWING", updated="a")
     (root / "claims" / "1").mkdir(parents=True)

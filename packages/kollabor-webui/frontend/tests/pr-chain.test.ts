@@ -86,3 +86,15 @@ describe("inFlight", () => {
     expect(requests.busy()).toBe(false);
   });
 });
+
+describe("inFlight with a request that never settles", () => {
+  it("stops counting a request after the limit so refreshing can resume", () => {
+    let clock = 0;
+    const requests = inFlight(30_000, () => clock);
+    requests.begin();
+    clock = 29_999;
+    expect(requests.busy()).toBe(true);
+    clock = 30_001;
+    expect(requests.busy()).toBe(false);
+  });
+});
