@@ -561,6 +561,30 @@ class TestHookProcessReaping:
         "time.sleep(60)\n"
     )
 
+    def test_windows_pid_probe_uses_process_query_api(self):
+        class Kernel32:
+            def __init__(self):
+                self.closed = []
+
+            def OpenProcess(self, access, inherit, pid):
+                assert access == 0x1000  # PROCESS_QUERY_LIMITED_INFORMATION
+                assert inherit is False
+                assert pid == 1234
+                return 56
+
+            def GetExitCodeProcess(self, handle, exit_code):
+                assert handle == 56
+                exit_code._obj.value = 259  # STILL_ACTIVE
+                return 1
+
+            def CloseHandle(self, handle):
+                self.closed.append(handle)
+                return 1
+
+        kernel32 = Kernel32()
+        assert _pid_is_alive(1234, platform="nt", kernel32=kernel32)
+        assert kernel32.closed == [56]
+
     async def _start_child(self, loader, pid_path):
         command = f"{sys.executable} -c {shlex.quote(self.CHILD_SCRIPT)} {shlex.quote(str(pid_path))}"
         task = asyncio.create_task(loader._run_command(command, "{}", timeout=30))
