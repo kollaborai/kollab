@@ -56,11 +56,11 @@
       "success": "Your final transcript becomes a normal turn in the selected chat; /voice off stops capture.",
       "recovery": [
         {
-          "symptom": "Voice setup or a model download is not ready.",
+          "symptom": "Voice setup or a model download is not ready",
           "action": "Run /voice status for the named missing dependency or setup state, install the stated prerequisite and use /voice retry."
         },
         {
-          "symptom": "The wrong chat responds or the microphone remains active.",
+          "symptom": "The wrong chat responds or the microphone remains active",
           "action": "Run /voice off in the active chat, then run /voice on in the intended chat."
         }
       ],
@@ -110,11 +110,11 @@
       "success": "The selected voice models are saved for this computer while the microphone stays off.",
       "recovery": [
         {
-          "symptom": "An engine is not installed or ready.",
+          "symptom": "An engine is not installed or ready",
           "action": "Check /voice status for the setup or download detail, then retry setup after resolving the named issue."
         },
         {
-          "symptom": "You expected settings to enable voice.",
+          "symptom": "You expected settings to enable voice",
           "action": "Start voice explicitly with /voice on; saving Voice Configuration never activates the microphone."
         }
       ]

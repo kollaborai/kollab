@@ -59,11 +59,11 @@
           "action": "Read the next action in the banner or /compact status. Resolve that issue before retrying; keep important decisions in a concise note."
         },
         {
-          "symptom": "A provider rejects the request because its context is too large.",
+          "symptom": "A provider rejects the request because its context is too large",
           "action": "The failed request is not resent automatically. Run /compact now or start a smaller conversation, then explicitly send the request again."
         },
         {
-          "symptom": "Compaction cannot run while another turn is active.",
+          "symptom": "Compaction cannot run while another turn is active",
           "action": "Wait for or stop that turn, inspect /compact status, then retry /compact now."
         }
       ],

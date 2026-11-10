@@ -38,11 +38,11 @@
       "success": "The selected agent works in the chosen workspace and returns a result you can inspect against the acceptance checks.",
       "recovery": [
         {
-          "symptom": "The agent is not available.",
+          "symptom": "The agent is not available",
           "action": "Check the selected workspace and agent definition, then refresh the Agents list."
         },
         {
-          "symptom": "The result is too broad to verify.",
+          "symptom": "The result is too broad to verify",
           "action": "Narrow the request to a specific outcome and ask for file paths, test commands and observed results."
         }
       ],
@@ -86,11 +86,11 @@
       "success": "The selected team starts in the chosen workspace with the reviewed lead and reporting structure.",
       "recovery": [
         {
-          "symptom": "The CLI selection excludes the authored lead.",
+          "symptom": "The CLI selection excludes the authored lead",
           "action": "Use the Web UI team picker to select a replacement lead, or include the authored lead in the CLI selection."
         },
         {
-          "symptom": "A custom team or roster does not appear.",
+          "symptom": "A custom team or roster does not appear",
           "action": "Check its JSON definition and resolution location, then reopen the team picker."
         }
       ]

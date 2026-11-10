@@ -46,11 +46,11 @@
       "success": "The selected role's rendered system prompt contains the saved instruction or included section.",
       "recovery": [
         {
-          "symptom": "Your edits do not appear in the prompt.",
+          "symptom": "Your edits do not appear in the prompt",
           "action": "Check whether a higher-priority project or global agent definition overrides the one you edited, then reload the agent and inspect the role in Settings > Prompts > Full Prompt."
         },
         {
-          "symptom": "An include is missing.",
+          "symptom": "An include is missing",
           "action": "Verify the section path is relative to the agent directory, the file exists in sections/, and the include syntax is exact."
         }
       ],
@@ -95,11 +95,11 @@
       "success": "The chosen role and model variant include the intended section in their Full Prompt; other roles remain unchanged unless the shared library section itself was edited.",
       "recovery": [
         {
-          "symptom": "The section is missing from the full prompt.",
+          "symptom": "The section is missing from the full prompt",
           "action": "Confirm you selected the intended role and model variant, then enable its section checkbox and inspect Full Prompt again."
         },
         {
-          "symptom": "You changed text for more roles than intended.",
+          "symptom": "You changed text for more roles than intended",
           "action": "If you edited a shared library section, use the role-specific section override or restore the library text, then inspect affected roles' Full Prompt."
         }
       ]

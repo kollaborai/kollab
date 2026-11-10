@@ -46,11 +46,11 @@
       "success": "The session runs in the chosen project workspace, keeping local agents and conversation history separate from other folders.",
       "recovery": [
         {
-          "symptom": "The wrong project is open.",
+          "symptom": "The wrong project is open",
           "action": "End or leave that session and choose the correct folder in the workspace picker before starting again."
         },
         {
-          "symptom": "A workspace's local agent is not listed.",
+          "symptom": "A workspace's local agent is not listed",
           "action": "Check that the agent definition is in that workspace's .kollab/agents/ directory and refresh the agent list."
         }
       ],
@@ -90,7 +90,7 @@
       "success": "The selected team's members start against the configured workspace and reporting structure.",
       "recovery": [
         {
-          "symptom": "A team member is missing or the wrong lead is selected.",
+          "symptom": "A team member is missing or the wrong lead is selected",
           "action": "Reopen Configure & Launch, correct the member and lead selection, and review the effective reporting tree before launching."
         }
       ]
@@ -125,11 +125,11 @@
       "success": "The agent appears in the new order or under Hidden Agents; it remains available and running as before.",
       "recovery": [
         {
-          "symptom": "A keyboard reorder did not take effect.",
+          "symptom": "A keyboard reorder did not take effect",
           "action": "Press Escape to cancel any active drag, then repeat Space, arrow keys and Space to drop."
         },
         {
-          "symptom": "You hid the wrong agent.",
+          "symptom": "You hid the wrong agent",
           "action": "Open Hidden Agents and restore the row; hiding never deletes or stops the agent."
         }
       ]

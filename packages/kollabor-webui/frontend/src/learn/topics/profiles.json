@@ -51,11 +51,11 @@
       "success": "The session uses the selected provider connection and model.",
       "recovery": [
         {
-          "symptom": "The loadout is not listed or the provider cannot authenticate.",
+          "symptom": "The loadout is not listed or the provider cannot authenticate",
           "action": "Check /llm and the provider's sign-in or environment setup; authenticate separately on this computer."
         },
         {
-          "symptom": "A saved active profile is missing.",
+          "symptom": "A saved active profile is missing",
           "action": "Select an available loadout with /llm or restore the missing profile configuration."
         }
       ],
@@ -123,11 +123,11 @@
       "success": "Kollab can resolve the named profile without storing its secret in a chat message.",
       "recovery": [
         {
-          "symptom": "Authentication fails after copying a profile.",
+          "symptom": "Authentication fails after copying a profile",
           "action": "Sign in on this computer or securely provide the copied profile's own KOLLAB_<NAME>_API_KEY; environment and provisioned keys are not transferred."
         },
         {
-          "symptom": "The wrong endpoint is used.",
+          "symptom": "The wrong endpoint is used",
           "action": "Inspect the profile's provider and base URL in settings before starting a session."
         }
       ]

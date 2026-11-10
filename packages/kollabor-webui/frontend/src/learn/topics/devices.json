@@ -46,11 +46,11 @@
       "success": "You can distinguish online devices from unavailable ones and see which agents are reachable on each.",
       "recovery": [
         {
-          "symptom": "A computer is offline or missing.",
+          "symptom": "A computer is offline or missing",
           "action": "Start Kollab on that computer, then refresh Connect status; verify both computers joined the intended network."
         },
         {
-          "symptom": "You cannot change network state in this window.",
+          "symptom": "You cannot change network state in this window",
           "action": "Use the Kollab window that owns the network daemon; another window may be read-only."
         }
       ],
@@ -83,7 +83,7 @@
       "success": "The network roster shows the new device name.",
       "recovery": [
         {
-          "symptom": "The name is rejected or still looks wrong.",
+          "symptom": "The name is rejected or still looks wrong",
           "action": "Use /connect help to check the current naming rules, then retry with a short, distinct name."
         }
       ]

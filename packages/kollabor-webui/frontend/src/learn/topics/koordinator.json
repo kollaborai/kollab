@@ -49,11 +49,11 @@
       "success": "The coordinator routes work to agents, tracks reported progress and returns results for your review.",
       "recovery": [
         {
-          "symptom": "The coordinator returns only a plan.",
+          "symptom": "The coordinator returns only a plan",
           "action": "Ask it to perform or assign the concrete work and report completed paths, test commands and observed results."
         },
         {
-          "symptom": "A task is stalled or lacks evidence.",
+          "symptom": "A task is stalled or lacks evidence",
           "action": "Ask for current ownership, blockers and the next check; do not treat a planned or worker-reported step as independently verified."
         },
         {

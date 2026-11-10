@@ -63,11 +63,11 @@
       "success": "The addressed identity receives the request; its later reply appears in the shared conversation.",
       "recovery": [
         {
-          "symptom": "The Hub does not recognize the recipient.",
+          "symptom": "The Hub does not recognize the recipient",
           "action": "Check the exact identity in the current Hub roster; use agent@device for a remote agent."
         },
         {
-          "symptom": "The recipient is offline or unreachable.",
+          "symptom": "The recipient is offline or unreachable",
           "action": "Check /connect status and start Kollab on the recipient's computer; then retry the message."
         }
       ],
