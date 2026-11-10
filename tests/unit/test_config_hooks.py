@@ -604,6 +604,12 @@ class TestHookProcessReaping:
         "time.sleep(60)\n"
     )
 
+    def test_process_reaping_tests_avoid_platform_specific_commands(self):
+        source = Path(__file__).read_text()
+
+        assert 'create_subprocess_exec(' + '"true"' + ')' not in source
+        assert "signal." + "SIGKILL" not in source
+
     def test_windows_pid_probe_uses_process_query_api(self):
         class Kernel32:
             def __init__(self):
