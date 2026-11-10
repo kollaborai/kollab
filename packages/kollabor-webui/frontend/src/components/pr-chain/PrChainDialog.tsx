@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import { describeEvent, inFlight, itemUrl, latestOnly, shortTime, sortItems, statusLabel, statusTone, type StatusTone } from "./prChain";
+import { describeEvent, inFlight, inOrder, itemUrl, shortTime, sortItems, statusLabel, statusTone, type StatusTone } from "./prChain";
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -34,34 +34,34 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const epoch = useRef(0);
-  const newest = useRef(latestOnly());
+  const order = useRef(inOrder());
   const requests = useRef(inFlight());
 
   const load = useCallback((manual = false) => {
     const mine = epoch.current;
-    const isNewest = newest.current();
+    const isCurrent = order.current();
     const end = requests.current.begin();
     if (manual) setBusy(true);
     api
       .getPrChain()
       .then((next) => {
-        if (mine !== epoch.current || !isNewest()) return;
+        if (mine !== epoch.current || !isCurrent()) return;
         setSnapshot(next);
         setLoadError(null);
       })
       .catch((error: unknown) => {
-        if (mine === epoch.current && isNewest()) setLoadError(errorText(error));
+        if (mine === epoch.current && isCurrent()) setLoadError(errorText(error));
       })
       .finally(() => {
         end();
-        if (mine === epoch.current && isNewest()) setBusy(false);
+        if (mine === epoch.current && isCurrent()) setBusy(false);
       });
   }, [api]);
 
   useEffect(() => {
     if (!open) return;
     load();
-    // A slow read finishes before the next timed one starts, or no answer would ever be the newest.
+    // A timed read waits for the previous one, so slow reads do not pile up on the engine.
     const timer = window.setInterval(() => {
       if (!requests.current.busy()) load();
     }, REFRESH_MS);

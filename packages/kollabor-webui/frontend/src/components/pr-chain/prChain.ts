@@ -71,27 +71,45 @@ export function describeEvent(event: PrChainEvent): string {
   return [target, parts.join(": ")].filter(Boolean).join(" ");
 }
 
-/** Hands out one check per request; only the newest request's check stays true. */
-export function latestOnly(): () => () => boolean {
-  let latest = 0;
+/** Hands out one check per request. A request's answer counts unless a later request's answer was already shown,
+ * so a slow poll cannot overwrite newer data, and polls that each take longer than the refresh gap still show. */
+export function inOrder(): () => () => boolean {
+  let issued = 0;
+  let shown = 0;
   return () => {
-    const mine = ++latest;
-    return () => mine === latest;
+    const mine = ++issued;
+    return () => {
+      if (mine < shown) return false;
+      shown = mine;
+      return true;
+    };
   };
 }
 
 /** Counts requests that have started and not yet ended, so a timer can skip a tick while one is still running.
- * A request older than `limitMs` stops counting, so one that never settles cannot stop refreshing for good. */
-export function inFlight(limitMs = 30_000, now: () => number = Date.now): { begin: () => () => void; busy: () => boolean } {
+ * A request older than `limitMs` stops counting and is forgotten, so one that never settles cannot stop
+ * refreshing for good or pile up. */
+export function inFlight(
+  limitMs = 30_000,
+  now: () => number = Date.now,
+): { begin: () => () => void; busy: () => boolean; pending: () => number } {
   const open = new Map<symbol, number>();
+  const forget = () => {
+    for (const [id, startedAt] of open) if (now() - startedAt >= limitMs) open.delete(id);
+  };
   return {
     begin: () => {
+      forget();
       const id = Symbol("request");
       open.set(id, now());
       return () => {
         open.delete(id);
       };
     },
-    busy: () => [...open.values()].some((startedAt) => now() - startedAt < limitMs),
+    busy: () => {
+      forget();
+      return open.size > 0;
+    },
+    pending: () => open.size,
   };
 }
