@@ -147,6 +147,17 @@ function errorMessageOf(payload: unknown, fallback: string): string {
   return fallback;
 }
 
+// Keep save outcomes with the buffer, so switching panes or devices cannot discard them.
+function setBufferSaveNotice(path: string, bufferId: number, notice: { owner: string; epoch: number; message: string; stale: boolean } | undefined) {
+  useEditorStore.setState((state) => {
+    const current = state.fileCache.get(path);
+    if (!current || current.bufferId !== bufferId) return state;
+    const fileCache = new Map(state.fileCache);
+    fileCache.set(path, { ...current, saveNotice: notice });
+    return { fileCache };
+  });
+}
+
 interface EditorPaneProps {
   paneId: string;
   rootPath: string;
@@ -165,8 +176,10 @@ export function EditorPane({ paneId, rootPath }: EditorPaneProps) {
   const file = activeFile;
 
   const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState("");
-  const [saveStale, setSaveStale] = useState(false);
+  const notice = file?.saveNotice;
+  const saveStale = Boolean(notice?.stale && notice.owner === editorOwner() && notice.epoch === editorOwnerEpoch());
+  const saveError = notice ? (notice.stale && !saveStale
+    ? "The file changed on disk. Save again before overwriting." : notice.message) : "";
   const [cursorLine, setCursorLine] = useState(1);
   const [cursorColumn, setCursorColumn] = useState(1);
   const [selectionLength, setSelectionLength] = useState(0);
@@ -203,26 +216,29 @@ export function EditorPane({ paneId, rootPath }: EditorPaneProps) {
 
   const handleSave = useCallback(async (force = false) => {
     if (!file || !isDirty(file)) return;
+    if (force && (!notice?.stale || notice.owner !== editorOwner() || notice.epoch !== editorOwnerEpoch())) return;
+    setBufferSaveNotice(file.path, file.bufferId, undefined);
     setSaving(true);
-    setSaveError("");
-    setSaveStale(false);
     const owner = editorOwner();
     const epoch = editorOwnerEpoch();
     const bufferId = file.bufferId;
+    const saveRevision = file.saveRevision ?? 0;
     const result = await saveWorkspaceFile(rootPath, file.path, file.content, { force });
-    if (owner !== editorOwner() || epoch !== editorOwnerEpoch() ||
-        useEditorStore.getState().fileCache.get(file.path)?.bufferId !== bufferId) {
-      setSaving(false);
-      return;
-    }
-    if (result.ok) {
-      markSaved(file.path, file.content);
-    } else {
-      setSaveError(result.message);
-      setSaveStale(result.stale);
+    const sameContext = owner === editorOwner() && epoch === editorOwnerEpoch();
+    const sameBuffer = useEditorStore.getState().fileCache.get(file.path)?.bufferId === bufferId;
+    if (sameBuffer) {
+      if (result.ok && sameContext) {
+        markSaved(file.path, file.content);
+      } else if (result.ok || !result.stale || (useEditorStore.getState().fileCache.get(file.path)?.saveRevision ?? 0) === saveRevision) {
+        setBufferSaveNotice(file.path, bufferId, {
+          owner, epoch,
+          message: result.ok ? "The save completed while the workspace changed. Check the file before retrying." : result.message,
+          stale: !result.ok && result.stale,
+        });
+      }
     }
     setSaving(false);
-  }, [file, markSaved, rootPath]);
+  }, [file, markSaved, rootPath, notice]);
 
   // keyboard shortcuts
   useEffect(() => {
@@ -444,12 +460,11 @@ export function EditorPane({ paneId, rootPath }: EditorPaneProps) {
               type="button"
               title={saveError}
               onClick={() => {
-                setSaveError("");
-                setSaveStale(false);
+                if (file) setBufferSaveNotice(file.path, file.bufferId, undefined);
               }}
-              className="cursor-pointer"
+              className="max-w-[min(70vw,28rem)] cursor-pointer whitespace-normal text-left"
             >
-              ✕ {saveStale ? "Changed on disk" : saveError.length > 40 ? saveError.slice(0, 40) + "…" : saveError}
+              ✕ {saveStale ? "Disk changed; overwrite replaces its contents." : saveError}
             </button>
             {saveStale && (
               <button type="button" onClick={() => void handleSave(true)} className="cursor-pointer text-foreground underline">

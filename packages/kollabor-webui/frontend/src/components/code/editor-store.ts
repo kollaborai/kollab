@@ -12,6 +12,8 @@ export interface FileData {
   savedContent: string;
   loading: boolean;
   pinned: boolean;
+  saveRevision?: number;
+  saveNotice?: { owner: string; epoch: number; message: string; stale: boolean };
   virtual?: boolean; // immutable content without a corresponding disk path
   headContent?: string | null; // diff tabs only
 }
@@ -464,7 +466,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
         const newCache = new Map(s.fileCache);
         const existing = newCache.get(path);
         if (existing) {
-          newCache.set(path, { ...existing, savedContent: content });
+          newCache.set(path, { ...existing, savedContent: content, saveNotice: undefined, saveRevision: (existing.saveRevision ?? 0) + 1 });
         }
         return { fileCache: newCache };
       });

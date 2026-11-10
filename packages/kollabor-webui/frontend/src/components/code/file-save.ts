@@ -67,7 +67,10 @@ export async function saveWorkspaceFile(
     const raw: unknown = await res.json().catch(() => null);
     if (owner !== editorOwner() || epoch !== editorOwnerEpoch() ||
         bufferId !== useEditorStore.getState().fileCache.get(path)?.bufferId) {
-      return { ok: false, stale: false, message: "The original file is no longer active." };
+      const failure = res.ok ? null : errorOf(raw);
+      return { ok: false, stale: false, message: failure && res.status < 500 && res.status !== 408 &&
+        failure.code !== "save_outcome_unknown" && failure.code !== "request_failed"
+        ? failure.message : "The save may have completed while the workspace changed; check the file before retrying." };
     }
     if (res.ok) {
       const data = raw && typeof raw === "object" && "data" in raw ? raw.data : raw;
