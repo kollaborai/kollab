@@ -42,7 +42,7 @@ describe("pr-chain helpers", () => {
   });
 
   it("shortens stamps and describes events", () => {
-    expect(shortTime("2026-11-09T17:27:03")).toBe("17:27");
+    expect(shortTime("2026-11-09T17:27:03", new Date(2026, 10, 9, 18, 0))).toBe("17:27");
     expect(shortTime(undefined)).toBe("");
     expect(describeEvent({ pr: 960, stage: "review", verdict: "PASS" })).toBe("PR 960 Review: Pass");
     expect(describeEvent({ issue: 893, stage: "issue-end", status: "BUILD-FAILED" })).toBe("Issue 893 Issue ended: Build failed");
