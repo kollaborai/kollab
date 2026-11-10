@@ -449,3 +449,98 @@ async def test_closing_one_terminal_does_not_signal_another(tmp_path):
     assert not terminal._SESSIONS[other_id].exited
     await other.send(type="input", data="echo still-alive-91''23\n")
     assert "still-alive-9123" in await other.until("still-alive-9123")
+
+
+def _job_is_running(process):
+    """Whether the test process can still execute."""
+    return process.is_running()
+
+
+async def test_job_liveness_does_not_count_a_zombie():
+    import asyncio
+    import os
+
+    import psutil
+
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)
+    process = psutil.Process(pid)
+    try:
+        for _ in range(100):
+            if process.status() == psutil.STATUS_ZOMBIE:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("test child did not become a zombie")
+        assert not _job_is_running(process)
+    finally:
+        os.waitpid(pid, 0)
+
+
+@pytest.mark.parametrize("mode", ["close", "idle", "shutdown"])
+@pytest.mark.parametrize("delay", [0.0, 0.01, 0.04, 0.06])
+async def test_teardown_stops_fast_detached_descendant(tmp_path, mode, delay):
+    import asyncio
+    import contextlib
+    import shlex
+    import sys
+
+    import psutil
+
+    marker = tmp_path / "detached.pid"
+    heartbeat = tmp_path / "heartbeat"
+    program = tmp_path / "spawn_job.py"
+    program.write_text(
+        "import os, signal, time\n"
+        f"time.sleep({delay!r})\n"
+        "if os.fork(): os._exit(0)\n"
+        "os.setsid()\n"
+        "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"open({str(marker)!r}, 'w').write(str(os.getpid()))\n"
+        "while True:\n"
+        f"    open({str(heartbeat)!r}, 'a').write('x')\n"
+        "    time.sleep(0.02)\n"
+    )
+    link = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
+    session_id = await link.open()
+    session = terminal._SESSIONS[session_id]
+    process = None
+    try:
+        await link.send(type="input", data=f"{shlex.quote(sys.executable)} {shlex.quote(str(program))} &\n")
+        for _ in range(250):
+            if marker.exists() and marker.read_text().strip() and heartbeat.exists():
+                process = psutil.Process(int(marker.read_text()))
+                break
+            await asyncio.sleep(0.01)
+        assert process is not None, "detached child did not start"
+        assert _job_is_running(process)
+        if mode == "close":
+            await link.send(type="close")
+            await session.destroy()
+        elif mode == "idle":
+            await link.call("detach")
+            session._reap_seconds = 0.01
+            session.schedule_reap()
+            for _ in range(200):
+                if session.closed:
+                    await session.destroy()
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                pytest.fail("idle reaper did not run")
+        else:
+            await terminal.shutdown_terminals()
+        for _ in range(200):
+            if not _job_is_running(process):
+                break
+            await asyncio.sleep(0.01)
+        assert not _job_is_running(process), "detached child survived terminal teardown"
+        size = heartbeat.stat().st_size
+        await asyncio.sleep(0.15)
+        assert heartbeat.stat().st_size == size, "detached child continued to do work"
+    finally:
+        if process is not None:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                process.kill()  # psutil checks the captured process identity before signalling
