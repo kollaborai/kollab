@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import secrets
+import select
 import signal
 import struct
 import subprocess
@@ -80,11 +81,20 @@ class _Session:
         fd: int,
         ring_bytes: int = RING_BYTES,
         reap_seconds: float = REAP_AFTER_SECONDS,
+        shell_pid: int | None = None,
+        pty_name: str | None = None,
     ) -> None:
         self.sid = sid
         self._ring_limit = ring_bytes
         self._reap_seconds = reap_seconds  # 0 = a shell nobody watches is never reaped
-        self.pid = proc.pid
+        self.pid = shell_pid if shell_pid is not None else proc.pid
+        self._supervised = shell_pid is not None
+        self._pty_name = pty_name
+        self._pty_anchor = os.dup(fd) if pty_name is not None else None
+        self._pty_identity = None
+        if pty_name is not None:
+            st = os.stat(pty_name)
+            self._pty_identity = (st.st_dev & 0xFFFFFFFF, st.st_ino)
         self._proc = proc  # _watch reaps the child and sets its status here, so Popen never waits or warns
         self.fd: int | None = fd
         self.exited = False  # the shell ended by itself
@@ -102,13 +112,17 @@ class _Session:
         self._watch_task: asyncio.Task[None] | None = None
         self._teardown_task: asyncio.Task[None] | None = None
         self._owned_processes: set[psutil.Process] = set()
+        self._inspection_warnings: set[str] = set()
         try:
-            self._shell_process: psutil.Process | None = psutil.Process(proc.pid)
+            self._shell_process: psutil.Process | None = psutil.Process(self.pid)
             self._owned_processes.add(self._shell_process)
+            self._shell_started = self._shell_process.create_time()
         except psutil.Error as exc:
             self._shell_process = None
+            self._shell_started = None
             logger.warning("Cannot inspect terminal process tree; terminal jobs may survive teardown: %s", exc)
         self._loop.add_reader(fd, self._on_readable)
+        self._capture_task = self._loop.create_task(self._monitor_processes()) if pty_name is not None else None
 
     @property
     def first_seq(self) -> int:
@@ -196,6 +210,11 @@ class _Session:
         if self._watch_task is None or self._watch_task.done():
             self._watch_task = self._loop.create_task(self._watch())
 
+    async def _monitor_processes(self) -> None:
+        while not self.closed:
+            self._capture_processes()
+            await asyncio.sleep(0.05)
+
     def _capture_processes(self) -> set[psutil.Process]:
         """Capture only this shell's descendants and members of its Unix session.
 
@@ -203,6 +222,8 @@ class _Session:
         only while the original shell handle is alive; a numeric session id alone could later be reused.
         """
         before = self._owned_processes.copy()
+        if self._supervised:
+            return set()
         shell = self._shell_process
         if shell is None:
             return set()
@@ -224,7 +245,19 @@ class _Session:
                 except psutil.Error:
                     continue
         except (psutil.Error, OSError) as exc:
-            logger.warning("Cannot inspect terminal process tree; terminal jobs may survive teardown: %s", exc)
+            if "tree" not in self._inspection_warnings:
+                logger.warning("Cannot inspect terminal process tree; terminal jobs may survive teardown: %s", exc)
+                self._inspection_warnings.add("tree")
+        if (self._pty_name is not None and self._pty_identity is not None and self._pty_anchor is not None
+                and self._shell_started is not None):
+            try:
+                from ._terminal_darwin import pty_holders
+
+                self._owned_processes.update(pty_holders(self._pty_name, self._pty_identity, self._shell_started))
+            except (psutil.Error, OSError) as exc:
+                if "pty" not in self._inspection_warnings:
+                    logger.warning("Cannot inspect terminal PTY holders; jobs may survive teardown: %s", exc)
+                    self._inspection_warnings.add("pty")
         return self._owned_processes - before
 
     def _signal_owned(self, sig: int, processes: set[psutil.Process] | None = None) -> None:
@@ -243,18 +276,28 @@ class _Session:
 
     async def _finish_teardown(self) -> None:
         """Escalate captured jobs even if the shell has already exited."""
-        deadline = self._loop.time() + KILL_AFTER_SECONDS
-        while self._loop.time() < deadline:
-            await asyncio.sleep(min(0.05, max(0, deadline - self._loop.time())))
-            new_processes = self._capture_processes()
-            if new_processes:
-                self._signal_owned(signal.SIGHUP, new_processes)
-                self._signal_owned(signal.SIGTERM, new_processes)
-            if not any(process.is_running() for process in self._owned_processes) and self._proc.returncode is not None:
-                break
-        self._signal_owned(signal.SIGKILL)
-        if self._watch_task is not None:
-            await self._watch_task
+        try:
+            if self._supervised:
+                if self._watch_task is not None:
+                    await self._watch_task
+                return
+            deadline = self._loop.time() + KILL_AFTER_SECONDS
+            while self._loop.time() < deadline:
+                await asyncio.sleep(min(0.05, max(0, deadline - self._loop.time())))
+                new_processes = self._capture_processes()
+                if new_processes:
+                    self._signal_owned(signal.SIGHUP, new_processes)
+                    self._signal_owned(signal.SIGTERM, new_processes)
+                if (self._proc.returncode is not None
+                        and not any(process.is_running() for process in self._owned_processes)):
+                    break
+            self._signal_owned(signal.SIGKILL)
+            if self._watch_task is not None:
+                await self._watch_task
+        finally:
+            if self._pty_anchor is not None:
+                os.close(self._pty_anchor)
+                self._pty_anchor = None
 
     async def _watch(self) -> None:
         """Poll until the shell is reaped, independently of job teardown."""
@@ -263,7 +306,7 @@ class _Session:
                 # Keep identities before waitpid releases the shell's PID.
                 if not self.closed:
                     self._capture_processes()
-                done, status = os.waitpid(self.pid, os.WNOHANG)
+                done, status = os.waitpid(self._proc.pid, os.WNOHANG)
             except ChildProcessError:
                 self._proc.returncode = 0
                 self._shell_ended(None)
@@ -313,11 +356,17 @@ class _Session:
         """End the terminal and return the independently escalating cleanup task."""
         if not self.closed:
             self.closed = True
+            if self._capture_task is not None:
+                self._capture_task.cancel()
             self.cancel_reap()
             _SESSIONS.pop(self.sid, None)
-            self._capture_processes()
-            self._signal_owned(signal.SIGHUP)
-            self._signal_owned(signal.SIGTERM)
+            if self._supervised:
+                with contextlib.suppress(ProcessLookupError):
+                    self._proc.send_signal(signal.SIGTERM)
+            else:
+                self._capture_processes()
+                self._signal_owned(signal.SIGHUP)
+                self._signal_owned(signal.SIGTERM)
             self._close_fd()
             if not self.exited:
                 self._ensure_watch()
@@ -498,31 +547,50 @@ def _spawn(cwd: str, cols: int, rows: int, settings: CodeSettings = DEFAULTS) ->
     env = _shell_env(settings)
     env["PWD"] = cwd
     master, slave = os.openpty()
+    ready_read = ready_write = None
+    proc = None
+    shell_pid = None
+    pty_name = os.ttyname(slave) if sys.platform == "darwin" else None
     try:
         _set_winsize(slave, cols, rows)
-        # No start_new_session: os.login_tty calls setsid itself, and setsid fails in a process group leader.
-        proc = subprocess.Popen(
-            [sys.executable, "-I", "-c", _SHELL_LAUNCHER, shell, *(["-l"] if settings.login else [])],
-            stdin=slave,
-            stdout=slave,
-            stderr=slave,
-            cwd=cwd,
-            env=env,
-            close_fds=True,
-        )
+        if sys.platform.startswith("linux"):
+            ready_read, ready_write = os.pipe()
+            argv = [sys.executable, "-I", "-c", "from kollabor.code_service._terminal_supervisor import main; main()",
+                    str(ready_write), shell, *(["-l"] if settings.login else [])]
+            proc = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave, cwd=cwd, env=env,
+                                    close_fds=True, pass_fds=(ready_write,))
+            os.close(ready_write)
+            ready_write = None
+            if not select.select([ready_read], [], [], 5)[0]:
+                raise OSError("terminal supervisor did not start")
+            answer = os.read(ready_read, 64).strip()
+            if not answer.isdigit():
+                raise OSError("terminal supervisor could not start")
+            shell_pid = int(answer)
+        else:
+            proc = subprocess.Popen(
+                [sys.executable, "-I", "-c", _SHELL_LAUNCHER, shell, *(["-l"] if settings.login else [])],
+                stdin=slave, stdout=slave, stderr=slave, cwd=cwd, env=env, close_fds=True,
+            )
     except BaseException:
+        if proc is not None:
+            proc.terminate()
+            proc.wait()
         os.close(master)
         raise
     finally:
-        os.close(slave)  # the shell has its own copy; ours would keep the PTY open after the shell ends
+        os.close(slave)
+        if ready_read is not None:
+            os.close(ready_read)
+        if ready_write is not None:
+            os.close(ready_write)
     os.set_inheritable(master, False)
     os.set_blocking(master, False)
     return _Session(
-        secrets.token_urlsafe(16),
-        proc,
-        master,
+        secrets.token_urlsafe(16), proc, master,
         ring_bytes=settings.scrollback_kb * 1024,
         reap_seconds=settings.idle_reap_minutes * 60,
+        shell_pid=shell_pid, pty_name=pty_name,
     )
 
 

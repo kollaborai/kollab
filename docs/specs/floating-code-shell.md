@@ -52,10 +52,10 @@ Mentiko's request and response shapes are kept, so its callers port unchanged.
   `terminal.env_allow`, `terminal.env_deny` and `terminal.env_set` adjust the list. Up to `terminal.max_shells` shells
   (default 8) and 64 links per daemon (fixed). A shell outlives its socket and is reaped `terminal.idle_reap_minutes`
   (default 10) after its last link detaches; a reconnecting client resumes it with the `sessionId` from `ready`.
-  Closing, idle reaping, or daemon shutdown signals discovered terminal session members and descendants, then escalates
-  surviving tracked processes after a bounded grace period. Process identities are checked before each signal.
-  Discovery is a snapshot, not a process ownership boundary: a child that detaches and is orphaned between scans can
-  survive all three teardown paths. This limitation applies on macOS and Linux; do not rely on teardown to stop it.
+  Closing, idle reaping, or daemon shutdown signals terminal jobs and escalates survivors after a bounded grace period.
+  On Linux, a per-terminal subreaper owns and reaps descendants even when they detach. On macOS, captured descendants
+  and processes holding the terminal slave are tracked by process identity; a job that detaches and closes all PTY
+  descriptors between scans can escape. Process inspection permissions are required to discover macOS jobs.
   `enabled` refuses every call, `terminal.enabled` opens no shells, `read_only` refuses terminal input
   (`code-shell-settings.md`).
 - The WebSocket is outside the HTTP bearer middleware, so the first message must be `{"type":"auth","token"}` within

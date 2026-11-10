@@ -7,6 +7,7 @@ check; only running the command does.
 
 import json
 import re
+import sys
 import time
 import uuid
 
@@ -489,7 +490,14 @@ async def test_job_liveness_does_not_count_a_zombie():
 
 @pytest.mark.parametrize("mode", ["close", "idle", "shutdown"])
 @pytest.mark.parametrize("delay", [0.0, 0.01, 0.04, 0.06])
-async def test_teardown_stops_fast_detached_descendant(tmp_path, mode, delay):
+@pytest.mark.parametrize("close_fds", [
+    False,
+    pytest.param(True, marks=pytest.mark.xfail(
+        sys.platform == "darwin", strict=True,
+        reason="macOS cannot discover a detached child that closes every inherited PTY descriptor between scans",
+    )),
+])
+async def test_teardown_stops_fast_detached_descendant(tmp_path, mode, delay, close_fds):
     import asyncio
     import contextlib
     import shlex
@@ -505,6 +513,7 @@ async def test_teardown_stops_fast_detached_descendant(tmp_path, mode, delay):
         f"time.sleep({delay!r})\n"
         "if os.fork(): os._exit(0)\n"
         "os.setsid()\n"
+        f"if {close_fds!r}: os.closerange(0, 256)\n"
         "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         f"open({str(marker)!r}, 'w').write(str(os.getpid()))\n"
