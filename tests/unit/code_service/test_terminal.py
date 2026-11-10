@@ -379,3 +379,58 @@ async def test_a_shell_that_exits_ends_the_stream_with_an_exit_message(tmp_path)
         kinds += [message["type"] for message in await link.poll()]
 
     assert kinds[-1] == "exit"
+
+
+@pytest.mark.parametrize("mode", ["close", "idle", "shutdown"])
+async def test_teardown_ends_background_job_after_shell_exits(tmp_path, mode):
+    """A job in its own shell process group must not outlive any terminal teardown path."""
+    import asyncio
+    import contextlib
+    import os
+    import shlex
+    import signal
+    import sys
+
+    link = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
+    sid = await link.open()
+    session = terminal._SESSIONS[sid]
+    marker = tmp_path / "job.pid"
+    program = (
+        "import os,signal,time; "
+        "signal.signal(signal.SIGHUP, signal.SIG_IGN); "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"open({str(marker)!r}, 'w').write(str(os.getpid())); "
+        "time.sleep(300)"
+    )
+    child_pid = None
+    try:
+        await link.send(type="input", data=f"{shlex.quote(sys.executable)} -c {shlex.quote(program)} &\n")
+        for _ in range(200):
+            if marker.exists() and marker.read_text().strip():
+                child_pid = int(marker.read_text())
+                break
+            await asyncio.sleep(0.02)
+        assert child_pid is not None, "background job did not start"
+        assert os.getsid(child_pid) == session.pid
+        if mode == "close":
+            await link.send(type="close")
+        elif mode == "idle":
+            await link.call("detach")
+            session._reap_seconds = 0.01
+            session.schedule_reap()
+        else:
+            await terminal.shutdown_terminals()
+        for _ in range(200):
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            await asyncio.sleep(0.02)
+        else:
+            pytest.fail(f"background job survived {mode}")
+    finally:
+        # Only clean up the child from this test's PTY session, never another session.
+        if child_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                if os.getsid(child_pid) == session.pid:
+                    os.kill(child_pid, signal.SIGKILL)
