@@ -4,11 +4,12 @@ The runner keeps ``prs/<n>/STATE.json``, ``issues/<n>/STATE.json`` and an append
 ``ledger.jsonl`` under one root. This module only reads them; it never writes.
 """
 
+import heapq
 import json
 import os
 import stat
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULT_ROOT = "~/backups/pr-chain"
 KINDS = {"pr": "prs", "issue": "issues"}
@@ -23,6 +24,10 @@ MAX_PID = 2**31 - 1
 # The newest ledger lines are all a screen shows. The file grows without bound.
 LEDGER_TAIL_BYTES = 256 * 1024
 MAX_EVENTS = 200
+# A poll looks at no more than MAX_SCAN entries of a folder and keeps the MAX_ITEMS highest numbers
+# (the newest PRs and issues) of each kind, so a huge or hostile folder cannot grow the work or the response.
+MAX_SCAN = 10_000
+MAX_ITEMS = 100
 
 
 def root() -> Path:
@@ -61,13 +66,19 @@ def _clean(data: Dict[str, Any], text_fields: Any, int_fields: Any) -> Dict[str,
     return out
 
 
-def _read_file(path: Path, limit: int, tail: bool = False) -> bytes:
-    """Up to ``limit`` + 1 bytes of a regular file (the last ones with ``tail``).
+def _read_file(base: Path, parts: Tuple[str, ...], limit: int, tail: bool = False) -> bytes:
+    """Up to ``limit`` + 1 bytes of the regular file ``base/<parts>`` (the last ones with ``tail``).
 
-    The runner's folder is not trusted: a named pipe or device there would block a reader
-    forever, so anything but a regular file raises ``OSError`` without being read.
+    The runner's folder is not trusted: a symlink at any step below ``base`` could point at
+    another file the engine can read, and a named pipe or device would block a reader forever.
+    Both raise ``OSError`` without the file being read.
     """
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    path = base
+    for part in parts:
+        path = path / part
+        if stat.S_ISLNK(os.lstat(path).st_mode):
+            raise OSError(f"{part} is a symlink")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
@@ -84,10 +95,10 @@ def _read_file(path: Path, limit: int, tail: bool = False) -> bytes:
         os.close(fd)
 
 
-def _runner_alive(claim: Path) -> bool:
+def _runner_alive(base: Path, claim: str) -> bool:
     """A claim counts only while the process that wrote it is still running."""
     try:
-        pid = int(_read_file(claim / "pid", 64).decode("ascii", "replace").strip())
+        pid = int(_read_file(base, ("claims", claim, "pid"), 64).decode("ascii", "replace").strip())
     except (OSError, ValueError, OverflowError):
         return False
     try:
@@ -103,9 +114,8 @@ def _runner_alive(claim: Path) -> bool:
 
 def read_item(base: Path, kind: str, number: int) -> Optional[Dict[str, Any]]:
     """One item's STATE.json as a row, or None when it is missing or unreadable."""
-    path = base / KINDS[kind] / str(number) / "STATE.json"
     try:
-        raw = _read_file(path, MAX_STATE_BYTES)
+        raw = _read_file(base, (KINDS[kind], str(number), "STATE.json"), MAX_STATE_BYTES)
         if len(raw) > MAX_STATE_BYTES:
             return None
         data = json.loads(raw.decode("utf-8", "replace"))
@@ -115,7 +125,7 @@ def read_item(base: Path, kind: str, number: int) -> Optional[Dict[str, Any]]:
         return None
     row: Dict[str, Any] = {"kind": kind, "number": number}
     row.update(_clean(data, TEXT_FIELDS, INT_FIELDS))
-    row["claimed"] = _runner_alive(base / "claims" / (str(number) if kind == "pr" else f"i{number}"))
+    row["claimed"] = _runner_alive(base, str(number) if kind == "pr" else f"i{number}")
     return row
 
 
@@ -124,16 +134,37 @@ def _is_number_folder(name: str) -> bool:
     return name.isascii() and name.isdigit() and len(name) <= MAX_DIGITS and name == str(int(name))
 
 
+def _newest_numbers(folder: Path) -> List[int]:
+    """The highest item numbers in ``folder``, looking at no more than ``MAX_SCAN`` entries.
+
+    A symlinked folder or entry is skipped; the runner's folder is not trusted.
+    """
+    if stat.S_ISLNK(os.lstat(folder).st_mode):
+        return []
+    best: List[int] = []
+    with os.scandir(folder) as entries:
+        for scanned, entry in enumerate(entries):
+            if scanned >= MAX_SCAN:
+                break
+            if not _is_number_folder(entry.name) or entry.is_symlink():
+                continue
+            if len(best) < MAX_ITEMS:
+                heapq.heappush(best, int(entry.name))
+            else:
+                heapq.heappushpop(best, int(entry.name))
+    return best
+
+
 def list_items(base: Path) -> List[Dict[str, Any]]:
-    """Every PR and issue with a readable state file, most recently updated first."""
+    """The newest PRs and issues with a readable state file, most recently updated first."""
     rows: List[Dict[str, Any]] = []
     for kind, sub in KINDS.items():
         try:
-            names = [p.name for p in (base / sub).iterdir() if _is_number_folder(p.name)]
+            numbers = _newest_numbers(base / sub)
         except OSError:
             continue
-        for name in names:
-            row = read_item(base, kind, int(name))
+        for number in numbers:
+            row = read_item(base, kind, number)
             if row:
                 rows.append(row)
     rows.sort(key=lambda r: str(r.get("updated") or ""), reverse=True)
@@ -147,7 +178,7 @@ def read_events(base: Path, kind: Optional[str] = None, number: Optional[int] = 
     ``number`` only that item's events return.
     """
     try:
-        raw = _read_file(base / "ledger.jsonl", LEDGER_TAIL_BYTES, tail=True).decode("utf-8", "replace")
+        raw = _read_file(base, ("ledger.jsonl",), LEDGER_TAIL_BYTES, tail=True).decode("utf-8", "replace")
     except OSError:
         return []
     events: List[Dict[str, Any]] = []
