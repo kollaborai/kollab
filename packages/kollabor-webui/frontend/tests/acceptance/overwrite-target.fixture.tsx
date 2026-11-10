@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { EditorPane } from "../../src/components/code/editor-pane";
+import { TabBar } from "../../src/components/code/tab-bar";
 import { useEditorStore } from "../../src/components/code/editor-store";
 import * as fileSave from "../../src/components/code/file-save";
 import { setEditorOwner } from "../../src/components/code/workspace-tabs";
@@ -23,7 +24,7 @@ useEditorStore.getState().setActiveFile(pane, "/fixture/a.txt");
 let root = createRoot(document.getElementById("root")!);
 export function mountPane() {
   root = createRoot(document.getElementById("root")!);
-  root.render(<div data-code-view style={{ width: "100vw", height: 700 }}><EditorPane paneId={pane} rootPath="/fixture" /></div>);
+  root.render(<div data-code-view style={{ width: "100vw", height: 700 }}><TabBar paneId={pane} rootPath="/fixture" /><EditorPane paneId={pane} rootPath="/fixture" /></div>);
 }
 export function unmountPane() { root.unmount(); }
-root.render(<div data-code-view style={{ width: "100vw", height: 700 }}><EditorPane paneId={pane} rootPath="/fixture" /></div>);
+root.render(<div data-code-view style={{ width: "100vw", height: 700 }}><TabBar paneId={pane} rootPath="/fixture" /><EditorPane paneId={pane} rootPath="/fixture" /></div>);

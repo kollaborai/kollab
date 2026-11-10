@@ -2,7 +2,7 @@ import { editorOwner, editorOwnerEpoch } from "@/components/code/workspace-tabs"
 import { useState, useCallback, type DragEvent } from "react";
 import { ChevronRight, CircleX, Save } from "lucide-react";
 import { saveWorkspaceFile } from "@/components/code/file-save";
-import { useEditorStore, usePane, isDirty } from "@/components/code/editor-store";
+import { useEditorStore, usePane, isDirty, setBufferSaveNotice } from "@/components/code/editor-store";
 import { getFileAccentColor } from "@/components/code/file-tree";
 
 interface TabBarProps {
@@ -18,20 +18,27 @@ export function TabBar({ paneId, rootPath }: TabBarProps) {
   const markSaved = useEditorStore((s) => s.markSaved);
   const reorderFiles = useEditorStore((s) => s.reorderFiles);
 
-  const [saveError, setSaveError] = useState("");
   const handleSave = useCallback(async (filePath: string, content: string) => {
     const owner = editorOwner();
     const epoch = editorOwnerEpoch();
-    const bufferId = useEditorStore.getState().fileCache.get(filePath)?.bufferId;
+    const initial = useEditorStore.getState().fileCache.get(filePath);
+    if (!initial) return;
+    const { bufferId } = initial;
+    const revision = initial.saveRevision ?? 0;
     const result = await saveWorkspaceFile(rootPath, filePath, content);
-    if (owner !== editorOwner() || epoch !== editorOwnerEpoch() ||
-        useEditorStore.getState().fileCache.get(filePath)?.bufferId !== bufferId) return;
-    if (result.ok) {
+    const current = useEditorStore.getState().fileCache.get(filePath);
+    if (!current || current.bufferId !== bufferId) return;
+    const sameContext = owner === editorOwner() && epoch === editorOwnerEpoch();
+    if (result.ok && sameContext) {
       markSaved(filePath, content);
-      setSaveError("");
     } else {
-      setActiveFile(paneId, filePath);
-      setSaveError(`${filePath}: ${result.message}${result.stale ? " Use the editor save control to review or overwrite." : ""}`);
+      const message = result.ok ? "The save completed while the workspace changed. Check the file before retrying."
+        : `${result.message}${result.stale ? " Save again to review the changed file." : ""}`;
+      if (!result.ok && result.stale && (current.saveRevision ?? 0) !== revision) return;
+      setBufferSaveNotice(filePath, bufferId, { owner, epoch, message, stale: false });
+      if (sameContext) {
+        setActiveFile(paneId, filePath);
+      }
     }
   }, [markSaved, paneId, rootPath, setActiveFile]);
 
@@ -98,7 +105,6 @@ export function TabBar({ paneId, rootPath }: TabBarProps) {
       className="flex flex-1 min-w-0 items-center gap-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       onDragOver={(e) => e.preventDefault()}
     >
-      {saveError && <span role="alert" className="shrink-0 text-xs text-destructive px-2">{saveError}</span>}
       {openFiles.map((file, index) => {
         const isActive = activeFile?.path === file.path;
         const dirty = isDirty(file);

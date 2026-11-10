@@ -544,6 +544,17 @@ useEditorStore.subscribe((state, prev) => {
   }
 });
 
+// Retain the outcome only on the buffer that initiated the operation.
+export function setBufferSaveNotice(path: string, bufferId: number, notice: FileData["saveNotice"]) {
+  useEditorStore.setState((state) => {
+    const current = state.fileCache.get(path);
+    if (!current || current.bufferId !== bufferId) return state;
+    const fileCache = new Map(state.fileCache);
+    fileCache.set(path, { ...current, saveNotice: notice });
+    return { fileCache };
+  });
+}
+
 // selectors
 export function isDirty(file: FileData): boolean {
   return file.content !== file.savedContent;

@@ -156,6 +156,35 @@ try {
     { path: "/fixture/a.txt", force: false }, { path: "/fixture/a.txt", force: false },
     { path: "/fixture/a.txt", force: false }]);
   assert.deepEqual(errors, []);
+  // Repeat the uncertain outcome through the tab save control, then change owner and unmount.
+  await page.reload();
+  await page.locator(".monaco-editor textarea").first().waitFor({ timeout: 30000 });
+  delayedStarted = new Promise((resolve) => { signalDelayed = resolve; });
+  delayedStatus = 502;
+  delayNext = true;
+  await page.locator('button[aria-label="Save file"]').first().click({ force: true });
+  await delayedStarted;
+  await page.evaluate(async () => {
+    const { setEditorOwner } = await import("/src/components/code/workspace-tabs.ts");
+    const { unmountPane } = await import("/tests/acceptance/overwrite-target.fixture.tsx");
+    setEditorOwner("other:/workspace", "other", "other-device");
+    unmountPane();
+  });
+  const tabResponse = page.waitForResponse((response) => response.url().includes("/code/fs/file") && response.status() === 502);
+  releaseDelayed();
+  await tabResponse;
+  await page.waitForTimeout(200);
+  await page.evaluate(async () => {
+    const { setEditorOwner } = await import("/src/components/code/workspace-tabs.ts");
+    const { mountPane } = await import("/tests/acceptance/overwrite-target.fixture.tsx");
+    setEditorOwner("fixture:/fixture", "fixture", "fixture-device");
+    mountPane();
+  });
+  const tabNotice = page.getByRole("button", { name: /The save may have completed while the workspace changed; check the file before retrying/ });
+  await tabNotice.waitFor({timeout: 3000});
+  await tabNotice.click();
+  await tabNotice.waitFor({ state: "hidden" });
+  assert.equal(await page.getByRole("alert").filter({ hasText: "save may have completed" }).count(), 0);
   await page.close();
   console.log(`overwrite stays bound to the conflicted buffer at ${width}px`);
   }

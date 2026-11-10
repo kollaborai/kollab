@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
 import type { editor } from "monaco-editor";
 import { Button } from "@/components/ui/button";
 import { saveWorkspaceFile } from "@/components/code/file-save";
-import { isDiffTab, isDirty, usePane, useEditorStore } from "@/components/code/editor-store";
+import { isDiffTab, isDirty, setBufferSaveNotice, usePane, useEditorStore } from "@/components/code/editor-store";
 import { getFileAccentColor } from "./file-tree";
 import { StatusBar } from "./status-bar";
 
@@ -145,17 +145,6 @@ function errorMessageOf(payload: unknown, fallback: string): string {
     }
   }
   return fallback;
-}
-
-// Keep save outcomes with the buffer, so switching panes or devices cannot discard them.
-function setBufferSaveNotice(path: string, bufferId: number, notice: { owner: string; epoch: number; message: string; stale: boolean } | undefined) {
-  useEditorStore.setState((state) => {
-    const current = state.fileCache.get(path);
-    if (!current || current.bufferId !== bufferId) return state;
-    const fileCache = new Map(state.fileCache);
-    fileCache.set(path, { ...current, saveNotice: notice });
-    return { fileCache };
-  });
 }
 
 interface EditorPaneProps {
