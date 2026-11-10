@@ -624,17 +624,22 @@ async def test_slow_process_enumeration_does_not_block_terminal_close(tmp_path, 
     assert time.monotonic() - started < 1.2, "process enumeration blocked the event loop during terminal close"
 
 
-async def test_late_process_scan_is_never_signalled_after_close(tmp_path, monkeypatch):
+async def test_late_process_scan_is_never_signalled_after_close(monkeypatch):
     import asyncio
-    import contextlib
+    import signal
     import threading
 
-    link = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
-    sid = await link.open()
-    await link.send(type="input", data="echo ready-late-27''3\n")
-    await link.until("ready-late-273")
-    session = terminal._SESSIONS[sid]
-    started = threading.Event()
+    # Exercise the PTY scan boundary directly: Linux terminals use a supervisor and do not schedule PTY scans.
+    session = object.__new__(terminal._Session)
+    session._loop = asyncio.get_running_loop()
+    session._scan_future = None
+    session._owned_processes = set()
+    session._inspection_warnings = set()
+    session._pty_name = "/test/pty"
+    session._pty_anchor = object()  # A live anchor; no real file descriptor or process is touched.
+    session._shell_process = object()
+    session.closed = False
+    started = asyncio.Event()
     release = threading.Event()
     sent = []
 
@@ -647,29 +652,49 @@ async def test_late_process_scan_is_never_signalled_after_close(tmp_path, monkey
     unrelated = Unrelated()
 
     def late_scan(known):
-        started.set()
-        release.wait(timeout=3)
+        session._loop.call_soon_threadsafe(started.set)
+        if not release.wait(timeout=15):
+            raise AssertionError("test did not release the blocked scan")
         return known | {unrelated}
 
     monkeypatch.setattr(session, "_collect_processes", late_scan)
-    monkeypatch.setattr(terminal, "KILL_AFTER_SECONDS", 0.05)
+    scan = asyncio.create_task(session._capture_async(0.1))
     try:
-        task = session.destroy()
-        assert task is not None
-        async with asyncio.timeout(2):
-            await task
-        assert started.is_set(), "test did not start its blocked scan"
-        release.set()
-        await asyncio.sleep(0.1)
-        assert unrelated not in session._owned_processes
-        assert not sent
+        async with asyncio.timeout(10):
+            await started.wait()
+            assert await scan == set(), "the blocked scan should time out before close"
+            pending = session._scan_future
+            assert pending is not None and not pending.done()
+            # Complete the actual worker only after the PTY anchor has been released.
+            session.closed = True
+            session._pty_anchor = None
+            release.set()
+            assert unrelated in await asyncio.shield(pending), "the late scan did not return its result"
+            assert await session._capture_async(1) == set(), "a scan completed after close was applied"
+            session._signal_owned(signal.SIGKILL)
+            assert unrelated not in session._owned_processes
+            assert not sent
     finally:
         release.set()
-        with contextlib.suppress(ProcessLookupError):
-            session._proc.kill()
-        if session._watch_task is not None:
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(session._watch_task, 3)
+        if not scan.done():
+            scan.cancel()
+            await asyncio.gather(scan, return_exceptions=True)
+
+
+
+async def test_supervised_teardown_does_not_schedule_pty_scan(monkeypatch):
+    session = object.__new__(terminal._Session)
+    session._supervised = True
+    session._watch_task = None
+    session._pty_anchor = None
+    session.fd = None
+
+    async def unexpected_scan(_timeout):
+        pytest.fail("supervised teardown must not schedule a PTY-holder scan")
+
+    monkeypatch.setattr(session, "_capture_async", unexpected_scan)
+    await session._finish_teardown()
+
 
 
 async def test_shutdown_does_not_wait_forever_for_a_stalled_teardown(monkeypatch):
