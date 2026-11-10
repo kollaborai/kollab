@@ -99,6 +99,12 @@ An engine route that takes a folder (`workspace`, `folder`, the picker's `path`)
 
 The sidebar footer's PR Chain button opens a read-only dialog (`PrChainDialog.tsx`, helpers in `prChain.ts`) fed by `GET /pr-chain` and `GET /pr-chain/{kind}/{number}` (`routes/pr_chain.py`). The routes read the state folder of an external runner through `kollabor_engine/pr_chain.py`: `KOLLAB_PR_CHAIN_ROOT`, default `~/backups/pr-chain`, holding `ledger.jsonl`, `prs/<n>/STATE.json`, `issues/<n>/STATE.json` and `claims/`. A missing folder answers `root_found: false`, never an error. The engine never writes there. Tests: `packages/kollabor-engine/tests/test_pr_chain_routes.py`, `frontend/tests/pr-chain.test.ts`.
 
+### Web UI Learn
+
+The Learn dialog uses one renderer (`frontend/src/components/learn/`) and the typed catalog in `frontend/src/learn/`, under `packages/kollabor-webui/`. Each topic's JSON defines workflows, exact entry points, steps, command examples, expected results, recovery, and product media. Keep topic IDs stable and change the shared renderer for repeated presentation changes. See [Learn maintenance](../../features/learn.md) for the content contract and recording process.
+
+Desktop images and optional recordings live in `frontend/public/learn/`. The phone-app build inlines only referenced image previews through `frontend/scripts/learn-phone-media-plugin.ts`; it uses those previews and written steps without requesting unsigned media or changing the portal CSP. Validate the catalog with `frontend/tests/learn-catalog.test.ts` and the actual browser surface with `tests/tmux/specs/learn_web_workflows.json` (requires the frontend dependencies and a Playwright-compatible Chromium executable).
+
 ## Project Structure
 
 ```
