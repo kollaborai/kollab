@@ -104,6 +104,7 @@ class ConfigHookLoader:
         self.config_service = config_service
         self._hooks_registered: List[str] = []
         self._pending_tasks: set = set()
+        self._shutting_down = False
 
     def _on_pending_task_done(self, task: asyncio.Task) -> None:
         """Remove an async hook task and retrieve failures before cleanup."""
@@ -273,14 +274,29 @@ class ConfigHookLoader:
         process running after Kollab exits (#930). Tasks that raise during
         cleanup are reported, not silently claimed as a clean shutdown.
         """
+        self._shutting_down = True
         if not self._pending_tasks:
             return
         logger.debug(f"Waiting for {len(self._pending_tasks)} pending hook tasks")
-        _done, pending = await asyncio.wait(self._pending_tasks, timeout=5)
-        for task in pending:
-            if not task.done():
-                task.cancel()
-        if pending:
+        deadline = asyncio.get_running_loop().time() + 5
+        while self._pending_tasks:
+            snapshot = set(self._pending_tasks)
+            remaining = max(0, deadline - asyncio.get_running_loop().time())
+            if remaining:
+                done, pending = await asyncio.wait(snapshot, timeout=remaining)
+                self._pending_tasks.difference_update(done)
+            else:
+                pending = snapshot
+
+            # A matching async hook may have registered while the snapshot was
+            # being awaited. Include it in this shutdown pass instead of
+            # clearing ownership while it is still running.
+            pending.update(self._pending_tasks - snapshot)
+            if not pending:
+                continue
+            for task in pending:
+                if not task.done():
+                    task.cancel()
             results = await asyncio.gather(*pending, return_exceptions=True)
             failures = [
                 result
@@ -293,7 +309,7 @@ class ConfigHookLoader:
                     "hook shutdown: %s task(s) raised during cancellation cleanup",
                     len(failures),
                 )
-        self._pending_tasks.clear()
+            self._pending_tasks.difference_update(pending)
 
     def _load_hooks_config(self) -> Optional[Dict[str, Any]]:
         """Load and merge hooks.json from project and global locations.
@@ -448,6 +464,8 @@ class ConfigHookLoader:
 
             if is_async:
                 # Fire and forget with cleanup tracking
+                if self._shutting_down:
+                    return None
                 task = asyncio.create_task(
                     self._run_command(command, payload_json, timeout)
                 )
