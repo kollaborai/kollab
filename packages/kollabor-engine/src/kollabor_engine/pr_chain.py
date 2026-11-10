@@ -158,6 +158,10 @@ def read_events(base: Path, kind: Optional[str] = None, number: Optional[int] = 
             continue
         if not isinstance(event, dict):
             continue
+        tag = event.get("pr")
+        if isinstance(tag, str) and tag[:1] == "i" and _number(tag[1:]) is not None:
+            # The runner tags an issue's agent runs ``i<number>`` under ``pr``.
+            event = {**event, "issue": tag[1:], "pr": None}
         event = _clean(event, EVENT_TEXT_FIELDS, EVENT_INT_FIELDS)
         if number is not None and event.get(kind or "pr") != number:
             continue
