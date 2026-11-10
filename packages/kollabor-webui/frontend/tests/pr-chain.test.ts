@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PrChainItem } from "../src/api";
-import { describeEvent, itemUrl, shortTime, sortItems, statusLabel, statusTone } from "../src/components/pr-chain/prChain";
+import { describeEvent, itemUrl, latestOnly, shortTime, sortItems, statusLabel, statusTone } from "../src/components/pr-chain/prChain";
 
 const item = (over: Partial<PrChainItem>): PrChainItem => ({ kind: "pr", number: 1, claimed: false, ...over });
 
@@ -50,4 +50,15 @@ describe("pr-chain helpers", () => {
     expect(statusLabel("SOME-NEW-STATE")).toBe("Some new state");
     expect(statusLabel(undefined)).toBe("Unknown");
   });
+});
+
+it("only the newest request counts, so a slow older poll cannot overwrite newer data", () => {
+  const next = latestOnly();
+  const first = next();
+  const second = next();
+  expect(first()).toBe(false);
+  expect(second()).toBe(true);
+  const third = next();
+  expect(second()).toBe(false);
+  expect(third()).toBe(true);
 });
