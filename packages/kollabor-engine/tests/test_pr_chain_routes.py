@@ -90,3 +90,76 @@ async def test_detail_of_a_stranger_is_404_and_a_bad_kind_is_422(client, root):
     assert (await client.get("/pr-chain/pr/404")).status_code == 404
     assert (await client.get("/pr-chain/../x/1")).status_code in (404, 422)
     assert (await client.get("/pr-chain/foo/1")).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_state_fields_of_the_wrong_type_come_out_as_plain_values(client, root):
+    write_state(root, "prs", 3, status=["x"], updated=12, round="two", last_verdict={"a": 1}, why=None, pr="3")
+    item = (await client.get("/pr-chain")).json()["items"][0]
+    assert item["status"] == "['x']" and item["updated"] == "12" and item["last_verdict"] == "{'a': 1}"
+    assert "round" not in item and "why" not in item and item["pr"] == 3
+
+
+@pytest.mark.asyncio
+async def test_events_of_the_wrong_type_come_out_as_plain_values(client, root):
+    rows = [{"pr": 8, "stage": 5, "status": ["a"], "ts": None, "round": "x"}, {"issue": "9", "verdict": 1}]
+    (root / "ledger.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    events = (await client.get("/pr-chain")).json()["events"]
+    assert events[0] == {"pr": 8, "stage": "5", "status": "['a']"}
+    assert events[1] == {"issue": 9, "verdict": "1"}
+
+
+@pytest.mark.asyncio
+async def test_a_folder_named_with_non_ascii_digits_does_not_break_the_list(client, root):
+    write_state(root, "prs", 1, status="READY", updated="a")
+    (root / "prs" / "²").mkdir()
+    (root / "prs" / "١٢").mkdir()
+    body = (await client.get("/pr-chain")).json()
+    assert [i["number"] for i in body["items"]] == [1]
+
+
+@pytest.mark.asyncio
+async def test_claimed_means_a_live_runner_process(client, root):
+    import os
+
+    write_state(root, "prs", 1, status="REVIEWING", updated="a")
+    write_state(root, "issues", 2, status="BUILDING", updated="b")
+    (root / "claims" / "1").mkdir(parents=True)
+    (root / "claims" / "1" / "pid").write_text(str(os.getpid()))
+    (root / "claims" / "i2").mkdir(parents=True)
+    (root / "claims" / "i2" / "pid").write_text("999999999")
+    items = {(i["kind"], i["number"]): i["claimed"] for i in (await client.get("/pr-chain")).json()["items"]}
+    assert items == {("pr", 1): True, ("issue", 2): False}
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_state_file_is_skipped(client, root):
+    write_state(root, "prs", 1, status="READY", updated="a")
+    write_state(root, "prs", 2, status="READY", updated="b", why="x" * (1024 * 1024))
+    assert [i["number"] for i in (await client.get("/pr-chain")).json()["items"]] == [1]
+
+
+@pytest.mark.asyncio
+async def test_detail_matches_events_whose_pr_is_a_string(client, root):
+    write_state(root, "prs", 5, status="READY", updated="x")
+    (root / "ledger.jsonl").write_text(json.dumps({"pr": "5", "stage": "fold"}) + "\n")
+    assert [e["stage"] for e in (await client.get("/pr-chain/pr/5")).json()["events"]] == ["fold"]
+
+
+@pytest.mark.asyncio
+async def test_issue_detail_and_the_event_cap(client, root):
+    write_state(root, "issues", 7, status="BUILDING", updated="x")
+    rows = [{"issue": 7, "stage": f"s{i}"} for i in range(250)] + [{"pr": 7, "stage": "other"}]
+    (root / "ledger.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    detail = (await client.get("/pr-chain/issue/7")).json()
+    assert detail["item"]["number"] == 7
+    assert len(detail["events"]) == 200 and detail["events"][-1]["stage"] == "s249"
+    assert len((await client.get("/pr-chain")).json()["events"]) == 200
+
+
+@pytest.mark.asyncio
+async def test_only_the_ledger_tail_is_read(client, root):
+    filler = json.dumps({"pr": 1, "stage": "old", "why": "x" * 200}) + "\n"
+    (root / "ledger.jsonl").write_text(filler * 3000 + json.dumps({"pr": 2, "stage": "new"}) + "\n")
+    events = (await client.get("/pr-chain")).json()["events"]
+    assert events[-1]["stage"] == "new" and len(events) <= 200
