@@ -17,7 +17,7 @@
       },
       "steps": [
         {
-          "action": "On the computer, open Settings > PhoneLink and select Link a Phone. Confirm that the portal is available before sharing an invitation."
+          "action": "On the computer, open Settings → PhoneLink and select Link a Phone. Confirm that the portal is available before sharing an invitation."
         },
         {
           "action": "On the phone you are linking, scan the QR code with its camera, or use Open on This Phone in the same browser."
@@ -26,7 +26,7 @@
           "action": "Compare the pairing code and host fingerprint shown on both screens; approve only on the computer if they match."
         },
         {
-          "action": "On the phone, let the app load, then bookmark it or add it to the Home Screen. Revoke a lost phone from Settings > PhoneLink on the computer."
+          "action": "On the phone, let the app load, then bookmark it or add it to the Home Screen. Revoke a lost phone from Settings → PhoneLink on the computer."
         }
       ],
       "media": {

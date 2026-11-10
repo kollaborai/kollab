@@ -70,7 +70,7 @@
       },
       "steps": [
         {
-          "action": "In Agents > Teams, choose Configure & Launch for the team."
+          "action": "In Agents → Teams, choose Configure & Launch for the team."
         },
         {
           "action": "Set the workspace, profile, members, lead and mission, then review the reporting tree."

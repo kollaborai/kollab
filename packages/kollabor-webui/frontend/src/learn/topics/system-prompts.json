@@ -17,7 +17,7 @@
       },
       "steps": [
         {
-          "action": "Open Settings > Prompts (or type /prompts in Web chat), choose the role you want to inspect, and open Full Prompt."
+          "action": "Open Settings → Prompts (or type /prompts in Web chat), choose the role you want to inspect, and open Full Prompt."
         },
         {
           "action": "For a project agent, edit .kollab/agents/<agent-name>/system_prompt.md in that project workspace."
@@ -26,7 +26,7 @@
           "action": "Make a focused change and save. Keep reusable fragments in that agent's sections/ directory and include one with <trender type=\"include\" path=\"sections/verify.md\" />."
         },
         {
-          "action": "Reload the agent, return to Settings > Prompts, select the same role and open Full Prompt to confirm the intended text is present."
+          "action": "Reload the agent, return to Settings → Prompts, select the same role and open Full Prompt to confirm the intended text is present."
         }
       ],
       "commands": [
@@ -34,7 +34,7 @@
           "syntax": "/prompts",
           "example": "/prompts",
           "description": "Open the System Prompts panel in the Web chat.",
-          "expect": "Settings > Prompts shows the current role's available sections and Full Prompt preview."
+          "expect": "Settings → Prompts shows the current role's available sections and Full Prompt preview."
         }
       ],
       "media": {
@@ -47,7 +47,7 @@
       "recovery": [
         {
           "symptom": "Your edits do not appear in the prompt",
-          "action": "Check whether a higher-priority project or global agent definition overrides the one you edited, then reload the agent and inspect the role in Settings > Prompts > Full Prompt."
+          "action": "Check whether a higher-priority project or global agent definition overrides the one you edited, then reload the agent and inspect the role in Settings → Prompts → Full Prompt."
         },
         {
           "symptom": "An include is missing",
@@ -69,7 +69,7 @@
       },
       "steps": [
         {
-          "action": "In Settings > Prompts, select the target under Roles and choose the relevant model variant."
+          "action": "In Settings → Prompts, select the target under Roles and choose the relevant model variant."
         },
         {
           "action": "Find the section you want and enable its checkbox for this role; the role composition saves automatically."
@@ -88,7 +88,7 @@
         {
           "syntax": "/prompts",
           "example": "/prompts",
-          "description": "Open Settings > Prompts in the Web chat.",
+          "description": "Open Settings → Prompts in the Web chat.",
           "expect": "The page offers Libraries, Roles, model variants, section selection, editing and Full Prompt."
         }
       ],

@@ -124,11 +124,12 @@
       "label": "Background model",
       "summary": "Keep the background Dream Model separate from the model that answers speech.",
       "entry": {
+        "ui": ["Terminal", "/config", "Hub", "Dream Model"],
         "command": "/config"
       },
       "steps": [
         {
-          "action": "In the terminal open /config > Hub > Dream Model."
+          "action": "In the terminal open /config → Hub → Dream Model."
         },
         {
           "action": "Enter a cheaper model ID supported by the active provider, or leave it blank.",
