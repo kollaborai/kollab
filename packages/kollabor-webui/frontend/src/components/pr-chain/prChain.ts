@@ -39,9 +39,14 @@ export function statusLabel(token: string | undefined): string {
   return text[0].toUpperCase() + text.slice(1);
 }
 
-/** The verdict and reason line under a row. */
+/**
+ * The verdict and reason line under a row. The runner keeps the reason and verdict of an earlier
+ * stop when a run starts again, so a live run shows neither and a ready one shows only its verdict.
+ */
 export function itemDetail(item: PrChainItem): string {
-  return [item.last_verdict ? statusLabel(item.last_verdict) : "", item.why].filter(Boolean).join(" · ");
+  if (item.claimed || item.status?.toLowerCase() === "running") return "";
+  const reason = item.status === "READY" ? undefined : item.why;
+  return [item.last_verdict ? statusLabel(item.last_verdict) : "", reason].filter(Boolean).join(" · ");
 }
 
 export function statusTone(item: PrChainItem): StatusTone {
