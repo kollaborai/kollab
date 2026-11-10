@@ -229,3 +229,53 @@ async def test_a_unicode_line_separator_inside_a_ledger_line_keeps_the_event(cli
     (root / "ledger.jsonl").write_text(line + "\n", encoding="utf-8")
     events = (await client.get("/pr-chain")).json()["events"]
     assert [e["stage"] for e in events] == ["review complete"]
+
+
+def release_fifo_later(path, after=1.5, give_up=4.0):
+    """Frees a reader stuck on a named pipe, so a broken build fails the test instead of hanging it."""
+    import os
+    import threading
+    import time
+
+    def run():
+        time.sleep(after)
+        deadline = time.monotonic() + give_up
+        while time.monotonic() < deadline:
+            try:
+                os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
+                return
+            except OSError:
+                time.sleep(0.1)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("where", ["prs/7/STATE.json", "claims/7/pid", "ledger.jsonl"])
+async def test_a_named_pipe_in_the_runner_folder_never_blocks_the_read(client, root, where):
+    import os
+    import time
+
+    write_state(root, "prs", 1, status="READY", updated="a")
+    (root / "claims" / "7").mkdir(parents=True)
+    if where == "prs/7/STATE.json":
+        (root / "prs" / "7").mkdir()
+    else:
+        write_state(root, "prs", 7, status="READY", updated="b")
+    pipe = root / where
+    os.mkfifo(pipe)
+    release_fifo_later(pipe)
+    started = time.monotonic()
+    response = await client.get("/pr-chain")
+    assert time.monotonic() - started < 1.0
+    assert response.status_code == 200
+    assert 1 in [i["number"] for i in response.json()["items"]]
+
+
+@pytest.mark.asyncio
+async def test_a_zero_padded_folder_name_is_not_a_second_copy_of_the_item(client, root):
+    write_state(root, "prs", 7, status="READY", updated="a")
+    write_state(root, "prs", "007", status="FAILED", updated="b")
+    write_state(root, "issues", "08", status="BUILDING", updated="c")
+    items = (await client.get("/pr-chain")).json()["items"]
+    assert [(i["kind"], i["number"], i["status"]) for i in items] == [("pr", 7, "READY")]
