@@ -62,3 +62,12 @@ it("only the newest request counts, so a slow older poll cannot overwrite newer 
   expect(second()).toBe(false);
   expect(third()).toBe(true);
 });
+
+describe("statusLabel with names that exist on every object", () => {
+  it("reads them as plain words, never as inherited properties", () => {
+    expect(statusLabel("__proto__")).toBe("Proto");
+    expect(statusLabel("constructor")).toBe("Constructor");
+    expect(statusLabel("toString")).toBe("Tostring");
+    expect(statusLabel("hasOwnProperty")).toBe("Hasownproperty");
+  });
+});
