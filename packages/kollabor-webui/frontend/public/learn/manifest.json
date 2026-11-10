@@ -16,7 +16,7 @@
       "assets": {
         "captions.vtt": {
           "bytes": 293,
-          "sha256": "9bdb3305b292dfb83c9ad31c5097fb1d767973782e3fef613eda6695b0961655"
+          "sha256": "e4c0604ccb9cd0b008d4ec9a5ad779f1c05b4075fe6bdfdb97cde2c4bc9b7f73"
         },
         "knocks.webp": {
           "bytes": 15442,
@@ -27,15 +27,17 @@
           "sha256": "3539e2d56a7525e8a139693a4c754efd205e957c7f1fc48d5d58eb15507af77b"
         },
         "walkthrough.mp4": {
-          "bytes": 275707,
-          "sha256": "8e524ec1f9e29b1b5fa0218b6db0125975f4beb60094e697adbf5ad615c3adcd"
+          "bytes": 233202,
+          "sha256": "e024d90152dccbfb82ac92772d1aa9bc4e699b2dc4ffc16302220c818a26f192"
         }
       },
       "video": {
-        "duration_seconds": 14.958008,
+        "duration_seconds": 12.958333,
         "width": 1280,
         "height": 800,
         "playback_speed": 2,
+        "public_trim_start_seconds": 2.0,
+        "public_trim_reason": "first 2 seconds showed the Session tab with build and version rows; captions retimed by -2.0 s",
         "source_capture_video_sha256": "8e524ec1f9e29b1b5fa0218b6db0125975f4beb60094e697adbf5ad615c3adcd",
         "recipe_sha256": "951e1d272a47c9653e40bea4d0ec21800c6748b42afa81fdaedcd53bdaa4c37c",
         "recorder_sha256": "8a0fa3a1f450774e6c22478414e9b8a6d6347a43b015cc91bf2f79fee832c174",
