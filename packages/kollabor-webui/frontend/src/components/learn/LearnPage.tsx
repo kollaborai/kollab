@@ -5,6 +5,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { getLearnMediaSource } from "./phone-media-map";
+import { prefersReducedMotion } from "./media";
 import { getLearnTopic, isLearnTopicId, LEARN_TOPICS, type LearnRoute, type LearnTopicId, type LearnWorkflow } from "@/learn/catalog";
 
 type LearnPageProps = {
@@ -40,7 +41,7 @@ function WorkflowMedia({ media, success }: { media: LearnWorkflow["media"]; succ
   }, [media]);
 
   useEffect(() => {
-    if (watching && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    if (watching && !prefersReducedMotion()) {
       void videoRef.current?.play().catch(() => {});
     }
   }, [watching, retry]);
