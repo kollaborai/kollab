@@ -4,9 +4,9 @@ import type { PrChainEvent, PrChainItem } from "@/api";
 export const PR_CHAIN_REPO = "kollaborai/kollab";
 
 /** Statuses where the workflow stopped on a failure. They sort to the top and read in the destructive color. */
-export const FAILED = new Set(["UI-FAILED", "BUILD-FAILED", "ERROR"]);
+export const FAILED = new Set(["UI-FAILED", "BUILD-FAILED", "ERROR", "GATE-FAILED", "NO-VERDICT", "UI-NO-VERDICT", "CI-RED"]);
 /** Statuses that wait for a person. They sort just after failures and read in the highlight color. */
-export const NEEDS_HUMAN = new Set(["AWAIT-HUMAN"]);
+export const NEEDS_HUMAN = new Set(["AWAIT-HUMAN", "NEEDS-HUMAN", "LAND-STOPPED"]);
 const DONE = new Set(["MERGED", "CLOSED"]);
 
 export const itemUrl = (item: PrChainItem) =>
