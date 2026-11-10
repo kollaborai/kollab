@@ -406,6 +406,7 @@ async def test_a_folder_swapped_for_a_symlink_while_it_is_being_read_does_not_le
     outside.mkdir()
     (outside / "STATE.json").write_text(json.dumps({"status": "LEAKED", "updated": "z"}))
     write_state(root, "prs", 123, status="READY", updated="a")
+    make_symlink(tmp_path / "probe-link", outside)  # skips here when the account may not create symlinks
     real_open = os.open
     swapped = []
     item_folder = (root / "prs" / "123").stat().st_ino
@@ -423,7 +424,7 @@ async def test_a_folder_swapped_for_a_symlink_while_it_is_being_read_does_not_le
         if ours and not swapped:
             swapped.append(True)
             (root / "prs" / "123").rename(root / "prs" / "123.orig")
-            (root / "prs" / "123").symlink_to(outside)
+            (root / "prs" / "123").symlink_to(outside, target_is_directory=True)
         return real_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(os, "open", open_after_a_swap)
@@ -526,6 +527,48 @@ async def test_without_dir_fd_a_folder_swapped_while_it_is_read_does_not_leak(
     monkeypatch.setattr(os, "open", open_after_a_swap)
     response = await client.get("/pr-chain/pr/123")
     assert swapped and "LEAKED" not in response.text, (swapped, response.text)
+
+
+def make_hard_link(link, target):
+    import os
+
+    try:
+        os.link(target, link)
+    except (OSError, NotImplementedError, AttributeError):
+        pytest.skip("hard links are not available here")
+
+
+@pytest.mark.asyncio
+async def test_a_state_file_hard_linked_from_outside_the_root_is_not_read(client, root, tmp_path):
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"status": "LEAKED", "updated": "z"}))
+    write_state(root, "prs", 7, status="READY", updated="a")
+    (root / "prs" / "7" / "STATE.json").unlink()
+    make_hard_link(root / "prs" / "7" / "STATE.json", outside)
+    assert (await client.get("/pr-chain/pr/7")).status_code == 404
+    assert "LEAKED" not in json.dumps((await client.get("/pr-chain")).json())
+
+
+@pytest.mark.asyncio
+async def test_a_ledger_hard_linked_from_outside_the_root_is_not_read(client, root, tmp_path):
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text(json.dumps({"pr": 7, "stage": "LEAKED"}) + "\n")
+    make_hard_link(root / "ledger.jsonl", outside)
+    assert "LEAKED" not in json.dumps((await client.get("/pr-chain")).json())
+
+
+@pytest.mark.asyncio
+async def test_without_dir_fd_the_opened_file_must_be_where_the_path_says(
+    client, root, tmp_path, no_dir_fd, monkeypatch
+):
+    """Both ``lstat`` checks can be fooled by a swap that is undone, so the OS is asked where the handle points."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    write_state(root, "prs", 5, status="READY", updated="a")
+    monkeypatch.setattr(pr_chain, "_final_path", lambda fd: str(outside / "STATE.json"))
+    assert (await client.get("/pr-chain/pr/5")).status_code == 404
+    monkeypatch.setattr(pr_chain, "_final_path", lambda fd: str(root.resolve() / "prs" / "5" / "STATE.json"))
+    assert (await client.get("/pr-chain/pr/5")).json()["status"] == "READY"
 
 
 @pytest.mark.asyncio
