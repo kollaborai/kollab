@@ -96,7 +96,7 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
           <div role="alert" className="bg-destructive/10 text-destructive mx-4 mb-2 flex items-start gap-2 rounded-md px-3 py-2 text-sm sm:mx-6">
             <AlertCircle className="mt-0.5 size-4 shrink-0" />
             <span className="min-w-0 flex-1 break-words" title={loadError}>
-              Couldn&apos;t load the PR chain.
+              Couldn&apos;t load the PR Chain.
             </span>
             <Button type="button" size="sm" variant="ghost" className="-my-1 h-7 shrink-0 px-2 max-sm:h-11" disabled={busy} onClick={() => load(true)}>
               Try again
@@ -113,7 +113,7 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
             </div>
           ) : !snapshot.root_found || items.length === 0 ? (
             <p className="text-muted-foreground py-8 text-center text-sm text-balance">
-              {snapshot.root_found ? "Nothing is tracked yet. " : "No PR chain state on this machine. "}
+              {snapshot.root_found ? "Nothing is tracked yet. " : "No PR Chain state on this machine. "}
               Run <code className="text-foreground font-mono text-xs whitespace-nowrap">pr-chain run &lt;pr number&gt;</code> or{" "}
               <code className="text-foreground font-mono text-xs whitespace-nowrap">pr-chain issue &lt;issue number&gt;</code> and it shows up here.
             </p>
@@ -123,7 +123,7 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
                 {items.map((item) => {
                   const tone = statusTone(item);
                   return (
-                    <li key={`${item.kind}-${item.number}`} className="grid grid-cols-[auto_1fr] items-baseline sm:grid-cols-[auto_1fr_auto] gap-x-3 gap-y-0.5 py-2 text-sm">
+                    <li key={`${item.kind}-${item.number}`} className="grid grid-cols-[5.5rem_1fr] items-baseline sm:grid-cols-[5.5rem_1fr_auto] gap-x-3 gap-y-0.5 py-2 text-sm">
                       <a
                         href={itemUrl(item)}
                         target="_blank"
@@ -134,7 +134,7 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
                         <ExternalLink className="size-3" />
                       </a>
                       <span className={cn("min-w-0 break-words font-medium", TONE[tone])}>
-                        {statusLabel(item.status)}
+                        {item.status ? statusLabel(item.status) : <span className="text-muted-foreground font-normal">No status yet</span>}
                         {item.claimed ? <span className="text-muted-foreground ml-1.5 font-normal">Running</span> : null}
                       </span>
                       <span className="text-muted-foreground col-span-2 font-mono text-xs sm:col-span-1 sm:whitespace-nowrap">
@@ -144,7 +144,7 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
                       </span>
                       {item.why || item.last_verdict ? (
                         <span
-                          className="text-muted-foreground col-span-2 line-clamp-3 min-w-0 break-words text-xs sm:col-span-3"
+                          className="text-muted-foreground col-span-2 min-w-0 break-words text-xs sm:line-clamp-3 sm:col-span-3"
                           title={[item.last_verdict ? statusLabel(item.last_verdict) : "", item.why].filter(Boolean).join(" · ")}
                         >
                           {[item.last_verdict ? statusLabel(item.last_verdict) : "", item.why].filter(Boolean).join(" · ")}
@@ -161,7 +161,7 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
                     {events.map((event, index) => (
                       <li key={`${event.ts}-${index}`} className="flex gap-3 text-xs">
                         <span className="text-muted-foreground shrink-0 font-mono">{shortTime(event.ts)}</span>
-                        <span className="min-w-0 truncate">{describeEvent(event)}</span>
+                        <span className="min-w-0 break-words sm:truncate">{describeEvent(event)}</span>
                       </li>
                     ))}
                   </ul>
