@@ -39,6 +39,11 @@ export function statusLabel(token: string | undefined): string {
   return text[0].toUpperCase() + text.slice(1);
 }
 
+/** The verdict and reason line under a row. */
+export function itemDetail(item: PrChainItem): string {
+  return [item.last_verdict ? statusLabel(item.last_verdict) : "", item.why].filter(Boolean).join(" · ");
+}
+
 export function statusTone(item: PrChainItem): StatusTone {
   const status = item.status ?? "";
   if (FAILED.has(status)) return "failed";

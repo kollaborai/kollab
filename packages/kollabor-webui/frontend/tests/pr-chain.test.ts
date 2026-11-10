@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PrChainItem } from "../src/api";
-import { describeEvent, inOrder, itemUrl, shortTime, sortItems, statusLabel, statusTone, inFlight } from "../src/components/pr-chain/prChain";
+import { describeEvent, inOrder, itemDetail, itemUrl, shortTime, sortItems, statusLabel, statusTone, inFlight } from "../src/components/pr-chain/prChain";
 
 const item = (over: Partial<PrChainItem>): PrChainItem => ({ kind: "pr", number: 1, claimed: false, ...over });
 
@@ -185,5 +185,22 @@ describe("inFlight cancels what it gives up on", () => {
     requests.abortAll();
     expect([a.signal.aborted, b.signal.aborted]).toEqual([true, true]);
     expect(requests.pending()).toBe(0);
+  });
+});
+
+describe("itemDetail", () => {
+  const old = { why: "conflict with main", last_verdict: "FAIL" };
+
+  it("shows the reason and verdict of a stopped run", () => {
+    expect(itemDetail(item({ status: "NEEDS-HUMAN", ...old }))).toBe("Fail · conflict with main");
+  });
+
+  it("hides a past failure while the run is going again", () => {
+    expect(itemDetail(item({ status: "running", ...old }))).toBe("");
+    expect(itemDetail(item({ status: "REVIEWING", claimed: true, ...old }))).toBe("");
+  });
+
+  it("keeps the verdict but not an old reason once a run is ready", () => {
+    expect(itemDetail(item({ status: "READY", last_verdict: "PASS", why: "conflict with main" }))).toBe("Pass");
   });
 });

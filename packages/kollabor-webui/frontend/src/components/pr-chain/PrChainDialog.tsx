@@ -12,7 +12,7 @@ import {
 import { NoticeAction, NoticeBar } from "@/components/shell/NoticeBar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import { describeEvent, inFlight, inOrder, itemUrl, shortTime, sortItems, statusLabel, statusTone, type StatusTone } from "./prChain";
+import { describeEvent, inFlight, inOrder, itemDetail, itemUrl, shortTime, sortItems, statusLabel, statusTone, type StatusTone } from "./prChain";
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -156,11 +156,11 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
                         {item.round && item.updated ? " · " : ""}
                         {shortTime(item.updated)}
                       </span>
-                      {item.why || item.last_verdict ? (
+                      {itemDetail(item) ? (
                         <span
                           className="text-muted-foreground col-span-2 min-w-0 break-words text-xs sm:col-span-3"
                         >
-                          {[item.last_verdict ? statusLabel(item.last_verdict) : "", item.why].filter(Boolean).join(" · ")}
+                          {itemDetail(item)}
                         </span>
                       ) : null}
                     </li>
