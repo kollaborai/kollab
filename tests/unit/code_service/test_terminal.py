@@ -444,18 +444,50 @@ async def test_teardown_ends_background_job_after_shell_exits(tmp_path, mode):
 
 
 async def test_closing_one_terminal_does_not_signal_another(tmp_path):
+    import asyncio
+
     first = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
     other = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
-    first_id = await first.open()
-    other_id = await other.open()
-    first_session = terminal._SESSIONS[first_id]
-    await first.send(type="close")
-    task = first_session.destroy()
-    if task is not None:
-        await task
-    assert not terminal._SESSIONS[other_id].exited
-    await other.send(type="input", data="echo still-alive-91''23\n")
-    assert "still-alive-9123" in await other.until("still-alive-9123")
+    async with asyncio.timeout(10):
+        first_id = await first.open()
+        other_id = await other.open()
+        first_session = terminal._SESSIONS[first_id]
+        await first.send(type="close")
+        task = first_session.destroy()
+        if task is not None:
+            await task
+        assert not terminal._SESSIONS[other_id].exited
+        await other.send(type="input", data="echo still-alive-91''23\n")
+        assert "still-alive-9123" in await other.until("still-alive-9123")
+
+
+async def test_teardown_does_not_wait_forever_for_an_unreaped_shell(tmp_path, monkeypatch):
+    import asyncio
+    import contextlib
+
+    link = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
+    sid = await link.open()
+    await link.send(type="input", data="echo shell-ready-57''9\n")
+    await link.until("shell-ready-579")
+    session = terminal._SESSIONS[sid]
+    monkeypatch.setattr(session, "_capture_processes", lambda: set())
+    monkeypatch.setattr(session, "_signal_owned", lambda *_args: None)
+    monkeypatch.setattr(terminal, "KILL_AFTER_SECONDS", 0.05)
+    try:
+        task = session.destroy()
+        assert task is not None
+        async with asyncio.timeout(1.0):
+            await asyncio.shield(task)
+    finally:
+        # This is the exact shell started by this test; Popen guards against signalling a reused PID.
+        with contextlib.suppress(ProcessLookupError):
+            session._proc.kill()
+        if session._watch_task is not None:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(session._watch_task, 3)
+        if session._teardown_task is not None:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(session._teardown_task, 3)
 
 
 def _job_is_running(process):
