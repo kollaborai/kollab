@@ -56,6 +56,7 @@ _SECRET_MARKERS = (
     "PASSWD",
     "CREDENTIAL",
     "PRIVATE_KEY",
+    "ACCESS_KEY",
     "DATABASE_URL",
 )
 # Whole `_`-separated words that mark a secret; a substring test would hit PATH and PATTERN_DIR.

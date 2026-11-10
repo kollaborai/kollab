@@ -295,7 +295,7 @@ def test_shell_env_drops_kollab_and_secret_names(monkeypatch):
 
 def test_shell_env_drops_common_credential_names_and_keeps_ordinary_ones(monkeypatch):
     # #987 review: these slipped through the four-marker rule.
-    secrets = ("DATABASE_URL", "GITHUB_PAT", "PAT", "OPENAI_APIKEY", "DB_PASSWD", "AWS_CREDENTIALS", "SSH_PRIVATE_KEY")
+    secrets = ("DATABASE_URL", "GITHUB_PAT", "PAT", "OPENAI_APIKEY", "DB_PASSWD", "AWS_CREDENTIALS", "SSH_PRIVATE_KEY", "AWS_ACCESS_KEY_ID")
     for name in secrets:
         monkeypatch.setenv(name, "x")
     for name in ("PATTERN_DIR", "EDITOR_PATH_HINT", "PATHEXT_NOTE"):

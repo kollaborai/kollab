@@ -19,7 +19,7 @@ The views have on and off switches and limits. Defaults are safe and nothing is 
 | `enabled` | true | false: the daemon refuses every code, git and terminal call (404 `code_disabled`). Lets a machine owner close the door |
 | `read_only` | false | true: writes, creates, renames, deletes, git writes and terminal input are refused (403 `read_only`). Opt-in only |
 | `terminal.enabled` | true | false: no shells |
-| `terminal.pass_secret_env` | false | true: secret-looking names reach the shell (containing TOKEN, SECRET, API_KEY, APIKEY, PASSWORD, PASSWD, CREDENTIAL, PRIVATE_KEY or DATABASE_URL, or a `_`-separated word PAT) |
+| `terminal.pass_secret_env` | false | true: secret-looking names reach the shell (containing TOKEN, SECRET, API_KEY, APIKEY, PASSWORD, PASSWD, CREDENTIAL, PRIVATE_KEY, ACCESS_KEY or DATABASE_URL, or a `_`-separated word PAT) |
 | `terminal.pass_kollab_env` | false | true: `KOLLAB_*` and `KOLLABOR_*` reach the shell |
 | `terminal.env_allow` | [] | exact names that always pass, even if a filter above would drop them |
 | `terminal.env_deny` | [] | exact names that never pass |
