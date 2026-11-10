@@ -1,10 +1,12 @@
 """The PR-chain read routes show an external runner's state folder (#1008)."""
 
 import json
+import os
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from kollabor_engine import pr_chain
 from kollabor_engine.server import create_app  # type: ignore[import-not-found]
 
 
@@ -262,6 +264,7 @@ def release_fifo_later(path, after=1.5, give_up=4.0):
     threading.Thread(target=run, daemon=True).start()
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are a POSIX feature")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("where", ["prs/7/STATE.json", "claims/7/pid", "ledger.jsonl"])
 async def test_a_named_pipe_in_the_runner_folder_never_blocks_the_read(client, root, where):
@@ -394,6 +397,7 @@ async def test_a_folder_with_a_huge_number_of_entries_is_only_partly_examined(cl
     assert 0 < len(items) <= 30
 
 
+@pytest.mark.skipif(not pr_chain._DIR_FD, reason="this swap is closed by descriptors, which need dir_fd")
 @pytest.mark.asyncio
 async def test_a_folder_swapped_for_a_symlink_while_it_is_being_read_does_not_leak(client, root, tmp_path, monkeypatch):
     import os
@@ -569,3 +573,9 @@ async def test_files_are_opened_in_binary_mode_where_the_platform_has_one(client
     (root / "ledger.jsonl").write_text(json.dumps({"pr": 1, "stage": "review"}) + "\n")
     assert (await client.get("/pr-chain")).status_code == 200
     assert seen == {"STATE.json": True, "ledger.jsonl": True}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="asks the Windows process table")
+def test_the_windows_probe_tells_a_live_process_from_a_dead_one():
+    assert pr_chain._windows_pid_alive(os.getpid())
+    assert not pr_chain._windows_pid_alive(2**31 - 2)

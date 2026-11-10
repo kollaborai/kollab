@@ -66,6 +66,7 @@ def _clean(data: Dict[str, Any], text_fields: Any, int_fields: Any) -> Dict[str,
     return out
 
 
+_WINDOWS = os.name == "nt"
 _DIR_FD = os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
 
 
@@ -135,7 +136,7 @@ def _read_file(base: Path, parts: Tuple[str, ...], limit: int, tail: bool = Fals
     another file the engine can read, and a named pipe or device would block a reader forever.
     Both raise ``OSError`` without the file being read.
     """
-    fd = _open_file(base, parts, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    fd = _open_file(base, parts, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
@@ -152,6 +153,26 @@ def _read_file(base: Path, parts: Tuple[str, ...], limit: int, tail: bool = Fals
         os.close(fd)
 
 
+def _windows_pid_alive(pid: int) -> bool:
+    """Whether a process with this id is running, asked of the OS without signalling it.
+
+    ``os.kill(pid, 0)`` is ``CTRL_C_EVENT`` on Windows, which interrupts a console process group.
+    """
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        # Access denied means the process exists but belongs to someone else.
+        return ctypes.get_last_error() == 5
+    try:
+        code = ctypes.c_ulong()
+        return bool(kernel32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code))) and code.value == 259
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+
 def _runner_alive(base: Path, claim: str) -> bool:
     """A claim counts only while the process that wrote it is still running."""
     try:
@@ -161,6 +182,8 @@ def _runner_alive(base: Path, claim: str) -> bool:
     try:
         if not 1 < pid <= MAX_PID:
             return False
+        if _WINDOWS:
+            return _windows_pid_alive(pid)
         os.kill(pid, 0)
     except PermissionError:
         return True
