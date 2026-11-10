@@ -85,6 +85,21 @@ test("Learn recovery symptoms are bare labels because the renderer appends the c
   }
 });
 
+test("Learn instructional paths use arrows while literal command examples remain free-form", () => {
+  function check(value: unknown, location: string): void {
+    if (typeof value === "string") {
+      assert.ok(!/\s>\s/.test(value), `${location} uses > as a UI path separator`);
+    } else if (Array.isArray(value)) {
+      value.forEach((item, index) => check(item, `${location}[${index}]`));
+    } else if (value && typeof value === "object") {
+      for (const [key, item] of Object.entries(value)) {
+        if (key !== "syntax" && key !== "example") check(item, `${location}.${key}`);
+      }
+    }
+  }
+  for (const topic of LEARN_TOPICS) check(topic, topic.id);
+});
+
 test("PhoneLink resolves Learn images only from the signed app's inline asset map", () => {
   const root = mkdtempSync(path.join(tmpdir(), "kollab-phone-learn-media-"));
   const topicsDir = path.join(root, "topics");
@@ -170,7 +185,7 @@ test("all lessons preserve high-value truthful behavior from the former catalog"
 
   const voice = lessonText("voice");
   for (const detail of [
-    /\/config > Hub > Dream Model/, /model ID/, /active provider/, /kollabor\.llm\.fast_model/,
+    /\/config → Hub → Dream Model/, /model ID/, /active provider/, /kollabor\.llm\.fast_model/,
     /active session model/, /endpoint and credentials/, /dreaming only/, /does not change voice replies/,
     /Settings → Voice → (?:Voice Preferences → )?Quick Model/, /\/voice config → Quick Model/, /any configured provider['’]s model/,
     /OpenRouter/, /Same as Chat/, /\/voice status/, /\/voice on/, /\/voice off/,

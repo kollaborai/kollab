@@ -365,6 +365,93 @@ async function waitForLesson(page, title) {
   await page.getByRole("heading", { level: 1, name: title, exact: true }).waitFor({ state: "visible" });
 }
 
+async function verifyMobileLearnLayout(browser, baseUrl) {
+  const failures = [];
+  const checks = [
+    {
+      name: "mobile preview preserves readable native size and can pan",
+      run: async (page) => {
+        await page.goto(`${baseUrl}/learn?topic=networks`, { waitUntil: "domcontentloaded" });
+        await waitForLesson(page, "Connect");
+        const main = page.getByRole("main", { name: "Learn", exact: true });
+        await main.getByRole("button", { name: "Enlarge product preview", exact: true }).click();
+        const dialog = page.getByRole("dialog", { name: "Product preview", exact: true });
+        await dialog.waitFor();
+        const image = dialog.locator("img");
+        await image.evaluate((element) => element.decode());
+        const size = await image.evaluate((element) => ({
+          native: element.naturalWidth,
+          rendered: element.getBoundingClientRect().width,
+          viewport: innerWidth,
+          scrollWidth: element.parentElement.scrollWidth,
+          visibleWidth: element.parentElement.clientWidth,
+        }));
+        assert.ok(size.native > size.viewport, "this regression requires a product capture wider than the phone");
+        assert.ok(size.rendered >= size.native - 1, `preview shrank from ${size.native}px to ${size.rendered}px`);
+        assert.ok(size.scrollWidth > size.visibleWidth, "wide preview must pan inside its image viewport");
+        const panned = await image.evaluate((element) => {
+          element.parentElement.scrollLeft = 80;
+          return element.parentElement.scrollLeft;
+        });
+        assert.ok(panned > 0, "preview cannot be panned horizontally");
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
+        await page.keyboard.press("Escape");
+        await dialog.waitFor({ state: "hidden" });
+        await waitForLesson(page, "Connect");
+      },
+    },
+    {
+      name: "mobile workflow labels remain fully visible and selectable",
+      run: async (page) => {
+        await page.goto(`${baseUrl}/learn?topic=devices`, { waitUntil: "domcontentloaded" });
+        await waitForLesson(page, "Devices");
+        const main = page.getByRole("main", { name: "Learn", exact: true });
+        const tabs = main.getByRole("tablist", { name: "Devices workflows", exact: true });
+        await tabs.waitFor();
+        await page.evaluate(async () => {
+          await document.fonts.ready;
+          await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        });
+        const layout = await tabs.evaluate((element) => {
+          const bounds = element.getBoundingClientRect();
+          return {
+            visibleWidth: element.clientWidth,
+            scrollWidth: element.scrollWidth,
+            labels: [...element.querySelectorAll('[role="tab"]')].map((tab) => {
+              const box = tab.getBoundingClientRect();
+              return { text: tab.textContent, left: box.left - bounds.left, right: box.right - bounds.left };
+            }),
+          };
+        });
+        assert.ok(layout.labels.length > 1, "this regression requires several workflows");
+        assert.ok(layout.scrollWidth <= layout.visibleWidth + 1, "workflow choices extend beyond their visible row");
+        for (const label of layout.labels) {
+          assert.ok(label.left >= -1 && label.right <= layout.visibleWidth + 1, `${label.text} is clipped at phone width`);
+        }
+        const lastTab = tabs.getByRole("tab").last();
+        await lastTab.click();
+        await page.waitForFunction(() => document.querySelector('[aria-label="Devices workflows"] [role="tab"]:last-child')?.getAttribute("aria-selected") === "true");
+      },
+    },
+  ];
+  for (const check of checks) {
+    const view = await openPage(browser, baseUrl, makeFixtures(), { viewport: { width: 390, height: 844 }, isMobile: true });
+    try {
+      await check.run(view.page);
+      assert.deepEqual(view.pageErrors, []);
+      assert.deepEqual(view.consoleErrors, []);
+      assert.deepEqual(view.externalRequests, []);
+      console.log(`PASS: ${check.name}`);
+    } catch (error) {
+      failures.push(error);
+      console.error(`FAIL: ${check.name}: ${error.message}`);
+    } finally {
+      await view.context.close();
+    }
+  }
+  if (failures.length) throw new AggregateError(failures, "Mobile Learn layout regressions");
+}
+
 async function main() {
   const captureCodeHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim();
   console.log(`Learn browser acceptance code head: ${captureCodeHead}`);
@@ -377,6 +464,8 @@ async function main() {
       ...(executablePath ? { executablePath } : {}),
       args: process.platform === "linux" ? ["--no-sandbox"] : [],
     });
+
+    await verifyMobileLearnLayout(browser, baseUrl);
 
     const fixtures = makeFixtures({ discoveryFailureOnce: true, discoveryProgressOnce: true });
     const shell = await openPage(browser, baseUrl, fixtures);
