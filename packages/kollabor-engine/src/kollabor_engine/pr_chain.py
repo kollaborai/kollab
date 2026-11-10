@@ -102,13 +102,44 @@ def _open_dir(base: Path, parts: Tuple[str, ...]) -> int:
     return fd
 
 
+def _final_path(fd: int) -> Optional[str]:
+    """Where the OS says the open descriptor ``fd`` really points, or None where that cannot be asked.
+
+    Only Windows is asked (``GetFinalPathNameByHandleW``); POSIX opens are pinned with ``dir_fd`` instead.
+    """
+    if not _WINDOWS:
+        return None
+    import ctypes
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    call = kernel32.GetFinalPathNameByHandleW
+    call.restype = ctypes.c_uint32
+    call.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
+    handle = msvcrt.get_osfhandle(fd)  # type: ignore[attr-defined]
+    size = 1024
+    while size <= 32768:
+        buf = ctypes.create_unicode_buffer(size)
+        needed = call(handle, buf, size, 0)
+        if needed == 0:
+            raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined]
+        if needed < size:
+            path = buf.value
+            if path.startswith("\\\\?\\UNC\\"):
+                return "\\\\" + path[8:]
+            return path[4:] if path.startswith("\\\\?\\") else path
+        size = needed + 1
+    raise OSError("the final path is too long")
+
+
 def _open_file(base: Path, parts: Tuple[str, ...], flags: int) -> int:
     """A descriptor for ``base/<parts>`` that is not reached through a link.
 
     With ``dir_fd`` the file is opened relative to its folder's descriptor, which closes the swap.
-    Without it (Windows) no step can be pinned, so the open is checked on both sides: no link on the
-    path before, and no link on the path after with the opened file being the one the path names.
-    A swap that is undone between those checks, or a hard link, is not detected.
+    Without it (Windows) no step can be pinned, so the open is checked three ways: no link on the
+    path before, no link on the path after with the opened file being the one the path names, and the
+    OS's own answer for where the opened handle points (a swap undone between the two path checks
+    still shows up there).
     """
     if _DIR_FD:
         folder = _open_dir(base, parts[:-1])
@@ -116,6 +147,7 @@ def _open_file(base: Path, parts: Tuple[str, ...], flags: int) -> int:
             return os.open(parts[-1], flags | getattr(os, "O_NOFOLLOW", 0), dir_fd=folder)
         finally:
             os.close(folder)
+    expected = os.path.normcase(os.path.join(os.path.realpath(base), *parts))
     path = _checked_path(base, parts)
     fd = os.open(path, flags)
     try:
@@ -123,6 +155,9 @@ def _open_file(base: Path, parts: Tuple[str, ...], flags: int) -> int:
         named = os.lstat(_checked_path(base, parts))
         if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
             raise OSError(f"{parts[-1]} changed while it was opened")
+        final = _final_path(fd)
+        if final is not None and os.path.normcase(final) != expected:
+            raise OSError(f"{parts[-1]} is not where its path says")
     except BaseException:
         os.close(fd)
         raise
@@ -133,14 +168,17 @@ def _read_file(base: Path, parts: Tuple[str, ...], limit: int, tail: bool = Fals
     """Up to ``limit`` + 1 bytes of the regular file ``base/<parts>`` (the last ones with ``tail``).
 
     The runner's folder is not trusted: a symlink at any step below ``base`` could point at
-    another file the engine can read, and a named pipe or device would block a reader forever.
-    Both raise ``OSError`` without the file being read.
+    another file the engine can read, a hard link is a second name for one, and a named pipe or
+    device would block a reader forever. All raise ``OSError`` without the file being read.
     """
     fd = _open_file(base, parts, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise OSError(f"{parts[-1]} is not a regular file")
+        if info.st_nlink > 1:
+            # The runner writes each file once. A second name for it is a link made from somewhere else.
+            raise OSError(f"{parts[-1]} has more than one hard link")
         if tail and info.st_size > limit:
             os.lseek(fd, info.st_size - limit, os.SEEK_SET)
         chunks: List[bytes] = []

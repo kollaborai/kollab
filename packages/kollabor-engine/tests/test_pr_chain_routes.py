@@ -568,7 +568,7 @@ async def test_without_dir_fd_the_opened_file_must_be_where_the_path_says(
     monkeypatch.setattr(pr_chain, "_final_path", lambda fd: str(outside / "STATE.json"))
     assert (await client.get("/pr-chain/pr/5")).status_code == 404
     monkeypatch.setattr(pr_chain, "_final_path", lambda fd: str(root.resolve() / "prs" / "5" / "STATE.json"))
-    assert (await client.get("/pr-chain/pr/5")).json()["status"] == "READY"
+    assert (await client.get("/pr-chain/pr/5")).json()["item"]["status"] == "READY"
 
 
 @pytest.mark.asyncio
