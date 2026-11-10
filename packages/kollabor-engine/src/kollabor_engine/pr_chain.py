@@ -6,6 +6,7 @@ The runner keeps ``prs/<n>/STATE.json``, ``issues/<n>/STATE.json`` and an append
 
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -54,10 +55,33 @@ def _clean(data: Dict[str, Any], text_fields: Any, int_fields: Any) -> Dict[str,
     return out
 
 
+def _read_file(path: Path, limit: int, tail: bool = False) -> bytes:
+    """Up to ``limit`` + 1 bytes of a regular file (the last ones with ``tail``).
+
+    The runner's folder is not trusted: a named pipe or device there would block a reader
+    forever, so anything but a regular file raises ``OSError`` without being read.
+    """
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError(f"{path.name} is not a regular file")
+        if tail and info.st_size > limit:
+            os.lseek(fd, info.st_size - limit, os.SEEK_SET)
+        chunks: List[bytes] = []
+        total = 0
+        while total <= limit and (chunk := os.read(fd, limit + 1 - total)):
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
 def _runner_alive(claim: Path) -> bool:
     """A claim counts only while the process that wrote it is still running."""
     try:
-        pid = int((claim / "pid").read_text().strip())
+        pid = int(_read_file(claim / "pid", 64).decode("ascii", "replace").strip())
     except (OSError, ValueError, OverflowError):
         return False
     try:
@@ -75,9 +99,10 @@ def read_item(base: Path, kind: str, number: int) -> Optional[Dict[str, Any]]:
     """One item's STATE.json as a row, or None when it is missing or unreadable."""
     path = base / KINDS[kind] / str(number) / "STATE.json"
     try:
-        if path.stat().st_size > MAX_STATE_BYTES:
+        raw = _read_file(path, MAX_STATE_BYTES)
+        if len(raw) > MAX_STATE_BYTES:
             return None
-        data = json.loads(path.read_text())
+        data = json.loads(raw.decode("utf-8", "replace"))
     except OSError, ValueError, RecursionError:
         return None
     if not isinstance(data, dict):
@@ -88,12 +113,17 @@ def read_item(base: Path, kind: str, number: int) -> Optional[Dict[str, Any]]:
     return row
 
 
+def _is_number_folder(name: str) -> bool:
+    """Only the canonical spelling of a number names an item, so ``007`` is not a second ``7``."""
+    return name.isascii() and name.isdigit() and len(name) <= MAX_DIGITS and name == str(int(name))
+
+
 def list_items(base: Path) -> List[Dict[str, Any]]:
     """Every PR and issue with a readable state file, most recently updated first."""
     rows: List[Dict[str, Any]] = []
     for kind, sub in KINDS.items():
         try:
-            names = [p.name for p in (base / sub).iterdir() if p.name.isascii() and p.name.isdigit()]
+            names = [p.name for p in (base / sub).iterdir() if _is_number_folder(p.name)]
         except OSError:
             continue
         for name in names:
@@ -111,11 +141,7 @@ def read_events(base: Path, kind: Optional[str] = None, number: Optional[int] = 
     ``number`` only that item's events return.
     """
     try:
-        with open(base / "ledger.jsonl", "rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            size = handle.tell()
-            handle.seek(max(0, size - LEDGER_TAIL_BYTES))
-            raw = handle.read().decode("utf-8", "replace")
+        raw = _read_file(base / "ledger.jsonl", LEDGER_TAIL_BYTES, tail=True).decode("utf-8", "replace")
     except OSError:
         return []
     events: List[Dict[str, Any]] = []
