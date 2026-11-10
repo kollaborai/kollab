@@ -1,0 +1,99 @@
+{
+  "id": "agents",
+  "title": "Agents",
+  "summary": "Choose a specialist for focused work or launch a coordinated team for work that divides into roles.",
+  "workflows": [
+    {
+      "id": "ask-a-specialist",
+      "label": "Start focused agent work",
+      "summary": "Give one agent a bounded task and ask for verifiable evidence.",
+      "entry": {
+        "prerequisite": "Open the workspace that contains the agent you want.",
+        "ui": [
+          "Session Options",
+          "Agent"
+        ]
+      },
+      "steps": [
+        {
+          "action": "Open Session Options beside +, then choose the agent in Agent. Use the Agents button at the bottom of the sidebar to inspect rosters and roles first if needed."
+        },
+        {
+          "action": "Choose Workspace and Model, then select Start Session.",
+          "expect": "The agent opens in the chosen project folder."
+        },
+        {
+          "action": "Give it a specific objective, scope, constraints and the evidence you want back."
+        },
+        {
+          "action": "Review its output and verify the files or tests it reports."
+        }
+      ],
+      "media": {
+        "kind": "image",
+        "src": "/learn/agents/overview.webp",
+        "alt": "Kollab Agents panel with specialist agents in a workspace",
+        "caption": "Choose a specialist and give it a bounded objective with clear acceptance evidence."
+      },
+      "success": "The selected agent works in the chosen workspace and returns a result you can inspect against the acceptance checks.",
+      "recovery": [
+        {
+          "symptom": "The agent is not available",
+          "action": "Check the selected workspace and agent definition, then refresh the Agents list."
+        },
+        {
+          "symptom": "The result is too broad to verify",
+          "action": "Narrow the request to a specific outcome and ask for file paths, test commands and observed results."
+        }
+      ],
+      "note": "The agent’s role sets its instructions; its Hub identity is the name used to address it. Agents created from the Web UI keep their conversation through Web UI or engine restarts. Use Delete in the Web UI or send /quit to the agent to stop it."
+    },
+    {
+      "id": "launch-a-team",
+      "label": "Launch a team",
+      "summary": "Configure a reporting structure and launch selected roles together.",
+      "entry": {
+        "ui": [
+          "Agents",
+          "Teams",
+          "Configure & Launch"
+        ],
+        "command": "kollab --hub org <team>"
+      },
+      "steps": [
+        {
+          "action": "Open Agents → Teams and choose Configure & Launch on the team you want."
+        },
+        {
+          "action": "Choose a workspace and profile, include the members you need, and select a lead and optional mission."
+        },
+        {
+          "action": "Review the effective reporting tree, then choose Launch Team."
+        },
+        {
+          "action": "For later launches, review the saved choices. Use Reset to restore defaults.",
+          "expect": "Choices are saved per team and workspace folder."
+        }
+      ],
+      "commands": [
+        {
+          "syntax": "kollab --hub org <team> --dir <workspace> --only <members>",
+          "example": "kollab --hub org engineering --dir ./project --only backend-eng,qa-eng",
+          "description": "Launch selected team members from a terminal. --only and --without accept comma-separated names and cannot be combined.",
+          "expect": "The authored team lead is used unless you select a replacement in the Web UI."
+        }
+      ],
+      "success": "The selected team starts in the chosen workspace with the reviewed lead and reporting structure.",
+      "recovery": [
+        {
+          "symptom": "The CLI selection excludes the authored lead",
+          "action": "Use the Web UI team picker to select a replacement lead, or include the authored lead in the CLI selection."
+        },
+        {
+          "symptom": "A custom team or roster does not appear",
+          "action": "Check its JSON definition and resolution location, then reopen the team picker."
+        }
+      ]
+    }
+  ]
+}
