@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from kollabor.code_service import git as code_git
 from tests.unit.code_service.daemon_client import AsyncDaemonClient
 
 
@@ -312,7 +313,7 @@ async def test_stash_create_apply_and_drop(client, machine):
     (machine.repo / "tracked.txt").write_text("hello\nwip\n")
 
     created = (await _act(client, machine, "create_stash", stashMessage="wip work")).json()["data"]
-    assert created == {"ok": True, "stashId": "stash@{0}", "message": "wip work"}
+    assert created == {"ok": True}
     assert (machine.repo / "tracked.txt").read_text() == "hello\n"
     commit = (await _act(client, machine, "list_stashes")).json()["data"]["stashes"][0]["commitHash"]
 
@@ -339,6 +340,74 @@ async def test_a_stash_with_nothing_to_save_is_409(client, machine):
 
     assert response.status_code == 409
     assert _error_code(response) == "nothing_to_stash"
+
+
+@pytest.mark.asyncio
+async def test_external_stash_does_not_make_empty_create_look_successful(client, machine, monkeypatch):
+    original_write = code_git._write
+
+    async def external_stash_after_write(root, args, *rest, **kwargs):
+        result = await original_write(root, args, *rest, **kwargs)
+        if args[:2] == ["stash", "push"]:
+            (machine.repo / "tracked.txt").write_text("another writer\n")
+            _git(machine.repo, "stash", "push", "-m", "external")
+        return result
+
+    monkeypatch.setattr(code_git, "_write", external_stash_after_write)
+    response = await _act(client, machine, "create_stash")
+    assert response.status_code != 200
+    assert "external" in _git(machine.repo, "stash", "list")
+
+
+@pytest.mark.asyncio
+async def test_stash_create_does_not_claim_concurrent_top_as_its_result(client, machine, monkeypatch):
+    (machine.repo / "tracked.txt").write_text("own change\n")
+    original_write = code_git._write
+
+    async def external_stash_after_write(root, args, *rest, **kwargs):
+        result = await original_write(root, args, *rest, **kwargs)
+        if args[:2] == ["stash", "push"]:
+            (machine.repo / "tracked.txt").write_text("another writer\n")
+            _git(machine.repo, "stash", "push", "-m", "external")
+        return result
+
+    monkeypatch.setattr(code_git, "_write", external_stash_after_write)
+    response = await _act(client, machine, "create_stash", stashMessage="own")
+    assert response.status_code == 200
+    assert response.json()["data"] == {"ok": True}
+    assert len(_git(machine.repo, "stash", "list").splitlines()) == 2
+
+
+@pytest.mark.asyncio
+async def test_unrecognized_stash_output_is_uncertain(client, machine, monkeypatch):
+    async def unfamiliar(*args, **kwargs):
+        return subprocess.CompletedProcess([], 0, "unexpected output\n", "")
+
+    monkeypatch.setattr(code_git, "_write", unfamiliar)
+    response = await _act(client, machine, "create_stash")
+    assert response.status_code == 502
+    assert _error_code(response) == "stash_outcome_unknown"
+
+
+@pytest.mark.asyncio
+async def test_failed_stash_command_is_uncertain(client, machine, monkeypatch):
+    async def failed(*args, **kwargs):
+        raise code_git.GitRequestError(409, "git_failed", "injected failure after mutation")
+
+    monkeypatch.setattr(code_git, "_write", failed)
+    response = await _act(client, machine, "create_stash")
+    assert response.status_code == 502
+    assert _error_code(response) == "stash_outcome_unknown"
+
+
+@pytest.mark.asyncio
+async def test_stash_output_is_recognized_under_a_different_locale(client, machine, monkeypatch):
+    monkeypatch.setenv("LC_ALL", "not-a-real-locale")
+    monkeypatch.setenv("LANGUAGE", "not-a-real-language")
+    (machine.repo / "tracked.txt").write_text("own change\n")
+    response = await _act(client, machine, "create_stash")
+    assert response.status_code == 200
+    assert response.json()["data"] == {"ok": True}
 
 
 @pytest.mark.asyncio

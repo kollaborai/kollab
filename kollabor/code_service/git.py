@@ -60,10 +60,14 @@ def _fail(status: int, code: str, message: str) -> Reply:
 
 
 def _run_git(
-    root: str, args: list[str], read: bool, timeout: int = GIT_TIMEOUT, *, errors: str = "replace"
+    root: str, args: list[str], read: bool, timeout: int = GIT_TIMEOUT, *, errors: str = "replace",
+    stable_messages: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     env = {key: value for key, value in os.environ.items() if key not in REPO_ENV}
     env["GIT_TERMINAL_PROMPT"] = "0"
+    if stable_messages:
+        env["LC_ALL"] = "C"
+        env["LANGUAGE"] = "C"
     if read:
         env["GIT_OPTIONAL_LOCKS"] = "0"  # a read never takes an index lock
     try:
@@ -152,9 +156,11 @@ def _run_git(
 
 
 async def _git(
-    root: str, args: list[str], *, read: bool = True, timeout: int = GIT_TIMEOUT
+    root: str, args: list[str], *, read: bool = True, timeout: int = GIT_TIMEOUT, stable_messages: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run git in ``root`` on a worker thread. ``args`` is an argv list, never a shell string."""
+    if stable_messages:
+        return await asyncio.to_thread(_run_git, root, args, read, timeout, stable_messages=True)
     return await asyncio.to_thread(_run_git, root, args, read, timeout)
 
 
@@ -492,9 +498,13 @@ def _reason(proc: subprocess.CompletedProcess[str]) -> str:
     return (lines[-1] if lines else "git refused the change.")[:REASON_MAX]
 
 
-async def _write(root: str, args: list[str], timeout: int = GIT_TIMEOUT) -> subprocess.CompletedProcess[str]:
+async def _write(
+    root: str, args: list[str], timeout: int = GIT_TIMEOUT, *, stable_messages: bool = False,
+) -> subprocess.CompletedProcess[str]:
     """One write git call. A refusal raises a 409 that carries git's one-line reason."""
-    proc = await _git(root, args, read=False, timeout=timeout)
+    proc = await _git(root, args, read=False, timeout=timeout, stable_messages=True) if stable_messages else await _git(
+        root, args, read=False, timeout=timeout
+    )
     if proc.returncode != 0:
         raise GitRequestError(409, "git_failed", _reason(proc))
     return proc
@@ -646,28 +656,23 @@ async def _create_stash(root: str, body: dict[str, Any], settings: CodeSettings 
         args.append("-u")
     if message:
         args += ["-m", message]
-    # With nothing to save, `git stash push` exits 0 and makes no stash: compare the top of refs/stash.
-    before = (await _text(root, ["rev-parse", "--verify", "-q", "refs/stash"])).strip()
-    await _write(root, [*args, "--", "."])  # the workspace only, as the panel lists: not the whole repository
-    after_proc = await _after_write(_git(root, ["rev-parse", "--verify", "-q", "refs/stash"]))
-    if after_proc.returncode != 0:
-        if after_proc.returncode == 1 and not before and not after_proc.stderr:
-            raise GitRequestError(409, "nothing_to_stash", "There are no local changes to stash.")
-        raise GitRequestError(
-            502, "git_status_after_write_failed", "The stash operation ran, but its result is unavailable."
-        )
-    after = after_proc.stdout.strip()
-    if after == before:
-        raise GitRequestError(
-            409, "nothing_to_stash", "No new stash was detected. Check the repository before retrying."
-        )
-    stashes = (await _after_write(_list_stashes(root, {})))["stashes"]
-    if not stashes:
-        raise GitRequestError(
-            502, "git_status_after_write_failed", "The stash operation ran, but its result is unavailable."
-        )
-    top: dict[str, Any] = stashes[0]
-    return {"ok": True, "stashId": f"stash@{{{top['id']}}}", "message": message or top["message"]}
+    # Git does not return a stable stash object ID. Its C-locale output distinguishes
+    # this command's no-op from creation; a later reflog snapshot can belong to another writer.
+    try:
+        proc = await _write(root, [*args, "--", "."], stable_messages=True)
+    except GitRequestError as exc:
+        if exc.code == "git_failed":
+            raise GitRequestError(
+                502, "stash_outcome_unknown", "The stash may have changed. Check the repository before retrying."
+            ) from exc
+        raise
+    if proc.stdout.strip() == "No local changes to save":
+        raise GitRequestError(409, "nothing_to_stash", "There are no local changes to stash.")
+    if proc.stdout.startswith("Saved working directory and index state "):
+        return {"ok": True}
+    raise GitRequestError(
+        502, "stash_outcome_unknown", "The stash may have changed. Check the repository before retrying."
+    )
 
 
 async def _named_stash(root: str, body: dict[str, Any]) -> tuple[str, str]:
