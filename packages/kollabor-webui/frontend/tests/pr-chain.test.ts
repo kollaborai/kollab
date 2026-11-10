@@ -92,8 +92,8 @@ describe("inFlight", () => {
   it("is busy from begin until the matching end, and an end counts once", () => {
     const requests = inFlight();
     expect(requests.busy()).toBe(false);
-    const first = requests.begin();
-    const second = requests.begin();
+    const first = requests.begin().end;
+    const second = requests.begin().end;
     expect(requests.busy()).toBe(true);
     first();
     first();
@@ -124,5 +124,56 @@ describe("inFlight forgets what it gave up on", () => {
       clock += 31_000;
     }
     expect(requests.pending()).toBe(1);
+  });
+});
+
+describe("statusLabel keeps acronyms", () => {
+  it("writes PR, CI, UI and ID in capitals inside an unknown token", () => {
+    expect(statusLabel("PR-OPEN")).toBe("PR open");
+    expect(statusLabel("ci_running")).toBe("CI running");
+    expect(statusLabel("ui-id-check")).toBe("UI ID check");
+    expect(statusLabel("pricing")).toBe("Pricing");
+  });
+});
+
+describe("shortTime with a date other than today", () => {
+  const now = new Date(2026, 10, 9, 18, 0, 0);
+  it("shows only the time for today", () => {
+    expect(shortTime("2026-11-09T17:27:03", now)).toBe("17:27");
+  });
+  it("adds the month and day for another day", () => {
+    expect(shortTime("2026-11-08T17:27:03", now)).toBe("11-08 17:27");
+  });
+  it("shows anything else as given", () => {
+    expect(shortTime("soon", now)).toBe("soon");
+    expect(shortTime(undefined, now)).toBe("");
+  });
+});
+
+describe("inFlight cancels what it gives up on", () => {
+  it("aborts a request that outlived the limit when the next one begins", () => {
+    let clock = 0;
+    const requests = inFlight(30_000, () => clock);
+    const stale = requests.begin();
+    clock = 31_000;
+    const fresh = requests.begin();
+    expect(stale.signal.aborted).toBe(true);
+    expect(fresh.signal.aborted).toBe(false);
+  });
+
+  it("does not abort a request that settled", () => {
+    const requests = inFlight();
+    const done = requests.begin();
+    done.end();
+    expect(done.signal.aborted).toBe(false);
+  });
+
+  it("aborts every open request on abortAll", () => {
+    const requests = inFlight();
+    const a = requests.begin();
+    const b = requests.begin();
+    requests.abortAll();
+    expect([a.signal.aborted, b.signal.aborted]).toEqual([true, true]);
+    expect(requests.pending()).toBe(0);
   });
 });

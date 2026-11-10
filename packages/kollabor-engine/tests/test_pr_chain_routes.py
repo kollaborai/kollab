@@ -279,3 +279,20 @@ async def test_a_zero_padded_folder_name_is_not_a_second_copy_of_the_item(client
     write_state(root, "issues", "08", status="BUILDING", updated="c")
     items = (await client.get("/pr-chain")).json()["items"]
     assert [(i["kind"], i["number"], i["status"]) for i in items] == [("pr", 7, "READY")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("depth", [990, 20_000, 60_000, 90_000])
+async def test_a_value_nested_just_inside_the_parser_limit_is_not_a_500(client, root, depth):
+    deep = "[" * depth + "]" * depth
+    write_state(root, "prs", 1, status="READY", updated="a")
+    folder = root / "prs" / "2"
+    folder.mkdir()
+    (folder / "STATE.json").write_text('{"status": ' + deep + ', "updated": "b"}')
+    good = json.dumps({"pr": 1, "stage": "ok"})
+    (root / "ledger.jsonl").write_text(good + "\n" + '{"pr": 2, "stage": ' + deep + "}\n" + good + "\n")
+    response = await client.get("/pr-chain")
+    assert response.status_code == 200
+    body = response.json()
+    assert 1 in [i["number"] for i in body["items"]]
+    assert [e["stage"] for e in body["events"] if "stage" in e].count("ok") == 2
