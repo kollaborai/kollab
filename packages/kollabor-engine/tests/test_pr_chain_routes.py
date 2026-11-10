@@ -308,3 +308,87 @@ async def test_a_value_nested_just_inside_the_parser_limit_is_not_a_500(client, 
     body = response.json()
     assert 1 in [i["number"] for i in body["items"]]
     assert [e["stage"] for e in body["events"] if "stage" in e].count("ok") == 2
+
+
+def make_symlink(link, target):
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available here")
+
+
+@pytest.mark.asyncio
+async def test_a_symlinked_state_file_is_not_followed(client, root, tmp_path):
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"status": "LEAKED", "updated": "z"}))
+    write_state(root, "prs", 1, status="READY", updated="a")
+    folder = root / "prs" / "7"
+    folder.mkdir()
+    make_symlink(folder / "STATE.json", outside)
+    body = (await client.get("/pr-chain")).json()
+    assert [i["number"] for i in body["items"]] == [1]
+    assert "LEAKED" not in json.dumps(body)
+    assert (await client.get("/pr-chain/pr/7")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_a_symlinked_item_folder_is_not_followed(client, root, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "STATE.json").write_text(json.dumps({"status": "LEAKED", "updated": "z"}))
+    write_state(root, "prs", 1, status="READY", updated="a")
+    make_symlink(root / "prs" / "7", elsewhere)
+    body = (await client.get("/pr-chain")).json()
+    assert [i["number"] for i in body["items"]] == [1]
+    assert "LEAKED" not in json.dumps(body)
+    assert (await client.get("/pr-chain/pr/7")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_a_symlinked_kind_folder_is_not_followed(client, root, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "5").mkdir(parents=True)
+    (elsewhere / "5" / "STATE.json").write_text(json.dumps({"status": "LEAKED", "updated": "z"}))
+    make_symlink(root / "prs", elsewhere)
+    body = (await client.get("/pr-chain")).json()
+    assert body["items"] == []
+    assert "LEAKED" not in json.dumps(body)
+
+
+@pytest.mark.asyncio
+async def test_a_symlinked_ledger_and_claim_pid_are_not_followed(client, root, tmp_path):
+    import os
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text(json.dumps({"pr": 1, "stage": "LEAKED"}) + "\n")
+    make_symlink(root / "ledger.jsonl", outside)
+    write_state(root, "prs", 1, status="READY", updated="a")
+    (root / "claims" / "1").mkdir(parents=True)
+    pid_file = tmp_path / "pid"
+    pid_file.write_text(str(os.getpid()))
+    make_symlink(root / "claims" / "1" / "pid", pid_file)
+    body = (await client.get("/pr-chain")).json()
+    assert body["events"] == []
+    assert body["items"][0]["claimed"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_list_returns_only_the_newest_hundred_items_of_each_kind(client, root):
+    for number in range(1, 131):
+        write_state(root, "prs", number, status="READY", updated=f"2026-11-09T10:{number % 60:02d}:00")
+    write_state(root, "issues", 5, status="BUILDING", updated="2026-11-09T09:00:00")
+    items = (await client.get("/pr-chain")).json()["items"]
+    prs = sorted(i["number"] for i in items if i["kind"] == "pr")
+    assert prs == list(range(31, 131))
+    assert [i["number"] for i in items if i["kind"] == "issue"] == [5]
+
+
+@pytest.mark.asyncio
+async def test_a_folder_with_a_huge_number_of_entries_is_only_partly_examined(client, root, monkeypatch):
+    from kollabor_engine import pr_chain
+
+    monkeypatch.setattr(pr_chain, "MAX_SCAN", 30, raising=False)
+    for number in range(1, 131):
+        write_state(root, "prs", number, status="READY", updated="a")
+    items = (await client.get("/pr-chain")).json()["items"]
+    assert 0 < len(items) <= 30
