@@ -31,6 +31,16 @@ describe("pr-chain helpers", () => {
     expect(statusTone(item({ status: "READY" }))).toBe("idle");
   });
 
+  it("classifies every stop the runner can end on", () => {
+    for (const status of ["GATE-FAILED", "NO-VERDICT", "UI-NO-VERDICT", "CI-RED"]) {
+      expect(statusTone(item({ status, claimed: false }))).toBe("failed");
+    }
+    for (const status of ["NEEDS-HUMAN", "LAND-STOPPED"]) {
+      expect(statusTone(item({ status, claimed: false }))).toBe("attention");
+    }
+    expect(statusLabel("CI-RED")).toBe("CI red");
+  });
+
   it("shortens stamps and describes events", () => {
     expect(shortTime("2026-11-09T17:27:03")).toBe("17:27");
     expect(shortTime(undefined)).toBe("");
