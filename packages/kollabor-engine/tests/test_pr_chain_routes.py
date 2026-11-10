@@ -207,3 +207,25 @@ async def test_a_lone_surrogate_in_runner_text_is_not_a_500(client, root):
     assert response.status_code == 200
     assert response.json()["items"][0]["status"] == "A?B"
     assert response.json()["events"][0]["stage"] == "s?x"
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_claim_pid_is_not_a_live_runner(client, root):
+    write_state(root, "prs", 1, status="REVIEWING", updated="a")
+    pid_file = root / "claims" / "1" / "pid"
+    pid_file.parent.mkdir(parents=True)
+    pid_file.write_text("1")
+    pid_file.chmod(0)
+    try:
+        response = await client.get("/pr-chain")
+    finally:
+        pid_file.chmod(0o600)
+    assert response.status_code == 200 and response.json()["items"][0]["claimed"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_unicode_line_separator_inside_a_ledger_line_keeps_the_event(client, root):
+    line = json.dumps({"pr": 1, "stage": "review complete"}, ensure_ascii=False)
+    (root / "ledger.jsonl").write_text(line + "\n", encoding="utf-8")
+    events = (await client.get("/pr-chain")).json()["events"]
+    assert [e["stage"] for e in events] == ["review complete"]
