@@ -79,3 +79,20 @@ export function latestOnly(): () => () => boolean {
     return () => mine === latest;
   };
 }
+
+/** Counts requests that have started and not yet ended, so a timer can skip a tick while one is still running. */
+export function inFlight(): { begin: () => () => void; busy: () => boolean } {
+  let open = 0;
+  return {
+    begin: () => {
+      open += 1;
+      let ended = false;
+      return () => {
+        if (ended) return;
+        ended = true;
+        open -= 1;
+      };
+    },
+    busy: () => open > 0,
+  };
+}

@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import { describeEvent, itemUrl, latestOnly, shortTime, sortItems, statusLabel, statusTone, type StatusTone } from "./prChain";
+import { describeEvent, inFlight, itemUrl, latestOnly, shortTime, sortItems, statusLabel, statusTone, type StatusTone } from "./prChain";
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -35,10 +35,12 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
   const [busy, setBusy] = useState(false);
   const epoch = useRef(0);
   const newest = useRef(latestOnly());
+  const requests = useRef(inFlight());
 
   const load = useCallback((manual = false) => {
     const mine = epoch.current;
     const isNewest = newest.current();
+    const end = requests.current.begin();
     if (manual) setBusy(true);
     api
       .getPrChain()
@@ -51,6 +53,7 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
         if (mine === epoch.current && isNewest()) setLoadError(errorText(error));
       })
       .finally(() => {
+        end();
         if (mine === epoch.current && isNewest()) setBusy(false);
       });
   }, [api]);
@@ -58,7 +61,10 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
   useEffect(() => {
     if (!open) return;
     load();
-    const timer = window.setInterval(load, REFRESH_MS);
+    // A slow read finishes before the next timed one starts, or no answer would ever be the newest.
+    const timer = window.setInterval(() => {
+      if (!requests.current.busy()) load();
+    }, REFRESH_MS);
     return () => {
       epoch.current += 1;
       window.clearInterval(timer);
