@@ -40,6 +40,10 @@ RING_BYTES = 256 * 1024
 READ_BYTES = 65536
 MAX_INPUT_BYTES = 64 * 1024
 MAX_PENDING_INPUT_BYTES = 1024 * 1024
+# Leave ample space for the RPC envelope and transport framing. A PTY read is
+# at most READ_BYTES before decoding and remains below this budget when escaped.
+MAX_POLL_JSON_BYTES = 1024 * 1024
+MAX_POLL_MESSAGES = 128
 MAX_DIMENSION = 500
 DEFAULT_COLS = 80
 DEFAULT_ROWS = 24
@@ -91,11 +95,10 @@ class _Session:
     def next_seq(self) -> int:
         return self._next_seq
 
-    def chunks_from(self, seq: int) -> tuple[list[str], int]:
-        """The ring's text from sequence ``seq`` (older text may be gone) and the sequence to ask for next."""
+    def chunks_from(self, seq: int):
+        """Iterate retained chunks from ``seq`` without copying the whole ring."""
         start = max(seq, self.first_seq)
-        texts = [text for _, text, _ in islice(self._chunks, start - self.first_seq, None)]
-        return texts, self._next_seq
+        return islice(self._chunks, start - self.first_seq, None)
 
     async def wait_for_change(self, seq: int) -> None:
         """Return at once when there is text after ``seq`` or the shell is over; otherwise wait for more."""
@@ -297,13 +300,21 @@ class _Link:
         session = self.session
         if session is None:
             return [], self.seq
-        texts, nxt = session.chunks_from(self.seq)
         start = max(self.seq, session.first_seq)
         messages: list[dict[str, Any]] = []
         if self.seq < session.first_seq:
             messages.append({"type": "gap", "nextSeq": session.first_seq})
-        messages.extend({"type": "output", "data": text, "seq": start + i} for i, text in enumerate(texts))
-        if not texts and (session.exited or session.closed):
+        size = len(json.dumps(messages))
+        nxt = start
+        for seq, text, _ in session.chunks_from(self.seq):
+            message = {"type": "output", "data": text, "seq": seq}
+            message_size = len(json.dumps(message)) + 2  # array separator
+            if len(messages) >= MAX_POLL_MESSAGES or size + message_size > MAX_POLL_JSON_BYTES:
+                break
+            messages.append(message)
+            size += message_size
+            nxt = seq + 1
+        if nxt == start and start == session.next_seq and (session.exited or session.closed):
             messages.append({"type": "exit", "code": session.exit_code})
         return messages, nxt
 

@@ -142,6 +142,56 @@ async def test_reattach_reports_a_gap_when_the_ring_has_wrapped(tmp_path):
     link.detach()
 
 
+async def test_large_escaped_scrollback_is_paged_and_replayed(tmp_path):
+    client = Link(tmp_path, CodeSettings(scrollback_kb=65536))
+    sid = await client.open()
+    session = terminal._SESSIONS[sid]
+    text = "\x01" * terminal.READ_BYTES
+    for _ in range(64):
+        session._publish(text)
+    link = terminal._Link()
+    link.attach(session, 0)
+    result = []
+    while True:
+        messages, nxt = link.pending()
+        assert len(json.dumps(messages).encode()) <= 1024 * 1024
+        assert link.pending() == (messages, nxt)  # lost reply is replayed
+        result.extend(m for m in messages if m["type"] == "output")
+        if nxt == session.next_seq:
+            break
+        assert nxt > link.seq
+        link.seq = nxt
+    assert [m["seq"] for m in result] == list(range(session.first_seq, session.next_seq))
+    assert "".join(m["data"] for m in result) == text * 64
+    link.detach()
+
+
+async def test_paged_scrollback_keeps_gap_and_exit_order(tmp_path):
+    client = Link(tmp_path)
+    sid = await client.open()
+    session = terminal._SESSIONS[sid]
+    session._ring_limit = terminal.MAX_POLL_MESSAGES + 5
+    for _ in range(terminal.MAX_POLL_MESSAGES * 2):
+        session._publish("x")
+    link = terminal._Link()
+    link.attach(session, 0)
+    try:
+        session.exited = True  # simulate exit without allowing the fixture to lose the shell
+        first, ack = link.pending()
+        assert first[0] == {"type": "gap", "nextSeq": session.first_seq}
+        assert len(first) == terminal.MAX_POLL_MESSAGES
+        assert all(message["type"] != "exit" for message in first)
+        link.seq = ack
+        second, ack = link.pending()
+        assert all(message["type"] == "output" for message in second)
+        assert ack == session.next_seq
+        link.seq = ack
+        assert link.pending()[0] == [{"type": "exit", "code": None}]
+    finally:
+        session.exited = False
+        link.detach()
+
+
 async def test_a_poll_whose_answer_was_lost_is_sent_again(tmp_path):
     link = Link(tmp_path)
     await link.open()
