@@ -163,3 +163,35 @@ async def test_only_the_ledger_tail_is_read(client, root):
     (root / "ledger.jsonl").write_text(filler * 3000 + json.dumps({"pr": 2, "stage": "new"}) + "\n")
     events = (await client.get("/pr-chain")).json()["events"]
     assert events[-1]["stage"] == "new" and len(events) <= 200
+
+
+@pytest.mark.asyncio
+async def test_a_huge_digit_string_is_dropped_not_a_500(client, root):
+    huge = "9" * 5000
+    write_state(root, "prs", 1, status="READY", updated="a", round=huge, pr=huge)
+    (root / "ledger.jsonl").write_text(json.dumps({"pr": huge, "issue": huge, "stage": "x"}) + "\n")
+    body = (await client.get("/pr-chain")).json()
+    assert body["items"][0]["number"] == 1 and "round" not in body["items"][0]
+    assert body["events"] == [{"stage": "x"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pid", ["0", "-1", "9" * 30, "abc", ""])
+async def test_a_bad_claim_pid_is_not_a_live_runner(client, root, pid):
+    write_state(root, "prs", 1, status="REVIEWING", updated="a")
+    (root / "claims" / "1").mkdir(parents=True)
+    (root / "claims" / "1" / "pid").write_text(pid)
+    response = await client.get("/pr-chain")
+    assert response.status_code == 200 and response.json()["items"][0]["claimed"] is False
+
+
+@pytest.mark.asyncio
+async def test_deeply_nested_json_hides_only_itself(client, root):
+    write_state(root, "prs", 1, status="READY", updated="a")
+    (root / "prs" / "2").mkdir()
+    (root / "prs" / "2" / "STATE.json").write_text("[" * 100_000 + "]" * 100_000)
+    good = json.dumps({"pr": 1, "stage": "ok"})
+    (root / "ledger.jsonl").write_text(good + "\n" + "[" * 100_000 + "\n" + good + "\n")
+    body = (await client.get("/pr-chain")).json()
+    assert [i["number"] for i in body["items"]] == [1]
+    assert [e["stage"] for e in body["events"]] == ["ok", "ok"]
