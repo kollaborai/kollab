@@ -34,7 +34,7 @@ def write_state(root, kind, number, **fields):
 async def test_missing_root_is_an_empty_list(client, tmp_path, monkeypatch):
     monkeypatch.setenv("KOLLAB_PR_CHAIN_ROOT", str(tmp_path / "nope"))
     body = (await client.get("/pr-chain")).json()
-    assert body == {"items": [], "events": [], "root_found": False}
+    assert body == {"items": [], "events": [], "root_found": False, "truncated": False}
 
 
 @pytest.mark.asyncio
@@ -392,3 +392,54 @@ async def test_a_folder_with_a_huge_number_of_entries_is_only_partly_examined(cl
         write_state(root, "prs", number, status="READY", updated="a")
     items = (await client.get("/pr-chain")).json()["items"]
     assert 0 < len(items) <= 30
+
+
+@pytest.mark.asyncio
+async def test_a_folder_swapped_for_a_symlink_while_it_is_being_read_does_not_leak(client, root, tmp_path, monkeypatch):
+    import os
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "STATE.json").write_text(json.dumps({"status": "LEAKED", "updated": "z"}))
+    write_state(root, "prs", 123, status="READY", updated="a")
+    real_open = os.open
+    swapped = []
+
+    def open_after_a_swap(path, flags, *args, **kwargs):
+        # An attacker replaces the item folder right after the checks and before the file is opened.
+        if str(path).endswith("STATE.json") and not swapped:
+            swapped.append(True)
+            (root / "prs" / "123").rename(root / "prs" / "123.orig")
+            (root / "prs" / "123").symlink_to(outside)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_after_a_swap)
+    response = await client.get("/pr-chain/pr/123")
+    assert swapped and response.status_code == 200, (swapped, response.status_code, response.text)
+    assert "LEAKED" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_the_list_says_when_it_left_items_out(client, root):
+    for number in range(1, 102):
+        write_state(root, "prs", number, status="READY", updated="a")
+    body = (await client.get("/pr-chain")).json()
+    assert body["truncated"] is True
+    assert len(body["items"]) == 100
+
+
+@pytest.mark.asyncio
+async def test_the_list_says_when_the_scan_cap_stopped_it(client, root, monkeypatch):
+    from kollabor_engine import pr_chain
+
+    monkeypatch.setattr(pr_chain, "MAX_SCAN", 5, raising=False)
+    for number in range(1, 11):
+        write_state(root, "prs", number, status="READY", updated="a")
+    assert (await client.get("/pr-chain")).json()["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_short_list_is_not_marked_as_cut(client, root):
+    for number in range(1, 4):
+        write_state(root, "prs", number, status="READY", updated="a")
+    assert (await client.get("/pr-chain")).json()["truncated"] is False
