@@ -697,6 +697,17 @@ class TestHookProcessReaping:
         assert await ConfigHookLoader._reap_child(proc) is True
 
     @pytest.mark.asyncio
+    async def test_signal_permission_error_is_reported_as_reap_failure(self):
+        class RefusingProcess:
+            returncode = None
+            pid = 1234
+
+            def terminate(self):
+                raise PermissionError("signal denied")
+
+        assert await ConfigHookLoader._reap_child(RefusingProcess()) is False
+
+    @pytest.mark.asyncio
     async def test_cleanup_failure_is_reported_not_silent(
         self, loader, tmp_path, caplog, monkeypatch
     ):
