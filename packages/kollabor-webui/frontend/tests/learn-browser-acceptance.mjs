@@ -628,6 +628,13 @@ async function main() {
     await shell.page.emulateMedia({ reducedMotion: "reduce" });
     await shell.page.goto(`${baseUrl}/learn?topic=networks`, { waitUntil: "domcontentloaded" });
     await waitForLesson(shell.page, "Connect");
+    // Escape pressed as soon as the enlarged preview opens closes only that preview, never the Learn dialog.
+    await shell.page.getByRole("button", { name: "Enlarge product preview", exact: true }).click();
+    await shell.page.getByRole("dialog", { name: "Product preview", exact: true }).waitFor();
+    await shell.page.keyboard.press("Escape");
+    await shell.page.getByRole("dialog", { name: "Product preview", exact: true }).waitFor({ state: "hidden" });
+    assert.equal(new URL(shell.page.url()).pathname, "/learn", "Escape on the enlarged preview also closed Learn");
+    await waitForLesson(shell.page, "Connect");
     assert.equal(await shell.page.locator("main video").count(), 0);
     await shell.page.getByRole("button", { name: "Watch walkthrough", exact: true }).click();
     const walkthrough = shell.page.locator("main video");
