@@ -564,8 +564,18 @@ class ConfigHookLoader:
             raise
         except asyncio.CancelledError:
             # A cancelled hook task must not leave its child executing after
-            # the task is gone (#930).
-            if not await self._reap_child(proc):
+            # the task is gone (#930). Keep the cleanup task shielded so a
+            # repeated cancellation cannot interrupt escalation and reaping.
+            cleanup_task = asyncio.create_task(self._reap_child(proc))
+            while True:
+                try:
+                    reaped = await asyncio.shield(cleanup_task)
+                    break
+                except asyncio.CancelledError:
+                    if cleanup_task.done():
+                        reaped = cleanup_task.result()
+                        break
+            if not reaped:
                 logger.warning("cancelled hook left its child running: pid %s", proc.pid)
             raise
         return (
