@@ -443,3 +443,78 @@ async def test_a_short_list_is_not_marked_as_cut(client, root):
     for number in range(1, 4):
         write_state(root, "prs", number, status="READY", updated="a")
     assert (await client.get("/pr-chain")).json()["truncated"] is False
+
+
+@pytest.fixture
+def no_dir_fd(monkeypatch, tmp_path):
+    """The path a platform without ``dir_fd`` takes. ``os.open`` refuses a folder there, as on Windows."""
+    import os
+
+    from kollabor_engine import pr_chain
+
+    monkeypatch.setattr(pr_chain, "_DIR_FD", False)
+    real_open = os.open
+
+    def open_like_windows(path, flags, *args, **kwargs):
+        if str(path).startswith(str(tmp_path)) and os.path.isdir(path):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_like_windows)
+
+
+@pytest.mark.asyncio
+async def test_without_dir_fd_the_list_and_detail_still_work(client, root, no_dir_fd):
+    write_state(root, "prs", 5, status="READY", updated="a")
+    write_state(root, "issues", 6, status="BUILDING", updated="b")
+    body = (await client.get("/pr-chain")).json()
+    assert sorted((i["kind"], i["number"]) for i in body["items"]) == [("issue", 6), ("pr", 5)]
+    assert (await client.get("/pr-chain/pr/5")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_without_dir_fd_a_symlinked_file_folder_or_kind_is_not_followed(client, root, tmp_path, no_dir_fd):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "STATE.json").write_text(json.dumps({"status": "LEAKED", "updated": "z"}))
+    write_state(root, "prs", 1, status="READY", updated="a")
+    (root / "prs" / "7").mkdir()
+    make_symlink(root / "prs" / "7" / "STATE.json", outside / "STATE.json")
+    make_symlink(root / "prs" / "8", outside)
+    make_symlink(root / "issues", tmp_path)
+    body = (await client.get("/pr-chain")).json()
+    assert [i["number"] for i in body["items"]] == [1]
+    assert "LEAKED" not in json.dumps(body)
+    for number in (7, 8):
+        assert (await client.get(f"/pr-chain/pr/{number}")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_without_dir_fd_a_folder_swapped_while_it_is_read_does_not_leak(client, root, tmp_path, no_dir_fd, monkeypatch):
+    import os
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "STATE.json").write_text(json.dumps({"status": "LEAKED", "updated": "z"}))
+    write_state(root, "prs", 123, status="READY", updated="a")
+    inner_open = os.open
+    swapped = []
+
+    def open_after_a_swap(path, flags, *args, **kwargs):
+        if str(path).endswith("STATE.json") and not swapped:
+            swapped.append(True)
+            (root / "prs" / "123").rename(root / "prs" / "123.orig")
+            (root / "prs" / "123").symlink_to(outside)
+        return inner_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_after_a_swap)
+    response = await client.get("/pr-chain/pr/123")
+    assert swapped and "LEAKED" not in response.text, (swapped, response.text)
+
+
+@pytest.mark.asyncio
+async def test_without_dir_fd_the_list_is_still_bounded_and_marked(client, root, no_dir_fd):
+    for number in range(1, 102):
+        write_state(root, "prs", number, status="READY", updated="a")
+    body = (await client.get("/pr-chain")).json()
+    assert body["truncated"] is True and len(body["items"]) == 100

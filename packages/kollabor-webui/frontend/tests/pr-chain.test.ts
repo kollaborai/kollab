@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PrChainItem } from "../src/api";
-import { describeEvent, inOrder, itemDetail, itemUrl, shortTime, sortItems, statusLabel, statusTone, inFlight } from "../src/components/pr-chain/prChain";
+import { describeEvent, listNote, inOrder, itemDetail, itemUrl, shortTime, sortItems, statusLabel, statusTone, inFlight } from "../src/components/pr-chain/prChain";
 
 const item = (over: Partial<PrChainItem>): PrChainItem => ({ kind: "pr", number: 1, claimed: false, ...over });
 
@@ -202,5 +202,17 @@ describe("itemDetail", () => {
 
   it("keeps the verdict but not an old reason once a run is ready", () => {
     expect(itemDetail(item({ status: "READY", last_verdict: "PASS", why: "conflict with main" }))).toBe("Pass");
+  });
+});
+
+describe("the note under the list", () => {
+  it("is shown whenever the list was cut, even if nothing readable was found", () => {
+    expect(listNote({ root_found: true, items: [], events: [], truncated: true })).toBe("Some items are not listed.");
+    expect(listNote({ root_found: true, items: [item({})], events: [], truncated: true })).toBe("Some items are not listed.");
+  });
+
+  it("is absent when the list is whole", () => {
+    expect(listNote({ root_found: true, items: [item({})], events: [] })).toBeNull();
+    expect(listNote({ root_found: true, items: [], events: [], truncated: false })).toBeNull();
   });
 });
