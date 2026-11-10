@@ -611,7 +611,7 @@ async def test_slow_process_enumeration_does_not_block_terminal_close(tmp_path, 
     session = terminal._SESSIONS[sid]
 
     def slow_scan():
-        time.sleep(0.8)
+        time.sleep(2.0)
         return iter(())
 
     monkeypatch.setattr(terminal.psutil, "process_iter", slow_scan)
@@ -619,6 +619,54 @@ async def test_slow_process_enumeration_does_not_block_terminal_close(tmp_path, 
     started = time.monotonic()
     task = session.destroy()
     assert task is not None
-    async with asyncio.timeout(2):
+    async with asyncio.timeout(3):
         await task
-    assert time.monotonic() - started < 0.6, "process enumeration blocked the event loop during terminal close"
+    assert time.monotonic() - started < 1.2, "process enumeration blocked the event loop during terminal close"
+
+
+async def test_late_process_scan_is_never_signalled_after_close(tmp_path, monkeypatch):
+    import asyncio
+    import contextlib
+    import threading
+
+    link = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
+    sid = await link.open()
+    await link.send(type="input", data="echo ready-late-27''3\n")
+    await link.until("ready-late-273")
+    session = terminal._SESSIONS[sid]
+    started = threading.Event()
+    release = threading.Event()
+    sent = []
+
+    class Unrelated:
+        pid = -1
+
+        def send_signal(self, sig):
+            sent.append(sig)
+
+    unrelated = Unrelated()
+
+    def late_scan(known):
+        started.set()
+        release.wait(timeout=3)
+        return known | {unrelated}
+
+    monkeypatch.setattr(session, "_collect_processes", late_scan)
+    monkeypatch.setattr(terminal, "KILL_AFTER_SECONDS", 0.05)
+    try:
+        task = session.destroy()
+        assert task is not None
+        async with asyncio.timeout(2):
+            await task
+        assert started.is_set(), "test did not start its blocked scan"
+        release.set()
+        await asyncio.sleep(0.1)
+        assert unrelated not in session._owned_processes
+        assert not sent
+    finally:
+        release.set()
+        with contextlib.suppress(ProcessLookupError):
+            session._proc.kill()
+        if session._watch_task is not None:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(session._watch_task, 3)

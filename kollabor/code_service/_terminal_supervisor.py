@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 _GRACE = 1.0
+_REAP_LIMIT = 2.0
 _STOP = False
 
 
@@ -138,5 +139,8 @@ def main():
                     _signal(pid, start, signal.SIGKILL)
         if no_children:
             break
+        if deadline is not None and time.monotonic() >= deadline + _REAP_LIMIT:
+            # The daemon must not wait forever on an unsignalable or uninterruptible child.
+            os._exit(125)
         time.sleep(0.02)
     os._exit((shell_code if shell_code >= 0 else 128 - shell_code) & 0xff)

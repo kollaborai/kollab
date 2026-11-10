@@ -20,6 +20,7 @@ import signal
 import struct
 import subprocess
 import sys
+import threading
 from collections import deque
 from itertools import islice
 from typing import Any
@@ -33,6 +34,10 @@ logger = logging.getLogger(__name__)
 
 REAP_AFTER_SECONDS = 600.0
 KILL_AFTER_SECONDS = 1.0
+REAP_WAIT_SECONDS = 0.2
+SUPERVISOR_WAIT_SECONDS = 4.0
+SCAN_WAIT_SECONDS = 0.05
+INITIAL_SCAN_WAIT_SECONDS = 0.2
 LINK_IDLE_SECONDS = 90.0
 # A daemon answers the requests of one connection in the order they came, so a poll that waited long would hold up
 # every keystroke and every other call behind it. The wait is short and the engine polls again (routes/code.py).
@@ -69,6 +74,7 @@ _OWN_PREFIXES = ("KOLLAB_", "KOLLABOR_")
 
 _SESSIONS: dict[str, _Session] = {}
 _TEARDOWNS: set[asyncio.Task[None]] = set()
+_SCAN_SLOTS = threading.BoundedSemaphore(MAX_SESSIONS)
 
 
 class _Session:
@@ -111,6 +117,7 @@ class _Session:
         self._reap_handle: asyncio.TimerHandle | None = None
         self._watch_task: asyncio.Task[None] | None = None
         self._teardown_task: asyncio.Task[None] | None = None
+        self._scan_future: asyncio.Future[set[psutil.Process]] | None = None
         self._owned_processes: set[psutil.Process] = set()
         self._inspection_warnings: set[str] = set()
         try:
@@ -212,52 +219,128 @@ class _Session:
 
     async def _monitor_processes(self) -> None:
         while not self.closed:
-            self._capture_processes()
+            await self._capture_async(SCAN_WAIT_SECONDS)
             await asyncio.sleep(0.05)
 
-    def _capture_processes(self) -> set[psutil.Process]:
+    def _collect_processes(self, known: set[psutil.Process]) -> set[psutil.Process]:
         """Capture only this shell's descendants and members of its Unix session.
 
         psutil Process handles retain creation time and check it before signalling. Session membership is scanned
         only while the original shell handle is alive; a numeric session id alone could later be reused.
         """
-        before = self._owned_processes.copy()
+        owned = known.copy()
         if self._supervised:
-            return set()
+            return owned
         shell = self._shell_process
         if shell is None:
-            return set()
+            return owned
         try:
-            shell_alive = shell.is_running() and self._proc.returncode is None
-            if shell_alive:
-                self._owned_processes.update(shell.children(recursive=True))
-                for process in psutil.process_iter():
-                    try:
-                        if os.getsid(process.pid) == self.pid:
-                            self._owned_processes.add(process)
-                    except (ProcessLookupError, PermissionError, psutil.Error):
-                        continue
-            # Also follow known descendants which have made a new session since the last capture.
-            for process in tuple(self._owned_processes):
-                try:
-                    if process.is_running():
-                        self._owned_processes.update(process.children(recursive=True))
-                except psutil.Error:
-                    continue
+            processes = list(psutil.process_iter())
         except (psutil.Error, OSError) as exc:
             if "tree" not in self._inspection_warnings:
-                logger.warning("Cannot inspect terminal process tree; terminal jobs may survive teardown: %s", exc)
+                logger.warning("Cannot inspect terminal processes; terminal jobs may survive teardown: %s", exc)
+                self._inspection_warnings.add("tree")
+            return owned
+        try:
+            # psutil's children(recursive=True) enumerates the system. Calling it for each known process makes
+            # a single scan quadratic and blocks the event loop while other terminals are trying to close.
+            shell_alive = shell.is_running() and self._proc.returncode is None
+            by_parent: dict[int, list[psutil.Process]] = {}
+            for process in processes:
+                try:
+                    parent = process.ppid()
+                    by_parent.setdefault(parent, []).append(process)
+                    if shell_alive and os.getsid(process.pid) == self.pid and process.is_running():
+                        owned.add(process)
+                except (ProcessLookupError, PermissionError, psutil.Error):
+                    continue
+            # Walk the one snapshot from identity-checked previously owned processes, including detached ones.
+            pending = list(owned)
+            visited: set[int] = set()
+            while pending:
+                parent = pending.pop()
+                if parent.pid in visited or not parent.is_running():
+                    continue
+                visited.add(parent.pid)
+                for process in by_parent.get(parent.pid, []):
+                    if parent.is_running() and process.is_running() and process not in owned:
+                        owned.add(process)
+                        pending.append(process)
+        except (psutil.Error, OSError) as exc:
+            if "tree" not in self._inspection_warnings:
+                logger.warning("Cannot inspect terminal process tree; jobs may survive teardown: %s", exc)
                 self._inspection_warnings.add("tree")
         if (self._pty_name is not None and self._pty_identity is not None and self._pty_anchor is not None
                 and self._shell_started is not None):
             try:
                 from ._terminal_darwin import pty_holders
 
-                self._owned_processes.update(pty_holders(self._pty_name, self._pty_identity, self._shell_started))
+                owned.update(pty_holders(self._pty_name, self._pty_identity, self._shell_started, processes))
             except (psutil.Error, OSError) as exc:
                 if "pty" not in self._inspection_warnings:
                     logger.warning("Cannot inspect terminal PTY holders; jobs may survive teardown: %s", exc)
                     self._inspection_warnings.add("pty")
+        return owned
+
+    def _capture_processes(self) -> set[psutil.Process]:
+        """Synchronous helper for isolated tests; runtime scans use the bounded worker below."""
+        before = self._owned_processes.copy()
+        self._owned_processes.update(self._collect_processes(before))
+        return self._owned_processes - before
+
+    async def _capture_async(self, timeout: float) -> set[psutil.Process]:
+        """Run at most one daemon scan per terminal without blocking the event loop."""
+        future = self._scan_future
+        if future is None:
+            if not _SCAN_SLOTS.acquire(blocking=False):
+                if "scan_capacity" not in self._inspection_warnings:
+                    logger.warning("Terminal process scans are busy; jobs may survive teardown")
+                    self._inspection_warnings.add("scan_capacity")
+                return set()
+            future = self._loop.create_future()
+            self._scan_future = future
+            known = self._owned_processes.copy()
+            loop = self._loop
+
+            def scan() -> None:
+                try:
+                    result = self._collect_processes(known)
+                except Exception:
+                    logger.exception("Terminal process scan failed; jobs may survive teardown")
+                    result = known
+                finally:
+                    _SCAN_SLOTS.release()
+
+                def deliver() -> None:
+                    if not future.done():
+                        future.set_result(result)
+
+                try:
+                    loop.call_soon_threadsafe(deliver)
+                except RuntimeError:  # The daemon's event loop has already closed.
+                    pass
+
+            try:
+                threading.Thread(target=scan, name="kollab-terminal-scan", daemon=True).start()
+            except RuntimeError:
+                _SCAN_SLOTS.release()
+                self._scan_future = None
+                logger.exception("Cannot start terminal process scan; jobs may survive teardown")
+                return set()
+        try:
+            found = await asyncio.wait_for(asyncio.shield(future), timeout=max(0.0, timeout))
+        except TimeoutError:
+            if not future.done():
+                return set()
+            found = future.result()
+        finally:
+            if future.done() and self._scan_future is future:
+                self._scan_future = None
+        # Never apply a late scan after the PTY anchor was released and its device could be reused.
+        if self._pty_name is not None and self._pty_anchor is None:
+            return set()
+        before = self._owned_processes.copy()
+        self._owned_processes.update(found)
         return self._owned_processes - before
 
     def _signal_owned(self, sig: int, processes: set[psutil.Process] | None = None) -> None:
@@ -278,34 +361,46 @@ class _Session:
         """Escalate captured jobs even if the shell has already exited."""
         try:
             if self._supervised:
-                if self._watch_task is not None:
-                    await self._watch_task
+                await self._wait_for_watch(SUPERVISOR_WAIT_SECONDS)
                 return
+            # On macOS closing the master revokes slave descriptors, so discover holders first. An existing
+            # monitor scan may predate close; spend the remaining budget on a fresh snapshot if it completed.
+            scan_deadline = self._loop.time() + INITIAL_SCAN_WAIT_SECONDS
+            await self._capture_async(INITIAL_SCAN_WAIT_SECONDS)
+            if self._scan_future is None and self._loop.time() < scan_deadline:
+                await self._capture_async(scan_deadline - self._loop.time())
+            if self._scan_future is not None and not self._scan_future.done():
+                logger.warning("Terminal process scan timed out; jobs may survive teardown")
+            self._signal_owned(signal.SIGHUP)
+            self._signal_owned(signal.SIGTERM)
+            self._close_fd()
             deadline = self._loop.time() + KILL_AFTER_SECONDS
             while self._loop.time() < deadline:
                 await asyncio.sleep(min(0.05, max(0, deadline - self._loop.time())))
-                new_processes = self._capture_processes()
+                new_processes = await self._capture_async(min(SCAN_WAIT_SECONDS, deadline - self._loop.time()))
                 if new_processes:
                     self._signal_owned(signal.SIGHUP, new_processes)
                     self._signal_owned(signal.SIGTERM, new_processes)
-                if (self._proc.returncode is not None
-                        and not any(process.is_running() for process in self._owned_processes)):
-                    break
             self._signal_owned(signal.SIGKILL)
-            if self._watch_task is not None:
-                await self._watch_task
+            await self._wait_for_watch(REAP_WAIT_SECONDS)
         finally:
+            self._close_fd()
             if self._pty_anchor is not None:
                 os.close(self._pty_anchor)
                 self._pty_anchor = None
+
+    async def _wait_for_watch(self, timeout: float) -> None:
+        """Bound teardown; leave the watcher running to reap a child that exits later."""
+        task = self._watch_task
+        if task is not None:
+            _, pending = await asyncio.wait({task}, timeout=timeout)
+            if pending:
+                logger.warning("Terminal shell did not exit within %.1f seconds; it may still be running", timeout)
 
     async def _watch(self) -> None:
         """Poll until the shell is reaped, independently of job teardown."""
         while True:
             try:
-                # Keep identities before waitpid releases the shell's PID.
-                if not self.closed:
-                    self._capture_processes()
                 done, status = os.waitpid(self._proc.pid, os.WNOHANG)
             except ChildProcessError:
                 self._proc.returncode = 0
@@ -314,6 +409,8 @@ class _Session:
             if done:
                 code = os.waitstatus_to_exitcode(status)
                 self._proc.returncode = code
+                if self._supervised and self.closed and code == 125:
+                    logger.warning("Terminal supervisor exited with status 125; job cleanup may be incomplete")
                 self._shell_ended(code)
                 return
             if not self.closed and self.fd is not None:
@@ -363,11 +460,11 @@ class _Session:
             if self._supervised:
                 with contextlib.suppress(ProcessLookupError):
                     self._proc.send_signal(signal.SIGTERM)
-            else:
-                self._capture_processes()
-                self._signal_owned(signal.SIGHUP)
-                self._signal_owned(signal.SIGTERM)
-            self._close_fd()
+                self._close_fd()
+            elif self.fd is not None:
+                # Keep the master open for the bounded initial PTY-holder scan.
+                self._loop.remove_reader(self.fd)
+                self._loop.remove_writer(self.fd)
             if not self.exited:
                 self._ensure_watch()
             self._teardown_task = self._loop.create_task(self._finish_teardown())
@@ -575,7 +672,14 @@ def _spawn(cwd: str, cols: int, rows: int, settings: CodeSettings = DEFAULTS) ->
     except BaseException:
         if proc is not None:
             proc.terminate()
-            proc.wait()
+            try:
+                proc.wait(timeout=SUPERVISOR_WAIT_SECONDS)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=REAP_WAIT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    logger.error("Terminal launcher did not exit after being killed")
         os.close(master)
         raise
     finally:

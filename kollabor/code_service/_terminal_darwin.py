@@ -11,12 +11,12 @@ class _FD(ctypes.Structure):
     _fields_ = [("fd", ctypes.c_int32), ("kind", ctypes.c_uint32)]
 
 
-def pty_holders(path: str, identity: tuple[int, int], earliest: float):
+def pty_holders(path: str, identity: tuple[int, int], earliest: float, processes=None):
     """Return identity-checked same-user processes holding the allocated slave vnode."""
     lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
     lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
     lib.proc_pidfdinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
-    for process in psutil.process_iter():
+    for process in psutil.process_iter() if processes is None else processes:
         try:
             if process.pid == os.getpid() or process.uids().real != os.getuid() or process.create_time() < earliest:
                 continue

@@ -56,6 +56,7 @@ Mentiko's request and response shapes are kept, so its callers port unchanged.
   On Linux, a per-terminal subreaper owns and reaps descendants even when they detach. On macOS, captured descendants
   and processes holding the terminal slave are tracked by process identity; a job that detaches and closes all PTY
   descriptors between scans can escape. Process inspection permissions are required to discover macOS jobs.
+  Teardown waits are bounded; if inspection or reaping times out, jobs can survive and the daemon logs a warning.
   `enabled` refuses every call, `terminal.enabled` opens no shells, `read_only` refuses terminal input
   (`code-shell-settings.md`).
 - The WebSocket is outside the HTTP bearer middleware, so the first message must be `{"type":"auth","token"}` within

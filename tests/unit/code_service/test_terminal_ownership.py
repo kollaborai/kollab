@@ -136,3 +136,40 @@ def test_capture_does_not_rescan_process_tree_for_every_known_process(monkeypatc
     monkeypatch.setattr(terminal.os, "getsid", lambda _pid: shell.pid)
     session._capture_processes()
     assert len(calls) <= 1, f"capture recursively scanned the system {len(calls)} times"
+
+
+def test_supervisor_stops_waiting_for_an_unreapable_child(monkeypatch):
+    class Exit(Exception):
+        pass
+
+    class Clock:
+        value = 0.0
+
+        def monotonic(self):
+            self.value += 0.5
+            return self.value
+
+        def sleep(self, _seconds):
+            assert self.value < 20, "supervisor did not honor its reap deadline"
+
+    def exit_process(code):
+        raise Exit(code)
+
+    fake_os = SimpleNamespace(
+        write=lambda *_args: None, close=lambda *_args: None, fork=lambda: 123,
+        waitpid=lambda *_args: (0, 0), WNOHANG=1, _exit=exit_process,
+    )
+    fake_signal = SimpleNamespace(SIGHUP=1, SIGTERM=15, signal=lambda *_args: None)
+    fake_ctypes = SimpleNamespace(CDLL=lambda *_args, **_kwargs: SimpleNamespace(prctl=lambda *_args: 0))
+    monkeypatch.setattr(_terminal_supervisor, "os", fake_os)
+    monkeypatch.setattr(_terminal_supervisor, "signal", fake_signal)
+    monkeypatch.setattr(_terminal_supervisor, "ctypes", fake_ctypes)
+    monkeypatch.setattr(_terminal_supervisor, "time", Clock())
+    monkeypatch.setattr(_terminal_supervisor, "sys", SimpleNamespace(argv=["supervisor", "4", "/bin/sh"]))
+    monkeypatch.setattr(_terminal_supervisor, "_descendants", lambda: {})
+    monkeypatch.setattr(_terminal_supervisor, "_STOP", True)
+    import pytest
+
+    with pytest.raises(Exit) as outcome:
+        _terminal_supervisor.main()
+    assert outcome.value.args == (125,)
