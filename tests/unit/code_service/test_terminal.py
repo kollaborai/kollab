@@ -448,19 +448,22 @@ async def test_closing_one_terminal_does_not_signal_another(tmp_path):
 
     first = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
     other = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
-    async with asyncio.timeout(10):
-        first_id = await first.open()
-        other_id = await other.open()
-        first_session = terminal._SESSIONS[first_id]
-        await first.send(type="close")
-        task = first_session.destroy()
-        if task is not None:
-            await task
-        other_session = terminal._SESSIONS[other_id]
-        assert other_session.pid not in {process.pid for process in first_session._owned_processes}
-        assert not other_session.exited
-        await other.send(type="input", data="echo still-alive-91''23\n")
-        assert "still-alive-9123" in await other.until("still-alive-9123")
+    try:
+        async with asyncio.timeout(10):
+            first_id = await first.open()
+            other_id = await other.open()
+            first_session = terminal._SESSIONS[first_id]
+            await first.send(type="close")
+            task = first_session.destroy()
+            if task is not None:
+                await task
+            other_session = terminal._SESSIONS[other_id]
+            assert other_session.pid not in {process.pid for process in first_session._owned_processes}
+            assert not other_session.exited
+            await other.send(type="input", data="echo still-alive-91''23\n")
+            assert "still-alive-9123" in await other.until("still-alive-9123")
+    except TimeoutError:
+        pytest.fail("Closing one terminal or checking its neighbor exceeded 10 seconds")
 
 
 async def test_teardown_does_not_wait_forever_for_an_unreaped_shell(tmp_path, monkeypatch):
@@ -596,3 +599,26 @@ async def test_teardown_stops_fast_detached_descendant(tmp_path, mode, delay, cl
         if process is not None:
             with contextlib.suppress(psutil.NoSuchProcess):
                 process.kill()  # psutil checks the captured process identity before signalling
+
+
+async def test_slow_process_enumeration_does_not_block_terminal_close(tmp_path, monkeypatch):
+    import asyncio
+
+    link = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
+    sid = await link.open()
+    await link.send(type="input", data="echo ready-scan-62''1\n")
+    await link.until("ready-scan-621")
+    session = terminal._SESSIONS[sid]
+
+    def slow_scan():
+        time.sleep(0.8)
+        return iter(())
+
+    monkeypatch.setattr(terminal.psutil, "process_iter", slow_scan)
+    monkeypatch.setattr(terminal, "KILL_AFTER_SECONDS", 0.05)
+    started = time.monotonic()
+    task = session.destroy()
+    assert task is not None
+    async with asyncio.timeout(2):
+        await task
+    assert time.monotonic() - started < 0.6, "process enumeration blocked the event loop during terminal close"
