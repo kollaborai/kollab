@@ -72,6 +72,19 @@ test("Learn catalog imports all eleven stable JSON topics with complete workflow
   assert.equal(getLearnTopic("networks").title, "Connect");
 });
 
+test("Learn recovery symptoms are bare labels because the renderer appends the colon", () => {
+  for (const topic of LEARN_TOPICS) {
+    for (const workflow of topic.workflows) {
+      for (const item of workflow.recovery) {
+        assert.ok(
+          !item.symptom.trimEnd().endsWith("."),
+          `${topic.id}/${workflow.id} symptom "${item.symptom}" must not end with a period`,
+        );
+      }
+    }
+  }
+});
+
 test("PhoneLink resolves Learn images only from the signed app's inline asset map", () => {
   const root = mkdtempSync(path.join(tmpdir(), "kollab-phone-learn-media-"));
   const topicsDir = path.join(root, "topics");
