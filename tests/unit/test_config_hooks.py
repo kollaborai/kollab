@@ -22,6 +22,49 @@ from kollabor_events import EventBus
 from kollabor_events.models import Event, EventType, HookPriority
 
 
+def _pid_is_alive(pid, *, platform=None, kernel32=None):
+    """Check process liveness without sending signals on Windows."""
+    platform = platform or os.name
+    if platform == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        if kernel32 is None:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [
+                wintypes.DWORD,
+                wintypes.BOOL,
+                wintypes.DWORD,
+            ]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.GetExitCodeProcess.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(wintypes.DWORD),
+            ]
+            kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return True  # Unknown is conservatively treated as still alive.
+            return exit_code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 @pytest.fixture
 def event_bus():
     return EventBus()
@@ -600,9 +643,7 @@ class TestHookProcessReaping:
         loop = asyncio.get_running_loop()
         end = loop.time() + deadline
         while loop.time() < end:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
+            if not _pid_is_alive(pid):
                 return
             await asyncio.sleep(0.1)
         pytest.fail(f"hook child {pid} still running after cancellation")
