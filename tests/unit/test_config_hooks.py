@@ -733,6 +733,47 @@ class TestHookProcessReaping:
         assert loader._pending_tasks == set()
 
     @pytest.mark.asyncio
+    async def test_shutdown_drains_tasks_added_during_cleanup(self, loader, monkeypatch):
+        cleanup_started = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        late_task_cancelled = asyncio.Event()
+
+        async def initial_task():
+            try:
+                await asyncio.Future()
+            finally:
+                cleanup_started.set()
+                await release_cleanup.wait()
+
+        async def late_task():
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                late_task_cancelled.set()
+                raise
+
+        async def immediate_wait(tasks, timeout):
+            return set(), set(tasks)
+
+        monkeypatch.setattr(asyncio, "wait", immediate_wait)
+        initial = asyncio.create_task(initial_task())
+        initial.add_done_callback(loader._on_pending_task_done)
+        loader._pending_tasks.add(initial)
+
+        shutdown = asyncio.create_task(loader.shutdown())
+        await cleanup_started.wait()
+
+        late = asyncio.create_task(late_task())
+        late.add_done_callback(loader._on_pending_task_done)
+        loader._pending_tasks.add(late)
+        release_cleanup.set()
+        await shutdown
+
+        assert late_task_cancelled.is_set()
+        assert late.done()
+        assert loader._pending_tasks == set()
+
+    @pytest.mark.asyncio
     async def test_repeated_shutdown_is_quiet(self, loader):
         await loader.shutdown()
         await loader.shutdown()
