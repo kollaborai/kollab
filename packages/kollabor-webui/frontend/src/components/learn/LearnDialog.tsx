@@ -13,11 +13,10 @@ export function LearnDialog(props: ComponentProps<typeof LearnPage>) {
           // An enlarged preview is a nested dialog. Radix can deliver the first Escape to this outer dialog
           // before the nested one registers as the top layer; the outer then consumes the event, so the nested
           // dialog never closes. Close the nested preview here instead, and keep Learn open.
-          const openDialogs = document.querySelectorAll<HTMLElement>('[role="dialog"][data-state="open"]');
-          const nested = openDialogs[openDialogs.length - 1];
-          if (openDialogs.length < 2 || !nested) return;
+          const previewClose = document.querySelector<HTMLButtonElement>('[data-learn-preview][data-state="open"] [data-slot="dialog-close"]');
+          if (!previewClose) return;
           event.preventDefault();
-          nested.querySelector<HTMLButtonElement>('[data-slot="dialog-close"]')?.click();
+          previewClose.click();
         }}
       >
         <DialogTitle className="sr-only">Learn</DialogTitle>

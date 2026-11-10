@@ -58,7 +58,7 @@ function WorkflowMedia({ media, success }: { media: LearnWorkflow["media"]; succ
           <img key={`${media.src}-${retry}`} className="max-h-[min(38vh,24rem)] w-full rounded-lg bg-muted/30 object-contain" src={imageSource!} alt={media.alt} loading="lazy" onError={() => setFailed(true)} />
         </button>
       </DialogTrigger>
-      <DialogContent className="inset-0 top-0 left-0 h-dvh w-screen max-w-none translate-x-0 translate-y-0 grid-rows-[auto_minmax(0,1fr)] gap-2 rounded-none border-0 p-4 sm:max-w-none">
+      <DialogContent data-learn-preview="" className="inset-0 top-0 left-0 h-dvh w-screen max-w-none translate-x-0 translate-y-0 grid-rows-[auto_minmax(0,1fr)] gap-2 rounded-none border-0 p-4 sm:max-w-none">
         <DialogTitle className="pr-8 text-sm">Product preview</DialogTitle>
         <DialogDescription className="sr-only">{media.alt}</DialogDescription>
         <div className="min-h-0 overflow-auto overscroll-contain">

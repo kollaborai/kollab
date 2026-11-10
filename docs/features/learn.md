@@ -26,7 +26,8 @@ Settings and Agents panels across desktop and mobile.
 
 The topic menu uses plain text labels without numbering. Page and section headings
 omit decorative icons, taglines, and lesson counters. The modal has a close icon
-in its top-right corner and scrolls internally. Escape also closes it. Topic URLs
+in its top-right corner and scrolls internally. Escape closes an enlarged product
+preview first, returning to the lesson; another Escape closes Learn. Topic URLs
 can be bookmarked or opened directly and browser Back/Forward restores navigation.
 
 | Topic ID | Lesson |
