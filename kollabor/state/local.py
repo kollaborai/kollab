@@ -1379,10 +1379,11 @@ class LocalStateService(StateService):
                     records = await asyncio.to_thread(ledger.get_in_flight_dispatches_for_assignee, identity)
                     data = answer["body"]["data"]
                     available = {entry["path"] for entry in data["folders"]}
-                    assigned = {os.path.realpath(item["worktree"]) for item in records
-                                if isinstance(item.get("worktree"), str) and os.path.isabs(item["worktree"])}
-                    if len(assigned) == 1 and assigned <= available:
-                        data["default"] = next(iter(assigned))
+                    paths = [item.get("worktree") for item in records]
+                    if paths and all(isinstance(path, str) and os.path.isabs(path) for path in paths):
+                        assigned = {os.path.realpath(path) for path in paths}
+                        if len(assigned) == 1 and assigned <= available:
+                            data["default"] = next(iter(assigned))
             except Exception:
                 logger.debug("could not determine assigned code folder", exc_info=True)
         return answer

@@ -250,3 +250,39 @@ def test_code_rpc_timeout_releases_real_client_writer_lock():
         assert writer.writes == 2
 
     run(exercise())
+
+@pytest.mark.parametrize("unknown", [{}, {"worktree": "relative"}, {"worktree": None}, {"worktree": "\0"}])
+def test_folder_default_does_not_guess_when_any_assignment_lacks_a_known_worktree(wire, tmp_path, monkeypatch, unknown):
+    remote, _, _, service = wire
+    from kollabor.code_service import folders
+
+    worktree = tmp_path / "worker"
+    worktree.mkdir()
+    monkeypatch.setattr(folders, "linked_folders", lambda root: [
+        {"path": str(tmp_path), "branch": "main"}, {"path": str(worktree), "branch": "worker"},
+    ])
+    ledger = SimpleNamespace(get_in_flight_dispatches_for_assignee=lambda identity: [
+        {"worktree": str(worktree)}, unknown,
+    ])
+    hub = SimpleNamespace(_identity=SimpleNamespace(identity="worker"), _task_ledger=ledger)
+    service._event_bus = SimpleNamespace(get_service=lambda name: hub)
+
+    answer = run(remote.code_call("folders", {}))
+    assert answer["body"]["data"]["default"] == str(tmp_path)
+
+
+def test_folder_default_accepts_multiple_assignments_to_same_worktree(wire, tmp_path, monkeypatch):
+    remote, _, _, service = wire
+    from kollabor.code_service import folders
+
+    worktree = tmp_path / "worker"
+    worktree.mkdir()
+    monkeypatch.setattr(folders, "linked_folders", lambda root: [
+        {"path": str(tmp_path), "branch": "main"}, {"path": str(worktree), "branch": "worker"},
+    ])
+    ledger = SimpleNamespace(get_in_flight_dispatches_for_assignee=lambda identity: [
+        {"worktree": str(worktree)}, {"worktree": str(worktree)},
+    ])
+    hub = SimpleNamespace(_identity=SimpleNamespace(identity="worker"), _task_ledger=ledger)
+    service._event_bus = SimpleNamespace(get_service=lambda name: hub)
+    assert run(remote.code_call("folders", {}))["body"]["data"]["default"] == str(worktree)
