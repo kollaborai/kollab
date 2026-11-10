@@ -195,3 +195,15 @@ async def test_deeply_nested_json_hides_only_itself(client, root):
     body = (await client.get("/pr-chain")).json()
     assert [i["number"] for i in body["items"]] == [1]
     assert [e["stage"] for e in body["events"]] == ["ok", "ok"]
+
+
+@pytest.mark.asyncio
+async def test_a_lone_surrogate_in_runner_text_is_not_a_500(client, root):
+    folder = root / "prs" / "1"
+    folder.mkdir(parents=True)
+    (folder / "STATE.json").write_text('{"status": "A\\ud800B", "why": "x"}')
+    (root / "ledger.jsonl").write_text('{"pr": 1, "stage": "s\\udfffx"}\n')
+    response = await client.get("/pr-chain")
+    assert response.status_code == 200
+    assert response.json()["items"][0]["status"] == "A?B"
+    assert response.json()["events"][0]["stage"] == "s?x"
