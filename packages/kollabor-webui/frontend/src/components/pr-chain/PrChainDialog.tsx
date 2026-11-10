@@ -80,6 +80,19 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
 
   const items = snapshot ? sortItems(snapshot.items) : [];
   const events = snapshot ? [...snapshot.events].reverse().slice(0, 12) : [];
+  const activity = events.length ? (
+    <section className="mt-4">
+      <h3 className="text-muted-foreground mb-1 text-xs font-medium">Recent activity</h3>
+      <ul className="space-y-0.5">
+        {events.map((event, index) => (
+          <li key={`${event.ts}-${index}`} className="flex gap-3 text-xs">
+            <span className="text-muted-foreground shrink-0 font-mono">{shortTime(event.ts)}</span>
+            <span className="min-w-0 break-words">{describeEvent(event)}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  ) : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -130,12 +143,15 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
               <Skeleton className="h-8 w-full" />
             </div>
           ) : !snapshot.root_found || items.length === 0 ? (
-            <p className="text-muted-foreground py-8 text-center text-sm text-balance">
-              {snapshot.root_found ? "Nothing is tracked yet. " : "No PR Chain state on this machine. "}
-              Run <code className="text-foreground font-mono text-xs whitespace-nowrap">pr-chain run &lt;pr number&gt;</code> or{" "}
-              <code className="text-foreground font-mono text-xs whitespace-nowrap">pr-chain issue &lt;issue number&gt;</code> and it shows up here.
-              {listNote(snapshot) ? <span className="mt-1 block">{listNote(snapshot)}</span> : null}
-            </p>
+            <>
+              <p className="text-muted-foreground py-8 text-center text-sm text-balance">
+                {snapshot.root_found ? "Nothing is tracked yet. " : "No PR Chain state on this machine. "}
+                Run <code className="text-foreground font-mono text-xs whitespace-nowrap">pr-chain run &lt;pr number&gt;</code> or{" "}
+                <code className="text-foreground font-mono text-xs whitespace-nowrap">pr-chain issue &lt;issue number&gt;</code> and it shows up here.
+                {listNote(snapshot) ? <span className="mt-1 block">{listNote(snapshot)}</span> : null}
+              </p>
+              {activity}
+            </>
           ) : (
             <>
               <ul className="divide-border divide-y" aria-label="Tracked items">
@@ -172,19 +188,7 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
                 })}
               </ul>
               {listNote(snapshot) ? <p className="text-muted-foreground mt-2 text-xs">{listNote(snapshot)}</p> : null}
-              {events.length ? (
-                <section className="mt-4">
-                  <h3 className="text-muted-foreground mb-1 text-xs font-medium">Recent activity</h3>
-                  <ul className="space-y-0.5">
-                    {events.map((event, index) => (
-                      <li key={`${event.ts}-${index}`} className="flex gap-3 text-xs">
-                        <span className="text-muted-foreground shrink-0 font-mono">{shortTime(event.ts)}</span>
-                        <span className="min-w-0 break-words">{describeEvent(event)}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
-              ) : null}
+              {activity}
             </>
           )}
         </div>

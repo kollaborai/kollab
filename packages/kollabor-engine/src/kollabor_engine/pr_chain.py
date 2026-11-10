@@ -162,13 +162,15 @@ def _windows_pid_alive(pid: int) -> bool:
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
     kernel32.OpenProcess.restype = ctypes.c_void_p
-    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    # SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION. The exit code alone is not enough: a process
+    # that exited with code 259 (STILL_ACTIVE) looks running, but a zero-time wait is signalled once it ends.
+    handle = kernel32.OpenProcess(0x101000, False, pid)
     if not handle:
         # Access denied means the process exists but belongs to someone else.
         return ctypes.get_last_error() == 5
     try:
-        code = ctypes.c_ulong()
-        return bool(kernel32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code))) and code.value == 259
+        kernel32.WaitForSingleObject.restype = ctypes.c_ulong
+        return kernel32.WaitForSingleObject(ctypes.c_void_p(handle), 0) == 0x102  # WAIT_TIMEOUT
     finally:
         kernel32.CloseHandle(ctypes.c_void_p(handle))
 

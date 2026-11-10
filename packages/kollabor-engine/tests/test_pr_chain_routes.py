@@ -315,7 +315,7 @@ async def test_a_value_nested_just_inside_the_parser_limit_is_not_a_500(client, 
 
 def make_symlink(link, target):
     try:
-        link.symlink_to(target)
+        link.symlink_to(target, target_is_directory=target.is_dir())
     except (OSError, NotImplementedError):
         pytest.skip("symlinks are not available here")
 
@@ -414,8 +414,13 @@ async def test_a_folder_swapped_for_a_symlink_while_it_is_being_read_does_not_le
         # An attacker replaces the item folder right after the checks and before the file is opened.
         # Only this item's open counts; the patch is process wide and other threads open files too.
         folder = kwargs.get("dir_fd")
-        ours = folder is not None and os.fstat(folder).st_ino == item_folder
-        if str(path).endswith("STATE.json") and ours and not swapped:
+        ours = False
+        if str(path).endswith("STATE.json") and folder is not None:
+            try:
+                ours = os.fstat(folder).st_ino == item_folder
+            except OSError:
+                pass
+        if ours and not swapped:
             swapped.append(True)
             (root / "prs" / "123").rename(root / "prs" / "123.orig")
             (root / "prs" / "123").symlink_to(outside)
@@ -507,6 +512,7 @@ async def test_without_dir_fd_a_folder_swapped_while_it_is_read_does_not_leak(
     outside.mkdir()
     (outside / "STATE.json").write_text(json.dumps({"status": "LEAKED", "updated": "z"}))
     write_state(root, "prs", 123, status="READY", updated="a")
+    make_symlink(tmp_path / "probe-link", outside)  # skips here when the account may not create symlinks
     inner_open = os.open
     swapped = []
 
@@ -514,7 +520,7 @@ async def test_without_dir_fd_a_folder_swapped_while_it_is_read_does_not_leak(
         if str(path).endswith("STATE.json") and str(root) in str(path) and not swapped:
             swapped.append(True)
             (root / "prs" / "123").rename(root / "prs" / "123.orig")
-            (root / "prs" / "123").symlink_to(outside)
+            (root / "prs" / "123").symlink_to(outside, target_is_directory=True)
         return inner_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(os, "open", open_after_a_swap)
