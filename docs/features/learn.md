@@ -205,18 +205,36 @@ be enlarged; videos start from their poster and offer Watch walkthrough, native
 playback controls and a return to the preview. Reduced motion keeps playback manual.
 Recovery guidance stays collapsed below the instructions.
 
-This repository does not ship a media recorder or a source-freshness checker. Refresh
-a lesson's stills by hand: rebuild the Web UI, capture each product still from the
-running app with staged example data at 1280, 820 and 390 px, and replace the file in
+The reusable recorder, all eleven capture recipes and watched-source freshness checks
+are maintained in the existing local capture toolchain. Publishing that private
+toolchain is outside [this change's scope](https://github.com/kollaborai/kollab/issues/1006);
+its commands and recipe maintenance belong in its local guide. The committed media
+manifest records provenance, and does not by itself establish that a scene is current
+or that its backend workflow was verified.
+
+From a fresh clone, rebuild the Web UI and capture native product stills with staged
+example data at 1280, 820 and 390 px. Replace the reviewed assets in
 `frontend/public/learn/<topic-id>/`. When a control's label or location changes, update
-the native selectors and assertions in that topic's JSON and re-capture every still that
-shows the old control. Then run these checks from a fresh clone:
+the lesson's entry paths, steps and command examples in that topic's JSON, then refresh
+the scenes that show the old control. Capture selectors and assertions belong to the
+capture recipes, maintained through the local toolchain's guide.
+
+These repository checks require the frontend dependencies:
 
 ```sh
 cd packages/kollabor-webui/frontend
 npm run typecheck
 npm test
 node --test tests/learn-catalog.test.ts
+```
+
+For reproducible Learn screenshots and browser checks with the repository's staged
+API fixtures, use a compatible Chromium executable and a fresh screenshot directory:
+
+```sh
+CHROME_PATH=/absolute/path/to/chromium \
+  LEARN_SCREENSHOT_DIR=/absolute/path/to/fresh-screenshots \
+  npm run test:e2e:learn
 ```
 
 Keep a video at one viewport. Capture responsive product stills separately, and
