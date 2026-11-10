@@ -97,6 +97,12 @@ An engine route that takes a folder (`workspace`, `folder`, the picker's `path`)
 
 The authenticated Code routes are an exception for folders on a session's daemon, which may be on another computer: the engine proxies the selection and never opens that path locally. The daemon resolves and validates the selected absolute directory on its own machine before serving files or Git (`docs/specs/floating-code-shell.md`).
 
+### Web UI Learn
+
+The Learn dialog uses one renderer (`frontend/src/components/learn/`) and the typed catalog in `frontend/src/learn/`, under `packages/kollabor-webui/`. Each topic's JSON defines workflows, exact entry points, steps, command examples, expected results, recovery, and product media. Keep topic IDs stable and change the shared renderer for repeated presentation changes. See [Learn maintenance](../../features/learn.md) for the content contract and recording process.
+
+Desktop images and optional recordings live in `frontend/public/learn/`. The phone-app build inlines only referenced image previews through `frontend/scripts/learn-phone-media-plugin.ts`; it uses those previews and written steps without requesting unsigned media or changing the portal CSP. Validate the catalog with `frontend/tests/learn-catalog.test.ts` and the actual browser surface with `tests/tmux/specs/learn_web_workflows.json` (requires the frontend dependencies and a Playwright-compatible Chromium executable).
+
 ## Project Structure
 
 ```
