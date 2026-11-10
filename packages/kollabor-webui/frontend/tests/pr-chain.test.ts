@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PrChainItem } from "../src/api";
-import { describeEvent, itemUrl, latestOnly, shortTime, sortItems, statusLabel, statusTone } from "../src/components/pr-chain/prChain";
+import { describeEvent, itemUrl, latestOnly, shortTime, sortItems, statusLabel, statusTone, inFlight } from "../src/components/pr-chain/prChain";
 
 const item = (over: Partial<PrChainItem>): PrChainItem => ({ kind: "pr", number: 1, claimed: false, ...over });
 
@@ -69,5 +69,20 @@ describe("statusLabel with names that exist on every object", () => {
     expect(statusLabel("constructor")).toBe("Constructor");
     expect(statusLabel("toString")).toBe("Tostring");
     expect(statusLabel("hasOwnProperty")).toBe("Hasownproperty");
+  });
+});
+
+describe("inFlight", () => {
+  it("is busy from begin until the matching end, and an end counts once", () => {
+    const requests = inFlight();
+    expect(requests.busy()).toBe(false);
+    const first = requests.begin();
+    const second = requests.begin();
+    expect(requests.busy()).toBe(true);
+    first();
+    first();
+    expect(requests.busy()).toBe(true);
+    second();
+    expect(requests.busy()).toBe(false);
   });
 });
