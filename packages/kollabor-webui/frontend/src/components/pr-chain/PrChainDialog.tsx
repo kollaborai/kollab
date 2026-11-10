@@ -80,11 +80,11 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
               Every PR and issue the review workflow is working on.
             </DialogDescription>
           </div>
-          <Button type="button" size="icon-sm" variant="ghost" aria-label="Refresh" className="max-sm:size-11" disabled={busy} onClick={() => load(true)}>
+          <Button type="button" size="icon-sm" variant="ghost" aria-label="Refresh" className="shrink-0 max-sm:size-11" disabled={busy} onClick={() => load(true)}>
             {busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
           </Button>
           <DialogClose asChild>
-            <Button type="button" size="icon-sm" variant="ghost" aria-label="Close" className="max-sm:size-11">
+            <Button type="button" size="icon-sm" variant="ghost" aria-label="Close" className="shrink-0 max-sm:size-11">
               <X />
             </Button>
           </DialogClose>
