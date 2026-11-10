@@ -339,6 +339,45 @@ def test_deleted_default_loadout_starts_on_the_active_profile(
     assert "Applied default loadout" not in caplog.text
 
 
+def test_default_matching_no_loadout_logs_a_warning_naming_it(
+    tmp_path, monkeypatch, caplog
+):
+    """A saved default that matches no loadout (#964) is logged by name, so the
+    silent fall back to the active profile is visible in the log."""
+    _startup_with_default_loadout(
+        tmp_path,
+        monkeypatch,
+        caplog,
+        loadouts={"luna-max": {"provider_profile": "ghost", "model": "gpt-6-luna"}},
+        default_loadout={"name": "luna", "level": "global"},
+    )
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "Default loadout 'luna' matches no saved loadout" in message
+        for message in warnings
+    ), warnings
+
+
+def test_default_with_different_case_does_not_apply_and_is_logged(
+    tmp_path, monkeypatch, caplog
+):
+    """The saved default is compared exactly (#964): 'Luna' does not apply to a
+    saved 'luna', and the fall back is logged naming 'Luna'."""
+    app = _startup_with_default_loadout(
+        tmp_path,
+        monkeypatch,
+        caplog,
+        loadouts={"luna": {"provider_profile": "ghost", "model": "gpt-6-luna"}},
+        default_loadout={"name": "Luna", "level": "global"},
+    )
+
+    active = app.profile_manager.get_active_profile()
+    assert active.model == "claude-haiku-4.5"
+    assert "Applied default loadout" not in caplog.text
+    assert "Default loadout 'Luna' matches no saved loadout" in caplog.text
+
+
 def test_exact_default_loadout_still_applies_at_startup(tmp_path, monkeypatch, caplog):
     """The guard for the fix above: an exact saved default keeps applying."""
     app = _startup_with_default_loadout(
