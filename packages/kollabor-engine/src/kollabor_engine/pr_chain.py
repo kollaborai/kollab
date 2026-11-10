@@ -165,7 +165,13 @@ def _open_file(base: Path, parts: Tuple[str, ...], flags: int) -> int:
 
 
 def _trusted_owner(base: Path) -> Optional[int]:
-    """The user that owns the runner's root folder, or None where files have no POSIX owner (Windows)."""
+    """The user that owns the runner's root folder, or None where files have no POSIX owner (Windows).
+
+    Trust contract: the runner writes the folder as the same user that runs the engine, and everyone who
+    can write the folder is trusted with that user's read access. A file owned by anyone else is refused
+    on purpose (the state is hidden, not shown wrongly). This keeps a link to another user's file out;
+    it is not a boundary against a writer who is trusted anyway.
+    """
     if not hasattr(os, "getuid"):
         return None
     return os.stat(base).st_uid
