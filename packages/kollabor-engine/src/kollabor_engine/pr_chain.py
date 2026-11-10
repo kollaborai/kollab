@@ -58,6 +58,9 @@ def _runner_alive(claim: Path) -> bool:
     """A claim counts only while the process that wrote it is still running."""
     try:
         pid = int((claim / "pid").read_text().strip())
+    except (OSError, ValueError, OverflowError):
+        return False
+    try:
         if not 0 < pid <= MAX_PID:
             return False
         os.kill(pid, 0)
@@ -116,7 +119,7 @@ def read_events(base: Path, kind: Optional[str] = None, number: Optional[int] = 
     except OSError:
         return []
     events: List[Dict[str, Any]] = []
-    for line in raw.splitlines():
+    for line in raw.split("\n"):
         try:
             event = json.loads(line)
         except ValueError, RecursionError:
