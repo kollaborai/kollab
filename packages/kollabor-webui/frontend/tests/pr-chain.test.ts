@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PrChainItem } from "../src/api";
-import { describeEvent, itemUrl, shortTime, sortItems, statusTone } from "../src/components/pr-chain/prChain";
+import { describeEvent, itemUrl, shortTime, sortItems, statusLabel, statusTone } from "../src/components/pr-chain/prChain";
 
 const item = (over: Partial<PrChainItem>): PrChainItem => ({ kind: "pr", number: 1, claimed: false, ...over });
 
@@ -22,7 +22,10 @@ describe("pr-chain helpers", () => {
   });
 
   it("reads the tone from status and claim", () => {
-    expect(statusTone(item({ status: "UI-FAILED" }))).toBe("attention");
+    expect(statusTone(item({ status: "UI-FAILED" }))).toBe("failed");
+    expect(statusTone(item({ status: "BUILD-FAILED" }))).toBe("failed");
+    expect(statusTone(item({ status: "ERROR" }))).toBe("failed");
+    expect(statusTone(item({ status: "AWAIT-HUMAN" }))).toBe("attention");
     expect(statusTone(item({ status: "MERGED" }))).toBe("done");
     expect(statusTone(item({ status: "REVIEWING", claimed: true }))).toBe("active");
     expect(statusTone(item({ status: "READY" }))).toBe("idle");
@@ -32,6 +35,19 @@ describe("pr-chain helpers", () => {
     expect(shortTime("2026-11-09T17:27:03")).toBe("17:27");
     expect(shortTime(undefined)).toBe("");
     expect(describeEvent({ pr: 960, stage: "review", verdict: "PASS" })).toBe("PR 960 review: PASS");
-    expect(describeEvent({ issue: 893, stage: "issue-end", status: "BUILD-FAILED" })).toBe("Issue 893 issue-end: BUILD-FAILED");
+    expect(describeEvent({ issue: 893, stage: "issue-end", status: "BUILD-FAILED" })).toBe("Issue 893 Issue ended: Build failed");
+    expect(describeEvent({ pr: 7, stage: "human-gate", status: "AWAIT-HUMAN" })).toBe("PR 7 Waiting for you: Waiting for you");
+  });
+
+  it("names workflow tokens in plain words", () => {
+    expect(statusLabel("AWAIT-HUMAN")).toBe("Waiting for you");
+    expect(statusLabel("BUILD-FAILED")).toBe("Build failed");
+    expect(statusLabel("UI-FAILED")).toBe("UI failed");
+    expect(statusLabel("ERROR")).toBe("Error");
+    expect(statusLabel("REVIEWING")).toBe("Reviewing");
+    expect(statusLabel("MERGED")).toBe("Merged");
+    expect(statusLabel("ui-review")).toBe("UI review");
+    expect(statusLabel("SOME-NEW-STATE")).toBe("Some new state");
+    expect(statusLabel(undefined)).toBe("Unknown");
   });
 });
