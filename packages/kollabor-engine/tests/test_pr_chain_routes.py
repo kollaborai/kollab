@@ -147,6 +147,18 @@ async def test_detail_matches_events_whose_pr_is_a_string(client, root):
 
 
 @pytest.mark.asyncio
+async def test_an_agent_event_logged_under_an_issue_tag_belongs_to_that_issue(client, root):
+    write_state(root, "issues", 893, status="BUILDING", updated="x")
+    write_state(root, "prs", 893, status="READY", updated="x")
+    row = {"stage": "agent", "pr": "i893", "role": "build", "rc": 124}
+    (root / "ledger.jsonl").write_text(json.dumps(row) + "\n")
+    assert [e["stage"] for e in (await client.get("/pr-chain/issue/893")).json()["events"]] == ["agent"]
+    assert (await client.get("/pr-chain/pr/893")).json()["events"] == []
+    event = (await client.get("/pr-chain")).json()["events"][0]
+    assert event.get("issue") == 893 and "pr" not in event
+
+
+@pytest.mark.asyncio
 async def test_issue_detail_and_the_event_cap(client, root):
     write_state(root, "issues", 7, status="BUILDING", updated="x")
     rows = [{"issue": 7, "stage": f"s{i}"} for i in range(250)] + [{"pr": 7, "stage": "other"}]
