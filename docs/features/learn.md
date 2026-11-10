@@ -205,30 +205,20 @@ be enlarged; videos start from their poster and offer Watch walkthrough, native
 playback controls and a return to the preview. Reduced motion keeps playback manual.
 Recovery guidance stays collapsed below the instructions.
 
-The maintained local refresh entry point is `~/.marcoverse/bin/kollab-learn-refresh.py`.
-It uses the existing capture adapter and saved topic recipes in
-`~/.marcoverse/assets/kollab-learn/recipes/`, with the current checkout and a fresh
-output directory supplied on each run:
+This repository does not ship a media recorder or a source-freshness checker. Refresh
+a lesson's stills by hand: rebuild the Web UI, capture each product still from the
+running app with staged example data at 1280, 820 and 390 px, and replace the file in
+`frontend/public/learn/<topic-id>/`. When a control's label or location changes, update
+the native selectors and assertions in that topic's JSON and re-capture every still that
+shows the old control. Then run these checks from a fresh clone:
 
 ```sh
-python3 ~/.marcoverse/bin/kollab-learn-refresh.py \
-  --source /absolute/path/to/current-kollab-checkout \
-  --output /absolute/path/to/fresh-media-take
+cd packages/kollabor-webui/frontend
+npm run typecheck
+npm test
+node --test tests/learn-catalog.test.ts
 ```
 
-All saved topics are captured by default. Repeat `--topic` to select a subset,
-or use `--prepare-only` to inspect configured recipes without recording. The
-adjacent `~/.marcoverse/assets/kollab-learn/README.md` documents dependencies and
-source-freshness checks. Update native selectors and assertions as controls change;
-the refresh command builds the selected checkout and refuses existing outputs.
-
-The private lens recipe adapter records the actual compiled UI with staged data.
-Use assertions for visible controls before capture, not just successful navigation.
-Keep recipes, raw takes and capture evidence outside public runtime assets. Each
-capture records nonempty watched-source hashes, build and recipe hashes, privacy
-checks and whether backend workflows were verified. The public media manifest uses
-repository-relative source names and records staged provenance without private paths.
-Refresh stale scenes when their watched source or recipe changes.
 Keep a video at one viewport. Capture responsive product stills separately, and
 crop full frames after recording so screenshot clipping cannot resize the video.
 
