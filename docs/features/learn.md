@@ -198,6 +198,8 @@ Edit each topic's JSON in `frontend/src/learn/topics` within the Web UI package;
 `src/learn/model.ts` defines the shared workflow contract. Keep entry paths as
 individual breadcrumb labels, command examples on one logical line, and expected
 results short and observable. Preserve substantive guidance when reorganizing a topic.
+Write recovery symptoms as labels without a trailing period; the shared renderer
+adds the colon before the corrective action.
 
 Keep product assets in `frontend/public/learn/<topic-id>/`. A workflow can show a
 focused image or a video with a readable poster and captions. Still previews can
