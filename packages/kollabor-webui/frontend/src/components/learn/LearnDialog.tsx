@@ -9,6 +9,16 @@ export function LearnDialog(props: ComponentProps<typeof LearnPage>) {
         showCloseButton={false}
         className="flex h-[min(48rem,88dvh)] w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(64rem,calc(100%-2rem))]"
         onOpenAutoFocus={(event) => event.preventDefault()}
+        onEscapeKeyDown={(event) => {
+          // An enlarged preview is a nested dialog. Radix can deliver the first Escape to this outer dialog
+          // before the nested one registers as the top layer; the outer then consumes the event, so the nested
+          // dialog never closes. Close the nested preview here instead, and keep Learn open.
+          const openDialogs = document.querySelectorAll<HTMLElement>('[role="dialog"][data-state="open"]');
+          const nested = openDialogs[openDialogs.length - 1];
+          if (openDialogs.length < 2 || !nested) return;
+          event.preventDefault();
+          nested.querySelector<HTMLButtonElement>('[data-slot="dialog-close"]')?.click();
+        }}
       >
         <DialogTitle className="sr-only">Learn</DialogTitle>
         <DialogDescription className="sr-only">Reference topics for using Kollab.</DialogDescription>
