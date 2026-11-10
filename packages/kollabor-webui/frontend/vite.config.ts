@@ -186,6 +186,11 @@ const mainConfig = defineConfig({
     // Vitest suites; Node's built-in test runner remains for older tests.
     include: [
       "tests/prompts-page.test.ts",
+      "tests/terminal-ws-protocol.test.ts",
+      "tests/lazy-file-list.test.ts",
+      "tests/code-fetch-session.test.ts",
+      "tests/terminal-env.test.ts",
+      "tests/file-save.test.ts",
       "tests/history-cache.test.ts",
       "tests/phone-frame.test.ts",
       "tests/phone-audio.test.ts",
@@ -206,6 +211,11 @@ const mainConfig = defineConfig({
       "tests/trajectory-detail-title.test.ts",
       "tests/sidebar-breakpoint.test.ts",
       "tests/session-refresh-gate.test.ts",
+      "tests/code-editor-store.test.ts",
+      "tests/code-open-file.test.ts",
+      "tests/workspace-ownership.test.ts",
+      "tests/file-mutations.test.ts",
+      "tests/editor-shortcuts.test.ts",
 
       "tests/team-model.test.ts",
       "tests/team-selection.test.ts",
