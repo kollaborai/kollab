@@ -94,23 +94,26 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
           <div role="alert" className="bg-destructive/10 text-destructive mx-4 mb-2 flex items-start gap-2 rounded-md px-3 py-2 text-sm sm:mx-6">
             <AlertCircle className="mt-0.5 size-4 shrink-0" />
             <span className="min-w-0 flex-1 break-words" title={loadError}>
-              Couldn&apos;t load the PR chain. Press Refresh to try again.
+              Couldn&apos;t load the PR chain.
             </span>
+            <Button type="button" size="sm" variant="ghost" className="-my-1 h-7 shrink-0 px-2 max-sm:h-11" disabled={busy} onClick={() => load(true)}>
+              Try again
+            </Button>
           </div>
         ) : null}
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 sm:px-6">
-          {snapshot === null ? (
+          {snapshot === null && loadError ? null : snapshot === null ? (
             <div className="space-y-2" aria-label="Loading">
               <Skeleton className="h-8 w-full" />
               <Skeleton className="h-8 w-full" />
               <Skeleton className="h-8 w-full" />
             </div>
           ) : !snapshot.root_found || items.length === 0 ? (
-            <p className="text-muted-foreground py-8 text-center text-sm">
+            <p className="text-muted-foreground py-8 text-center text-sm text-balance">
               {snapshot.root_found ? "Nothing is tracked yet. " : "No PR chain state on this machine. "}
-              Run <code className="text-foreground font-mono text-xs">pr-chain run &lt;pr number&gt;</code> or{" "}
-              <code className="text-foreground font-mono text-xs">pr-chain issue &lt;issue number&gt;</code> and it shows up here.
+              Run <code className="text-foreground font-mono text-xs whitespace-nowrap">pr-chain run &lt;pr number&gt;</code> or{" "}
+              <code className="text-foreground font-mono text-xs whitespace-nowrap">pr-chain issue &lt;issue number&gt;</code> and it shows up here.
             </p>
           ) : (
             <>
@@ -123,7 +126,7 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
                         href={itemUrl(item)}
                         target="_blank"
                         rel="noreferrer"
-                        className="hover:text-primary flex items-center gap-1 font-mono text-xs"
+                        className="hover:text-primary flex items-center gap-1 font-mono text-xs max-sm:min-h-11"
                       >
                         {item.kind === "pr" ? "PR" : "Issue"} {item.number}
                         <ExternalLink className="size-3" />
@@ -138,8 +141,11 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
                         {shortTime(item.updated)}
                       </span>
                       {item.why || item.last_verdict ? (
-                        <span className="text-muted-foreground col-span-2 min-w-0 break-words text-xs sm:col-span-3">
-                          {[item.last_verdict, item.why].filter(Boolean).join(" · ")}
+                        <span
+                          className="text-muted-foreground col-span-2 line-clamp-3 min-w-0 break-words text-xs sm:col-span-3"
+                          title={[item.last_verdict ? statusLabel(item.last_verdict) : "", item.why].filter(Boolean).join(" · ")}
+                        >
+                          {[item.last_verdict ? statusLabel(item.last_verdict) : "", item.why].filter(Boolean).join(" · ")}
                         </span>
                       ) : null}
                     </li>

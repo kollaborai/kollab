@@ -64,6 +64,9 @@ export function shortTime(stamp: string | undefined): string {
 /** One plain line for a ledger event, e.g. "PR 960 review: PASS". */
 export function describeEvent(event: PrChainEvent): string {
   const target = event.issue != null ? `Issue ${event.issue}` : event.pr != null ? `PR ${event.pr}` : "";
-  const parts = [event.stage, event.status ?? event.verdict].filter(Boolean).map((part) => statusLabel(part));
+  const parts = [event.stage, event.status ?? event.verdict]
+    .filter(Boolean)
+    .map((part) => statusLabel(part))
+    .filter((label, index, all) => all.indexOf(label) === index);
   return [target, parts.join(": ")].filter(Boolean).join(" ");
 }
