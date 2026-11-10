@@ -11,6 +11,8 @@ nothing is locked.
 3. The global `~/.kollab/config.json`.
 4. The default in the table.
 
+Project and global config are merged before they are read (project keys win), so tiers 2 and 3 act as one. A value of the wrong type is ignored and the next tier down in this list is used; because the merge already picked the project value, a wrong-typed project value falls to the default, not to the global value. Known limitation: a typo in a switch such as `read_only` therefore falls to its default.
+
 The daemon of the session resolves these (`kollabor/code_service/settings.py`, `resolve(config, agent_code)`), so a
 session on another computer follows that computer's config and agent, not this one's. The web UI shows and edits them
 in Settings (System Configuration, section "Code And Terminal" for global/project) and, per agent, in the agent's
@@ -25,7 +27,7 @@ A setting is read when a request or a shell starts. A running shell keeps the en
 | `enabled` | true | false: the daemon refuses every code, git and terminal call (404 `code_disabled`). Lets a machine owner close the door |
 | `read_only` | false | true: writes, creates, renames, deletes, git writes and terminal input are refused (403 `read_only`). Opt-in only |
 | `terminal.enabled` | true | false: no shells |
-| `terminal.pass_secret_env` | false | true: names containing TOKEN, SECRET, API_KEY or PASSWORD reach the shell |
+| `terminal.pass_secret_env` | false | true: secret-looking names reach the shell (containing TOKEN, SECRET, API_KEY, APIKEY, PASSWORD, PASSWD, CREDENTIAL, PRIVATE_KEY or DATABASE_URL, or a `_`-separated word PAT) |
 | `terminal.pass_kollab_env` | false | true: `KOLLAB_*` and `KOLLABOR_*` reach the shell |
 | `terminal.env_allow` | [] | exact names that always pass, even if a filter above would drop them |
 | `terminal.env_deny` | [] | exact names that never pass |

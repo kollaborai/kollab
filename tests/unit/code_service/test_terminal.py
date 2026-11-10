@@ -293,6 +293,30 @@ def test_shell_env_drops_kollab_and_secret_names(monkeypatch):
     assert env["TERM"] == "xterm-256color"
 
 
+def test_shell_env_drops_common_credential_names_and_keeps_ordinary_ones(monkeypatch):
+    # #987 review: these slipped through the four-marker rule.
+    secrets = ("DATABASE_URL", "GITHUB_PAT", "PAT", "OPENAI_APIKEY", "DB_PASSWD", "AWS_CREDENTIALS", "SSH_PRIVATE_KEY")
+    for name in secrets:
+        monkeypatch.setenv(name, "x")
+    for name in ("PATTERN_DIR", "EDITOR_PATH_HINT", "PATHEXT_NOTE"):
+        monkeypatch.setenv(name, "ok")
+
+    env = terminal._shell_env()
+
+    assert not [name for name in secrets if name in env]
+    assert env["PATTERN_DIR"] == "ok" and env["EDITOR_PATH_HINT"] == "ok" and env["PATHEXT_NOTE"] == "ok"
+    assert "PATH" in env
+
+
+def test_shell_env_passes_common_credential_names_when_the_setting_is_on(monkeypatch):
+    monkeypatch.setenv("GITHUB_PAT", "p")
+    monkeypatch.setenv("DATABASE_URL", "d")
+
+    env = terminal._shell_env(CodeSettings(pass_secret_env=True))
+
+    assert env["GITHUB_PAT"] == "p" and env["DATABASE_URL"] == "d"
+
+
 def test_shell_env_keeps_secret_names_when_the_setting_is_on_but_never_kollab_names(monkeypatch):
     monkeypatch.setenv("KOLLAB_X", "1")
     monkeypatch.setenv("KOLLABOR_HUB_BRIDGE_TOKEN", "3")

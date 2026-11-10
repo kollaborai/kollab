@@ -47,7 +47,19 @@ MAX_POLL_MESSAGES = 128
 MAX_DIMENSION = 500
 DEFAULT_COLS = 80
 DEFAULT_ROWS = 24
-_SECRET_MARKERS = ("TOKEN", "SECRET", "API_KEY", "PASSWORD")
+_SECRET_MARKERS = (
+    "TOKEN",
+    "SECRET",
+    "API_KEY",
+    "APIKEY",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+    "PRIVATE_KEY",
+    "DATABASE_URL",
+)
+# Whole `_`-separated words that mark a secret; a substring test would hit PATH and PATTERN_DIR.
+_SECRET_WORDS = frozenset({"PAT"})
 # Never passed on, whatever the setting says: the engine's and the daemon's own variables.
 _OWN_PREFIXES = ("KOLLAB_", "KOLLABOR_")
 
@@ -343,6 +355,12 @@ def _login_shell(configured: str = "") -> str:
     return "/bin/sh"
 
 
+def _looks_secret(upper: str) -> bool:
+    if any(marker in upper for marker in _SECRET_MARKERS):
+        return True
+    return any(word in _SECRET_WORDS for word in upper.split("_"))
+
+
 def _env_verdict(name: str, settings: CodeSettings) -> str | None:
     """Why a variable does not reach a new shell (``denied``, ``kollab`` or ``secret``), or None when it passes."""
     upper = name.upper()
@@ -352,7 +370,7 @@ def _env_verdict(name: str, settings: CodeSettings) -> str | None:
         return None
     if not settings.pass_kollab_env and upper.startswith(_OWN_PREFIXES):
         return "kollab"
-    if not settings.pass_secret_env and any(marker in upper for marker in _SECRET_MARKERS):
+    if not settings.pass_secret_env and _looks_secret(upper):
         return "secret"
     return None
 
