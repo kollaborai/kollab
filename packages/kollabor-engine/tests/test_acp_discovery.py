@@ -14,10 +14,8 @@ from kollabor_engine import server
 from kollabor_engine.routes import profiles as profiles_route
 
 import kollabor_ai.loadout_manager as loadout_manager_module
-import kollabor_config
 from kollabor.llm import acp_discovery
 from kollabor_ai import acp_options as acp_options_module
-from kollabor_config import config_utils
 
 
 class FakeProfile:
@@ -607,7 +605,7 @@ async def test_choices_route_returns_discovery_status_and_uses_only_fresh_option
     received = {}
 
     class FakeManager:
-        def __init__(self, _profile_manager, *, config):
+        def __init__(self, _profile_manager, *, config=None):
             self.config = config
 
         def provider_profiles(self):
@@ -625,8 +623,11 @@ async def test_choices_route_returns_discovery_status_and_uses_only_fresh_option
 
     monkeypatch.setattr(profiles_route, "_get_profile_manager", lambda: object())
     monkeypatch.setattr(loadout_manager_module, "LoadoutManager", FakeManager)
-    monkeypatch.setattr(kollabor_config, "ConfigService", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(config_utils, "get_global_config_path", lambda: "/tmp/config.json")
+    # the route passes no config handle to LoadoutManager; this stub keeps a stray read off the real config (#966)
+    empty_config = SimpleNamespace(get=lambda key, default=None: default)
+    monkeypatch.setattr(
+        profiles_route, "_loadout_config", lambda workspace="": empty_config
+    )
     monkeypatch.setattr(acp_discovery, "discover_profiles", discover)
 
     response = await profiles_route.list_choices()
@@ -795,7 +796,7 @@ def _stub_route(monkeypatch, profiles, *, refresh_catalogs=None) -> None:
     """The route's collaborators, faked: the profile list, catalogs and row builder."""
 
     class FakeManager:
-        def __init__(self, _profile_manager, *, config):
+        def __init__(self, _profile_manager, *, config=None):
             self.config = config
 
         def provider_profiles(self):
@@ -815,8 +816,6 @@ def _stub_route(monkeypatch, profiles, *, refresh_catalogs=None) -> None:
 
     monkeypatch.setattr(profiles_route, "_get_profile_manager", lambda: object())
     monkeypatch.setattr(loadout_manager_module, "LoadoutManager", FakeManager)
-    monkeypatch.setattr(kollabor_config, "ConfigService", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(config_utils, "get_global_config_path", lambda: "/tmp/config.json")
 
 
 @pytest.mark.asyncio

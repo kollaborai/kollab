@@ -353,11 +353,10 @@ _catalogs = _CatalogRefresh()
 
 def _picker_manager():
     from kollabor_ai.loadout_manager import LoadoutManager
-    from kollabor_config import ConfigService
-    from kollabor_config.config_utils import get_global_config_path
 
-    config = ConfigService(get_global_config_path(), fast_mode=True)  # saved loadouts live here
-    return LoadoutManager(_get_profile_manager(), config=config)
+    # no config handle: the picker lists no saved loadouts, so no layered config read happens here. Profile
+    # definitions still come from the config files through ProfileManager, as GET /profiles reads them (#966)
+    return LoadoutManager(_get_profile_manager())
 
 
 async def warm_model_choices() -> None:
