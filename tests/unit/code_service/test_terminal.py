@@ -475,7 +475,7 @@ async def test_teardown_does_not_wait_forever_for_an_unreaped_shell(tmp_path, mo
     await link.send(type="input", data="echo shell-ready-57''9\n")
     await link.until("shell-ready-579")
     session = terminal._SESSIONS[sid]
-    monkeypatch.setattr(session, "_capture_processes", lambda: set())
+    monkeypatch.setattr(session, "_collect_processes", lambda known: known)
     monkeypatch.setattr(session, "_signal_owned", lambda *_args: None)
     monkeypatch.setattr(terminal, "KILL_AFTER_SECONDS", 0.05)
     try:

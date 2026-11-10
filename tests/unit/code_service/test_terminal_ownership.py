@@ -138,7 +138,7 @@ def test_capture_does_not_rescan_process_tree_for_every_known_process(monkeypatc
     session._pty_name = None
     monkeypatch.setattr(terminal.psutil, "process_iter", lambda: iter(processes))
     monkeypatch.setattr(terminal.os, "getsid", lambda _pid: shell.pid)
-    session._capture_processes()
+    session._collect_processes(session._owned_processes)
     assert len(calls) <= 1, f"capture recursively scanned the system {len(calls)} times"
 
 
@@ -208,5 +208,5 @@ def test_capture_rejects_process_older_than_its_apparent_parent(monkeypatch):
     session._pty_name = None
     monkeypatch.setattr(terminal.psutil, "process_iter", lambda: iter([shell, unrelated]))
     monkeypatch.setattr(terminal.os, "getsid", lambda _pid: shell.pid)
-    session._capture_processes()
-    assert session._owned_processes == {shell}
+    result = session._collect_processes(session._owned_processes)
+    assert result == {shell}

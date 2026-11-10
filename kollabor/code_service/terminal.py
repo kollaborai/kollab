@@ -288,12 +288,6 @@ class _Session:
                     self._inspection_warnings.add("pty")
         return owned
 
-    def _capture_processes(self) -> set[psutil.Process]:
-        """Synchronous helper for isolated tests; runtime scans use the bounded worker below."""
-        before = self._owned_processes.copy()
-        self._owned_processes.update(self._collect_processes(before))
-        return self._owned_processes - before
-
     async def _capture_async(self, timeout: float) -> set[psutil.Process]:
         """Run at most one daemon scan per terminal without blocking the event loop."""
         future = self._scan_future
