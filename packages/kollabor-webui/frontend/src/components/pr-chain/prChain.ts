@@ -80,19 +80,18 @@ export function latestOnly(): () => () => boolean {
   };
 }
 
-/** Counts requests that have started and not yet ended, so a timer can skip a tick while one is still running. */
-export function inFlight(): { begin: () => () => void; busy: () => boolean } {
-  let open = 0;
+/** Counts requests that have started and not yet ended, so a timer can skip a tick while one is still running.
+ * A request older than `limitMs` stops counting, so one that never settles cannot stop refreshing for good. */
+export function inFlight(limitMs = 30_000, now: () => number = Date.now): { begin: () => () => void; busy: () => boolean } {
+  const open = new Map<symbol, number>();
   return {
     begin: () => {
-      open += 1;
-      let ended = false;
+      const id = Symbol("request");
+      open.set(id, now());
       return () => {
-        if (ended) return;
-        ended = true;
-        open -= 1;
+        open.delete(id);
       };
     },
-    busy: () => open > 0,
+    busy: () => [...open.values()].some((startedAt) => now() - startedAt < limitMs),
   };
 }

@@ -61,7 +61,7 @@ def _runner_alive(claim: Path) -> bool:
     except (OSError, ValueError, OverflowError):
         return False
     try:
-        if not 0 < pid <= MAX_PID:
+        if not 1 < pid <= MAX_PID:
             return False
         os.kill(pid, 0)
     except PermissionError:
