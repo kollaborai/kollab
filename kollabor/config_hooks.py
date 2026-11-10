@@ -236,6 +236,11 @@ class ConfigHookLoader:
             proc.terminate()
         except ProcessLookupError:
             return True
+        except Exception as exc:  # noqa: BLE001 - report cleanup failure
+            logger.warning(
+                "hook child terminate failed for pid %s: %s", proc.pid, exc
+            )
+            return False
         try:
             await asyncio.wait_for(
                 proc.wait(), timeout=ConfigHookLoader.REAP_GRACE_SECONDS
@@ -243,10 +248,16 @@ class ConfigHookLoader:
             return True
         except asyncio.TimeoutError:
             pass
+        except Exception as exc:  # noqa: BLE001 - report cleanup failure
+            logger.warning("hook child reap failed for pid %s: %s", proc.pid, exc)
+            return False
         try:
             proc.kill()
         except ProcessLookupError:
             return True
+        except Exception as exc:  # noqa: BLE001 - report cleanup failure
+            logger.warning("hook child kill failed for pid %s: %s", proc.pid, exc)
+            return False
         try:
             await proc.wait()
             return True
