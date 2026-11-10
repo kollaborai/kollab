@@ -10,6 +10,7 @@ import re
 import time
 import uuid
 
+import psutil
 import pytest
 import pytest_asyncio
 
@@ -388,26 +389,30 @@ async def test_teardown_ends_background_job_after_shell_exits(tmp_path, mode):
     import contextlib
     import os
     import shlex
-    import signal
     import sys
 
     link = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
     sid = await link.open()
     session = terminal._SESSIONS[sid]
     marker = tmp_path / "job.pid"
+    heartbeat = tmp_path / "job-heartbeat"
     program = (
-        "import os,signal,time; "
-        "signal.signal(signal.SIGHUP, signal.SIG_IGN); "
-        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-        f"open({str(marker)!r}, 'w').write(str(os.getpid())); "
-        "time.sleep(300)"
+        "import os,signal,time\n"
+        "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"open({str(marker)!r}, 'w').write(str(os.getpid()))\n"
+        "while True:\n"
+        f"    open({str(heartbeat)!r}, 'a').write('x')\n"
+        "    time.sleep(0.02)\n"
     )
     child_pid = None
+    process = None
     try:
         await link.send(type="input", data=f"{shlex.quote(sys.executable)} -c {shlex.quote(program)} &\n")
         for _ in range(200):
-            if marker.exists() and marker.read_text().strip():
+            if marker.exists() and marker.read_text().strip() and heartbeat.exists():
                 child_pid = int(marker.read_text())
+                process = psutil.Process(child_pid)
                 break
             await asyncio.sleep(0.02)
         assert child_pid is not None, "background job did not start"
@@ -421,19 +426,20 @@ async def test_teardown_ends_background_job_after_shell_exits(tmp_path, mode):
         else:
             await terminal.shutdown_terminals()
         for _ in range(200):
-            try:
-                os.kill(child_pid, 0)
-            except ProcessLookupError:
+            if not _job_is_running(process):
                 break
             await asyncio.sleep(0.02)
         else:
             pytest.fail(f"background job survived {mode}")
+        size = heartbeat.stat().st_size
+        await asyncio.sleep(0.15)
+        assert heartbeat.stat().st_size == size, "background job continued to do work"
     finally:
-        # Only clean up the child from this test's PTY session, never another session.
-        if child_pid is not None:
-            with contextlib.suppress(ProcessLookupError):
-                if os.getsid(child_pid) == session.pid:
-                    os.kill(child_pid, signal.SIGKILL)
+        # psutil verifies the recorded process identity before signalling it.
+        if process is not None:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                process.kill()
+
 
 
 async def test_closing_one_terminal_does_not_signal_another(tmp_path):
@@ -453,7 +459,10 @@ async def test_closing_one_terminal_does_not_signal_another(tmp_path):
 
 def _job_is_running(process):
     """Whether the test process can still execute."""
-    return process.is_running()
+    try:
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
 
 
 async def test_job_liveness_does_not_count_a_zombie():
