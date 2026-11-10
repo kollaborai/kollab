@@ -377,6 +377,9 @@ async function verifyMobileLearnLayout(browser, baseUrl) {
         await main.getByRole("button", { name: "Enlarge product preview", exact: true }).click();
         const dialog = page.getByRole("dialog", { name: "Product preview", exact: true });
         await dialog.waitFor();
+        await dialog.evaluate(async (element) => {
+          await Promise.all(element.getAnimations({ subtree: true }).map((animation) => animation.finished));
+        });
         const image = dialog.locator("img");
         await image.evaluate((element) => element.decode());
         const size = await image.evaluate((element) => ({
