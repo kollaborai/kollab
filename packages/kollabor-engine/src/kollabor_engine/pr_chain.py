@@ -164,6 +164,13 @@ def _open_file(base: Path, parts: Tuple[str, ...], flags: int) -> int:
     return fd
 
 
+def _trusted_owner(base: Path) -> Optional[int]:
+    """The user that owns the runner's root folder, or None where files have no POSIX owner (Windows)."""
+    if not hasattr(os, "getuid"):
+        return None
+    return os.stat(base).st_uid
+
+
 def _read_file(base: Path, parts: Tuple[str, ...], limit: int, tail: bool = False) -> bytes:
     """Up to ``limit`` + 1 bytes of the regular file ``base/<parts>`` (the last ones with ``tail``).
 
@@ -179,6 +186,11 @@ def _read_file(base: Path, parts: Tuple[str, ...], limit: int, tail: bool = Fals
         if info.st_nlink > 1:
             # The runner writes each file once. A second name for it is a link made from somewhere else.
             raise OSError(f"{parts[-1]} has more than one hard link")
+        owner = _trusted_owner(base)
+        if owner is not None and info.st_uid != owner:
+            # A link can be unlinked right after the open, which hides it from the link count above.
+            # The opened inode's own owner cannot be hidden: a file the root's owner does not own is not the runner's.
+            raise OSError(f"{parts[-1]} is not owned by the user that owns the folder")
         if tail and info.st_size > limit:
             os.lseek(fd, info.st_size - limit, os.SEEK_SET)
         chunks: List[bytes] = []
