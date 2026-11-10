@@ -45,6 +45,9 @@ export async function saveWorkspaceFile(
   content: string,
   options: { force?: boolean } = {},
 ): Promise<SaveResult> {
+  if (path.includes("\0") || useEditorStore.getState().fileCache.get(path)?.virtual) {
+    return { ok: false, stale: false, message: "This view is read-only." };
+  }
   if (!bufferBelongsHere(path)) return { ok: false, stale: false, message: "Switch back to the original device and folder to save this file." };
   const owner = editorOwner();
   const bufferId = useEditorStore.getState().fileCache.get(path)?.bufferId;

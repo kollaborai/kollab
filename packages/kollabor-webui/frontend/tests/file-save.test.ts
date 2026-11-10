@@ -20,6 +20,12 @@ afterEach(() => {
   forgetMtime("/w/a.txt");
 });
 
+test("virtual commit views cannot be sent to the file endpoint", async () => {
+  const result = await saveWorkspaceFile("/w", "\0commit:abcd", "patch", { force: true });
+  expect(result).toEqual({ ok: false, stale: false, message: "This view is read-only." });
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
 test("a save sends the mtime the file was read with", async () => {
   rememberMtime("/w/a.txt", 1000);
   fetchMock.mockResolvedValue(reply(200, { success: true, data: { mtime: 2000 } }));

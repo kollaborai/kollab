@@ -12,6 +12,7 @@ export interface FileData {
   savedContent: string;
   loading: boolean;
   pinned: boolean;
+  virtual?: boolean; // immutable content without a corresponding disk path
   headContent?: string | null; // diff tabs only
 }
 
@@ -113,6 +114,7 @@ interface EditorStore {
 
   // pane-scoped actions
   openFile: (paneId: string, path: string, name: string, ext: string, content: string) => void;
+  openVirtualFile: (paneId: string, path: string, name: string, ext: string, content: string) => void;
   closeFile: (paneId: string, path: string) => void;
   setActiveFile: (paneId: string, path: string) => void;
   updateContent: (path: string, content: string) => void;
@@ -259,7 +261,10 @@ function saveLayout(state: Pick<EditorStore, "panes" | "activePaneId" | "splitTr
   const storage = browserStorage();
   if (!storage) return;
   const layout: SavedLayout = {
-    panes: state.panes.map((p) => ({ id: p.id, openPaths: [...p.openPaths], activePath: p.activePath })),
+    panes: state.panes.map((p) => {
+      const openPaths = p.openPaths.filter((path) => !path.includes("\0"));
+      return { id: p.id, openPaths, activePath: p.activePath && openPaths.includes(p.activePath) ? p.activePath : null };
+    }),
     activePaneId: state.activePaneId,
     splitTree: state.splitTree,
   };
@@ -371,6 +376,18 @@ export const useEditorStore = create<EditorStore>((set, get) => {
       set({ fileCache: newCache, panes: showFileTab(store.panes, paneId, path, store.fileCache) });
     },
 
+    openVirtualFile: (paneId, path, name, ext, content) => {
+      if (!path.includes("\0")) return;
+      get().openFile(paneId, path, name, ext, content);
+      set((s) => {
+        const existing = s.fileCache.get(path);
+        if (!existing) return s;
+        const fileCache = new Map(s.fileCache);
+        fileCache.set(path, { ...existing, virtual: true });
+        return { fileCache };
+      });
+    },
+
     openDiffFile: (paneId, path, name, ext, modified, headContent) => {
       const store = get();
       const pane = store.panes.find((p) => p.id === paneId);
@@ -435,7 +452,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
       set((s) => {
         const newCache = new Map(s.fileCache);
         const existing = newCache.get(path);
-        if (existing) {
+        if (existing && !existing.virtual) {
           newCache.set(path, { ...existing, content, pinned: true });
         }
         return { fileCache: newCache };

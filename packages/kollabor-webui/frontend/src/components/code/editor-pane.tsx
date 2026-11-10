@@ -378,7 +378,7 @@ export function EditorPane({ paneId, rootPath }: EditorPaneProps) {
             ) : (
               <MonacoEditor
                 height="100%"
-                path={file.path}
+                path={file.virtual ? undefined : file.path}
                 language={language}
                 value={file.content}
                 onChange={(val) => updateContent(file.path, val ?? "")}
@@ -387,6 +387,7 @@ export function EditorPane({ paneId, rootPath }: EditorPaneProps) {
                 theme="kollab-void"
                 options={{
                   fontSize: editorConfig.fontSize,
+                  readOnly: file.virtual === true,
                   fontFamily:
                     "ui-monospace, SFMono-Regular, Menlo, Monaco, monospace",
                   lineHeight: 1.6,

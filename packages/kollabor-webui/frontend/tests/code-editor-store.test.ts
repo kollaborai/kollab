@@ -58,6 +58,20 @@ function fileState(path: string): FileData {
   return must(store().fileCache.get(path), `file ${path}`);
 }
 
+test("commit views cannot collide with or edit a real file and are not restored as disk paths", () => {
+  const real = "/w/.diffs/abcd.diff";
+  const virtual = "\0commit:abcd1234";
+  store().openFile(PANE, real, "abcd.diff", "diff", "real file");
+  store().pinFile(real);
+  store().openVirtualFile(PANE, virtual, "commit", "diff", "patch");
+  store().updateContent(virtual, "edited patch");
+  expect(fileState(real).content).toBe("real file");
+  expect(fileState(virtual)).toMatchObject({ content: "patch", virtual: true });
+  const layout = JSON.parse(must(storage.get(CODE_EDITOR_LAYOUT_KEY), "layout"));
+  expect(layout.panes[0].openPaths).toEqual([real]);
+  expect(layout.panes[0].activePath).toBeNull();
+});
+
 // a pinned tab is never replaced by a later preview open
 function openPinned(paneId: string, path: string): void {
   store().openFile(paneId, path, path, "ts", `// ${path}`);

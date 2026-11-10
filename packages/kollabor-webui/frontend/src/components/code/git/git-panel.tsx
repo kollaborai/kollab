@@ -243,7 +243,7 @@ export interface GitPanelProps {
 export function GitPanel({ sessionId, workspace, onOpenFile, onOpenDiff }: GitPanelProps) {
   // A commit's patch is a read-only tab with no file on disk behind it, and the diff props
   // cannot open one, so that tab goes to the editor store directly.
-  const openFile = useEditorStore((s) => s.openFile);
+  const openVirtualFile = useEditorStore((s) => s.openVirtualFile);
   const setFileLoading = useEditorStore((s) => s.setFileLoading);
   const activePaneId = useEditorStore((s) => s.activePaneId);
 
@@ -382,13 +382,12 @@ export function GitPanel({ sessionId, workspace, onOpenFile, onOpenDiff }: GitPa
   const handleCommitClick = useCallback(
     async (entry: GitLogEntry) => {
       if (!activePaneId) return;
-      const base = workspace.endsWith("/") ? workspace.slice(0, -1) : workspace;
-      // Synthetic path: gives the patch its own tab and never collides with a real file.
-      const virtualPath = `${base}/.diffs/${entry.shortHash}.diff`;
+      // NUL cannot occur in a filesystem path; full hashes avoid prefix collisions.
+      const virtualPath = `\0commit:${entry.hash}`;
       const name = `${entry.shortHash} ${entry.message}`.slice(0, 60);
 
       const owner = editorOwner();
-      openFile(activePaneId, virtualPath, name, "diff", "");
+      openVirtualFile(activePaneId, virtualPath, name, "diff", "");
       setFileLoading(virtualPath, true);
       const bufferId = useEditorStore.getState().fileCache.get(virtualPath)?.bufferId;
       const isCurrent = () => owner === editorOwner() && useEditorStore.getState().fileCache.get(virtualPath)?.bufferId === bufferId;
@@ -397,11 +396,11 @@ export function GitPanel({ sessionId, workspace, onOpenFile, onOpenDiff }: GitPa
           action: "show_commit",
           commitHash: entry.hash,
         });
-        if (isCurrent()) openFile(activePaneId, virtualPath, name, "diff", data.content ?? "");
+        if (isCurrent()) openVirtualFile(activePaneId, virtualPath, name, "diff", data.content ?? "");
       } catch (e) {
         if (!isCurrent()) return;
         const reason = e instanceof Error ? e.message : String(e);
-        openFile(
+        openVirtualFile(
           activePaneId,
           virtualPath,
           name,
@@ -412,7 +411,7 @@ export function GitPanel({ sessionId, workspace, onOpenFile, onOpenDiff }: GitPa
         if (isCurrent()) setFileLoading(virtualPath, false);
       }
     },
-    [activePaneId, gitPost, openFile, setFileLoading, workspace],
+    [activePaneId, gitPost, openVirtualFile, setFileLoading],
   );
 
   if (loading) {
