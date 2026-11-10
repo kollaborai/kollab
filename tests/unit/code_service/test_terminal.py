@@ -434,3 +434,18 @@ async def test_teardown_ends_background_job_after_shell_exits(tmp_path, mode):
             with contextlib.suppress(ProcessLookupError):
                 if os.getsid(child_pid) == session.pid:
                     os.kill(child_pid, signal.SIGKILL)
+
+
+async def test_closing_one_terminal_does_not_signal_another(tmp_path):
+    first = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
+    other = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
+    first_id = await first.open()
+    other_id = await other.open()
+    first_session = terminal._SESSIONS[first_id]
+    await first.send(type="close")
+    task = first_session.destroy()
+    if task is not None:
+        await task
+    assert not terminal._SESSIONS[other_id].exited
+    await other.send(type="input", data="echo still-alive-91''23\n")
+    assert "still-alive-9123" in await other.until("still-alive-9123")

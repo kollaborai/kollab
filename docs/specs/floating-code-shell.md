@@ -52,6 +52,8 @@ Mentiko's request and response shapes are kept, so its callers port unchanged.
   `terminal.env_allow`, `terminal.env_deny` and `terminal.env_set` adjust the list. Up to `terminal.max_shells` shells
   (default 8) and 64 links per daemon (fixed). A shell outlives its socket and is reaped `terminal.idle_reap_minutes`
   (default 10) after its last link detaches; a reconnecting client resumes it with the `sessionId` from `ready`.
+  Closing, idle reaping, or daemon shutdown signals the terminal session and its tracked descendants, then escalates
+  surviving jobs after a bounded grace period. Process identities are checked before each signal.
   `enabled` refuses every call, `terminal.enabled` opens no shells, `read_only` refuses terminal input
   (`code-shell-settings.md`).
 - The WebSocket is outside the HTTP bearer middleware, so the first message must be `{"type":"auth","token"}` within

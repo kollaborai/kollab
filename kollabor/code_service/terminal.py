@@ -23,6 +23,8 @@ from collections import deque
 from itertools import islice
 from typing import Any
 
+import psutil
+
 from .reply import Reply
 from .settings import DEFAULTS, CodeSettings
 
@@ -65,6 +67,7 @@ _SECRET_WORDS = frozenset({"PAT"})
 _OWN_PREFIXES = ("KOLLAB_", "KOLLABOR_")
 
 _SESSIONS: dict[str, _Session] = {}
+_TEARDOWNS: set[asyncio.Task[None]] = set()
 
 
 class _Session:
@@ -97,7 +100,14 @@ class _Session:
         self._pending = bytearray()
         self._reap_handle: asyncio.TimerHandle | None = None
         self._watch_task: asyncio.Task[None] | None = None
-        self._kill_at: float | None = None
+        self._teardown_task: asyncio.Task[None] | None = None
+        self._owned_processes: set[psutil.Process] = set()
+        try:
+            self._shell_process: psutil.Process | None = psutil.Process(proc.pid)
+            self._owned_processes.add(self._shell_process)
+        except psutil.Error as exc:
+            self._shell_process = None
+            logger.warning("Cannot inspect terminal process tree; terminal jobs may survive teardown: %s", exc)
         self._loop.add_reader(fd, self._on_readable)
 
     @property
@@ -186,29 +196,84 @@ class _Session:
         if self._watch_task is None or self._watch_task.done():
             self._watch_task = self._loop.create_task(self._watch())
 
-    async def _watch(self) -> None:
-        """Poll until the shell is gone, then record its exit code.
+    def _capture_processes(self) -> set[psutil.Process]:
+        """Capture only this shell's descendants and members of its Unix session.
 
-        While it lives, re-arm the PTY reader (a read can report the end before the shell has opened its side of the
-        PTY), and SIGKILL it once a close has outlived ``KILL_AFTER_SECONDS``.
+        psutil Process handles retain creation time and check it before signalling. Session membership is scanned
+        only while the original shell handle is alive; a numeric session id alone could later be reused.
         """
+        before = self._owned_processes.copy()
+        shell = self._shell_process
+        if shell is None:
+            return set()
+        try:
+            shell_alive = shell.is_running() and self._proc.returncode is None
+            if shell_alive:
+                self._owned_processes.update(shell.children(recursive=True))
+                for process in psutil.process_iter():
+                    try:
+                        if os.getsid(process.pid) == self.pid:
+                            self._owned_processes.add(process)
+                    except (ProcessLookupError, PermissionError, psutil.Error):
+                        continue
+            # Also follow known descendants which have made a new session since the last capture.
+            for process in tuple(self._owned_processes):
+                try:
+                    if process.is_running():
+                        self._owned_processes.update(process.children(recursive=True))
+                except psutil.Error:
+                    continue
+        except (psutil.Error, OSError) as exc:
+            logger.warning("Cannot inspect terminal process tree; terminal jobs may survive teardown: %s", exc)
+        return self._owned_processes - before
+
+    def _signal_owned(self, sig: int, processes: set[psutil.Process] | None = None) -> None:
+        # Send to individual identity-checked processes: a process group may have disappeared and its id been reused.
+        for process in tuple(self._owned_processes if processes is None else processes):
+            try:
+                process.send_signal(sig)
+            except psutil.NoSuchProcess:
+                continue
+            except (psutil.Error, OSError) as exc:
+                logger.warning("Cannot signal terminal process %s: %s", process.pid, exc)
+        if processes is None and self._shell_process is None and self._proc.returncode is None:
+            # Popen owns this child and checks its wait status before signalling it.
+            with contextlib.suppress(ProcessLookupError):
+                self._proc.send_signal(sig)
+
+    async def _finish_teardown(self) -> None:
+        """Escalate captured jobs even if the shell has already exited."""
+        deadline = self._loop.time() + KILL_AFTER_SECONDS
+        while self._loop.time() < deadline:
+            await asyncio.sleep(min(0.05, max(0, deadline - self._loop.time())))
+            new_processes = self._capture_processes()
+            if new_processes:
+                self._signal_owned(signal.SIGHUP, new_processes)
+                self._signal_owned(signal.SIGTERM, new_processes)
+            if not any(process.is_running() for process in self._owned_processes) and self._proc.returncode is not None:
+                break
+        self._signal_owned(signal.SIGKILL)
+        if self._watch_task is not None:
+            await self._watch_task
+
+    async def _watch(self) -> None:
+        """Poll until the shell is reaped, independently of job teardown."""
         while True:
             try:
+                # Keep identities before waitpid releases the shell's PID.
+                if not self.closed:
+                    self._capture_processes()
                 done, status = os.waitpid(self.pid, os.WNOHANG)
-            except ChildProcessError:  # reaped by someone else; the exit code is lost
-                self._proc.returncode = 0  # the answer Popen itself gives for a child whose status is gone
+            except ChildProcessError:
+                self._proc.returncode = 0
                 self._shell_ended(None)
                 return
             if done:
                 code = os.waitstatus_to_exitcode(status)
-                self._proc.returncode = code  # reaped here: Popen must not wait again or warn that it still runs
+                self._proc.returncode = code
                 self._shell_ended(code)
                 return
-            if self.closed:
-                if self._kill_at is not None and self._loop.time() >= self._kill_at:
-                    self._kill_at = None
-                    _signal_group(self.pid, signal.SIGKILL)
-            elif self.fd is not None:
+            if not self.closed and self.fd is not None:
                 self._loop.add_reader(self.fd, self._on_readable)
             await asyncio.sleep(0.05)
 
@@ -245,18 +310,22 @@ class _Session:
             self.destroy()
 
     def destroy(self) -> asyncio.Task[None] | None:
-        """End the shell now. Returns the task that finishes once it is gone, or None if it had already ended."""
+        """End the terminal and return the independently escalating cleanup task."""
         if not self.closed:
             self.closed = True
             self.cancel_reap()
             _SESSIONS.pop(self.sid, None)
-            self._kill_at = self._loop.time() + KILL_AFTER_SECONDS
+            self._capture_processes()
+            self._signal_owned(signal.SIGHUP)
+            self._signal_owned(signal.SIGTERM)
             self._close_fd()
             if not self.exited:
-                _signal_group(self.pid, signal.SIGHUP)
                 self._ensure_watch()
+            self._teardown_task = self._loop.create_task(self._finish_teardown())
+            _TEARDOWNS.add(self._teardown_task)
+            self._teardown_task.add_done_callback(_TEARDOWNS.discard)
             self._wake()
-        return None if self.exited else self._watch_task
+        return self._teardown_task
 
 
 class _Link:
@@ -421,11 +490,6 @@ def _set_winsize(fd: int, cols: int, rows: int) -> None:
     import termios
 
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-
-
-def _signal_group(pid: int, sig: int) -> None:
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(pid, sig)
 
 
 def _spawn(cwd: str, cols: int, rows: int, settings: CodeSettings = DEFAULTS) -> _Session:
@@ -646,6 +710,7 @@ async def shutdown_terminals() -> None:
         task = session.destroy()
         if task is not None:
             tasks.append(task)
+    tasks.extend(task for task in _TEARDOWNS if task not in tasks)
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     _SESSIONS.clear()
