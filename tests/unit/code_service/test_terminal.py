@@ -456,7 +456,7 @@ async def test_closing_one_terminal_does_not_signal_another(tmp_path):
             await first.send(type="close")
             task = first_session.destroy()
             if task is not None:
-                await task
+                await asyncio.shield(task)
             other_session = terminal._SESSIONS[other_id]
             assert other_session.pid not in {process.pid for process in first_session._owned_processes}
             assert not other_session.exited
@@ -670,3 +670,24 @@ async def test_late_process_scan_is_never_signalled_after_close(tmp_path, monkey
         if session._watch_task is not None:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(session._watch_task, 3)
+
+
+async def test_shutdown_does_not_wait_forever_for_a_stalled_teardown(monkeypatch):
+    import asyncio
+    import contextlib
+
+    stalled = asyncio.create_task(asyncio.Event().wait())
+    monkeypatch.setattr(terminal, "_SESSIONS", {})
+    monkeypatch.setattr(terminal, "_TEARDOWNS", {stalled})
+    monkeypatch.setattr(terminal, "SUPERVISOR_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(terminal, "INITIAL_SCAN_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(terminal, "KILL_AFTER_SECONDS", 0.05)
+    monkeypatch.setattr(terminal, "REAP_WAIT_SECONDS", 0.05)
+    try:
+        async with asyncio.timeout(1):
+            await terminal.shutdown_terminals()
+    finally:
+        stalled.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stalled
+        terminal._TEARDOWNS.clear()
