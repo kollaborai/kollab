@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
-import { BookOpen, ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Newspaper, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
+import { BookOpen, ChevronDown, Eye, EyeOff, GitPullRequest, LayoutGrid, Loader2, Newspaper, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
 import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, LiveAgent, ModelChoice, OfflineAgent, Profile, Session } from "@/api";
 import { ModelPicker } from "@/components/shell/ModelPicker";
 import { AgentPicker, choiceLabel } from "@/components/agents/AgentPicker";
@@ -159,6 +159,7 @@ export function AppSidebar({
   onSettings,
   onHalt,
   onLearn,
+  onPrChain,
   learnActive,
   onWhatsNew,
   whatsNewActive,
@@ -219,6 +220,8 @@ export function AppSidebar({
   /** Open Settings on the Halt and Resume screen (works with no chat open). */
   onHalt: () => void;
   onLearn: () => void;
+  /** Opens the PR Chain dialog; works without a session. */
+  onPrChain: () => void;
   learnActive: boolean;
   onWhatsNew: () => void;
   whatsNewActive: boolean;
@@ -934,6 +937,17 @@ export function AppSidebar({
             }}
           >
             <BookOpen className="size-4" />
+          </TooltipIconButton>
+          <TooltipIconButton
+            tooltip="PR Chain"
+            side="top"
+            className={FOOTER_BUTTON}
+            onClick={() => {
+              setOpenMobile(false);
+              onPrChain();
+            }}
+          >
+            <GitPullRequest className="size-4" />
           </TooltipIconButton>
           <TooltipIconButton
             tooltip="What’s New"

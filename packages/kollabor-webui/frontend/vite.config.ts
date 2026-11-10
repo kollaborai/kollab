@@ -177,6 +177,7 @@ const mainConfig = defineConfig({
     // Vitest suites; Node's built-in test runner remains for older tests.
     include: [
       "tests/prompts-page.test.ts",
+      "tests/pr-chain.test.ts",
       "tests/history-cache.test.ts",
       "tests/phone-frame.test.ts",
       "tests/phone-audio.test.ts",

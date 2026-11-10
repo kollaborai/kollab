@@ -366,9 +366,11 @@ def create_app(port: Optional[int] = None) -> FastAPI:
     app.include_router(rosters_router)
     app.include_router(teams_router)
 
+    from .routes.pr_chain import router as pr_chain_router
     from .routes.sidebar import router as sidebar_router
     from .routes.workspaces import router as workspaces_router
 
+    app.include_router(pr_chain_router)
     app.include_router(sidebar_router)
     app.include_router(workspaces_router)
 
