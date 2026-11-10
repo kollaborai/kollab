@@ -626,18 +626,28 @@ async def test_slow_process_enumeration_does_not_block_terminal_close(tmp_path, 
 
 async def test_late_process_scan_is_never_signalled_after_close(monkeypatch):
     import asyncio
+    import os
     import signal
     import threading
 
-    # Exercise the PTY scan boundary directly: Linux terminals use a supervisor and do not schedule PTY scans.
+    # Construct the PTY-scanning lifecycle directly: Linux terminals normally use a supervisor instead.
     session = object.__new__(terminal._Session)
+    session.sid = f"late-scan-{uuid.uuid4().hex}"
     session._loop = asyncio.get_running_loop()
     session._scan_future = None
+    session._capture_task = None
+    session._watch_task = None
+    session._teardown_task = None
+    session._reap_handle = None
+    session._waiters = set()
     session._owned_processes = set()
     session._inspection_warnings = set()
     session._pty_name = "/test/pty"
-    session._pty_anchor = object()  # A live anchor; no real file descriptor or process is touched.
+    session._pty_anchor = os.open(os.devnull, os.O_RDONLY)  # Only this test-owned descriptor is closed.
     session._shell_process = object()
+    session._supervised = False
+    session.fd = None
+    session.exited = True
     session.closed = False
     started = asyncio.Event()
     release = threading.Event()
@@ -658,16 +668,18 @@ async def test_late_process_scan_is_never_signalled_after_close(monkeypatch):
         return known | {unrelated}
 
     monkeypatch.setattr(session, "_collect_processes", late_scan)
-    scan = asyncio.create_task(session._capture_async(0.1))
+    monkeypatch.setattr(terminal, "INITIAL_SCAN_WAIT_SECONDS", 0.1)
+    monkeypatch.setattr(terminal, "KILL_AFTER_SECONDS", 0.05)
+    task = session.destroy()
+    assert task is not None
     try:
         async with asyncio.timeout(10):
             await started.wait()
-            assert await scan == set(), "the blocked scan should time out before close"
             pending = session._scan_future
             assert pending is not None and not pending.done()
-            # Complete the actual worker only after the PTY anchor has been released.
-            session.closed = True
-            session._pty_anchor = None
+            await asyncio.shield(task)
+            assert session.closed and session._pty_anchor is None
+            assert not pending.done(), "the test must finish teardown before releasing the scan"
             release.set()
             assert unrelated in await asyncio.shield(pending), "the late scan did not return its result"
             assert await session._capture_async(1) == set(), "a scan completed after close was applied"
@@ -676,9 +688,12 @@ async def test_late_process_scan_is_never_signalled_after_close(monkeypatch):
             assert not sent
     finally:
         release.set()
-        if not scan.done():
-            scan.cancel()
-            await asyncio.gather(scan, return_exceptions=True)
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if session._pty_anchor is not None:
+            os.close(session._pty_anchor)
+            session._pty_anchor = None
 
 
 
