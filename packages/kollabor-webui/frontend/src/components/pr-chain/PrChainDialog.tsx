@@ -37,11 +37,14 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
   const epoch = useRef(0);
   const order = useRef(inOrder());
   const requests = useRef(inFlight());
+  const manualRead = useRef(0);
 
   const load = useCallback((manual = false) => {
     const mine = epoch.current;
     const isCurrent = order.current();
     const { signal, end } = requests.current.begin();
+    // Refresh stays disabled until the read it started ends, whatever the timed reads do meanwhile.
+    const mineManual = manual ? ++manualRead.current : 0;
     if (manual) setBusy(true);
     api
       .getPrChain(signal)
@@ -56,7 +59,7 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
       })
       .finally(() => {
         end();
-        if (mine === epoch.current && isCurrent()) setBusy(false);
+        if (mineManual && mineManual === manualRead.current && mine === epoch.current) setBusy(false);
       });
   }, [api]);
 
