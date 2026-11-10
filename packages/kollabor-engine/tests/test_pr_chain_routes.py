@@ -404,10 +404,14 @@ async def test_a_folder_swapped_for_a_symlink_while_it_is_being_read_does_not_le
     write_state(root, "prs", 123, status="READY", updated="a")
     real_open = os.open
     swapped = []
+    item_folder = (root / "prs" / "123").stat().st_ino
 
     def open_after_a_swap(path, flags, *args, **kwargs):
         # An attacker replaces the item folder right after the checks and before the file is opened.
-        if str(path).endswith("STATE.json") and not swapped:
+        # Only this item's open counts; the patch is process wide and other threads open files too.
+        folder = kwargs.get("dir_fd")
+        ours = folder is not None and os.fstat(folder).st_ino == item_folder
+        if str(path).endswith("STATE.json") and ours and not swapped:
             swapped.append(True)
             (root / "prs" / "123").rename(root / "prs" / "123.orig")
             (root / "prs" / "123").symlink_to(outside)
@@ -490,7 +494,9 @@ async def test_without_dir_fd_a_symlinked_file_folder_or_kind_is_not_followed(cl
 
 
 @pytest.mark.asyncio
-async def test_without_dir_fd_a_folder_swapped_while_it_is_read_does_not_leak(client, root, tmp_path, no_dir_fd, monkeypatch):
+async def test_without_dir_fd_a_folder_swapped_while_it_is_read_does_not_leak(
+    client, root, tmp_path, no_dir_fd, monkeypatch
+):
     import os
 
     outside = tmp_path / "outside"
@@ -501,7 +507,7 @@ async def test_without_dir_fd_a_folder_swapped_while_it_is_read_does_not_leak(cl
     swapped = []
 
     def open_after_a_swap(path, flags, *args, **kwargs):
-        if str(path).endswith("STATE.json") and not swapped:
+        if str(path).endswith("STATE.json") and str(root) in str(path) and not swapped:
             swapped.append(True)
             (root / "prs" / "123").rename(root / "prs" / "123.orig")
             (root / "prs" / "123").symlink_to(outside)

@@ -69,20 +69,28 @@ def _clean(data: Dict[str, Any], text_fields: Any, int_fields: Any) -> Dict[str,
 _DIR_FD = os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
 
 
+def _is_link(info: os.stat_result) -> bool:
+    """A symlink, or on Windows any reparse point such as a junction."""
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_reparse_tag", 0))
+
+
+def _checked_path(base: Path, parts: Tuple[str, ...]) -> Path:
+    """``base/<parts>`` after checking, with ``lstat``, that no step below ``base`` is a link."""
+    path = base
+    for part in parts:
+        path = path / part
+        if _is_link(os.lstat(path)):
+            raise OSError(f"{part} is a link")
+    return path
+
+
 def _open_dir(base: Path, parts: Tuple[str, ...]) -> int:
     """A descriptor for the folder ``base/<parts>``, refusing a symlink at any step below ``base``.
 
     Each step is opened relative to the descriptor of the one before it with ``O_NOFOLLOW``, so a
     folder swapped for a symlink after a check cannot redirect the read. ``base`` itself may be a link.
-    Without ``dir_fd`` support (Windows) the steps are checked with ``lstat`` instead.
+    Only used where ``dir_fd`` is supported; Windows takes the path checks in ``_read_file``.
     """
-    if not _DIR_FD:
-        path = base
-        for part in parts:
-            path = path / part
-            if stat.S_ISLNK(os.lstat(path).st_mode):
-                raise OSError(f"{part} is a symlink")
-        return os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
     for part in parts:
         try:
@@ -93,6 +101,33 @@ def _open_dir(base: Path, parts: Tuple[str, ...]) -> int:
     return fd
 
 
+def _open_file(base: Path, parts: Tuple[str, ...], flags: int) -> int:
+    """A descriptor for ``base/<parts>`` that is not reached through a link.
+
+    With ``dir_fd`` the file is opened relative to its folder's descriptor, which closes the swap.
+    Without it (Windows) no step can be pinned, so the open is checked on both sides: no link on the
+    path before, and no link on the path after with the opened file being the one the path names.
+    A swap that is undone between those checks, or a hard link, is not detected.
+    """
+    if _DIR_FD:
+        folder = _open_dir(base, parts[:-1])
+        try:
+            return os.open(parts[-1], flags | getattr(os, "O_NOFOLLOW", 0), dir_fd=folder)
+        finally:
+            os.close(folder)
+    path = _checked_path(base, parts)
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        named = os.lstat(_checked_path(base, parts))
+        if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+            raise OSError(f"{parts[-1]} changed while it was opened")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _read_file(base: Path, parts: Tuple[str, ...], limit: int, tail: bool = False) -> bytes:
     """Up to ``limit`` + 1 bytes of the regular file ``base/<parts>`` (the last ones with ``tail``).
 
@@ -100,17 +135,7 @@ def _read_file(base: Path, parts: Tuple[str, ...], limit: int, tail: bool = Fals
     another file the engine can read, and a named pipe or device would block a reader forever.
     Both raise ``OSError`` without the file being read.
     """
-    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
-    folder = _open_dir(base, parts[:-1])
-    try:
-        if _DIR_FD:
-            fd = os.open(parts[-1], flags, dir_fd=folder)
-        else:
-            if stat.S_ISLNK(os.lstat(base.joinpath(*parts)).st_mode):
-                raise OSError(f"{parts[-1]} is a symlink")
-            fd = os.open(base.joinpath(*parts), flags)
-    finally:
-        os.close(folder)
+    fd = _open_file(base, parts, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
@@ -174,14 +199,14 @@ def _newest_numbers(base: Path, sub: str) -> Tuple[List[int], bool]:
     """
     best: List[int] = []
     cut = False
-    fd = _open_dir(base, (sub,))
+    fd = _open_dir(base, (sub,)) if _DIR_FD else None
     try:
-        with os.scandir(fd if _DIR_FD else base / sub) as entries:
+        with os.scandir(fd if fd is not None else _checked_path(base, (sub,))) as entries:
             for scanned, entry in enumerate(entries):
                 if scanned >= MAX_SCAN:
                     cut = True
                     break
-                if not _is_number_folder(entry.name) or entry.is_symlink():
+                if not _is_number_folder(entry.name) or entry.is_symlink() or entry.is_junction():
                     continue
                 if len(best) < MAX_ITEMS:
                     heapq.heappush(best, int(entry.name))
@@ -189,7 +214,8 @@ def _newest_numbers(base: Path, sub: str) -> Tuple[List[int], bool]:
                     cut = True
                     heapq.heappushpop(best, int(entry.name))
     finally:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
     return best, cut
 
 

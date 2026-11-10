@@ -1,4 +1,4 @@
-import type { PrChainEvent, PrChainItem } from "@/api";
+import type { PrChainEvent, PrChainItem, PrChainSnapshot } from "@/api";
 
 /** The repository the pr-chain workflow opens PRs and issues in. */
 export const PR_CHAIN_REPO = "kollaborai/kollab";
@@ -139,4 +139,9 @@ export function inFlight(
       open.clear();
     },
   };
+}
+
+/** The line under the list when the engine left folders out; null when everything was listed. */
+export function listNote(snapshot: PrChainSnapshot): string | null {
+  return snapshot.truncated ? "Some items are not listed." : null;
 }

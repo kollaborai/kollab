@@ -12,7 +12,7 @@ import {
 import { NoticeAction, NoticeBar } from "@/components/shell/NoticeBar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import { describeEvent, inFlight, inOrder, itemDetail, itemUrl, shortTime, sortItems, statusLabel, statusTone, type StatusTone } from "./prChain";
+import { describeEvent, inFlight, inOrder, itemDetail, itemUrl, listNote, shortTime, sortItems, statusLabel, statusTone, type StatusTone } from "./prChain";
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -134,6 +134,7 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
               {snapshot.root_found ? "Nothing is tracked yet. " : "No PR Chain state on this machine. "}
               Run <code className="text-foreground font-mono text-xs whitespace-nowrap">pr-chain run &lt;pr number&gt;</code> or{" "}
               <code className="text-foreground font-mono text-xs whitespace-nowrap">pr-chain issue &lt;issue number&gt;</code> and it shows up here.
+              {listNote(snapshot) ? <span className="mt-1 block">{listNote(snapshot)}</span> : null}
             </p>
           ) : (
             <>
@@ -170,9 +171,7 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
                   );
                 })}
               </ul>
-              {snapshot.truncated ? (
-                <p className="text-muted-foreground mt-2 text-xs">Showing the newest items only. Older ones are not listed.</p>
-              ) : null}
+              {listNote(snapshot) ? <p className="text-muted-foreground mt-2 text-xs">{listNote(snapshot)}</p> : null}
               {events.length ? (
                 <section className="mt-4">
                   <h3 className="text-muted-foreground mb-1 text-xs font-medium">Recent activity</h3>
