@@ -31,7 +31,13 @@ def root() -> Path:
 
 def _text(value: Any) -> Optional[str]:
     """Any JSON value as short text; None stays absent. The runner's files are not trusted to have types."""
-    return None if value is None else str(value)[:MAX_TEXT].encode("utf-8", "replace").decode("utf-8")
+    if value is None:
+        return None
+    try:
+        text = str(value)
+    except RecursionError:
+        return None
+    return text[:MAX_TEXT].encode("utf-8", "replace").decode("utf-8")
 
 
 def _number(value: Any) -> Optional[int]:
