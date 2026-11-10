@@ -103,17 +103,19 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
         </header>
 
         {loadError ? (
-          <NoticeBar
-            urgent
-            detail={loadError}
-            actions={
-              <NoticeAction className="text-foreground max-lg:h-11" disabled={busy} onClick={() => load(true)}>
-                Try again
-              </NoticeAction>
-            }
-          >
-            Couldn&apos;t load the PR Chain.
-          </NoticeBar>
+          <div className="px-1 sm:px-3">
+            <NoticeBar
+              urgent
+              detail={loadError}
+              actions={
+                <NoticeAction className="text-foreground max-lg:h-11" disabled={busy} onClick={() => load(true)}>
+                  Try again
+                </NoticeAction>
+              }
+            >
+              Couldn&apos;t load the PR Chain.
+            </NoticeBar>
+          </div>
         ) : null}
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 sm:px-6">

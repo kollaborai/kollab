@@ -24,7 +24,7 @@ const LABELS: Record<string, string> = {
   MERGED: "Merged",
   CLOSED: "Closed",
   "ui-review": "UI review",
-  "issue-end": "Issue ended",
+  "issue-end": "Ended",
   review: "Review",
 };
 
