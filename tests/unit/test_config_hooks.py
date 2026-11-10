@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import shlex
-import signal
 import sys
 import tempfile
 from pathlib import Path
@@ -697,7 +696,7 @@ class TestHookProcessReaping:
 
     @pytest.mark.asyncio
     async def test_already_exited_child_counts_as_reaped(self, loader):
-        proc = await asyncio.create_subprocess_exec("true")
+        proc = await asyncio.create_subprocess_exec(sys.executable, "-c", "pass")
         await proc.wait()
 
         assert await ConfigHookLoader._reap_child(proc) is True
@@ -717,7 +716,10 @@ class TestHookProcessReaping:
     async def test_cleanup_failure_is_reported_not_silent(
         self, loader, tmp_path, caplog, monkeypatch
     ):
+        reap_child = ConfigHookLoader._reap_child
+
         async def refusing_reap(proc):
+            await reap_child(proc)
             return False
 
         monkeypatch.setattr(ConfigHookLoader, "_reap_child", staticmethod(refusing_reap))
@@ -732,5 +734,4 @@ class TestHookProcessReaping:
         try:
             assert "left its child running" in caplog.text
         finally:
-            os.kill(pid, signal.SIGKILL)  # the stub refused; clean the child up here
             await self._assert_gone(pid)
