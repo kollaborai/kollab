@@ -791,7 +791,7 @@ export type PrChainEvent = {
   n?: number;
 };
 
-export type PrChainSnapshot = { root_found: boolean; items: PrChainItem[]; events: PrChainEvent[] };
+export type PrChainSnapshot = { root_found: boolean; items: PrChainItem[]; events: PrChainEvent[]; truncated?: boolean };
 
 export type AppsRegistryResult = AppsPicker & {
   query?: string | null;

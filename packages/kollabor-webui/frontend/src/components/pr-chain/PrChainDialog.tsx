@@ -29,7 +29,7 @@ const TONE: Record<StatusTone, string> = {
 
 type Props = { api: EngineApi; open: boolean; onOpenChange: (open: boolean) => void };
 
-/** Read-only view of the pr-chain workflow: every PR and issue it tracks, and what it did last. */
+/** Read-only view of the pr-chain workflow: the newest PRs and issues it tracks, and what it did last. */
 export function PrChainDialog({ api, open, onOpenChange }: Props) {
   const [snapshot, setSnapshot] = useState<PrChainSnapshot | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -92,7 +92,7 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
           <div className="min-w-0 flex-1">
             <DialogTitle className="text-base font-semibold">PR Chain</DialogTitle>
             <DialogDescription className="text-muted-foreground text-sm">
-              Every PR and issue the review workflow is working on.
+              The PRs and issues the review workflow is working on.
             </DialogDescription>
           </div>
           <Button type="button" size="icon-sm" variant="ghost" aria-label="Refresh" className="shrink-0 max-lg:size-11" disabled={busy} onClick={() => load(true)}>
@@ -170,6 +170,9 @@ export function PrChainDialog({ api, open, onOpenChange }: Props) {
                   );
                 })}
               </ul>
+              {snapshot.truncated ? (
+                <p className="text-muted-foreground mt-2 text-xs">Showing the newest items only. Older ones are not listed.</p>
+              ) : null}
               {events.length ? (
                 <section className="mt-4">
                   <h3 className="text-muted-foreground mb-1 text-xs font-medium">Recent activity</h3>

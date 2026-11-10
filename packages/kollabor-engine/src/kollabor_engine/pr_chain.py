@@ -66,6 +66,33 @@ def _clean(data: Dict[str, Any], text_fields: Any, int_fields: Any) -> Dict[str,
     return out
 
 
+_DIR_FD = os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+
+
+def _open_dir(base: Path, parts: Tuple[str, ...]) -> int:
+    """A descriptor for the folder ``base/<parts>``, refusing a symlink at any step below ``base``.
+
+    Each step is opened relative to the descriptor of the one before it with ``O_NOFOLLOW``, so a
+    folder swapped for a symlink after a check cannot redirect the read. ``base`` itself may be a link.
+    Without ``dir_fd`` support (Windows) the steps are checked with ``lstat`` instead.
+    """
+    if not _DIR_FD:
+        path = base
+        for part in parts:
+            path = path / part
+            if stat.S_ISLNK(os.lstat(path).st_mode):
+                raise OSError(f"{part} is a symlink")
+        return os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    for part in parts:
+        try:
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        finally:
+            os.close(fd)
+        fd = nxt
+    return fd
+
+
 def _read_file(base: Path, parts: Tuple[str, ...], limit: int, tail: bool = False) -> bytes:
     """Up to ``limit`` + 1 bytes of the regular file ``base/<parts>`` (the last ones with ``tail``).
 
@@ -73,16 +100,21 @@ def _read_file(base: Path, parts: Tuple[str, ...], limit: int, tail: bool = Fals
     another file the engine can read, and a named pipe or device would block a reader forever.
     Both raise ``OSError`` without the file being read.
     """
-    path = base
-    for part in parts:
-        path = path / part
-        if stat.S_ISLNK(os.lstat(path).st_mode):
-            raise OSError(f"{part} is a symlink")
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    folder = _open_dir(base, parts[:-1])
+    try:
+        if _DIR_FD:
+            fd = os.open(parts[-1], flags, dir_fd=folder)
+        else:
+            if stat.S_ISLNK(os.lstat(base.joinpath(*parts)).st_mode):
+                raise OSError(f"{parts[-1]} is a symlink")
+            fd = os.open(base.joinpath(*parts), flags)
+    finally:
+        os.close(folder)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
-            raise OSError(f"{path.name} is not a regular file")
+            raise OSError(f"{parts[-1]} is not a regular file")
         if tail and info.st_size > limit:
             os.lseek(fd, info.st_size - limit, os.SEEK_SET)
         chunks: List[bytes] = []
@@ -134,41 +166,52 @@ def _is_number_folder(name: str) -> bool:
     return name.isascii() and name.isdigit() and len(name) <= MAX_DIGITS and name == str(int(name))
 
 
-def _newest_numbers(folder: Path) -> List[int]:
-    """The highest item numbers in ``folder``, looking at no more than ``MAX_SCAN`` entries.
+def _newest_numbers(base: Path, sub: str) -> Tuple[List[int], bool]:
+    """The highest item numbers in ``base/sub`` and whether others were left out.
 
-    A symlinked folder or entry is skipped; the runner's folder is not trusted.
+    At most ``MAX_SCAN`` entries are looked at and ``MAX_ITEMS`` numbers kept. A symlinked folder or
+    entry is skipped; the runner's folder is not trusted.
     """
-    if stat.S_ISLNK(os.lstat(folder).st_mode):
-        return []
     best: List[int] = []
-    with os.scandir(folder) as entries:
-        for scanned, entry in enumerate(entries):
-            if scanned >= MAX_SCAN:
-                break
-            if not _is_number_folder(entry.name) or entry.is_symlink():
-                continue
-            if len(best) < MAX_ITEMS:
-                heapq.heappush(best, int(entry.name))
-            else:
-                heapq.heappushpop(best, int(entry.name))
-    return best
+    cut = False
+    fd = _open_dir(base, (sub,))
+    try:
+        with os.scandir(fd if _DIR_FD else base / sub) as entries:
+            for scanned, entry in enumerate(entries):
+                if scanned >= MAX_SCAN:
+                    cut = True
+                    break
+                if not _is_number_folder(entry.name) or entry.is_symlink():
+                    continue
+                if len(best) < MAX_ITEMS:
+                    heapq.heappush(best, int(entry.name))
+                else:
+                    cut = True
+                    heapq.heappushpop(best, int(entry.name))
+    finally:
+        os.close(fd)
+    return best, cut
 
 
-def list_items(base: Path) -> List[Dict[str, Any]]:
-    """The newest PRs and issues with a readable state file, most recently updated first."""
+def list_items(base: Path) -> Tuple[List[Dict[str, Any]], bool]:
+    """The newest PRs and issues with a readable state file, most recently updated first.
+
+    The second value is True when more folders existed than were listed.
+    """
     rows: List[Dict[str, Any]] = []
+    truncated = False
     for kind, sub in KINDS.items():
         try:
-            numbers = _newest_numbers(base / sub)
+            numbers, cut = _newest_numbers(base, sub)
         except OSError:
             continue
+        truncated = truncated or cut
         for number in numbers:
             row = read_item(base, kind, number)
             if row:
                 rows.append(row)
     rows.sort(key=lambda r: str(r.get("updated") or ""), reverse=True)
-    return rows
+    return rows, truncated
 
 
 def read_events(base: Path, kind: Optional[str] = None, number: Optional[int] = None) -> List[Dict[str, Any]]:

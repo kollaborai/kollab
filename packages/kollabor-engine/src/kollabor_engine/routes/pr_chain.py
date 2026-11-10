@@ -12,10 +12,12 @@ router = APIRouter(prefix="/pr-chain", tags=["pr-chain"])
 @router.get("")
 def list_pr_chain() -> Dict[str, Any]:
     base = pr_chain.root()
+    items, truncated = pr_chain.list_items(base)
     return {
         "root_found": base.is_dir(),
-        "items": pr_chain.list_items(base),
+        "items": items,
         "events": pr_chain.read_events(base),
+        "truncated": truncated,
     }
 
 
