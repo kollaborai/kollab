@@ -650,6 +650,11 @@ async def _delete_branch(root: str, body: dict[str, Any], settings: CodeSettings
 
 
 async def _create_stash(root: str, body: dict[str, Any], settings: CodeSettings | None = None) -> dict[str, Any]:
+    if await _workspace_prefix(root):
+        raise GitRequestError(
+            409, "stash_subfolder_unsupported",
+            "Stashing from a subfolder is unavailable. Select the repository root to stash changes.",
+        )
     message = _message(body.get("stashMessage")) or None
     args = ["stash", "push"]
     if body.get("includeUntracked") is True:
