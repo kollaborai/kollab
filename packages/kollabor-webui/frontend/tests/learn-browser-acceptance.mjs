@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -10,13 +11,7 @@ import { createServer } from "vite";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = path.resolve(scriptDir, "..");
 const repoRoot = path.resolve(frontendRoot, "../../..");
-const screenshotDir = path.join(repoRoot, "docs/screenshots");
-const topics = [
-  { id: "networks", title: "Kollab networks" },
-  { id: "agents", title: "Agents" },
-  { id: "phone-access", title: "PhoneLink" },
-];
-
+const screenshotDir = process.env.LEARN_SCREENSHOT_DIR ?? path.join(os.tmpdir(), "kollab-learn-renderer-screenshots");
 export function makeFixtures(options = {}) {
   let createdSession = null;
   let createPayload = null;
@@ -210,10 +205,11 @@ export function makeFixtures(options = {}) {
       return json(route, { path: asked, name: asked.split("/").pop(), parent: null, dirs: [] });
     }
     if (endpoint.endsWith("/history")) {
+      const history = options.history ?? [];
       return json(route, {
-        history: [],
+        history,
         start_index: 0,
-        end_index: 0,
+        end_index: history.length,
         has_more_older: false,
         older_cursor: null,
         has_more_newer: false,
@@ -310,6 +306,7 @@ export async function openPage(browser, baseUrl, fixtures, options = {}) {
   const context = await browser.newContext({
     viewport,
     deviceScaleFactor: 1,
+    reducedMotion: options.reducedMotion ?? "no-preference",
     isMobile: options.isMobile ?? false,
     hasTouch: options.isMobile ?? false,
   });
@@ -368,6 +365,96 @@ async function waitForLesson(page, title) {
   await page.getByRole("heading", { level: 1, name: title, exact: true }).waitFor({ state: "visible" });
 }
 
+async function verifyMobileLearnLayout(browser, baseUrl) {
+  const failures = [];
+  const checks = [
+    {
+      name: "mobile preview preserves readable native size and can pan",
+      run: async (page) => {
+        await page.goto(`${baseUrl}/learn?topic=networks`, { waitUntil: "domcontentloaded" });
+        await waitForLesson(page, "Connect");
+        const main = page.getByRole("main", { name: "Learn", exact: true });
+        await main.getByRole("button", { name: "Enlarge product preview", exact: true }).click();
+        const dialog = page.getByRole("dialog", { name: "Product preview", exact: true });
+        await dialog.waitFor();
+        await dialog.evaluate(async (element) => {
+          await Promise.all(element.getAnimations({ subtree: true }).map((animation) => animation.finished));
+        });
+        const image = dialog.locator("img");
+        await image.evaluate((element) => element.decode());
+        const size = await image.evaluate((element) => ({
+          native: element.naturalWidth,
+          rendered: element.getBoundingClientRect().width,
+          viewport: innerWidth,
+          scrollWidth: element.parentElement.scrollWidth,
+          visibleWidth: element.parentElement.clientWidth,
+        }));
+        assert.ok(size.native > size.viewport, "this regression requires a product capture wider than the phone");
+        assert.ok(size.rendered >= size.native - 1, `preview shrank from ${size.native}px to ${size.rendered}px`);
+        assert.ok(size.scrollWidth > size.visibleWidth, "wide preview must pan inside its image viewport");
+        const panned = await image.evaluate((element) => {
+          element.parentElement.scrollLeft = 80;
+          return element.parentElement.scrollLeft;
+        });
+        assert.ok(panned > 0, "preview cannot be panned horizontally");
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
+        await page.keyboard.press("Escape");
+        await dialog.waitFor({ state: "hidden" });
+        await waitForLesson(page, "Connect");
+      },
+    },
+    {
+      name: "mobile workflow labels remain fully visible and selectable",
+      run: async (page) => {
+        await page.goto(`${baseUrl}/learn?topic=devices`, { waitUntil: "domcontentloaded" });
+        await waitForLesson(page, "Devices");
+        const main = page.getByRole("main", { name: "Learn", exact: true });
+        const tabs = main.getByRole("tablist", { name: "Devices workflows", exact: true });
+        await tabs.waitFor();
+        await page.evaluate(async () => {
+          await document.fonts.ready;
+          await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        });
+        const layout = await tabs.evaluate((element) => {
+          const bounds = element.getBoundingClientRect();
+          return {
+            visibleWidth: element.clientWidth,
+            scrollWidth: element.scrollWidth,
+            labels: [...element.querySelectorAll('[role="tab"]')].map((tab) => {
+              const box = tab.getBoundingClientRect();
+              return { text: tab.textContent, left: box.left - bounds.left, right: box.right - bounds.left };
+            }),
+          };
+        });
+        assert.ok(layout.labels.length > 1, "this regression requires several workflows");
+        assert.ok(layout.scrollWidth <= layout.visibleWidth + 1, "workflow choices extend beyond their visible row");
+        for (const label of layout.labels) {
+          assert.ok(label.left >= -1 && label.right <= layout.visibleWidth + 1, `${label.text} is clipped at phone width`);
+        }
+        const lastTab = tabs.getByRole("tab").last();
+        await lastTab.click();
+        await page.waitForFunction(() => document.querySelector('[aria-label="Devices workflows"] [role="tab"]:last-child')?.getAttribute("aria-selected") === "true");
+      },
+    },
+  ];
+  for (const check of checks) {
+    const view = await openPage(browser, baseUrl, makeFixtures(), { viewport: { width: 390, height: 844 }, isMobile: true });
+    try {
+      await check.run(view.page);
+      assert.deepEqual(view.pageErrors, []);
+      assert.deepEqual(view.consoleErrors, []);
+      assert.deepEqual(view.externalRequests, []);
+      console.log(`PASS: ${check.name}`);
+    } catch (error) {
+      failures.push(error);
+      console.error(`FAIL: ${check.name}: ${error.message}`);
+    } finally {
+      await view.context.close();
+    }
+  }
+  if (failures.length) throw new AggregateError(failures, "Mobile Learn layout regressions");
+}
+
 async function main() {
   const captureCodeHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim();
   console.log(`Learn browser acceptance code head: ${captureCodeHead}`);
@@ -381,6 +468,8 @@ async function main() {
       args: process.platform === "linux" ? ["--no-sandbox"] : [],
     });
 
+    await verifyMobileLearnLayout(browser, baseUrl);
+
     const fixtures = makeFixtures({ discoveryFailureOnce: true, discoveryProgressOnce: true });
     const shell = await openPage(browser, baseUrl, fixtures);
     await shell.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
@@ -393,15 +482,16 @@ async function main() {
     // Learn lives with the footer icons; contextual help stays in its related controls.
     await shell.page.getByRole("button", { name: "Learn", exact: true }).click();
     await shell.page.waitForFunction(() => location.pathname === "/learn");
-    await waitForLesson(shell.page, "Kollab networks");
-    await shell.page.getByRole("button", { name: "Close Learn", exact: true }).click();
+    await waitForLesson(shell.page, "Connect");
+    await shell.page.keyboard.press("Escape");
     await shell.page.waitForFunction(() => location.pathname === "/" && document.activeElement?.id === "app-main-pane");
 
     await shell.page.getByTestId("new-session-options").click();
     // Help is a hover card on the control, never an inline link.
     assert.equal(await shell.page.getByRole("link", { name: /Learn about|Learn more/ }).count(), 0);
     const manageProfiles = shell.page.getByRole("button", { name: "Manage Profiles", exact: true });
-    await manageProfiles.hover();
+    // Use the help control so the assertion is independent of hover dwell/animation timing.
+    await manageProfiles.locator("..").getByRole("button", { name: "What is this?", exact: true }).click();
     await shell.page.getByRole("tooltip").filter({ hasText: "A profile picks the provider" }).first().waitFor({ state: "visible" });
 
     // Exercise App -> AppSidebar -> ProfilesDialog, not just the isolated dialog fixture.
@@ -474,7 +564,7 @@ async function main() {
     // Learn route entry/exit must preserve the existing main pane and restore keyboard focus.
     await shell.page.getByRole("button", { name: "Learn", exact: true }).click();
     await shell.page.waitForFunction(() => location.pathname === "/learn");
-    await waitForLesson(shell.page, "Kollab networks");
+    await waitForLesson(shell.page, "Connect");
     await shell.page.getByRole("button", { name: "Close Learn", exact: true }).click();
     await shell.page.waitForFunction(() => location.pathname === "/" && document.activeElement?.id === "app-main-pane");
 
@@ -494,6 +584,108 @@ async function main() {
     await waitForLesson(shell.page, "Agents");
     await shell.page.goBack();
     await shell.page.waitForFunction(() => location.pathname === "/learn" && location.search === "");
+    await shell.page.goForward();
+    await shell.page.waitForFunction(() => location.pathname === "/learn" && location.search === "?topic=agents");
+    await waitForLesson(shell.page, "Agents");
+
+    // Every current topic must load its JSON-backed workflow, not a blank placeholder.
+    await shell.page.emulateMedia({ reducedMotion: "reduce" });
+
+    for (const topicId of ["networks", "devices", "workspaces", "agents", "profiles", "context-compaction", "koordinator", "hub-messaging", "voice", "system-prompts", "phone-access"]) {
+      await shell.page.goto(`${baseUrl}/learn?topic=${topicId}`, { waitUntil: "domcontentloaded" });
+      const learn = shell.page.getByRole("main", { name: "Learn", exact: true });
+      const heading = learn.getByRole("heading", { level: 1 });
+      await heading.waitFor({ state: "visible" });
+      assert.notEqual(await heading.innerText(), "That topic is not available", `${topicId} route unexpectedly unresolved`);
+      await shell.page.getByRole("tabpanel").first().waitFor({ state: "visible" });
+      assert.ok((await shell.page.getByRole("tabpanel").first().innerText()).trim().length > 0, `${topicId} workflow is empty`);
+      const topicMedia = learn.locator("img, video").first();
+      await topicMedia.waitFor({ state: "visible" });
+      if (await topicMedia.evaluate((element) => element instanceof HTMLImageElement)) {
+        await shell.page.waitForFunction((id) => {
+          const image = document.querySelector('main[aria-label="Learn"] img');
+          return image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0 && image.src.endsWith(`/learn/${id}/overview.webp`);
+        }, topicId);
+      }
+
+      const workflowTabs = learn.getByRole("tab");
+      if (await workflowTabs.count() > 1) {
+        await workflowTabs.first().focus();
+        await shell.page.keyboard.press("ArrowRight");
+        await shell.page.waitForFunction(() => document.querySelectorAll('main[aria-label="Learn"] [role="tab"]')[1]?.getAttribute("aria-selected") === "true");
+        assert.equal(await workflowTabs.nth(1).getAttribute("aria-selected"), "true", `${topicId} workflow tabs are not keyboard navigable`);
+      }
+      const reducedMotion = await shell.page.evaluate(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+      const video = shell.page.locator("main video").first();
+      if (reducedMotion && await video.count()) {
+        assert.equal(await video.getAttribute("autoplay"), null, `${topicId} video must not autoplay`);
+        assert.equal(await video.evaluate((element) => element.paused), true, `${topicId} video unexpectedly plays on load`);
+      }
+    }
+    await shell.page.emulateMedia({ reducedMotion: "no-preference" });
+
+    // The walkthrough starts from a readable poster; reduced motion waits for explicit play.
+    await shell.page.emulateMedia({ reducedMotion: "reduce" });
+    await shell.page.goto(`${baseUrl}/learn?topic=networks`, { waitUntil: "domcontentloaded" });
+    await waitForLesson(shell.page, "Connect");
+    // Escape pressed as soon as the enlarged preview opens closes only that preview, never the Learn dialog.
+    await shell.page.getByRole("button", { name: "Enlarge product preview", exact: true }).click();
+    await shell.page.getByRole("dialog", { name: "Product preview", exact: true }).waitFor();
+    await shell.page.keyboard.press("Escape");
+    await shell.page.getByRole("dialog", { name: "Product preview", exact: true }).waitFor({ state: "hidden" });
+    assert.equal(new URL(shell.page.url()).pathname, "/learn", "Escape on the enlarged preview also closed Learn");
+    await waitForLesson(shell.page, "Connect");
+    assert.equal(await shell.page.locator("main video").count(), 0);
+    await shell.page.getByRole("button", { name: "Watch walkthrough", exact: true }).click();
+    const walkthrough = shell.page.locator("main video");
+    await walkthrough.waitFor();
+    await walkthrough.evaluate(async (video) => {
+      if (!video.readyState) await new Promise((resolve, reject) => { video.onloadedmetadata = resolve; video.onerror = reject; });
+    });
+    assert.equal(await walkthrough.evaluate((video) => video.paused && video.controls && video.playsInline), true);
+    assert.equal(await walkthrough.getAttribute("autoplay"), null);
+    assert.equal(await walkthrough.locator('track[kind="captions"]').count(), 1);
+    await walkthrough.evaluate((video) => video.play());
+    await shell.page.waitForFunction(() => document.querySelector("main video")?.currentTime > 0.2);
+    await shell.page.emulateMedia({ reducedMotion: "no-preference" });
+    await shell.page.emulateMedia({ reducedMotion: "reduce" });
+    await shell.page.waitForFunction(() => document.querySelector("main video")?.paused);
+    await shell.page.getByRole("button", { name: "Show preview", exact: true }).click();
+    assert.equal(await shell.page.locator("main video").count(), 0);
+    await shell.page.getByRole("button", { name: "Enlarge product preview", exact: true }).click();
+    const enlargedPreview = shell.page.getByRole("dialog", { name: "Product preview", exact: true });
+    await enlargedPreview.waitFor();
+    await enlargedPreview.locator("img").evaluate((image) => image.decode());
+    await shell.page.keyboard.press("Escape");
+    await enlargedPreview.waitFor({ state: "hidden" });
+    await waitForLesson(shell.page, "Connect");
+    await shell.page.emulateMedia({ reducedMotion: "no-preference" });
+
+    // A failed overview image has an actionable recovery and a real retry re-requests the asset.
+    const mediaRecovery = await openPage(browser, baseUrl, makeFixtures());
+    let failOverviewOnce = true;
+    await mediaRecovery.page.route("**/learn/devices/overview.webp", async (route) => {
+      if (failOverviewOnce) {
+        failOverviewOnce = false;
+        await route.abort();
+      } else {
+        await route.continue();
+      }
+    });
+    await mediaRecovery.page.goto(`${baseUrl}/learn?topic=devices`, { waitUntil: "domcontentloaded" });
+    await waitForLesson(mediaRecovery.page, "Devices");
+    const mediaError = mediaRecovery.page.getByRole("group", { name: "Lesson media recovery" });
+    await mediaError.getByRole("status").waitFor({ state: "visible" });
+    await mediaError.getByRole("button", { name: "Try again" }).click();
+    const restoredImage = mediaRecovery.page.locator('main img[src="/learn/devices/overview.webp"]');
+    await restoredImage.waitFor({ state: "visible" });
+    await mediaRecovery.page.waitForFunction(() => {
+      const image = document.querySelector('main img[src="/learn/devices/overview.webp"]');
+      return image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0;
+    });
+    await mediaRecovery.context.close();
+
+
     await shell.page.goto(`${baseUrl}/learn?topic=not-a-topic`, { waitUntil: "domcontentloaded" });
     await shell.page.getByRole("heading", { name: "That topic is not available" }).waitFor({ state: "visible" });
     await shell.page.getByRole("button", { name: "Browse topics" }).click();
@@ -776,7 +968,7 @@ async function main() {
 
     if (process.env.LEARN_CAPTURE_SCREENSHOTS !== "0") {
       const captures = [
-        { width: 390, height: 844, isMobile: true, id: "networks", title: "Kollab networks", file: "learn-page-390x844-networks.png" },
+        { width: 390, height: 844, isMobile: true, id: "networks", title: "Connect", file: "learn-page-390x844-networks.png" },
         { width: 820, height: 1180, isMobile: false, id: "agents", title: "Agents", file: "learn-page-820x1180-agents.png" },
         { width: 1280, height: 900, isMobile: false, id: "phone-access", title: "PhoneLink", file: "learn-page-1280x900-phone-access.png" },
       ];
