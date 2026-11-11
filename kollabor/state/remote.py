@@ -14,6 +14,7 @@ holding.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -1014,6 +1015,28 @@ class RemoteStateService(StateService):
             timeout=max(self._timeout, self.PANEL_ACTION_TIMEOUTS.get(name, self.PANEL_ACTION_TIMEOUT)),
         )
         return _panel_answer(result, "result")
+
+    # Terminal polls need short deadlines. Other Code responses can approach the 16 MiB RPC frame limit and
+    # traverse a base64-encoded, rate-limited device tunnel; allow time for the full frame plus contention.
+    CODE_CALL_TIMEOUT: float = 40.0
+    BULK_CODE_CALL_TIMEOUT: float = 1200.0
+
+    async def code_call(self, op: str, params: dict[str, Any]) -> dict[str, Any]:
+        timeout = max(
+            self._timeout, self.CODE_CALL_TIMEOUT if op.startswith("terminal.") else self.BULK_CODE_CALL_TIMEOUT
+        )
+        # RpcClient's own reply deadline starts after its writer lock and drain; bound those waits too.
+        async with asyncio.timeout(timeout):
+            result = await self._rpc.call("state.code_call", {"op": op, "params": params}, timeout=timeout)
+        answer = result.get("answer") if isinstance(result, dict) else None
+        if (
+            not isinstance(answer, dict)
+            or not isinstance(answer.get("status"), int)
+            or not isinstance(answer.get("body"), dict)
+        ):
+            # A daemon that outlived an update answers in a shape this engine does not know (compare #955).
+            raise ValueError("daemon code call failed")
+        return answer
 
     async def hub_connect(self, command: str) -> str:
         result = await self._rpc.call(
