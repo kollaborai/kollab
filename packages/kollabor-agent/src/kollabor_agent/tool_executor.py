@@ -1,1 +1,3306 @@
-@packages/kollabor-agent/src/kollabor_agent/tool_executor.py
+"""Tool execution engine for terminal commands, MCP tools, and file operations.
+
+Provides unified execution interface for terminal commands, MCP tool calls, and
+file operations with proper error handling, logging, and result processing.
+"""
+
+import asyncio
+import logging
+import re
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Dict, List, Optional
+
+from kollabor_events.models import EventType
+
+from .file_operations_executor import FileOperationsExecutor
+from .mcp_integration import MCPIntegration
+from .sandbox_gate import SandboxGate
+from .shell_executor import ShellExecutor
+from .tool_output_budget import ToolOutputArtifactStore
+from .voice_admission import is_voice_origin
+from .voice_tool_policy import (
+    MAX_VOICE_COMMAND_SECONDS,
+    MAX_VOICE_OUTPUT_BYTES,
+    VoiceTerminalPlan,
+    VoiceToolDecision,
+    VoiceToolExecutionGuard,
+)
+from .yes_approval import NEEDS_YES, NOT_IN_HIDDEN_TURN, YesApprovals, call_approval
+
+logger = logging.getLogger(__name__)
+
+
+class ToolExecutionResult:
+    """Result of tool execution."""
+
+    def __init__(
+        self,
+        tool_id: str,
+        tool_type: str,
+        success: bool,
+        output: str = "",
+        error: str = "",
+        execution_time: float = 0.0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        """Initialize tool execution result.
+
+        Args:
+            tool_id: Unique identifier for the tool
+            tool_type: Type of tool (terminal, mcp_tool, file_edit, etc.)
+            success: Whether execution was successful
+            output: Tool output/result
+            error: Error message if failed
+            execution_time: Execution time in seconds
+            metadata: Additional metadata (e.g., diff_info for file edits)
+        """
+        self.tool_id = tool_id
+        self.tool_type = tool_type
+        self.success = success
+        self.output = output
+        self.error = error
+        self.execution_time = execution_time
+        self.metadata = metadata or {}
+        self.timestamp = time.time()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert result to dictionary."""
+        return {
+            "tool_id": self.tool_id,
+            "tool_type": self.tool_type,
+            "success": self.success,
+            "output": self.output,
+            "error": self.error,
+            "execution_time": self.execution_time,
+            "timestamp": self.timestamp,
+        }
+
+    def __str__(self) -> str:
+        """String representation of result."""
+        status = "SUCCESS" if self.success else "FAILED"
+        return (
+            f"[{status}] {self.tool_type}:{self.tool_id} ({self.execution_time:.2f}s)"
+        )
+
+
+def _is_blocked_kollab_spawn(
+    command: str, *, background: bool = False, _depth: int = 0
+) -> bool:
+    """Detect Kollab agent launches and all-agent stops through common wrappers."""
+    import ast
+    import base64
+    import re
+    import shlex
+
+    assignment = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+    shell_names = {"sh", "bash", "dash", "zsh", "ksh"}
+    python_name = re.compile(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?")
+    separators = {";", "&", "&&", "|", "||", "(", ")"}
+
+    def basename(token: str) -> str:
+        return token.replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+    def suspicious_launch(text: str, is_background: bool) -> bool:
+        target = re.search(
+            r"\b(?:kollab|main\.py|kollabor_cli_main)\b", text, re.IGNORECASE
+        )
+        dangerous = re.search(
+            r"--agent(?:=|\b)|--detached(?:=|\b)|"
+            r"--hub(?:=|\s+)(?:stop|kill)(?:\s+|=)all",
+            text,
+            re.IGNORECASE,
+        )
+        return bool(target and (is_background or dangerous))
+
+    def blocked_args(args: list[str], is_background: bool) -> bool:
+        if is_background:
+            return True
+        lowered = [str(arg).lower() for arg in args]
+        # Shell indirection such as eval or $(...) is outside this text guard;
+        # cli_main also checks launch context at runtime.
+        for index, arg in enumerate(lowered):
+            if arg == "--":
+                break
+            option = arg.split("=", 1)[0]
+            if arg.startswith("-a") and not arg.startswith("--"):
+                return True
+            if option == "-d" or (
+                option.startswith(("--ag", "--det"))
+                and any(long_option.startswith(option) for long_option in ("--agent", "--detached"))
+            ):
+                return True
+            if option == "--hub":
+                tail = lowered[index + 1:]
+                if "=" in arg:
+                    action = arg.split("=", 1)[1]
+                elif tail:
+                    action, tail = tail[0], tail[1:]
+                else:
+                    continue
+                if action in {"stop", "kill"} and "all" in tail:
+                    return True
+        return False
+
+    def python_code_spawns(code: str, is_background: bool, depth: int) -> bool:
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return False
+        spawn_calls = {
+            "Popen",
+            "run",
+            "call",
+            "check_call",
+            "check_output",
+            "system",
+            "exec",
+            "execv",
+            "execve",
+            "execvp",
+            "execvpe",
+            "getoutput",
+            "popen",
+            "create_subprocess_exec",
+            "create_subprocess_shell",
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            function = node.func
+            name = (
+                function.id
+                if isinstance(function, ast.Name)
+                else getattr(function, "attr", "")
+            )
+            if name not in spawn_calls and not name.startswith(("spawn", "exec")):
+                continue
+            for argument in [*node.args, *(keyword.value for keyword in node.keywords)]:
+                try:
+                    value = ast.literal_eval(argument)
+                except ValueError, TypeError:
+                    continue
+                if isinstance(value, str):
+                    if _is_blocked_kollab_spawn(
+                        value, background=is_background, _depth=depth + 1
+                    ):
+                        return True
+                elif isinstance(value, (list, tuple)) and all(
+                    isinstance(item, str) for item in value
+                ):
+                    if scan_tokens(list(value), is_background, depth + 1):
+                        return True
+        return False
+
+    def unwrap(
+        tokens: list[str], is_background: bool, depth: int
+    ) -> tuple[list[str], bool]:
+        tokens = list(tokens)
+        while tokens:
+            executable = basename(tokens[0]).removesuffix(".exe")
+            if assignment.match(tokens[0]):
+                tokens = tokens[1:]
+                continue
+
+            if executable == "env":
+                index = 1
+                while index < len(tokens):
+                    token = tokens[index]
+                    if token == "--":
+                        index += 1
+                        break
+                    if token in {"-u", "--unset", "-C", "--chdir"}:
+                        index += 2
+                    elif token.startswith("--unset=") or token.startswith("--chdir="):
+                        index += 1
+                    elif token in {"-S", "--split-string"} and index + 1 < len(tokens):
+                        return [], _is_blocked_kollab_spawn(
+                            tokens[index + 1],
+                            background=is_background,
+                            _depth=depth + 1,
+                        )
+                    elif token.startswith("-") or assignment.match(token):
+                        index += 1
+                    else:
+                        break
+                tokens = tokens[index:]
+                continue
+            if executable == "nohup":
+                tokens = tokens[1:]
+                if tokens and tokens[0] == "--":
+                    tokens = tokens[1:]
+                continue
+            if executable == "setsid":
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    index += 1
+                tokens = tokens[index:]
+                continue
+            if executable == "time":
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    if tokens[index] in {"-f", "--format", "-o", "--output"}:
+                        index += 2
+                    elif tokens[index] == "--":
+                        index += 1
+                        break
+                    else:
+                        index += 1
+                tokens = tokens[index:]
+                continue
+            if executable == "stdbuf":
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    if tokens[index] in {"-i", "-o", "-e"}:
+                        index += 2
+                    elif tokens[index] == "--":
+                        index += 1
+                        break
+                    else:
+                        index += 1
+                tokens = tokens[index:]
+                continue
+            if executable in {"command", "exec"}:
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    token = tokens[index]
+                    if token == "--":
+                        index += 1
+                        break
+                    if executable == "exec" and token in {"-a", "--argv0"}:
+                        index += 2
+                    elif executable == "exec" and token in {"-c", "-l"}:
+                        index += 1
+                    elif executable == "command" and token in {"-p", "-v", "-V"}:
+                        index += 1
+                    else:
+                        break
+                tokens = tokens[index:]
+                continue
+            if executable == "xargs":
+                index = 1
+                value_options = {
+                    "-a",
+                    "--arg-file",
+                    "-I",
+                    "--replace",
+                    "-L",
+                    "--max-lines",
+                    "-n",
+                    "--max-args",
+                    "-d",
+                    "--delimiter",
+                    "-P",
+                    "--max-procs",
+                }
+                while index < len(tokens):
+                    token = tokens[index]
+                    if token == "--":
+                        index += 1
+                        break
+                    if token in value_options:
+                        index += 2
+                    elif token.startswith("-"):
+                        index += 1
+                    else:
+                        break
+                tokens = tokens[index:]
+                continue
+            if executable in {"sudo", "doas"}:
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    if tokens[index] in {
+                        "-u",
+                        "--user",
+                        "-g",
+                        "--group",
+                        "-h",
+                        "--host",
+                        "-p",
+                        "--prompt",
+                    }:
+                        index += 2
+                    else:
+                        index += 1
+                tokens = tokens[index:]
+                continue
+            if executable == "nice":
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    index += 2 if tokens[index] in {"-n", "--adjustment"} else 1
+                tokens = tokens[index:]
+                continue
+            if executable == "timeout":
+                index = 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    index += (
+                        2
+                        if tokens[index] in {"-k", "--kill-after", "-s", "--signal"}
+                        else 1
+                    )
+                if index < len(tokens):
+                    index += 1  # timeout duration
+                tokens = tokens[index:]
+                continue
+            if (
+                executable in {"uv", "poetry", "pipenv", "pipx"}
+                and len(tokens) > 1
+                and tokens[1] == "run"
+            ):
+                tokens = tokens[2:]
+                continue
+            break
+        return tokens, False
+
+    def inspect_windows_wrapper(
+        executable: str, args: list[str], is_background: bool, depth: int
+    ) -> bool | None:
+        if executable in shell_names or python_name.fullmatch(executable):
+            return None
+
+        def inspect_command(command_text: str) -> bool:
+            return _is_blocked_kollab_spawn(
+                command_text, background=is_background, _depth=depth + 1
+            )
+
+        def suspicious_wrapper() -> bool:
+            return suspicious_launch(f"{executable} {' '.join(args)}", is_background)
+
+        if executable in {"powershell", "pwsh"}:
+            index = 0
+            while index < len(args):
+                option = args[index].lower()
+                if option in {
+                    "-noprofile",
+                    "-nop",
+                    "-nologo",
+                    "-nol",
+                    "-noexit",
+                    "-noe",
+                    "-noninteractive",
+                    "-noni",
+                }:
+                    index += 1
+                    continue
+
+                if option in {"-command", "-commandwithargs", "-c"}:
+                    command_text = " ".join(args[index + 1 :]).strip()
+                    return command_text == "-" or (
+                        bool(command_text) and inspect_command(command_text)
+                    )
+
+                if option in {"-encodedcommand", "-enc", "-ec", "-e"}:
+                    if index + 1 >= len(args):
+                        return True
+                    try:
+                        command_text = (
+                            base64.b64decode(args[index + 1], validate=True)
+                            .decode("utf-16le")
+                            .lstrip("\ufeff")
+                        )
+                    except ValueError:
+                        return True
+                    return inspect_command(command_text)
+
+                if option in {
+                    "-executionpolicy",
+                    "-ep",
+                    "-inputformat",
+                    "-if",
+                    "-outputformat",
+                    "-of",
+                    "-version",
+                    "-v",
+                }:
+                    if index + 1 >= len(args):
+                        return suspicious_wrapper()
+                    index += 2
+                    continue
+
+                if option.startswith("-"):
+                    return suspicious_wrapper()
+                return inspect_command(" ".join(args[index:]))
+            return False
+
+        if executable == "cmd":
+            index = 0
+            while index < len(args):
+                option = args[index].lower()
+                if option in {"/d", "/s", "/q", "/a", "/u"}:
+                    index += 1
+                    continue
+                if option in {"/c", "/k"}:
+                    command_text = " ".join(args[index + 1 :]).strip()
+                    return bool(command_text) and inspect_command(command_text)
+                if option.startswith("/"):
+                    return suspicious_wrapper()
+                return inspect_command(" ".join(args[index:]))
+            return False
+
+        wrapper_options = {
+            "-c",
+            "-command",
+            "-commandwithargs",
+            "-e",
+            "-ec",
+            "-enc",
+            "-encodedcommand",
+            "/c",
+            "/k",
+        }
+        normalized = [argument.lower().split("=", 1)[0] for argument in args]
+        if any(option in wrapper_options for option in normalized):
+            if any(
+                option in {"-e", "-ec", "-enc", "-encodedcommand"}
+                for option in normalized
+            ):
+                return True
+            return suspicious_wrapper()
+        return None
+
+    def inspect_segment(tokens: list[str], is_background: bool, depth: int) -> bool:
+        if not tokens:
+            return False
+        tokens, nested_result = unwrap(tokens, is_background, depth)
+        if nested_result:
+            return True
+        if not tokens:
+            return False
+
+        executable = basename(tokens[0]).removesuffix(".exe")
+        args = tokens[1:]
+        windows_result = inspect_windows_wrapper(executable, args, is_background, depth)
+        if windows_result is not None:
+            return windows_result
+        if executable in shell_names:
+            for index, token in enumerate(args[:-1]):
+                if token == "-c" or (
+                    token.startswith("-")
+                    and not token.startswith("--")
+                    and "c" in token[1:]
+                ):
+                    return _is_blocked_kollab_spawn(
+                        args[index + 1], background=is_background, _depth=depth + 1
+                    )
+            return False
+
+        if python_name.fullmatch(executable):
+            index = 0
+            while index < len(args):
+                token = args[index]
+                if token == "-c" and index + 1 < len(args):
+                    return python_code_spawns(args[index + 1], is_background, depth)
+                if token == "-m" and index + 1 < len(args):
+                    module = args[index + 1].split(":", 1)[0].lower()
+                    if module in {"kollabor_cli_main", "kollabor"}:
+                        return blocked_args(args[index + 2 :], is_background)
+                    return False
+                if token in {"-X", "-W"}:
+                    index += 2
+                    continue
+                if token.startswith("-"):
+                    index += 1
+                    continue
+                script = basename(token)
+                if script in {"main.py", "kollabor_cli_main.py", "kollabor_cli_main"}:
+                    return blocked_args(args[index + 1 :], is_background)
+                return False
+            return False
+
+        if executable in {
+            "kollab",
+            "main.py",
+            "kollabor_cli_main",
+            "kollabor_cli_main.py",
+        }:
+            return blocked_args(args, is_background)
+        return False
+
+    def scan_tokens(tokens: list[str], is_background: bool, depth: int) -> bool:
+        if depth > 8:
+            return suspicious_launch(" ".join(tokens), is_background)
+        segment: list[str] = []
+        for token in tokens:
+            if token in separators:
+                if inspect_segment(segment, is_background or token == "&", depth):
+                    return True
+                segment = []
+            else:
+                segment.append(token)
+        if inspect_segment(segment, is_background, depth):
+            return True
+
+        # Catch shell command substitutions without treating ordinary quoted
+        # mentions (e.g. echo 'kollab --agent') as executable commands.
+        for token in tokens:
+            nested_commands = re.findall(
+                r"\$\(([^()]*)\)|`([^`]+)`|[<>]\(([^()]*)\)", token
+            )
+            for groups in nested_commands:
+                nested = next((group for group in groups if group), "")
+                if nested and _is_blocked_kollab_spawn(
+                    nested, background=is_background, _depth=depth + 1
+                ):
+                    return True
+        return False
+
+    if _depth > 8:
+        return suspicious_launch(command, background)
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        tokens = list(lexer)
+    except ValueError:
+        return suspicious_launch(command, background)
+    return scan_tokens(tokens, background, _depth)
+
+
+class ToolExecutor:
+    """Execute tools with unified interface for terminal, MCP, and file operations.
+
+    Handles execution of terminal commands, MCP tool calls, and file operations
+    with proper error handling, timeouts, and result logging.
+    """
+
+    def __init__(
+        self,
+        mcp_integration: MCPIntegration,
+        event_bus,
+        terminal_timeout: int = 90,
+        mcp_timeout: int = 180,
+        config=None,
+        renderer=None,
+        tmux_plugin=None,
+        workspace=None,
+    ):
+        """Initialize tool executor.
+
+        Args:
+            mcp_integration: MCP integration instance
+            event_bus: Event bus for hook emissions
+            terminal_timeout: Timeout for terminal commands in seconds
+            mcp_timeout: Timeout for MCP tool calls in seconds
+            config: Configuration manager (optional)
+            renderer: Terminal renderer for tool execution state (optional)
+            tmux_plugin: TmuxPlugin instance for terminal execution (optional)
+            workspace: Default working directory for terminal and file tools
+        """
+        self.mcp_integration = mcp_integration
+        self.event_bus = event_bus
+        self.terminal_timeout = terminal_timeout
+        self.mcp_timeout = mcp_timeout
+        self.renderer = renderer  # Store renderer for tool execution state
+        self.tmux_plugin = tmux_plugin  # Store tmux plugin reference
+        self._config = config
+        self.workspace = Path(workspace).expanduser().resolve() if workspace else None
+
+        # Create own shell executor instance (fallback if tmux_plugin not available)
+        # Check config for interactive shell mode (sources .zshrc/.bashrc for aliases)
+        interactive_shell = False
+        if config:
+            interactive_shell = config.get("terminal.interactive_shell", False)
+        self.shell_executor = ShellExecutor(interactive=interactive_shell)
+        self._voice_tool_guard = VoiceToolExecutionGuard()
+        self.yes_approvals = YesApprovals()
+        # Promotion gate (#725): off unless sandbox_gate.enabled.
+        self.sandbox_gate = SandboxGate(config)
+        # Trust All, kept in step by PermissionManager: a voice turn then runs its
+        # tools as a typed one does, with no voice list and no spoken yes.
+        self.trust_all = False
+
+        # True while a tool is genuinely executing. The TurnWatchdog reads this
+        # (like an in-flight API call) so a long-running foreground tool — e.g.
+        # a 10-minute build — is never mistaken for a wedged session and
+        # interrupted. Independent of the renderer so it works headless.
+        self.tool_executing = False
+
+        # Tools executed since the last turn_complete. Counted here because
+        # every tool path funnels through execute_tool, and one turn can span
+        # several continuation passes.
+        self._executed_count = 0
+
+        # File operations executor
+        self.file_ops_executor = FileOperationsExecutor(
+            config=config,
+            workspace=self.workspace,
+        )
+        self.file_ops_executor.event_bus = event_bus
+        self._tool_output_store: Optional[ToolOutputArtifactStore] = None
+        self._tool_output_max_chars = 80000
+        self._tool_output_preview_chars = 12000
+
+        # Plugin-registered tool handlers (populated via register_plugin_handler)
+        self._plugin_handlers: Dict[
+            str, Callable[[Dict[str, Any]], Awaitable["ToolExecutionResult"]]
+        ] = {}
+
+        # Bundle scope enforcement
+        self._bundle_tools: Optional[List[str]] = None
+        """If set, only these tool names are allowed. None = all tools allowed."""
+        self._enforce_bundle_scope: bool = True
+        """Whether to enforce bundle scope. Can be toggled via config."""
+
+        # Execution statistics
+        self.stats = {
+            "total_executions": 0,
+            "successful_executions": 0,
+            "failed_executions": 0,
+            "terminal_executions": 0,
+            "mcp_executions": 0,
+            "file_op_executions": 0,
+            "total_execution_time": 0.0,
+        }
+
+        # Cancellation callback - checked between tool executions
+        self._cancel_callback = None
+        self._operation_observer = None
+
+        # Async callback fired after dynamic tool scope changes (tool
+        # loads) so the owner can refresh derived state such as the
+        # native API tool schema list. Issue #202.
+        self._scope_change_callback: Optional[Callable[[], Awaitable[None]]] = None
+
+        # Track active shell executor so ESC can cancel running subprocesses
+        self._active_shell_executor: Optional[ShellExecutor] = None
+
+        logger.info(
+            "Tool executor initialized with terminal, MCP, and file operations support"
+        )
+
+    def set_cancel_callback(self, callback):
+        """Set callback to check for cancellation requests.
+
+        Args:
+            callback: Callable that returns True if cancellation is requested
+        """
+        self._cancel_callback = callback
+
+    def set_operation_observer(self, observer):
+        """Attach a best-effort observer for shared tool execution phases."""
+        self._operation_observer = observer
+
+    def _notify_operation_observer(
+        self,
+        phase: str,
+        *,
+        tool_data: Dict[str, Any],
+        tool_call_id: str,
+        tool_call_id_generated: bool,
+        operation_generation: int | None = None,
+        begin: bool = False,
+    ) -> int | None:
+        observer = self._operation_observer
+        if not callable(observer):
+            return None
+        try:
+            generation = observer(
+                phase=phase,
+                tool_data=tool_data,
+                tool_call_id=tool_call_id,
+                tool_call_id_generated=tool_call_id_generated,
+                operation_generation=operation_generation,
+                begin=begin,
+            )
+            return generation if isinstance(generation, int) else None
+        except Exception:
+            # Diagnostics must never alter permission decisions or tool results.
+            logger.debug("Tool operation observer failed")
+            return None
+
+    def configure_tool_output_store(
+        self,
+        store: ToolOutputArtifactStore,
+        *,
+        max_result_chars: int = 80000,
+        preview_chars: int = 12000,
+    ) -> None:
+        """Install the shared lossless tool-output boundary.
+
+        QueueProcessor owns the session/batch budget, while ToolExecutor is the
+        earliest common producer boundary. Applying the per-result pass here
+        keeps oversized output out of the renderer, hooks, and history.
+        """
+        self._tool_output_store = store
+        self._tool_output_max_chars = max_result_chars
+        self._tool_output_preview_chars = preview_chars
+        self.file_ops_executor.configure_tool_output_store(
+            store,
+            preview_chars=preview_chars,
+        )
+
+    async def _notify_scope_change(self) -> None:
+        """Invoke the scope-change callback, absorbing its failures.
+
+        Best-effort by design: the tool load itself succeeded, and a
+        broken refresh must not turn it into an error.
+        """
+        callback = getattr(self, "_scope_change_callback", None)
+        if callback is None:
+            return
+        try:
+            await callback()
+        except Exception as e:
+            logger.warning("Scope-change callback failed: %s", e)
+
+    def set_scope_change_callback(
+        self, callback: Optional[Callable[[], Awaitable[None]]]
+    ) -> None:
+        """Set an async callback invoked after the dynamic tool scope changes.
+
+        Tool loads (built-in and MCP) mutate the in-memory scope/enable
+        state directly, so the native API tool schemas go stale unless
+        something reloads them. The coordinator wires this callback to
+        its native-tool refresh (issue #202). Failures in the callback
+        must never fail the tool load itself.
+
+        Args:
+            callback: Async callable taking no arguments, or None to clear.
+        """
+        self._scope_change_callback = callback
+
+    def set_bundle_scope(self, allowed_tools: Optional[List[str]]) -> None:
+        """Set the bundle scope for tool access control.
+
+        Args:
+            allowed_tools: List of registry tool names (e.g. ['file-read',
+                'terminal', 'hub-msg']) this agent has access to.
+                None = all tools allowed (legacy default).
+                ["*"] = wildcard, treated as None (all tools allowed).
+        """
+        if allowed_tools == ["*"]:
+            allowed_tools = None
+        self._bundle_tools = allowed_tools
+        logger.debug(
+            f"Bundle scope set: {len(allowed_tools) if allowed_tools else 'all'} tools"
+        )
+
+    def clear_bundle_scope(self) -> None:
+        """Clear bundle scope, allowing all tools."""
+        self._bundle_tools = None
+
+    # Internal dispatch types that bypass scope checks.
+    # These are infrastructure types, not agent-facing tools.  ``mcp_tool``
+    # is deliberately absent: external MCP calls are agent-facing and must
+    # be denied when a bounded bundle does not grant them.
+    _INTERNAL_TYPES = frozenset({
+        "terminal_status",
+        "terminal_output",
+        "terminal_kill",
+        "malformed_file_op",
+        "malformed_tool",
+        "unknown",
+    })
+
+    def _tool_type_to_registry_name(self, tool_type: str) -> Optional[str]:
+        """Convert a tool_type (from dispatch) to a registry tool name.
+
+        Uses the registry's reverse lookup (get_by_native_name,
+        get_by_xml_tag) to find the canonical name. Falls back to
+        simple underscore-to-hyphen conversion.
+
+        Args:
+            tool_type: The 'type' field from parsed tool data.
+
+        Returns:
+            Registry-compatible name, or None if it's an internal type.
+        """
+        # Internal dispatch types — not agent-facing tools
+        if tool_type in self._INTERNAL_TYPES:
+            return None
+
+        # Try registry reverse lookups
+        try:
+            from .tool_registry import get_registry
+            registry = get_registry()
+
+            # Try native name lookup (handles file_mkdir -> directory)
+            tool = registry.get_by_native_name(tool_type)
+            if tool:
+                return tool.name
+
+            # Try xml tag lookup (handles hub_msg -> hub-msg)
+            tool = registry.get_by_xml_tag(tool_type)
+            if tool:
+                return tool.name
+        except Exception:
+            pass  # Registry not available — fall through
+
+        # Fallback: simple underscore-to-hyphen
+        return tool_type.replace("_", "-")
+
+    def _check_bundle_scope(
+        self, tool_type: str, tool_name: Optional[str] = None
+    ) -> Optional[str]:
+        """Check if a tool_type is allowed by the bundle scope.
+
+        Args:
+            tool_type: The dispatch tool type to check.
+            tool_name: The concrete MCP tool name, when checking an MCP call.
+
+        Returns:
+            None if allowed, error message string if denied.
+        """
+        if not self._enforce_bundle_scope:
+            return None
+
+        if self._bundle_tools is None:
+            return None  # Legacy: all tools allowed
+
+        # Internal dispatch types bypass scope
+        if tool_type in self._INTERNAL_TYPES:
+            return None
+
+        # MCP tools share one dispatch type, but bundle scopes may grant all
+        # MCP tools or a specific tool (optionally qualified by its server).
+        if tool_type == "mcp_tool":
+            if "mcp" in self._bundle_tools or "mcp-tool" in self._bundle_tools:
+                return None
+
+            if tool_name:
+                candidates = [tool_name]
+                tool_registry = getattr(self.mcp_integration, "tool_registry", None)
+                if isinstance(tool_registry, dict):
+                    tool_info = tool_registry.get(tool_name)
+                    if isinstance(tool_info, dict):
+                        server_name = tool_info.get("server")
+                        if server_name:
+                            candidates.append(f"mcp:{server_name}:{tool_name}")
+                if any(candidate in self._bundle_tools for candidate in candidates):
+                    return None
+
+        registry_name = self._tool_type_to_registry_name(tool_type)
+
+        # Internal type (returned None)
+        if registry_name is None:
+            return None
+
+        # Direct match against bundle tools
+        if registry_name in self._bundle_tools:
+            return None
+
+        # Also check the original tool_type (some tools like 'terminal'
+        # are the same in both forms)
+        if tool_type in self._bundle_tools:
+            return None
+
+        # Tool not in scope
+        sorted_tools = sorted(set(self._bundle_tools))
+        return (
+            f"[{tool_type}] this agent does not have access to the "
+            f"{registry_name} tool. available tools: "
+            f"{', '.join(sorted_tools)}"
+        )
+
+    def register_plugin_handler(
+        self,
+        tool_type: str,
+        handler: Callable[[Dict[str, Any]], Awaitable["ToolExecutionResult"]],
+    ) -> None:
+        """Register a plugin tool handler.
+
+        When execute_tool encounters this tool_type, it routes to
+        the registered handler instead of the built-in if/elif chain.
+
+        Args:
+            tool_type: matches tool_type from parser registration
+            handler: async function that executes the tool and returns ToolExecutionResult
+        """
+        self._plugin_handlers[tool_type] = handler
+        logger.debug(f"Registered plugin handler for tool type: {tool_type}")
+
+    @property
+    def plugin_handlers(self) -> Dict[str, Any]:
+        """Return registered plugin handlers dict (for native_tools_handler routing)."""
+        return self._plugin_handlers
+
+    def is_cancelled(self) -> bool:
+        """Check if cancellation has been requested."""
+        if self._cancel_callback:
+            return self._cancel_callback()
+        return False
+
+    async def cancel_running_tool(self) -> None:
+        """Cancel any currently running subprocess-backed tool.
+
+        Called by the ESC/cancel handler to interrupt long-running terminal
+        commands and MCP requests that are waiting on a stdio server.
+        """
+        if self._active_shell_executor is not None:
+            logger.info("Cancelling active shell executor subprocess")
+            await self._active_shell_executor.cancel()
+            self._active_shell_executor = None
+
+        # Also cancel via tmux plugin if it has a running foreground process
+        if self.tmux_plugin and hasattr(self.tmux_plugin, "_active_executor"):
+            active = getattr(self.tmux_plugin, "_active_executor", None)
+            if active is not None:
+                logger.info("Cancelling tmux plugin foreground subprocess")
+                await active.cancel()
+                self.tmux_plugin._active_executor = None
+
+        # MCP reload and MCP tool calls wait on stdio responses. Closing the
+        # active connection resolves those waits and terminates the child
+        # process; merely setting the LLM cancellation flag is not enough.
+        cancel_mcp = getattr(self.mcp_integration, "cancel_active_connections", None)
+        if callable(cancel_mcp):
+            try:
+                cancellation = cancel_mcp()
+                if hasattr(cancellation, "__await__"):
+                    await cancellation
+            except Exception as e:
+                logger.debug("Could not cancel active MCP connections: %s", e)
+
+    def take_executed_count(self) -> int:
+        """Return tools executed since the last call, then reset the counter."""
+        count = self._executed_count
+        self._executed_count = 0
+        return count
+
+    def _ask_for_yes(self, tool_data: Dict[str, Any], context: Dict[str, Any] | None) -> str:
+        """Keep a call for the user's yes; what the model reads in place of its result."""
+        self.yes_approvals.ask(tool_data, context)  # never a hidden turn's call
+        if isinstance(context, dict) and context.get("voice_hidden") is True:
+            return NOT_IN_HIDDEN_TURN
+        return NEEDS_YES
+
+    async def execute_tool(
+        self,
+        tool_data: Dict[str, Any],
+        *,
+        execution_context: Dict[str, Any] | None = None,
+    ) -> ToolExecutionResult:
+        """Execute a single tool and emit tool_start/tool_result to the tap.
+
+        Every tool path funnels through here - XML tools from queue_processor
+        and native tool calls via native_tools_handler - so this is the one
+        place remote clients need instrumented.
+        """
+        from kollabor_tui.display_tap import publish_semantic
+
+        tool_id = tool_data.get("id", "unknown")
+        tool_name = self._get_display_name(tool_data)
+        approval = "yes" if self.yes_approvals.take(tool_data) else None
+        voice_decision: VoiceToolDecision | None = None
+        if is_voice_origin(execution_context) and not self.trust_all:
+            voice_decision = self._voice_tool_guard.evaluate(
+                tool_data,
+                execution_context,
+                repository_root=self.workspace or Path.cwd(),
+            )
+            if approval is None:
+                approval = "ask"  # a voice turn asks for a yes, never waits on a prompt
+            elif voice_decision.reason_code == "confirmation_required":
+                # Their yes OK'd it: the guard plans it again, argv with no shell.
+                voice_decision = self._voice_tool_guard.evaluate(
+                    tool_data,
+                    execution_context,
+                    repository_root=self.workspace or Path.cwd(),
+                    approved=True,
+                )
+            if not voice_decision.allowed:
+                reason_code = voice_decision.reason_code or "command_blocked"
+                message = voice_decision.message or "Voice tool policy denied this action."
+                error = f"{reason_code}: {message}"
+                if reason_code == "confirmation_required":
+                    error = self._ask_for_yes(tool_data, execution_context)
+                logger.info(f"Voice tool {tool_id} not run: {reason_code}")
+                result = ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type=tool_data.get("type", "unknown"),
+                    success=False,
+                    error=error,
+                    metadata={
+                        "reason_code": reason_code,
+                        "voice_tool_policy": execution_context.get("voice_tool_policy"),
+                    },
+                )
+                self._executed_count += 1
+                publish_semantic(
+                    self.event_bus,
+                    "tool_result",
+                    tool_id=tool_id,
+                    tool_name=tool_name,
+                    success=False,
+                    output="",
+                    error=result.error,
+                    execution_time=0.0,
+                    metadata=result.metadata,
+                )
+                return result
+
+        raw_operation_id = tool_data.get("id")
+        if (
+            isinstance(raw_operation_id, str)
+            and len(raw_operation_id) <= 128
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", raw_operation_id)
+            and raw_operation_id != "unknown"
+        ):
+            operation_call_id = raw_operation_id
+            operation_call_id_generated = False
+        else:
+            operation_call_id = uuid.uuid4().hex
+            operation_call_id_generated = True
+
+        operation_generation = self._notify_operation_observer(
+            "tool_permission",
+            tool_data=tool_data,
+            tool_call_id=operation_call_id,
+            tool_call_id_generated=operation_call_id_generated,
+            begin=True,
+        )
+
+        publish_semantic(
+            self.event_bus,
+            "tool_start",
+            tool_id=tool_id,
+            tool_name=tool_name,
+            tool_type=tool_data.get("type", "unknown"),
+            input=tool_data.get("input", tool_data.get("params", {})),
+        )
+
+        try:
+            inner_kwargs: Dict[str, Any] = {
+                "operation_generation": operation_generation,
+                "operation_call_id": operation_call_id,
+                "operation_call_id_generated": operation_call_id_generated,
+            }
+            if execution_context is not None:
+                inner_kwargs["execution_context"] = execution_context
+                inner_kwargs["voice_decision"] = voice_decision
+            approval_token = call_approval.set(approval)
+            try:
+                result = await self._execute_tool_inner(tool_data, **inner_kwargs)
+            finally:
+                call_approval.reset(approval_token)
+            self._executed_count += 1
+
+            if self._tool_output_store is not None:
+                self._tool_output_store.prepare_result(
+                    result,
+                    max_chars=self._tool_output_max_chars,
+                    preview_chars=self._tool_output_preview_chars,
+                )
+
+            publish_semantic(
+                self.event_bus,
+                "tool_result",
+                tool_id=result.tool_id,
+                tool_name=tool_name,
+                success=result.success,
+                output=result.output,
+                error=result.error,
+                execution_time=result.execution_time,
+                metadata=result.metadata or {},
+            )
+            return result
+        finally:
+            self._notify_operation_observer(
+                "tool_complete",
+                tool_data=tool_data,
+                tool_call_id=operation_call_id,
+                tool_call_id_generated=operation_call_id_generated,
+                operation_generation=operation_generation,
+            )
+
+    async def _execute_tool_inner(
+        self,
+        tool_data: Dict[str, Any],
+        *,
+        operation_generation: int | None = None,
+        operation_call_id: str | None = None,
+        operation_call_id_generated: bool = False,
+        execution_context: Dict[str, Any] | None = None,
+        voice_decision: VoiceToolDecision | None = None,
+    ) -> ToolExecutionResult:
+        """Execute a single tool (terminal, MCP, or file operation).
+
+        Args:
+            tool_data: Tool information from ResponseParser
+
+        Returns:
+            Tool execution result
+        """
+        tool_type = tool_data.get("type", "unknown")
+        tool_id = tool_data.get("id", "unknown")
+
+        # Native callers are normalized before reaching this method, but keep
+        # the legacy alias safe for direct/older callers too. The registered
+        # ``git`` definition is documentation for terminal execution, not a
+        # separate executor type.
+        if tool_type == "git":
+            tool_data = {**tool_data, "type": "terminal"}
+            tool_type = "terminal"
+
+        voice_terminal_plan: VoiceTerminalPlan | None = None
+        if is_voice_origin(execution_context) and not self.trust_all:
+            decision = voice_decision or self._voice_tool_guard.evaluate(
+                tool_data,
+                execution_context,
+                repository_root=self.workspace or Path.cwd(),
+            )
+            if not decision.allowed:
+                reason_code = decision.reason_code or "command_blocked"
+                message = decision.message or "Voice tool policy denied this action."
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type=tool_type,
+                    success=False,
+                    error=f"{reason_code}: {message}",
+                    metadata={
+                        "reason_code": reason_code,
+                        "voice_tool_policy": execution_context.get("voice_tool_policy"),
+                    },
+                )
+            voice_terminal_plan = decision.plan
+
+        # Check for cancellation before starting
+        if self.is_cancelled():
+            logger.info(f"Tool {tool_id} skipped - cancellation requested")
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type=tool_type,
+                success=False,
+                error="Cancelled by user",
+                metadata={"cancelled": True},
+            )
+
+        # Check bundle scope — reject tools not in the agent's allowed set
+        scope_error = self._check_bundle_scope(
+            tool_type,
+            tool_name=tool_data.get("name") if tool_type == "mcp_tool" else None,
+        )
+        if scope_error:
+            logger.warning(f"Tool {tool_id} rejected by bundle scope: {tool_type}")
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type=tool_type,
+                success=False,
+                error=scope_error,
+                metadata={"scope_denied": True},
+            )
+
+        gate_refusal = self.sandbox_gate.check(tool_data, self.workspace or Path.cwd())
+        if gate_refusal:
+            logger.warning(f"Tool {tool_id} refused by sandbox gate")
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type=tool_type,
+                success=False,
+                error=gate_refusal,
+                metadata={"sandbox_gate": True},
+            )
+
+        # Set tool executing state for spinner animation
+        tool_name = self._get_display_name(tool_data)
+        self.tool_executing = True  # watchdog: real work in flight
+        if self.renderer:
+            self.renderer.set_tool_executing(True, tool_name)
+
+        start_time = time.time()
+
+        try:
+            # Emit pre-execution hook (includes permission check)
+            logger.info(f"[DIAG] Emitting TOOL_CALL_PRE for {tool_id}")
+            pre_call_results = await self.event_bus.emit_with_hooks(
+                EventType.TOOL_CALL_PRE, {"tool_data": tool_data}, "tool_executor"
+            )
+            logger.info(f"[DIAG] TOOL_CALL_PRE completed for {tool_id}")
+
+            # Check if event was cancelled (permission denied)
+            if pre_call_results and pre_call_results.get("cancelled", False):
+                # Get permission decision details from the final data
+                final_data = pre_call_results.get("main", {}).get("final_data", {})
+                permission_decision = final_data.get("permission_decision", {})
+                reason = permission_decision.get("reason", "Permission denied")
+                if permission_decision.get("needs_yes") is True:
+                    # A prompt it did not wait on: the manager's own decision, never
+                    # a tool's text, keeps the call for the user's yes.
+                    reason = self._ask_for_yes(tool_data, execution_context)
+
+                logger.warning(f"Tool {tool_id} execution denied: {reason}")
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type=tool_type,
+                    success=False,
+                    error=reason,
+                    execution_time=time.time() - start_time,
+                    metadata={"permission_denied": True},
+                )
+
+            # Time the tool itself: the pre hook can sit on a permission
+            # prompt until the user answers, which is not the tool's run time.
+            start_time = time.time()
+
+            # Execute based on tool type
+            execution_phase_started = False
+
+            def mark_tool_execution() -> None:
+                nonlocal execution_phase_started
+                if execution_phase_started:
+                    return
+                execution_phase_started = True
+                self._notify_operation_observer(
+                    "tool_execution",
+                    tool_data=tool_data,
+                    tool_call_id=operation_call_id or uuid.uuid4().hex,
+                    tool_call_id_generated=operation_call_id_generated,
+                    operation_generation=operation_generation,
+                )
+
+            try:
+                logger.debug(f"Executing tool {tool_id} of type {tool_type}")
+                try:
+                    # Check plugin handlers BEFORE built-in types.
+                    # Normalize hyphen->underscore: native tools use hyphens
+                    # (hub-msg) but handlers register with underscores (hub_msg).
+                    _plugin_key = tool_type
+                    if _plugin_key not in self._plugin_handlers:
+                        _plugin_key = tool_type.replace("-", "_")
+                    if _plugin_key in self._plugin_handlers:
+                        logger.debug(
+                            f"Routing to plugin handler for {_plugin_key}"
+                        )
+                        mark_tool_execution()
+                        result = await self._plugin_handlers[_plugin_key](tool_data)
+                    elif tool_type in (
+                        "terminal",
+                        "terminal_status",
+                        "terminal_output",
+                        "terminal_send",
+                        "terminal_kill",
+                    ):
+                        logger.debug(
+                            f"About to call _execute_terminal_command for {tool_id}"
+                        )
+                        mark_tool_execution()
+                        if voice_terminal_plan is not None:
+                            result = await self._execute_voice_terminal_plan(
+                                tool_data,
+                                voice_terminal_plan,
+                            )
+                        else:
+                            result = await self._execute_terminal_command(tool_data)
+                        logger.debug(
+                            f"_execute_terminal_command completed for {tool_id}"
+                        )
+                    elif tool_type == "mcp_tool":
+                        logger.debug(f"About to call _execute_mcp_tool for {tool_id}")
+                        mark_tool_execution()
+                        result = await self._execute_mcp_tool(tool_data)
+                        logger.debug(f"_execute_mcp_tool completed for {tool_id}")
+                    elif tool_type in ("web_fetch", "web-fetch"):
+                        logger.debug(f"About to call _execute_web_fetch for {tool_id}")
+                        mark_tool_execution()
+                        result = await self._execute_web_fetch(tool_data)
+                        logger.debug(f"_execute_web_fetch completed for {tool_id}")
+                    elif tool_type in ("web_search", "web-search"):
+                        logger.debug(f"About to call _execute_web_search for {tool_id}")
+                        mark_tool_execution()
+                        result = await self._execute_web_search(tool_data)
+                        logger.debug(f"_execute_web_search completed for {tool_id}")
+                    elif (
+                        tool_type.startswith("file_")
+                        or tool_type == "malformed_file_op"
+                    ):
+                        # File operation (including malformed ops for error reporting)
+                        logger.debug(
+                            f"About to call _execute_file_operation for {tool_id}"
+                        )
+                        mark_tool_execution()
+                        result = await self._execute_file_operation(tool_data)
+                        logger.debug(f"_execute_file_operation completed for {tool_id}")
+                    elif tool_type in ("sandbox_promote", "sandbox-promote"):
+                        mark_tool_execution()
+                        result = await self._execute_sandbox_promote(tool_data)
+                    elif tool_type in ("workspace_set", "workspace-set"):
+                        logger.debug(
+                            f"About to call _execute_workspace_set for {tool_id}"
+                        )
+                        mark_tool_execution()
+                        result = await self._execute_workspace_set(tool_data)
+                        logger.debug(
+                            f"_execute_workspace_set completed for {tool_id}"
+                        )
+                    elif tool_type in ("mcp_reload", "mcp-reload"):
+                        logger.debug(
+                            f"About to call _execute_mcp_reload for {tool_id}"
+                        )
+                        mark_tool_execution()
+                        result = await self._execute_mcp_reload(tool_data)
+                        logger.debug(
+                            f"_execute_mcp_reload completed for {tool_id}"
+                        )
+                    elif tool_type in ("tool_search", "tool-search"):
+                        logger.debug(
+                            f"About to call _execute_tool_search for {tool_id}"
+                        )
+                        mark_tool_execution()
+                        result = await self._execute_tool_search(tool_data)
+                        logger.debug(
+                            f"_execute_tool_search completed for {tool_id}"
+                        )
+                    elif tool_type in ("tool_load", "tool-load"):
+                        logger.debug(
+                            f"About to call _execute_tool_load for {tool_id}"
+                        )
+                        mark_tool_execution()
+                        result = await self._execute_tool_load(tool_data)
+                        logger.debug(
+                            f"_execute_tool_load completed for {tool_id}"
+                        )
+                    elif tool_type == "malformed_tool":
+                        # The parser could not read the call: say which and why.
+                        result = ToolExecutionResult(
+                            tool_id=tool_id,
+                            tool_type=tool_type,
+                            success=False,
+                            error=(
+                                f"Could not read this tool call "
+                                f"({tool_data.get('error', 'malformed')}): "
+                                f"{str(tool_data.get('raw', ''))[:300]}"
+                            ),
+                        )
+                    else:
+                        result = ToolExecutionResult(
+                            tool_id=tool_id,
+                            tool_type=tool_type,
+                            success=False,
+                            error=f"Unknown tool type: {tool_type}",
+                        )
+                    logger.debug(
+                        f"Tool {tool_id} execution result: success={result.success}"
+                    )
+                except Exception as inner_e:
+                    import traceback
+
+                    inner_trace = traceback.format_exc()
+                    logger.error(f"Inner execution error for {tool_id}: {str(inner_e)}")
+                    logger.error(
+                        f"Inner execution traceback for {tool_id}: {inner_trace}"
+                    )
+                    raise  # Re-raise for outer handler
+            except Exception as e:
+                import traceback
+
+                error_details = f"Tool execution exception: {str(e)}\nTraceback: {traceback.format_exc()}"
+                logger.error(
+                    f"Critical error during tool {tool_id} execution: {error_details}"
+                )
+                result = ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type=tool_type,
+                    success=False,
+                    error=f"Tool execution error: {str(e) or type(e).__name__}",
+                )
+
+            # Update execution time
+            result.execution_time = time.time() - start_time
+
+            # Emit post-execution hook
+            await self.event_bus.emit_with_hooks(
+                EventType.TOOL_CALL_POST,
+                {"tool_data": tool_data, "result": result.to_dict()},
+                "tool_executor",
+            )
+
+            # Update statistics
+            self._update_stats(result)
+
+            logger.info(f"Tool execution completed: {result}")
+            return result
+
+        except Exception as e:
+            execution_time = time.time() - start_time
+            error_result = ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type=tool_type,
+                success=False,
+                error=f"Execution error: {str(e) or type(e).__name__}",
+                execution_time=execution_time,
+            )
+
+            self._update_stats(error_result)
+            logger.error(f"Tool execution failed: {e}")
+            return error_result
+        finally:
+            # Always clear tool executing state, even if exception occurs
+            self.tool_executing = False
+            if self.renderer:
+                self.renderer.set_tool_executing(False)
+
+    async def execute_all_tools(
+        self, tools: List[Dict[str, Any]]
+    ) -> List[ToolExecutionResult]:
+        """Execute multiple tools in sequence.
+
+        Args:
+            tools: List of tool data from ResponseParser
+
+        Returns:
+            List of execution results in order
+        """
+        if not tools:
+            return []
+
+        logger.info(f"Executing {len(tools)} tools in sequence")
+        results = []
+
+        for i, tool_data in enumerate(tools):
+            # Check for cancellation between tools
+            if self.is_cancelled():
+                logger.info(f"Tool batch cancelled at {i+1}/{len(tools)}")
+                # Add cancelled results for remaining tools
+                for remaining in tools[i:]:
+                    results.append(
+                        ToolExecutionResult(
+                            tool_id=remaining.get("id", "unknown"),
+                            tool_type=remaining.get("type", "unknown"),
+                            success=False,
+                            error="Cancelled by user",
+                            metadata={"cancelled": True},
+                        )
+                    )
+                break
+
+            logger.info(
+                f"[DIAG] About to execute tool {i+1}/{len(tools)}: {tool_data.get('id', 'unknown')}"
+            )
+
+            result = await self.execute_tool(tool_data)
+            logger.info(
+                f"[DIAG] Completed tool {i+1}/{len(tools)}: success={result.success}"
+            )
+            results.append(result)
+
+            # Log intermediate result
+            if result.success:
+                logger.debug(f"Tool {i+1} succeeded: {len(result.output)} chars output")
+            else:
+                logger.warning(f"Tool {i+1} failed: {result.error}")
+                # Continue executing remaining tools even if one fails
+
+        cancelled_count = sum(1 for r in results if r.metadata.get("cancelled"))
+        if cancelled_count:
+            logger.info(
+                f"Tool execution batch: {cancelled_count} cancelled, "
+                f"{sum(1 for r in results if r.success)}/{len(results)} successful"
+            )
+        else:
+            logger.info(
+                f"Tool execution batch completed: "
+                f"{sum(1 for r in results if r.success)}/{len(results)} successful"
+            )
+
+        return results
+
+    async def _execute_voice_terminal_plan(
+        self,
+        tool_data: Dict[str, Any],
+        plan: VoiceTerminalPlan,
+    ) -> ToolExecutionResult:
+        """Run a canonical voice plan with argv, never through a command shell."""
+        self._active_shell_executor = self.shell_executor
+        try:
+            result = await self.shell_executor.run_argv(
+                plan.argv,
+                timeout=min(self.terminal_timeout, MAX_VOICE_COMMAND_SECONDS),
+                cwd=plan.canonical_cwd,
+                max_output_bytes=MAX_VOICE_OUTPUT_BYTES,
+            )
+        finally:
+            self._active_shell_executor = None
+
+        return ToolExecutionResult(
+            tool_id=tool_data.get("id", "unknown"),
+            tool_type="terminal",
+            success=result.success,
+            output=result.stdout if result.success else result.stderr,
+            error=(
+                ""
+                if result.success
+                else result.error or f"Exit code {result.exit_code}: {result.stderr}"
+            ),
+            execution_time=result.execution_time,
+            metadata={
+                "voice_terminal_plan_id": plan.plan_id,
+                "voice_action_digest": plan.digest,
+                "classification": plan.classification,
+            },
+        )
+
+    async def _execute_terminal_command(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Execute a terminal command using TmuxPlugin or fallback to ShellExecutor.
+
+        Routes to appropriate handler based on tool_type:
+        - terminal: Regular execution (foreground or background)
+        - terminal_status: Get session status
+        - terminal_output: Capture session output
+        - terminal_kill: Kill session
+
+        Args:
+            tool_data: Terminal tool data with command and attributes
+
+        Returns:
+            Execution result
+        """
+        tool_id = tool_data.get("id", "unknown")
+        tool_type = tool_data.get("type", "terminal")
+
+        # Route to specific handler based on type
+        if tool_type == "terminal_status":
+            return await self._execute_terminal_status(tool_data)
+        elif tool_type == "terminal_output":
+            return await self._execute_terminal_output(tool_data)
+        elif tool_type == "terminal_send":
+            return await self._execute_terminal_send(tool_data)
+        elif tool_type == "terminal_kill":
+            return await self._execute_terminal_kill(tool_data)
+
+        # Regular terminal execution (foreground or background)
+        command = tool_data.get("command", "").strip()
+        background = tool_data.get("background", False)
+
+        if not command:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type=tool_type,
+                success=False,
+                error="Empty command",
+            )
+
+        # Block agents from spawning kollab processes via terminal.
+        # Agents MUST use hub_spawn to spawn peers -- direct spawning
+        # bypasses the hub mesh and creates invisible rogue processes.
+        if _is_blocked_kollab_spawn(command, background=bool(background)):
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type=tool_type,
+                success=False,
+                error=(
+                    "spawning agents via terminal is blocked. "
+                    "CLI stop-all is also blocked; use /hub stop all for agents "
+                    "owned by this caller. Use <hub_spawn> to spawn peers."
+                ),
+            )
+
+        logger.debug(
+            f"Executing terminal command: {command[:100]}... (background={background})"
+        )
+
+        cwd = self._resolve_terminal_cwd(tool_data.get("cwd"))
+
+        # Use TmuxPlugin if available, otherwise fallback to ShellExecutor
+        if self.tmux_plugin:
+            try:
+                if background:
+                    # Persistent background session via subprocess
+                    result = await self.tmux_plugin.execute_background(
+                        command=command,
+                        name=tool_data.get("name"),
+                        timeout=tool_data.get("timeout"),
+                        cwd=str(cwd) if cwd else None,
+                    )
+                    return ToolExecutionResult(
+                        tool_id=tool_id,
+                        tool_type=tool_type,
+                        success=result.get("success", False),
+                        output=result.get("message", "Background session started"),
+                        error=(
+                            ""
+                            if result.get("success")
+                            else result.get("message", "Unknown error")
+                        ),
+                        metadata={"session_name": result.get("session_name")},
+                    )
+                else:
+                    # Foreground execution via temporary subprocess
+                    result = await self.tmux_plugin.execute_foreground(
+                        command=command,
+                        timeout=self.terminal_timeout,
+                        cwd=str(cwd) if cwd else None,
+                    )
+                    return ToolExecutionResult(
+                        tool_id=tool_id,
+                        tool_type=tool_type,
+                        success=result.get("success", False),
+                        output=result.get("output", ""),
+                        error=result.get("error", ""),
+                        metadata={"exit_code": result.get("exit_code", -1)},
+                    )
+            except Exception as e:
+                logger.error(f"Error executing terminal command via subprocess: {e}")
+                # Fallback to ShellExecutor
+                logger.debug("Falling back to ShellExecutor for command execution")
+
+        # Fallback: Use ShellExecutor (no terminal plugin available or it failed)
+        self._active_shell_executor = self.shell_executor
+        try:
+            result = await self.shell_executor.run(
+                command,
+                timeout=self.terminal_timeout,
+                cwd=cwd,
+            )
+        finally:
+            self._active_shell_executor = None
+
+        if result.error:
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type=tool_type, success=False, error=result.error
+            )
+
+        output = result.stdout if result.success else result.stderr
+        error = (
+            "" if result.success else f"Exit code {result.exit_code}: {result.stderr}"
+        )
+
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            tool_type=tool_type,
+            success=result.success,
+            output=output,
+            error=error,
+        )
+
+    async def _execute_terminal_status(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Handle <terminal-status>session_name</terminal-status>
+
+        Args:
+            tool_data: Tool data with session_name
+
+        Returns:
+            Execution result with session status
+        """
+        tool_id = tool_data.get("id", "unknown")
+        session_name = tool_data.get("session_name", "*")
+
+        if not self.tmux_plugin:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_status",
+                success=False,
+                error="Tmux plugin not available",
+            )
+
+        try:
+            result = await self.tmux_plugin.get_session_status(session_name)
+
+            if result.get("success"):
+                if session_name == "*":
+                    # Format list of sessions
+                    sessions = result.get("sessions", [])
+                    if not sessions:
+                        output = "No sessions found"
+                    else:
+                        lines = ["Active sessions:"]
+                        for session in sessions:
+                            lines.append(
+                                f"  - {session['name']}: {session['status']} ({session['command']})"
+                            )
+                        output = "\n".join(lines)
+                else:
+                    # Single session status
+                    output = f"Session '{session_name}': {result['status']} (command: {result['command']})"
+            else:
+                output = result.get("message", "Failed to get session status")
+
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_status",
+                success=result.get("success", False),
+                output=output,
+                error="" if result.get("success") else result.get("message", ""),
+            )
+        except Exception as e:
+            logger.error(f"Error getting terminal status: {e}")
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_status",
+                success=False,
+                error=str(e),
+            )
+
+    async def _execute_terminal_output(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Handle <terminal-output lines="50">session_name</terminal-output>
+
+        Args:
+            tool_data: Tool data with session_name and lines
+
+        Returns:
+            Execution result with captured output
+        """
+        tool_id = tool_data.get("id", "unknown")
+        session_name = tool_data.get("session_name", "")
+        lines = tool_data.get("lines", 50)
+
+        if not self.tmux_plugin:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_output",
+                success=False,
+                error="Tmux plugin not available",
+            )
+
+        if not session_name:
+            try:
+                status = await self.tmux_plugin.get_session_status("*")
+            except Exception as e:
+                logger.error(f"Error listing terminal sessions: {e}")
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="terminal_output",
+                    success=False,
+                    error="Session name required; unable to list active terminal sessions",
+                )
+
+            if not isinstance(status, dict) or not status.get("success"):
+                message = (
+                    status.get("message", "") if isinstance(status, dict) else ""
+                )
+                error = "Session name required; unable to list active terminal sessions"
+                if message:
+                    error = f"{error}: {message}"
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="terminal_output",
+                    success=False,
+                    error=error,
+                )
+
+            session_list = status.get("sessions")
+            sessions = (
+                [
+                    session
+                    for session in session_list
+                    if isinstance(session, dict)
+                    and isinstance(session.get("name"), str)
+                    and session["name"].strip()
+                    and str(session.get("status", "")).lower() == "alive"
+                ]
+                if isinstance(session_list, list)
+                else []
+            )
+            if len(sessions) == 1:
+                session_name = sessions[0].get("name", "")
+            elif not sessions:
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="terminal_output",
+                    success=False,
+                    error=(
+                        "Session name required; no active terminal sessions. "
+                        "Use terminal-status to list sessions."
+                    ),
+                )
+            else:
+                names = ", ".join(
+                    str(session.get("name", "?")) for session in sessions
+                )
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="terminal_output",
+                    success=False,
+                    error=(
+                        "Session name required; multiple active terminal sessions: "
+                        f"{names}. Use terminal_output with one of these names."
+                    ),
+                )
+
+        try:
+            result = await self.tmux_plugin.capture_session_output(
+                session_name, lines=lines
+            )
+
+            if result.get("success"):
+                output_lines = result.get("output", [])
+                output = f"Output from session '{session_name}' (last {lines} lines):\n"
+                output += "\n".join(output_lines)
+            else:
+                output = result.get("message", "Failed to capture output")
+
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_output",
+                success=result.get("success", False),
+                output=output,
+                error="" if result.get("success") else result.get("message", ""),
+            )
+        except Exception as e:
+            logger.error(f"Error capturing terminal output: {e}")
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_output",
+                success=False,
+                error=str(e),
+            )
+
+    async def _execute_terminal_kill(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Handle <terminal-kill>session_name</terminal-kill>
+
+        Args:
+            tool_data: Tool data with session_name
+
+        Returns:
+            Execution result
+        """
+        tool_id = tool_data.get("id", "unknown")
+        session_name = tool_data.get("session_name", "")
+
+        if not self.tmux_plugin:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_kill",
+                success=False,
+                error="Tmux plugin not available",
+            )
+
+        if not session_name:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_kill",
+                success=False,
+                error="Session name required",
+            )
+
+        try:
+            result = await self.tmux_plugin.kill_background_session(session_name)
+
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_kill",
+                success=result.get("success", False),
+                output=result.get("message", ""),
+                error="" if result.get("success") else result.get("message", ""),
+            )
+        except Exception as e:
+            logger.error(f"Error killing terminal session: {e}")
+            return ToolExecutionResult(
+                tool_id=tool_id, tool_type="terminal_kill", success=False, error=str(e)
+            )
+
+    async def _execute_terminal_send(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Send one line of input to a named background terminal session."""
+        tool_id = tool_data.get("id", "unknown")
+        arguments = tool_data.get("input") or tool_data.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        session_name = (
+            tool_data.get("session_name")
+            or arguments.get("session_name")
+        )
+        text = tool_data.get("text", arguments.get("text"))
+
+        if not self.tmux_plugin:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=False,
+                error="Tmux plugin not available",
+            )
+        if not isinstance(session_name, str) or not session_name.strip():
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=False,
+                error="Session name required",
+            )
+        if not isinstance(text, str):
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=False,
+                error="Text must be a string",
+            )
+
+        try:
+            result = self.tmux_plugin.send_to_session(session_name.strip(), text)
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=result.get("success", False),
+                output=result.get("message", ""),
+                error="" if result.get("success") else result.get("message", ""),
+            )
+        except Exception as e:
+            logger.error(f"Error sending input to terminal session: {e}")
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=False,
+                error=str(e),
+            )
+
+    async def _execute_mcp_tool(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
+        """Execute an MCP tool call.
+
+        Args:
+            tool_data: MCP tool data with name and arguments
+
+        Returns:
+            Execution result
+        """
+        tool_name = tool_data.get("name", "")
+        tool_arguments = tool_data.get("arguments", {})
+        tool_id = tool_data.get("id", "unknown")
+
+        if not tool_name:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="mcp_tool",
+                success=False,
+                error="Missing tool name",
+            )
+
+        logger.debug(f"Executing MCP tool: {tool_name} with args {tool_arguments}")
+
+        try:
+            # MCPIntegration owns call timeout cleanup so it can close and
+            # reconnect poisoned stdio connections before later tool calls.
+            mcp_result = await self.mcp_integration.call_mcp_tool(
+                tool_name,
+                tool_arguments,
+                timeout=self.mcp_timeout,
+            )
+
+            # Process MCP result
+            if "error" in mcp_result:
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="mcp_tool",
+                    success=False,
+                    error=mcp_result["error"],
+                )
+            else:
+                # Format MCP output for display
+                output = self._format_mcp_output(mcp_result)
+
+                # MCP reports a tool-level failure inside a normal result.
+                if mcp_result.get("isError") is True:
+                    return ToolExecutionResult(
+                        tool_id=tool_id,
+                        tool_type="mcp_tool",
+                        success=False,
+                        error=output or "MCP tool reported an error",
+                    )
+
+                return ToolExecutionResult(
+                    tool_id=tool_id, tool_type="mcp_tool", success=True, output=output
+                )
+
+        except Exception as e:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="mcp_tool",
+                success=False,
+                error=f"MCP execution error: {str(e)}",
+            )
+
+    def _format_mcp_output(self, mcp_result: Dict[str, Any]) -> str:
+        """Format MCP tool result for display.
+
+        Args:
+            mcp_result: Raw MCP result dictionary
+
+        Returns:
+            Formatted output string
+        """
+        # Handle different MCP result formats
+        if "content" in mcp_result:
+            # Standard MCP content format
+            content = mcp_result["content"]
+            if isinstance(content, list) and content:
+                # Multiple content blocks
+                parts = []
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            parts.append(block.get("text", ""))
+                        else:
+                            parts.append(str(block))
+                    else:
+                        parts.append(str(block))
+                return "\n".join(parts)
+            else:
+                return str(content)
+
+        elif "output" in mcp_result:
+            # Simple output format
+            return str(mcp_result["output"])
+
+        elif "result" in mcp_result:
+            # JSON-RPC result format
+            return str(mcp_result["result"])
+
+        else:
+            # Fallback: stringify entire result
+            return str(mcp_result)
+
+    async def _execute_file_operation(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Execute a file operation.
+
+        Args:
+            tool_data: File operation data from parser
+
+        Returns:
+            Tool execution result
+        """
+        tool_id = tool_data.get("id", "unknown")
+        tool_type = tool_data.get("type", "unknown")
+
+        logger.debug(f"Executing file operation: {tool_type}")
+
+        # Run file operation synchronously (file I/O is blocking anyway)
+        # Use asyncio.to_thread to avoid blocking the event loop
+        try:
+            result_dict = await asyncio.to_thread(
+                self.file_ops_executor.execute_operation, tool_data
+            )
+
+            # Convert to ToolExecutionResult, preserving metadata (e.g., diff_info)
+            metadata = {}
+            if "diff_info" in result_dict:
+                metadata["diff_info"] = result_dict["diff_info"]
+            if "diffs" in result_dict:
+                metadata["diffs"] = result_dict["diffs"]
+            if "tool_output_path" in result_dict:
+                metadata["tool_output_path"] = result_dict["tool_output_path"]
+            if "file_content_hash" in result_dict:
+                metadata["file_content_hash"] = result_dict["file_content_hash"]
+            # Propagate file path for context-service ledger ingestion
+            file_path = (
+                tool_data.get("file")
+                or tool_data.get("file_path")
+                or tool_data.get("arguments", {}).get("path")
+                or tool_data.get("arguments", {}).get("file_path")
+                or tool_data.get("from")  # move/copy source
+            )
+            if file_path:
+                metadata["file_path"] = self._resolve_workspace_path(file_path)
+            to_path = tool_data.get("to")  # move/copy destination
+            if to_path:
+                metadata["to_path"] = self._resolve_workspace_path(to_path)
+
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type=tool_type,
+                success=result_dict.get("success", False),
+                output=result_dict.get("output", ""),
+                error=result_dict.get("error", ""),
+                metadata=metadata,
+            )
+
+        except Exception as e:
+            import traceback
+
+            error_trace = traceback.format_exc()
+            logger.error(f"File operation execution failed: {error_trace}")
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type=tool_type,
+                success=False,
+                error=f"File operation error: {str(e)}",
+            )
+
+    def _resolve_workspace_path(self, file_path: str) -> str:
+        """Resolve relative file metadata against the executor workspace."""
+        try:
+            path = Path(file_path).expanduser()
+            if path.is_absolute() or self.workspace is None:
+                return str(path)
+            return str((self.workspace / path).resolve())
+        except Exception:
+            return file_path
+
+    def _resolve_terminal_cwd(self, cwd_value: Optional[str]) -> Optional[Path]:
+        """Resolve terminal cwd relative to the executor workspace when present."""
+        if not cwd_value:
+            return self.workspace
+
+        path = Path(cwd_value).expanduser()
+        if not path.is_absolute() and self.workspace is not None:
+            path = self.workspace / path
+        return path.resolve()
+
+    async def _execute_sandbox_promote(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Validate a scratch checkout and issue a promotion token (#725)."""
+        args = tool_data.get("arguments") or {}
+        scratch = tool_data.get("scratch") or args.get("scratch") or ""
+        root = tool_data.get("root") or args.get("root") or ""
+        tool_id = tool_data.get("id", "unknown")
+        if not scratch or not root:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="sandbox_promote",
+                success=False,
+                error="sandbox-promote needs both scratch and root",
+            )
+        outcome = await asyncio.to_thread(
+            self.sandbox_gate.promote,
+            self._resolve_workspace_path(scratch),
+            self._resolve_workspace_path(root),
+        )
+        ok = outcome["success"]
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            tool_type="sandbox_promote",
+            success=ok,
+            output=outcome["message"] if ok else "",
+            error="" if ok else outcome["message"],
+        )
+
+    async def _execute_workspace_set(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Switch the agent's working directory.
+
+        Updates self.workspace and calls os.chdir() so the status bar
+        cwd widget reflects the change immediately.
+
+        Args:
+            tool_data: Tool information containing the path parameter.
+
+        Returns:
+            ToolExecutionResult with confirmation or error.
+        """
+        import os
+
+        tool_id = tool_data.get("id", "unknown")
+
+        # Extract path from tool_data — support both nested XML and flat params
+        params = tool_data.get("parameters", tool_data)
+        raw_path = (
+            params.get("path")
+            or params.get("Path")
+            or tool_data.get("path")
+        )
+
+        if not raw_path:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="workspace_set",
+                success=False,
+                error="Missing required parameter: path",
+            )
+
+        try:
+            # Expand ~ and resolve relative to current workspace
+            expanded = Path(raw_path).expanduser()
+            if not expanded.is_absolute() and self.workspace is not None:
+                expanded = self.workspace / expanded
+            resolved = expanded.resolve()
+
+            if not resolved.exists():
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="workspace_set",
+                    success=False,
+                    error=f"Directory not found: {raw_path}",
+                )
+
+            if not resolved.is_dir():
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="workspace_set",
+                    success=False,
+                    error=f"Not a directory: {raw_path}",
+                )
+
+            # Update workspace + process cwd
+            old_workspace = str(self.workspace) if self.workspace else str(Path.cwd())
+            self.workspace = resolved
+            os.chdir(str(resolved))
+
+            logger.info(f"Workspace switched: {old_workspace} -> {resolved}")
+
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="workspace_set",
+                success=True,
+                output=f"Workspace changed to: {resolved}",
+                metadata={
+                    "old_workspace": old_workspace,
+                    "new_workspace": str(resolved),
+                },
+            )
+
+        except PermissionError:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="workspace_set",
+                success=False,
+                error=f"Permission denied: {raw_path}",
+            )
+        except Exception as e:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="workspace_set",
+                success=False,
+                error=f"Failed to switch workspace: {e}",
+            )
+
+    async def _execute_mcp_reload(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Reload MCP server connections and rediscover tools.
+
+        Calls mcp_integration.reload_mcp_servers() to close active
+        connections, reload config files, and reconnect.
+
+        Args:
+            tool_data: Tool information (no required params).
+
+        Returns:
+            ToolExecutionResult with reload summary or error.
+        """
+        import time
+
+        tool_id = tool_data.get("id", "unknown")
+        start_time = time.time()
+
+        if self.mcp_integration is None:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="mcp_reload",
+                success=False,
+                error="MCP integration is not available in this session.",
+            )
+
+        try:
+            counts = await self.mcp_integration.reload_mcp_servers()
+            elapsed = time.time() - start_time
+
+            configured = counts.get("configured", 0)
+            discovered = counts.get("discovered", 0)
+            reconnected = counts.get("reconnected", 0)
+            failed = int(counts.get("failed", 0) or 0)
+            failed_servers = counts.get("failed_servers", []) or []
+            cancelled = bool(counts.get("cancelled", False))
+
+            if not isinstance(failed_servers, list):
+                failed_servers = [str(failed_servers)]
+            failed = max(failed, len(failed_servers))
+
+            # Count total tools discovered
+            total_tools = 0
+            if hasattr(self.mcp_integration, "get_tool_definitions_for_api"):
+                total_tools = len(
+                    self.mcp_integration.get_tool_definitions_for_api()
+                )
+
+            output = (
+                f"MCP servers {'reloaded' if not failed and not cancelled else 'reload incomplete'}.\n"
+                f"  Configured: {configured}\n"
+                f"  Discovered: {discovered}\n"
+                f"  Reconnected: {reconnected}\n"
+                f"  Failed: {failed}\n"
+                f"  Tools available: {total_tools}"
+            )
+            if failed_servers:
+                output += f"\n  Failed servers: {', '.join(str(name) for name in failed_servers)}"
+            if cancelled:
+                output += "\n  Cancelled by user."
+
+            success = not failed and not cancelled
+            error = ""
+            if failed_servers:
+                error = f"MCP reload failed for: {', '.join(str(name) for name in failed_servers)}"
+            elif cancelled:
+                error = "MCP reload cancelled by user"
+
+            logger.info(
+                f"MCP reload {'complete' if success else 'incomplete'}: "
+                f"{reconnected}/{configured} servers, {total_tools} tools "
+                f"({elapsed:.1f}s)"
+            )
+
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="mcp_reload",
+                success=success,
+                output=output,
+                error=error,
+                metadata={
+                    "configured": configured,
+                    "discovered": discovered,
+                    "reconnected": reconnected,
+                    "failed": failed,
+                    "failed_servers": failed_servers,
+                    "cancelled": cancelled,
+                    "total_tools": total_tools,
+                    "elapsed": round(elapsed, 2),
+                },
+            )
+
+        except Exception as e:
+            logger.error(f"MCP reload failed: {e}")
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="mcp_reload",
+                success=False,
+                error=f"MCP reload failed: {e}",
+            )
+
+    async def _execute_tool_search(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Search for available tools by keyword.
+
+        Searches both the built-in ToolRegistry and the MCP integration's
+        tool_registry dict. Returns a compact list (name, category/source,
+        one-line description) without full schemas.
+
+        Args:
+            tool_data: Tool information containing 'query' (required).
+
+        Returns:
+            ToolExecutionResult with formatted search results.
+        """
+        tool_id = tool_data.get("id", "unknown")
+
+        # Extract query — support both nested XML and flat params
+        params = tool_data.get("parameters", tool_data)
+        query = (
+            params.get("query")
+            or params.get("Query")
+            or tool_data.get("query")
+            or ""
+        )
+        query = query.strip().lower()
+
+        results: List[Dict[str, str]] = []
+
+        # Search built-in tools from the ToolRegistry
+        try:
+            from .tool_registry import get_registry
+            registry = get_registry()
+
+            for tool in registry.list():
+                # Skip the on-demand tools themselves — no recursive searching
+                if tool.category == "on_demand":
+                    continue
+
+                if not query:
+                    # No query — return all tools (full catalog)
+                    results.append({
+                        "name": tool.name,
+                        "category": tool.category,
+                        "source": "built-in",
+                        "description": tool.description.split(".")[0] + ".",
+                    })
+                else:
+                    searchable = f"{tool.name} {tool.category} {tool.description}".lower()
+                    if query in searchable:
+                        results.append({
+                            "name": tool.name,
+                            "category": tool.category,
+                            "source": "built-in",
+                            "description": tool.description.split(".")[0] + ".",
+                        })
+        except Exception as e:
+            logger.warning(f"Tool search: registry query failed: {e}")
+
+        # Search MCP tools from the MCP integration
+        if self.mcp_integration and hasattr(self.mcp_integration, "tool_registry"):
+            for tool_name, tool_info in self.mcp_integration.tool_registry.items():
+                if not tool_info.get("enabled", True):
+                    continue
+
+                server = tool_info.get("server", "unknown")
+                definition = tool_info.get("definition", {})
+                description = definition.get("description", "")
+
+                searchable = f"{tool_name} {server} {description}".lower()
+                if query in searchable:
+                    results.append({
+                        "name": f"mcp:{server}:{tool_name}",
+                        "category": "mcp",
+                        "source": f"MCP ({server})",
+                        "description": description.split(".")[0] + "." if description else "",
+                    })
+
+        # Rank results: name matches first, then description matches
+        def _rank(r: Dict[str, str]) -> int:
+            name_lower = r["name"].lower()
+            if query in name_lower:
+                return 0  # name match = highest relevance
+            return 1
+
+        results.sort(key=_rank)
+
+        if not results:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_search",
+                success=True,
+                output=f"No tools found matching '{query}'.",
+                metadata={"query": query, "result_count": 0},
+            )
+
+        # Format compact output
+        lines = [f"Found {len(results)} tool(s) matching '{query}':\n"]
+        for r in results:
+            desc = r["description"] or "(no description)"
+            lines.append(f"  {r['name']}  [{r['source']}]  {desc}")
+
+        lines.append("\nUse tool-load to activate any of these tools.")
+
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            tool_type="tool_search",
+            success=True,
+            output="\n".join(lines),
+            metadata={"query": query, "result_count": len(results)},
+        )
+
+    async def _execute_tool_load(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Load a tool's full definition into the active session.
+
+        For built-in tools: adds the tool name to _bundle_tools so it
+        passes the bundle scope check. Returns the full markdown docs.
+        For MCP tools: marks the tool as enabled and returns its schema.
+
+        Args:
+            tool_data: Tool information containing 'name' (required).
+
+        Returns:
+            ToolExecutionResult with the loaded tool's full definition.
+        """
+        tool_id = tool_data.get("id", "unknown")
+
+        # Extract name — support both nested XML and flat params
+        params = tool_data.get("parameters", tool_data)
+        tool_name = (
+            params.get("name")
+            or params.get("Name")
+            or tool_data.get("name")
+            or ""
+        )
+        tool_name = tool_name.strip()
+
+        if not tool_name:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error="Missing required parameter: name",
+            )
+
+        # Check if it's an MCP tool (format: mcp:server:tool_name)
+        if tool_name.startswith("mcp:"):
+            return await self._load_mcp_tool(tool_id, tool_name)
+
+        # Built-in tool — look up in the ToolRegistry
+        try:
+            from .tool_registry import get_registry
+            registry = get_registry()
+        except Exception as e:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=f"Tool registry unavailable: {e}",
+            )
+
+        tool_def = registry.get(tool_name)
+        if tool_def is None:
+            # Try native name lookup (user might pass underscore form)
+            tool_def = registry.get_by_native_name(tool_name)
+        if tool_def is None:
+            # Try XML tag lookup
+            tool_def = registry.get_by_xml_tag(tool_name)
+
+        if tool_def is None:
+            available = ", ".join(registry.names())
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=f"Tool not found: {tool_name}. Use tool-search to find available tools.",
+                metadata={"available_tools": available},
+            )
+
+        # Add to bundle scope if active
+        newly_loaded = False
+        if self._bundle_tools is not None and tool_def.name not in self._bundle_tools:
+            self._bundle_tools.append(tool_def.name)
+            newly_loaded = True
+            logger.info(f"Tool loaded into active set: {tool_def.name}")
+
+        # Generate full documentation
+        markdown = tool_def.to_markdown()
+
+        output = (
+            f"Tool loaded: {tool_def.name}\n\n"
+            f"{markdown}"
+        )
+
+        # Issue #202: a load just changed the dynamic scope, so the native
+        # API schema list must be refreshed for the tool to be callable
+        # in native mode on the next turn.
+        await self._notify_scope_change()
+
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            tool_type="tool_load",
+            success=True,
+            output=output,
+            metadata={
+                "loaded_tool": tool_def.name,
+                "category": tool_def.category,
+                "already_active": not newly_loaded,
+            },
+        )
+
+    async def _load_mcp_tool(
+        self, tool_id: str, full_name: str
+    ) -> ToolExecutionResult:
+        """Load an MCP tool by its full name (mcp:server:tool_name).
+
+        Args:
+            tool_id: The executing tool's ID.
+            full_name: Full MCP tool name in mcp:server:tool_name format.
+
+        Returns:
+            ToolExecutionResult with the MCP tool's schema.
+        """
+        # Parse mcp:server:tool_name
+        parts = full_name.split(":", 2)
+        if len(parts) < 3:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=(
+                    f"Invalid MCP tool name format: {full_name}. "
+                    f"Expected: mcp:<server>:<tool_name>"
+                ),
+            )
+
+        _prefix, server, tool_name = parts
+
+        if self.mcp_integration is None:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error="MCP integration is not available in this session.",
+            )
+
+        # Look up in MCP tool registry
+        mcp_tool = self.mcp_integration.tool_registry.get(tool_name)
+        if mcp_tool is None:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=f"MCP tool not found: {tool_name}. Use tool-search to find available tools.",
+            )
+
+        # Verify the server matches
+        actual_server = mcp_tool.get("server", "")
+        if actual_server and server != actual_server:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=(
+                    f"Tool '{tool_name}' belongs to server '{actual_server}', "
+                    f"not '{server}'. Correct name: mcp:{actual_server}:{tool_name}"
+                ),
+            )
+
+        # Check if server is connected
+        if server not in self.mcp_integration.server_connections:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=f"MCP server '{server}' is not connected. Use mcp-reload to reconnect.",
+            )
+
+        # Ensure enabled
+        mcp_tool["enabled"] = True
+
+        # Issue #202: enabling an MCP tool changes what the native API
+        # should expose — refresh the schema list via the coordinator
+        # callback (no-op when none is wired).
+        await self._notify_scope_change()
+
+        definition = mcp_tool.get("definition", {})
+        description = definition.get("description", "(no description)")
+        schema = definition.get("parameters", {})
+
+        # Format the schema for the agent
+        import json
+
+        schema_str = json.dumps(schema, indent=2) if schema else "{}"
+
+        output = (
+            f"MCP tool loaded: {full_name}\n"
+            f"  Server: {server}\n"
+            f"  Description: {description}\n"
+            f"  Schema: {schema_str}\n\n"
+            f"This tool is now active. Use it as an MCP tool call with "
+            f"the name '{tool_name}'."
+        )
+
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            tool_type="tool_load",
+            success=True,
+            output=output,
+            metadata={
+                "loaded_tool": full_name,
+                "mcp_server": server,
+                "mcp_tool_name": tool_name,
+                "category": "mcp",
+            },
+        )
+
+
+    def _update_stats(self, result: ToolExecutionResult):
+        """Update execution statistics.
+
+        Args:
+            result: Tool execution result
+        """
+        self.stats["total_executions"] += 1
+        self.stats["total_execution_time"] += result.execution_time
+
+        if result.success:
+            self.stats["successful_executions"] += 1
+        else:
+            self.stats["failed_executions"] += 1
+
+        if result.tool_type == "terminal":
+            self.stats["terminal_executions"] += 1
+        elif result.tool_type == "mcp_tool":
+            self.stats["mcp_executions"] += 1
+        elif result.tool_type.startswith("file_"):
+            self.stats["file_op_executions"] += 1
+        elif result.tool_type in ("web_fetch", "web_search"):
+            self.stats.setdefault("web_executions", 0)
+            self.stats["web_executions"] += 1
+        elif result.tool_type in ("mcp_reload", "mcp-reload"):
+            self.stats.setdefault("mcp_reload_executions", 0)
+            self.stats["mcp_reload_executions"] += 1
+        elif result.tool_type in ("tool_search", "tool_load"):
+            self.stats.setdefault("on_demand_executions", 0)
+            self.stats["on_demand_executions"] += 1
+
+    def get_execution_stats(self) -> Dict[str, Any]:
+        """Get execution statistics.
+
+        Returns:
+            Dictionary of execution statistics
+        """
+        total = self.stats["total_executions"]
+        if total == 0:
+            return {**self.stats, "success_rate": 0.0, "average_time": 0.0}
+
+        return {
+            **self.stats,
+            "success_rate": self.stats["successful_executions"] / total,
+            "average_time": self.stats["total_execution_time"] / total,
+        }
+
+    def format_result_for_conversation(self, result: ToolExecutionResult) -> str:
+        """Format tool result for conversation history.
+
+        Args:
+            result: Tool execution result
+
+        Returns:
+            Formatted string for conversation logging
+        """
+        if result.success:
+            return f"[{result.tool_type}] {result.output}"
+        else:
+            return f"[{result.tool_type}] ERROR: {result.error}"
+
+    def reset_stats(self):
+        """Reset execution statistics."""
+        self.stats = {
+            "total_executions": 0,
+            "successful_executions": 0,
+            "failed_executions": 0,
+            "terminal_executions": 0,
+            "mcp_executions": 0,
+            "file_op_executions": 0,
+            "total_execution_time": 0.0,
+        }
+        logger.info("Tool execution statistics reset")
+
+    # ------------------------------------------------------------------
+    # WEB TOOLS (web-fetch, web-search)
+    # ------------------------------------------------------------------
+
+    async def _execute_web_fetch(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
+        """Fetch a URL and return cleaned text content.
+
+        Uses aiohttp with a 30-second timeout. Content extraction follows
+        a priority chain: JSON-LD → meta tags → semantic HTML5 → readability
+        heuristic. If the extracted text is suspiciously sparse (<500 chars
+        from a 200 OK), retries with Playwright headless browser (if installed)
+        to handle JS-rendered pages.
+
+        Output is truncated to max_chars (default 5000).
+
+        Args:
+            tool_data: Dict with 'url' (required), 'max_chars' (optional),
+                       and 'extract_main' (optional, default true).
+
+        Returns:
+            ToolExecutionResult with the cleaned text or an error message.
+        """
+        import aiohttp
+
+        tool_id = tool_data.get("id", "unknown")
+        url = tool_data.get("url", "").strip()
+        max_chars = int(tool_data.get("max_chars", 5000))
+        extract_main = tool_data.get("extract_main", True)
+
+        if not url:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error="No URL provided",
+            )
+
+        # Basic URL validation
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error=f"Invalid URL: {url}",
+            )
+        if parsed.scheme not in ("http", "https"):
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error=f"Unsupported scheme: {parsed.scheme} (only http/https)",
+            )
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (compatible; KollabAgent/1.0; "
+                    "+https://github.com/kollaborai/kollab)"
+                ),
+            }
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, headers=headers, allow_redirects=True) as resp:
+                    if resp.status >= 400:
+                        return ToolExecutionResult(
+                            tool_id=tool_id,
+                            tool_type="web_fetch",
+                            success=False,
+                            error=f"HTTP {resp.status} {resp.reason}",
+                        )
+
+                    # Content-Length check: warn on very large pages
+                    try:
+                        content_length = resp.headers.get("Content-Length", "")
+                        if content_length and int(content_length) > 500_000:
+                            logger.warning(
+                                f"web_fetch: large page {url} ({content_length} bytes)"
+                            )
+                    except (ValueError, TypeError):
+                        pass
+
+                    final_url = str(resp.url)
+                    raw = await resp.text(errors="replace")
+
+            # Extract main content using priority chain
+            text = self._extract_main_content(raw, extract_main)
+
+            # Playwright fallback: if aiohttp got suspiciously little text
+            # from a valid response, the page may be JS-rendered.
+            if len(text) < 500:
+                pw_text = await self._playwright_fetch(url)
+                if pw_text and len(pw_text) > len(text):
+                    text = pw_text
+                    logger.info(f"web_fetch: used Playwright fallback for {url}")
+
+            # Truncate to max_chars (accounting for the URL header)
+            header = f"URL: {final_url}\n\n"
+            available = max(100, max_chars - len(header))
+            if len(text) > available:
+                text = text[:available] + "\n...[truncated]"
+
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=True,
+                output=header + text,
+                metadata={"url": final_url, "chars": len(text)},
+            )
+
+        except asyncio.TimeoutError:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error="Request timeout after 30 seconds",
+            )
+        except aiohttp.ClientError as e:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error=f"Network error: {e}",
+            )
+        except Exception as e:
+            logger.error(f"web_fetch error for {url}: {e}", exc_info=True)
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error=f"Fetch error: {e}",
+            )
+
+    async def _execute_web_search(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
+        """Search the web using DuckDuckGo's HTML endpoint and return results.
+
+        No API key required. Parses the top N results (title, URL, snippet)
+        from the DuckDuckGo HTML search page.
+
+        Args:
+            tool_data: Dict with 'query' (required) and 'max_results' (optional).
+
+        Returns:
+            ToolExecutionResult with formatted search results.
+        """
+        import aiohttp
+
+        tool_id = tool_data.get("id", "unknown")
+        query = tool_data.get("query", "").strip()
+        max_results = int(tool_data.get("max_results", 5))
+
+        if not query:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_search",
+                success=False,
+                error="No search query provided",
+            )
+
+        search_url = "https://html.duckduckgo.com/html/"
+        params = {"q": query}
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (compatible; KollabAgent/1.0; "
+                "+https://github.com/kollaborai/kollab)"
+            ),
+        }
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    search_url, data=params, headers=headers, allow_redirects=True
+                ) as resp:
+                    if resp.status >= 400:
+                        return ToolExecutionResult(
+                            tool_id=tool_id,
+                            tool_type="web_search",
+                            success=False,
+                            error=f"Search failed: HTTP {resp.status}",
+                        )
+                    html = await resp.text(errors="replace")
+
+            results = self._parse_ddg_results(html, max_results)
+
+            if not results:
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="web_search",
+                    success=True,
+                    output=f"No results found for: {query}",
+                    metadata={"query": query, "count": 0},
+                )
+
+            lines = [f"Search results for: {query}", ""]
+            for i, r in enumerate(results, 1):
+                lines.append(f"{i}. {r['title']}")
+                lines.append(f"   {r['url']}")
+                if r.get("snippet"):
+                    lines.append(f"   {r['snippet']}")
+                lines.append("")
+
+            lines.append("Use web-fetch to get full content from any result.")
+
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_search",
+                success=True,
+                output="\n".join(lines).strip(),
+                metadata={"query": query, "count": len(results)},
+            )
+
+        except asyncio.TimeoutError:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_search",
+                success=False,
+                error="Search timed out after 30 seconds",
+            )
+        except aiohttp.ClientError as e:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_search",
+                success=False,
+                error=f"Network error: {e}",
+            )
+        except Exception as e:
+            logger.error(f"web_search error for '{query}': {e}", exc_info=True)
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_search",
+                success=False,
+                error=f"Search error: {e}",
+            )
+
+    # ------------------------------------------------------------------
+    # HTML / search-result helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _html_to_text(html: str) -> str:
+        """Backward-compatible alias for _extract_main_content."""
+        return ToolExecutor._extract_main_content(html)
+
+    @staticmethod
+    def _extract_main_content(html: str, extract_main: bool = True) -> str:
+        """Extract main content from HTML using a priority chain.
+
+        Priority order:
+        1. JSON-LD structured data (articleBody / description)
+        2. Semantic HTML5 (<article>, <main>, <section>)
+        3. Readability heuristic (highest text-to-tag ratio element)
+        4. Fallback: strip non-content tags, extract remaining text
+
+        Uses beautifulsoup4 with lxml parser. Falls back to regex-based
+        extraction if bs4 is not available.
+        """
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "lxml")
+        except ImportError:
+            # bs4 not available — fall back to regex-based extraction
+            return ToolExecutor._html_to_text_regex(html)
+
+        # Remove non-content elements entirely
+        for tag in soup.find_all(["script", "style", "nav", "footer", "aside",
+                                   "header", "noscript", "svg", "form",
+                                   "button", "iframe"]):
+            tag.decompose()
+
+        if extract_main:
+            # Priority 1: JSON-LD structured data
+            text = ToolExecutor._extract_json_ld(soup)
+            if text and len(text) > 200:
+                return text
+
+            # Priority 2: Semantic HTML5 — <article>, <main>
+            for selector in ["article", "main", "[role='main']"]:
+                element = soup.select_one(selector)
+                if element:
+                    text = ToolExecutor._soup_to_text(element)
+                    if len(text) > 200:
+                        return text
+
+            # Priority 3: Readability heuristic — find densest content block
+            text = ToolExecutor._readability_extract(soup)
+            if text and len(text) > 200:
+                return text
+
+        # Priority 4: Fallback — extract all remaining text
+        return ToolExecutor._soup_to_text(soup)
+
+    @staticmethod
+    def _extract_json_ld(soup) -> str:
+        """Extract articleBody or description from JSON-LD script tags."""
+        import json
+
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string or "")
+                # Handle both single objects and arrays
+                items = data if isinstance(data, list) else [data]
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    # Look for articleBody first (richest content)
+                    body = item.get("articleBody") or item.get("text", "")
+                    if body and len(body) > 200:
+                        # Collapse whitespace
+                        lines = [ln.strip() for ln in body.split("\n") if ln.strip()]
+                        return "\n".join(lines)
+                    # Fall back to description
+                    desc = item.get("description", "")
+                    if desc and len(desc) > 100:
+                        return desc.strip()
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return ""
+
+    @staticmethod
+    def _readability_extract(soup) -> str:
+        """Find the element with the highest text-to-tag ratio.
+
+        Scores each <div> and <section> by text length / number of child
+        tags. Returns the text from the highest-scoring element.
+        """
+        best_text = ""
+        best_score = 0
+
+        for element in soup.find_all(["div", "section"]):
+            # Skip tiny elements
+            text = element.get_text(separator=" ", strip=True)
+            if len(text) < 200:
+                continue
+
+            # Score: text length weighted by text-to-tag ratio
+            tag_count = len(element.find_all())
+            if tag_count == 0:
+                continue
+            ratio = len(text) / tag_count
+            # Prefer elements with more text, but penalize high tag density
+            score = len(text) * min(ratio / 10, 1.0)
+
+            if score > best_score:
+                best_score = score
+                best_text = text
+
+        if best_text:
+            lines = [ln.strip() for ln in best_text.split("\n") if ln.strip()]
+            return "\n".join(lines)
+        return ""
+
+    @staticmethod
+    def _soup_to_text(element) -> str:
+        """Extract clean text from a BeautifulSoup element.
+
+        Inserts newlines for block-level tags, decodes entities,
+        collapses whitespace.
+        """
+        # Insert newlines for block-level elements
+        for tag in element.find_all(["p", "div", "br", "h1", "h2", "h3",
+                                      "h4", "h5", "h6", "li", "tr", "blockquote",
+                                      "pre"]):
+            tag.append("\n")
+
+        text = element.get_text()
+        lines = [line.strip() for line in text.split("\n")]
+        lines = [line for line in lines if line]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _html_to_text_regex(html: str) -> str:
+        """Regex-based HTML to text fallback (no bs4 dependency).
+
+        Used when beautifulsoup4 is not installed.
+        """
+        import html as html_mod
+        import re
+
+        # Remove non-content tags entirely (tag + inner content)
+        non_content = re.compile(
+            r"<(script|style|nav|footer|aside|header|noscript|svg|form|iframe)\b[^>]*>.*?</\1>",
+            re.DOTALL | re.IGNORECASE,
+        )
+        html = non_content.sub("", html)
+
+        # Remove HTML comments
+        html = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
+
+        # Insert newlines for block-level tags before stripping
+        block_tags = re.compile(
+            r"</?(p|div|br|h[1-6]|li|tr|td|th|section|article|blockquote|pre)\b[^>]*>",
+            re.IGNORECASE,
+        )
+        html = block_tags.sub("\n", html)
+
+        # Strip all remaining tags
+        html = re.sub(r"<[^>]+>", "", html)
+
+        # Decode HTML entities
+        html = html_mod.unescape(html)
+
+        # Collapse whitespace
+        lines = [line.strip() for line in html.split("\n")]
+        lines = [line for line in lines if line]
+
+        return "\n".join(lines)
+
+    async def _playwright_fetch(self, url: str) -> str:
+        """Fetch a URL using Playwright headless browser (optional).
+
+        Used as a fallback for JS-rendered pages where aiohttp returns
+        sparse content. Returns extracted text or empty string if
+        Playwright is not available or fails.
+        """
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            return ""
+
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+                await page.goto(url, timeout=20000, wait_until="networkidle")
+                html = await page.content()
+                await browser.close()
+
+            return self._extract_main_content(html)
+        except Exception as e:
+            logger.debug(f"Playwright fetch failed for {url}: {e}")
+            return ""
+
+    @staticmethod
+    def _parse_ddg_results(html: str, max_results: int) -> list:
+        """Parse DuckDuckGo HTML search results into structured data.
+
+        Extracts result links and snippets from the DDG HTML endpoint.
+        Returns a list of dicts: {title, url, snippet}.
+        """
+        import re
+
+        results = []
+
+        # DDG HTML results have result blocks in <div class="result ...">
+        # Each contains an <a class="result__a" href="...">title</a>
+        # and an <a class="result__snippet">snippet</a>
+
+        # Extract result blocks
+        result_blocks = re.findall(
+            r'<a[^>]+class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+            html,
+            re.DOTALL,
+        )
+
+        # Extract snippets
+        snippets = re.findall(
+            r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
+            html,
+            re.DOTALL,
+        )
+
+        # Also try the newer DDG layout with result__url
+        if not result_blocks:
+            result_blocks = re.findall(
+                r'<a[^>]+rel="nofollow"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+                html,
+                re.DOTALL,
+            )
+
+        for i, (raw_url, raw_title) in enumerate(result_blocks[:max_results]):
+            # DDG wraps URLs in a redirect; extract actual URL
+            # Format: //duckduckgo.com/l/?uddg=ENCODED_URL&...
+            if "uddg=" in raw_url:
+                from urllib.parse import parse_qs, urlparse
+
+                parsed = urlparse(raw_url)
+                qs = parse_qs(parsed.query)
+                actual_url = qs.get("uddg", [raw_url])[0]
+            elif raw_url.startswith("//"):
+                actual_url = "https:" + raw_url
+            else:
+                actual_url = raw_url
+
+            # Strip HTML from title
+            title = re.sub(r"<[^>]+>", "", raw_title).strip()
+            if not title:
+                title = actual_url
+
+            snippet = ""
+            if i < len(snippets):
+                snippet = re.sub(r"<[^>]+>", "", snippets[i]).strip()
+
+            results.append({"title": title, "url": actual_url, "snippet": snippet})
+
+        return results
+
+    def _get_display_name(self, tool_data: Dict[str, Any]) -> str:
+        """Get a human-readable display name for the tool.
+
+        Args:
+            tool_data: Tool data dictionary
+
+        Returns:
+            Display name for the tool
+        """
+        tool_type = tool_data.get("type", "tool")
+
+        if tool_type == "terminal":
+            command = tool_data.get("command", "")
+            # Collapse multi-line commands (heredocs, chained commands) to first line
+            if "\n" in command:
+                first_line = command.split("\n")[0]
+                return f"terminal: {first_line}..."
+            return f"terminal: {command}"
+
+        elif tool_type == "mcp_tool":
+            name = tool_data.get("name", "mcp_tool")
+            # Clean up malformed tool names
+            if "<" in name or ">" in name:
+                import re
+
+                match = re.search(r"<([^<]+)", name)
+                if match:
+                    name = match.group(1).strip()
+                else:
+                    words = re.findall(r"\b([a-z_]+)\b", name.lower())
+                    name = words[-1] if words else "mcp_tool"
+            return str(name)
+
+        elif tool_type.startswith("file_"):
+            # For file operations, show the operation type
+            return str(tool_type)
+
+        elif tool_type in ("web_fetch", "web-fetch"):
+            url = tool_data.get("url", "")
+            return f"web-fetch: {url[:60]}" if url else "web-fetch"
+
+        elif tool_type in ("web_search", "web-search"):
+            query = tool_data.get("query", "")
+            return f"web-search: {query[:60]}" if query else "web-search"
+
+        elif tool_type in ("mcp_reload", "mcp-reload"):
+            return "mcp-reload"
+
+        elif tool_type in ("tool_search", "tool-search"):
+            query = tool_data.get("query", "")
+            return f"tool-search: {query[:60]}" if query else "tool-search"
+
+        elif tool_type in ("tool_load", "tool-load"):
+            name = tool_data.get("name", "")
+            return f"tool-load: {name[:60]}" if name else "tool-load"
+
+        return str(tool_type)
