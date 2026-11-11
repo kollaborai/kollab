@@ -261,6 +261,11 @@ Run multiple servers of the same type:
 
 MCP uses JSON-RPC 2.0 over stdio:
 
+The client continuously drains each server's stderr so verbose diagnostics do not
+block protocol responses. Diagnostic contents are discarded because they may
+contain secrets. When a failed server is known to have exited, startup diagnostics
+include its exit code and the number of bytes drained so far.
+
 ### Initialize
 
 ```json
