@@ -1,0 +1,141 @@
+{
+  "id": "networks",
+  "title": "Connect",
+  "summary": "Bring your computers and their agents together. Use Knocks to work with someone on another network.",
+  "workflows": [
+    {
+      "id": "join-a-device",
+      "label": "Connect devices",
+      "summary": "Use a one-time code and approve the new device on a computer already on your network.",
+      "entry": {
+        "prerequisite": "On the inviting computer, open an agent chat. Keep Kollab running on both computers.",
+        "ui": [
+          "Settings",
+          "Network",
+          "Access"
+        ],
+        "command": "/connect"
+      },
+      "steps": [
+        {
+          "action": "On the existing computer, choose New Join Code in Access. Share it privately with the person joining.",
+          "expect": "The code admits one computer and expires after five minutes."
+        },
+        {
+          "action": "On the other computer, open Settings → Network → Overview, choose Join With a Code and enter the code in its private form.",
+          "expect": "Keep the code out of ordinary chat and command arguments."
+        },
+        {
+          "action": "On the existing computer, review the joining device and approve it only if you recognize it."
+        },
+        {
+          "action": "Check the sidebar or run /connect status on either computer.",
+          "expect": "The device and its reachable agents appear in the network."
+        }
+      ],
+      "commands": [
+        {
+          "syntax": "/connect",
+          "example": "/connect",
+          "description": "Open the Connect controls on the computer whose network you want to inspect."
+        },
+        {
+          "syntax": "/connect status",
+          "example": "/connect status",
+          "description": "Check online devices, agents and pending joins.",
+          "expect": "The newly approved device appears in the network roster."
+        }
+      ],
+      "media": {
+        "kind": "video",
+        "src": "/learn/networks/walkthrough.mp4",
+        "poster": "/learn/networks/overview.webp",
+        "captions": "/learn/networks/captions.vtt",
+        "alt": "Kollab Network Access with New Join Code",
+        "caption": "Settings is the sliders button at the bottom of the sidebar."
+      },
+      "success": "The second computer and its available agents appear in your network.",
+      "recovery": [
+        {
+          "symptom": "The code is expired, already used, or the relay restarted",
+          "action": "On the existing computer, create a fresh code and enter it on the joining computer."
+        },
+        {
+          "symptom": "No request appears for approval",
+          "action": "Run /connect status on the joining computer, confirm it says the request is waiting, and check that Kollab and the relay are online on both computers."
+        },
+        {
+          "symptom": "An agent is missing from the roster",
+          "action": "Check /connect status and make sure Kollab is running on that agent's computer; then check the network trust policy."
+        },
+        {
+          "symptom": "You joined the wrong computer or must stop sharing",
+          "action": "On the inviter, run /connect revoke <device>; on the joining computer, /connect leave. This stops future settings sync but does not revoke provider API keys already received; rotate those with the provider if needed."
+        }
+      ],
+      "note": "Joining trusts the computer and shares sealed managed settings, including API keys, loadouts, MCP servers, agents and skills. Project folders, vaults, conversations and ChatGPT OAuth sign-ins do not transfer; sign in locally. Settings continue syncing while joined. Revoke stops future updates; rotate provider keys separately if they must stop working."
+    },
+    {
+      "id": "answer-a-knock",
+      "label": "Knocks",
+      "summary": "Review a request from someone outside your network, then choose which agent they can reach.",
+      "entry": {
+        "prerequisite": "Both computers must be online. Find your Knocks Address in Network → Overview.",
+        "ui": [
+          "Settings",
+          "Network",
+          "Knocks"
+        ],
+        "command": "/connect knocks"
+      },
+      "steps": [
+        {
+          "action": "On the receiving computer, copy the Knocks Address from Overview and share it with the person you want to hear from."
+        },
+        {
+          "action": "On the caller’s computer, send /connect knock <route> \"<reason>\" using that address.",
+          "expect": "The caller stays on their own network."
+        },
+        {
+          "action": "On your computer, open Network → Knocks. Review the caller and reason, then choose Accept, Reject or Block."
+        },
+        {
+          "action": "On the receiving computer, use /connect allow <device> <agent> in the terminal: name the caller’s device and one of your local agents.",
+          "expect": "Accepting the knock alone does not grant an agent."
+        }
+      ],
+      "commands": [
+        {
+          "syntax": "/connect knock <route> \"<reason>\"",
+          "example": "/connect knock kollabor.ai/c/example-route \"Please review my deployment plan\"",
+          "description": "Request contact with another network. Replace the example address with the recipient’s Knocks Address.",
+          "expect": "The receiving computer sees a ringing knock for up to five minutes while online."
+        },
+        {
+          "syntax": "/connect allow <device> <agent>",
+          "example": "/connect allow guest-laptop reviewer",
+          "description": "Let the caller on guest-laptop reach your local reviewer agent after accepting the knock.",
+          "expect": "Only your reviewer agent is reachable by that caller."
+        }
+      ],
+      "success": "The caller stays on their own network and can reach only the local agent you allowed.",
+      "recovery": [
+        {
+          "symptom": "No knock arrives",
+          "action": "Keep Kollab online on the receiving computer and verify both computers use the same knock-capable directory."
+        },
+        {
+          "symptom": "The caller can reach more agents than intended",
+          "action": "Run /connect deny <device> [agent] or /connect revoke <device> to stop access, then check the allowed-agent list."
+        }
+      ],
+      "note": "A Knocks Address is a contact address, not a one-time join code. Accepting a knock does not join networks or copy settings; grant only the agent access you intend.",
+      "media": {
+        "kind": "image",
+        "src": "/learn/networks/knocks.webp",
+        "alt": "Kollab Network Knocks showing a caller’s reason and Accept, Reject and Block controls",
+        "caption": "Review the caller and reason before accepting. Grant the agent separately."
+      }
+    }
+  ]
+}

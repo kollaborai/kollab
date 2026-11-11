@@ -77,6 +77,20 @@ def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=True, **kwargs)
 
 
+def run_with_retry(cmd: list[str], attempts: int = 4, **kwargs) -> subprocess.CompletedProcess:
+    """`run`, tried again when it fails: pex downloads the portable CPython from
+    GitHub, and a read timeout there failed CI on a commit that passed on re-run."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return run(cmd, **kwargs)
+        except subprocess.CalledProcessError:
+            if attempt == attempts:
+                raise
+            print(f"build step failed (attempt {attempt}/{attempts}); retrying", flush=True)
+            time.sleep(15 * attempt)
+    raise AssertionError("unreachable")
+
+
 def kollab_version(wheels: list[Path]) -> str:
     for wheel in wheels:
         match = re.fullmatch(r"kollab-([^-]+)-.+\.whl", wheel.name)
@@ -189,7 +203,7 @@ def binary_filename() -> str:
 def floor_platform(path: Path) -> Path:
     """A pex complete platform: this machine's wheel tags, minus any newer than FLOORS."""
     # pip's --platform cannot do this: it never widens manylinux_2_28 to the older tags.
-    inspected = json.loads(run([*UVX_PEX, "pex3", "interpreter", "inspect", "--markers", "--tags"],
+    inspected = json.loads(run_with_retry([*UVX_PEX, "pex3", "interpreter", "inspect", "--markers", "--tags"],
                                capture_output=True, text=True).stdout)
 
     def supported(tag: str) -> bool:
@@ -215,7 +229,7 @@ def build(wheels: list[Path], out: Path, scratch: Path) -> Path:
     # relative to that folder, which Windows refuses across drives, so the scie is
     # written there and then moved to out.
     folder = wheels[0].parent
-    run(
+    run_with_retry(
         [
             *UVX_PEX, "pex",
             *(wheel.name for wheel in wheels),
