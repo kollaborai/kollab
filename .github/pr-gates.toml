@@ -16,7 +16,9 @@ checks = [
   "conventional_title",
   "linked_issue",
   "regression_test",
+  "spec_or_fix_brief",
 ]
+spec_or_fix_brief_mode = "warn"
 
 # Maps a regex over changed paths to the docs that must also be updated in
 # the same PR. Un-comment to require e.g. CHANGELOG.md for package changes.

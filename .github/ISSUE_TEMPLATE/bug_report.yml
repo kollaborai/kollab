@@ -7,6 +7,7 @@ body:
     attributes:
       value: |
         Thanks for reporting a bug. Please avoid posting API keys, OAuth tokens, raw cookies, or private conversation logs.
+        Maintainers or the fix owner complete the optional Fix brief; outside reporters can leave it blank.
   - type: textarea
     id: summary
     attributes:
@@ -52,4 +53,9 @@ body:
     attributes:
       label: Relevant logs or screenshots
       description: Redact secrets and private paths before sharing.
+  - type: textarea
+    id: fix_brief
+    attributes:
+      label: Fix brief
+      description: Optional for reporters. Maintainers or the fix owner add Symptom, Exact reproduction, Root cause, Fix layer, Regression test, Siblings swept, and Risk before the fix PR is complete.
 
