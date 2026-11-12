@@ -335,10 +335,10 @@ async def list_choices(workspace: _Workspace = ""):
 
     pm = _folder_profile_manager(workspace)
     workspace = folder_or_400(workspace.strip())
-    # saved loadouts live in that folder's layers; reading the files keeps no
-    # per-request poller alive (see #966)
-    config = _loadout_config(workspace)
-    manager = LoadoutManager(pm, config=config)
+    # no config handle: the picker lists no saved loadouts, so no layered config read happens here. Profile
+    # definitions still come from the config files through ProfileManager, as GET /profiles reads them (#966);
+    # a named workspace gets that folder's own manager (#972)
+    manager = LoadoutManager(pm)
     profiles = manager.provider_profiles()
 
     async def refresh_catalogs() -> None:

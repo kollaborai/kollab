@@ -1,0 +1,108 @@
+{
+  "id": "system-prompts",
+  "title": "System prompts",
+  "summary": "Inspect the prompt used by an agent role, edit its startup instructions or compose role-specific reusable sections.",
+  "workflows": [
+    {
+      "id": "edit-an-agent-prompt",
+      "label": "Change an agent's startup instructions",
+      "summary": "Update the prompt file for the agent scope you intend to affect, then inspect the rendered result.",
+      "entry": {
+        "prerequisite": "Know whether this is a project-local, global or bundled agent; local project definitions take precedence.",
+        "ui": [
+          "Settings",
+          "Prompts"
+        ],
+        "command": "/prompts"
+      },
+      "steps": [
+        {
+          "action": "Open Settings → Prompts (or type /prompts in Web chat), choose the role you want to inspect, and open Full Prompt."
+        },
+        {
+          "action": "For a project agent, edit .kollab/agents/<agent-name>/system_prompt.md in that project workspace."
+        },
+        {
+          "action": "Make a focused change and save. Keep reusable fragments in that agent's sections/ directory and include one with <trender type=\"include\" path=\"sections/verify.md\" />."
+        },
+        {
+          "action": "Reload the agent, return to Settings → Prompts, select the same role and open Full Prompt to confirm the intended text is present."
+        }
+      ],
+      "commands": [
+        {
+          "syntax": "/prompts",
+          "example": "/prompts",
+          "description": "Open the System Prompts panel in the Web chat.",
+          "expect": "Settings → Prompts shows the current role's available sections and Full Prompt preview."
+        }
+      ],
+      "media": {
+        "kind": "image",
+        "src": "/learn/system-prompts/overview.webp",
+        "alt": "Kollab Prompts settings showing a role's sections and rendered prompt",
+        "caption": "Select a role, inspect Full Prompt, then reload after changing its startup instructions."
+      },
+      "success": "The selected role's rendered system prompt contains the saved instruction or included section.",
+      "recovery": [
+        {
+          "symptom": "Your edits do not appear in the prompt",
+          "action": "Check whether a higher-priority project or global agent definition overrides the one you edited, then reload the agent and inspect the role in Settings → Prompts → Full Prompt."
+        },
+        {
+          "symptom": "An include is missing",
+          "action": "Verify the section path is relative to the agent directory, the file exists in sections/, and the include syntax is exact."
+        }
+      ],
+      "note": "Prompt files are not Agent Skills. Skills use their own directory contract and a SKILL.md file; assign them separately through agent metadata."
+    },
+    {
+      "id": "compose-role-sections",
+      "label": "Choose sections for an agent role",
+      "summary": "Include a shared prompt section for one role and inspect the assembled prompt before relying on it.",
+      "entry": {
+        "ui": [
+          "Settings",
+          "Prompts"
+        ],
+        "command": "/prompts"
+      },
+      "steps": [
+        {
+          "action": "In Settings → Prompts, select the target under Roles and choose the relevant model variant."
+        },
+        {
+          "action": "Find the section you want and enable its checkbox for this role; the role composition saves automatically."
+        },
+        {
+          "action": "Select a section to edit its text, choose Edit, make the change and select Save for this role or Save to Library as appropriate."
+        },
+        {
+          "action": "Select Full Prompt to review the assembled prompt and confirm the section appears for the chosen role and variant."
+        },
+        {
+          "action": "To create shared content first, select or create a library with New library, then use New section; return to the role and include that section."
+        }
+      ],
+      "commands": [
+        {
+          "syntax": "/prompts",
+          "example": "/prompts",
+          "description": "Open Settings → Prompts in the Web chat.",
+          "expect": "The page offers Libraries, Roles, model variants, section selection, editing and Full Prompt."
+        }
+      ],
+      "success": "The chosen role and model variant include the intended section in their Full Prompt; other roles remain unchanged unless the shared library section itself was edited.",
+      "recovery": [
+        {
+          "symptom": "The section is missing from the full prompt",
+          "action": "Confirm you selected the intended role and model variant, then enable its section checkbox and inspect Full Prompt again."
+        },
+        {
+          "symptom": "You changed text for more roles than intended",
+          "action": "If you edited a shared library section, use the role-specific section override or restore the library text, then inspect affected roles' Full Prompt."
+        }
+      ]
+    }
+  ]
+}
