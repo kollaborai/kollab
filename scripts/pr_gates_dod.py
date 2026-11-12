@@ -49,11 +49,15 @@ every exit code is 0. DoD is a hygiene gate, not a correctness verdict.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 import tomllib
 import urllib.error
 import urllib.request
@@ -78,6 +82,19 @@ DEFAULT_CHECK_NAME = "dod/ready-for-review"
 # convention. Repos configure their own via regression_profile.
 DEFAULT_FINDING_PATTERN = r"\bF\d+\b"
 DEFAULT_TEST_PATHS: list[str] = ["tests/"]
+# Suppressions stay unavailable unless the protected base-branch config names
+# trusted accounts explicitly.
+DEFAULT_TRUSTED_REVIEWERS: tuple[str, ...] = ()
+SUPPRESSION_MARKER_PREFIX = "<!-- pr-gates-ignore-reference:v1"
+SUPPRESSION_MARKER_SUFFIX = "-->"
+SUPPRESSION_FIELDS = {
+    "source_kind",
+    "source_id",
+    "source_body_sha256",
+    "finding_id",
+    "occurrence",
+    "reason",
+}
 
 CONVENTIONAL_TITLE_RE = re.compile(
     r"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)"
@@ -103,6 +120,9 @@ class RegressionProfile:
 
     finding_id_pattern: str = DEFAULT_FINDING_PATTERN
     test_paths: list[str] = field(default_factory=lambda: list(DEFAULT_TEST_PATHS))
+    trusted_reviewers: list[str] = field(
+        default_factory=lambda: list(DEFAULT_TRUSTED_REVIEWERS)
+    )
 
 
 @dataclass(frozen=True)
@@ -173,7 +193,26 @@ def load_config(path: str | os.PathLike[str]) -> DodConfig:
             f"pr_gates.dod.regression_profile.finding_id_pattern is not a "
             f"valid regex ({pattern!r}): {exc}"
         ) from exc
-    regression = RegressionProfile(finding_id_pattern=pattern, test_paths=test_paths)
+    trusted_reviewers = list(
+        _as_str_tuple(
+            raw_profile.get("trusted_reviewers", list(DEFAULT_TRUSTED_REVIEWERS)),
+            "pr_gates.dod.regression_profile.trusted_reviewers",
+        )
+    )
+    normalized_reviewers = [reviewer.casefold() for reviewer in trusted_reviewers]
+    if any(not reviewer for reviewer in normalized_reviewers):
+        raise ConfigError(
+            "pr_gates.dod.regression_profile.trusted_reviewers cannot contain empty logins"
+        )
+    if len(set(normalized_reviewers)) != len(normalized_reviewers):
+        raise ConfigError(
+            "pr_gates.dod.regression_profile.trusted_reviewers cannot contain duplicates"
+        )
+    regression = RegressionProfile(
+        finding_id_pattern=pattern,
+        test_paths=test_paths,
+        trusted_reviewers=trusted_reviewers,
+    )
 
     return DodConfig(
         enabled=enabled,
@@ -209,6 +248,39 @@ class PRData:
     merge_base_sha: str
     commits_behind_base: int
     changed_file_contents: dict[str, str] = field(default_factory=dict)
+    comments: tuple["PRComment", ...] = ()
+    reviews: tuple["PRReview", ...] = ()
+    pull_author_login: str = ""
+    head_sha: str = ""
+
+
+@dataclass(frozen=True)
+class PRComment:
+    kind: str  # "issue_comment" or "review_comment"
+    comment_id: int
+    body: str
+    author_login: str
+
+
+@dataclass(frozen=True)
+class PRReview:
+    review_id: int
+    author_login: str
+    state: str
+    commit_id: str
+    submitted_at: str
+
+
+@dataclass(frozen=True)
+class FindingSuppression:
+    source_kind: str
+    source_id: int
+    source_body_sha256: str
+    finding_id: str
+    occurrence: int
+    reason: str
+    reviewer_login: str
+    approval_review_id: int
 
 
 @dataclass(frozen=True)
@@ -216,6 +288,7 @@ class DoDReport:
     ran: bool
     evaluated: list[str]
     failed: list[tuple[str, str]]  # (check name, detail)
+    audit_notes: list[FindingSuppression] = field(default_factory=list)
 
     @property
     def outcome(self) -> str:
@@ -239,10 +312,19 @@ class DoDReport:
             return "pr-gates DoD: disabled; no checks ran."
         if not self.failed:
             names = ", ".join(self.evaluated) or "none"
-            return f"pr-gates DoD: all enabled checks passed ({names})."
-        lines = [f"pr-gates DoD: {len(self.failed)} failed item(s):"]
-        for name, detail in self.failed:
-            lines.append(f"- {name}: {detail}")
+            lines = [f"pr-gates DoD: all enabled checks passed ({names})."]
+        else:
+            lines = [f"pr-gates DoD: {len(self.failed)} failed item(s):"]
+            for name, detail in self.failed:
+                lines.append(f"- {name}: {detail}")
+        if self.audit_notes:
+            lines.append("Audited finding-reference suppressions:")
+            lines.extend(
+                f"- {note.finding_id} occurrence {note.occurrence} in "
+                f"{note.source_kind} {note.source_id}; reviewer={note.reviewer_login} "
+                f"review={note.approval_review_id}; reason={note.reason}"
+                for note in self.audit_notes
+            )
         return "\n".join(lines)
 
 
@@ -307,13 +389,214 @@ def _mentions_finding(content: str, finding: str) -> bool:
     return re.search(pattern, content, re.IGNORECASE) is not None
 
 
-def _check_regression_test(cfg: DodConfig, data: PRData) -> str:
+def _json_object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate annotation field {key!r}")
+        result[key] = value
+    return result
+
+
+def _parse_suppression_marker(comment: PRComment) -> dict[str, Any] | None:
+    """Parse a marker-only issue comment; malformed markers have no authority."""
+    if comment.kind != "issue_comment":
+        return None
+    body = (comment.body or "").strip()
+    if not body.startswith(SUPPRESSION_MARKER_PREFIX):
+        return None
+    if not body.endswith(SUPPRESSION_MARKER_SUFFIX):
+        return None
+    payload_text = body[len(SUPPRESSION_MARKER_PREFIX) : -len(SUPPRESSION_MARKER_SUFFIX)].strip()
+    if "-->" in payload_text or "<!--" in payload_text:
+        return None
+    try:
+        payload = json.loads(payload_text, object_pairs_hook=_json_object_without_duplicate_keys)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or set(payload) != SUPPRESSION_FIELDS:
+        return None
+    source_kind = payload.get("source_kind")
+    if not isinstance(source_kind, str) or source_kind not in {
+        "issue_comment",
+        "review_comment",
+    }:
+        return None
+    if type(payload.get("source_id")) is not int or payload["source_id"] <= 0:
+        return None
+    if type(payload.get("occurrence")) is not int or payload["occurrence"] <= 0:
+        return None
+    finding_id = payload.get("finding_id")
+    if not isinstance(finding_id, str) or not finding_id:
+        return None
+    body_hash = payload.get("source_body_sha256")
+    if not isinstance(body_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", body_hash):
+        return None
+    reason = payload.get("reason")
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 500:
+        return None
+    if "\n" in reason or "\r" in reason:
+        return None
+    return payload
+
+
+def _latest_current_head_review(
+    data: PRData, reviewer_login: str
+) -> PRReview | None:
+    """Return only an unambiguous latest submitted review by this actor/head."""
+    if not data.head_sha or not reviewer_login:
+        return None
+    actor = reviewer_login.casefold()
+    relevant = [
+        review
+        for review in data.reviews
+        if review.author_login.casefold() == actor and review.commit_id == data.head_sha
+    ]
+    if not relevant:
+        return None
+    dated: list[tuple[datetime, PRReview]] = []
+    for review in relevant:
+        # GitHub's PENDING reviews are drafts, not submitted review events, and
+        # have no submitted_at. They do not supersede the latest submitted vote.
+        if review.state.upper() == "PENDING":
+            continue
+        if not review.submitted_at:
+            return None
+        try:
+            submitted = datetime.fromisoformat(review.submitted_at.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if submitted.tzinfo is None:
+            return None
+        dated.append((submitted, review))
+    if not dated:
+        return None
+    latest_time = max(item[0] for item in dated)
+    latest = [review for submitted, review in dated if submitted == latest_time]
+    if len(latest) != 1 or latest[0].state.upper() != "APPROVED":
+        return None
+    if latest[0].review_id <= 0:
+        return None
+    return latest[0]
+
+
+def _finding_suppressions(
+    cfg: DodConfig, data: PRData, pattern: re.Pattern[str]
+) -> tuple[set[tuple[str, int, str, int]], set[int], list[FindingSuppression]]:
+    """Validate exact-occurrence annotations from trusted current-head reviewers."""
+    comments_by_key: dict[tuple[str, int], list[PRComment]] = {}
+    for comment in data.comments:
+        comments_by_key.setdefault((comment.kind, comment.comment_id), []).append(comment)
+
+    candidates: dict[tuple[str, int, str, int], list[tuple[PRComment, PRReview, str]]] = {}
+    for marker_comment in data.comments:
+        annotation = _parse_suppression_marker(marker_comment)
+        if annotation is None:
+            continue
+        reviewer_login = marker_comment.author_login
+        if not reviewer_login or marker_comment.comment_id <= 0 or not data.pull_author_login:
+            continue
+        normalized = reviewer_login.casefold()
+        configured = {login.casefold() for login in cfg.regression.trusted_reviewers}
+        if normalized not in configured or normalized == data.pull_author_login.casefold():
+            continue
+        approval = _latest_current_head_review(data, reviewer_login)
+        if approval is None:
+            continue
+        source_kind = annotation["source_kind"]
+        source_id = annotation["source_id"]
+        if source_id == marker_comment.comment_id and source_kind == marker_comment.kind:
+            continue
+        sources = comments_by_key.get((source_kind, source_id), [])
+        if len(sources) != 1:
+            continue
+        source = sources[0]
+        expected_hash = hashlib.sha256(source.body.encode("utf-8")).hexdigest()
+        if annotation["source_body_sha256"] != expected_hash:
+            continue
+        finding_id = annotation["finding_id"]
+        if pattern.fullmatch(finding_id) is None:
+            continue
+        occurrence = annotation["occurrence"]
+        matches = [
+            match.group(0)
+            for match in pattern.finditer(source.body)
+            if match.group(0) == finding_id
+        ]
+        if occurrence > len(matches):
+            continue
+        key = (source_kind, source_id, finding_id, occurrence)
+        reason = _redact(annotation["reason"].strip())
+        candidates.setdefault(key, []).append((marker_comment, approval, reason))
+
+    accepted: set[tuple[str, int, str, int]] = set()
+    marker_comment_ids: set[int] = set()
+    audit_notes: list[FindingSuppression] = []
+    for key, entries in candidates.items():
+        # Multiple annotations for one occurrence are ambiguous, so none wins.
+        if len(entries) != 1:
+            continue
+        marker_comment, approval, reason = entries[0]
+        accepted.add(key)
+        marker_comment_ids.add(marker_comment.comment_id)
+        source_kind, source_id, finding_id, occurrence = key
+        source = comments_by_key[(source_kind, source_id)][0]
+        audit_notes.append(
+            FindingSuppression(
+                source_kind=source_kind,
+                source_id=source_id,
+                source_body_sha256=hashlib.sha256(source.body.encode("utf-8")).hexdigest(),
+                finding_id=finding_id,
+                occurrence=occurrence,
+                reason=reason,
+                reviewer_login=marker_comment.author_login,
+                approval_review_id=approval.review_id,
+            )
+        )
+    return accepted, marker_comment_ids, audit_notes
+
+
+def _check_regression_test(
+    cfg: DodConfig, data: PRData
+) -> tuple[str, list[FindingSuppression]]:
     pattern = re.compile(cfg.regression.finding_id_pattern)
     findings: set[str] = set()
-    for body in data.review_comment_bodies or ():
-        findings.update(pattern.findall(body or ""))
+    if data.comments:
+        metadata_matches = tuple(comment.body for comment in data.comments) == tuple(
+            data.review_comment_bodies
+        )
+        if metadata_matches:
+            suppressions, marker_comment_ids, audit_notes = _finding_suppressions(
+                cfg, data, pattern
+            )
+            for comment in data.comments:
+                if comment.comment_id in marker_comment_ids and comment.kind == "issue_comment":
+                    continue
+                occurrence_counts: dict[str, int] = {}
+                for match in pattern.finditer(comment.body or ""):
+                    finding_id = match.group(0)
+                    occurrence_counts[finding_id] = occurrence_counts.get(finding_id, 0) + 1
+                    suppression_key = (
+                        comment.kind,
+                        comment.comment_id,
+                        finding_id,
+                        occurrence_counts[finding_id],
+                    )
+                    if suppression_key not in suppressions:
+                        findings.add(finding_id)
+        else:
+            # Incomplete or mismatched metadata cannot authorize any exception.
+            audit_notes = []
+            for body in (*data.review_comment_bodies, *(c.body for c in data.comments)):
+                findings.update(match.group(0) for match in pattern.finditer(body or ""))
+    else:
+        # Legacy/local test callers have no comment metadata, so no annotation
+        # can be trusted and every ID remains gate-relevant.
+        audit_notes = []
+        for body in data.review_comment_bodies or ():
+            findings.update(match.group(0) for match in pattern.finditer(body or ""))
     if not findings:
-        return ""
+        return "", audit_notes
     test_files = [
         (path, content)
         for path, content in (data.changed_file_contents or {}).items()
@@ -328,8 +611,8 @@ def _check_regression_test(cfg: DodConfig, data: PRData) -> str:
         return (
             "no regression test covers finding id(s): "
             f"{', '.join(uncovered)} under {', '.join(cfg.regression.test_paths)}"
-        )
-    return ""
+        ), audit_notes
+    return "", audit_notes
 
 
 # --- evaluation -----------------------------------------------------------------
@@ -340,6 +623,7 @@ def evaluate(cfg: DodConfig, data: PRData) -> DoDReport:
     if not cfg.enabled:
         return DoDReport(ran=False, evaluated=[], failed=[])
     failed: list[tuple[str, str]] = []
+    audit_notes: list[FindingSuppression] = []
     for name in cfg.checks:
         if name == "signed_commits":
             detail = _check_signed_commits(data)
@@ -354,12 +638,18 @@ def evaluate(cfg: DodConfig, data: PRData) -> DoDReport:
         elif name == "linked_issue":
             detail = _check_linked_issue(data)
         elif name == "regression_test":
-            detail = _check_regression_test(cfg, data)
+            detail, suppression_notes = _check_regression_test(cfg, data)
+            audit_notes.extend(suppression_notes)
         else:  # load_config rejects unknowns; defensive here
             detail = f"unknown check {name!r}"
         if detail:
             failed.append((name, detail))
-    return DoDReport(ran=True, evaluated=list(cfg.checks), failed=failed)
+    return DoDReport(
+        ran=True,
+        evaluated=list(cfg.checks),
+        failed=failed,
+        audit_notes=audit_notes,
+    )
 
 
 # --- audit -----------------------------------------------------------------------
@@ -449,6 +739,37 @@ def _gh(*args: str) -> Any:
     return json.loads(proc.stdout) if proc.stdout.strip() else None
 
 
+def _gh_blob(endpoint: str, max_output: int) -> Any:
+    """Read bounded blob data with a deadline, without starting a worker."""
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        auth = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=False)
+        if auth.returncode != 0 or not auth.stdout.strip():
+            raise RuntimeError("GitHub authentication unavailable; failing closed")
+        token = auth.stdout.strip()
+    base = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+    request = urllib.request.Request(f"{base}/{endpoint}", headers={
+        "Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    deadline = time.monotonic() + 30
+    output = bytearray()
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            while True:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("blob request timed out; failing closed")
+                chunk = response.read1(min(65536, max_output + 1 - len(output)))
+                if not chunk:
+                    break
+                output.extend(chunk)
+                if len(output) > max_output:
+                    raise RuntimeError("blob response exceeds limit; failing closed")
+        return json.loads(output)
+    except (OSError, urllib.error.URLError) as exc:
+        raise RuntimeError("blob request failed or timed out; failing closed") from exc
+
+
 PAGE_SIZE = 100
 # Liveness bound: 50 full pages of 100 items (5000) is far above any real
 # PR's commits, files, or comments. A gate script must hang never and
@@ -497,13 +818,47 @@ def _gh_paginate(endpoint: str) -> list[dict[str, Any]]:
         page += 1
 
 
-def collect_pr_data(repo: str, pr: int, *, root: str = ".") -> PRData:
-    """Collect PR facts with the gh CLI against the checked-out PR head."""
+def collect_pr_data(repo: str, pr: int, *, root: str = ".", test_paths: tuple[str, ...] = ("tests/",)) -> PRData:
+    """Collect PR facts without checking out or executing PR-controlled code."""
     pull = _gh("api", f"repos/{repo}/pulls/{pr}")
     commits_raw = _gh_paginate(f"repos/{repo}/pulls/{pr}/commits")
     files_raw = _gh_paginate(f"repos/{repo}/pulls/{pr}/files")
     review_comments = _gh_paginate(f"repos/{repo}/pulls/{pr}/comments")
     issue_comments = _gh_paginate(f"repos/{repo}/issues/{pr}/comments")
+    reviews_raw = _gh_paginate(f"repos/{repo}/pulls/{pr}/reviews")
+
+    def login(entry: dict[str, Any]) -> str:
+        user = entry.get("user") or {}
+        return user.get("login", "") if isinstance(user, dict) else ""
+
+    def comment_record(entry: dict[str, Any], kind: str) -> PRComment:
+        body = entry.get("body")
+        if not isinstance(body, str):
+            raise RuntimeError(
+                f"{kind} {entry.get('id', 'unknown')} has no textual body; failing closed"
+            )
+        comment_id = entry.get("id")
+        return PRComment(
+            kind=kind,
+            comment_id=comment_id if type(comment_id) is int and comment_id > 0 else 0,
+            body=body,
+            author_login=login(entry),
+        )
+
+    comment_records = tuple(
+        [comment_record(entry, "review_comment") for entry in review_comments]
+        + [comment_record(entry, "issue_comment") for entry in issue_comments]
+    )
+    reviews = tuple(
+        PRReview(
+            review_id=(entry.get("id") if type(entry.get("id")) is int else 0),
+            author_login=login(entry),
+            state=str(entry.get("state") or ""),
+            commit_id=str(entry.get("commit_id") or ""),
+            submitted_at=str(entry.get("submitted_at") or ""),
+        )
+        for entry in reviews_raw
+    )
 
     default_branch = pull["base"]["ref"]
     branch_info = _gh("api", f"repos/{repo}/branches/{default_branch}")
@@ -586,15 +941,60 @@ def collect_pr_data(repo: str, pr: int, *, root: str = ".") -> PRData:
         + [entry["body"] for entry in issue_comments]
     )
 
-    # The action checks out the PR head, so test-file contents come from the
-    # local tree; a local run from the PR branch sees the same files.
+    # Use immutable trees to identify changed tests and their blob IDs. The
+    # PR files endpoint is mutable during pagination and is not a snapshot.
+    def test_tree(commit_sha: str) -> dict[str, dict[str, Any]]:
+        tree = _gh("api", f"repos/{repo}/git/trees/{commit_sha}?recursive=1")
+        if not isinstance(tree, dict) or tree.get("truncated") is not False or not isinstance(tree.get("tree"), list):
+            raise RuntimeError("incomplete commit tree; failing closed")
+        result: dict[str, dict[str, Any]] = {}
+        for item in tree["tree"]:
+            if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                raise RuntimeError("invalid commit tree entry; failing closed")
+            path = item["path"]
+            if item.get("type") == "tree" or not any(path.startswith(prefix) for prefix in test_paths):
+                continue
+            if path in result or item.get("type") != "blob" or item.get("mode") not in {"100644", "100755"}:
+                raise RuntimeError(f"unsupported test tree entry {path}; failing closed")
+            result[path] = item
+        return result
+
+    base_tree = test_tree(compare["merge_base_commit"]["sha"])
+    head_tree = test_tree(head_sha)
+    changed_tests = [(path, entry) for path, entry in head_tree.items()
+                     if path not in base_tree or (entry.get("sha"), entry.get("mode")) !=
+                     (base_tree[path].get("sha"), base_tree[path].get("mode"))]
+    if len(changed_tests) > 256:
+        raise RuntimeError("too many changed test files; failing closed")
+    total_bytes = 0
     contents: dict[str, str] = {}
-    for path in changed_files:
+    for path, entry in changed_tests:
+        sha = entry.get("sha")
+        if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise RuntimeError(f"missing blob identity for {path}; failing closed")
+        size = entry.get("size")
+        if type(size) is not int or size < 0 or size > 1_000_000:
+            raise RuntimeError(f"invalid test blob size for {path}; failing closed")
+        total_bytes += size
+        if total_bytes > 16_000_000:
+            raise RuntimeError("changed test files exceed size limit; failing closed")
+        blob = _gh_blob(f"repos/{repo}/git/blobs/{sha}", 2 * size + 8192)
+        if (not isinstance(blob, dict) or blob.get("encoding") != "base64" or blob.get("sha") != sha
+                or blob.get("size") != size or not isinstance(blob.get("content"), str)
+                or len(blob["content"]) > 2 * size + 1024):
+            raise RuntimeError(f"invalid blob response for {path}; failing closed")
         try:
-            with open(os.path.join(root, path), encoding="utf-8") as fh:
-                contents[path] = fh.read()
-        except (OSError, UnicodeDecodeError):
-            contents[path] = ""
+            raw = base64.b64decode("".join(blob["content"].split()), validate=True)
+            if len(raw) != size:
+                raise ValueError("test blob size mismatch")
+            contents[path] = raw.decode("utf-8")
+        except (KeyError, TypeError, ValueError, UnicodeDecodeError, binascii.Error) as exc:
+            raise RuntimeError(f"invalid test blob for {path}; failing closed") from exc
+
+    # The files listing and the original head must describe the same PR state.
+    current_pull = _gh("api", f"repos/{repo}/pulls/{pr}")
+    if current_pull.get("head", {}).get("sha") != head_sha:
+        raise RuntimeError("PR head changed while collecting facts; failing closed")
 
     return PRData(
         title=pull.get("title") or "",
@@ -608,6 +1008,10 @@ def collect_pr_data(repo: str, pr: int, *, root: str = ".") -> PRData:
         merge_base_sha=compare["merge_base_commit"]["sha"],
         commits_behind_base=compare["behind_by"],
         changed_file_contents=contents,
+        comments=comment_records,
+        reviews=reviews,
+        pull_author_login=login(pull),
+        head_sha=head_sha,
     )
 
 
@@ -635,13 +1039,27 @@ def main(argv: list[str] | None = None) -> int:
         if not cfg.enabled:
             print("pr-gates DoD is disabled (pr_gates.dod.enabled = false); exit 0.")
             return 0
-        data = collect_pr_data(args.repo, args.pr)
+        data = collect_pr_data(args.repo, args.pr, test_paths=tuple(cfg.regression.test_paths))
+        if args.post and data.head_sha != args.head_sha:
+            raise RuntimeError("event head differs from collected PR head; failing closed")
     except (ConfigError, RuntimeError, KeyError, ValueError) as exc:
         print(f"pr-gates DoD: error: {_redact(str(exc))}", file=sys.stderr)
         return 2
 
     report = evaluate(cfg, data)
     print(report.summary())
+    for suppression in report.audit_notes:
+        audit(
+            "finding_reference_suppressed",
+            finding_id=suppression.finding_id,
+            occurrence=suppression.occurrence,
+            source_kind=suppression.source_kind,
+            source_id=suppression.source_id,
+            source_body_sha256=suppression.source_body_sha256,
+            reviewer=suppression.reviewer_login,
+            approval_review_id=suppression.approval_review_id,
+            reason=suppression.reason,
+        )
 
     if args.post:
         if not args.head_sha:

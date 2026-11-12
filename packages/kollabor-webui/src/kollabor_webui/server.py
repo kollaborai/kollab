@@ -97,16 +97,21 @@ def _assistant_static_dir() -> Path | None:
 
 
 def _safe_asset(root: Path, asset_path: str) -> Path | None:
-    """Resolve an asset below ``root`` without allowing path traversal."""
+    """The file ``asset_path`` names below ``root``, or None.
 
-    if not asset_path:
+    None for text that leaves ``root`` (``..``, an absolute path, a symlink that points out), a NUL byte, a folder
+    and a path with nothing there. The real path is held against the real root with a closing separator, so a
+    sibling that only shares the root's name prefix is outside it (#980). The phone portal keeps a copy of this
+    check (``plugins/hub/phone_portal.py``): the relay build ships it without this package.
+    """
+
+    if not asset_path or "\0" in asset_path:
         return None
-    candidate = (root / asset_path).resolve()
-    try:
-        candidate.relative_to(root.resolve())
-    except ValueError:
+    base = os.path.join(os.path.realpath(root), "")
+    candidate = os.path.realpath(os.path.join(base, asset_path))
+    if not candidate.startswith(base):
         return None
-    return candidate if candidate.is_file() else None
+    return Path(candidate) if os.path.isfile(candidate) else None
 
 
 def create_app(

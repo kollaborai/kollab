@@ -105,6 +105,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         state.hub_knocks              (one knock action on the relay's owner)
         state.get_panel               (describe a kollabor.panels panel)
         state.panel_action            (run one panel action)
+        state.code_call               (code editor files, git and terminal, #987)
     """
 
     async def _get_conversation(params: dict[str, Any]) -> dict[str, Any]:
@@ -204,7 +205,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         persist_local = bool(params.get("persist_local", False))
         reload_profile = bool(params.get("reload_profile", False))
         model = params.get("model") or None
-        effort = params.get("effort") or None
+        effort = params.get("effort")  # "" is the model's own default: it clears an earlier pick
         try:
             snapshot = await state_service.set_active_profile(
                 name.strip(),
@@ -212,7 +213,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
                 persist_local=persist_local,
                 reload_profile=reload_profile,
                 model=str(model) if model else None,
-                effort=str(effort) if effort else None,
+                effort=None if effort is None else str(effort),
             )
         except ProfileActivationError as e:
             return _error_result(e)
@@ -737,6 +738,17 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         except Exception as exc:
             return _panel_error(exc)
 
+    async def _code_call(params: dict[str, Any]) -> dict[str, Any]:
+        op, call_params = params.get("op"), params.get("params", {})
+        if set(params) - {"op", "params"} or not isinstance(op, str) or not isinstance(call_params, dict):
+            return {"error": "invalid code request", "status": 400}
+        try:
+            return {"answer": await state_service.code_call(op, call_params)}
+        except Exception as exc:
+            # Never log params or the message: they can hold file contents and terminal input.
+            logger.error("code call failed: %s", type(exc).__name__)
+            return {"error": "code service unavailable", "status": 500}
+
     async def _goal_command(params: dict[str, Any]) -> dict[str, Any]:
         try:
             return await state_service.goal_command(str(params.get("text", "")))
@@ -816,6 +828,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.hub_knocks": _hub_knocks,
         "state.get_panel": _get_panel,
         "state.panel_action": _panel_action,
+        "state.code_call": _code_call,
         "state.hub_connect": _hub_connect,
         "state.hub_send_msg": _hub_send_msg,
         "state.list_hub_agents": _list_hub_agents,

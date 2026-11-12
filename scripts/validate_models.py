@@ -55,6 +55,9 @@ def validate(data: dict) -> list[str]:
         for field in BOOL_FIELDS:
             if field in info and not isinstance(info[field], bool):
                 errors.append(f"{name}: {field} must be true/false")
+        levels = info.get("effort_levels")
+        if levels is not None and not (isinstance(levels, list) and all(isinstance(x, str) for x in levels)):
+            errors.append(f"{name}: effort_levels must be a list of level names")
 
     updated = data.get("_meta", {}).get("updated")
     if not updated:

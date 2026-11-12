@@ -17,7 +17,7 @@ and where things break.
 there are exactly 4 message flows in the hub. every bug we've
 seen maps to one of these.
 
-  flow 1: human types -> broadcast to peers
+  flow 1: human types -> sent to peers, addressed to its window
   flow 2: LLM emits <hub_msg> -> parse, route, strip, display
   flow 3: agent receives message -> display, inject, trigger LLM
   flow 4: event pipeline mechanics (PRE -> MAIN -> POST)
@@ -26,7 +26,7 @@ seen maps to one of these.
 ## flow 1: human types in agent window
 
 human types in koordinator's input box. the message goes to
-koordinator's LLM AND is broadcast to all peers.
+koordinator's LLM AND to all peers, addressed to koordinator.
 
 ```
   human types "hi lapis"
@@ -41,7 +41,7 @@ koordinator's LLM AND is broadcast to all peers.
     create HubMessage(
       from_agent = "human"
       from_identity = "username"       <-- human name, NOT agent
-      to = "*"                         <-- broadcast
+      to = "koordinator"               <-- its window (was "*" before #659)
       scope = BROADCAST
       metadata = {source_agent: "koordinator"}  <-- which window
     )
@@ -54,10 +54,15 @@ koordinator's LLM AND is broadcast to all peers.
        +---> mailbox file (messenger.py:678)
 ```
 
-key: the broadcast uses from_identity="username" (the human)
+key: the message uses from_identity="username" (the human)
 not "koordinator" (the agent). this is correct -- it identifies
 WHO typed, not WHERE they typed. the source_agent metadata tells
 receivers which window it came from.
+
+to is that window's agent, so peers see "<user> -> koordinator".
+peers observe it and do not answer (the do-not-relay hint). the
+window's own agent gets no copy: its user turn already holds the
+text. before #659, to was "*", so peers saw "<user> -> *".
 
 only the human's own typing is broadcast. skipped: slash commands,
 injected `<sys_msg>` / `[message from` text, attach-mode input, a
