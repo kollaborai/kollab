@@ -328,9 +328,9 @@ async def list_profiles(workspace: _Workspace = ""):
 async def list_choices(workspace: _Workspace = ""):
     """Every provider profile x model x effort to start or switch a session
     on, for the web UI's searchable model picker, for ``workspace``'s own
-    profiles and saved loadouts (empty is the engine's folder). ACP choices
-    are discovered in a short-lived, isolated session when a harness has no
-    fresh options."""
+    profiles (empty is the engine's folder; saved loadouts are not rows, so
+    none is read). ACP choices are discovered in a short-lived, isolated
+    session when a harness has no fresh options."""
     from kollabor_ai.loadout_manager import LoadoutManager
 
     pm = _folder_profile_manager(workspace)
