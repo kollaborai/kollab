@@ -62,6 +62,13 @@ documentation or process maintenance may use its existing authorization as the
 tracked task without a separate issue. Small code fixes still get an issue so
 the PR branch and commit can reference it.
 
+Before feature implementation starts, the feature issue links a spec in
+`docs/specs/` or states that the implementation PR will add one from
+`docs/specs/TEMPLATE.md`. A bug fix records the concise `Fix brief` shape from
+`docs/specs/FIX_BRIEF.md` in the issue or PR body. The DoD check reports missing
+specs or briefs in warning mode; maintainers can switch it to blocking after
+reviewing the open work.
+
 ## Writer worktrees and main integration
 
 - Each active writing lane has one named owner, one unique worktree, and one

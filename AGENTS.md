@@ -9,6 +9,7 @@ Before changing Kollab itself, read
 `bundles/skills/kollab-development/SKILL.md`. This applies to every model,
 including Luna and delegated agents. Include that path in implementation handoffs.
 For relay/DNS/service work, also read its `references/relay-change-guide.md`.
+Feature specs use `docs/specs/TEMPLATE.md`; bug fixes use `docs/specs/FIX_BRIEF.md`.
 
 Kollab is in active development with no established legacy-support obligation.
 Update the current implementation and canonical docs directly;
