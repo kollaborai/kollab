@@ -1,1 +1,1 @@
-- The CI binary build tries its download step up to three times, so a gateway timeout from the package host no longer fails it (flaky-ci-binary-smoke).
+- The CI binary build retries its pex download steps up to four attempts with growing pauses, so a gateway timeout from the package host no longer fails it (flaky-ci-binary-smoke).
