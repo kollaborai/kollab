@@ -10,7 +10,11 @@ ring, with only the socket transport stubbed where it must be.
 from __future__ import annotations
 
 import asyncio
+import shutil
+import tempfile
 import uuid
+from collections.abc import Iterator
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -110,9 +114,22 @@ async def _serve_reply(path: str, reply: str):
     return await asyncio.start_unix_server(handle, path=path)
 
 
+@pytest.fixture
+def short_socket_dir() -> Iterator[Path]:
+    """Bind test sockets from a short /tmp directory.
+
+    AF_UNIX paths cap at 104 bytes and pytest's tmp_path lives deep under
+    ``/var/folders/...`` on macOS, past that limit; the same idiom as the
+    short_socket_dir fixtures in the hub rpc and peer-credential tests.
+    """
+    short_dir = Path(tempfile.mkdtemp(prefix="hubrecv-", dir="/tmp"))
+    yield short_dir
+    shutil.rmtree(short_dir, ignore_errors=True)
+
+
 @pytest.mark.asyncio
-async def test_an_ack_for_another_message_does_not_confirm_this_one(tmp_path):
-    sock = str(tmp_path / "lapis.sock")
+async def test_an_ack_for_another_message_does_not_confirm_this_one(short_socket_dir):
+    sock = str(short_socket_dir / "lapis.sock")
     message = _message()
     server = await _serve_reply(sock, '{"type": "ack", "id": "' + "f" * 32 + '"}')
     try:
@@ -125,8 +142,8 @@ async def test_an_ack_for_another_message_does_not_confirm_this_one(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_an_ack_naming_this_message_confirms_it(tmp_path):
-    sock = str(tmp_path / "lapis.sock")
+async def test_an_ack_naming_this_message_confirms_it(short_socket_dir):
+    sock = str(short_socket_dir / "lapis.sock")
     message = _message()
     server = await _serve_reply(sock, '{"type": "ack", "id": "%s"}' % message.id)
     try:

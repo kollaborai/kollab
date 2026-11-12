@@ -104,6 +104,7 @@ class ConfigHookLoader:
         self.config_service = config_service
         self._hooks_registered: List[str] = []
         self._pending_tasks: set = set()
+        self._shutting_down = False
 
     def _on_pending_task_done(self, task: asyncio.Task) -> None:
         """Remove an async hook task and retrieve failures before cleanup."""
@@ -215,16 +216,114 @@ class ConfigHookLoader:
             logger.info(f"Loaded {count} config hooks from hooks.json")
         return count
 
+    # Seconds a reaped hook child gets to exit on SIGTERM before SIGKILL.
+    REAP_GRACE_SECONDS = 2.0
+
+    @staticmethod
+    async def _reap_child(proc: asyncio.subprocess.Process) -> bool:
+        """Stop a hook's direct child and wait for it to be reaped.
+
+        SIGTERM first, then SIGKILL after a short grace, always awaiting the
+        child's exit: a timed-out or cancelled hook must not leave a process
+        behind. Only the direct child is signalled (the hook starts its own
+        session, so descendants are not hit and no unrelated process is
+        signalled; the child owns its own children). Already-exited children
+        count as reaped. Returns False when cleanup itself failed, so callers
+        can report it instead of claiming a clean shutdown.
+        """
+        if proc.returncode is not None:
+            return True
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            return True
+        except Exception as exc:  # noqa: BLE001 - report cleanup failure
+            logger.warning("hook child terminate failed for pid %s: %s", proc.pid, exc)
+            return False
+        try:
+            await asyncio.wait_for(
+                proc.wait(), timeout=ConfigHookLoader.REAP_GRACE_SECONDS
+            )
+            return True
+        except asyncio.TimeoutError:
+            pass
+        except Exception as exc:  # noqa: BLE001 - report cleanup failure
+            logger.warning("hook child reap failed for pid %s: %s", proc.pid, exc)
+            return False
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            return True
+        except Exception as exc:  # noqa: BLE001 - report cleanup failure
+            logger.warning("hook child kill failed for pid %s: %s", proc.pid, exc)
+            return False
+        try:
+            await proc.wait()
+            return True
+        except Exception:  # noqa: BLE001 - report, never silently claim success
+            logger.warning("hook child reap failed for pid %s", proc.pid)
+            return False
+
+    @staticmethod
+    async def _reap_child_shielded(proc: asyncio.subprocess.Process) -> bool:
+        """Reap the child to completion even under repeated cancellation.
+
+        The awaiting hook task may be cancelled mid-reap (a timeout turning
+        into a cancellation, or shutdown cancelling twice); the cleanup task
+        is shielded so escalation always reaches SIGKILL and the exit wait.
+        """
+        cleanup_task = asyncio.create_task(ConfigHookLoader._reap_child(proc))
+        while True:
+            try:
+                return await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                if cleanup_task.done():
+                    return cleanup_task.result()
+
     async def shutdown(self) -> None:
-        """Wait for pending async hook tasks to finish before exit."""
-        if self._pending_tasks:
-            logger.debug(f"Waiting for {len(self._pending_tasks)} pending hook tasks")
-            done, _ = await asyncio.wait(self._pending_tasks, timeout=5)
-            # Cancel any that didn't finish in time
-            for task in self._pending_tasks:
+        """Wait for pending async hook tasks to finish before exit.
+
+        Tasks that do not finish in time are cancelled and awaited THROUGH
+        their cleanup: dropping ownership here would leave a hook's child
+        process running after Kollab exits (#930). Tasks that raise during
+        cleanup are reported, not silently claimed as a clean shutdown.
+        """
+        self._shutting_down = True
+        if not self._pending_tasks:
+            return
+        logger.debug(f"Waiting for {len(self._pending_tasks)} pending hook tasks")
+        deadline = asyncio.get_running_loop().time() + 5
+        while self._pending_tasks:
+            snapshot = set(self._pending_tasks)
+            remaining = max(0, deadline - asyncio.get_running_loop().time())
+            if remaining:
+                done, pending = await asyncio.wait(snapshot, timeout=remaining)
+                self._pending_tasks.difference_update(done)
+            else:
+                pending = snapshot
+
+            # A matching async hook may have registered while the snapshot was
+            # being awaited. Include it in this shutdown pass instead of
+            # clearing ownership while it is still running.
+            pending.update(self._pending_tasks - snapshot)
+            if not pending:
+                continue
+            for task in pending:
                 if not task.done():
                     task.cancel()
-            self._pending_tasks.clear()
+            results = await asyncio.gather(*pending, return_exceptions=True)
+            failures = [
+                result
+                for result in results
+                if isinstance(result, BaseException)
+                and not isinstance(result, asyncio.CancelledError)
+            ]
+            if failures:
+                logger.warning(
+                    "hook shutdown: %s task(s) raised during cancellation cleanup",
+                    len(failures),
+                )
+            self._pending_tasks.difference_update(pending)
 
     def _load_hooks_config(self) -> Optional[Dict[str, Any]]:
         """Load and merge hooks.json from project and global locations.
@@ -379,6 +478,8 @@ class ConfigHookLoader:
 
             if is_async:
                 # Fire and forget with cleanup tracking
+                if self._shutting_down:
+                    return None
                 task = asyncio.create_task(
                     self._run_command(command, payload_json, timeout)
                 )
@@ -488,8 +589,23 @@ class ConfigHookLoader:
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+            # One escalation policy for both boundaries: the hook's child is
+            # reaped (SIGTERM, short grace, SIGKILL) and waited for. The
+            # shield keeps a cancellation landing mid-cleanup from stranding
+            # a SIGTERM'd-but-unkilled child (#930).
+            if not await self._reap_child_shielded(proc):
+                logger.warning(
+                    "timed-out hook left its child running: pid %s", proc.pid
+                )
+            raise
+        except asyncio.CancelledError:
+            # A cancelled hook task must not leave its child executing after
+            # the task is gone (#930). The shield also holds off repeated
+            # cancellation until escalation and reaping complete.
+            if not await self._reap_child_shielded(proc):
+                logger.warning(
+                    "cancelled hook left its child running: pid %s", proc.pid
+                )
             raise
         return (
             proc.returncode or 0,
