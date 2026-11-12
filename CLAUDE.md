@@ -5,6 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 Before maintaining Kollab, read `bundles/skills/kollab-development/SKILL.md`.
 It defines the unreleased development policy, current-implementation workflow,
 agent handoff requirements, and conditional relay operations guide.
+Feature specs use `docs/specs/TEMPLATE.md`; bug fixes use `docs/specs/FIX_BRIEF.md`.
 
 ## Project Overview
 
