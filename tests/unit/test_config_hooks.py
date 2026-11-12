@@ -813,6 +813,46 @@ class TestHookProcessReaping:
         assert late.done()
         assert loader._pending_tasks == set()
 
+    MARKER_SCRIPT = (
+        "import sys\n"
+        "with open(sys.argv[1], 'a') as handle:\n"
+        "    handle.write('x')\n"
+    )
+
+    @pytest.mark.asyncio
+    async def test_shutdown_gate_blocks_async_hook_admission(self, loader, tmp_path):
+        marker = tmp_path / "hook.ran"
+        command = (
+            f"{sys.executable} -c {shlex.quote(self.MARKER_SCRIPT)}"
+            f" {shlex.quote(str(marker))}"
+        )
+        callback = loader._build_hook_callback(
+            command=command,
+            event_type=EventType.SYSTEM_STARTUP,
+            event_name="SessionStart",
+            matcher="",
+            timeout=5,
+            is_async=True,
+            failure_filter=False,
+        )
+        event = Event(type=EventType.SYSTEM_STARTUP, data={}, source="test")
+
+        # Control: before shutdown, the async trigger path admits the hook.
+        assert await callback(event.data, event) is None
+        assert len(loader._pending_tasks) == 1
+        admitted = next(iter(loader._pending_tasks))
+        await asyncio.wait_for(admitted, timeout=10)
+        await asyncio.sleep(0.05)
+        assert loader._pending_tasks == set()
+        assert marker.read_text() == "x"
+
+        # Once shutdown has begun, the same trigger path admits nothing.
+        loader._shutting_down = True
+        assert await callback(event.data, event) is None
+        assert loader._pending_tasks == set()
+        await asyncio.sleep(0.3)
+        assert marker.read_text() == "x"
+
     @pytest.mark.asyncio
     async def test_repeated_shutdown_is_quiet(self, loader):
         await loader.shutdown()
