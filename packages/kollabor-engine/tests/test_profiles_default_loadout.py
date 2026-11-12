@@ -217,6 +217,35 @@ async def test_the_model_picker_lists_the_chosen_folder_s_own_profiles(
     assert not any(name == "folder-private" for name, _model in names(own["choices"]))
 
 
+@pytest.mark.asyncio
+async def test_a_folder_with_no_own_config_is_not_offered_the_engines_folder_s_profiles(
+    tmp_path, tmp_path_is_home, monkeypatch
+):
+    """A chosen folder with no own .kollab/config.json reads no local layer at
+    all (#972): the engine folder's own private profile is not listed or
+    offered for it, the same wrong-folder read the other way round."""
+    import kollabor_engine.routes.profiles as profile_routes
+
+    async def no_catalog_refresh(self):
+        return None
+
+    monkeypatch.setattr(
+        "kollabor_ai.loadout_manager.LoadoutManager.refresh_catalogs", no_catalog_refresh
+    )
+
+    folder = tmp_path / "chosen"
+    folder.mkdir()
+    engine_folder = tmp_path / "engine"
+    _write_folder_config(engine_folder, profiles=_FOLDER_PROFILE)
+    monkeypatch.chdir(engine_folder)
+
+    listed = await profile_routes.list_profiles(workspace=str(folder))
+    assert "folder-private" not in [p["name"] for p in listed["profiles"]]
+
+    picked = await profile_routes.list_choices(workspace=str(folder))
+    assert not any(row["profile"] == "folder-private" for row in picked["choices"])
+
+
 def _pollers():
     """Config services still polling their file on this loop."""
     return [task for task in asyncio.all_tasks() if task.get_name() == "config-mtime-poll" and not task.done()]
