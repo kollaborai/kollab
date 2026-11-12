@@ -259,6 +259,36 @@ async def test_acp_says_sent_only_when_the_recipient_confirmed():
 
 
 @pytest.mark.asyncio
+async def test_acp_hub_spawn_forwards_explicit_identity():
+    handler = AsyncMock(
+        return_value=ToolExecutionResult(
+            tool_id="spawn",
+            tool_type="hub_spawn",
+            success=True,
+            output="created",
+        )
+    )
+    hub = SimpleNamespace(_identity=SimpleNamespace(identity="jasper"), _handle_hub_spawn_tool=handler)
+    tools = ACPHubTools(hub)
+
+    result = await tools.call(
+        "hub_spawn",
+        {
+            "name": "coder",
+            "identity": "kollabor",
+            "task": "review the work",
+            "llm": "codex-cli",
+        },
+    )
+
+    assert result["success"]
+    call = handler.await_args.args[0]
+    assert call["input"]["name"] == "coder"
+    assert call["input"]["identity"] == "kollabor"
+    assert call["input"]["llm"] == "codex-cli"
+
+
+@pytest.mark.asyncio
 async def test_acp_does_not_call_a_queued_message_sent():
     tools = _acp_with(_delivery_result("queued", []))
 
