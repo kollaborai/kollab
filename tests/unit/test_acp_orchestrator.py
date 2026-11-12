@@ -889,12 +889,17 @@ class Hub:
 class Bus:
     def __init__(self):
         self.services = {"display_tap": Tap()}
+        self.emitted = []
 
     def get_service(self, name):
         return self.services.get(name)
 
     def register_service(self, name, service):
         self.services[name] = service
+
+    async def emit_with_hooks(self, event_type, data, source):
+        self.emitted.append((event_type, data))
+        return {}
 
 
 class FakeRunner:

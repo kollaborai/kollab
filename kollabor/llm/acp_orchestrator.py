@@ -22,6 +22,7 @@ from typing import Any
 
 from kollabor.user_input_source import HUMAN_USER_INPUT_SOURCES
 from kollabor_ai.profile_manager import EFFORT_LEVELS, LLMProfile
+from kollabor_events import EventType
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import publish_semantic
 from kollabor_tui.terminal_state import TerminalMode
@@ -900,7 +901,8 @@ class ACPOrchestrator:
         message is already in the conversation; this drops the buffer so no
         harness is offered them again. A message that still has no history row
         is kept, and no turn starts. Each history write is awaited first. True
-        means the native continuation can safely read every kept message.
+        means the native continuation can safely read every kept message, and
+        the one turn that answers them has been started here.
         """
         self.observations_held = False
         if not self._observation_count and not self._unwritten_observations:
@@ -936,6 +938,14 @@ class ACPOrchestrator:
         settled = [task for task in writes if task is not None]
         if settled:
             await asyncio.gather(*settled, return_exceptions=True)
+        # Every switch into a native profile ends here (coordinator, state RPC,
+        # loadout activation, the fallback plugin); the turn that answers the
+        # buffered messages starts with this event (#560).
+        await self.event_bus.emit_with_hooks(
+            EventType.TRIGGER_LLM_CONTINUE,
+            {"source": "acp_handover", "content": ""},
+            "acp_orchestrator",
+        )
         return True
 
     def _write_history_row(self, row_id: str, text: str) -> bool:

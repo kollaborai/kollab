@@ -201,9 +201,10 @@ class _Harness:
     """The ACP orchestrator as a switch sees it: its fence on new prompts, over
     a runner busy while a prompt runs or waits."""
 
-    def __init__(self, *prompts, kept=0):
+    def __init__(self, *prompts, kept=0, bus=None):
         self.closing_reason, self.prompts, self.runner = "", list(prompts), self
         self.held, self.released, self.active, self.kept, self.handed = False, [], True, kept, 0
+        self.bus = bus
 
     @property
     def busy(self):
@@ -222,7 +223,16 @@ class _Harness:
 
     async def hand_over_to_native(self):
         self.held, self.handed = False, self.handed + 1
-        return self.kept > 0
+        if self.kept > 0:
+            # The real orchestrator starts the answering turn itself (#560).
+            if self.bus is not None:
+                await self.bus.emit_with_hooks(
+                    EventType.TRIGGER_LLM_CONTINUE,
+                    {"source": "acp_handover", "content": ""},
+                    "acp_orchestrator",
+                )
+            return True
+        return False
 
     def admit(self, text):
         if self.closing_reason:
@@ -275,7 +285,7 @@ async def test_a_native_fallback_answers_the_peer_messages_kept_for_it(monkeypat
     # Selenite on #549 round 6: activating a native profile closed the harness,
     # and nothing answered the messages it had kept for the switch.
     plugin, bus, tap, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
-    harness = _Harness(kept=2)
+    harness = _Harness(kept=2, bus=bus)
     bus.register_service("acp_orchestrator", harness)
     activate = _Loadouts.activate
 

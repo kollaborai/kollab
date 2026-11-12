@@ -261,10 +261,10 @@ class ModelFallbackPlugin(BasePlugin):
             held.release_observations(flush=False)
         elif getattr(held, "active", False):
             held.release_observations(flush=True)
-        elif await held.hand_over_to_native() and self.event_bus is not None:
-            await self.event_bus.emit_with_hooks(
-                EventType.TRIGGER_LLM_CONTINUE, {"source": "model_fallback"}, "model_fallback"
-            )
+        else:
+            # The handover starts the native turn itself (#560); the switch that
+            # already ran it inside the activation finds nothing left to write.
+            await held.hand_over_to_native()
 
     # -- switching ------------------------------------------------------------
 
