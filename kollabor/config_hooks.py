@@ -238,9 +238,7 @@ class ConfigHookLoader:
         except ProcessLookupError:
             return True
         except Exception as exc:  # noqa: BLE001 - report cleanup failure
-            logger.warning(
-                "hook child terminate failed for pid %s: %s", proc.pid, exc
-            )
+            logger.warning("hook child terminate failed for pid %s: %s", proc.pid, exc)
             return False
         try:
             await asyncio.wait_for(
@@ -596,14 +594,18 @@ class ConfigHookLoader:
             # shield keeps a cancellation landing mid-cleanup from stranding
             # a SIGTERM'd-but-unkilled child (#930).
             if not await self._reap_child_shielded(proc):
-                logger.warning("timed-out hook left its child running: pid %s", proc.pid)
+                logger.warning(
+                    "timed-out hook left its child running: pid %s", proc.pid
+                )
             raise
         except asyncio.CancelledError:
             # A cancelled hook task must not leave its child executing after
             # the task is gone (#930). The shield also holds off repeated
             # cancellation until escalation and reaping complete.
             if not await self._reap_child_shielded(proc):
-                logger.warning("cancelled hook left its child running: pid %s", proc.pid)
+                logger.warning(
+                    "cancelled hook left its child running: pid %s", proc.pid
+                )
             raise
         return (
             proc.returncode or 0,

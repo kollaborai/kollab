@@ -606,7 +606,7 @@ class TestHookProcessReaping:
     def test_process_reaping_tests_avoid_platform_specific_commands(self):
         source = Path(__file__).read_text()
 
-        assert 'create_subprocess_exec(' + '"true"' + ')' not in source
+        assert "create_subprocess_exec(" + '"true"' + ")" not in source
         assert "signal." + "SIGKILL" not in source
 
     def test_windows_pid_probe_uses_process_query_api(self):
@@ -676,7 +676,9 @@ class TestHookProcessReaping:
             "    handle.write(str(os.getpid()))\n"
             "time.sleep(60)\n"
         )
-        command = f"{sys.executable} -c {shlex.quote(script)} {shlex.quote(str(pid_path))}"
+        command = (
+            f"{sys.executable} -c {shlex.quote(script)} {shlex.quote(str(pid_path))}"
+        )
         task = asyncio.create_task(loader._run_command(command, "{}", timeout=30))
         for _ in range(100):
             if pid_path.exists():
@@ -692,9 +694,7 @@ class TestHookProcessReaping:
             reap_started.set()
             return await reap_child(proc)
 
-        monkeypatch.setattr(
-            ConfigHookLoader, "_reap_child", staticmethod(observe_reap)
-        )
+        monkeypatch.setattr(ConfigHookLoader, "_reap_child", staticmethod(observe_reap))
         monkeypatch.setattr(ConfigHookLoader, "REAP_GRACE_SECONDS", 1)
 
         task.cancel()
@@ -738,7 +738,10 @@ class TestHookProcessReaping:
             "    handle.write(str(os.getpid()))\n"
             "time.sleep(60)\n"
         )
-        command = f"{sys.executable} -c {shlex.quote(script)} {shlex.quote(str(pid_path))} {shlex.quote(str(term_path))}"
+        command = (
+            f"{sys.executable} -c {shlex.quote(script)}"
+            f" {shlex.quote(str(pid_path))} {shlex.quote(str(term_path))}"
+        )
         task = asyncio.create_task(loader._run_command(command, "{}", timeout=1))
         for _ in range(100):
             if pid_path.exists():
@@ -773,7 +776,9 @@ class TestHookProcessReaping:
         assert loader._pending_tasks == set()
 
     @pytest.mark.asyncio
-    async def test_shutdown_drains_tasks_added_during_cleanup(self, loader, monkeypatch):
+    async def test_shutdown_drains_tasks_added_during_cleanup(
+        self, loader, monkeypatch
+    ):
         cleanup_started = asyncio.Event()
         release_cleanup = asyncio.Event()
         late_task_cancelled = asyncio.Event()
@@ -886,7 +891,9 @@ class TestHookProcessReaping:
             await reap_child(proc)
             return False
 
-        monkeypatch.setattr(ConfigHookLoader, "_reap_child", staticmethod(refusing_reap))
+        monkeypatch.setattr(
+            ConfigHookLoader, "_reap_child", staticmethod(refusing_reap)
+        )
         pid_path = tmp_path / "child.pid"
         task, pid = await self._start_child(loader, pid_path)
         caplog.set_level(logging.WARNING)
