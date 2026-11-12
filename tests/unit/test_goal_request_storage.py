@@ -205,3 +205,222 @@ def test_competing_different_inputs_with_same_submission_key_do_not_both_stage(t
     assert len(stores[0].pending_attachment_requests('a')) == 1
     for store in stores:
         store.close()
+
+
+# --- #540: bounded retention of submission identities -----------------------
+
+DAY = 24 * 3600
+ATTACHMENT_SUBMISSION_REPLAY_S = 7 * DAY  # the documented replay promise
+
+
+class _Clock:
+    def __init__(self, now: float = 1_000_000.0):
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _identity_rows(db):
+    import sqlite3
+
+    conn = sqlite3.connect(str(db))
+    try:
+        return conn.execute("SELECT * FROM goal_attachment_submissions").fetchall()
+    finally:
+        conn.close()
+
+
+def _stage(store, key="key", uid="a", fingerprint="fp"):
+    return store.stage_attachment_submission(key, uid, fingerprint, "/goal same", [{"ref": "same"}])
+
+
+def test_discarded_identity_is_refused_inside_window_and_dropped_after_it(tmp_path):
+    db, clock = tmp_path / "goals.db", _Clock()
+    store = GoalStore(db, clock=clock)
+    first = _stage(store)
+    assert store.discard_attachment_request("a", first["request_id"])
+
+    clock.now += ATTACHMENT_SUBMISSION_REPLAY_S - 1
+    inside = _stage(store)
+    assert inside["discarded"] and not inside["created"]
+    assert store.pending_attachment_requests("a") == []
+
+    clock.now += 2  # past the boundary
+    after = _stage(store)
+    assert after["created"] and not after["discarded"]
+    assert after["request_id"] != first["request_id"]
+    assert len(store.pending_attachment_requests("a")) == 1
+    assert len(_identity_rows(db)) == 1  # the old tombstone is gone, not accumulating
+    store.close()
+
+
+def test_settled_identities_do_not_accumulate(tmp_path):
+    db, clock = tmp_path / "goals.db", _Clock()
+    store = GoalStore(db, clock=clock)
+    for index in range(20):
+        saved = _stage(store, key=f"key-{index}", fingerprint=f"fp-{index}")
+        assert store.discard_attachment_request("a", saved["request_id"])
+    assert len(_identity_rows(db)) == 20
+    clock.now += ATTACHMENT_SUBMISSION_REPLAY_S + 1
+    _stage(store, key="fresh", fingerprint="fp-fresh")
+    assert len(_identity_rows(db)) == 1
+    store.close()
+
+
+def test_committed_receipt_is_kept_inside_window_then_dropped_without_a_second_goal(tmp_path):
+    db, clock = tmp_path / "goals.db", _Clock()
+    store = GoalStore(db, clock=clock)
+    saved = _stage(store)
+    goal = store.create("a", "same", "/repo", attachment_request_id=saved["request_id"])
+
+    clock.now += ATTACHMENT_SUBMISSION_REPLAY_S - 1
+    inside = store.attachment_submission("key", "a", "fp")
+    assert inside["goal_id"] == goal.goal_id
+
+    clock.now += 2
+    assert store.attachment_submission("key", "a", "fp") is None
+    replay = _stage(store)
+    assert replay["created"] and replay["goal_id"] is None
+    # the original goal is untouched and the replay did not create another
+    assert store.get(goal.goal_id).objective == "same"
+    store.close()
+
+
+def test_pending_identity_never_expires(tmp_path):
+    db, clock = tmp_path / "goals.db", _Clock()
+    store = GoalStore(db, clock=clock)
+    saved = _stage(store)
+    clock.now += 10 * ATTACHMENT_SUBMISSION_REPLAY_S
+    store.close()
+    store = GoalStore(db, clock=clock)  # restart long after the window
+    again = _stage(store)
+    assert not again["created"] and again["request_id"] == saved["request_id"]
+    assert len(store.pending_attachment_requests("a")) == 1
+    store.close()
+
+
+def test_window_runs_from_settlement_not_from_first_submission(tmp_path):
+    db, clock = tmp_path / "goals.db", _Clock()
+    store = GoalStore(db, clock=clock)
+    saved = _stage(store)
+    clock.now += 3 * ATTACHMENT_SUBMISSION_REPLAY_S  # pending for a long time
+    assert store.discard_attachment_request("a", saved["request_id"])
+    clock.now += 60  # a prompt retry right after the discard
+    retry = _stage(store)
+    assert retry["discarded"] and not retry["created"]
+    assert store.pending_attachment_requests("a") == []
+    store.close()
+
+
+def test_expiry_survives_restart_and_keeps_conversations_isolated(tmp_path):
+    from kollabor.state.goal_store import GoalSubmissionConflict
+
+    db, clock = tmp_path / "goals.db", _Clock()
+    store = GoalStore(db, clock=clock)
+    saved = _stage(store)
+    assert store.discard_attachment_request("a", saved["request_id"])
+    store.close()
+
+    store = GoalStore(db, clock=clock)  # restart inside the window keeps the tombstone
+    assert _stage(store)["discarded"]
+    with pytest.raises(GoalSubmissionConflict):  # another conversation still cannot read it
+        store.attachment_submission("key", "b", "fp")
+    store.close()
+
+    clock.now += ATTACHMENT_SUBMISSION_REPLAY_S + 1
+    store = GoalStore(db, clock=clock)  # restart after the window drops it
+    assert _identity_rows(db) == []
+    other = _stage(store, uid="b")
+    assert other["created"]
+    store.close()
+
+
+def test_replay_discard_and_expiry_race_never_duplicate_or_resurrect(tmp_path):
+    db, clock = tmp_path / "goals.db", _Clock()
+    stores = [GoalStore(db, clock=clock) for _ in range(4)]
+    saved = _stage(stores[0])
+    request_id = saved["request_id"]
+
+    def worker(index):
+        if index == 0:
+            return ("discard", stores[0].discard_attachment_request("a", request_id))
+        return ("replay", _stage(stores[index]))
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(worker, range(4)))
+    replays = [value for kind, value in results if kind == "replay"]
+    assert all(not item["created"] and item["request_id"] == request_id for item in replays)
+    assert stores[0].pending_attachment_requests("a") == []
+
+    clock.now += ATTACHMENT_SUBMISSION_REPLAY_S + 1
+
+    def post_window(index):
+        return _stage(stores[index])
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        later = list(pool.map(post_window, range(4)))
+    assert sum(item["created"] for item in later) == 1  # exactly one new request, never two
+    assert len({item["request_id"] for item in later}) == 1
+    assert len(stores[0].pending_attachment_requests("a")) == 1
+    for store in stores:
+        store.close()
+
+
+def test_identity_rows_hold_no_command_text_or_artifact_paths(tmp_path):
+    db = tmp_path / "goals.db"
+    store = GoalStore(db, clock=_Clock())
+    store.stage_attachment_submission(
+        "hashed-key", "a", "hashed-fp", "/goal secret-text data:image/png;base64,AAAA",
+        [{"ref": "/home/operator/.kollab/goals/artifacts/deadbeef.png"}],
+    )
+    flattened = " ".join(str(value) for row in _identity_rows(db) for value in row)
+    assert "secret-text" not in flattened and "artifacts" not in flattened and "base64" not in flattened
+    store.close()
+
+
+def test_store_created_before_retention_column_is_upgraded_in_place(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "goals.db"
+    GoalStore(db).close()
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        DROP TABLE goal_attachment_submissions;
+        CREATE TABLE goal_attachment_submissions (
+            submission_key TEXT PRIMARY KEY, conversation_uid TEXT NOT NULL,
+            fingerprint TEXT NOT NULL, request_id TEXT NOT NULL UNIQUE);
+        """
+    )
+    conn.commit()
+    conn.close()
+    clock = _Clock()
+    store = GoalStore(db, clock=clock)  # must open, and keep the pending identity
+    store.stage_attachment_submission("old", "a", "fp", "/goal x", [{"ref": "x"}])
+    assert store.attachment_submission("old", "a", "fp") is not None
+    store.close()
+
+
+def test_documented_replay_window_is_seven_days():
+    from kollabor.state.goal_store import ATTACHMENT_SUBMISSION_REPLAY_S as window
+
+    assert window == ATTACHMENT_SUBMISSION_REPLAY_S
+
+
+def test_submission_expiry_crossing_boundary_prunes_and_reuses_key_atomically(tmp_path):
+    db, clock = tmp_path / "goals.db", _Clock()
+    store = GoalStore(db, clock=clock)
+    first = _stage(store)
+    assert store.discard_attachment_request("a", first["request_id"])
+    settled_at = clock.now
+
+    reads = iter((settled_at + ATTACHMENT_SUBMISSION_REPLAY_S,
+                  settled_at + ATTACHMENT_SUBMISSION_REPLAY_S + 0.001,
+                  settled_at + ATTACHMENT_SUBMISSION_REPLAY_S + 0.001))
+    store._clock = lambda: next(reads)
+    replay = _stage(store)
+
+    assert not replay["created"] and replay["discarded"]
+    assert replay["request_id"] == first["request_id"]
+    store.close()
