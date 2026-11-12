@@ -253,6 +253,15 @@ class StateService(Protocol):
         """
         ...
 
+    async def code_call(self, op: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Run one code-editor operation (files, git or terminal) in this daemon's folder (#987).
+
+        ``op`` is one of ``kollabor.code_service.OPS``. Returns ``{"status": int, "body": dict}``, the HTTP answer the
+        engine passes on. A remote service asks the daemon it is connected to, so the folder, git and shell are the
+        remote computer's. Params can hold file contents and terminal input: never log them.
+        """
+        ...
+
     async def open_generated_artifact(self, media_id: str) -> bool:
         """Open a session-private generated image by opaque media ID.
 

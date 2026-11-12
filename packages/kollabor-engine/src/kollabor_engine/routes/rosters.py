@@ -1,12 +1,12 @@
 """Persona roster routes: the JSON libraries behind agent names (docs/specs/rosters-and-teams.md)."""
 
 import mimetypes
-import os
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Query  # type: ignore[import-not-found]
 from fastapi.responses import FileResponse  # type: ignore[import-not-found]
+
+from ..workspace_folder import folder_or_400
 
 router = APIRouter(prefix="/rosters", tags=["rosters"])
 
@@ -16,11 +16,11 @@ AVATAR_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
 
 
 def folder_of(workspace: Optional[str]) -> str:
-    """The folder whose project rosters and teams apply: ``workspace``, else this engine's."""
-    folder = workspace or os.getcwd()
-    if not Path(folder).is_dir():
-        raise HTTPException(status_code=400, detail=f"workspace does not exist: {folder}")
-    return os.path.realpath(folder)
+    """The folder whose project rosters and teams apply: ``workspace``, else this engine's.
+
+    The engine's folder rule decides which folders a request may name (workspace_folder.py).
+    """
+    return folder_or_400(workspace)
 
 
 def load(folder: str):
@@ -56,15 +56,19 @@ def persona_dict(persona: Any) -> Dict[str, Any]:
     }
 
 
-def apply_persona(body: Any) -> None:
-    """Fill a session request from the persona its ``identity`` names. What the caller set wins."""
+def apply_persona(body: Any, workspace: Optional[str] = None) -> None:
+    """Fill a session request from the persona its ``identity`` names. What the caller set wins.
+
+    ``workspace`` is the folder the engine's folder rule passed (POST /sessions); a caller that
+    holds only the request falls back to the request's own.
+    """
     if not body.identity:
         return
     try:
         from plugins.hub.rosters import find_persona
     except ImportError:
         return
-    persona = find_persona(body.identity, body.workspace)
+    persona = find_persona(body.identity, workspace if workspace is not None else body.workspace)
     if persona is None:
         return
     body.agent = body.agent or persona.agent or None

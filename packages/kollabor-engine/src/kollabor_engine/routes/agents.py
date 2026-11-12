@@ -11,6 +11,7 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request, Response  # 
 from ..folders import agents_in_folder, hub_folder
 from ..gem_appearance import load_appearance, record_births, save_appearance
 from ..hub_bridge import HubBridge
+from ..workspace_folder import folder_or_400
 from .rosters import avatar_descriptor, persona_dict
 
 # plugins.hub.models.COORDINATOR_IDENTITY; kept here so the route imports no plugin.
@@ -172,7 +173,7 @@ async def list_agent_pool(
     folder's wins when a name runs in several). ``live`` lists every running
     agent in that scope, one per process, so a row finds its own by ``agent_id``.
     """
-    folder = os.path.realpath(os.path.expanduser(workspace)) if workspace else os.path.realpath(os.getcwd())
+    folder = folder_or_400(workspace)
     pool = pool_identities(folder)
     live = [
         agent
@@ -361,11 +362,10 @@ async def list_agent_bundles(
     except ImportError:
         return {"bundles": [], "count": 0}
 
+    folder = folder_or_400(workspace) if workspace else None
     bundles: list = []
     try:
-        manager = AgentManager(
-            project_path=Path(workspace).expanduser().resolve() if workspace else None
-        )
+        manager = AgentManager(project_path=Path(folder) if folder else None)
         for agent in manager.list_agents():
             description = str(getattr(agent, "description", "") or "")
             profile = getattr(agent, "profile", None)

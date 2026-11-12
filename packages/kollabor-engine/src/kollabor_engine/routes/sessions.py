@@ -33,6 +33,7 @@ from ..hub_bridge import HubBridge, network_daemons
 from ..network_aggregate import merge_view_and_memberships
 from ..server import get_session_registry, open_named_session
 from ..session import INLINE_PROFILE, EngineSession
+from ..workspace_folder import folder_or_400
 from .rosters import apply_persona
 from .workspaces import remember_workspace
 
@@ -310,13 +311,17 @@ async def create_session(body: CreateSessionRequest, request: Request):
     # Resolve user_token: body takes priority, header is fallback (proxy injects it)
     user_token = body.user_token or request.headers.get("x-mentiko-session-token")
 
+    # The one folder rule (workspace_folder.py) runs before anything starts. Everything below reads the
+    # checked folder, never the request's own text.
+    workspace = folder_or_400(body.workspace) if body.workspace else None
+
     # A persona names its own bundle and profile; what the caller set wins.
-    apply_persona(body)
+    apply_persona(body, workspace)
 
     # Resolve agent definition if requested
     agent_data = None
     if body.agent:
-        agent_data = _resolve_agent(body.agent, body.workspace)
+        agent_data = _resolve_agent(body.agent, workspace)
         if agent_data is None:
             raise HTTPException(
                 status_code=404, detail=f"Agent '{body.agent}' not found"
@@ -464,7 +469,7 @@ async def create_session(body: CreateSessionRequest, request: Request):
                 session_id=session_id,
                 profile=profile,
                 approval_mode=body.approval_mode,
-                workspace=body.workspace,
+                workspace=workspace,
                 system_prompt=safe_system_prompt,
                 mcp_server_names=effective_mcp_servers,
                 user_token=user_token,
