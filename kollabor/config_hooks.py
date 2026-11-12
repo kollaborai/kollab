@@ -266,6 +266,22 @@ class ConfigHookLoader:
             logger.warning("hook child reap failed for pid %s", proc.pid)
             return False
 
+    @staticmethod
+    async def _reap_child_shielded(proc: asyncio.subprocess.Process) -> bool:
+        """Reap the child to completion even under repeated cancellation.
+
+        The awaiting hook task may be cancelled mid-reap (a timeout turning
+        into a cancellation, or shutdown cancelling twice); the cleanup task
+        is shielded so escalation always reaches SIGKILL and the exit wait.
+        """
+        cleanup_task = asyncio.create_task(ConfigHookLoader._reap_child(proc))
+        while True:
+            try:
+                return await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                if cleanup_task.done():
+                    return cleanup_task.result()
+
     async def shutdown(self) -> None:
         """Wait for pending async hook tasks to finish before exit.
 
@@ -576,24 +592,17 @@ class ConfigHookLoader:
             )
         except asyncio.TimeoutError:
             # One escalation policy for both boundaries: the hook's child is
-            # reaped (SIGTERM, short grace, SIGKILL) and waited for.
-            if not await self._reap_child(proc):
+            # reaped (SIGTERM, short grace, SIGKILL) and waited for. The
+            # shield keeps a cancellation landing mid-cleanup from stranding
+            # a SIGTERM'd-but-unkilled child (#930).
+            if not await self._reap_child_shielded(proc):
                 logger.warning("timed-out hook left its child running: pid %s", proc.pid)
             raise
         except asyncio.CancelledError:
             # A cancelled hook task must not leave its child executing after
-            # the task is gone (#930). Keep the cleanup task shielded so a
-            # repeated cancellation cannot interrupt escalation and reaping.
-            cleanup_task = asyncio.create_task(self._reap_child(proc))
-            while True:
-                try:
-                    reaped = await asyncio.shield(cleanup_task)
-                    break
-                except asyncio.CancelledError:
-                    if cleanup_task.done():
-                        reaped = cleanup_task.result()
-                        break
-            if not reaped:
+            # the task is gone (#930). The shield also holds off repeated
+            # cancellation until escalation and reaping complete.
+            if not await self._reap_child_shielded(proc):
                 logger.warning("cancelled hook left its child running: pid %s", proc.pid)
             raise
         return (
