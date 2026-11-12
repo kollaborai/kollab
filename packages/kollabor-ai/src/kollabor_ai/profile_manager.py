@@ -1851,9 +1851,13 @@ class ProfileManager:
                 for path in get_local_config_path_candidates(self._local_folder)
                 if path.exists()
             ),
-            get_local_config_path(),
+            # A chosen folder with no own config reads no local layer: falling
+            # back to this engine folder's own config would list its private
+            # profiles for the chosen workspace (#972). None keeps today's
+            # behavior for the engine's own folder.
+            get_local_config_path() if self._local_folder is None else None,
         )
-        if local_config.exists():
+        if local_config and local_config.exists():
             config_data = _read_config(local_config)
             llm_config = config_data.get("kollabor", {}).get("llm", {})
             local_profiles = llm_config.get("profiles", {}) or {}
