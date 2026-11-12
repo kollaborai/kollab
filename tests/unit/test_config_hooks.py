@@ -722,6 +722,46 @@ class TestHookProcessReaping:
         await self._assert_gone(pid)
 
     @pytest.mark.asyncio
+    @pytest.mark.skipif(os.name == "nt", reason="SIGTERM is not catchable on Windows")
+    async def test_cancellation_during_timeout_reap_still_kills_child(
+        self, loader, tmp_path
+    ):
+        pid_path = tmp_path / "child.pid"
+        term_path = tmp_path / "child.term"
+        script = (
+            "import os, signal, sys, time\n"
+            "def _noted(signum, frame):\n"
+            "    with open(sys.argv[2], 'w') as handle:\n"
+            "        handle.write('term')\n"
+            "signal.signal(signal.SIGTERM, _noted)\n"
+            "with open(sys.argv[1], 'w') as handle:\n"
+            "    handle.write(str(os.getpid()))\n"
+            "time.sleep(60)\n"
+        )
+        command = f"{sys.executable} -c {shlex.quote(script)} {shlex.quote(str(pid_path))} {shlex.quote(str(term_path))}"
+        task = asyncio.create_task(loader._run_command(command, "{}", timeout=1))
+        for _ in range(100):
+            if pid_path.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert pid_path.exists(), "child never wrote its pid"
+        pid = int(pid_path.read_text())
+
+        # The timeout branch has fired and SIGTERM was delivered (the child
+        # noted it); the reap is now inside its grace window, before SIGKILL.
+        for _ in range(100):
+            if term_path.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert term_path.exists(), "timeout reap never signalled the child"
+        await asyncio.sleep(0.3)
+        task.cancel()
+        with pytest.raises((asyncio.TimeoutError, asyncio.CancelledError)):
+            await task
+
+        await self._assert_gone(pid)
+
+    @pytest.mark.asyncio
     async def test_loader_shutdown_reaps_through_cleanup(self, loader, tmp_path):
         task, pid = await self._start_child(loader, tmp_path / "child.pid")
         loader._pending_tasks.add(task)
