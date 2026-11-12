@@ -336,9 +336,16 @@ CREATE TABLE IF NOT EXISTS goal_attachment_submissions (
     submission_key TEXT PRIMARY KEY,
     conversation_uid TEXT NOT NULL,
     fingerprint TEXT NOT NULL,
-    request_id TEXT NOT NULL UNIQUE
+    request_id TEXT NOT NULL UNIQUE,
+    settled_at REAL
 );
 """
+
+# How long a settled (committed or discarded) image submission keeps answering
+# replays of its client request ID. A pending submission is never expired. After
+# the window the identity is dropped and the same ID is admitted as a new
+# submission (docs/features/goal-command.md, "Replay window").
+ATTACHMENT_SUBMISSION_REPLAY_S = 7 * 24 * 3600
 
 # Record fields a caller may update through transition()/update_fields().
 _UPDATABLE = {
@@ -390,6 +397,7 @@ class GoalStore:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         with self._lock, self._conn:
             self._conn.executescript(_SCHEMA)
+        self._upgrade_submission_retention()
 
     # ------------------------------------------------------------------
     # helpers
@@ -397,6 +405,39 @@ class GoalStore:
 
     def close(self) -> None:
         self._conn.close()
+
+    def _upgrade_submission_retention(self) -> None:
+        """Add the settle stamp to a table saved without one, then drop expired identities."""
+        with self._lock:
+            self._begin()
+            try:
+                columns = {r["name"] for r in self._conn.execute("PRAGMA table_info(goal_attachment_submissions)")}
+                if "settled_at" not in columns:
+                    self._conn.execute("ALTER TABLE goal_attachment_submissions ADD COLUMN settled_at REAL")
+                    # Saved identities already settled start their window now; pending ones stay open.
+                    self._conn.execute(
+                        "UPDATE goal_attachment_submissions SET settled_at = ? WHERE NOT EXISTS ("
+                        "SELECT 1 FROM goal_attachment_requests r "
+                        "WHERE r.request_id = goal_attachment_submissions.request_id AND r.goal_id IS NULL)",
+                        (self._now(),),
+                    )
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_goal_attachment_submissions_settled "
+                    "ON goal_attachment_submissions(settled_at)"
+                )
+                self._prune_attachment_submissions()
+                self._commit()
+            except Exception:
+                self._rollback()
+                raise
+
+    def _prune_attachment_submissions(self, cutoff: Optional[float] = None) -> None:
+        if cutoff is None:
+            cutoff = self._now() - ATTACHMENT_SUBMISSION_REPLAY_S
+        self._conn.execute(
+            "DELETE FROM goal_attachment_submissions WHERE settled_at IS NOT NULL AND settled_at < ?",
+            (cutoff,),
+        )
 
     def _now(self) -> float:
         return self._clock()
@@ -624,6 +665,10 @@ class GoalStore:
                         "WHERE request_id = ? AND conversation_uid = ?",
                         (record.goal_id, attachment_request_id, conversation_uid),
                     )
+                    self._conn.execute(
+                        "UPDATE goal_attachment_submissions SET settled_at = ? WHERE request_id = ?",
+                        (now, attachment_request_id),
+                    )
                 self._commit()
             except sqlite3.IntegrityError as exc:
                 self._rollback()
@@ -656,12 +701,17 @@ class GoalStore:
             )
         return request_id
 
-    def _attachment_submission(self, key: str, uid: str, fingerprint: str) -> Optional[Dict[str, Any]]:
+    def _attachment_submission(self, key: str, uid: str, fingerprint: str,
+                               cutoff: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        if cutoff is None:
+            cutoff = self._now() - ATTACHMENT_SUBMISSION_REPLAY_S
         row = self._conn.execute(
             "SELECT s.conversation_uid, s.fingerprint, s.request_id, "
             "r.request_id AS existing_request, r.goal_id "
             "FROM goal_attachment_submissions s LEFT JOIN goal_attachment_requests r "
-            "ON r.request_id = s.request_id WHERE s.submission_key = ?", (key,),
+            "ON r.request_id = s.request_id WHERE s.submission_key = ? "
+            "AND (s.settled_at IS NULL OR s.settled_at >= ?)",
+            (key, cutoff),
         ).fetchone()
         if row is None:
             return None
@@ -681,7 +731,9 @@ class GoalStore:
         with self._lock:
             self._begin()
             try:
-                existing = self._attachment_submission(key, uid, fingerprint)
+                cutoff = self._now() - ATTACHMENT_SUBMISSION_REPLAY_S
+                self._prune_attachment_submissions(cutoff)
+                existing = self._attachment_submission(key, uid, fingerprint, cutoff)
                 if existing is not None:
                     self._commit()
                     return {**existing, "created": False}
@@ -726,10 +778,23 @@ class GoalStore:
 
     def discard_attachment_request(self, conversation_uid: str, request_id: str) -> bool:
         with self._lock:
-            cursor = self._conn.execute(
-                "DELETE FROM goal_attachment_requests WHERE request_id = ? AND conversation_uid = ? AND goal_id IS NULL",
-                (request_id, conversation_uid),
-            )
+            self._begin()
+            try:
+                cursor = self._conn.execute(
+                    "DELETE FROM goal_attachment_requests "
+                    "WHERE request_id = ? AND conversation_uid = ? AND goal_id IS NULL",
+                    (request_id, conversation_uid),
+                )
+                if cursor.rowcount == 1:
+                    # The tombstone answers replays for the window, counted from now.
+                    self._conn.execute(
+                        "UPDATE goal_attachment_submissions SET settled_at = ? WHERE request_id = ?",
+                        (self._now(), request_id),
+                    )
+                self._commit()
+            except Exception:
+                self._rollback()
+                raise
         return cursor.rowcount == 1
 
     def get(self, goal_id: str) -> GoalRecord:
