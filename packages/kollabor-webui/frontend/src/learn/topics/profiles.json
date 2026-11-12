@@ -1,0 +1,136 @@
+{
+  "id": "profiles",
+  "title": "Provider profiles",
+  "summary": "Select the provider connection, model and request settings for a session without changing the agent's instructions.",
+  "workflows": [
+    {
+      "id": "choose-a-profile",
+      "label": "Choose a profile",
+      "summary": "Browse and activate a configured loadout before starting work.",
+      "entry": {
+        "ui": [
+          "Session Options",
+          "Manage Profiles"
+        ],
+        "command": "/llm",
+        "prerequisite": "Open Session Options with the sliders button beside + in the sidebar."
+      },
+      "steps": [
+        {
+          "action": "Open Session Options → Model and choose a configured model/profile before starting a session."
+        },
+        {
+          "action": "Use Manage Profiles to inspect its provider, endpoint, model and reasoning effort.",
+          "expect": "The profile name is a label; the endpoint determines where requests go."
+        },
+        {
+          "action": "Select Start Session after checking the agent and workspace.",
+          "expect": "Changing the provider setup does not change the agent’s role or instructions."
+        }
+      ],
+      "commands": [
+        {
+          "syntax": "/llm [name|new]",
+          "example": "/llm",
+          "description": "Browse and switch loadouts; /llm <name> activates a named loadout and /llm new opens creation.",
+          "expect": "The active loadout supplies the session's provider, model and parameters."
+        },
+        {
+          "syntax": "kollab --llm <profile>",
+          "example": "kollab --llm work",
+          "description": "Start Kollab with the named profile selected for this launch.",
+          "expect": "The selected profile is used for the session."
+        }
+      ],
+      "media": {
+        "kind": "image",
+        "src": "/learn/profiles/overview.webp",
+        "alt": "Kollab provider profile settings showing provider and model choices",
+        "caption": "Check provider, endpoint and model before activating a profile."
+      },
+      "success": "The session uses the selected provider connection and model.",
+      "recovery": [
+        {
+          "symptom": "The loadout is not listed or the provider cannot authenticate",
+          "action": "Check /llm and the provider's sign-in or environment setup; authenticate separately on this computer."
+        },
+        {
+          "symptom": "A saved active profile is missing",
+          "action": "Select an available loadout with /llm or restore the missing profile configuration."
+        }
+      ],
+      "note": "A profile chooses the provider connection and model; it does not select an agent or change the agent's prompt."
+    },
+    {
+      "id": "copy-a-profile",
+      "label": "Copy a profile",
+      "summary": "Keep a connection’s stored configuration while giving the copy its own name.",
+      "entry": {
+        "ui": [
+          "Session Options",
+          "Manage Profiles"
+        ]
+      },
+      "steps": [
+        {
+          "action": "Choose Copy on the source profile, then enter a name for the copy."
+        },
+        {
+          "action": "Check the provider, base URL/endpoint, model and reasoning effort, then choose Copy Profile.",
+          "expect": "Stored fields not shown in the form, including an ACP command, are preserved."
+        },
+        {
+          "action": "If its key came from KOLLAB_<PROFILE>_API_KEY or KOLLAB_API_KEY, securely set a profile-specific key for the copy or sign in again.",
+          "expect": "Environment-sourced and provisioned keys do not move; stored keyring/sign-in references are retained."
+        }
+      ],
+      "success": "The new profile keeps the source’s stored connection settings and can be selected separately.",
+      "recovery": [
+        {
+          "symptom": "The copy cannot authenticate",
+          "action": "Check its own sign-in or KOLLAB_<PROFILE>_API_KEY. Do not paste credentials into chat or Hub messages."
+        }
+      ],
+      "note": "Copying retains stored ACP command, working directory, workspace, environment and install guidance. Verify the endpoint before using the copy."
+    },
+    {
+      "id": "configure-environment-profile",
+      "label": "Use an environment profile",
+      "summary": "Set a profile's provider and credentials in your shell environment, then launch that profile.",
+      "entry": {
+        "prerequisite": "Have an API key from your provider and keep it out of shared messages and source files.",
+        "command": "kollab --llm work"
+      },
+      "steps": [
+        {
+          "action": "In your shell, export the profile-specific provider and key, for example KOLLAB_WORK_PROVIDER=openai and KOLLAB_WORK_API_KEY=$OPENAI_API_KEY."
+        },
+        {
+          "action": "Launch with kollab --llm work and confirm the profile's provider, model and endpoint are the ones you intended."
+        },
+        {
+          "action": "If you copy a profile, check its endpoint and set up its own environment key or sign-in; copied profiles do not receive environment-sourced or provisioned keys."
+        }
+      ],
+      "commands": [
+        {
+          "syntax": "KOLLAB_{NAME}_{FIELD}=value",
+          "example": "export KOLLAB_WORK_PROVIDER=openai && export KOLLAB_WORK_API_KEY=$OPENAI_API_KEY && kollab --llm work",
+          "description": "Provide a named profile's provider and credentials through environment variables. Avoid putting real credentials in command history; export them securely in your shell instead.",
+          "expect": "Kollab resolves the named environment profile for the session."
+        }
+      ],
+      "success": "Kollab can resolve the named profile without storing its secret in a chat message.",
+      "recovery": [
+        {
+          "symptom": "Authentication fails after copying a profile",
+          "action": "Sign in on this computer or securely provide the copied profile's own KOLLAB_<NAME>_API_KEY; environment and provisioned keys are not transferred."
+        },
+        {
+          "symptom": "The wrong endpoint is used",
+          "action": "Inspect the profile's provider and base URL in settings before starting a session."
+        }
+      ]
+    }
+  ]
+}

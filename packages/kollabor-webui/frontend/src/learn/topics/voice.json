@@ -1,0 +1,152 @@
+{
+  "id": "voice",
+  "title": "Voice mode",
+  "summary": "Use the microphone explicitly, check voice readiness and stop voice when you are done.",
+  "workflows": [
+    {
+      "id": "start-and-stop-voice",
+      "label": "Speak to the current chat",
+      "summary": "Start voice in the chat you want to respond, then release the microphone when finished.",
+      "entry": {
+        "prerequisite": "Choose the chat that should receive your speech. Starting voice activates its microphone.",
+        "ui": [
+          "Chat",
+          "Microphone"
+        ],
+        "command": "/voice on"
+      },
+      "steps": [
+        {
+          "action": "On the computer running Kollab, run /voice status to check voice setup and readiness."
+        },
+        {
+          "action": "Run /voice on in the chat that should respond, or select the Web UI microphone button and allow browser microphone access."
+        },
+        {
+          "action": "Speak a request; the final transcript is sent to that chat as a normal turn."
+        },
+        {
+          "action": "Run /voice off or press the stop control to release the microphone and cancel unplayed speech."
+        }
+      ],
+      "commands": [
+        {
+          "syntax": "/voice status",
+          "example": "/voice status",
+          "description": "Inspect setup, microphone, model readiness, transcript and delivery state."
+        },
+        {
+          "syntax": "/voice on",
+          "example": "/voice on",
+          "description": "Enable voice for this chat and make it the responding conversation.",
+          "expect": "Kollab prepares local voice components and starts listening."
+        },
+        {
+          "syntax": "/voice off",
+          "example": "/voice off",
+          "description": "Release the microphone lease and cancel unplayed speech."
+        }
+      ],
+      "media": {
+        "kind": "image",
+        "src": "/learn/voice/overview.webp",
+        "alt": "Kollab Voice Configuration showing Transcript Context and Quick Model controls",
+        "caption": "Voice Preferences chooses the model for spoken replies without enabling the microphone."
+      },
+      "success": "Your final transcript becomes a normal turn in the selected chat; /voice off stops capture.",
+      "recovery": [
+        {
+          "symptom": "Voice setup or a model download is not ready",
+          "action": "Run /voice status for the named missing dependency or setup state, install the stated prerequisite and use /voice retry."
+        },
+        {
+          "symptom": "The wrong chat responds or the microphone remains active",
+          "action": "Run /voice off in the active chat, then run /voice on in the intended chat."
+        }
+      ],
+      "note": "Saving Voice Configuration does not enable the microphone. On the Web UI, explicitly allow microphone access when you start voice."
+    },
+    {
+      "id": "choose-voice-models",
+      "label": "Choose voice models",
+      "summary": "Select transcription and speech engines in Voice settings without enabling the microphone.",
+      "entry": {
+        "ui": [
+          "Settings",
+          "Voice",
+          "Voice Preferences"
+        ],
+        "command": "/voice config"
+      },
+      "steps": [
+        {
+          "action": "Open Settings → Voice → Voice Preferences → Quick Model. In the terminal use /voice config → Quick Model."
+        },
+        {
+          "action": "Choose Quick Model. Same as Chat keeps the active chat model; otherwise choose any configured provider’s model from /llm, such as an OpenRouter model.",
+          "expect": "Spoken replies use that provider’s own connection. Typed messages keep the chat model."
+        },
+        {
+          "action": "In Audio and Device, choose Transcription Engine and Speech Engine, then Save for This Device."
+        },
+        {
+          "action": "Check /voice status for installation and readiness.",
+          "expect": "Saving does not turn on the microphone."
+        }
+      ],
+      "commands": [
+        {
+          "syntax": "/voice config",
+          "example": "/voice config",
+          "description": "Open Voice Configuration in the TUI or Web UI settings."
+        },
+        {
+          "syntax": "/voice context <lines>",
+          "example": "/voice context 20",
+          "description": "Set how many prior transcript lines provide context; valid range is 1–50.",
+          "expect": "The chosen transcript window is used for later voice requests."
+        }
+      ],
+      "success": "The selected voice models are saved for this computer while the microphone stays off.",
+      "recovery": [
+        {
+          "symptom": "An engine is not installed or ready",
+          "action": "Check /voice status for the setup or download detail, then retry setup after resolving the named issue."
+        },
+        {
+          "symptom": "You expected settings to enable voice",
+          "action": "Start voice explicitly with /voice on; saving Voice Configuration never activates the microphone."
+        }
+      ]
+    },
+    {
+      "id": "background-dream-model",
+      "label": "Background model",
+      "summary": "Keep the background Dream Model separate from the model that answers speech.",
+      "entry": {
+        "ui": ["Terminal", "/config", "Hub", "Dream Model"],
+        "command": "/config"
+      },
+      "steps": [
+        {
+          "action": "In the terminal open /config → Hub → Dream Model."
+        },
+        {
+          "action": "Enter a cheaper model ID supported by the active provider, or leave it blank.",
+          "expect": "Blank uses kollabor.llm.fast_model, then the active session model."
+        },
+        {
+          "action": "Keep the active profile’s endpoint and credentials appropriate for that model."
+        }
+      ],
+      "success": "The selected model is used for background agent dreaming only. Dream Model does not change voice replies.",
+      "recovery": [
+        {
+          "symptom": "The Dream Model is unsupported",
+          "action": "Use a model ID supported by the active provider or leave the setting blank to use its fallback."
+        }
+      ]
+    }
+  ],
+  "note": "Opening Learn never turns on the microphone. Start voice explicitly, and stop it when finished."
+}
