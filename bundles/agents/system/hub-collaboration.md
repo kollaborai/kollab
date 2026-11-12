@@ -143,6 +143,8 @@ syntax:
 "name" is the agent BUNDLE TYPE (coder, research, reviewer, etc),
 NOT a gem identity. the hub auto-assigns a gem identity when the
 agent joins the mesh and reports back the mapping.
+For a specific identity, use `identity="jasper"`; exact roster persona names
+in `name` remain identities. This is also true when `llm` selects an ACP harness.
 
 example:
   <hub_spawn name="coder">fix the bug in foo.py. read foo.py first.
