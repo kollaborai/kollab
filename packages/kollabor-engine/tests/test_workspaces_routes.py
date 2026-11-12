@@ -43,6 +43,9 @@ async def test_browse_lists_subfolders_without_hidden_ones(client, tmp_path):
     body = (await client.get("/workspaces/browse", params={"path": str(tmp_path)})).json()
 
     assert body["dirs"] == ["Alpha", "beta"]
-    assert body["path"] == str(tmp_path.resolve()) and body["parent"] == str(tmp_path.resolve().parent)
+    # tmp_path is the test's home (conftest): going up from it would leave the folder rule, so there is no Up.
+    assert body["path"] == str(tmp_path.resolve()) and body["parent"] is None
+    inner = (await client.get("/workspaces/browse", params={"path": str(tmp_path / "beta")})).json()
+    assert inner["parent"] == str(tmp_path.resolve())
     missing = await client.get("/workspaces/browse", params={"path": str(tmp_path / "nope")})
     assert missing.status_code == 400

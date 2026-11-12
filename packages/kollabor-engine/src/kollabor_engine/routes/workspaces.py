@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query  # type: ignore[import-not-f
 
 from ..hub_bridge import HubBridge
 from ..server import get_session_registry
+from ..workspace_folder import folder_or_400, parent_folder
 
 logger = logging.getLogger(__name__)
 
@@ -79,21 +80,23 @@ async def list_workspaces() -> Dict[str, Any]:
 
 @router.get("/browse")
 async def browse(path: str = Query("", description="Folder to list; empty is the home folder")) -> Dict[str, Any]:
-    """A folder's subfolders, for picking a workspace. Hidden folders are left out."""
-    folder = Path(path).expanduser() if path else Path.home()
+    """A folder's subfolders, for picking a workspace. Hidden folders are left out.
+
+    Only a folder the engine's folder rule allows (workspace_folder.py) opens, and ``parent`` is null
+    once going up would leave it, so the picker's Up button stops there.
+    """
+    folder = folder_or_400(path or os.path.expanduser("~"))
     try:
-        folder = folder.resolve(strict=True)
         names = sorted(
             (entry.name for entry in os.scandir(folder) if entry.is_dir() and not entry.name.startswith(".")),
             key=str.lower,
         )
-    except (OSError, RuntimeError) as exc:
-        reason = getattr(exc, "strerror", None) or exc
+    except OSError as exc:
+        reason = exc.strerror or exc
         raise HTTPException(status_code=400, detail=f"Can't open {path or folder}: {reason}") from exc
-    parent = folder.parent
     return {
-        "path": str(folder),
-        "name": folder.name or str(folder),
-        "parent": str(parent) if parent != folder else None,
+        "path": folder,
+        "name": os.path.basename(folder) or folder,
+        "parent": parent_folder(folder),
         "dirs": names[:500],
     }

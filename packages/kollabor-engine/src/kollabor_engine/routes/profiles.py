@@ -24,6 +24,8 @@ from kollabor_ai.providers import (
     RateLimitError,
 )
 
+from ..workspace_folder import folder_or_400
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/profiles", tags=["profiles"])
 
@@ -294,6 +296,7 @@ _Workspace = Annotated[str, Query(description="Folder whose default loadout appl
 @router.get("")
 async def list_profiles(workspace: _Workspace = ""):
     """List all available profiles."""
+    workspace = folder_or_400(workspace.strip())
     pm = _get_profile_manager()
     profiles = pm.list_profiles()
 
@@ -303,7 +306,7 @@ async def list_profiles(workspace: _Workspace = ""):
         "count": len(profiles),
         "providers": [provider.value for provider in ProviderType],
         "invalid_profiles": getattr(pm, "get_invalid_profiles", lambda: {})(),
-        "default_loadout": _default_loadout(pm, workspace.strip()),
+        "default_loadout": _default_loadout(pm, workspace),
     }
 
 
@@ -313,11 +316,10 @@ async def list_choices():
     on, for the web UI's searchable model picker. ACP choices are discovered
     in a short-lived, isolated session when a harness has no fresh options."""
     from kollabor_ai.loadout_manager import LoadoutManager
-    from kollabor_config import ConfigService
-    from kollabor_config.config_utils import get_global_config_path
 
-    config = ConfigService(get_global_config_path(), fast_mode=True)  # saved loadouts live here
-    manager = LoadoutManager(_get_profile_manager(), config=config)
+    # no config handle: the picker lists no saved loadouts, so no layered config read happens here. Profile
+    # definitions still come from the config files through ProfileManager, as GET /profiles reads them (#966)
+    manager = LoadoutManager(_get_profile_manager())
     profiles = manager.provider_profiles()
 
     async def refresh_catalogs() -> None:

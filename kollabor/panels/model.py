@@ -262,7 +262,7 @@ class ModelPanel:
                 return ok_result(f"ACP reasoning effort set to {level.strip()}.", panel=await self.describe(ctx, {}))
             if action == "pick":
                 return await self._pick(ctx, handler, payload)
-            return unknown_action(self.name, action)
+            raise unknown_action(self.name, action)
         if action == "refresh":
             return ok_result("Catalog refreshed.", panel=await self.describe(ctx, {}))
         if action == "select":
