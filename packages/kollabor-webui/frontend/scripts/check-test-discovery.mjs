@@ -9,12 +9,13 @@ const testPatterns = [
   "src/**/*.{test,spec}.{js,cjs,mjs,jsx,ts,cts,mts,tsx}",
 ];
 
-// Match the Node command in CI exactly: only top-level tests/*.test.ts files
-// without this Vitest import are passed to `node --test`.
-export function uncollectedTests(root, vitestFiles) {
+// Match the Node commands in CI: top-level tests/*.test.ts files without a
+// Vitest import, plus the explicitly listed browser-runner Node tests.
+export function uncollectedTests(root, vitestFiles, explicitNodeFiles = []) {
   const collected = new Set(
     vitestFiles.map((file) => path.relative(root, file).split(path.sep).join("/")),
   );
+  for (const file of explicitNodeFiles) collected.add(file);
   const candidates = new Set(
     testPatterns.flatMap((pattern) => [...globSync(pattern, { cwd: root })]),
   );
@@ -42,7 +43,12 @@ function main() {
     throw listing.error ?? new Error(`Vitest file discovery failed (${listing.status}).`);
   }
   const files = JSON.parse(listing.stdout).map((entry) => entry.file);
-  const missing = uncollectedTests(frontendRoot, files);
+  const pkg = JSON.parse(readFileSync(path.join(frontendRoot, "package.json"), "utf8"));
+  const command = pkg.scripts?.["test:e2e:runner"] ?? "";
+  const nodeFiles = command.startsWith("node --test ")
+    ? command.slice("node --test ".length).split(/\s+/).filter((file) => /^tests\/[\w./-]+\.test\.mjs$/.test(file))
+    : [];
+  const missing = uncollectedTests(frontendRoot, files, nodeFiles);
   if (missing.length) {
     console.error("These test files are not selected by the CI Vitest or Node commands:");
     for (const file of missing) console.error(`  ${file}`);
