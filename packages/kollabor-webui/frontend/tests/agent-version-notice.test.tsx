@@ -53,6 +53,13 @@ describe("AgentVersionNotice", () => {
     expect(html).toContain("aria-controls=");
   });
 
+  it("puts expanded version details on a full-width row at phone widths", () => {
+    const notice = agentVersionNotice({ ...differ, restartAgents: true })!;
+    const html = renderToStaticMarkup(<AgentVersionNotice notice={notice} busy={false} onRestart={() => {}} />);
+    expect(html).toMatch(/<details class="[^"]*basis-full[^"]*sm:basis-auto/);
+    expect(html).toMatch(/<span id="[^"]+" class="[^"]*block w-full break-words/);
+  });
+
   it("flag off: the /restart line and no button", () => {
     const notice = agentVersionNotice({ ...differ, restartAgents: false })!;
     const html = renderToStaticMarkup(<AgentVersionNotice notice={notice} busy={false} onRestart={() => {}} />);
