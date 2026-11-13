@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
-import { DEFAULT_SUITE_TIMEOUT_MS, runBrowserSuites } from "../scripts/browser-acceptance-runner.mjs";
+import { DEFAULT_SUITE_TIMEOUT_MS, runBrowserSuites, suiteTimeoutMs } from "../scripts/browser-acceptance-runner.mjs";
 
 async function fixture(name, source) {
   const root = await mkdtemp(path.join(os.tmpdir(), `kollab-runner-${name}-`));
@@ -192,4 +192,9 @@ test("runs independent workers concurrently", async () => {
 test("the default suite timeout leaves headroom over the slowest observed CI run", () => {
   // learn took 231 to 381 s on ubuntu-latest; the limit must clear twice the slowest run.
   assert.ok(DEFAULT_SUITE_TIMEOUT_MS >= 2 * 381_000, `default ${DEFAULT_SUITE_TIMEOUT_MS} ms is too tight`);
+});
+
+test("suiteTimeoutMs uses the default and honors the env override", () => {
+  assert.equal(suiteTimeoutMs({}), DEFAULT_SUITE_TIMEOUT_MS);
+  assert.equal(suiteTimeoutMs({ KOLLAB_BROWSER_TIMEOUT_MS: "1234" }), 1234);
 });
