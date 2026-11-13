@@ -82,9 +82,11 @@ jobs:
 
           # Files whose tests run multi-second each: hashed by test item so no
           # one of them can land whole in one shard and bound the run (#1022).
-          # test_network_members.py is absent on purpose: its revocation tests
-          # run minutes each and own the dedicated heavy job below.
+          # test_network_members.py is skipped here and absent from the
+          # item-split below: its revocation tests run minutes each and own
+          # the dedicated heavy job, so no shard picks the file up whole.
           SLOW_FILES = {
+              b"tests/unit/test_network_members.py",
               b"tests/unit/test_mesh_network.py",
               b"tests/unit/test_kill_switch_f13.py",
               b"tests/unit/test_crystal_store_cache.py",
