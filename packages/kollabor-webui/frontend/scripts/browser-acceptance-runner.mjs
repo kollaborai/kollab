@@ -73,6 +73,10 @@ async function prepareWorkerWorkspace({ suite, artifacts }) {
 // Per-suite limit. The learn suite takes 231 to 381 s on CI runners, so 900 s clears twice the slowest run.
 export const DEFAULT_SUITE_TIMEOUT_MS = 900_000;
 
+export function suiteTimeoutMs(env = process.env) {
+  return Number(env.KOLLAB_BROWSER_TIMEOUT_MS ?? String(DEFAULT_SUITE_TIMEOUT_MS));
+}
+
 /** Run disjoint browser scripts in isolated homes, bounded workers, and owned process groups. */
 export async function runBrowserSuites({
   suites,
@@ -326,7 +330,7 @@ export async function runBrowserSuites({
 async function main() {
   const { chromium } = await import("playwright-core");
   const workers = Number(process.env.KOLLAB_BROWSER_WORKERS ?? "2");
-  const timeoutMs = Number(process.env.KOLLAB_BROWSER_TIMEOUT_MS ?? String(DEFAULT_SUITE_TIMEOUT_MS));
+  const timeoutMs = suiteTimeoutMs();
   const artifacts = process.env.KOLLAB_BROWSER_RESULTS_DIR
     ? path.resolve(process.env.KOLLAB_BROWSER_RESULTS_DIR)
     : await mkdtemp(path.join(os.tmpdir(), "kollab-browser-acceptance-"));
