@@ -27,7 +27,8 @@ Two details keep the list honest:
   folder and home are not remembered folders; they are resolved when asked.
 - **On a volume that ignores case, a root spelled in other letters is the same root.** macOS and Windows volumes
   usually ignore case, so `/users/me/DEV` is `/Users/me/dev`. A volume that tells them apart (most Linux) keeps them
-  apart.
+  apart. The folder is answered spelled the way the volume stores it (`/Users/me/dev/CASEPROJECT` comes back as
+  `/Users/me/dev/CaseProject`), because a daemon started there reports that spelling.
 
 ## Routes that call it
 
@@ -54,7 +55,7 @@ Two details keep the list honest:
 | a sibling that only shares a name prefix with a root (`/home/me/proj` and `/home/me/proj2`) | 400: a root matches itself and what is inside it, nothing else |
 | a folder outside home and the engine's, with an agent running in it or below it | accepted |
 | a folder outside home that nothing runs in | 400. Start kollab in it once (a terminal, or an engine started there); it then opens, and so does everything below it |
-| a folder in home typed in other letters (`/USERS/ME/Dev/app` for `/Users/me/dev/app`), on a volume that ignores case | accepted like the right spelling; the start that names the root is spelled as the root, the rest stays as typed |
+| a folder in home typed in other letters (`/USERS/ME/Dev/app` for `/Users/me/dev/app`), on a volume that ignores case | accepted like the right spelling; the answer is spelled the way the volume stores it, the root and what is below it |
 | the same on a volume that tells cases apart | 400: it is another name, so it is "outside" or "does not exist" |
 | a recent or agent folder outside home that was moved away and replaced by a symlink to another folder | 400 for the old pathname and for the place the link leads; the folder no longer counts |
 | a recent or agent folder outside home that was made again, as a real folder, at the same pathname | accepted: the pathname leads to itself again |
@@ -79,8 +80,19 @@ Two details keep the list honest:
   volume answers by whether the root with its case swapped is the same folder (`samefile`); only then is the start of
   the request that names the root rewritten to the root's spelling, and the usual `startswith` test runs on the
   result. A request can only be moved onto a root it already names in other letters, so nothing widens, and a
-  volume that tells cases apart is never asked to ignore them. The answer is not cached: it is computed only for a
-  request that spelled a root in other letters.
+  volume that tells cases apart is never asked to ignore them. The answer is not cached; it costs two `stat` calls
+  for each accepted folder.
+- **The answer is spelled the way the volume stores it (`_on_disk`).** A volume that ignores case keeps the spelling
+  that was typed in `realpath`, but a daemon started in that folder reports the stored one (its working folder), and
+  New Session waits for the agent it launched by comparing the two folder strings
+  (`HubBridge.get_agent_by_identity`). A folder typed as `cASEpROJECT` made it wait 45 s and answer 503 while the daemon
+  ran, on the version before this rule too (found in the post-merge review of #982). The producer is fixed, not the
+  lookup: every part below the matching root is looked up in its folder and replaced by the entry the volume says is
+  the same one (`samefile`), so the engine, the recent list and every agent row hold one spelling. A part that is
+  already an entry is kept without a lookup, a part with no entry stays as typed, and so does a part on a mount that
+  tells cases apart (`samefile` finds no such name) or in a folder that cannot be listed. It runs only where
+  `_ignores_case(root)` says the volume ignores case. A remembered folder recorded in the old spelling keeps it until
+  it is forgotten.
 - **One helper, so one sanitizer.** CodeQL's `py/path-injection` accepts a path that was normalized with
   `os.path.realpath` and then checked with `startswith` against a root. That check lives only in `checked_folder`;
   the existence and directory tests run after it, inside it. The respelling feeds that same check (`spelled`).

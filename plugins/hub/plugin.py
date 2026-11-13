@@ -1961,10 +1961,13 @@ class HubPlugin(BasePlugin):
         #     → by agent_type: picks next available gem with agent_type=coder
         #   <hub_spawn name="lapis" type="research">task</hub_spawn>
         #     → explicit identity + type override
+        #   <hub_spawn name="coder" identity="jasper" llm="codex-cli">task</hub_spawn>
+        #     → explicit identity under an ACP harness
         def _extract_hub_spawn(m):
             attrs = tag_attrs(m.group(1))
             return {
                 "name": attrs.get("name", "").strip(),
+                "identity": attrs.get("identity", "").strip(),
                 "agent_type_override": attrs.get("type", "").strip(),
                 "llm": attrs.get("llm", "").strip(),
                 "task": m.group(2).strip(),
@@ -11605,20 +11608,21 @@ class HubPlugin(BasePlugin):
         if not peers:
             return data
 
-        # Include source agent identity so receivers know which window
-        # the human typed in.  This prevents other agents from
-        # auto-responding with messages directed at the source agent
-        # (otherwise coordinator sees "user -> *", responds with
-        # <hub_msg to="lapis">, and lapis gets a message "from
-        # coordinator" even though the human was typing locally).
+        # Address the message to the window it was typed in (#659): peers
+        # see "<user> -> <source>" and observe it without answering. The
+        # source agent already holds the text as its own user turn, so it
+        # gets no copy. source_agent tells receivers a human is typing
+        # elsewhere, not that the message is for them.
         source_agent = self._identity.identity if self._identity else ""
         for peer in peers:
+            if source_agent and peer.identity == source_agent:
+                continue
             try:
                 msg = HubMessage(
                     action="message",
                     from_agent="human",
                     from_identity=user_name,
-                    to="*",
+                    to=source_agent or "*",
                     content=user_content,
                     scope=MessageScope.BROADCAST.value,
                     metadata={"source_agent": source_agent},
@@ -14460,24 +14464,161 @@ class HubPlugin(BasePlugin):
             if not agent_name or not task:
                 return "usage: /hub spawn <name> [identity=X] [type=X] <task>"
 
-        harness = False
-        if requested_llm and self.event_bus:
-            profile_mgr = self.event_bus.get_service("profile_manager")
-            if profile_mgr is not None:
-                from kollabor_ai.loadout_manager import LoadoutManager
-                loadout, _ = LoadoutManager(profile_mgr).resolve(requested_llm)
-                selected = profile_mgr.get_profile(loadout.provider_profile if loadout else requested_llm)
-                harness = selected is not None and selected.get_provider() == "acp"
-
-        # --- Resolve what was requested ---
         # Is agent_name a pool identity? (e.g. "lapis")
         pool_match = find_persona(agent_name)
         if pool_match and pool_match.name != split_ref(agent_name)[1]:
             pool_match = None  # lapis-2 is not a persona to spawn
 
+        def _explicit_profile(value: object) -> str:
+            if not isinstance(value, str):
+                return ""
+            profile = value.strip()
+            return profile if profile and profile != "default" else ""
+
+        # Match application startup: --llm selects an exact profile first, and
+        # resolves a loadout only when no profile has that name. The identity
+        # profile is inherited when no explicit request or bundle profile wins.
+        harness = False
+        profile_mgr = (
+            self.event_bus.get_service("profile_manager") if self.event_bus else None
+        )
+        profile_candidate = _explicit_profile(requested_llm)
+        if not profile_candidate:
+            requested_persona = find_persona(requested_identity) if requested_identity else None
+            if requested_persona and requested_persona.name != split_ref(requested_identity)[1]:
+                requested_persona = None
+            if agent_type_override:
+                selected_type = agent_type_override
+            elif pool_match:
+                selected_type = pool_match.agent or "coder"
+            elif requested_persona:
+                selected_type = requested_persona.agent or agent_name
+            else:
+                selected_type = agent_name
+            try:
+                agent_mgr = (
+                    self.event_bus.get_service("agent_manager") if self.event_bus else None
+                )
+                agent_def = agent_mgr.get_agent(selected_type) if agent_mgr else None
+                profile_candidate = _explicit_profile(
+                    getattr(agent_def, "profile", "") if agent_def else ""
+                )
+            except Exception:
+                profile_candidate = ""
+            if not profile_candidate and self._identity:
+                profile_candidate = _explicit_profile(self._identity.profile)
+            if not profile_candidate and profile_mgr:
+                profile_candidate = _explicit_profile(
+                    getattr(profile_mgr, "active_profile_name", "")
+                )
+
+        if profile_candidate and profile_mgr:
+            selected_profile = profile_mgr.get_profile(profile_candidate)
+            if selected_profile is None:
+                from kollabor_ai.loadout_manager import LoadoutManager
+
+                loadout, _ = LoadoutManager(profile_mgr).resolve(profile_candidate)
+                if loadout:
+                    selected_profile = profile_mgr.get_profile(loadout.provider_profile)
+            if selected_profile is not None:
+                get_provider = getattr(selected_profile, "get_provider", None)
+                provider = (
+                    get_provider()
+                    if callable(get_provider)
+                    else getattr(selected_profile, "provider", "")
+                )
+                harness = str(provider).lower() == "acp"
+
+        # --- Resolve what was requested ---
+
         if harness:
-            resolved_identity = requested_identity or agent_name
+            # ACP owns the brain/tools, but the name still follows hub_spawn's
+            # identity-vs-role contract. A roster persona is an explicit
+            # identity; a known bundle role picks a free roster identity.
+            # `identity=` is the escape hatch for a custom identity, and an
+            # unknown adapter name (for example `claude`) remains usable as-is.
             effective_agent_type = ""
+            resolved_identity = requested_identity
+            if not resolved_identity and pool_match:
+                resolved_identity = pool_match.name
+
+            if not resolved_identity:
+                selected_type = agent_type_override or agent_name
+                personas = roster_personas()
+                online_identities = set()
+                if self._presence:
+                    online_identities = {
+                        peer.identity for peer in self._presence.scan_all_presence()
+                    }
+
+                for persona in personas:
+                    if persona.agent == selected_type and persona.name not in online_identities:
+                        resolved_identity = persona.name
+                        break
+
+                agent_def = None
+                if not resolved_identity and self.event_bus:
+                    try:
+                        agent_mgr = self.event_bus.get_service("agent_manager")
+                        agent_def = agent_mgr.get_agent(selected_type) if agent_mgr else None
+                    except Exception:
+                        agent_def = None
+
+                if agent_def is not None:
+                    # A recognized bundle with no persona bound to that bundle
+                    # may use the next free identity. If it has bound personas,
+                    # never substitute an identity belonging to another role.
+                    bound_personas = [
+                        persona for persona in personas
+                        if persona.agent == selected_type
+                    ]
+                    if bound_personas:
+                        busy = [
+                            persona.name for persona in bound_personas
+                            if persona.name in online_identities
+                        ]
+                        return (
+                            f"all {selected_type} agents are busy: "
+                            f"{', '.join(busy)}. use hub_msg to assign work to an existing one."
+                        )
+                    for persona in personas:
+                        if persona.name not in online_identities:
+                            resolved_identity = persona.name
+                            break
+                    if not resolved_identity:
+                        if not personas:
+                            return (
+                                f"no persona found with agent_type '{selected_type}'. "
+                                "check the roster configuration (plugins.hub.roster)."
+                            )
+                        return (
+                            f"all identities are busy for agent_type '{selected_type}'. "
+                            "use hub_msg to assign work to an existing one."
+                        )
+                elif not resolved_identity:
+                    # An unrecognized ACP name is a harness identity, not a
+                    # role. Keep the explicit name rather than guessing.
+                    resolved_identity = agent_name
+        elif requested_identity:
+            # An explicit identity wins over either a role name or a persona
+            # shorthand. The role/persona still selects the bundle when one is
+            # available, unless the caller supplied a type override.
+            resolved_identity = requested_identity
+            requested_persona = find_persona(requested_identity)
+            if requested_persona and requested_persona.name != split_ref(requested_identity)[1]:
+                requested_persona = None
+            if pool_match:
+                effective_agent_type = (
+                    agent_type_override or pool_match.agent or "coder"
+                )
+            else:
+                effective_agent_type = agent_type_override or agent_name
+                if requested_persona:
+                    effective_agent_type = (
+                        agent_type_override
+                        or requested_persona.agent
+                        or effective_agent_type
+                    )
         elif pool_match:
             # MODE 1 or 3: spawning by identity
             resolved_identity = pool_match.name
@@ -14488,20 +14629,8 @@ class HubPlugin(BasePlugin):
         else:
             # MODE 2: spawning by agent_type (e.g. "coder")
             # Find next available gem from pool with matching agent_type
-            effective_agent_type = agent_name
+            effective_agent_type = agent_type_override or agent_name
             resolved_identity = ""
-
-            if requested_identity:
-                requested_pool = find_persona(requested_identity)
-                if requested_pool and requested_pool.name != split_ref(requested_identity)[1]:
-                    requested_pool = None
-                resolved_identity = requested_identity
-                if requested_pool:
-                    effective_agent_type = (
-                        agent_type_override
-                        or requested_pool.agent
-                        or effective_agent_type
-                    )
 
             # Get online identities to exclude
             online_identities = set()
@@ -14529,11 +14658,24 @@ class HubPlugin(BasePlugin):
                 except Exception:
                     agent_def = None
                 if agent_def is not None:
-                    for gem in roster_personas():
-                        if gem.name not in online_identities:
-                            resolved_identity = gem.name
-                            break
+                    personas = roster_personas()
+                    bound_personas = [gem for gem in personas if gem.agent == agent_name]
+                    if not bound_personas:
+                        for gem in personas:
+                            if gem.name not in online_identities:
+                                resolved_identity = gem.name
+                                break
                     if not resolved_identity:
+                        if bound_personas:
+                            busy = [
+                                gem.name for gem in bound_personas
+                                if gem.name in online_identities
+                            ]
+                            return (
+                                f"all {agent_name} agents are busy: "
+                                f"{', '.join(busy)}. "
+                                "use hub_msg to assign work to an existing one."
+                            )
                         return (
                             f"all identities are busy for agent_type '{agent_name}'. "
                             f"use hub_msg to assign work to an existing one."
@@ -14593,13 +14735,10 @@ class HubPlugin(BasePlugin):
         # auto-detect, not an explicit provider selection.  Passing it to a
         # child can silently auto-select a billable provider, so never let it
         # override a real parent profile or escape this resolver.
-        def _explicit_profile(value: object) -> str:
-            if not isinstance(value, str):
-                return ""
-            profile = value.strip()
-            return profile if profile and profile != "default" else ""
-
-        resolved_profile = _explicit_profile(requested_llm)
+        # Keep the profile selected for harness detection identical to the
+        # profile passed to the child. This matters when the bundle's explicit
+        # profile overrides the parent's inherited profile.
+        resolved_profile = _explicit_profile(requested_llm) or profile_candidate
         try:
             agent_mgr = (
                 self.event_bus.get_service("agent_manager") if self.event_bus else None
