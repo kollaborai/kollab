@@ -5,6 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 Before maintaining Kollab, read `bundles/skills/kollab-development/SKILL.md`.
 It defines the unreleased development policy, current-implementation workflow,
 agent handoff requirements, and conditional relay operations guide.
+Feature specs use `docs/specs/TEMPLATE.md`; bug fixes use `docs/specs/FIX_BRIEF.md`.
 
 ## Project Overview
 
@@ -44,7 +45,7 @@ These three live in the reference pages and are easy to break without reading th
 
 - Code that starts kollab again uses `kollabor.binary.kollab_argv()`, never `sys.executable -m kollabor_cli_main` (`releases.md`).
 - `kollab --hub msg <name> <text>` reaches every online agent and wakes only the named one; send one message per agent you need to act (`hub.md`).
-- An engine route that takes a folder calls `folder_or_400` first and uses what it returns (`components.md`).
+- An engine route that opens a local folder calls `folder_or_400` first and uses what it returns. The Code routes pass session-daemon paths to that daemon for validation (`components.md`).
 
 ## Terminal UI rules
 

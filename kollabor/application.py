@@ -329,7 +329,11 @@ class TerminalLLMChat:
                     loadout_manager = LoadoutManager(
                         self.profile_manager, config=self.config
                     )
-                    loadout, _ = loadout_manager.resolve(default_loadout)
+                    # The saved default is an exact name, not typed input: a forgiving
+                    # match would start on a similarly named loadout nobody chose once
+                    # the default is deleted (#964). resolve() stays for --llm and
+                    # /llm typed names.
+                    loadout = loadout_manager.get(default_loadout)
                     loadout_profile = (
                         self.profile_manager.get_profile(loadout.provider_profile)
                         if loadout
@@ -371,6 +375,14 @@ class TerminalLLMChat:
                             loadout.provider_profile, persist=False
                         )
                         logger.info("Applied default loadout '%s'", loadout.name)
+                    elif not loadout:
+                        # Exact-name miss (a deleted or re-cased default): the
+                        # terminal stays on the active profile; say why (#964).
+                        logger.warning(
+                            "Default loadout '%s' matches no saved loadout; "
+                            "starting on the active profile",
+                            default_loadout,
+                        )
             except InvalidACPLoadoutError:
                 raise
             except Exception as exc:
@@ -3813,6 +3825,14 @@ class TerminalLLMChat:
             except Exception as e:
                 logger.debug(f"widget state refresher stop error: {e}")
             self._widget_state_refresher = None
+
+        # End the code editor's terminal shells (kollabor.code_service); a no-op when none was opened
+        try:
+            from kollabor import code_service
+
+            await code_service.shutdown()
+        except Exception as e:
+            logger.debug(f"code service shutdown error: {e}")
 
         # Close attach proxy socket if active
         if hasattr(self, "_attach_writer") and self._attach_writer:
