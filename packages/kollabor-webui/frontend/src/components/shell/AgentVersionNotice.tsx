@@ -12,7 +12,7 @@ function VersionDetails({ detail }: { detail: string }) {
     <>
       {/* Collapsed, the disclosure is one icon inline with the actions; it never takes its own row. */}
       <details className="min-w-0" onToggle={(event) => setExpanded(event.currentTarget.open)}>
-        <summary aria-label="Version details" aria-expanded={expanded} aria-controls={contentId} title={detail} className="group/version relative min-h-7 cursor-pointer px-1 text-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2">
+        <summary aria-label="Version details" aria-expanded={expanded} aria-controls={contentId} title={detail} className="group/version relative min-h-7 list-none cursor-pointer px-1 text-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2 [&::-webkit-details-marker]:hidden">
           <Info aria-hidden="true" className="size-3" />
         </summary>
       </details>
