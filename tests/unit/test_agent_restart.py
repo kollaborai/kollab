@@ -90,6 +90,33 @@ class TestRestartInPlace:
         assert len(polls) == 4  # it did not go on while the turn still ran
         assert await daemon.wait_until_idle(lambda: True, poll=0.001, limit=0.02) is False
 
+    @pytest.mark.asyncio
+    async def test_snapshot_save_failure_aborts_restart(self, monkeypatch):
+        from plugins.hub.plugin import HubPlugin
+
+        plugin = HubPlugin.__new__(HubPlugin)
+        plugin._identity = SimpleNamespace(identity="lapis")
+        plugin.event_bus = MagicMock()
+        plugin._self_restart_requested = True
+        plugin.network_turn_open = lambda: False
+        plugin._perform_self_restart = AsyncMock()
+
+        async def no_watchdog(*args):
+            return None
+
+        plugin._self_restart_watchdog = no_watchdog
+        conversation = SimpleNamespace(
+            current_session_id="session-1",
+            messages=[{"role": "user", "content": "latest"}],
+            save_conversation=MagicMock(side_effect=OSError("snapshot unavailable")),
+        )
+        llm = SimpleNamespace(is_processing=False, conversation_manager=conversation)
+
+        await plugin._restart_when_idle(llm)
+
+        plugin._perform_self_restart.assert_not_awaited()
+        assert plugin._self_restart_requested is False
+
 
 class TestRestartCommand:
     def _handler(self):
