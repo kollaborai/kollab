@@ -2,23 +2,25 @@ import { useId, useState } from "react";
 import { Info } from "lucide-react";
 import type { LiveAgent } from "@/api";
 import { NoticeAction, NoticeBar } from "@/components/shell/NoticeBar";
+import { cn } from "@/lib/utils";
 
 function VersionDetails({ detail }: { detail: string }) {
   const [expanded, setExpanded] = useState(false);
   const contentId = useId();
 
   return (
-    <details
-      className="min-w-0 basis-full text-xs text-foreground sm:basis-auto"
-      onToggle={(event) => setExpanded(event.currentTarget.open)}
-    >
-      <summary aria-label="Version details" aria-expanded={expanded} aria-controls={contentId} title={detail} className="group/version relative min-h-7 cursor-pointer px-1 text-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2">
-        <Info aria-hidden="true" className="size-3" />
-      </summary>
-      <span id={contentId} className="block w-full break-words text-muted-foreground">
+    <>
+      {/* Collapsed, the disclosure is one icon inline with the actions; it never takes its own row. */}
+      <details className="min-w-0" onToggle={(event) => setExpanded(event.currentTarget.open)}>
+        <summary aria-label="Version details" aria-expanded={expanded} aria-controls={contentId} title={detail} className="group/version relative min-h-7 cursor-pointer px-1 text-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2">
+          <Info aria-hidden="true" className="size-3" />
+        </summary>
+      </details>
+      {/* Expanded, the detail text is the strip's last row: full width, below the Dismiss. */}
+      <span id={contentId} className={cn("order-last w-full break-words text-muted-foreground", !expanded && "hidden")}>
         {expanded ? detail : null}
       </span>
-    </details>
+    </>
   );
 }
 
