@@ -32,6 +32,8 @@ type Store = {
   running: Promise<void> | null;
   /** A Retry pressed while a load runs rides on that load's next ask. */
   retryNext: boolean;
+  /** Last launch identity per profile, used to discard rows from an older ACP context. */
+  profileSignatures: Map<string, string> | null;
 };
 
 const stores = new WeakMap<EngineApi, Store>();
@@ -50,7 +52,7 @@ export function profileChoicesKey(
 function storeOf(api: EngineApi): Store {
   let store = stores.get(api);
   if (!store) {
-    store = { view: EMPTY, listeners: new Set(), running: null, retryNext: false };
+    store = { view: EMPTY, listeners: new Set(), running: null, retryNext: false, profileSignatures: null };
     stores.set(api, store);
   }
   return store;
@@ -147,8 +149,38 @@ async function poll(api: EngineApi, store: Store): Promise<void> {
  * Ask the engine for the list and keep asking while it reports a harness still loading. Joins a load that is
  * already running instead of starting a second. `retry` makes the engine probe the incomplete harnesses again.
  */
-export function loadModelChoices(api: EngineApi, options: { retry?: boolean } = {}): Promise<void> {
+export function loadModelChoices(
+  api: EngineApi,
+  options: {
+    retry?: boolean;
+    profiles?: readonly Pick<Profile, "name" | "provider" | "choices_fingerprint">[];
+  } = {},
+): Promise<void> {
   const store = storeOf(api);
+  if (options.profiles) {
+    const nextSignatures = new Map(
+      options.profiles.map(({ name, provider, choices_fingerprint }) => [
+        name,
+        `${provider ?? ""}\u0000${choices_fingerprint ?? ""}`,
+      ]),
+    );
+    const previousSignatures = store.profileSignatures;
+    if (previousSignatures) {
+      const changed = new Set([...previousSignatures.keys(), ...nextSignatures.keys()]);
+      for (const name of changed) {
+        if (previousSignatures.get(name) === nextSignatures.get(name)) changed.delete(name);
+      }
+      if (changed.size && store.view.choices) {
+        publish(store, {
+          ...store.view,
+          choices: store.view.choices.filter((choice) => !changed.has(choice.profile)),
+          discovering: store.view.discovering.filter((name) => !changed.has(name)),
+          incomplete: store.view.incomplete.filter((name) => !changed.has(name)),
+        });
+      }
+    }
+    store.profileSignatures = nextSignatures;
+  }
   if (options.retry) store.retryNext = true;
   if (store.running) return store.running;
   const run = poll(api, store).finally(() => {

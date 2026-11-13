@@ -268,7 +268,7 @@ export function AppSidebar({
   // button opens on a list that is already complete (#953). The engine has been learning it since it started.
   const profilesKey = profileChoicesKey(profiles);
   useEffect(() => {
-    void loadModelChoices(api);
+    void loadModelChoices(api, { profiles });
   }, [api, profilesKey]);
   // Every live agent on this computer is a session row (the engine lists them); these are the other computers'.
   // The #158 tree: NETWORKS > DEVICES > WORKSPACES > AGENTS across every network
