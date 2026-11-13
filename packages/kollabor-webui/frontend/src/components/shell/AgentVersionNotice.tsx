@@ -1,5 +1,25 @@
+import { useId, useState } from "react";
 import type { LiveAgent } from "@/api";
 import { NoticeAction, NoticeBar } from "@/components/shell/NoticeBar";
+
+function VersionDetails({ detail }: { detail: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const contentId = useId();
+
+  return (
+    <details
+      className="shrink-0 text-xs text-foreground"
+      onToggle={(event) => setExpanded(event.currentTarget.open)}
+    >
+      <summary aria-expanded={expanded} aria-controls={contentId} className="min-h-7 cursor-pointer px-1 underline underline-offset-2">
+        Version details
+      </summary>
+      <span id={contentId} className="break-words text-muted-foreground">
+        {expanded ? detail : null}
+      </span>
+    </details>
+  );
+}
 
 /** What a chat says when its agent runs other code than the engine. */
 export type AgentVersionNoticeState = {
@@ -71,7 +91,7 @@ export function AgentVersionNotice({
 }) {
   if (failure && tooOld) {
     return (
-      <NoticeBar urgent detail={notice.detail} onDismiss={onDismiss}>
+      <NoticeBar urgent detail={notice.detail} details={<VersionDetails detail={notice.detail} />} onDismiss={onDismiss}>
         {tooOldLine(notice.name)}
       </NoticeBar>
     );
@@ -81,6 +101,7 @@ export function AgentVersionNotice({
       <NoticeBar
         urgent
         detail={notice.detail}
+        details={<VersionDetails detail={notice.detail} />}
         actions={<NoticeAction onClick={onRestart}>Try Again</NoticeAction>}
         onDismiss={onDismiss}
       >
@@ -90,21 +111,21 @@ export function AgentVersionNotice({
   }
   if (busy) {
     return (
-      <NoticeBar detail={notice.detail}>
+      <NoticeBar detail={notice.detail} details={<VersionDetails detail={notice.detail} />}>
         {waiting ? "This agent restarts when its turn ends." : "Restarting this agent…"}
       </NoticeBar>
     );
   }
   if (notice.kind === "too-old") {
     return (
-      <NoticeBar detail={notice.detail} onDismiss={onDismiss}>
+      <NoticeBar detail={notice.detail} details={<VersionDetails detail={notice.detail} />} onDismiss={onDismiss}>
         {tooOldLine(notice.name)}
       </NoticeBar>
     );
   }
   if (notice.kind === "command") {
     return (
-      <NoticeBar detail={notice.detail} onDismiss={onDismiss}>
+      <NoticeBar detail={notice.detail} details={<VersionDetails detail={notice.detail} />} onDismiss={onDismiss}>
         Run /restart to update the agent version running.
       </NoticeBar>
     );
@@ -112,6 +133,7 @@ export function AgentVersionNotice({
   return (
     <NoticeBar
       detail={notice.detail}
+      details={<VersionDetails detail={notice.detail} />}
       actions={<NoticeAction onClick={onRestart}>Restart Agent</NoticeAction>}
       onDismiss={onDismiss}
     >
