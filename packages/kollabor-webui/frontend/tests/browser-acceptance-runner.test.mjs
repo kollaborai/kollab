@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
-import { runBrowserSuites } from "../scripts/browser-acceptance-runner.mjs";
+import { DEFAULT_SUITE_TIMEOUT_MS, runBrowserSuites } from "../scripts/browser-acceptance-runner.mjs";
 
 async function fixture(name, source) {
   const root = await mkdtemp(path.join(os.tmpdir(), `kollab-runner-${name}-`));
@@ -187,4 +187,9 @@ test("runs independent workers concurrently", async () => {
   }
   const results = await runBrowserSuites({ suites: scripts, workers: 2, timeoutMs: 3000, root, artifacts: root });
   assert.ok(results.every((result) => result.ok));
+});
+
+test("the default suite timeout leaves headroom over the slowest observed CI run", () => {
+  // learn took 231 to 381 s on ubuntu-latest; the limit must clear twice the slowest run.
+  assert.ok(DEFAULT_SUITE_TIMEOUT_MS >= 2 * 381_000, `default ${DEFAULT_SUITE_TIMEOUT_MS} ms is too tight`);
 });
