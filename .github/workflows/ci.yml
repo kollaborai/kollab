@@ -64,8 +64,8 @@ jobs:
       - name: Install workspace
         run: uv sync --all-packages --extra dev
 
-      # Hash test files across the matrix. Split the high-latency network
-      # membership module by test item so one file can't dominate a shard.
+      # Hash test files across the matrix. Files whose tests run multi-second
+      # each are hashed by test item so one file can't dominate a shard (#1022).
       # Keep the two parallel-sensitive tests serial in the support job (#470).
       - name: Run unit test shard
         env:
@@ -82,8 +82,9 @@ jobs:
 
           # Files whose tests run multi-second each: hashed by test item so no
           # one of them can land whole in one shard and bound the run (#1022).
+          # test_network_members.py is absent on purpose: its revocation tests
+          # run minutes each and own the dedicated heavy job below.
           SLOW_FILES = {
-              b"tests/unit/test_network_members.py",
               b"tests/unit/test_mesh_network.py",
               b"tests/unit/test_kill_switch_f13.py",
               b"tests/unit/test_crystal_store_cache.py",
@@ -108,7 +109,6 @@ jobs:
           slow_tests=()
           selected_slow_tests=$(
               uv run python -m pytest \
-                tests/unit/test_network_members.py \
                 tests/unit/test_mesh_network.py \
                 tests/unit/test_kill_switch_f13.py \
                 tests/unit/test_crystal_store_cache.py \
@@ -148,6 +148,40 @@ jobs:
           uv run python -m pytest "${test_targets[@]}" -q -n auto --durations=25 \
             --deselect=tests/unit/test_hub_email_bridge.py::test_disconnect_ends_a_poll_blocked_in_idle \
             --deselect=tests/unit/test_relay_build_allowlist.py::test_packaged_relay_imports_and_help_from_allowlist_alone
+
+  # The network-membership revocation tests run minutes each (one is ~140s on
+  # a runner); hashed into shards they made whichever shard drew them the
+  # slowest job of the run. This dedicated lane isolates them so the shards
+  # stay flat (#1022); the runner's four workers spread the file's items.
+  heavy_tests:
+    name: ci/tests (heavy)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          cache-suffix: ${{ github.job }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Install workspace
+        run: uv sync --all-packages --extra dev
+
+      - name: Run network membership tests
+        run: >-
+          uv run python -m pytest tests/unit/test_network_members.py
+          -q -n auto --durations=25
 
   # The support lanes are independent of each other, so they run as parallel
   # jobs instead of serial steps inside one job (#1020): the web UI browser
@@ -310,20 +344,21 @@ jobs:
     # is free-form: this resolves as the check "ci/tests", which is the exact
     # name the required rule expects.
     name: ci/tests
-    needs: [tests, supporting_tests, support_voice_tests, support_webui_tests]
+    needs: [tests, heavy_tests, supporting_tests, support_voice_tests, support_webui_tests]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Fail unless every required test job passed
         env:
           UNIT_RESULT: ${{ needs.tests.result }}
+          HEAVY_RESULT: ${{ needs.heavy_tests.result }}
           SUPPORT_PYTHON_RESULT: ${{ needs.supporting_tests.result }}
           SUPPORT_VOICE_RESULT: ${{ needs.support_voice_tests.result }}
           SUPPORT_WEBUI_RESULT: ${{ needs.support_webui_tests.result }}
         run: |
-          case "$UNIT_RESULT:$SUPPORT_PYTHON_RESULT:$SUPPORT_VOICE_RESULT:$SUPPORT_WEBUI_RESULT" in
-            success:success:success:success) echo "ci/tests: all required test jobs succeeded"; exit 0 ;;
-            *) echo "ci/tests: unit shards '$UNIT_RESULT'; support python '$SUPPORT_PYTHON_RESULT'; support voice '$SUPPORT_VOICE_RESULT'; support webui '$SUPPORT_WEBUI_RESULT'"; exit 1 ;;
+          case "$UNIT_RESULT:$HEAVY_RESULT:$SUPPORT_PYTHON_RESULT:$SUPPORT_VOICE_RESULT:$SUPPORT_WEBUI_RESULT" in
+            success:success:success:success:success) echo "ci/tests: all required test jobs succeeded"; exit 0 ;;
+            *) echo "ci/tests: unit shards '$UNIT_RESULT'; heavy '$HEAVY_RESULT'; support python '$SUPPORT_PYTHON_RESULT'; support voice '$SUPPORT_VOICE_RESULT'; support webui '$SUPPORT_WEBUI_RESULT'"; exit 1 ;;
           esac
 
   standards-check:
