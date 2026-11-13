@@ -316,10 +316,11 @@ session launch, Learn navigation/focus, and responsive layouts. It writes the
 three viewport screenshots to `LEARN_SCREENSHOT_DIR` (by default a directory
 under the system temp dir); set `LEARN_CAPTURE_SCREENSHOTS=0` to run the
 checks without writing images.
-Two sibling suites split out of the original monolithic script so CI workers
-run them in parallel (#1022): `npm run test:e2e:learn:loadouts` covers the
-default-loadout scenarios and `npm run test:e2e:learn:notices` the notice and
-release-notes scenarios.
+Four sibling suites split out of the original monolithic script so CI workers
+run them in parallel (#1022): `npm run test:e2e:learn:topics` (topic tour and
+walkthrough video), `test:e2e:learn:loadouts` (default-loadout scenarios),
+`test:e2e:learn:notices` (release notes and notice lines) and
+`test:e2e:learn:retries` (dismissed retry and hand-made model changes).
 
 
 ## License

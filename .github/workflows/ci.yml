@@ -20,14 +20,24 @@ permissions:
 
 jobs:
   tests:
-    name: ci/tests (unit shard ${{ matrix.shard }})
+    name: ci/tests (${{ matrix.shard.gem }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # 3.14 is the floor and the launch runtime.
+        # 3.14 is the floor and the launch runtime. Eight gem-named shards keep
+        # every leg under the three-minute run goal (#1022); the index feeds the
+        # hash split below and SHARD_COUNT must match the list length.
         python-version: ["3.14"]
-        shard: [0, 1, 2, 3]
+        shard:
+          - { index: 0, gem: amber }
+          - { index: 1, gem: beryl }
+          - { index: 2, gem: coral }
+          - { index: 3, gem: diamond }
+          - { index: 4, gem: garnet }
+          - { index: 5, gem: jade }
+          - { index: 6, gem: opal }
+          - { index: 7, gem: ruby }
 
     steps:
       - uses: actions/checkout@v6
@@ -42,7 +52,7 @@ jobs:
         uses: astral-sh/setup-uv@v8.1.0
         with:
           # Matrix legs need separate caches; otherwise they race to save one key.
-          cache-suffix: ${{ github.job }}-${{ matrix.shard }}
+          cache-suffix: ${{ github.job }}-${{ matrix.shard.gem }}
 
       # Wheel/editable builds fail instead of substituting an older WebUI.
       - uses: actions/setup-node@v6
@@ -57,8 +67,8 @@ jobs:
       # Keep the two parallel-sensitive tests serial in the support job (#470).
       - name: Run unit test shard
         env:
-          SHARD: ${{ matrix.shard }}
-          SHARD_COUNT: ${{ strategy.job-total }}
+          SHARD: ${{ matrix.shard.index }}
+          SHARD_COUNT: 8
         run: |
           set -euo pipefail
           selected_files=$(find tests/unit -type f -name 'test_*.py' -print |
@@ -199,8 +209,26 @@ jobs:
   # node:test files (Node 24 strips the types). Node-only lane: no python,
   # uv or workspace install.
   support_webui_tests:
-    name: ci/tests (support, webui)
+    name: ci/tests (support, webui ${{ matrix.lane }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The browser suites fan out across four lane jobs so no single suite
+        # bounds the run (#1022). Every lane runs its slice through the same
+        # parallel runner; the core lane also owns the static web UI checks,
+        # the runner unit tests, the controls inventory and the dist build
+        # (team-launch needs the built frontend).
+        lane: [core, learn, topics, notices]
+        include:
+          - lane: core
+            suites: agent-sidebar,remote-chat-lifecycle,team-launch,profile-rows,profile-copy
+          - lane: learn
+            suites: learn,learn-loadouts
+          - lane: topics
+            suites: learn-topics
+          - lane: notices
+            suites: learn-notices,learn-retries
 
     steps:
       - uses: actions/checkout@v6
@@ -210,11 +238,17 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
+          cache: npm
+          cache-dependency-path: packages/kollabor-webui/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: packages/kollabor-webui/frontend
+        run: npm ci --no-audit --no-fund
 
       - name: Run web UI tests
+        if: matrix.lane == 'core'
         working-directory: packages/kollabor-webui/frontend
         run: |
-          npm ci --no-audit --no-fund
           npx tsc --noEmit
           node scripts/check-test-discovery.mjs
           npx vitest run
@@ -225,26 +259,28 @@ jobs:
         run: npx playwright-core install --with-deps chromium
 
       # The runner supports 1-4 workers and every suite gets an isolated
-      # HOME/TMPDIR and its own Chromium; the learn suite is split into
-      # tour/loadouts/notices (#1022) so the 8 suites share the 4 workers
-      # instead of one suite owning the critical path.
+      # HOME/TMPDIR and its own Chromium. KOLLAB_BROWSER_SUITES names this
+      # lane's slice; the runner fails fast on an unknown name.
       - name: Run web UI browser acceptance
         working-directory: packages/kollabor-webui/frontend
         env:
           KOLLAB_BROWSER_WORKERS: "4"
+          KOLLAB_BROWSER_SUITES: ${{ matrix.suites }}
           KOLLAB_BROWSER_RESULTS_DIR: ${{ runner.temp }}/kollab-browser-results
         run: |
           mkdir -p "$KOLLAB_BROWSER_RESULTS_DIR"
-          npm run build
-          npm run test:e2e:runner
-          npm run inventory:controls -- "$KOLLAB_BROWSER_RESULTS_DIR/control-candidates.json"
+          if [ "${{ matrix.lane }}" = "core" ]; then
+            npm run build
+            npm run test:e2e:runner
+            npm run inventory:controls -- "$KOLLAB_BROWSER_RESULTS_DIR/control-candidates.json"
+          fi
           npm run test:e2e:parallel
 
       - name: Upload browser acceptance evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: browser-acceptance-results
+          name: browser-acceptance-results-${{ matrix.lane }}
           path: ${{ runner.temp }}/kollab-browser-results
           if-no-files-found: ignore
 

@@ -196,8 +196,10 @@ test("the browser suite list is pinned and every suite script exists", () => {
   // coverage from CI while everything stays green; this pins the list (#1022).
   const expected = [
     { name: "learn", script: "tests/learn-browser-acceptance.mjs" },
+    { name: "learn-topics", script: "tests/learn-topics-browser-acceptance.mjs" },
     { name: "learn-loadouts", script: "tests/learn-loadouts-browser-acceptance.mjs" },
     { name: "learn-notices", script: "tests/learn-notices-browser-acceptance.mjs" },
+    { name: "learn-retries", script: "tests/learn-retries-browser-acceptance.mjs" },
     { name: "profile-rows", script: "tests/acceptance/profile-rows.browser.mjs" },
     { name: "profile-copy", script: "tests/acceptance/profile-copy.browser.mjs" },
     { name: "agent-sidebar", script: "tests/agent-sidebar-glyph-browser-acceptance.mjs" },

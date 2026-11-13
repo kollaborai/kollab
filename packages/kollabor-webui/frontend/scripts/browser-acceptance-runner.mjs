@@ -6,8 +6,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const browserSuites = Object.freeze([
   { name: "learn", script: "tests/learn-browser-acceptance.mjs" },
+  { name: "learn-topics", script: "tests/learn-topics-browser-acceptance.mjs" },
   { name: "learn-loadouts", script: "tests/learn-loadouts-browser-acceptance.mjs" },
   { name: "learn-notices", script: "tests/learn-notices-browser-acceptance.mjs" },
+  { name: "learn-retries", script: "tests/learn-retries-browser-acceptance.mjs" },
   { name: "profile-rows", script: "tests/acceptance/profile-rows.browser.mjs" },
   { name: "profile-copy", script: "tests/acceptance/profile-copy.browser.mjs" },
   { name: "agent-sidebar", script: "tests/agent-sidebar-glyph-browser-acceptance.mjs" },
@@ -339,7 +341,19 @@ async function main() {
     : await mkdtemp(path.join(os.tmpdir(), "kollab-browser-acceptance-"));
   await mkdir(artifacts, { recursive: true });
   const chromePath = process.env.CHROME_PATH || chromium.executablePath();
-  const results = await runBrowserSuites({ suites: browserSuites, workers, timeoutMs, root: frontendRoot, artifacts, chromePath });
+  // CI fans the suites out across parallel webui lane jobs (#1022); a lane
+  // names its suites and anything unknown fails fast instead of silently
+  // running nothing.
+  const selected = process.env.KOLLAB_BROWSER_SUITES;
+  const suites = selected
+    ? selected.split(",").map((name) => name.trim()).filter(Boolean).map((name) => {
+        const suite = browserSuites.find((entry) => entry.name === name);
+        if (!suite) throw new Error(`KOLLAB_BROWSER_SUITES names unknown suite '${name}'`);
+        return suite;
+      })
+    : browserSuites;
+  if (!suites.length) throw new Error("KOLLAB_BROWSER_SUITES selected no suites");
+  const results = await runBrowserSuites({ suites, workers, timeoutMs, root: frontendRoot, artifacts, chromePath });
   console.log(`Browser acceptance results: ${path.join(artifacts, "results.json")}`);
   if (results.some((result) => !result.ok)) process.exitCode = 1;
 }
