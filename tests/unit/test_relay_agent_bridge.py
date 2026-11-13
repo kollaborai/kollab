@@ -2312,7 +2312,7 @@ async def test_remote_directory_falls_back_after_secure_error_from_old_peer(brid
         requests.append(payload)
         if payload:
             # SecureConversationTransport sanitizes remote application errors.
-            raise RelayError("secure conversation transport failed")
+            raise RelayError("peer application request failed", "peer_application")
         return _directory_reply(right)
 
     left.secure_transport.request = old_peer
@@ -2320,6 +2320,23 @@ async def test_remote_directory_falls_back_after_secure_error_from_old_peer(brid
     await left._rpc_directory({"peer": right.commands.client.public_key})
 
     assert requests == [{"agent_type": True}, {}]
+
+
+@pytest.mark.asyncio
+async def test_remote_directory_does_not_retry_generic_transport_failure(bridges):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    requests = []
+
+    async def unreachable_peer(_peer, method, payload, *, timeout=10):
+        requests.append(payload)
+        raise RelayError("secure conversation transport failed")
+
+    left.secure_transport.request = unreachable_peer
+
+    await left._rpc_directory({"peer": right.commands.client.public_key})
+
+    assert requests == [{"agent_type": True}]
 
 
 @pytest.mark.asyncio
