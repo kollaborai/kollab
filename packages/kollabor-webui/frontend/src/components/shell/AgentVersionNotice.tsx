@@ -1,4 +1,5 @@
 import { useId, useState } from "react";
+import { Info } from "lucide-react";
 import type { LiveAgent } from "@/api";
 import { NoticeAction, NoticeBar } from "@/components/shell/NoticeBar";
 
@@ -8,13 +9,13 @@ function VersionDetails({ detail }: { detail: string }) {
 
   return (
     <details
-      className="shrink-0 text-xs text-foreground"
+      className="min-w-0 basis-full text-xs text-foreground sm:basis-auto"
       onToggle={(event) => setExpanded(event.currentTarget.open)}
     >
-      <summary aria-expanded={expanded} aria-controls={contentId} className="min-h-7 cursor-pointer px-1 underline underline-offset-2">
-        Version details
+      <summary aria-label="Version details" aria-expanded={expanded} aria-controls={contentId} title={detail} className="group/version relative min-h-7 cursor-pointer px-1 text-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2">
+        <Info aria-hidden="true" className="size-3" />
       </summary>
-      <span id={contentId} className="break-words text-muted-foreground">
+      <span id={contentId} className="block w-full break-words text-muted-foreground">
         {expanded ? detail : null}
       </span>
     </details>
