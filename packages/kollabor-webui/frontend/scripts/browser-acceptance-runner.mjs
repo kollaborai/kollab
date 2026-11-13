@@ -6,6 +6,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const browserSuites = Object.freeze([
   { name: "learn", script: "tests/learn-browser-acceptance.mjs" },
+  { name: "learn-loadouts", script: "tests/learn-loadouts-browser-acceptance.mjs" },
+  { name: "learn-notices", script: "tests/learn-notices-browser-acceptance.mjs" },
   { name: "profile-rows", script: "tests/acceptance/profile-rows.browser.mjs" },
   { name: "profile-copy", script: "tests/acceptance/profile-copy.browser.mjs" },
   { name: "agent-sidebar", script: "tests/agent-sidebar-glyph-browser-acceptance.mjs" },
@@ -70,7 +72,8 @@ async function prepareWorkerWorkspace({ suite, artifacts }) {
   return { suiteArtifacts, home };
 }
 
-// Per-suite limit. The learn suite takes 231 to 381 s on CI runners, so 900 s clears twice the slowest run.
+// Per-suite limit. The monolithic learn suite took 231 to 381 s on CI runners before it was split into
+// parallel suites (#1022); 900 s still clears twice the slowest run any suite has shown.
 export const DEFAULT_SUITE_TIMEOUT_MS = 900_000;
 
 export function suiteTimeoutMs(env = process.env) {

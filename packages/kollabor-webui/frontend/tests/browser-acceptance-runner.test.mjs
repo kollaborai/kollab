@@ -190,7 +190,8 @@ test("runs independent workers concurrently", async () => {
 });
 
 test("the default suite timeout leaves headroom over the slowest observed CI run", () => {
-  // learn took 231 to 381 s on ubuntu-latest; the limit must clear twice the slowest run.
+  // The monolithic learn suite took 231 to 381 s on ubuntu-latest before the #1022 split;
+  // the limit must clear twice the slowest run any suite has shown.
   assert.ok(DEFAULT_SUITE_TIMEOUT_MS >= 2 * 381_000, `default ${DEFAULT_SUITE_TIMEOUT_MS} ms is too tight`);
 });
 

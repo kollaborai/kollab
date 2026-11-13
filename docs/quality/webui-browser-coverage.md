@@ -18,7 +18,7 @@ npm run inventory:controls -- /tmp/kollab-control-candidates.json
 npm run test:e2e:parallel
 ```
 
-The runner executes six independent browser suites using two workers by
+The runner executes eight independent browser suites using two workers by
 default. Each has its own scratch home, temporary directory, browser context,
 and dynamically allocated local listener. It does not inherit unrelated
 environment variables. `KOLLAB_BROWSER_WORKERS` accepts 1–4;
@@ -46,7 +46,7 @@ test a real remote agent or provider.
 
 ## Current evidence and gaps
 
-- Learn, navigation, new-session shell and mocked remote selection: `learn-browser-acceptance.mjs`. Still needed: real remote send/reply, switching, close/reopen, reconnect and history persistence.
+- Learn, navigation, new-session shell, mocked remote selection and the topic tour: `learn-browser-acceptance.mjs`. The default-loadout scenarios (#957/#961) run in `learn-loadouts-browser-acceptance.mjs` and the notice and release-notes scenarios (#887/#956/#959) in `learn-notices-browser-acceptance.mjs`; the split keeps every suite inside one CI worker wave (#1022). Still needed: real remote send/reply, switching, close/reopen, reconnect and history persistence.
 - Profile rows: `acceptance/profile-rows.browser.mjs`. Still needed: full profile lifecycle and real authentication/error paths.
 - Profile copy: `acceptance/profile-copy.browser.mjs`. Still needed: real keyring, provider and provisioned-profile negative cases.
 - Agent sidebar glyphs and responsive layout: `agent-sidebar-glyph-browser-acceptance.mjs`. Still needed: agent launch, stop, deletion and remote failures.

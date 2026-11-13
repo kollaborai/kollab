@@ -225,8 +225,9 @@ jobs:
         run: npx playwright-core install --with-deps chromium
 
       # The runner supports 1-4 workers and every suite gets an isolated
-      # HOME/TMPDIR and its own Chromium; 4 workers halves the waves for the
-      # 6 suites on the 4-vCPU runner.
+      # HOME/TMPDIR and its own Chromium; the learn suite is split into
+      # tour/loadouts/notices (#1022) so the 8 suites share the 4 workers
+      # instead of one suite owning the critical path.
       - name: Run web UI browser acceptance
         working-directory: packages/kollabor-webui/frontend
         env:
