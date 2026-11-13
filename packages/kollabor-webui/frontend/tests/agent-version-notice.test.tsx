@@ -48,7 +48,8 @@ describe("AgentVersionNotice", () => {
     const notice = agentVersionNotice({ ...differ, restartAgents: true })!;
     const html = renderToStaticMarkup(<AgentVersionNotice notice={notice} busy={false} onRestart={() => {}} />);
     expect(html).toContain("Version details");
-    expect(html).toContain("Agent 0.20.0+bbbb2222 · engine 0.21.0+aaaa1111");
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain("aria-controls=");
   });
 
   it("flag off: the /restart line and no button", () => {
