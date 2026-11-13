@@ -153,11 +153,17 @@ jobs:
 
   # The network-membership revocation tests run minutes each (one is ~140s on
   # a runner); hashed into shards they made whichever shard drew them the
-  # slowest job of the run. This dedicated lane isolates them so the shards
-  # stay flat (#1022); the runner's four workers spread the file's items.
+  # slowest job of the run. These two dedicated lanes isolate them so the
+  # shards stay flat (#1022); each lane hashes the file's test items across
+  # itself, so the one ~140s test cannot stack with the other revocation
+  # tests behind a single job.
   heavy_tests:
-    name: ci/tests (heavy)
+    name: ci/tests (heavy ${{ matrix.lane }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [a, b]
 
     steps:
       - uses: actions/checkout@v6
@@ -171,7 +177,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
         with:
-          cache-suffix: ${{ github.job }}
+          cache-suffix: ${{ github.job }}-${{ matrix.lane }}
 
       - uses: actions/setup-node@v6
         with:
@@ -180,10 +186,37 @@ jobs:
       - name: Install workspace
         run: uv sync --all-packages --extra dev
 
-      - name: Run network membership tests
-        run: >-
-          uv run python -m pytest tests/unit/test_network_members.py
-          -q -n auto --durations=25
+      - name: Run this lane's network membership tests
+        env:
+          HEAVY_LANE: ${{ matrix.lane }}
+        run: |
+          set -euo pipefail
+          lane=0
+          [ "$HEAVY_LANE" = "b" ] && lane=1
+          selected=$(
+            uv run python -m pytest tests/unit/test_network_members.py --collect-only -q |
+            python -c '
+          import hashlib
+          import os
+          import sys
+
+          lane = int(sys.argv[1])
+          for nodeid in sys.stdin.buffer:
+              nodeid = nodeid.rstrip(b"\n")
+              if b"::" not in nodeid:
+                  continue
+              digest = hashlib.sha256(b"kollab-ci-heavy:" + nodeid).digest()
+              if int.from_bytes(digest[:4], "big") % 2 == lane:
+                  print(os.fsdecode(nodeid))
+          ' "$lane"
+          )
+          mapfile -t targets <<< "$selected"
+          if [ "${#targets[@]}" -eq 0 ]; then
+            echo "Heavy lane $HEAVY_LANE discovered no test items" >&2
+            exit 1
+          fi
+          printf 'Heavy lane %s selected %s test items\n' "$HEAVY_LANE" "${#targets[@]}"
+          uv run python -m pytest "${targets[@]}" -q -n auto --durations=25
 
   # The support lanes are independent of each other, so they run as parallel
   # jobs instead of serial steps inside one job (#1020): the web UI browser
