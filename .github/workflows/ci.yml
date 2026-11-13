@@ -20,26 +20,26 @@ permissions:
 
 jobs:
   tests:
-    name: ci/tests (${{ matrix.shard.planet }})
+    name: ci/tests (${{ matrix.shard.gem }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # 3.14 is the floor and the launch runtime. Nine planet-named shards
+        # 3.14 is the floor and the launch runtime. Nine gem-named shards
         # keep every leg under the three-minute run goal (#1022); the names are
         # cosmetic (the hash split below decides content), the index feeds it,
         # and SHARD_COUNT must match the list length.
         python-version: ["3.14"]
         shard:
-          - { index: 0, planet: mercury }
-          - { index: 1, planet: venus }
-          - { index: 2, planet: earth }
-          - { index: 3, planet: mars }
-          - { index: 4, planet: jupiter }
-          - { index: 5, planet: saturn }
-          - { index: 6, planet: uranus }
-          - { index: 7, planet: neptune }
-          - { index: 8, planet: pluto }
+          - { index: 0, gem: amber }
+          - { index: 1, gem: beryl }
+          - { index: 2, gem: coral }
+          - { index: 3, gem: diamond }
+          - { index: 4, gem: garnet }
+          - { index: 5, gem: jade }
+          - { index: 6, gem: opal }
+          - { index: 7, gem: ruby }
+          - { index: 8, gem: sapphire }
 
     steps:
       - uses: actions/checkout@v6
@@ -54,7 +54,7 @@ jobs:
         uses: astral-sh/setup-uv@v8.1.0
         with:
           # Matrix legs need separate caches; otherwise they race to save one key.
-          cache-suffix: ${{ github.job }}-${{ matrix.shard.planet }}
+          cache-suffix: ${{ github.job }}-${{ matrix.shard.gem }}
 
       # Wheel/editable builds fail instead of substituting an older WebUI.
       - uses: actions/setup-node@v6
