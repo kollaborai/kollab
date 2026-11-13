@@ -92,8 +92,8 @@ class TestRestartInPlace:
 
     @pytest.mark.asyncio
     async def test_snapshot_save_failure_aborts_restart(self, monkeypatch):
-        from plugins.hub.plugin import HubPlugin
         from kollabor_tui import display_tap
+        from plugins.hub.plugin import HubPlugin
 
         plugin = HubPlugin.__new__(HubPlugin)
         plugin._identity = SimpleNamespace(identity="lapis")
