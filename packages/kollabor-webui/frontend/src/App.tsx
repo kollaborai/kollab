@@ -1166,6 +1166,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         try {
           await api.streamEvents(activeId, controller.signal, (event) => {
             const type = event.type ?? "";
+            if (type === "agent_restart_failed" && event.session_id === activeId) {
+              setAgentRestart({
+                sessionId: activeId,
+                waiting: false,
+                failure: "The conversation could not be saved.",
+                tooOld: false,
+              });
+            }
             if (type === "supervisor_alert") setSupervisorEvents((prev) => [...prev.slice(-19), event]);
 
             const compactionStatus = parseContextCompactionStatus(event);

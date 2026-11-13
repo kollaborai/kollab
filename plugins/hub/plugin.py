@@ -4600,6 +4600,13 @@ class HubPlugin(BasePlugin):
         except Exception as e:
             logger.warning(f"restart in place: could not save the conversation: {e}")
             self._self_restart_requested = False
+            from kollabor_tui.display_tap import publish_semantic
+
+            publish_semantic(
+                self.event_bus,
+                "agent_restart_failed",
+                identity=self._identity.identity,
+            )
             return
         # Past this point the process image is replaced or the process ends: tell every
         # attached window now, so a terminal waits and attaches again instead of
