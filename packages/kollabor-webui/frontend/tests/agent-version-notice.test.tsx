@@ -47,7 +47,8 @@ describe("AgentVersionNotice", () => {
   it("makes the agent and engine versions available through a touch-accessible disclosure", () => {
     const notice = agentVersionNotice({ ...differ, restartAgents: true })!;
     const html = renderToStaticMarkup(<AgentVersionNotice notice={notice} busy={false} onRestart={() => {}} />);
-    expect(html).toContain("Version details");
+    expect(html).toContain('<summary aria-label="Version details"');
+    expect(html).not.toContain(">Version details</summary>");
     expect(html).toContain('aria-expanded="false"');
     expect(html).toContain("aria-controls=");
   });
