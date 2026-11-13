@@ -219,6 +219,35 @@ test("an engine restarted with the page open does not blank a harness the page a
   assert.deepEqual(getModelChoices(api).discovering, []);
 });
 
+test("a changed ACP launch fingerprint drops only that profile's cached rows while loading", async () => {
+  const { api } = fakeApi(
+    {
+      choices: [row("p", "old-a"), row("p", "old-b"), row("native", "n")],
+      discovery: { p: ready, native: ready },
+    },
+    {
+      choices: [row("p"), row("native", "n")],
+      discovery: { p: loading, native: ready },
+    },
+    {
+      choices: [row("p", "new-a"), row("native", "n")],
+      discovery: { p: ready, native: ready },
+    },
+  );
+  const oldProfile = [{ name: "p", provider: "acp", choices_fingerprint: "before" }];
+  const editedProfile = [{ name: "p", provider: "acp", choices_fingerprint: "after" }];
+
+  await loadModelChoices(api, { profiles: oldProfile } as never);
+  vi.useFakeTimers();
+  const refresh = loadModelChoices(api, { profiles: editedProfile } as never);
+  await vi.advanceTimersByTimeAsync(0);
+
+  assert.deepEqual(getModelChoices(api).choices, [row("p"), row("native", "n")]);
+  assert.deepEqual(getModelChoices(api).discovering, ["p"]);
+  await vi.advanceTimersByTimeAsync(POLL_MS);
+  await refresh;
+});
+
 test("a first-ever warm shows each batch as it arrives, rows only growing", async () => {
   vi.useFakeTimers();
   const { api } = fakeApi(
