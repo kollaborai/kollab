@@ -173,6 +173,28 @@ async def test_window_attaches_again_when_the_daemon_announces_a_restart(sock):
 
 
 @pytest.mark.asyncio
+async def test_window_shows_when_a_restart_fails_after_the_command_returns(sock):
+    daemon = Image(sock, "img1", "0.21.0+aaa", [_message(41, "old line")])
+    await daemon.start()
+    app, shown, scheduled, hooks, tasks = _window(sock, alive=True)
+    try:
+        await app._initialize_attach_proxy()
+        await _until(lambda: "old line" in _texts(shown))
+
+        daemon.send({
+            "type": "agent_restart_failed",
+            "identity": "sunstone",
+            "seq": 42,
+        })
+        await _until(lambda: "Restart of sunstone failed; the agent is still running." in _texts(shown))
+
+        assert app.running is True and scheduled == []
+        assert "[ok] Restarting this agent. The conversation stays." not in _texts(shown)
+    finally:
+        await _stop(app, tasks, daemon)
+
+
+@pytest.mark.asyncio
 async def test_window_attaches_again_while_the_pid_is_alive_and_nobody_announced_anything(sock):
     daemon = Image(sock, "img1", "0.21.0+aaa", [_message(41, "old line")])
     await daemon.start()
