@@ -2808,6 +2808,18 @@ class TerminalLLMChat:
                     if isinstance(runtime, dict):
                         runtime["last_heartbeat_at"] = time.time()
 
+                elif etype == "agent_restart_failed":
+                    failed_identity = event.get("identity", identity)
+                    coordinator.display_message_sequence(
+                        [
+                            (
+                                "system",
+                                f"Restart of {failed_identity} failed; the agent is still running.",
+                                {"display_type": "error"},
+                            ),
+                        ]
+                    )
+
                 elif etype == "daemon_restarting":
                     # The daemon replaces its process image next (#968): this
                     # window waits for the new one and attaches again.
