@@ -53,6 +53,13 @@ describe("AgentVersionNotice", () => {
     expect(html).toContain("aria-controls=");
   });
 
+  it("resets the browser's disclosure marker so no triangle stacks on the info icon", () => {
+    const notice = agentVersionNotice({ ...differ, restartAgents: true })!;
+    const html = renderToStaticMarkup(<AgentVersionNotice notice={notice} busy={false} onRestart={() => {}} />);
+    expect(html).toMatch(/<summary[^>]*class="[^"]*list-none/);
+    expect(html).toMatch(/<summary[^>]*class="[^"]*\[&amp;::-webkit-details-marker\]:hidden/);
+  });
+
   it("keeps the disclosure on the actions row at phone widths; only the expanded text spans full width", () => {
     const notice = agentVersionNotice({ ...differ, restartAgents: true })!;
     const html = renderToStaticMarkup(<AgentVersionNotice notice={notice} busy={false} onRestart={() => {}} />);
