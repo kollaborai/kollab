@@ -293,6 +293,11 @@ export async function openVite() {
     root: frontendRoot,
     logLevel: "error",
     clearScreen: false,
+    // Each suite gets its own cache dir (the runner provisions a unique TMPDIR
+    // per suite) so concurrent suites never share the dep-optimizer cache in
+    // node_modules/.vite, which serializes cold starts and can trigger
+    // outdated-optimize-dep reloads mid-suite (#1022).
+    cacheDir: path.join(process.env.TMPDIR ?? os.tmpdir(), "kollab-vite-cache"),
     server: { host: "127.0.0.1", port: 0, strictPort: false, hmr: false },
   });
   await server.listen();
@@ -455,8 +460,9 @@ async function verifyMobileLearnLayout(browser, baseUrl) {
   if (failures.length) throw new AggregateError(failures, "Mobile Learn layout regressions");
 }
 
-// Every learn-suite script launches Chromium the same way; CI pins CHROME_PATH
-// to the runner-installed binary and Linux runners need --no-sandbox.
+// Every learn-suite script launches Chromium the same way. CHROME_PATH, when
+// set, selects the binary; otherwise playwright's own registry install is used
+// (the CI install step populates it). Linux runners need --no-sandbox.
 export async function launchAcceptanceBrowser() {
   const executablePath = process.env.CHROME_PATH;
   return chromium.launch({

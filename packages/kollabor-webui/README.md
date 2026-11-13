@@ -313,8 +313,9 @@ live engine, router, or user configuration. Install a browser once with
 Chrome/Chromium executable, then run `npm run test:e2e:learn` from `frontend/`.
 The harness checks startup, Hub/network listing, profile selection and agent
 session launch, Learn navigation/focus, and responsive layouts. It writes the
-three viewport screenshots to the repository's `docs/screenshots/`; set
-`LEARN_CAPTURE_SCREENSHOTS=0` to run the checks without rewriting images.
+three viewport screenshots to `LEARN_SCREENSHOT_DIR` (by default a directory
+under the system temp dir); set `LEARN_CAPTURE_SCREENSHOTS=0` to run the
+checks without writing images.
 Two sibling suites split out of the original monolithic script so CI workers
 run them in parallel (#1022): `npm run test:e2e:learn:loadouts` covers the
 default-loadout scenarios and `npm run test:e2e:learn:notices` the notice and

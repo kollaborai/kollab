@@ -21,8 +21,9 @@ npm run test:e2e:parallel
 The runner executes eight independent browser suites using two workers by
 default. Each has its own scratch home, temporary directory, browser context,
 and dynamically allocated local listener. It does not inherit unrelated
-environment variables. `KOLLAB_BROWSER_WORKERS` accepts 1–4;
-`KOLLAB_BROWSER_TIMEOUT_MS` bounds each worker (900 seconds by default).
+environment variables. `KOLLAB_BROWSER_WORKERS` accepts 1–4
+(CI sets it to 4); `KOLLAB_BROWSER_TIMEOUT_MS` bounds each suite (900 seconds
+by default).
 `CHROME_PATH` may select an existing Chromium executable. Results, captured
 worker output, and suite screenshots go under a unique temporary directory or
 under `KOLLAB_BROWSER_RESULTS_DIR` when specified. A failed or timed-out suite makes
