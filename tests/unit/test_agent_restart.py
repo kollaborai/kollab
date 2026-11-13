@@ -93,6 +93,7 @@ class TestRestartInPlace:
     @pytest.mark.asyncio
     async def test_snapshot_save_failure_aborts_restart(self, monkeypatch):
         from plugins.hub.plugin import HubPlugin
+        from kollabor_tui import display_tap
 
         plugin = HubPlugin.__new__(HubPlugin)
         plugin._identity = SimpleNamespace(identity="lapis")
@@ -105,6 +106,8 @@ class TestRestartInPlace:
             return None
 
         plugin._self_restart_watchdog = no_watchdog
+        published = []
+        monkeypatch.setattr(display_tap, "publish_semantic", lambda *args, **kwargs: published.append((args, kwargs)))
         conversation = SimpleNamespace(
             current_session_id="session-1",
             messages=[{"role": "user", "content": "latest"}],
@@ -116,6 +119,7 @@ class TestRestartInPlace:
 
         plugin._perform_self_restart.assert_not_awaited()
         assert plugin._self_restart_requested is False
+        assert published == [((plugin.event_bus, "agent_restart_failed"), {"identity": "lapis"})]
 
 
 class TestRestartCommand:
