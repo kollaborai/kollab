@@ -4592,13 +4592,6 @@ class HubPlugin(BasePlugin):
             logger.warning("restart in place: the turn never ended, so the agent keeps running")
             self._self_restart_requested = False
             return
-        # Past this point the process image is replaced or the process ends: tell every
-        # attached window now, so a terminal waits and attaches again instead of
-        # reporting an exit, and give the attach streams time to write it out first.
-        from kollabor_tui.display_tap import publish_semantic
-
-        publish_semantic(self.event_bus, "daemon_restarting", identity=self._identity.identity)
-        await asyncio.sleep(0.25)
         conv = getattr(llm, "conversation_manager", None)
         session_id = str(getattr(conv, "current_session_id", "") or "")
         try:
@@ -4606,6 +4599,15 @@ class HubPlugin(BasePlugin):
                 conv.save_conversation()
         except Exception as e:
             logger.warning(f"restart in place: could not save the conversation: {e}")
+            self._self_restart_requested = False
+            return
+        # Past this point the process image is replaced or the process ends: tell every
+        # attached window now, so a terminal waits and attaches again instead of
+        # reporting an exit, and give the attach streams time to write it out first.
+        from kollabor_tui.display_tap import publish_semantic
+
+        publish_semantic(self.event_bus, "daemon_restarting", identity=self._identity.identity)
+        await asyncio.sleep(0.25)
         exec_argv = restart_command(sys.argv)
         os.environ.update(restart_env(session_id))  # execvp hands the environment on
         self._self_restart_cmd = exec_argv
