@@ -89,8 +89,14 @@ CONVERTED = {
     ),
     "hub_spawn": (
         "<hub_spawn {attrs}>do it</hub_spawn>",
-        {"name": "lapis", "type": "research"},
-        {"name": "lapis", "agent_type_override": "research", "task": "do it", "llm": ""},
+        {"name": "coder", "identity": "kollabor", "type": "research", "llm": "codex-cli"},
+        {
+            "name": "coder",
+            "identity": "kollabor",
+            "agent_type_override": "research",
+            "task": "do it",
+            "llm": "codex-cli",
+        },
     ),
     "hub_capture": (
         "<hub_capture {attrs}/>",
