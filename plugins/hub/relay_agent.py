@@ -2937,17 +2937,13 @@ class RelayAgentBridge:
                             peer_key, "directory", {"agent_type": True}, timeout=3
                         )
                     except RelayError as exc:
-                        # Older peers accept only the original empty request.
-                        # The secure transport sanitizes remote application
-                        # errors, so an old peer's rejection is also reported
-                        # as a generic transport failure. Directory reads are
-                        # idempotent; retry that legacy shape so the peer stays
-                        # visible. If the retry also fails, normal handling
-                        # below drops the unavailable peer for this refresh.
-                        if str(exc) not in {
-                            "invalid directory request",
-                            "secure conversation transport failed",
-                        }:
+                        # Older peers reject the extended shape at their
+                        # application handler. Retry only that sanitized
+                        # application failure; carrier failures and deadlines
+                        # must not double the wait for an unreachable peer.
+                        if str(exc) != "invalid directory request" and getattr(
+                            exc, "code", None
+                        ) != "peer_application":
                             raise
                         result = await self.secure_transport.request(
                             peer_key, "directory", {}, timeout=3
