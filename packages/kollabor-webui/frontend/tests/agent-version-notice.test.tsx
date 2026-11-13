@@ -44,6 +44,13 @@ describe("AgentVersionNotice", () => {
     expect(html.replace(/title="[^"]*"/g, "")).not.toMatch(/0\.2\d\.\d/);
   });
 
+  it("makes the agent and engine versions available through a touch-accessible disclosure", () => {
+    const notice = agentVersionNotice({ ...differ, restartAgents: true })!;
+    const html = renderToStaticMarkup(<AgentVersionNotice notice={notice} busy={false} onRestart={() => {}} />);
+    expect(html).toContain("Version details");
+    expect(html).toContain("Agent 0.20.0+bbbb2222 · engine 0.21.0+aaaa1111");
+  });
+
   it("flag off: the /restart line and no button", () => {
     const notice = agentVersionNotice({ ...differ, restartAgents: false })!;
     const html = renderToStaticMarkup(<AgentVersionNotice notice={notice} busy={false} onRestart={() => {}} />);
