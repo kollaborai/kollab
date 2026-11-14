@@ -1,4 +1,5 @@
 """Scaffolding creates a local plugin without overwriting existing files."""
+
 import json
 
 import pytest

@@ -1,6 +1,7 @@
 """Headless plugin management commands."""
 
 import argparse
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -27,6 +28,8 @@ def main(argv: list[str]) -> int:
     for action in ("enable", "disable"):
         command = subparsers.add_parser(action, help=f"{action.title()} an installed plugin")
         command.add_argument("plugin_id")
+    new = subparsers.add_parser("new", help="Create a plugin from the hello template")
+    new.add_argument("plugin_id")
     add = subparsers.add_parser("add", help="Install a Git plugin after confirmation")
     add.add_argument("source")
     dev = subparsers.add_parser("dev", help="Attach a local development checkout")
@@ -41,6 +44,24 @@ def main(argv: list[str]) -> int:
         from .services import run_service
 
         return run_service(args.plugin_id, args.service, args.nonce)
+    if args.action == "new":
+        import shutil
+
+        from kollabor_config.config_utils import _get_bundled_dir
+
+        if not _ID.fullmatch(args.plugin_id):
+            raise ValueError("Invalid plugin id")
+        bundle = _get_bundled_dir("plugins")
+        if bundle is None or not (bundle / "hello").is_dir():
+            raise ValueError("Bundled hello plugin is not available")
+        target = Path.cwd() / args.plugin_id
+        shutil.copytree(bundle / "hello", target, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        manifest_path = target / "kollab-plugin.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["id"] = args.plugin_id
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        print(f"Created {target}")
+        return 0
     if args.action in {"add", "enable", "disable", "dev"} and not sys.stdin.isatty():
         raise ValueError("Plugin management requires interactive confirmation")
     if args.action in {"enable", "disable"}:

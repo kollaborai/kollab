@@ -6,7 +6,6 @@ from pathlib import Path
 from kollabor_plugins import BasePlugin
 from kollabor_plugins.packages import validate_manifest
 
-
 ROOT = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
 
 
