@@ -7,6 +7,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-11-14
+
+### Added
+- The web UI sidebar has a PR Chain dialog that lists the pull requests and issues an external review runner is working on, with status, round and recent activity (#1008).
+- The web UI's session panel has Code Editor, Git and Terminal views beside Chat and Trajectory, shown for a chat that
+  has a folder. Code Editor is a Monaco editor with file tree, search, quick open and split panes; Git is its own view
+  (status, stage, commit, branches, stash, log, diff) with the git panel beside the same editor panes; Terminal is a
+  real shell. The daemon of the session serves them, through `/sessions/{id}/code/*` and a
+  `/sessions/{id}/code/terminal` WebSocket, so a session opened from another computer shows that computer's files, git
+  and shell (#987). The on and off switches, the terminal's environment filters and shell limits, the editor's file size
+  and folder rules, and the Git rules all have settings (#987). The Terminal view shows a plain notice to restart the
+  agent when the session's daemon is older than this change (#987).
+- Code and Git share a folder selector that discovers linked worktrees and browses the agent computer. Guarded subfolder commits and stash deletion are unavailable because concurrent Git activity can change the checked index or stash position.
+- Feature work now has a shared spec template, bug fixes have a concise fix brief, and the PR gate reports missing documentation before blocking is enabled (#984).
+- The web UI shows the agent's latest todo list as a Todo card under the Session Controls panel: a count, the items with finished ones struck through, and a header that opens and closes it (#973).
+- `/restart` restarts a detached agent in place on the installed Kollab version and keeps its conversation; `/new` and `/clear` clear it. A web chat whose agent runs an older version than the engine says so, with a Restart Agent button when `kollabor.updates.restart_agents` is on (default off) and the `/restart` line when it is off. Agents publish the version and build they run in presence, `GET /agents` and the network rows. An agent that cannot restart itself (it started before Restart Agent existed) gets a stop command and instructions to select its Offline row in the sidebar to start it again, without a button (#968).
+- Agent bundles can grant read-only terminal access with `terminal-read` (#889).
+- `/llm fallback` lets an agent switch once to a configured loadout after usage, quota, rate-limit or login errors (#548).
+
+### Changed
+- Migration: engine folder routes now refuse a folder unless it sits inside your home folder, the engine's own folder, a folder a kollab agent runs in, or a recent web session folder (see Security). To use a project elsewhere, start its agent from that folder or move the project under your home folder.
+- Learn pages use feature-specific workflows with real product visuals, exact entry points, command examples, expected results, and recovery guidance across all eleven topics, including Connect and Knocks (#1006).
+- Run isolated web UI browser acceptance suites in parallel and record a control inventory with explicit coverage gaps.
+
+### Fixed
+- The CI binary build retries its pex download steps up to four attempts with growing pauses, so a gateway timeout from the package host no longer fails it.
+- The web UI browser acceptance runner gives each suite 900 seconds instead of 360, so the slowest suite no longer fails with a bare timeout on a slow CI runner (#1018).
+- Prevent concurrent editor opens from advancing a dirty file's revision and refuse unsafe subfolder stash creation (#1011).
+- Stop terminal jobs on close, idle reap, and daemon shutdown; detect macOS jobs that detach and close PTY descriptors
+  between scans, and keep Linux source-mode terminal startup working with the isolated supervisor (#1011).
+- The empty Code Editor pane on phones includes a touch-sized button to open the file tree (#1011).
+- The Code Editor's active line and gutter numbers keep readable contrast in light and dark themes (#1011).
+- Selecting a file in the Code sidebar closes the sidebar on narrow screens so the editor has room (#1011).
+- Long Markdown code lines stay accessible in the Code Editor preview on narrow screens (#1011).
+- Narrow editor users can switch between every open split pane from visible phone controls (#1011).
+- Keep split Code Editor documents readable on narrow screens by showing the active pane full width (#1011).
+- Fall back to readable Monaco canvas and source colors when the active theme palette lacks contrast (#1011).
+- The binary build retries its pex step up to four times, waiting longer each time, so a network timeout while fetching the portable CPython no longer fails `ci/binary-smoke` (#996).
+- New Session in a folder typed in other letters than it has on disk (`~/dev/cASEpROJECT` for `~/dev/CaseProject`)
+  no longer waits 45 seconds and fails with "daemon did not publish a socket" on a computer whose disk ignores case
+  (macOS, Windows). The engine now answers a folder the way the disk spells it, so the agent it starts is found at once
+  (#980).
+- The web UI keeps the text you typed in a chat's message box when that chat's thread is rebuilt. Before, opening an
+  agent whose history the engine had not loaded yet showed a saved copy first, and the agent's own history
+  replacing it rebuilt the thread and emptied the box mid-sentence. A draft now stays in its own chat, also when you
+  go to another chat and back, and text you deleted or sent does not come back. Reloading the page still starts with
+  an empty box (#976).
+- New Session lists profiles and model choices for the folder it starts in, and a profile saved only in the chosen workspace starts there too: the chosen workspace's own profiles, loadouts, and default loadout are read for that folder, not the engine's (#972).
+- A terminal window attached to an agent stays open when that agent restarts in place (`/restart` or the web Restart Agent button). It prints "Restarting <agent>...", keeps its scrollback, attaches again by itself and prints "Restarted on <version>"; it says "Restarted. Run kollab again to attach." only when the agent is not back after 30 seconds, and it no longer prints "daemon exited" while the agent's process is alive (#968).
+- At phone width the version notice keeps its disclosure icon on the actions row instead of stacking empty rows above and below it, and the expanded version text is the strip's one full-width row; the browser's default disclosure triangle no longer renders on top of the info icon (#968).
+- When an agent cannot save its snapshot before restarting, an attached terminal now shows that the restart failed and the agent is still running (#968).
+- The Restart Agent notice reports a conversation save failure and offers Try Again instead of remaining on “Restarting this agent…” (#968).
+- Restarting an agent stops safely if its conversation snapshot cannot be saved, preserving the current process and conversation (#968).
+- The agent version notice now lets touch users open the running and engine versions (#968).
+- A configuration service built on a file of its own (a test, a probe or a tool) now reads and writes only that file. It no longer overwrites your saved `config.json` when it starts or saves (#967).
+- The model picker no longer leaves a config file poller running after every
+  refresh while a New Session form stays open (#966).
+- A deleted startup default loadout no longer starts the terminal on a similarly named loadout: the saved default is matched by exact name, falling back to the active profile (#964).
+- A session whose agent runs older code than the engine now answers a settings change with a clear message
+  ("restart the session") instead of "daemon unreachable (TypeError)", and an unknown action on an ACP agent's
+  model panel is a 404 instead of a bare string (#955).
+- The web UI's Model picker is ready before you click it: the engine learns each harness's models and efforts
+  in the background when it starts and keeps the list, and the page asks for it as it loads, instead of waiting
+  about 30 s on every opening. Retry keeps loading until fresh options arrive, and editing an ACP profile's
+  launch settings removes its old model rows while the matching list is warmed (#953). Each workspace keeps
+  its own ACP discovery cache, so requests for another folder do not cancel or discard its warm results.
+- Configured hook subprocesses are reaped when the hook task is cancelled or the hook loader shuts down: SIGTERM, a short grace, then SIGKILL, always awaited, with cleanup failures reported instead of silently claimed (#930).
+- ACP `hub_spawn` now resolves bundle roles to roster identities, while preserving exact and explicitly selected names in chat (#928).
+- Behaviour changes:
+  - A busy role no longer borrows another role's persona.
+  - `name=<persona> identity=<x>` now honours the explicit identity.
+  - Harness mode is detected from the bundle or inherited profile.
+- Saved conversation durations now account for timestamp timezone offsets (#906).
+- ACP profile mirroring preserves the daemon's image capability across profile and panel refreshes (#900).
+- Native-tool providers no longer receive the XML tool reference (#896).
+- Agent tool lists treat `*` as allow all and warn when listed tool names are redundant (#892).
+- Read-only terminal access rejects recursive or symlink-following `ls` commands that could inspect paths outside the project (#889).
+- Read-only Git commands ignore inherited `GIT_*` overrides and disable repository fsmonitor helpers so they stay rooted at the project without executing local helpers.
+- Agent terminal commands can send Hub messages beginning with `-a` or `-d` without tripping the spawn guard (#878).
+- `--detached` waits for startup and reports a child refusal with a failing exit status (#872).
+- Usage ledger labels session-stat token fallbacks and documents per-request timing and ACP coverage (#871).
+- Retired Hub work slots stop repeating TaskLedger cleanup and are removed after 30 days (#863).
+- Hub stale sweeps resolve upstream refs in each slot's repository (#862).
+- The sandbox gate blocks case-variant paths into protected roots on case-insensitive filesystems (#861).
+- Profile creation validates reasoning effort against the effective API key, and `none` is labeled `none (no reasoning)` in effort pickers (#854).
+- Conversation logger mode tightening prioritizes transcript files ahead of lock sidecars (#850).
+- The web UI no longer shows a version-mismatch banner on source checkouts, where the engine's version carries a build suffix after the release number (#684).
+- The sidebar now shows the agent-type glyph on rows for agents running on other computers in your network. New peers opt in to the field; older peers keep using the original directory request and roster shape (#662).
+- A message typed into an agent's window now reaches the other agents addressed to that agent (`<user> -> lapis`), not to everyone (`<user> -> *`), and they see it dimmed as observed (#659).
+- Compaction no longer shows a retained paged tool result twice after its output reference is renumbered, and a live tool turn is kept when an earlier stored turn only shares its words: a transient turn is replaced by its stored copy only when both carry the same request id, or the same tool calls, results and pictures (#637).
+- A new picture turn is no longer dropped when an earlier stored turn has the same words: without a shared request id the turn stays, so it can show twice until reload (#637).
+- Transient turn dedupe: a repeated prompt's new reply is no longer dropped when only its user row was stored and an identical earlier answer exists. A transient block is dropped only when its rows match the newest stored rows in order (#666).
+- Unsent chat drafts now survive page reloads during agent compaction and are restored for the same agent and conversation (#637).
+- Failed chat sends keep their unsent composer draft available after reload (#637).
+- The Settings dialog uses its neutral surface instead of a decorative gradient outline (#548).
+- Image goal submissions with a client request ID no longer pile up in goal storage: a committed or discarded submission keeps answering replays for 7 days from when it settled, a pending one for as long as it is pending, and after that its saved ID is deleted so the same ID is accepted as a new submission (#540).
+
+### Security
+- Engine routes that take a folder (`workspace`: profiles, agents, rosters, teams, New Session; `path`: the folder
+  picker) hold it to one rule: it must exist, be a folder, and sit inside your home folder, the engine's own folder,
+  a folder a kollab agent runs in, or a recent web session folder. `..` and symlinks that lead out are refused, and
+  the picker's Up button stops at the top of those folders. A folder an agent ran in, or a recent one, grants access
+  only while its pathname still leads to itself: a symlink put in its place grants nothing. On a volume that ignores
+  case (macOS), a folder typed in other letters than it has on disk is the same folder (#980).
+- Web UI files, PhoneLink page files and prompt role and library names are held below their own folder by a check
+  the code scanner recognizes. A NUL byte in a web UI or phone page path now answers like any other missing file
+  instead of failing with a server error (#980).
+- Prevent `tool-load` from granting tools outside an agent's declared tools list (#891).
+- Preserve task IDs in logs while redacting OpenAI keys and tolerate malformed exception info (#852).
+
 ## [0.21.1] - 2026-11-08
 
 ### Fixed
