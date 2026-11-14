@@ -1020,6 +1020,17 @@ class ACPRunner:
             with contextlib.suppress(psutil.Error):
                 if not owner.is_running():
                     self._owned_processes.pop(owner.pid, None)
+        if os.name == "nt":
+            # Windows has no POSIX process group for the adapter. Retain the
+            # existing owned-root traversal there so descendants remain
+            # available to the direct process-handle cleanup path.
+            for owner in tuple(self._owned_processes.values()):
+                with contextlib.suppress(psutil.Error):
+                    if owner.ppid() in self._owned_processes:
+                        continue
+                    for child in owner.children(recursive=True):
+                        child.create_time()
+                        self._owned_processes[child.pid] = child
 
     async def _track_process_tree(self) -> None:
         while self._owned_processes:
