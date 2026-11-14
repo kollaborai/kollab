@@ -15,7 +15,7 @@ import psutil
 from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.file_lock import try_lock, unlock
 
-from .packages import _ID, _SERVICE, _read_registry
+from .packages import _ID, _SERVICE, _read_registry, files_sha256
 
 logger = logging.getLogger(__name__)
 _LOG_LIMIT = 10 * 1024 * 1024
@@ -74,6 +74,9 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
     if not isinstance(record, dict) or record.get("enabled") is not True:
         raise ValueError("Plugin is not enabled")
     root = home / "plugins" / plugin_id
+    expected_hash = record.get("files_sha256")
+    if not isinstance(expected_hash, str) or files_sha256(root) != expected_hash:
+        raise ValueError("Plugin files changed since approval")
     try:
         manifest = json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
         service = manifest["services"][service_name]
@@ -261,6 +264,9 @@ def supervisor_tick() -> None:
             continue
         root = home / "plugins" / plugin_id
         try:
+            expected_hash = record.get("files_sha256")
+            if not isinstance(expected_hash, str) or files_sha256(root) != expected_hash:
+                raise ValueError("Plugin files changed since approval")
             manifest = json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
             services = manifest.get("services", {})
             if not isinstance(services, dict):
