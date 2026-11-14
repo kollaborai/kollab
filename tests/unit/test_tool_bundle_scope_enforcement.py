@@ -1,6 +1,7 @@
 """Tests for bundle scope enforcement in tool execution."""
 
 import asyncio
+from types import SimpleNamespace
 
 from kollabor_agent.tool_executor import ToolExecutor
 
@@ -190,6 +191,32 @@ class TestBundleScopeEnforcement:
         )
 
         assert result.metadata.get("scope_denied") is True
+
+    def test_git_only_terminal_call_disables_configured_pager(self):
+        """Git-only grants must not execute a configured pager command."""
+
+        class CapturingShell:
+            command = None
+
+            async def run(self, command, timeout=None, cwd=None):
+                self.command = command
+                return SimpleNamespace(
+                    error=None, success=True, stdout="", stderr="", exit_code=0
+                )
+
+        executor = _make_executor()
+        executor.set_bundle_scope(["git"])
+        shell = CapturingShell()
+        executor.shell_executor = shell
+
+        result = _run_async(
+            executor._execute_terminal_command(
+                {"id": "git-pager", "type": "terminal", "command": "git -p log -1"}
+            )
+        )
+
+        assert result.success is True
+        assert shell.command == "GIT_PAGER=cat PAGER=cat git -p log -1"
 
     def test_git_config_mutation_is_denied_without_terminal_grant(self):
         """A Git grant cannot persist command execution through local config."""
