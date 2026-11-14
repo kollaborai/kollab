@@ -77,6 +77,15 @@ async def test_a_session_starts_a_bundled_agent_on_an_empty_home(client, empty_h
     assert not empty_home.global_agents.exists()  # resolving seeds nothing
 
 
+def test_session_profile_manager_stub_accepts_local_folder(client, empty_home):
+    """The fixture must match the workspace-scoped constructor used by sessions."""
+    import kollabor_ai
+
+    profiles = kollabor_ai.ProfileManager(local_folder=empty_home.project)
+
+    assert profiles.active_profile_name == "saved"
+
+
 @pytest.mark.asyncio
 async def test_a_session_still_rejects_an_agent_nobody_has(client, empty_home):
     response = await client.post(
