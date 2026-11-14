@@ -355,6 +355,35 @@ async def test_the_shell_sits_on_a_real_terminal_and_leads_its_process_group(tmp
     assert shell_pid == process_group
 
 
+async def test_linux_supervisor_uses_its_source_file_for_isolated_python(monkeypatch, tmp_path):
+    import os
+    from types import SimpleNamespace
+
+    commands = []
+
+    class Session:
+        def __init__(self, _sid, _proc, fd, **_kwargs):
+            self.fd = fd
+
+    def fake_popen(argv, **kwargs):
+        commands.append(argv)
+        os.write(kwargs["pass_fds"][0], b"4242\n")
+        return SimpleNamespace(pid=4241, returncode=None)
+
+    monkeypatch.setattr(terminal.sys, "platform", "linux")
+    monkeypatch.setattr(terminal, "_set_winsize", lambda *_args: None)
+    monkeypatch.setattr(terminal, "_login_shell", lambda *_args: "/bin/sh")
+    monkeypatch.setattr(terminal, "_shell_env", lambda *_args: {})
+    monkeypatch.setattr(terminal.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(terminal, "_Session", Session)
+    session = terminal._spawn(str(tmp_path), 80, 24)
+    try:
+        expected = os.path.join(os.path.dirname(terminal.__file__), "_terminal_supervisor.py")
+        assert commands[0][2] == expected
+    finally:
+        os.close(session.fd)
+
+
 async def test_ctrl_c_interrupts_a_running_command_and_the_shell_prompts_again(tmp_path):
     link = Link(tmp_path)
     await link.open()
