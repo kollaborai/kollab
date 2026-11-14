@@ -44,9 +44,7 @@ class PluginRegistry:
         self.plugins_dir = plugins_dir
         self.no_plugins = no_plugins
         self.plugin_dirs = self._resolve_plugin_dirs(plugins_dir, extra_plugin_dirs)
-        self.discoveries = [
-            PluginDiscovery(plugin_dir) for plugin_dir in self.plugin_dirs
-        ]
+        self.discoveries = [PluginDiscovery(plugin_dir) for plugin_dir in self.plugin_dirs]
         self.discovery = self.discoveries[0]
         if not no_plugins:
             global_root = (Path.home() / ".kollab" / "plugins").resolve()
@@ -55,7 +53,7 @@ class PluginRegistry:
                     try:
                         records = _read_registry(global_root.parent / "plugins.json")
                         discovery.blocked_plugin_dirs = set(records["plugins"])
-                    except (OSError, ValueError):
+                    except OSError, ValueError:
                         # Corrupt authority must not make installed directories
                         # eligible for unchecked legacy imports.
                         discovery.block_all_subdirs = True
@@ -199,9 +197,7 @@ class PluginRegistry:
             discovery.discover_and_load()
         self._merge_discovery_results()
         self._load_packages()
-        logger.info(
-            f"Plugin registry loaded {len(self.discovery.loaded_classes)} plugins"
-        )
+        logger.info(f"Plugin registry loaded {len(self.discovery.loaded_classes)} plugins")
 
     def discover_classes_only(self) -> List[Type]:
         """Discover plugin classes across all configured roots."""
@@ -260,9 +256,7 @@ class PluginRegistry:
         """
         try:
             plugin_class = self.discovery.get_plugin_class(plugin_name)
-            return self.collector.get_plugin_startup_info(
-                plugin_name, plugin_class, config
-            )
+            return self.collector.get_plugin_startup_info(plugin_name, plugin_class, config)
         except KeyError:
             logger.warning(f"Plugin {plugin_name} not found for startup info")
             return []
@@ -302,3 +296,133 @@ class PluginRegistry:
             "factory_stats": self.factory.get_factory_stats(),
             "collector_stats": self.collector.get_collector_stats(),
         }
+
+
+def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
+    """Describe built-in, loose, installed and development plugin entries."""
+    if plugins_dir is None:
+        plugins_dir = next(
+            (
+                parent / "plugins"
+                for parent in Path(__file__).resolve().parents
+                if (parent / "plugins" / "__init__.py").is_file()
+            ),
+            Path.cwd() / "plugins",
+        )
+    registry = PluginRegistry(plugins_dir, no_plugins="--no-plugins" in sys.argv[1:])
+    classes = registry.discover_classes_only()
+    entries: list[dict] = []
+    for cls in classes:
+        if cls.__module__.startswith("_kollab_package_"):
+            continue
+        defaults = registry.discovery.plugin_configs.get(cls.__name__, {})
+        plugin_defaults = defaults.get("plugins", {}) if isinstance(defaults, dict) else {}
+        if isinstance(plugin_defaults, dict) and plugin_defaults:
+            plugin_id = next(iter(plugin_defaults))
+        else:
+            plugin_id = getattr(cls, "name", cls.__name__.removesuffix("Plugin").lower())
+        if not isinstance(plugin_id, str):
+            plugin_id = cls.__name__.removesuffix("Plugin").lower()
+        try:
+            section = cls.get_config_widgets() if callable(getattr(cls, "get_config_widgets", None)) else None
+        except Exception as exc:
+            logger.warning("Cannot describe plugin %s settings: %s", plugin_id, exc)
+            section = None
+        enabled = (
+            plugin_defaults.get(plugin_id, {}).get("enabled", True)
+            if isinstance(plugin_defaults.get(plugin_id), dict)
+            else True
+        )
+        entries.append(
+            {
+                "id": plugin_id,
+                "name": getattr(cls, "name", plugin_id),
+                "version": None,
+                "kind": "built-in",
+                "source": inspect.getfile(cls),
+                "commit": None,
+                "enabled": enabled,
+                "shadowed": False,
+                "state": "ok" if enabled else "off",
+                "error": None,
+                "settings": section.get("widgets", []) if isinstance(section, dict) else [],
+                "settings_section": section,
+                "web": None,
+                "contributes": {},
+                "services": [],
+                "uses": [],
+                "granted": [],
+            }
+        )
+    home = Path.home() / ".kollab"
+    try:
+        data = _read_registry(home / "plugins.json")
+    except ValueError as exc:
+        logger.warning("Cannot list installed plugins: %s", exc)
+        return entries
+    for plugin_id, record in data["plugins"].items():
+        if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id) or not isinstance(record, dict):
+            continue
+        root = home / "plugins" / plugin_id
+        manifest: dict = {}
+        error = None
+        state = "off" if not record.get("enabled") else "ok"
+        settings = []
+        try:
+            if files_sha256(root) != record.get("files_sha256"):
+                state = "changed-on-disk"
+                error = "Plugin files changed since approval"
+            manifest = json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict):
+                raise ValueError("Invalid manifest")
+            if manifest.get("settings"):
+                section_path = _within(root.resolve(), manifest["settings"], "settings")
+                section = json.loads(section_path.read_text(encoding="utf-8"))
+                settings = section.get("widgets", []) if isinstance(section, dict) else []
+        except (OSError, ValueError, TypeError) as exc:
+            state, error = "error", str(exc)
+        if plugin_id in registry.package_errors and state == "ok":
+            state, error = "error", registry.package_errors[plugin_id]
+        service_entries = []
+        declared_services = manifest.get("services", {})
+        if isinstance(declared_services, dict):
+            for name in declared_services:
+                if not isinstance(name, str):
+                    continue
+                state_file = home / "plugin-data" / plugin_id / "run" / f"{name}.state"
+                try:
+                    service_state = json.loads(state_file.read_text(encoding="utf-8"))
+                except OSError, ValueError:
+                    service_state = {}
+                service_entries.append(
+                    {
+                        "name": name,
+                        "state": service_state.get("status", "stopped"),
+                        "desired": service_state.get("desired", "stopped"),
+                        "pid": None,
+                        "since": None,
+                        "restarts": len(service_state.get("exit_history", [])),
+                        "heartbeat": None,
+                    }
+                )
+        entries.append(
+            {
+                "id": plugin_id,
+                "name": manifest.get("name", plugin_id),
+                "version": manifest.get("version"),
+                "kind": "installed",
+                "source": record.get("source"),
+                "commit": record.get("commit"),
+                "enabled": record.get("enabled", False),
+                "shadowed": plugin_id in data["dev"],
+                "state": state,
+                "error": error,
+                "settings": settings,
+                "web": manifest.get("web"),
+                "contributes": manifest.get("contributes", {}),
+                "services": service_entries,
+                "uses": manifest.get("uses", []),
+                "granted": record.get("granted", []),
+            }
+        )
+    return entries
