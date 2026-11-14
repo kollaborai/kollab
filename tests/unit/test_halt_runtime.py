@@ -114,6 +114,48 @@ def test_waiter_execs_with_captured_argv_and_env_once_lifted(tmp_path, monkeypat
     assert hr.WAITER_ENV not in calls[0][2]
 
 
+def test_waiter_reports_detached_startup_before_wait_and_strips_channel(tmp_path, monkeypatch):
+    from kollabor import daemon
+
+    events = []
+    monkeypatch.setenv(daemon.DETACHED_READY_FD_ENV, "2")
+    monkeypatch.setattr(daemon, "report_detached_startup", lambda **kw: events.append(("ready", kw)))
+    monkeypatch.setattr(hr, "register_waiter", lambda root=None: events.append(("registered", None)))
+    monkeypatch.setattr(
+        hr,
+        "_waiter_presence",
+        lambda *a: (events.append(("presence", None)) or (None, None)),
+    )
+    monkeypatch.setattr(hr, "listener_running", lambda root=None: True)
+    monkeypatch.setattr(hr, "restart_argv", lambda argv: ["/bin/kollab", *argv[1:]])
+    hf = nh.HaltFile(tmp_path)
+    hf.write(HALTED)
+
+    def release_halt(_sleep):
+        hf.write({"scopes": {}, "networks": {}})
+
+    calls = []
+    env = {
+        "PATH": "/bin",
+        daemon.DETACHED_READY_FD_ENV: "2",
+    }
+    hr.run_waiter(
+        ["kollab", "--detached"],
+        env,
+        FOLDER,
+        root=tmp_path,
+        execve=lambda *args: calls.append(args),
+        sleep=release_halt,
+    )
+
+    assert events == [
+        ("registered", None),
+        ("presence", None),
+        ("ready", {"ready": True}),
+    ]
+    assert calls[0][2] == {"PATH": "/bin"}
+
+
 def test_waiter_never_takes_halt_lock(tmp_path, monkeypatch):
     monkeypatch.setattr(hr, "_waiter_presence", lambda *a: (None, None))
     started = []
