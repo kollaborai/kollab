@@ -414,7 +414,7 @@ def test_dispatcher_reloads_development_python_and_rejects_manifest_changes(tmp_
     data = home / "plugin-data" / "hello@dev"
     data.mkdir(parents=True)
     (data / "approval.json").write_text(json.dumps({
-        "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(), "granted": [],
+        "folder": str(root), "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(), "granted": [],
     }))
     with TestClient(create_app()) as client:
         assert client.get("/plugins/hello@dev/api/version").json() == {"version": 1}
