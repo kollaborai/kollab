@@ -69,6 +69,7 @@ def busy_room():
         admit=runner.admit,
         supports_image_input=False,
         voice_rules_epochs=set(),
+        voice_turns={},
     )
     return runner, acp_view, extension
 
@@ -93,8 +94,9 @@ async def test_spoken_livekit_turn_gets_the_voice_tag_and_queues():
     assert extension.received == [], "a spoken line steered the running turn"
     assert runner._queue.qsize() == 1
     queued = runner._queue.get_nowait()
-    assert queued.text.startswith(VOICE_NUDGE)
-    assert VOICE_RULES_MARK in queued.text, "the room session's first turn lacks the rules"
+    assert queued.text.startswith(VOICE_RULES_MARK), "the room session's first turn lacks the rules"
+    assert VOICE_NUDGE in queued.text
+    assert acp_view.voice_turns == {}, "a room turn must not be handed to /voice device speech"
     assert acp_view.voice_rules_epochs == {f"{BINDING['voice_session_id']}:{BINDING['generation']}"}
 
 
@@ -113,6 +115,7 @@ async def test_second_spoken_line_queues_with_nudge_only():
     queued = runner._queue.get_nowait()
     assert queued.text.startswith(VOICE_NUDGE)
     assert VOICE_RULES_MARK not in queued.text, "the rules were sent twice in one room session"
+    assert acp_view.voice_turns == {}, "a room turn must not be handed to /voice device speech"
 
 
 @pytest.mark.asyncio
