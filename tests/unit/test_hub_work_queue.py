@@ -199,6 +199,19 @@ def test_sweep_stale_is_idempotent(tmp_path, monkeypatch):
     assert saves == []
 
 
+def test_sweep_stale_prunes_retired_slots_after_retention(tmp_path, monkeypatch):
+    monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
+    queue = WorkQueue()
+    queue.add("old retired task")
+    data = json.loads(queue._path.read_text())
+    data["slots"][0].update({"status": "retired", "retired_at": 1})
+    queue._path.write_text(json.dumps(data))
+
+    queue.sweep_stale()
+
+    assert queue.get_all() == []
+
+
 def test_sweep_stale_checker_exception_keeps_work(tmp_path, monkeypatch):
     monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
     queue = WorkQueue()

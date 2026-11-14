@@ -1,5 +1,6 @@
 """Regression coverage for linked work slots and durable task cards."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -89,6 +90,14 @@ def test_stale_sweep_terminalizes_paired_card_and_keeps_retry_state(
         "github_terminal_state",
         lambda ref, project=None: f"{ref} merged",
     )
+    terminalize_calls = []
+    original_terminalize = plugin._task_ledger.terminalize
+
+    def count_terminalize(*args, **kwargs):
+        terminalize_calls.append(args[0])
+        return original_terminalize(*args, **kwargs)
+
+    monkeypatch.setattr(plugin._task_ledger, "terminalize", count_terminalize)
 
     retired = plugin._sweep_stale_work_queue()
 
@@ -98,6 +107,45 @@ def test_stale_sweep_terminalizes_paired_card_and_keeps_retry_state(
     assert saved.terminal_actor == "work-queue-sweep"
     assert "#640 merged" in saved.terminal_reason
     assert plugin._task_ledger.get_open(project="test-project") == []
+
+    plugin._sweep_stale_work_queue()
+
+    assert terminalize_calls == [card.id]
+
+
+def test_expired_retired_slot_survives_until_task_card_cleanup_succeeds(
+    tmp_path, monkeypatch
+):
+    plugin = _plugin(tmp_path, monkeypatch)
+    plugin._handle_queue_command("work tied to #640", upstream_refs=["#640"])
+    card = plugin._task_ledger.get_open(project="test-project")[0]
+    slot = plugin._work_queue.get_all()[0]
+    plugin._work_queue.sweep_stale(lambda ref: f"{ref} merged")
+
+    payload = json.loads(plugin._work_queue._path.read_text())
+    payload["slots"][0]["retired_at"] = 1
+    plugin._work_queue._path.write_text(json.dumps(payload))
+
+    original_terminalize = plugin._task_ledger.terminalize
+
+    def fail_terminalize(*args, **kwargs):
+        raise OSError("temporary ledger write failure")
+
+    monkeypatch.setattr(plugin._task_ledger, "terminalize", fail_terminalize)
+    retry = plugin._sweep_stale_work_queue()
+
+    assert [(item.id, item.task_card_id) for item in retry] == [(slot.id, card.id)]
+    assert [(item.id, item.task_card_id) for item in plugin._work_queue.get_all()] == [
+        (slot.id, card.id)
+    ]
+
+    monkeypatch.setattr(plugin._task_ledger, "terminalize", original_terminalize)
+    assert [item.id for item in plugin._sweep_stale_work_queue()] == [slot.id]
+    assert plugin._task_ledger.get(card.id).status == "cancelled"
+    assert plugin._work_queue.get_all()[0].task_card_terminalized is True
+
+    assert plugin._sweep_stale_work_queue() == []
+    assert plugin._work_queue.get_all() == []
 
 
 def test_queue_command_cancels_card_if_slot_retires_before_link(tmp_path, monkeypatch):
