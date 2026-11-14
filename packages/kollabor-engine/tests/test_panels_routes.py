@@ -283,6 +283,42 @@ class TestErrors:
 
 
 class TestApplyProfileMirror:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("supports_vision", [True, False])
+    async def test_panel_refresh_preserves_acp_vision_capability(
+        self, monkeypatch, supports_vision
+    ):
+        from kollabor_engine.routes.panels import _refresh_profile_mirror
+        from kollabor_engine.session import EngineSession
+
+        import kollabor_ai
+        from kollabor.state.snapshots import ProfileSnapshot
+
+        snapshot = ProfileSnapshot(
+            name="acp",
+            model="live-model",
+            provider="acp",
+            supports_vision=supports_vision,
+        )
+        profile = SimpleNamespace(name="acp", model="saved-model", provider="acp")
+        monkeypatch.setattr(
+            kollabor_ai,
+            "ProfileManager",
+            lambda: SimpleNamespace(get_profile=lambda name: profile),
+        )
+        session = EngineSession("s", snapshot)
+        session.daemon = SimpleNamespace(
+            alive=True,
+            identity="",
+            agent_name="",
+            pid=1,
+            state=SimpleNamespace(get_active_profile=AsyncMock(return_value=snapshot)),
+        )
+
+        await _refresh_profile_mirror(session)
+
+        assert session.to_dict()["supports_vision"] is supports_vision
+
     def test_points_the_session_at_the_profile_with_the_live_model(self, monkeypatch):
         from kollabor_engine.routes.sessions import (  # type: ignore[import-not-found]
             apply_profile_mirror,
