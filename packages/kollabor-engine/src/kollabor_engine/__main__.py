@@ -130,6 +130,7 @@ def main():
 
     port = args.port
     app = create_app(port=port)
+    app.state.warm_model_choices = True  # a served engine fills the model picker's cache at start
     host = args.host
     log_level = args.log_level
 

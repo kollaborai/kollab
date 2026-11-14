@@ -83,6 +83,47 @@ def test_prompt_registry_uses_runtime_bundle_tools():
     assert "<hub_spawn>" not in tool_reference
 
 
+def test_prompt_registry_skips_reference_for_native_tool_provider():
+    profile = MagicMock()
+    profile.get_supports_tools.return_value = True
+    profile_manager = MagicMock(spec=["get_active_profile"])
+    profile_manager.get_active_profile.return_value = profile
+    builder = SystemPromptBuilder(
+        config=_registry_enabled_config(),
+        profile_manager=profile_manager,
+    )
+
+    assert builder._get_registry_tool_reference() is None
+
+
+def test_prompt_registry_keeps_reference_for_xml_tool_provider():
+    profile = MagicMock()
+    profile.get_supports_tools.return_value = False
+    profile_manager = MagicMock(spec=["get_active_profile"])
+    profile_manager.get_active_profile.return_value = profile
+    builder = SystemPromptBuilder(
+        config=_registry_enabled_config(),
+        profile_manager=profile_manager,
+    )
+
+    tool_reference = builder._get_registry_tool_reference()
+
+    assert tool_reference is not None
+    assert "# Tool Reference" in tool_reference
+
+
+def test_prompt_registry_logs_missing_active_profile_method(caplog):
+    caplog.set_level("DEBUG")
+    builder = SystemPromptBuilder(
+        config=_registry_enabled_config(),
+        profile_manager=MagicMock(spec=[]),
+    )
+
+    builder._get_registry_tool_reference()
+
+    assert "Unable to check active profile tool support" in caplog.text
+
+
 def test_native_tool_schemas_use_runtime_bundle_tools():
     runtime = _restricted_research_runtime()
     mcp = MCPIntegration.__new__(MCPIntegration)

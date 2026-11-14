@@ -130,20 +130,37 @@ at max, `claude code opus max` finds Claude Code's opus at max.
   window stays. A harness that has reported no model shows its
   profile's name, never the profile's saved model. A model with no
   levels gets one row
-  that keeps the harness's level. For a configured harness, opening the picker
-  discovers its model and effort options in a separate short-lived session.
+  that keeps the harness's level. The engine discovers a configured harness's
+  model and effort options in the background, in a separate short-lived
+  session: once when it starts, and again behind the list it already has when
+  that list is 10 minutes old (on the next ask). The picker answers at once
+  from the last good list and never waits for a harness; a harness not learned
+  yet shows as loading. A list stays up until a newer one of equal or better
+  quality replaces it, however long the engine sat idle; one whose refreshes
+  keep failing for 30 minutes gives way to the failure, and a sign-in failure
+  replaces it at once. A harness that failed is tried again after 15 s, then
+  60 s, then every 300 s, asking only for the models that failed.
   Discovery sends no prompt and does not pass the user's configured MCP servers.
   It can still create an empty session in the provider's history or refresh the
   harness's credentials. If discovery is incomplete, the picker says so and
-  offers Retry; model-only choices never claim an unobserved effort.
-- Opening the list fetches any provider catalog older than an hour (up to
-  8 s), so an endpoint's models show without opening Settings → Loadouts first.
+  offers Retry (`GET /profiles/choices?refresh=true`), which probes the
+  incomplete harnesses again at once; model-only choices never claim an
+  unobserved effort. A change to a harness's login shows within 10 minutes (or
+  after an engine restart); an edit to the profile's launch settings shows as
+  soon as the engine has learned it again. `KOLLAB_PICKER_WARM=0` brings back
+  the old behavior: the engine discovers when the picker asks, and the picker
+  waits for it.
+- The engine refreshes any provider catalog older than an hour in the
+  background (up to 8 s), so an endpoint's models show without opening
+  Settings → Loadouts first; only the first ask after an engine starts waits
+  for it, up to 1.5 s.
   A ChatGPT login's list is kept only when the tokens it was fetched with are
   the login signed in as it arrives, and only while that login stays signed
   in: signing in as another account fetches that account's models. A login
   that names no account is known by a digest of its token, and its list stays
-  in memory, never in the cache file. Each opening asks again, so the list
-  never shows what an earlier login fetched.
+  in memory, never in the cache file. Each opening asks the engine again, and
+  the engine never answers with another login's catalog; the page shows its
+  previous answer only until that one lands.
 - An environment variable outranks a pick (`KOLLAB_<PROFILE>_MODEL`,
   `KOLLAB_<PROFILE>_EFFORT`, `KOLLAB_MODEL`, `KOLLAB_EFFORT`): the picker says
   which model kept running instead of showing the pick as applied.
@@ -151,7 +168,10 @@ at max, `claude code opus max` finds Claude Code's opus at max.
   profile, which every session on that profile shares. Use it from Settings →
   Loadouts.
 - The list is `GET /profiles/choices` on the engine
-  (`LoadoutManager.list_choices`).
+  (`LoadoutManager.list_choices`). The web UI asks for it when the shell loads,
+  again when the profiles change and on each opening, and keeps it
+  (`model-choices.ts`), so the Model button opens on a complete list; a
+  harness still loading is asked about every 1.5 s.
 - Settings → Loadouts → Manage Profiles opens the profile editor.
 
 ## Launching with a loadout

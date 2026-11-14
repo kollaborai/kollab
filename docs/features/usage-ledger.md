@@ -118,7 +118,10 @@ The ledger distinguishes "no data" from zero:
 
 - `usage_source: "provider"` means the provider reported counts.
 - `usage_source: "estimated"` means some counts were estimated (for example, a
-  stream cut short). They are kept and marked.
+  stream cut short or an estimated session-stat fallback). They are kept and
+  marked.
+- `usage_source: "session_stats"` means `input_tokens` or `output_tokens` came
+  from session stats because the request did not report that count.
 - `usage_source: "none"` means the provider reported nothing. Token fields and cost
   are `null`, and `turns_without_usage` counts the gap.
 
@@ -126,13 +129,16 @@ The ledger distinguishes "no data" from zero:
 
 ## What is recorded, and what is not
 
-Recorded: agent name, lane, PR label, provider, model, token counts, cache counts,
-wall time from the first request of a turn to the final response, and cost.
+Recorded per API request: agent name, lane, PR label, provider, model, token
+counts, cache counts, request wall time, and cost. ACP agent turns are not
+recorded yet; `queue_processor.py` is the only producer of `LLM_REQUEST_POST`.
 
 Never recorded: prompts, outputs, tool arguments, or credentials.
 
-`wall_ms` covers the model requests of the turn, not the time tools run between
-them. A turn that ends in a provider error writes no row.
+`wall_ms` covers one API request, from `LLM_REQUEST_PRE` to its
+`LLM_REQUEST_POST`. A tool loop writes a separate row for each request, and
+`wall_ms` excludes tool time between requests. A request that ends in a provider
+error writes no row.
 
 ## Limits
 
