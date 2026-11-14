@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A message typed into an agent's window now reaches the other agents addressed to that agent (`<user> -> lapis`), not to everyone (`<user> -> *`), and they see it dimmed as observed (#659).
 
 ### Fixed
+- Hub ledger mutations leave files with corrupt trailing data untouched and report how to repair them before retrying (#914).
 - New Session in a folder typed in other letters than it has on disk (`~/projects/cASEpROJECT` for `~/projects/CaseProject`)
   no longer waits 45 seconds and fails with "daemon did not publish a socket" on a computer whose disk ignores case
   (macOS, Windows). The engine now answers a folder the way the disk spells it, so the agent it starts is found at once
