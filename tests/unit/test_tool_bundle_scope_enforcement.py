@@ -191,6 +191,23 @@ class TestBundleScopeEnforcement:
 
         assert result.metadata.get("scope_denied") is True
 
+    def test_git_config_mutation_is_denied_without_terminal_grant(self):
+        """A Git grant cannot persist command execution through local config."""
+        executor = _make_executor()
+        executor.set_bundle_scope(["git"])
+
+        result = _run_async(
+            executor.execute_tool(
+                {
+                    "id": "git-config-call",
+                    "type": "terminal",
+                    "command": "git config core.pager 'printf PAGER_EXECUTED'",
+                }
+            )
+        )
+
+        assert result.metadata.get("scope_denied") is True
+
     def test_execute_tool_rejects_out_of_scope(self):
         """execute_tool returns error for out-of-scope tools."""
         executor = _make_executor()
