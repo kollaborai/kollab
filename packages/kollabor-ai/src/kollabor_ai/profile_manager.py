@@ -1330,7 +1330,12 @@ class ProfileManager:
         },
     }
 
-    def __init__(self, config=None, cli_profile: Optional[str] = None):
+    def __init__(
+        self,
+        config=None,
+        cli_profile: Optional[str] = None,
+        local_folder: Optional[Path] = None,
+    ):
         """
         Initialize profile manager.
 
@@ -1338,8 +1343,13 @@ class ProfileManager:
             config: Configuration object with get() method
             cli_profile: CLI --llm override (auto-detected profiles are
                 registered but never activated over it)
+            local_folder: another folder whose own ``.kollab`` local layer
+                overrides the shared ones when reading profiles (the web UI
+                lists the chosen workspace). None is this process's
+                working directory.
         """
         self.config = config
+        self._local_folder = local_folder
         self._profiles: Dict[str, LLMProfile] = {}
         self._invalid_profile_errors: Dict[str, str] = {}
         self._active_profile_name: str = "default"
@@ -1836,10 +1846,18 @@ class ProfileManager:
                 logger.debug(f"Loaded profiles from: {global_config}")
 
         local_config = next(
-            (path for path in get_local_config_path_candidates() if path.exists()),
-            get_local_config_path(),
+            (
+                path
+                for path in get_local_config_path_candidates(self._local_folder)
+                if path.exists()
+            ),
+            # A chosen folder with no own config reads no local layer: falling
+            # back to this engine folder's own config would list its private
+            # profiles for the chosen workspace (#972). None keeps today's
+            # behavior for the engine's own folder.
+            get_local_config_path() if self._local_folder is None else None,
         )
-        if local_config.exists():
+        if local_config and local_config.exists():
             config_data = _read_config(local_config)
             llm_config = config_data.get("kollabor", {}).get("llm", {})
             local_profiles = llm_config.get("profiles", {}) or {}

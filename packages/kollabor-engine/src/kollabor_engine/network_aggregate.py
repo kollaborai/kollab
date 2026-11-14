@@ -187,6 +187,9 @@ def _ingest_remote_rows(
                 "name": str(tool["name"]),
                 "type": str(tool.get("type") or ""),
             }
+        if row.get("version"):
+            agent["version"] = str(row["version"])  # what that agent runs (#968)
+            agent["build"] = str(row.get("build") or "")
         if agent not in workspace_row["agents"]:
             workspace_row["agents"].append(agent)
 

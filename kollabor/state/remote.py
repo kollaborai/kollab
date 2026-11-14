@@ -703,6 +703,22 @@ class RemoteStateService(StateService):
             _raise_for_error(result)
         return ConversationSnapshot.from_dict(result)
 
+    async def restart_agent(self) -> dict[str, Any]:
+        """Ask the daemon to restart itself in place, keeping its conversation."""
+        from kollabor_rpc import RpcMethodNotFound
+
+        logger.debug("state rpc: restart_agent")
+        try:
+            result = await self._rpc.call("state.restart_agent", {}, timeout=self._timeout)
+        except RpcMethodNotFound as e:
+            # An agent started before this call existed cannot restart itself (#968).
+            raise ValueError("this agent is too old to restart itself: quit it and start it again") from e
+        if not isinstance(result, dict):
+            raise TypeError(f"state.restart_agent expected dict, got {type(result).__name__}")
+        if "error" in result and result.get("error"):
+            _raise_for_error(result)
+        return result
+
     # === MCP writes (phase 4.5 step 7) ===
 
     async def enable_mcp_server(self, name: str) -> McpSnapshot:

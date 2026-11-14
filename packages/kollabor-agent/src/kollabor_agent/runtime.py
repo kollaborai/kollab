@@ -22,6 +22,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, cast
 
 
@@ -192,6 +193,23 @@ def own_start_token() -> str:
     return _OWN_START_TOKENS[pid] or ""
 
 
+@lru_cache(maxsize=1)
+def own_build() -> tuple[str, str]:
+    """The version and full build SHA this process runs, as ("", "") when unreadable.
+
+    Read once, when the process first publishes: an agent keeps the code it
+    started with, so the first answer is the one that stays true (an exec starts
+    a new image, which reads again). Imported lazily because this package must
+    load without the app around it.
+    """
+    try:
+        from kollabor.version import get_build_provenance, get_runtime_version
+
+        return get_runtime_version(), get_build_provenance().sha
+    except Exception:
+        return "", ""
+
+
 @dataclass
 class AgentRuntime:
     """The ONE object that represents everything about an AI agent.
@@ -299,6 +317,14 @@ class AgentRuntime:
     into the presence record. A peer compares it to the process now at ``pid`` to
     tell a reused pid from a live owner; empty when unreadable or from an older
     record, which a peer never reclaims on."""
+
+    version: str = ""
+    """The app version this process runs (``kollabor.version.get_runtime_version``),
+    stamped into the presence record so the web UI can tell an agent that kept
+    its old code through an upgrade. Empty on a record from an older agent."""
+
+    build: str = ""
+    """The full commit SHA of that build; empty on a record from an older agent."""
 
     last_heartbeat: float = field(default_factory=time.time)
     """Unix timestamp of last heartbeat update.
@@ -716,6 +742,8 @@ class AgentRuntime:
             "started_at": self.started_at,
             "start_token": self.start_token
             or (own_start_token() if self.pid == os.getpid() else ""),
+            "version": self.version or (own_build()[0] if self.pid == os.getpid() else ""),
+            "build": self.build or (own_build()[1] if self.pid == os.getpid() else ""),
             "last_heartbeat": self.last_heartbeat,
             "state": self.state,
             "state_changed_at": self.state_changed_at,
@@ -761,6 +789,8 @@ class AgentRuntime:
             "socket_path",
             "started_at",
             "start_token",
+            "version",
+            "build",
             "last_heartbeat",
             "state",
             "state_changed_at",

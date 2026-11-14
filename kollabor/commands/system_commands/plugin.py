@@ -409,6 +409,16 @@ class SystemCommandsPlugin:
             display_type="error",
         )
 
+    async def handle_new(self, command: SlashCommand) -> CommandResult:
+        """Handle /new command."""
+        if self._system_handler:
+            return await self._system_handler.handle_new(command)
+        return CommandResult(
+            success=False,
+            message="System handler not initialized",
+            display_type="error",
+        )
+
     async def handle_login(self, command: SlashCommand) -> CommandResult:
         """Handle /login command."""
         if self._login_handler:
