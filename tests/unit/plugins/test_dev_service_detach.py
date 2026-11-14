@@ -53,6 +53,8 @@ def test_detach_stops_dev_service(tmp_path, monkeypatch):
                 break
             time.sleep(0.02)
         assert pid.exists() and json.loads(pid.read_text()).get("child")
+        # A development checkout may change while the previously approved process runs.
+        (source / "kollab-plugin.json").write_text(json.dumps({"id": "hello", "services": {}}))
         assert cli.main(["dev", "off", "hello"]) == 0
         wrapper.wait(timeout=5)
         assert "hello" not in json.loads((home / "plugins.json").read_text())["dev"]
