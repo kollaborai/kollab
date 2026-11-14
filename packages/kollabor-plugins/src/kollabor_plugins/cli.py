@@ -139,6 +139,7 @@ def main(argv: list[str]) -> int:
         if input("Confirm? [yes/no] ").strip().lower() != "yes":
             return 1
         set_enabled(args.plugin_id, args.action == "enable")
+        print(f"{'Enabled' if args.action == 'enable' else 'Disabled'} {args.plugin_id}")
         return 0
     if args.action == "dev":
         print("Development code is unpinned and runs as your user with your computer's permissions.")
