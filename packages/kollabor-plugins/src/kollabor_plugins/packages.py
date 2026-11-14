@@ -196,7 +196,7 @@ def _git(*args: str) -> bytes:
             diagnostic,
         )
         diagnostic = re.sub(r"(?i)\b(bearer|basic)\s+[^\s,;]+", r"\1 [REDACTED]", diagnostic)
-        diagnostic = re.sub(r"\b(?:sk|ghp|gho|github_pat)-[A-Za-z0-9_-]+", "[REDACTED]", diagnostic).strip()
+        diagnostic = re.sub(r"\b(?:sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_-]+", "[REDACTED]", diagnostic).strip()
         message = f"Git {args[0]} failed (exit {completed.returncode})"
         raise ValueError(f"{message}: {diagnostic}" if diagnostic else message)
     return completed.stdout
