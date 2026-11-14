@@ -3455,7 +3455,7 @@ def cli_main() -> None:
                         f"[detached] child {child.pid} exited before reporting ready (status 0)",
                         file=sys.stderr,
                     )
-                    sys.exit(0)
+                    sys.exit(1)
                 print(
                     f"detached child {child.pid} exited before startup (status {exc.exit_code})",
                     file=sys.stderr,
@@ -3492,7 +3492,7 @@ def cli_main() -> None:
                             f"[detached] child {pid} exited before reporting ready (status 0)",
                             file=sys.stderr,
                         )
-                        sys.exit(0)
+                    sys.exit(1)
                     print(
                         f"detached child {pid} exited before startup (status {exc.exit_code})",
                         file=sys.stderr,
