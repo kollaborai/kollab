@@ -32,6 +32,8 @@ class PluginRegistry:
         self,
         plugins_dir: Path,
         extra_plugin_dirs: Sequence[Path] | None = None,
+        *,
+        no_plugins: bool = False,
     ) -> None:
         """Initialize the plugin registry with specialized components.
 
@@ -40,6 +42,7 @@ class PluginRegistry:
             extra_plugin_dirs: Additional user/project plugin roots.
         """
         self.plugins_dir = plugins_dir
+        self.no_plugins = no_plugins
         self.plugin_dirs = self._resolve_plugin_dirs(plugins_dir, extra_plugin_dirs)
         self.discoveries = [
             PluginDiscovery(plugin_dir) for plugin_dir in self.plugin_dirs
@@ -158,6 +161,8 @@ class PluginRegistry:
         Returns:
             List of discovered plugin module names.
         """
+        if self.no_plugins:
+            return []
         discovered: list[str] = []
         for discovery in self.discoveries:
             discovered.extend(discovery.scan_plugin_files())
@@ -170,10 +175,13 @@ class PluginRegistry:
         Args:
             module_name: Name of the plugin module to load.
         """
-        self.discovery.load_module(module_name)
+        if not self.no_plugins:
+            self.discovery.load_module(module_name)
 
     def load_all_plugins(self) -> None:
         """Discover and load all available plugins."""
+        if self.no_plugins:
+            return
         for discovery in self.discoveries:
             discovery.discover_and_load()
         self._merge_discovery_results()
@@ -184,6 +192,8 @@ class PluginRegistry:
 
     def discover_classes_only(self) -> List[Type]:
         """Discover plugin classes across all configured roots."""
+        if self.no_plugins:
+            return []
         plugin_classes: list[Type] = []
 
         for discovery in self.discoveries:

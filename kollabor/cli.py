@@ -223,7 +223,7 @@ def discover_plugin_args() -> tuple:
     if not plugins_dir.exists():
         plugins_dir = Path.cwd() / "plugins"
 
-    plugin_registry = PluginRegistry(plugins_dir)
+    plugin_registry = PluginRegistry(plugins_dir, no_plugins="--no-plugins" in sys.argv[1:])
     plugin_classes = plugin_registry.discover_classes_only()
 
     return plugin_classes, plugin_registry.discovery
@@ -369,6 +369,8 @@ Telegram bridge setup (run inside interactive mode):
 {cli_help}
         """,
     )
+
+    parser.add_argument("--no-plugins", action="store_true", help="Start without plugin code")
 
     # Manual help argument (we handle it after plugins are initialized)
     parser.add_argument(
@@ -1352,7 +1354,7 @@ async def async_main() -> None:
         # Reuse the discovery object from CLI arg parsing
         from kollabor_plugins import PluginRegistry
 
-        plugin_registry = PluginRegistry(discovery.plugins_dir)
+        plugin_registry = PluginRegistry(discovery.plugins_dir, no_plugins=args.no_plugins)
         plugin_registry.discovery = discovery  # Reuse discovery from CLI args
 
         # Resolve attach identity (set earlier if --attach was used)

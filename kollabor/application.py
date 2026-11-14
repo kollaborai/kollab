@@ -242,7 +242,7 @@ class TerminalLLMChat:
             else:
                 logger.info(f"Using installed package plugins directory: {plugins_dir}")
 
-            self.plugin_registry = PluginRegistry(plugins_dir)
+            self.plugin_registry = PluginRegistry(plugins_dir, no_plugins=getattr(args, "no_plugins", False))
             self.plugin_registry.load_all_plugins()
 
         # Initialize configuration service with plugin registry
