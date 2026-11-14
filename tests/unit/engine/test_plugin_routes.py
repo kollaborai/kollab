@@ -109,3 +109,24 @@ async def test_plugin_event_streams_heartbeat_and_disconnect(tmp_path, monkeypat
     hub.unsubscribe("other", other)
     assert hub.subscriber_count("hello") == 0
     assert hub.subscriber_count("other") == 0
+
+
+@pytest.mark.asyncio
+async def test_global_plugin_change_stream(tmp_path, monkeypatch):
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    from kollabor_engine.routes import plugins as plugin_routes
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    app = create_app()
+    response = await plugin_routes.plugin_changes(SimpleNamespace(app=app))
+    received = asyncio.create_task(anext(response.body_iterator))
+    app.state.plugin_events.publish_change()
+    event = json.loads((await asyncio.wait_for(received, timeout=1))["data"])
+    assert event["topic"] == "plugins-changed"
+    assert event["ts"] > 0
+    await response.body_iterator.aclose()
+    assert app.state.plugin_events.subscriber_count(None) == 0
