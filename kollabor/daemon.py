@@ -36,6 +36,9 @@ SERVICE_PID_ENV = "KOLLAB_SERVICE_PID"
 # exec_detached_child or by a supervisor that owns its Popen handle. The CLI
 # must not fork again or the supervisor would retain only the exiting parent.
 DETACHED_CHILD_ENV = "KOLLAB_DETACHED_CHILD"
+# Parent/child startup handshake for a direct ``--detached`` launch.
+DETACHED_READY_FD_ENV = "KOLLAB_DETACHED_READY_FD"
+DETACHED_STARTUP_TIMEOUT = 15.0
 # A restart in place (#968) names the conversation the new image resumes; the new
 # image reads it once at boot and drops it, so a later restart names its own.
 RESUME_SESSION_ENV = "KOLLAB_RESUME_SESSION"
@@ -51,6 +54,99 @@ class DaemonExited(RuntimeError):
     def __init__(self, exit_code: int):
         super().__init__(f"daemon exited with status {exit_code}")
         self.exit_code = exit_code
+
+
+def report_detached_startup(ready: bool, reason: str = "") -> None:
+    """Tell a direct detached launcher that startup succeeded or was refused."""
+    fd_str = os.environ.pop(DETACHED_READY_FD_ENV, "")
+    if not fd_str:
+        return
+    try:
+        fd = int(fd_str)
+    except ValueError:
+        return
+    try:
+        safe_reason = (reason or "startup failed").replace("\n", " ")[:1024]
+        payload = "ready" if ready else f"error:{safe_reason}"
+        os.write(fd, (payload + "\n").encode())
+    except (OSError, ValueError) as exc:
+        logger.debug("could not report detached startup: %s", exc)
+    finally:
+        try:
+            os.close(fd)
+        except (OSError, ValueError):
+            pass
+        if os.name == "nt" and fd == 2:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, 2)
+            os.close(devnull)
+
+
+def wait_for_detached_startup(
+    read_fd: int,
+    child_pid: int,
+    timeout: float = DETACHED_STARTUP_TIMEOUT,
+    child_process=None,
+) -> str | None:
+    """Wait until a detached child is ready, refuses startup, exits, or times out."""
+    import select
+    deadline = time.monotonic() + timeout
+    buf = b""
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        if os.name == "nt":
+            import ctypes
+            import msvcrt
+
+            available = ctypes.c_ulong()
+            handle = msvcrt.get_osfhandle(read_fd)
+            peek_named_pipe = ctypes.windll.kernel32.PeekNamedPipe
+            peek_named_pipe.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_ulong,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_ulong),
+                ctypes.c_void_p,
+            ]
+            ready = bool(
+                peek_named_pipe(
+                    handle, None, 0, None, ctypes.byref(available), None
+                )
+                and available.value
+            )
+            if not ready:
+                time.sleep(min(remaining, 0.1))
+        else:
+            ready, _, _ = select.select([read_fd], [], [], min(remaining, 0.1))
+        if ready:
+            try:
+                chunk = os.read(read_fd, 4096)
+            except OSError:
+                return "detached child closed its startup channel"
+            if chunk:
+                buf += chunk
+                if b"\n" in buf:
+                    message = buf.split(b"\n", 1)[0].decode(errors="replace")
+                    if message == "ready":
+                        return None
+                    if message.startswith("error:"):
+                        return message.partition(":")[2] or "startup failed"
+                    return f"detached child sent an invalid startup response: {message}"
+        if child_process is not None:
+            exit_code = child_process.poll()
+            if exit_code is not None:
+                raise DaemonExited(exit_code)
+        elif os.name != "nt":
+            try:
+                wpid, status = os.waitpid(child_pid, os.WNOHANG)
+                if wpid:
+                    raise DaemonExited(os.waitstatus_to_exitcode(status))
+            except ChildProcessError:
+                pass
+    raise TimeoutError(
+        f"detached child did not become ready within {timeout:g} seconds"
+    )
 
 
 def detached_command(argv: list[str]) -> list[str]:
@@ -107,21 +203,26 @@ async def wait_until_idle(is_busy, poll: float = 0.5, limit: float = 3600.0) -> 
     return True
 
 
-def spawn_detached_child(argv: list[str]) -> int:
-    """Windows has no fork: start a detached kollab with the same arguments and return its pid."""
+def spawn_detached_child(argv: list[str], *, wait_for_startup: bool = False):
+    """Windows has no fork: start a detached copy, optionally capturing its startup handshake."""
     import subprocess
 
     from kollabor_config import proc_ctl
 
+    env = {**os.environ, DETACHED_CHILD_ENV: "1"}
+    stderr = subprocess.DEVNULL
+    if wait_for_startup:
+        env[DETACHED_READY_FD_ENV] = "2"
+        stderr = subprocess.PIPE
     child = proc_ctl.start_child(
         detached_command(argv),
         detached=True,
-        env={**os.environ, DETACHED_CHILD_ENV: "1"},
+        env=env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=stderr,
     )
-    return child.pid
+    return child if wait_for_startup else child.pid
 
 
 def exec_detached_child(argv: list[str]) -> bool:
