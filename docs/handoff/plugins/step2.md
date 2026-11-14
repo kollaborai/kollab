@@ -55,11 +55,21 @@ context-lock-symlink-{red,green}.log`. Ruff and compilation passed for the conte
 and test files. This rejects a pre-existing symlink; it is not an OS sandbox or
 proof against concurrent directory replacement. Context remains incomplete.
 
+Context contract coverage: `059a2cd5` was red on a corrupt values file before
+`9bd4d6ae` normalized the error; `af7e6d3c` was red on undeclared stored
+settings before `e71fa095` restricted returned values to declared settings.
+The latter test also exercises hello settings save/defaults, grant denial,
+event and notice callbacks, service status, lock and the step-4 agent stub;
+`cb94744` adds unavailable-publisher and invalid-save coverage. Six context and
+settings tests pass (`context-contract-green.log`); Ruff and compilation pass.
+Logs are in `<home>/backups/plugins-step2-work/`. Context callbacks still need
+to be wired to the engine event streams and actual NoticeBar delivery.
+
 ## Remaining and exact next step
 
-Step 2 is not complete. Next: wire and test PluginContext, then implement the
-remaining engine routes, tokens, proxy and PhoneLink remote restrictions, and
-all tests specified in the brief. The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
+Step 2 is not complete. Next: implement the engine read routes in item 2,
+including wiring PluginContext events and notices, then the dispatcher, tokens,
+proxy and PhoneLink remote restrictions, and all tests specified in the brief. The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
 `packages/kollabor-engine/src/kollabor_engine/phone_link.py` is in scope only
 for refusing the spec's remote-disallowed plugin routes and its tests;
 `routes/phonelink.py` stays unchanged unless that refusal requires it. Audit the file deny list
