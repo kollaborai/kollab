@@ -29,6 +29,37 @@ def test_live_owned_processes_do_not_scan_host_process_table(tmp_path):
     assert runner._live_owned_processes() == [owner]
 
 
+def test_refresh_process_tree_tracks_descendants_on_windows(tmp_path, monkeypatch):
+    class Process:
+        def __init__(self, pid, children=()):
+            self.pid = pid
+            self._children = children
+
+        def is_running(self):
+            return True
+
+        def ppid(self):
+            return 1
+
+        def children(self, recursive=False):
+            assert recursive is True
+            return list(self._children)
+
+        def create_time(self):
+            return float(self.pid)
+
+    child = Process(202)
+    adapter = Process(101, (child,))
+    runner = ACPRunner(ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)))
+    runner._adapter_pid = adapter.pid
+    runner._owned_processes[adapter.pid] = adapter
+    monkeypatch.setattr(bridge_mod.os, "name", "nt")
+
+    runner._refresh_process_tree()
+
+    assert runner._owned_processes[child.pid] is child
+
+
 @pytest.mark.asyncio
 async def test_start_refuses_when_recorded_process_group_survives(tmp_path, monkeypatch):
     runner = ACPRunner(
