@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { renderToStaticMarkup } from "react-dom/server";
+import { createElement } from "react";
+import { EmptyEditorState } from "../src/components/code/empty-editor-state";
 import {
   CODE_EDITOR_LAYOUT_KEY,
   isDiffTab,
@@ -216,6 +219,20 @@ test("a malformed or inconsistent saved layout is ignored", () => {
       })
     )
   ).toBeNull();
+});
+
+test("the narrow empty editor exposes a touch-sized file picker", () => {
+  const html = renderToStaticMarkup(createElement(EmptyEditorState, { showFilePicker: true, onOpenFiles: () => {} }));
+
+  expect(html).toContain('type="button"');
+  expect(html).toContain("Browse files");
+  expect(html).toContain("min-h-10");
+});
+
+test("the empty editor does not add a file picker when its sidebar is visible", () => {
+  const html = renderToStaticMarkup(createElement(EmptyEditorState, { showFilePicker: false, onOpenFiles: () => {} }));
+
+  expect(html).not.toContain("Browse files");
 });
 
 test("opening a diff tab over a file with unsaved edits keeps the file dirty", () => {
