@@ -104,11 +104,9 @@ Step 2 is not complete. Item 4 requires each background process to receive
 `KOLLAB_ENGINE_URL` and its plugin-only `KOLLAB_PLUGIN_TOKEN`. The service wrapper
 at `packages/kollabor-plugins/src/kollabor_plugins/services.py:251-264` constructs
 a strict child environment that omits both, and the supervisor at lines 473-480
-starts that wrapper independently. `services.py` is outside the brief's listed file ownership. The earlier handoff
-incorrectly claimed the brief explicitly says to stop and tell the lead; it does
-not. No change was made to `services.py`. A lead decision for minimal token/URL
-provisioning and redaction remains queued as 6ba1d8d9, but the owned token and route
-work can proceed independently.
+starts that wrapper independently. The fresh step 2 instructions expressly
+expand ownership to the minimal service-child token/URL provisioning and redaction.
+No change has yet been made to `services.py`; this is the next active item.
 
 Token progress: tests `921d01c6`, `90ae0f15`, and `1a6918b2` were red before
 `6d389eff` added per-plugin stable 0600 token files, scoped HTTP authorization,
@@ -120,12 +118,14 @@ the two environment variables to service children: that ownership gap remains.
 Forwarded route policy: `83ebf610` was red before `41478c31` enforced remote
 management denials in the engine and fixed the allowed agent-route shapes.
 Package settings: `0f0ae1ce` was red before `b9ff77e7` added PUT through the
-existing settings.save writer and published plugins-changed. The built-in
-settings test `6a006d70` remains red: the specified shared settings.save writer
-in step 1 resolves only installed/development packages, while built-ins must
-persist in config.json. Its owner file `packages/kollabor-plugins/.../settings.py`
-is outside this lane; lead queue 0824d3f7 requests the writer and enable fix or
-expanded ownership. Do not introduce a second built-in writer.
+existing settings.save writer and published plugins-changed. Built-in writer
+coverage `84b91902` was red before `2c15e57d`: settings.save and set_enabled now
+handle built-ins, the terminal config panel routes them through the same writer,
+and its local/global target selection is retained. ConfigService batches and
+locks key writes; strict plugin writes refuse malformed files or conflicting
+non-object sections. Focused config/panel/plugin/route regression: 310 passed,
+1 skipped (`builtin-regression.log`); scoped Ruff and git diff --check passed.
+These are unit checks, not a live UI or process smoke.
 
 Service controls/logs: `a03a6d81` was red before `8513aabf` added start, stop,
 async restart with shutdown cleanup, and bounded service-log reads with symlink
@@ -133,10 +133,16 @@ checks and secret/plugin/user-token redaction. Twenty-nine focused tests passed
 with the known built-in settings test deselected (`plugin-service-routes-green.log`);
 Ruff and compilation passed. All route tests mock service supervision/control.
 
-Next: continue item 5 management routes using the existing APIs, then PhoneLink
-filtering, spoofing/normalization tests, all gates and smoke. Current branch is
-not ready to deploy: the built-in test is red; service-child environment
-provisioning and PhoneLink management blocking are absent. The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
+Management progress after the previous checkpoint: `79ba8bc9` adds enable,
+disable and remove guards; `6198e2b5` holds service locks during removal;
+`e869b785` honors the log tail limit. Install/update staging, polling and
+confirmation remain to be implemented and verified.
+
+Next: service-child environment provisioning and remaining item 5 management
+routes, then PhoneLink filtering, spoofing/normalization tests, all gates and
+smoke. The branch is not ready to deploy: service-child environment
+provisioning, install/update jobs and PhoneLink management blocking are absent.
+The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
 `packages/kollabor-engine/src/kollabor_engine/phone_link.py` is in scope only
 for refusing the spec's remote-disallowed plugin routes and its tests;
 `routes/phonelink.py` stays unchanged unless that refusal requires it. Audit the file deny list
@@ -145,3 +151,7 @@ fixed HEAD, Ruff, compilation, and the specified isolated live smoke; record
 results. Append the changelog line. Check PR #1065 only once step 2 is green;
 follow the brief's conditional PR instructions. No PR, release, or deployment
 has been created by this step. The base was step 1 commit `7ed6ec82`.
+
+Earlier in this continuation, one diagnostic pytest invocation used `/tmp` for
+its log and did not set an explicit backup-tree basetemp/HOME. No cleanup was
+performed there; all subsequent test runs above used fresh backup-tree paths.
