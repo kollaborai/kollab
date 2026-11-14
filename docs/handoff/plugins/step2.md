@@ -31,11 +31,21 @@ Engine `GET /plugins` now delegates to `plugin_entries()` and returns schema 1;
 red test `6f438cd2`, implementation `ad5217b7`, two targeted tests passed.
 Logs: `<home>/backups/plugins-step2-work/routes-list-{red,green}.log`.
 
+A preliminary `PluginContext` is in `65b80775`; its hello-fixture test
+`6259771f` was red before implementation and now passes. Logs:
+`<home>/backups/plugins-step2-work/context-{red,green}.log`. This is not fully
+integrated: event and notice publishers require engine callbacks, local-only
+marking needs dispatch enforcement, and settings, secrets, locks and services
+need complete contract and error-path tests. Do not treat the context as done.
+
 ## Remaining and exact next step
 
-Step 2 is not complete. Next: implement engine routes, PluginContext, tokens,
-proxy and PhoneLink remote restrictions, supervisor tick, and all tests
-specified in the brief. Audit the file deny list
+Step 2 is not complete. Next: wire and test PluginContext, then implement the
+remaining engine routes, tokens, proxy and PhoneLink remote restrictions, and
+all tests specified in the brief. The actual PhoneLink ASGI bridge is in
+`packages/kollabor-engine/src/kollabor_engine/phone_link.py`, outside the
+brief's stated ownership; its routes/phonelink.py is the management router.
+Resolve that scope mismatch before modifying the bridge. Audit the file deny list
 against all actual token paths and tool entrypoints. Run the full unit suite on a
 fixed HEAD, Ruff, compilation, and the specified isolated live smoke; record
 results. Append the changelog line. Check PR #1065 only once step 2 is green;
