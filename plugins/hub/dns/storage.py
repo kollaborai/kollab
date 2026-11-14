@@ -10,8 +10,9 @@ import logging
 import os
 import re
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from .. import file_lock
 from .models import AgentRecord, ReputationScore
@@ -20,6 +21,23 @@ logger = logging.getLogger(__name__)
 
 # Allowed characters in designation names (alphanumeric, hyphen, underscore)
 _SAFE_DESIGNATION_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+class DNSStorageReadError(RuntimeError):
+    """Existing DNS persistence data could not be read safely."""
+
+    def __init__(self, label: str, path: Path, reason: str):
+        super().__init__(
+            f"DNS {label} at {path} has {reason}; the original was preserved. "
+            "Back it up, repair the file, then retry."
+        )
+
+
+class RegistryReadError(DNSStorageReadError):
+    """An existing DNS registry could not be read safely."""
+
+    def __init__(self, path: Path, reason: str):
+        super().__init__("registry", path, reason)
 
 
 def _sanitize_designation(designation: str) -> str:
@@ -41,49 +59,62 @@ def _locked_atomic_write(path: Path, data: dict, *, compact: bool = False) -> No
     a .lock file to prevent concurrent writers from clobbering each
     other. Safe for shared files across multiple agent processes.
     """
+    with _file_lock(path):
+        _atomic_write_unlocked(path, data, compact=compact)
+
+
+@contextmanager
+def _file_lock(path: Path) -> Iterator[None]:
+    """Hold the cross-process lock associated with a persisted JSON file."""
     lock_path = path.with_suffix(".lock")
     fd = None
     try:
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
         file_lock.lock(fd)
-
-        tmp_fd, tmp_path = tempfile.mkstemp(
-            dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp"
-        )
-        try:
-            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                json.dump(
-                    data,
-                    f,
-                    ensure_ascii=not compact,
-                    indent=None if compact else 2,
-                    separators=(",", ":") if compact else None,
-                )
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, path)
-            # Pins and publisher revision counters must survive a crash after
-            # replacement, not merely be atomically visible to other readers.
-            # Directory fsync is a POSIX durability concept: Windows cannot
-            # open a directory fd through the CRT (EACCES without
-            # FILE_FLAG_BACKUP_SEMANTICS) and exposes no flush for it, so
-            # only POSIX gets the crash-survival pin.
-            if os.name != "nt":
-                directory_fd = os.open(path.parent, os.O_RDONLY)
-                try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
-        except BaseException:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+        yield
     finally:
         if fd is not None:
             file_lock.unlock(fd)
             os.close(fd)
+
+
+def _atomic_write_unlocked(
+    path: Path, data: dict, *, compact: bool = False
+) -> None:
+    """Atomically replace a JSON file while its caller holds its lock."""
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            json.dump(
+                data,
+                f,
+                ensure_ascii=not compact,
+                indent=None if compact else 2,
+                separators=(",", ":") if compact else None,
+            )
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        # Pins and publisher revision counters must survive a crash after
+        # replacement, not merely be atomically visible to other readers.
+        # Directory fsync is a POSIX durability concept: Windows cannot
+        # open a directory fd through the CRT (EACCES without
+        # FILE_FLAG_BACKUP_SEMANTICS) and exposes no flush for it, so
+        # only POSIX gets the crash-survival pin.
+        if os.name != "nt":
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def get_dns_dir() -> Path:
@@ -118,60 +149,114 @@ class DNSStorage:
 
     # --- Registry ---
 
-    def load_registry(self) -> Dict[str, AgentRecord]:
-        """Load all agent records from registry.json."""
+    def _read_registry_unlocked(self) -> Dict[str, AgentRecord]:
+        """Read and validate registry data while the caller holds its lock."""
         if not self._registry_path.exists():
             return {}
         try:
             with open(self._registry_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            records = {}
-            for designation, record_data in data.get("records", {}).items():
-                records[designation] = AgentRecord.from_dict(record_data)
-            return records
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning(f"failed to load DNS registry: {e}")
-            return {}
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise RegistryReadError(self._registry_path, "malformed JSON") from exc
+        except OSError as exc:
+            raise RegistryReadError(self._registry_path, "I/O error") from exc
 
-    def save_registry(self, records: Dict[str, AgentRecord]) -> None:
-        """Save all agent records to registry.json with flock."""
+        if (
+            not isinstance(data, dict)
+            or (
+                "version" in data
+                and (type(data["version"]) is not int or data["version"] != 1)
+            )
+            or not isinstance(data.get("records"), dict)
+        ):
+            raise RegistryReadError(self._registry_path, "invalid schema")
+
+        records: Dict[str, AgentRecord] = {}
+        try:
+            for designation, record_data in data["records"].items():
+                if not isinstance(designation, str) or not isinstance(
+                    record_data, dict
+                ):
+                    raise TypeError("registry records must map names to objects")
+                records[designation] = AgentRecord.from_dict(record_data)
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise RegistryReadError(
+                self._registry_path, "invalid record schema"
+            ) from exc
+        return records
+
+    @staticmethod
+    def _registry_document(records: Dict[str, AgentRecord]) -> dict:
         import time
 
-        data = {
+        return {
             "records": {k: v.to_dict() for k, v in records.items()},
             "version": 1,
             "updated_at": time.time(),
         }
-        _locked_atomic_write(self._registry_path, data)
+
+    def load_registry(self) -> Dict[str, AgentRecord]:
+        """Load all agent records from registry.json."""
+        with _file_lock(self._registry_path):
+            return self._read_registry_unlocked()
+
+    def save_registry(self, records: Dict[str, AgentRecord]) -> None:
+        """Replace registry.json under its cross-process lock."""
+        with _file_lock(self._registry_path):
+            _atomic_write_unlocked(
+                self._registry_path, self._registry_document(records)
+            )
 
     def merge_save_registry(
         self,
         records: Dict[str, AgentRecord],
         deleted_keys: Optional[List[str]] = None,
     ) -> None:
-        """Merge-save records so concurrent agents do not clobber trust state."""
-        existing = self.load_registry()
-        for key in deleted_keys or []:
-            existing.pop(key, None)
-        existing.update(records)
-        self.save_registry(existing)
+        """Merge records atomically; explicit deletions win over stale updates."""
+        with _file_lock(self._registry_path):
+            existing = self._read_registry_unlocked()
+            existing.update(records)
+            for key in deleted_keys or []:
+                existing.pop(key, None)
+            _atomic_write_unlocked(
+                self._registry_path, self._registry_document(existing)
+            )
 
     # --- Reputation ---
 
     def load_reputation(self) -> Dict[str, ReputationScore]:
         """Load all reputation scores from reputation.json."""
-        if not self._reputation_path.exists():
-            return {}
-        try:
-            with open(self._reputation_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            scores = {}
+        with _file_lock(self._reputation_path):
+            if not self._reputation_path.exists():
+                return {}
+            try:
+                with open(self._reputation_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except json.JSONDecodeError as exc:
+                raise DNSStorageReadError(
+                    "reputation", self._reputation_path, "malformed JSON"
+                ) from exc
+            except OSError as exc:
+                raise DNSStorageReadError(
+                    "reputation", self._reputation_path, "an I/O error"
+                ) from exc
+            if not isinstance(data, dict) or not isinstance(data.get("scores"), dict):
+                raise DNSStorageReadError(
+                    "reputation", self._reputation_path, "an invalid schema"
+                )
+            scores: Dict[str, ReputationScore] = {}
             for designation, score_data in data.get("scores", {}).items():
-                scores[designation] = ReputationScore.from_dict(score_data)
+                if not isinstance(designation, str) or not isinstance(score_data, dict):
+                    raise DNSStorageReadError(
+                        "reputation", self._reputation_path, "an invalid score schema"
+                    )
+                try:
+                    scores[designation] = ReputationScore.from_dict(score_data)
+                except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                    raise DNSStorageReadError(
+                        "reputation", self._reputation_path, "an invalid score schema"
+                    ) from exc
             return scores
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning(f"failed to load DNS reputation: {e}")
-            return {}
 
     def save_reputation(self, scores: Dict[str, ReputationScore]) -> None:
         """Save all reputation scores to reputation.json with flock."""
@@ -188,14 +273,28 @@ class DNSStorage:
 
     def load_capability_index(self) -> Dict[str, list]:
         """Load the capability reverse index."""
-        if not self._capability_index_path.exists():
-            return {}
-        try:
-            with open(self._capability_index_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning(f"failed to load capability index: {e}")
-            return {}
+        with _file_lock(self._capability_index_path):
+            if not self._capability_index_path.exists():
+                return {}
+            try:
+                with open(self._capability_index_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except json.JSONDecodeError as exc:
+                raise DNSStorageReadError(
+                    "capability index", self._capability_index_path, "malformed JSON"
+                ) from exc
+            except OSError as exc:
+                raise DNSStorageReadError(
+                    "capability index", self._capability_index_path, "an I/O error"
+                ) from exc
+            if not isinstance(data, dict) or any(
+                not isinstance(name, str) or not isinstance(entries, list)
+                for name, entries in data.items()
+            ):
+                raise DNSStorageReadError(
+                    "capability index", self._capability_index_path, "an invalid schema"
+                )
+            return data
 
     def save_capability_index(self, index: Dict[str, list]) -> None:
         """Save the capability reverse index with flock."""
