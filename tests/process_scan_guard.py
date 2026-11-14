@@ -207,6 +207,20 @@ def _command_tokens(command: Any) -> list[str] | None:
     return None
 
 
+def _shell_command_tokens(command: Any) -> list[str] | None:
+    """Tokenize shell control operators so only command positions are inspected."""
+    if isinstance(command, bytes):
+        command = os.fsdecode(command)
+    if not isinstance(command, str) or _WINDOWS_PATH_MARKER.search(command):
+        return _command_tokens(command)
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        return list(lexer)
+    except ValueError:
+        return None
+
+
 def _decode_powershell_encoded_command(encoded: str) -> str | None:
     """Decode PowerShell's UTF-16LE base64 command or report an unknown form."""
     try:
@@ -355,16 +369,32 @@ def _ps_has_only_pid_and_format_options(options: Sequence[str]) -> bool:
     return selectors > 0
 
 
-def is_process_table_enumeration_command(command: Any) -> bool:
+def is_process_table_enumeration_command(command: Any, *, shell: bool = False) -> bool:
     """Fail closed on host process tables; allow only narrow known-safe targets."""
-    tokens = _command_tokens(command)
+    if isinstance(command, bytes):
+        raw_command = os.fsdecode(command)
+    else:
+        raw_command = command
+    if isinstance(raw_command, str):
+        for embedded in re.finditer(r"\$\(([^()]*)\)|`([^`]*)`", raw_command):
+            nested = embedded.group(1) or embedded.group(2)
+            if nested and is_process_table_enumeration_command(nested, shell=True):
+                return True
+    tokens = _shell_command_tokens(command) if shell else _command_tokens(command)
     if tokens is None:
         return True
+    command_positions = {0}
+    if shell:
+        for index, token in enumerate(tokens[:-1]):
+            if token in {";", "&&", "||", "|", "&"}:
+                command_positions.add(index + 1)
     for index, token in enumerate(tokens):
         for embedded in re.finditer(r"\$\(([^()]*)\)|`([^`]*)`", token):
             nested = embedded.group(1) or embedded.group(2)
-            if nested and is_process_table_enumeration_command(nested):
+            if nested and is_process_table_enumeration_command(nested, shell=True):
                 return True
+        if index not in command_positions:
+            continue
         name = _executable_name(token)
         if name in {"sh", "bash", "zsh"}:
             shell_args = tokens[index + 1 :]
@@ -372,7 +402,9 @@ def is_process_table_enumeration_command(command: Any) -> bool:
                 command_option = option in {"-c", "--command"} or (
                     option.startswith("-") and not option.startswith("--") and "c" in option[1:]
                 )
-                if command_option and is_process_table_enumeration_command(shell_args[shell_index + 1]):
+                if command_option and is_process_table_enumeration_command(
+                    shell_args[shell_index + 1], shell=True
+                ):
                     return True
         if name.startswith(("powershell", "pwsh")) and name not in {
             "powershell",
@@ -392,7 +424,7 @@ def is_process_table_enumeration_command(command: Any) -> bool:
                     if (
                         not nested_command.strip()
                         or _powershell_payload_requires_fail_closed(nested_command)
-                        or is_process_table_enumeration_command(nested_command)
+                        or is_process_table_enumeration_command(nested_command, shell=True)
                     ):
                         return True
                     inspected_payload = True
@@ -404,7 +436,7 @@ def is_process_table_enumeration_command(command: Any) -> bool:
                     if (
                         nested_command is None
                         or _powershell_payload_requires_fail_closed(nested_command)
-                        or is_process_table_enumeration_command(nested_command)
+                        or is_process_table_enumeration_command(nested_command, shell=True)
                     ):
                         return True
                     inspected_payload = True
@@ -423,10 +455,41 @@ def is_process_table_enumeration_command(command: Any) -> bool:
             command_args = tokens[index + 1 :]
             for shell_index, option in enumerate(command_args[:-1]):
                 if option.casefold() in {"/c", "/k"}:
-                    nested_command = " ".join(command_args[shell_index + 1 :])
-                    if is_process_table_enumeration_command(nested_command):
+                    nested_command = command_args[shell_index + 1 :]
+                    if len(nested_command) == 1:
+                        payload = nested_command[0]
+                        if not _WINDOWS_PATH_MARKER.search(payload):
+                            nested_command = payload
+                        else:
+                            executable_ends = list(re.finditer(r"\.exe(?=\s|$)", payload, re.IGNORECASE))
+                            if executable_ends:
+                                end = executable_ends[-1].end()
+                                nested_command = [payload[:end], *shlex.split(payload[end:].strip())]
+                    if is_process_table_enumeration_command(nested_command, shell=True):
                         return True
                     break
+        docker_args = tokens[index + 1 :]
+        docker_exec_offset = (
+            2 if name == "docker" and len(docker_args) > 1 and docker_args[0] == "compose" and docker_args[1] == "exec"
+            else 1 if name == "docker" and docker_args and docker_args[0] == "exec"
+            else 1 if name == "docker-compose" and docker_args and docker_args[0] == "exec"
+            else None
+        )
+        if docker_exec_offset is not None:
+            exec_args = docker_args[docker_exec_offset:]
+            while exec_args and exec_args[0].startswith("-"):
+                option = exec_args[0]
+                exec_args = exec_args[1:]
+                if option in {"-e", "--env", "-w", "--workdir", "-u", "--user", "--detach-keys"}:
+                    if not exec_args:
+                        return True
+                    exec_args = exec_args[1:]
+                elif option.startswith(("--env=", "--workdir=", "--user=", "--detach-keys=")):
+                    continue
+                elif option not in {"-i", "-t", "-it", "-ti", "-d"}:
+                    return True
+            if len(exec_args) < 2 or is_process_table_enumeration_command(exec_args[1:], shell=True):
+                return True
         if name == "wmic" and _wmic_command_requires_fail_closed(tokens[index + 1 :]):
             return True
         # CIM/WMI accept arbitrary class and WQL query forms. Block these
@@ -592,8 +655,10 @@ def install_test_process_scan_guard(
             if command_tokens is None:
                 return block_process_table_command(*args, **kwargs)
             executable_command = [executable, *command_tokens[1:]]
-        if is_process_table_enumeration_command(command) or (
-            executable_command is not None and is_process_table_enumeration_command(executable_command)
+        shell = bool(kwargs.get("shell", False))
+        if is_process_table_enumeration_command(command, shell=shell) or (
+            executable_command is not None
+            and is_process_table_enumeration_command(executable_command, shell=shell)
         ):
             return block_process_table_command(*args, **kwargs)
         return original_popen(*args, **kwargs)
@@ -614,7 +679,7 @@ def install_test_process_scan_guard(
             **kwargs: Any,
         ) -> Any:
             command = args[0] if args else kwargs.get("cmd")
-            if is_process_table_enumeration_command(command):
+            if is_process_table_enumeration_command(command, shell=True):
                 return _blocked(*args, **kwargs)
             return _original(*args, **kwargs)
 
