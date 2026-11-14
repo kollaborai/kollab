@@ -150,8 +150,11 @@ def _is_blocked_kollab_spawn(
                     action, tail = tail[0], tail[1:]
                 else:
                     continue
-                if action in {"stop", "kill"} and "all" in tail:
-                    return True
+                if action in {"stop", "kill"}:
+                    return bool(tail and tail[0] == "all")
+                # Hub subcommands own the rest of argv. In particular, msg
+                # text is free text and may look like a Kollab launch flag.
+                return False
         return False
 
     def python_code_spawns(code: str, is_background: bool, depth: int) -> bool:
