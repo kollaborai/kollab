@@ -424,6 +424,38 @@ class PluginRegistry:
         }
 
 
+def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
+    from .packages import _SERVICE
+
+    result = []
+    declared = manifest.get("services", {})
+    if not isinstance(declared, dict):
+        return result
+    for name in declared:
+        if not isinstance(name, str) or not _SERVICE.fullmatch(name):
+            continue
+        state_file = home / "plugin-data" / plugin_id / "run" / f"{name}.state"
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            if not isinstance(state, dict):
+                state = {}
+        except OSError, ValueError:
+            state = {}
+        history = state.get("exit_history", [])
+        result.append(
+            {
+                "name": name,
+                "state": state.get("status", "stopped"),
+                "desired": state.get("desired", "stopped"),
+                "pid": None,
+                "since": None,
+                "restarts": len(history) if isinstance(history, list) else 0,
+                "heartbeat": None,
+            }
+        )
+    return result
+
+
 def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
     """Describe built-in, loose, installed and development plugin entries."""
     if plugins_dir is None:
@@ -508,28 +540,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
             state, error = "error", str(exc)
         if plugin_id in registry.package_errors and state == "ok":
             state, error = "error", registry.package_errors[plugin_id]
-        service_entries = []
-        declared_services = manifest.get("services", {})
-        if isinstance(declared_services, dict):
-            for name in declared_services:
-                if not isinstance(name, str):
-                    continue
-                state_file = home / "plugin-data" / plugin_id / "run" / f"{name}.state"
-                try:
-                    service_state = json.loads(state_file.read_text(encoding="utf-8"))
-                except OSError, ValueError:
-                    service_state = {}
-                service_entries.append(
-                    {
-                        "name": name,
-                        "state": service_state.get("status", "stopped"),
-                        "desired": service_state.get("desired", "stopped"),
-                        "pid": None,
-                        "since": None,
-                        "restarts": len(service_state.get("exit_history", [])),
-                        "heartbeat": None,
-                    }
-                )
+        service_entries = _service_entries(home, plugin_id, manifest)
         entries.append(
             {
                 "id": plugin_id,
@@ -580,7 +591,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
                 "settings": dev_settings,
                 "web": manifest.get("web"),
                 "contributes": manifest.get("contributes", {}),
-                "services": [],
+                "services": _service_entries(home, f"{plugin_id}@dev", manifest),
                 "uses": manifest.get("uses", []),
                 "granted": manifest.get("uses", []),
             }
