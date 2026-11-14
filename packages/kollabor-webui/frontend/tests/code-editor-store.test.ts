@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 import { EmptyEditorState } from "../src/components/code/empty-editor-state";
 import { editorThemeColors } from "../src/components/code/editor-theme";
+import { shouldHideSidebarAfterFileSelection } from "../src/components/code/floating-sidebar";
 import { visibleSplitTree } from "../src/components/code/split-layout";
 import {
   CODE_EDITOR_LAYOUT_KEY,
@@ -35,6 +36,12 @@ function resetEditor(): void {
     splitTree: { type: "leaf", paneId: PANE },
   });
 }
+
+test("file selection hides an open narrow sidebar but preserves wider sidebars", () => {
+  expect(shouldHideSidebarAfterFileSelection({ narrow: true, visible: true })).toBe(true);
+  expect(shouldHideSidebarAfterFileSelection({ narrow: true, visible: false })).toBe(false);
+  expect(shouldHideSidebarAfterFileSelection({ narrow: false, visible: true })).toBe(false);
+});
 
 beforeEach(() => {
   // a Map-backed localStorage, so no test touches a real one
