@@ -391,3 +391,38 @@ def install_stage(stage: Path, staged: dict, commit: str, digest: str, *, expect
             except Exception:
                 logger.exception("Plugin installation rollback failed; recovery will retry")
             raise
+
+
+def remove_package(plugin_id: str, *, expected_record: dict) -> None:
+    """Remove an approved disabled package using the same recoverable journal as install."""
+    if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id):
+        raise ValueError("Invalid plugin id")
+    home = Path.home() / ".kollab"
+    plugins_dir = home / "plugins"
+    registry_path = home / "plugins.json"
+    live = plugins_dir / plugin_id
+    old = plugins_dir / f"{plugin_id}.old"
+    journal = plugins_dir / f".{plugin_id}.transaction.json"
+    with locked_file(home / "plugins.json.lock", private=True):
+        _recover_locked(home)
+        registry = _read_registry(registry_path)
+        prior = registry["plugins"].get(plugin_id)
+        if prior != expected_record:
+            raise ValueError("Plugin registry changed during approval; try again")
+        if not isinstance(prior, dict) or prior.get("enabled") is not False:
+            raise ValueError("Disable the plugin before removing it")
+        if live.is_symlink() or not live.is_dir() or old.exists() or old.is_symlink():
+            raise ValueError("Plugin folder and registry disagree")
+        transaction = {"id": plugin_id, "registry": registry, "committed": False}
+        _write_json(journal, transaction)
+        try:
+            os.replace(live, old)
+            next_plugins = dict(registry["plugins"])
+            del next_plugins[plugin_id]
+            _write_json(registry_path, {**registry, "plugins": next_plugins})
+            transaction["committed"] = True
+            _write_json(journal, transaction)
+            _recover_locked(home)
+        except Exception:
+            _recover_locked(home)
+            raise

@@ -35,6 +35,9 @@ def main(argv: list[str]) -> int:
     logs.add_argument("service", nargs="?")
     new = subparsers.add_parser("new", help="Create a plugin from the hello template")
     new.add_argument("plugin_id")
+    remove = subparsers.add_parser("remove", help="Remove an installed plugin")
+    remove.add_argument("plugin_id")
+    remove.add_argument("--purge", action="store_true")
     update = subparsers.add_parser("update", help="Update an installed Git plugin")
     update.add_argument("plugin_id")
     add = subparsers.add_parser("add", help="Install a Git plugin after confirmation")
@@ -99,7 +102,7 @@ def main(argv: list[str]) -> int:
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         print(f"Created {target}")
         return 0
-    if args.action in {"add", "update", "enable", "disable", "dev"} and not sys.stdin.isatty():
+    if args.action in {"add", "update", "remove", "enable", "disable", "dev"} and not sys.stdin.isatty():
         raise ValueError("Plugin management requires interactive confirmation")
     if args.action in {"enable", "disable"}:
         from .settings import set_enabled
@@ -146,6 +149,67 @@ def main(argv: list[str]) -> int:
             _write_json(home / "plugins.json", registry)
             print(f"Attached {plugin_id}@dev from {folder}; local code runs as your user")
             return 0
+    if args.action == "remove":
+        import shutil
+
+        from kollabor_config.file_lock import try_lock, unlock
+
+        from .packages import remove_package
+        from .services import _recorded_process_alive
+
+        plugin_id = args.plugin_id
+        if not _ID.fullmatch(plugin_id):
+            raise ValueError("Invalid plugin id")
+        prior = registry["plugins"].get(plugin_id)
+        if not isinstance(prior, dict):
+            raise ValueError("Plugin is not installed")
+        if prior.get("enabled") is not False:
+            raise ValueError("Disable the plugin before removing it")
+        root = home / "plugins" / plugin_id
+        if root.is_symlink() or not root.is_dir():
+            raise ValueError("Invalid installed plugin folder")
+        manifest = json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
+        name = manifest.get("name", plugin_id)
+        services = manifest.get("services", {})
+        if not isinstance(services, dict):
+            raise ValueError("Invalid installed service declarations")
+        print(f"Remove {name} ({plugin_id})? Plugin data will be kept unless purged.")
+        if input("Remove this plugin? [yes/no] ").strip().lower() != "yes":
+            return 1
+        if args.purge and input(f"Delete {name}'s data folder permanently? [yes/no] ").strip().lower() != "yes":
+            return 1
+        data = home / "plugin-data" / plugin_id
+        run_dir = data / "run"
+        if any(path.is_symlink() for path in (home / "plugin-data", data, run_dir)):
+            raise ValueError("Plugin data path may not be a symlink")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        names = set(services) | {p.stem for p in run_dir.glob("*.pid")}
+        if any(not isinstance(item, str) or not _SERVICE.fullmatch(item) for item in names):
+            raise ValueError("Invalid installed service name")
+        locks = []
+        try:
+            for service_name in sorted(names):
+                fd = os.open(
+                    run_dir / f"{service_name}.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600
+                )
+                if not try_lock(fd):
+                    os.close(fd)
+                    raise ValueError("A plugin service is running; stop it and try again")
+                locks.append(fd)
+                if _recorded_process_alive(run_dir / f"{service_name}.pid"):
+                    raise ValueError("A plugin service is running; stop it and try again")
+            remove_package(plugin_id, expected_record=prior)
+        finally:
+            for fd in reversed(locks):
+                unlock(fd)
+                os.close(fd)
+        if args.purge:
+            if data.is_symlink() or (home / "plugin-data").is_symlink():
+                raise ValueError("Plugin removed, but data path changed; data was not purged")
+            shutil.rmtree(data)
+        print(f"Removed {plugin_id}" + (" and purged its data" if args.purge else ""))
+        return 0
+
     if args.action == "update":
         import hashlib
         import shlex

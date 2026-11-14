@@ -1,4 +1,5 @@
 """Removing an installed plugin preserves data unless separately confirmed."""
+
 import json
 
 import pytest

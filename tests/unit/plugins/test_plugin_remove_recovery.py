@@ -1,4 +1,5 @@
 """A failed removal rolls back the folder and registry together."""
+
 import json
 
 import pytest
