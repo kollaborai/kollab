@@ -104,7 +104,11 @@ class PluginContext:
         if not isinstance(name, str) or not _SERVICE.fullmatch(name):
             raise ValueError("Invalid plugin lock name")
         directory = self.data / "locks"
+        if directory.is_symlink():
+            raise ValueError("Plugin lock directory cannot be a symlink")
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if directory.is_symlink():
+            raise ValueError("Plugin lock directory cannot be a symlink")
         return locked_file(directory / f"{name}.lock", private=True)
 
     @staticmethod
