@@ -1168,6 +1168,14 @@ class TerminalLLMChat:
                 continue
         return None
 
+    def _start_plugin_supervisor(self) -> None:
+        """Schedule the shared service sweep as an app-owned background task."""
+        if getattr(self.args, "no_plugins", False):
+            return
+        from kollabor_plugins.services import supervise_services
+
+        self.create_background_task(supervise_services(), "plugin_service_supervisor")
+
     async def start(self, initial_message: str | None = None) -> None:
         """Start the chat application with guaranteed cleanup.
 
@@ -1219,6 +1227,7 @@ class TerminalLLMChat:
                 return
 
         try:
+            self._start_plugin_supervisor()
             # Display banner for interactive/command mode
             await self._display_banner()
             self._needs_terminal_cleanup = True  # Now we need cleanup on exit
@@ -1871,6 +1880,7 @@ class TerminalLLMChat:
             self.renderer.message_renderer.pipe_mode = True
 
         try:
+            self._start_plugin_supervisor()
             # Config hooks (.kollab/hooks.json) load before LLM/MCP init, as in
             # _deferred_startup, so pipe runs fire them too
             await self._load_config_hooks()

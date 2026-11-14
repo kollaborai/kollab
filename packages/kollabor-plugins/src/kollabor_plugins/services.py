@@ -1,5 +1,6 @@
 """Background plugin process supervision primitives."""
 
+import asyncio
 import json
 import logging
 import os
@@ -334,3 +335,13 @@ def stop_services(plugin_id: str) -> None:
             continue
         except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
             logger.warning("Could not stop service %s: %s", pid_path.name, exc)
+
+
+async def supervise_services() -> None:
+    """Sweep on startup and every 30 seconds until the application shuts down."""
+    while True:
+        try:
+            await asyncio.to_thread(supervisor_tick)
+        except Exception:
+            logger.exception("Plugin service supervisor sweep failed")
+        await asyncio.sleep(30)
