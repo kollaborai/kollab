@@ -8072,6 +8072,7 @@ class HubPlugin(BasePlugin):
 
     async def _cron_loop(self) -> None:
         """Check and fire hub cron jobs + task reminders every 10 seconds."""
+        task_ledger_read_error_active = False
         while True:
             try:
                 await asyncio.sleep(10)
@@ -8108,7 +8109,18 @@ class HubPlugin(BasePlugin):
 
                 # --- Task auto-cron: remind agents of due tasks ---
                 if has_task_ledger and self._task_ledger is not None:
-                    due_tasks = self._task_ledger.get_cron_due()
+                    try:
+                        due_tasks = self._task_ledger.get_cron_due()
+                    except TaskLedgerReadError as e:
+                        if not task_ledger_read_error_active:
+                            message = f"task cron: {e}"
+                            logger.error("%s", message)
+                            self._record_supervisor_alert(message)
+                            await self._notify_supervisor_alert(message)
+                            task_ledger_read_error_active = True
+                        due_tasks = []
+                    else:
+                        task_ledger_read_error_active = False
                     for task in due_tasks:
                         if task.assignee == self._identity.identity:
                             # Self-reminder: task is already in system
