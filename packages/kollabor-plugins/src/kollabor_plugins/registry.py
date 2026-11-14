@@ -426,6 +426,7 @@ class PluginRegistry:
 
 def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
     from .packages import _SERVICE
+    from .services import _identity_alive, _verified_wrapper
 
     result = []
     declared = manifest.get("services", {})
@@ -442,13 +443,28 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
         except OSError, ValueError:
             state = {}
         history = state.get("exit_history", [])
+        identity = None
+        try:
+            recorded = json.loads((state_file.parent / f"{name}.pid").read_text(encoding="utf-8"))
+            if isinstance(recorded, dict):
+                child = recorded.get("child")
+                wrapper = recorded.get("wrapper")
+                if isinstance(child, dict) and _identity_alive(child):
+                    identity = child
+                elif isinstance(wrapper, dict) and _verified_wrapper(wrapper):
+                    identity = wrapper
+        except (OSError, ValueError):
+            pass
+        status = state.get("status", "stopped")
+        if status == "running" and identity is None:
+            status = "unknown"
         result.append(
             {
                 "name": name,
-                "state": state.get("status", "stopped"),
+                "state": status,
                 "desired": state.get("desired", "stopped"),
-                "pid": None,
-                "since": None,
+                "pid": identity.get("pid") if identity else None,
+                "since": identity.get("start_time") if identity else None,
                 "restarts": len(history) if isinstance(history, list) else 0,
                 "heartbeat": None,
                 "error": state.get("error"),

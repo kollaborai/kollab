@@ -20,8 +20,8 @@ def test_dev_services_are_listed(tmp_path, monkeypatch):
     (home / "plugins.json").write_text(json.dumps({"plugins": {}, "dev": {"hello": str(root)}}))
     run = home / "plugin-data" / "hello@dev" / "run"
     run.mkdir(parents=True)
-    (run / "worker.state").write_text(json.dumps({"desired": "running", "status": "running", "exit_history": []}))
+    (run / "worker.state").write_text(json.dumps({"desired": "running", "status": "stopped", "exit_history": []}))
     entry = next(row for row in plugin_entries(builtins) if row["id"] == "hello@dev")
     assert [(item["name"], item["state"], item["desired"]) for item in entry["services"]] == [
-        ("worker", "running", "running")
+        ("worker", "stopped", "running")
     ]
