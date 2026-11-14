@@ -3371,7 +3371,11 @@ def cli_main() -> None:
     if sys.argv[1:2] == ["plugin"]:
         from kollabor_plugins.cli import main as plugin_main
 
-        result = plugin_main(sys.argv[2:])
+        try:
+            result = plugin_main(sys.argv[2:])
+        except (ValueError, OSError) as exc:
+            sys.stderr.write(f"plugin: {exc}\n")
+            raise SystemExit(1) from None
         if result:
             raise SystemExit(result)
         return
