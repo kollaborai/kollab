@@ -112,6 +112,7 @@ def apply_config_changes(changes: dict) -> dict:
     ordinary = {}
     values: dict[str, dict] = {}
     enabled = {}
+    controls = []
     for path, value in changes.items():
         if path.startswith("plugin-values."):
             parts = path.split(".", 2)
@@ -123,7 +124,19 @@ def apply_config_changes(changes: dict) -> dict:
             if len(parts) != 3 or not parts[1] or parts[2] != "enabled":
                 raise ValueError("Invalid plugin registry path")
             enabled[parts[1]] = value
-        elif path in {"plugin-values", "plugin-registry"}:
+        elif path.startswith("plugin-service."):
+            from .packages import _SERVICE
+
+            parts = path.split(".")
+            if (
+                len(parts) != 3
+                or not _ID.fullmatch(parts[1])
+                or not _SERVICE.fullmatch(parts[2])
+                or not isinstance(value, bool)
+            ):
+                raise ValueError("Invalid plugin service path or value")
+            controls.append((parts[1], parts[2], "start" if value else "stop"))
+        elif path in {"plugin-values", "plugin-registry", "plugin-service"}:
             raise ValueError("Invalid plugin configuration path")
         else:
             ordinary[path] = value
@@ -131,6 +144,11 @@ def apply_config_changes(changes: dict) -> dict:
         save(plugin_id, plugin_values)
     for plugin_id, value in enabled.items():
         set_enabled(plugin_id, value)
+    if controls:
+        from .services import control_service
+
+        for plugin_id, service_name, action in controls:
+            control_service(plugin_id, service_name, action)
     return ordinary
 
 
@@ -148,4 +166,11 @@ def config_value(path: str, default: object = None) -> object:
     if parts[0] == "plugin-values" and parts[2]:
         file = home / "plugin-data" / parts[1] / "values.json"
         return _read_json(file).get(parts[2], default) if file.exists() else default
+    if parts[0] == "plugin-service":
+        from .packages import _SERVICE
+
+        if not _SERVICE.fullmatch(parts[2]):
+            raise ValueError("Invalid service name")
+        file = home / "plugin-data" / parts[1] / "run" / f"{parts[2]}.state"
+        return _read_json(file).get("desired") == "running" if file.exists() else False
     raise ValueError("Invalid plugin configuration path")

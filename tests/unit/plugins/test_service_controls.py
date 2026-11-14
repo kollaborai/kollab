@@ -1,4 +1,5 @@
 """Explicit process controls record desired state and touch only the target."""
+
 import json
 from unittest.mock import Mock
 
@@ -12,9 +13,13 @@ def setup(tmp_path, monkeypatch):
     home = tmp_path / ".kollab"
     root = home / "plugins" / "hello"
     root.mkdir(parents=True)
-    manifest = {"services": {"one": {"command": ["python3", "-c", "pass"]}, "two": {"command": ["python3", "-c", "pass"]}}}
+    manifest = {
+        "services": {"one": {"command": ["python3", "-c", "pass"]}, "two": {"command": ["python3", "-c", "pass"]}}
+    }
     (root / "kollab-plugin.json").write_text(json.dumps(manifest))
-    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {"enabled": True, "files_sha256": files_sha256(root)}}, "dev": {}}))
+    (home / "plugins.json").write_text(
+        json.dumps({"plugins": {"hello": {"enabled": True, "files_sha256": files_sha256(root)}}, "dev": {}})
+    )
     return home / "plugin-data" / "hello" / "run"
 
 

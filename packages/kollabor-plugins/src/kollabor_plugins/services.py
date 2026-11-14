@@ -135,6 +135,22 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
         os.close(fd)
         raise
     pid_path = run_dir / f"{service_name}.pid"
+    initial_state_path = run_dir / f"{service_name}.state"
+    try:
+        if initial_state_path.is_symlink():
+            raise ValueError("Service state may not be a symlink")
+        if initial_state_path.exists():
+            initial_state = json.loads(initial_state_path.read_text(encoding="utf-8"))
+            if not isinstance(initial_state, dict):
+                raise ValueError("Invalid service state")
+            if initial_state.get("desired") == "stopped":
+                unlock(fd)
+                os.close(fd)
+                return 0
+    except Exception:
+        unlock(fd)
+        os.close(fd)
+        raise
     if _recorded_process_alive(pid_path):
         unlock(fd)
         os.close(fd)
@@ -364,6 +380,88 @@ def supervisor_tick() -> None:
                     unlock(fd)
             finally:
                 os.close(fd)
+
+
+def control_service(plugin_id: str, service_name: str, action: str) -> None:
+    """Set one installed service's desired state and signal only its verified wrapper."""
+    if not _ID.fullmatch(plugin_id) or not _SERVICE.fullmatch(service_name):
+        raise ValueError("Invalid plugin or service name")
+    if action not in {"start", "stop"}:
+        raise ValueError("Invalid service action")
+    home = Path.home() / ".kollab"
+    registry = _read_registry(home / "plugins.json")
+    record = registry["plugins"].get(plugin_id)
+    if not isinstance(record, dict):
+        raise ValueError("Plugin is not installed")
+    if action == "start" and record.get("enabled") is not True:
+        raise ValueError("Enable the plugin before starting its service")
+    root = home / "plugins" / plugin_id
+    if root.is_symlink() or files_sha256(root) != record.get("files_sha256"):
+        raise ValueError("Plugin files changed since approval")
+    try:
+        manifest = json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
+        if service_name not in manifest["services"]:
+            raise ValueError("Unknown plugin service")
+    except (OSError, KeyError, TypeError) as exc:
+        raise ValueError("Cannot load plugin service") from exc
+    data = home / "plugin-data" / plugin_id
+    run_dir = data / "run"
+    if any(path.is_symlink() for path in (home / "plugin-data", data, run_dir)):
+        raise ValueError("Plugin data path may not be a symlink")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    state_path = run_dir / f"{service_name}.state"
+    if state_path.is_symlink():
+        raise ValueError("Service state may not be a symlink")
+    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+    if not isinstance(state, dict):
+        raise ValueError("Invalid service state")
+    pid_path = run_dir / f"{service_name}.pid"
+    if action == "start":
+        if _recorded_process_alive(pid_path):
+            raise ValueError("Service is already running or has an unverifiable process")
+        state.update({"desired": "running", "status": "starting"})
+        _write_state(state_path, state)
+        supervisor_tick()
+        return
+    identity = {}
+    if not pid_path.exists() and not pid_path.is_symlink():
+        fd = os.open(run_dir / f"{service_name}.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            if not try_lock(fd):
+                raise ValueError("Service is starting; try stopping it again")
+            try:
+                if pid_path.exists() or pid_path.is_symlink():
+                    raise ValueError("Service started concurrently; try stopping it again")
+                state.update({"desired": "stopped", "status": "stopped"})
+                _write_state(state_path, state)
+                return
+            finally:
+                unlock(fd)
+        finally:
+            os.close(fd)
+    if pid_path.exists() or pid_path.is_symlink():
+        if pid_path.is_symlink():
+            raise ValueError("Service pid file may not be a symlink")
+        identity = json.loads(pid_path.read_text(encoding="utf-8"))
+        if not isinstance(identity, dict):
+            raise ValueError("Invalid service identity")
+    wrapper = identity.get("wrapper")
+    child = identity.get("child")
+    if not _identity_alive(wrapper, wrapper=True) and _identity_alive(child):
+        raise ValueError("Service child is alive without a verified wrapper")
+    state.update(
+        {
+            "desired": "stopped",
+            "status": "stopping" if wrapper and _identity_alive(wrapper, wrapper=True) else "stopped",
+        }
+    )
+    _write_state(state_path, state)
+    if wrapper and _identity_alive(wrapper, wrapper=True):
+        try:
+            os.kill(wrapper["pid"], signal.SIGTERM)
+        except ProcessLookupError:
+            state["status"] = "stopped"
+            _write_state(state_path, state)
 
 
 def stop_services(plugin_id: str) -> None:

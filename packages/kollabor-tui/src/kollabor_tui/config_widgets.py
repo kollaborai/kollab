@@ -287,14 +287,25 @@ class ConfigWidgetDefinitions:
 
         sections = []
         for entry in plugin_entries(ConfigWidgetDefinitions._packaged_plugins_dir()):
-            if entry.get("kind") == "installed" and entry.get("settings"):
+            if entry.get("kind") == "installed":
                 widgets = []
-                for widget in entry["settings"]:
+                for service in entry.get("services", []):
+                    if isinstance(service, dict) and isinstance(service.get("name"), str):
+                        widgets.append(
+                            {
+                                "type": "checkbox",
+                                "label": f"Background: {service['name']}",
+                                "config_path": f"plugin-service.{entry['id']}.{service['name']}",
+                                "help": f"State: {service.get('state', 'unknown')}; toggle to start or stop",
+                            }
+                        )
+                for widget in entry.get("settings", []):
                     if isinstance(widget, dict) and isinstance(widget.get("config_path"), str):
                         widgets.append(
                             {**widget, "config_path": f"plugin-values.{entry['id']}.{widget['config_path']}"}
                         )
-                sections.append({"title": entry.get("name", entry["id"]), "widgets": widgets})
+                if widgets:
+                    sections.append({"title": entry.get("name", entry["id"]), "widgets": widgets})
             elif isinstance(entry.get("settings_section"), dict):
                 sections.append(entry["settings_section"])
         return sections

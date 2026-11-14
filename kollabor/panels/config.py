@@ -281,7 +281,7 @@ def _field(row: dict, config_service: Any, managed, global_settings) -> dict:
         value = managed_value(managed, global_settings, path)
     elif wtype == "label":
         value = row.get("value")
-    elif path.startswith(("plugin-values.", "plugin-registry.")):
+    elif path.startswith(("plugin-values.", "plugin-registry.", "plugin-service.")):
         from kollabor_plugins.settings import config_value
 
         try:

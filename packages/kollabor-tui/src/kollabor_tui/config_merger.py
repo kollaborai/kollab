@@ -143,7 +143,7 @@ class ConfigMerger:
 
             # Apply changes temporarily
             for path, value in changes.items():
-                if path.startswith(("plugin-values.", "plugin-registry.")):
+                if path.startswith(("plugin-values.", "plugin-registry.", "plugin-service.")):
                     continue
                 try:
                     from kollabor_events.dict_utils import safe_set

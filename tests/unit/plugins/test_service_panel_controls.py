@@ -1,4 +1,5 @@
 """Process controls flow through the installed-plugin settings backend."""
+
 import json
 from unittest.mock import Mock
 
@@ -13,7 +14,19 @@ def test_process_row_shows_state_and_saved_desire(tmp_path, monkeypatch):
     state = tmp_path / ".kollab" / "plugin-data" / "hello" / "run" / "worker.state"
     state.parent.mkdir(parents=True)
     state.write_text(json.dumps({"status": "running", "desired": "running"}))
-    monkeypatch.setattr(registry, "plugin_entries", lambda path: [{"id": "hello", "name": "Hello", "kind": "installed", "settings": [], "services": [{"name": "worker", "state": "running", "desired": "running"}]}])
+    monkeypatch.setattr(
+        registry,
+        "plugin_entries",
+        lambda path: [
+            {
+                "id": "hello",
+                "name": "Hello",
+                "kind": "installed",
+                "settings": [],
+                "services": [{"name": "worker", "state": "running", "desired": "running"}],
+            }
+        ],
+    )
     sections = ConfigWidgetDefinitions.get_plugin_config_sections()
     row = sections[0]["widgets"][0]
     assert row["config_path"] == "plugin-service.hello.worker"
