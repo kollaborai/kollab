@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Code and Git share a folder selector that discovers linked worktrees and browses the agent computer. Guarded subfolder commits, subfolder stash creation and stash deletion are unavailable because concurrent Git activity can change the checked index or stash position (#987, #1011).
 - The web UI shows the agent's latest todo list as a Todo card under the Session Controls panel: a count, the items with finished ones struck through, and a header that opens and closes it (#973).
 - `/restart` restarts a detached agent in place on the installed Kollab version and keeps its conversation; `/new` and `/clear` clear it. A web chat whose agent runs an older version than the engine says so, with a Restart Agent button when `kollabor.updates.restart_agents` is on (default off) and the `/restart` line when it is off. Agents publish the version and build they run in presence and in the network rows. An agent that cannot restart itself (it started before Restart Agent existed) gets a stop command and instructions to select its Offline row in the sidebar to start it again, without a button. An attached terminal stays open through an in-place restart and reattaches by itself, a restart that cannot save the conversation stops with the agent still running and offers Try Again, and the version notice fits phone width and lets touch users open the running and engine versions (#968).
-- Agent bundles can grant read-only terminal access with `terminal-read` (#889).
+- Agent bundles can grant read-only terminal access with `terminal-read`. It rejects recursive or symlink-following `ls` commands that could inspect paths outside the project, and its read-only Git commands ignore inherited `GIT_*` overrides and disable fsmonitor helpers so they never run local programs (#889).
+- The web UI sidebar has a PR Chain dialog that shows the review pipeline's status when that pipeline runs on the same machine; elsewhere it opens empty (#1008).
 - `/llm fallback` lets an agent switch once to a configured loadout after usage, quota, rate-limit or login errors (#548).
 
 ### Changed
@@ -57,8 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Saved conversation durations now account for timestamp timezone offsets (#906).
 - ACP profile mirroring preserves the daemon's image capability across profile and panel refreshes (#900).
 - Native-tool providers no longer receive the XML tool reference (#896).
-- Read-only terminal access rejects recursive or symlink-following `ls` commands that could inspect paths outside the project (#889).
-- Read-only Git commands ignore inherited `GIT_*` overrides and disable repository fsmonitor helpers so they stay rooted at the project without executing local helpers (#889).
 - Agent terminal commands can send Hub messages beginning with `-a` or `-d` without tripping the spawn guard (#878).
 - Usage ledger labels session-stat token fallbacks and documents per-request timing and ACP coverage (#871).
 - Retired Hub work slots stop repeating TaskLedger cleanup and are removed after 30 days (#863).
@@ -80,7 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a folder a kollab agent runs in, or a recent web session folder. `..` and symlinks that lead out are refused, and
   the picker's Up button stops at the top of those folders. A folder an agent ran in, or a recent one, grants access
   only while its pathname still leads to itself: a symlink put in its place grants nothing. On a volume that ignores
-  case (macOS), a folder typed in other letters than it has on disk is the same folder (#980).
+  case (macOS and Windows), a folder typed in other letters than it has on disk is the same folder (#980).
 - Web UI files, PhoneLink page files and prompt role and library names are held below their own folder. A NUL byte in a web UI or phone page path now answers like any other missing file instead of failing with a server error (#980).
 - Prevent `tool-load` from granting tools outside an agent's declared tools list (#891).
 - Preserve task IDs in logs while redacting OpenAI keys and tolerate malformed exception info (#852).
