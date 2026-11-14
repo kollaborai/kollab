@@ -750,3 +750,40 @@ def test_package_settings_write_validates_and_publishes_change(tmp_path, monkeyp
         assert client.get("/plugins/hello/settings").json() == {"greeting": "Welcome"}
         app.state.plugin_events.unsubscribe(None, queue)
     assert app.state.plugin_events.subscriber_count(None) == 0
+
+
+def test_builtin_plugin_settings_preserve_unrelated_config(tmp_path, monkeypatch):
+    import json
+
+    from kollabor_config import config_utils
+    from kollabor_plugins import registry
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    path = tmp_path / ".kollab" / "config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"plugins": {"example": {"mode": "old", "enabled": True}}, "other": {"keep": 7}}))
+    monkeypatch.setattr(config_utils, "get_global_config_path", lambda: path)
+
+    def entries():
+        value = json.loads(path.read_text())["plugins"]["example"]["mode"]
+        return [{"id": "example", "kind": "built-in", "state": "ok", "services": [], "settings": [
+            {"path": "plugins.example.mode", "value": value, "type": "text_input", "editable": True},
+            {"path": "plugins.example.enabled", "value": True, "type": "checkbox", "editable": True},
+            {"path": "plugins.example.secret", "value": None, "type": "text_input", "editable": True, "secret": True},
+            {"path": "plugins.example.managed", "value": "x", "type": "text_input", "editable": True,
+             "managed_by": "primary"},
+        ]}]
+
+    monkeypatch.setattr(registry, "plugin_entries", entries)
+    with TestClient(create_app()) as client:
+        assert client.put("/plugins/example/settings", json={"plugins.example.mode": "new"}).json() == {
+            "plugins.example.mode": "new", "plugins.example.managed": "x",
+        }
+        saved = json.loads(path.read_text())
+        assert saved["plugins"]["example"] == {"mode": "new", "enabled": True}
+        assert saved["other"] == {"keep": 7}
+        for key in ("plugins.example.enabled", "plugins.example.secret", "plugins.example.managed", "other.keep"):
+            assert client.put("/plugins/example/settings", json={key: "leak"}).status_code == 422
+        assert json.loads(path.read_text()) == saved
