@@ -787,6 +787,10 @@ def test_builtin_plugin_settings_preserve_unrelated_config(tmp_path, monkeypatch
         for key in ("plugins.example.enabled", "plugins.example.secret", "plugins.example.managed", "other.keep"):
             assert client.put("/plugins/example/settings", json={key: "leak"}).status_code == 422
         assert json.loads(path.read_text()) == saved
+        assert client.post("/plugins/example/disable").json() == {"enabled": False}
+        assert json.loads(path.read_text())["plugins"]["example"]["enabled"] is False
+        assert client.post("/plugins/example/enable").json() == {"enabled": True}
+        assert json.loads(path.read_text())["plugins"]["example"]["enabled"] is True
 
 
 def test_service_actions_restart_and_redacted_log(tmp_path, monkeypatch):

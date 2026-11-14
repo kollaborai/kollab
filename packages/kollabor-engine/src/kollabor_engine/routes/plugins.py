@@ -331,10 +331,17 @@ def get_plugin_settings(plugin_id: str):
 def put_plugin_settings(request: Request, plugin_id: str, values: dict[str, Any]):
     context = _package_context(plugin_id)
     if context is None:
-        raise HTTPException(status_code=404, detail="Plugin not found")
+        # Verify that this is an actual built-in before invoking the shared writer.
+        get_plugin_settings(plugin_id)
     try:
-        context.settings.save(values)
-        saved = context.settings.get()
+        if context is None:
+            from kollabor_plugins.settings import save
+
+            save(plugin_id, values)
+            saved = get_plugin_settings(plugin_id)
+        else:
+            context.settings.save(values)
+            saved = context.settings.get()
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except OSError as exc:
@@ -533,9 +540,15 @@ async def set_plugin_enabled(request: Request, plugin_id: str):
 
     context = _package_context(plugin_id)
     if context is None:
-        raise HTTPException(status_code=404, detail="Plugin not found")
+        get_plugin_settings(plugin_id)  # Reject unknown IDs before changing config.
     enabled = request.scope["path"].rstrip("/").endswith("/enable")
     try:
+        if context is None:
+            from kollabor_plugins.settings import set_enabled
+
+            await asyncio.to_thread(set_enabled, plugin_id, enabled)
+            request.app.state.plugin_events.publish_change()
+            return {"enabled": enabled}
         await asyncio.to_thread(_set_package_enabled, context, enabled)
         if enabled:
             try:
