@@ -157,6 +157,23 @@ class TestBundleScopeEnforcement:
         composed_result = _run_async(executor.execute_tool(composed_call))
         assert composed_result.metadata.get("scope_denied") is True
 
+    def test_git_shell_alias_is_denied_without_terminal_grant(self):
+        """Git aliases prefixed with ! can execute shell commands."""
+        executor = _make_executor()
+        executor.set_bundle_scope(["git"])
+
+        result = _run_async(
+            executor.execute_tool(
+                {
+                    "id": "git-alias-call",
+                    "type": "terminal",
+                    "command": "git -c alias.pwn='!touch /tmp/pwned' pwn",
+                }
+            )
+        )
+
+        assert result.metadata.get("scope_denied") is True
+
     def test_execute_tool_rejects_out_of_scope(self):
         """execute_tool returns error for out-of-scope tools."""
         executor = _make_executor()
