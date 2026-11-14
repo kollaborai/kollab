@@ -709,3 +709,44 @@ def test_forwarded_engine_requests_cannot_use_plugin_management(tmp_path, monkey
         assert client.post("/plugins/hello/events", headers=remote, json={"topic": "x", "data": {}}).status_code == 200
         assert client.post("/plugins/hello/agents", headers=remote).status_code != 403
         assert client.delete("/plugins/hello/agents/run-1", headers=remote).status_code != 403
+
+
+def test_package_settings_write_validates_and_publishes_change(tmp_path, monkeypatch):
+    import asyncio
+    import json
+    import shutil
+    from pathlib import Path
+
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    source = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    home = tmp_path / ".kollab"
+    root = home / "plugins" / "hello"
+    shutil.copytree(source, root)
+    (home / "plugins.json").write_text(json.dumps({
+        "plugins": {"hello": {"enabled": False, "files_sha256": files_sha256(root), "granted": []}}, "dev": {},
+    }))
+    app = create_app()
+
+    async def subscribe():
+        return app.state.plugin_events.subscribe(None)
+
+    async def next_event(queue):
+        return await asyncio.wait_for(queue.get(), 1)
+
+    with TestClient(app) as client:
+        queue = client.portal.call(subscribe)
+        assert client.put("/plugins/hello/settings", json={"greeting": "Welcome"}).json() == {"greeting": "Welcome"}
+        assert client.portal.call(next_event, queue)["topic"] == "plugins-changed"
+        assert client.get("/plugins/hello/settings").json() == {"greeting": "Welcome"}
+        assert client.put("/plugins/hello/settings", json={"greeting": 4}).status_code == 422
+        assert client.put("/plugins/hello/settings", json={"enabled": True}).status_code == 422
+        assert client.put("/plugins/missing/settings", json={"greeting": "Hi"}).status_code == 404
+        assert client.put("/plugins/hello/settings", json={"greeting": "Remote"},
+                          headers={"x-kollab-plugin-remote": "1"}).status_code == 403
+        assert client.get("/plugins/hello/settings").json() == {"greeting": "Welcome"}
+        app.state.plugin_events.unsubscribe(None, queue)
+    assert app.state.plugin_events.subscriber_count(None) == 0
