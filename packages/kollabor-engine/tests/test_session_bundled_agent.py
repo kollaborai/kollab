@@ -49,7 +49,9 @@ async def client(empty_home, monkeypatch):
     profiles = SimpleNamespace(
         active_profile_name="saved", get_profile=lambda name: SimpleNamespace(name=name)
     )
-    monkeypatch.setattr("kollabor_ai.ProfileManager", lambda: profiles)
+    monkeypatch.setattr(
+        "kollabor_ai.ProfileManager", lambda local_folder=None: profiles
+    )
     monkeypatch.setattr(
         teams_routes, "_bridge", SimpleNamespace(get_agents=lambda use_cache=True: [])
     )
