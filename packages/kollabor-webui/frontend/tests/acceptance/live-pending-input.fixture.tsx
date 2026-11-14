@@ -51,6 +51,7 @@ function Probe({ onRefresh, historyCount }: { onRefresh: () => void; historyCoun
 
 function Fixture() {
   const [state, setState] = useState(initialState);
+  const [runtimeEpoch, setRuntimeEpoch] = useState(0);
   const refreshHistory = () => setState({
     ...initialState,
     messages: [{
@@ -63,7 +64,14 @@ function Fixture() {
   });
   window.refreshHistory = refreshHistory;
   return (
-    <EngineRuntimeProvider api={api} sessionId="s1" initialState={state} liveEvents={liveEvents}>
+    <EngineRuntimeProvider
+      key={runtimeEpoch}
+      api={api}
+      sessionId="s1"
+      initialState={state}
+      onStale={() => setRuntimeEpoch((epoch) => epoch + 1)}
+      liveEvents={liveEvents}
+    >
       <Probe onRefresh={refreshHistory} historyCount={state.messages.length} />
     </EngineRuntimeProvider>
   );
