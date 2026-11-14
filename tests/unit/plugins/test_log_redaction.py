@@ -40,6 +40,7 @@ def test_echoed_secret_and_token_are_redacted_in_cli(tmp_path, monkeypatch, caps
     )
     assert _keyring_set("TEST_TOKEN", "arbitrary-value-xyz")
     assert run_service("demo", "worker", "abcdef") == 0
+    assert _keyring_set("TEST_TOKEN", "rotated-value")
     assert main(["logs", "demo", "worker"]) == 0
     output = capsys.readouterr().out
     assert "[redacted]" in output
