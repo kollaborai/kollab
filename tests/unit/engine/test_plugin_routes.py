@@ -230,3 +230,52 @@ def test_plugin_usage_is_checkpointed_in_bounded_batches(tmp_path, monkeypatch):
         assert client.get("/plugins/hello/usage").json()["total"] == 1500
     assert len(offsets) >= 2
     assert offsets == sorted(set(offsets))
+
+
+@pytest.mark.asyncio
+async def test_engine_context_routes_events_notices_and_heartbeats(tmp_path, monkeypatch):
+    import asyncio
+    import json
+    import shutil
+    from pathlib import Path
+
+    from fastapi import HTTPException
+    from kollabor_engine.routes import plugins as plugin_routes
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    source = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    home = tmp_path / ".kollab"
+    root = home / "plugins" / "hello"
+    shutil.copytree(source, root)
+    record = {"enabled": True, "files_sha256": files_sha256(root), "granted": []}
+    registry_path = home / "plugins.json"
+    registry_path.write_text(json.dumps({"plugins": {"hello": record}, "dev": {}}))
+    hub = plugin_routes.PluginEventHub()
+    own = hub.subscribe("hello")
+    global_events = hub.subscribe(None)
+    other = hub.subscribe("other")
+    context = plugin_routes._engine_context("hello", hub)
+    context.events.publish("heartbeat", {"service": "hello"})
+    heartbeat = await asyncio.wait_for(own.get(), 1)
+    assert context.services.status()[0]["heartbeat"] == heartbeat["ts"]
+    context.notify("A pull request is waiting.", {"label": "Open"})
+    notice = await asyncio.wait_for(global_events.get(), 1)
+    assert notice["topic"] == "notice"
+    assert notice["data"] == {"plugin_id": "hello", "text": "A pull request is waiting.", "button": {"label": "Open"}}
+    assert other.empty()
+    with pytest.raises(ValueError, match="heartbeat"):
+        context.events.publish("heartbeat", {"service": "not-declared"})
+    with pytest.raises(ValueError, match="notice"):
+        context.notify("two\nlines")
+    with pytest.raises(PermissionError):
+        context.secrets.get("TOKEN")
+    record["enabled"] = False
+    registry_path.write_text(json.dumps({"plugins": {"hello": record}, "dev": {}}))
+    with pytest.raises(HTTPException) as disabled:
+        plugin_routes._engine_context("hello", hub)
+    assert disabled.value.status_code == 403
+    hub.unsubscribe("hello", own)
+    hub.unsubscribe(None, global_events)
+    hub.unsubscribe("other", other)
