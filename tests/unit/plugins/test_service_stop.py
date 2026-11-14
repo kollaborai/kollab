@@ -16,6 +16,7 @@ def test_stop_kills_group_after_leader_exits(tmp_path, monkeypatch):
     monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
     from kollabor_config import file_lock
     from kollabor_plugins import services
+    from kollabor_plugins.packages import files_sha256
 
     package_paths = [Path(module.__file__).resolve().parent.parent for module in (services, file_lock)]
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join(map(str, package_paths)))
@@ -35,7 +36,19 @@ def test_stop_kills_group_after_leader_exits(tmp_path, monkeypatch):
         json.dumps({"services": {"worker": {"command": [sys.executable, "-c", code], "stop_timeout_s": 0.3}}})
     )
     (home / "plugins.json").write_text(
-        json.dumps({"plugins": {"hello": {"enabled": True, "enabled_path": "/usr/bin:/bin", "granted": []}}, "dev": {}})
+        json.dumps(
+            {
+                "plugins": {
+                    "hello": {
+                        "enabled": True,
+                        "enabled_path": "/usr/bin:/bin",
+                        "granted": [],
+                        "files_sha256": files_sha256(root),
+                    }
+                },
+                "dev": {},
+            }
+        )
     )
     wrapper = subprocess.Popen(
         [

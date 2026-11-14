@@ -10,6 +10,7 @@ import psutil
 def test_supervisor_respects_surviving_child(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    from kollabor_plugins.packages import files_sha256
     from kollabor_plugins.services import supervisor_tick
 
     home = tmp_path / ".kollab"
@@ -19,7 +20,19 @@ def test_supervisor_respects_surviving_child(tmp_path, monkeypatch):
         json.dumps({"services": {"worker": {"command": [sys.executable, "-c", "pass"], "autostart": True}}})
     )
     (home / "plugins.json").write_text(
-        json.dumps({"plugins": {"hello": {"enabled": True, "enabled_path": "/usr/bin:/bin", "granted": []}}, "dev": {}})
+        json.dumps(
+            {
+                "plugins": {
+                    "hello": {
+                        "enabled": True,
+                        "enabled_path": "/usr/bin:/bin",
+                        "granted": [],
+                        "files_sha256": files_sha256(root),
+                    }
+                },
+                "dev": {},
+            }
+        )
     )
     run = home / "plugin-data" / "hello" / "run"
     run.mkdir(parents=True)

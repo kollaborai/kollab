@@ -7,6 +7,7 @@ import sys
 def test_wrapper_records_child_exit(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    from kollabor_plugins.packages import files_sha256
     from kollabor_plugins.services import run_service
 
     package = tmp_path / ".kollab" / "plugins" / "hello"
@@ -17,7 +18,19 @@ def test_wrapper_records_child_exit(tmp_path, monkeypatch):
         )
     )
     (tmp_path / ".kollab" / "plugins.json").write_text(
-        json.dumps({"plugins": {"hello": {"enabled": True, "enabled_path": "/usr/bin:/bin", "granted": []}}, "dev": {}})
+        json.dumps(
+            {
+                "plugins": {
+                    "hello": {
+                        "enabled": True,
+                        "enabled_path": "/usr/bin:/bin",
+                        "granted": [],
+                        "files_sha256": files_sha256(package),
+                    }
+                },
+                "dev": {},
+            }
+        )
     )
     assert run_service("hello", "worker", "0123456789abcdef") == 0
     run = tmp_path / ".kollab" / "plugin-data" / "hello" / "run"
