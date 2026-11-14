@@ -424,6 +424,19 @@ class PluginRegistry:
         }
 
 
+def _settings_fields(plugin_id: str, widgets: list[dict]) -> list[dict]:
+    """Expose panel fields while retaining widget definitions for the terminal."""
+    from kollabor.panels.config import _field
+
+    fields = []
+    for widget in widgets:
+        if not isinstance(widget, dict) or not isinstance(widget.get("config_path"), str):
+            continue
+        row = {**widget, "config_path": f"plugin-values.{plugin_id}.{widget['config_path']}"}
+        fields.append({**widget, **_field(row, None, None, {})})
+    return fields
+
+
 def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
     from .packages import _SERVICE
     from .services import _identity_alive, _verified_wrapper
@@ -570,7 +583,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
                 "shadowed": plugin_id in data["dev"],
                 "state": state,
                 "error": error,
-                "settings": settings,
+                "settings": _settings_fields(plugin_id, settings),
                 "web": manifest.get("web"),
                 "contributes": manifest.get("contributes", {}),
                 "services": service_entries,
@@ -605,7 +618,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
                 "shadowed": False,
                 "state": "error" if error else "ok",
                 "error": error,
-                "settings": dev_settings,
+                "settings": _settings_fields(f"{plugin_id}@dev", dev_settings),
                 "web": manifest.get("web"),
                 "contributes": manifest.get("contributes", {}),
                 "services": _service_entries(home, f"{plugin_id}@dev", manifest),
