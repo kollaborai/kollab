@@ -55,6 +55,27 @@ def test_report_detached_startup_clears_channel(monkeypatch):
         os.close(read_fd)
 
 
+def test_report_detached_startup_keeps_windows_stderr_open(monkeypatch):
+    operations = []
+    with monkeypatch.context() as patcher:
+        patcher.setattr(daemon.os, "name", "nt")
+        patcher.setattr(daemon.os, "write", lambda fd, data: len(data))
+        patcher.setattr(daemon.os, "close", lambda fd: operations.append(("close", fd)))
+        patcher.setattr(daemon.os, "open", lambda *args, **kwargs: 3)
+        patcher.setattr(
+            daemon.os,
+            "dup2",
+            lambda source, target: operations.append(("dup2", source, target)),
+        )
+        patcher.setenv(daemon.DETACHED_READY_FD_ENV, "2")
+
+        daemon.report_detached_startup(ready=True)
+
+    assert ("dup2", 3, 2) in operations
+    assert ("close", 3) in operations
+    assert ("close", 2) not in operations
+
+
 def test_wait_for_detached_startup_reports_child_exit(monkeypatch):
     read_fd, write_fd = os.pipe()
     monkeypatch.setattr("select.select", lambda *args: ([], [], []))
