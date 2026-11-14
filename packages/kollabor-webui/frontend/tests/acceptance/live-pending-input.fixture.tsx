@@ -55,7 +55,7 @@ function Fixture() {
   const refreshHistory = () => setState({
     ...initialState,
     messages: [{
-      id: "history-r1",
+      id: "history-0",
       role: "assistant",
       content: [{ type: "text", text: "AlphaBeta" }],
       metadata: { custom: { requestId: "r1" } },
