@@ -8387,6 +8387,7 @@ class HubPlugin(BasePlugin):
                     e,
                 )
                 continue
+            self._work_queue.mark_task_card_terminalized(slot.id)
             if card is None:
                 logger.warning(
                     "Task card %s for retired work slot %s is missing",
