@@ -1661,6 +1661,17 @@ class ToolExecutor:
         command = tool_data.get("command", "").strip()
         background = tool_data.get("background", False)
 
+        # Git may launch a configured pager even when the command contains no
+        # shell syntax. Disable it for Git-only grants before terminal dispatch.
+        if (
+            self._enforce_bundle_scope
+            and self._bundle_tools is not None
+            and "terminal" not in self._bundle_tools
+            and "git" in self._bundle_tools
+            and self._is_single_git_command(command)
+        ):
+            command = f"git --no-pager {command[len('git'):].lstrip()}"
+
         if not command:
             return ToolExecutionResult(
                 tool_id=tool_id,
