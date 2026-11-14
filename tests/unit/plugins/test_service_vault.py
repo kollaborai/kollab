@@ -33,5 +33,5 @@ def test_granted_secret_from_real_encrypted_vault(tmp_path, monkeypatch):
         )
     )
     assert _keyring_set("PLUGIN_TEST_TOKEN", "vault-secret")
-    assert run_service("demo", "worker", "test-vault") == 0
+    assert run_service("demo", "worker", "abcdef") == 0
     assert "found" in (home / "plugin-data/demo/run/worker.log").read_text()
