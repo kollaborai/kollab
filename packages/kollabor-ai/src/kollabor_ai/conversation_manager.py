@@ -442,23 +442,14 @@ class ConversationManager:
             return "0m"
 
         def parse_timestamp(ts: Any) -> Optional[datetime]:
-            """Parse timestamp to naive UTC; None when missing/unparseable.
+            """Parse timestamp to aware UTC; None when missing/unparseable.
 
             Session files can carry records with missing or corrupted
             stamps (crashed writers, imported transcripts). Duration must
             never make the whole save/resume-persist path fail over one
             bad stamp, so fail open per record instead of raising.
             """
-            if not isinstance(ts, str):
-                return None
-            try:
-                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            except ValueError:
-                return None
-            # Convert to naive UTC for consistent comparison
-            if dt.tzinfo is not None:
-                dt = dt.replace(tzinfo=None)
-            return dt
+            return _parse_record_stamp(ts)
 
         start = None
         end = None
