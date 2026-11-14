@@ -91,6 +91,41 @@ terminal_tool = ToolDefinition(
     ],
 )
 
+terminal_read_tool = ToolDefinition(
+    name="terminal-read",
+    description=(
+        "Run a read-only terminal command. Only commands accepted by the read-only "
+        "command policy are executed; writes and unsupported shell syntax are refused."
+    ),
+    category="terminal",
+    risk_level="low",
+    requires_permission=False,
+    parameters=[
+        ToolParameter(
+            name="command",
+            type="string",
+            description="Read-only command to run, such as git log --oneline -1",
+            required=True,
+        ),
+        ToolParameter(
+            name="cwd",
+            type="string",
+            description="Working directory inside the project.",
+            required=False,
+        ),
+    ],
+    examples=[
+        "terminal-read(command='git log --oneline -1')",
+        "terminal-read(command='rg TODO .')",
+    ],
+    result_format="On success: command stdout. On refusal: the reason the command is not allowed.",
+    error_modes=["Read-only command refused", "Command timed out"],
+    safety_features=[
+        "uses the voice read-only command classifier",
+        "executes parsed argv without a shell",
+    ],
+)
+
 terminal_status = ToolDefinition(
     name="terminal-status",
     description="List or check status of background terminal sessions.",
@@ -207,6 +242,7 @@ def register_all():
     """Register all terminal tool definitions."""
     registry = get_registry()
     registry.register(terminal_tool)
+    registry.register(terminal_read_tool)
     registry.register(terminal_status)
     registry.register(terminal_output)
     registry.register(terminal_send)
