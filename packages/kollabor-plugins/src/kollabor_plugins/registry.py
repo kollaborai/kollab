@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Sequence, Type
 from kollabor_events.dict_utils import deep_merge
 
 from .collector import PluginStatusCollector
+from .base import BasePlugin
 from .discovery import PluginDiscovery
 from .factory import PluginFactory
 from .packages import _ID, _SYMBOL, _read_registry, _within, files_sha256, recover_installs
@@ -152,8 +153,8 @@ class PluginRegistry:
                 finally:
                     sys.dont_write_bytecode = previous_bytecode
                 plugin_class = getattr(module, symbol)
-                if not inspect.isclass(plugin_class):
-                    raise ValueError("Python entry is not a class")
+                if not inspect.isclass(plugin_class) or not issubclass(plugin_class, BasePlugin):
+                    raise ValueError("Python entry must be a BasePlugin subclass")
                 if symbol in self.discovery.loaded_classes:
                     raise ValueError("Python entry class conflicts with another plugin")
                 get_config = getattr(plugin_class, "get_default_config", None)

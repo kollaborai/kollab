@@ -16,7 +16,9 @@ def test_package_discovery_enforces_enable_and_hash(tmp_path, monkeypatch):
     root.mkdir(parents=True)
     marker = tmp_path / "executed"
     (root / "kollab-plugin.json").write_text(json.dumps({"id": "hello", "python": "entry.py:HelloPlugin"}))
-    (root / "entry.py").write_text(f"open({str(marker)!r}, 'w').close()\nclass HelloPlugin: pass\n")
+    (root / "entry.py").write_text(
+        f"from kollabor_plugins import BasePlugin\nopen({str(marker)!r}, 'w').close()\nclass HelloPlugin(BasePlugin): pass\n"
+    )
     record = {"enabled": False, "files_sha256": files_sha256(root)}
     registry_file = tmp_path / ".kollab" / "plugins.json"
 
