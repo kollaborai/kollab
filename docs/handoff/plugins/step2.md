@@ -117,10 +117,20 @@ the previously unnamed router token accessor. Twenty-six focused tests passed
 (`plugin-token-green.log`); Ruff and compilation passed. These do not provision
 the two environment variables to service children: that ownership gap remains.
 
-Next: finish the item 4 token-path/normalization audit and spoof-proof remote
-headers, implement item 5 management routes, then PhoneLink filtering and the
-remaining specified tests and smoke. Current branch is not ready to deploy:
-service-child environment provisioning and PhoneLink management blocking are absent. The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
+Forwarded route policy: `83ebf610` was red before `41478c31` enforced remote
+management denials in the engine and fixed the allowed agent-route shapes.
+Package settings: `0f0ae1ce` was red before `b9ff77e7` added PUT through the
+existing settings.save writer and published plugins-changed. The built-in
+settings test `6a006d70` remains red: the specified shared settings.save writer
+in step 1 resolves only installed/development packages, while built-ins must
+persist in config.json. Its owner file `packages/kollabor-plugins/.../settings.py`
+is outside this lane; lead queue 0824d3f7 requests the writer and enable fix or
+expanded ownership. Do not introduce a second built-in writer.
+
+Next: continue item 5 management routes using the existing APIs, then PhoneLink
+filtering, spoofing/normalization tests, all gates and smoke. Current branch is
+not ready to deploy: the built-in test is red; service-child environment
+provisioning and PhoneLink management blocking are absent. The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
 `packages/kollabor-engine/src/kollabor_engine/phone_link.py` is in scope only
 for refusing the spec's remote-disallowed plugin routes and its tests;
 `routes/phonelink.py` stays unchanged unless that refusal requires it. Audit the file deny list
