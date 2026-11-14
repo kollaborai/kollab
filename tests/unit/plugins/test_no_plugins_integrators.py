@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 
 def test_safe_mode_skips_fullscreen_and_altview(monkeypatch):
-    from kollabor.application import KollaborApplication
     from kollabor.altview.command_integration import AltViewCommandIntegrator
+    from kollabor.application import TerminalLLMChat
     from kollabor.fullscreen.command_integration import FullScreenCommandIntegrator
 
     called = []
@@ -21,6 +21,6 @@ def test_safe_mode_skips_fullscreen_and_altview(monkeypatch):
         profile_manager=None,
         renderer=None,
     )
-    KollaborApplication._initialize_fullscreen_commands(app)
-    KollaborApplication._initialize_altview_commands(app)
+    TerminalLLMChat._initialize_fullscreen_commands(app)
+    TerminalLLMChat._initialize_altview_commands(app)
     assert called == []
