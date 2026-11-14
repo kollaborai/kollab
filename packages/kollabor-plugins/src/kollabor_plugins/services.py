@@ -317,3 +317,20 @@ def supervisor_tick() -> None:
                     unlock(fd)
             finally:
                 os.close(fd)
+
+
+def stop_services(plugin_id: str) -> None:
+    """Signal only verified wrappers belonging to the named plugin."""
+    if not _ID.fullmatch(plugin_id):
+        raise ValueError("Invalid plugin id")
+    run_dir = Path.home() / ".kollab" / "plugin-data" / plugin_id / "run"
+    for pid_path in run_dir.glob("*.pid"):
+        try:
+            identity = json.loads(pid_path.read_text(encoding="utf-8"))
+            wrapper = identity.get("wrapper")
+            if _identity_alive(wrapper, wrapper=True):
+                os.kill(wrapper["pid"], signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            logger.warning("Could not stop service %s: %s", pid_path.name, exc)

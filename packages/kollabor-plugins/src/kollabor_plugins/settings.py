@@ -96,3 +96,7 @@ def set_enabled(plugin_id: str, enabled: bool) -> None:
         if enabled:
             record["enabled_path"] = os.environ.get("PATH", os.defpath)
         _write_json(path, registry)
+    if not enabled:
+        from .services import stop_services
+
+        stop_services(plugin_id)
