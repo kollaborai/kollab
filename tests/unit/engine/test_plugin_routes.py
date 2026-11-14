@@ -640,3 +640,31 @@ def make_router(ctx):
             "/plugins/hello/api/socket", headers={"Authorization": "Bearer full-user-token"}
         ) as websocket:
             assert websocket.receive_text() == "ok"
+
+
+def test_plugin_token_mint_refuses_symlinks(tmp_path, monkeypatch):
+    import json
+    import shutil
+    from pathlib import Path
+
+    from kollabor_engine.routes import plugins as plugin_routes
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    source = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    home = tmp_path / ".kollab"
+    root = home / "plugins" / "hello"
+    shutil.copytree(source, root)
+    (home / "plugins.json").write_text(json.dumps({
+        "plugins": {"hello": {"enabled": True, "files_sha256": files_sha256(root), "granted": []}}, "dev": {},
+    }))
+    run = home / "plugin-data" / "hello" / "run"
+    run.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.write_text("do not alter")
+    (run / "token").symlink_to(outside)
+    context = plugin_routes._engine_context("hello", plugin_routes.PluginEventHub())
+    with pytest.raises(ValueError, match="symlink"):
+        plugin_routes.PluginTokenStore().mint(context)
+    assert outside.read_text() == "do not alter"
