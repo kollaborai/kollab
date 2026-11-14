@@ -242,6 +242,33 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result.success)
             self.assertEqual(result.output.strip(), "workspace-marker")
 
+    async def test_terminal_read_filters_git_overrides_for_windows_executable_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self.executor.workspace = Path(temp_dir)
+            self.executor.shell_executor.run_argv = AsyncMock(
+                return_value=ShellResult(
+                    success=True, stdout="commit\n", stderr="", exit_code=0
+                )
+            )
+
+            with patch(
+                "kollabor_agent.tool_executor._resolve_trusted_executable",
+                return_value=Path("/trusted/git.exe"),
+            ), patch.dict(os.environ, {"GIT_DIR": "/outside/.git"}):
+                result = await self.executor.execute_tool(
+                    {
+                        "type": "terminal_read",
+                        "id": "terminal-read-windows-git-name",
+                        "command": "git log --oneline -1",
+                    }
+                )
+
+            self.assertTrue(result.success)
+            child_env = self.executor.shell_executor.run_argv.await_args.kwargs["env"]
+            self.assertFalse(
+                any(name.upper().startswith("GIT_") for name in child_env)
+            )
+
     async def test_terminal_read_resolves_executable_outside_writable_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir) / "workspace"
