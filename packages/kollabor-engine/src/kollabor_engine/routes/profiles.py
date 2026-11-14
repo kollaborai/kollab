@@ -485,14 +485,22 @@ async def list_choices(workspace: _Workspace = "", refresh: bool = False):
 
     if acp_discovery.warming_enabled():
         refreshing = _catalogs.ensure(manager)
+        scope = "" if not workspace.strip() else str(folder_or_400(workspace.strip()))
         try:
-            acp_discovery.warm_in_background(profiles, force=refresh)
+            if scope:
+                acp_discovery.warm_in_background(profiles, force=refresh, scope=scope)
+            else:
+                acp_discovery.warm_in_background(profiles, force=refresh)
         except Exception:  # noqa: BLE001 - the answer below still comes from what is known
             logger.warning("model picker: could not start the background warm", exc_info=True)
         native = [p for p in profiles if str(getattr(p, "provider", "")).lower() != "acp"]
         if native and not _catalogs.settled:
             await asyncio.wait({refreshing}, timeout=_CATALOG_WAIT_SECONDS)
-        discovered = acp_discovery.known_outcomes(profiles)
+        discovered = (
+            acp_discovery.known_outcomes(profiles, scope=scope)
+            if scope
+            else acp_discovery.known_outcomes(profiles)
+        )
     else:
         discovered = await _discover_on_request(manager, profiles)
 
