@@ -142,6 +142,25 @@ def main(argv: list[str]) -> int:
         print(f"{'Enabled' if args.action == 'enable' else 'Disabled'} {args.plugin_id}")
         return 0
     if args.action == "dev":
+        if args.folder_or_off == "off":
+            if not args.plugin_id or not _ID.fullmatch(args.plugin_id):
+                raise ValueError("A valid plugin id is required")
+            print(f"Detach {args.plugin_id}@dev? Development data will be retained.")
+        else:
+            import shlex
+
+            from kollabor.version import get_runtime_version
+
+            if args.plugin_id is not None:
+                raise ValueError("Unexpected extra argument")
+            folder = Path(args.folder_or_off).expanduser().resolve(strict=True)
+            manifest = validate_manifest(folder, get_runtime_version())
+            print(f"Plugin: {manifest['name']} ({manifest['id']}@dev)")
+            print(f"Local folder: {folder}")
+            print("Uses: " + (", ".join(manifest.get("uses", [])) or "none"))
+            for name, service in manifest.get("services", {}).items():
+                print(f"Process {name}: {shlex.join(service['command'])}")
+                print("  Secrets: " + (", ".join(service.get("secrets", [])) or "none"))
         print("Development code is unpinned and runs as your user with your computer's permissions.")
         if input("Continue? [yes/no] ").strip().lower() != "yes":
             return 1
