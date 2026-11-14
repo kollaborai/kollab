@@ -1,0 +1,77 @@
+{
+  "id": "hub-messaging",
+  "title": "Hub messaging",
+  "summary": "Contact agents by their Hub identity. Hub messages are visible to all hub members, so they are not private direct messages.",
+  "workflows": [
+    {
+      "id": "message-a-hub-agent",
+      "label": "Ask a Hub agent for help",
+      "summary": "Address the actual Hub identity, state a bounded request and ask for evidence.",
+      "entry": {
+        "prerequisite": "The target agent must be online and reachable in your Hub.",
+        "command": "/hub agents"
+      },
+      "steps": [
+        {
+          "action": "Run /hub agents to find the exact identity; use /hub status to see current activity."
+        },
+        {
+          "action": "Send /hub msg <agent> <message> with the task, relevant context and evidence you want back.",
+          "expect": "For another computer, use agent@device."
+        },
+        {
+          "action": "Use /hub broadcast <message> when the whole Hub should receive the request."
+        },
+        {
+          "action": "Read the recipient’s response in the Hub conversation and verify its reported files or tests.",
+          "expect": "Delivery confirmation does not mean the agent has completed the work."
+        }
+      ],
+      "commands": [
+        {
+          "syntax": "/hub agents",
+          "example": "/hub agents",
+          "description": "List Hub identities."
+        },
+        {
+          "syntax": "/hub status",
+          "example": "/hub status",
+          "description": "Check who is active and the supervisor status."
+        },
+        {
+          "syntax": "/hub msg <agent> <message>",
+          "example": "/hub msg lapis Check the Learn links and report any broken routes.",
+          "description": "Send a bounded request to one identity."
+        },
+        {
+          "syntax": "/hub broadcast <message>",
+          "example": "/hub broadcast Report your current task and any blocker.",
+          "description": "Address all Hub members."
+        },
+        {
+          "syntax": "kollab --hub msg <agent> \"<message>\"",
+          "example": "kollab --hub msg lapis \"Check the Learn links and report any broken routes.\"",
+          "description": "Send from a terminal; the command reports delivery."
+        }
+      ],
+      "media": {
+        "kind": "image",
+        "src": "/learn/hub-messaging/overview.webp",
+        "alt": "Kollab Hub conversation showing an addressed agent request and reply",
+        "caption": "Use the agent's Hub identity and ask for concrete evidence in its reply."
+      },
+      "success": "The addressed identity receives the request; its later reply appears in the shared conversation.",
+      "recovery": [
+        {
+          "symptom": "The Hub does not recognize the recipient",
+          "action": "Check the exact identity in the current Hub roster; use agent@device for a remote agent."
+        },
+        {
+          "symptom": "The recipient is offline or unreachable",
+          "action": "Check /connect status and start Kollab on the recipient's computer; then retry the message."
+        }
+      ],
+      "note": "Never send passwords, API keys, private keys, or one-time access codes in Hub chat. Other Hub members can observe the exchange."
+    }
+  ]
+}

@@ -1961,10 +1961,13 @@ class HubPlugin(BasePlugin):
         #     → by agent_type: picks next available gem with agent_type=coder
         #   <hub_spawn name="lapis" type="research">task</hub_spawn>
         #     → explicit identity + type override
+        #   <hub_spawn name="coder" identity="jasper" llm="codex-cli">task</hub_spawn>
+        #     → explicit identity under an ACP harness
         def _extract_hub_spawn(m):
             attrs = tag_attrs(m.group(1))
             return {
                 "name": attrs.get("name", "").strip(),
+                "identity": attrs.get("identity", "").strip(),
                 "agent_type_override": attrs.get("type", "").strip(),
                 "llm": attrs.get("llm", "").strip(),
                 "task": m.group(2).strip(),
@@ -4552,6 +4555,75 @@ class HubPlugin(BasePlugin):
             output=f"{self._identity.identity} restarting...",
         )
 
+    async def restart_in_place(self) -> dict:
+        """Restart this detached agent on the installed code, same conversation (#968).
+
+        Replies at once. A task lets the turn in progress end (a running tool is
+        never cut), saves the conversation, runs the graceful shutdown and replaces
+        the process image: same pid, same flags, still detached, started through
+        ``kollab_argv()``. The hub socket is named by identity, so the engine's open
+        chat reattaches to the same path with no page reload.
+        """
+        import sys
+
+        from kollabor.daemon import DETACHED_CHILD_ENV
+
+        if not self._identity:
+            raise ValueError("hub not initialized")
+        if not {"--detached", "-d"} & set(sys.argv) and os.environ.get(DETACHED_CHILD_ENV) != "1":
+            raise ValueError("this window runs without a daemon: quit and start Kollab again to update it")
+        if getattr(self, "_self_restart_requested", False):
+            return {"restarting": True, "waiting_for_turn": False}
+        llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+        busy = bool(getattr(llm, "is_processing", False))
+        self._self_restart_requested = True
+        self._restart_task = asyncio.create_task(self._restart_when_idle(llm))
+        return {"restarting": True, "waiting_for_turn": busy}
+
+    async def _restart_when_idle(self, llm: Any) -> None:
+        import sys
+
+        from kollabor.daemon import restart_command, restart_env, wait_until_idle
+
+        def busy() -> bool:
+            return bool(getattr(llm, "is_processing", False)) or self.network_turn_open()
+
+        if not await wait_until_idle(busy):
+            logger.warning("restart in place: the turn never ended, so the agent keeps running")
+            self._self_restart_requested = False
+            return
+        conv = getattr(llm, "conversation_manager", None)
+        session_id = str(getattr(conv, "current_session_id", "") or "")
+        try:
+            if conv is not None and getattr(conv, "messages", None):
+                conv.save_conversation()
+        except Exception as e:
+            logger.warning(f"restart in place: could not save the conversation: {e}")
+            self._self_restart_requested = False
+            from kollabor_tui.display_tap import publish_semantic
+
+            publish_semantic(
+                self.event_bus,
+                "agent_restart_failed",
+                identity=self._identity.identity,
+            )
+            return
+        # Past this point the process image is replaced or the process ends: tell every
+        # attached window now, so a terminal waits and attaches again instead of
+        # reporting an exit, and give the attach streams time to write it out first.
+        from kollabor_tui.display_tap import publish_semantic
+
+        publish_semantic(self.event_bus, "daemon_restarting", identity=self._identity.identity)
+        await asyncio.sleep(0.25)
+        exec_argv = restart_command(sys.argv)
+        os.environ.update(restart_env(session_id))  # execvp hands the environment on
+        self._self_restart_cmd = exec_argv
+        self._self_stop_requested = True
+        self._self_restart_watchdog_task = asyncio.create_task(
+            self._self_restart_watchdog(exec_argv, self._identity.identity)
+        )
+        await self._perform_self_restart()
+
     async def _self_restart_watchdog(self, exec_argv, identity: str) -> None:
         try:
             await asyncio.sleep(8.0)
@@ -6403,6 +6475,17 @@ class HubPlugin(BasePlugin):
                     f"({'coordinator' if is_coordinator else 'peer'})",
                     from_agent=self._identity.identity,
                 )
+
+            # A restart in place (#968) names the conversation to pick back up. It runs before
+            # the session log path below is published, so peers read the resumed file.
+            try:
+                from kollabor.daemon import resume_after_restart
+
+                state_svc = self.event_bus.get_service("state_service") if self.event_bus else None
+                if state_svc is not None:
+                    await resume_after_restart(state_svc)
+            except Exception as e:
+                logger.warning(f"restart: could not resume the conversation: {e}")
 
             # Set session log path so other agents can find our conversation file
             llm_svc = (
@@ -14461,24 +14544,161 @@ class HubPlugin(BasePlugin):
             if not agent_name or not task:
                 return "usage: /hub spawn <name> [identity=X] [type=X] <task>"
 
-        harness = False
-        if requested_llm and self.event_bus:
-            profile_mgr = self.event_bus.get_service("profile_manager")
-            if profile_mgr is not None:
-                from kollabor_ai.loadout_manager import LoadoutManager
-                loadout, _ = LoadoutManager(profile_mgr).resolve(requested_llm)
-                selected = profile_mgr.get_profile(loadout.provider_profile if loadout else requested_llm)
-                harness = selected is not None and selected.get_provider() == "acp"
-
-        # --- Resolve what was requested ---
         # Is agent_name a pool identity? (e.g. "lapis")
         pool_match = find_persona(agent_name)
         if pool_match and pool_match.name != split_ref(agent_name)[1]:
             pool_match = None  # lapis-2 is not a persona to spawn
 
+        def _explicit_profile(value: object) -> str:
+            if not isinstance(value, str):
+                return ""
+            profile = value.strip()
+            return profile if profile and profile != "default" else ""
+
+        # Match application startup: --llm selects an exact profile first, and
+        # resolves a loadout only when no profile has that name. The identity
+        # profile is inherited when no explicit request or bundle profile wins.
+        harness = False
+        profile_mgr = (
+            self.event_bus.get_service("profile_manager") if self.event_bus else None
+        )
+        profile_candidate = _explicit_profile(requested_llm)
+        if not profile_candidate:
+            requested_persona = find_persona(requested_identity) if requested_identity else None
+            if requested_persona and requested_persona.name != split_ref(requested_identity)[1]:
+                requested_persona = None
+            if agent_type_override:
+                selected_type = agent_type_override
+            elif pool_match:
+                selected_type = pool_match.agent or "coder"
+            elif requested_persona:
+                selected_type = requested_persona.agent or agent_name
+            else:
+                selected_type = agent_name
+            try:
+                agent_mgr = (
+                    self.event_bus.get_service("agent_manager") if self.event_bus else None
+                )
+                agent_def = agent_mgr.get_agent(selected_type) if agent_mgr else None
+                profile_candidate = _explicit_profile(
+                    getattr(agent_def, "profile", "") if agent_def else ""
+                )
+            except Exception:
+                profile_candidate = ""
+            if not profile_candidate and self._identity:
+                profile_candidate = _explicit_profile(self._identity.profile)
+            if not profile_candidate and profile_mgr:
+                profile_candidate = _explicit_profile(
+                    getattr(profile_mgr, "active_profile_name", "")
+                )
+
+        if profile_candidate and profile_mgr:
+            selected_profile = profile_mgr.get_profile(profile_candidate)
+            if selected_profile is None:
+                from kollabor_ai.loadout_manager import LoadoutManager
+
+                loadout, _ = LoadoutManager(profile_mgr).resolve(profile_candidate)
+                if loadout:
+                    selected_profile = profile_mgr.get_profile(loadout.provider_profile)
+            if selected_profile is not None:
+                get_provider = getattr(selected_profile, "get_provider", None)
+                provider = (
+                    get_provider()
+                    if callable(get_provider)
+                    else getattr(selected_profile, "provider", "")
+                )
+                harness = str(provider).lower() == "acp"
+
+        # --- Resolve what was requested ---
+
         if harness:
-            resolved_identity = requested_identity or agent_name
+            # ACP owns the brain/tools, but the name still follows hub_spawn's
+            # identity-vs-role contract. A roster persona is an explicit
+            # identity; a known bundle role picks a free roster identity.
+            # `identity=` is the escape hatch for a custom identity, and an
+            # unknown adapter name (for example `claude`) remains usable as-is.
             effective_agent_type = ""
+            resolved_identity = requested_identity
+            if not resolved_identity and pool_match:
+                resolved_identity = pool_match.name
+
+            if not resolved_identity:
+                selected_type = agent_type_override or agent_name
+                personas = roster_personas()
+                online_identities = set()
+                if self._presence:
+                    online_identities = {
+                        peer.identity for peer in self._presence.scan_all_presence()
+                    }
+
+                for persona in personas:
+                    if persona.agent == selected_type and persona.name not in online_identities:
+                        resolved_identity = persona.name
+                        break
+
+                agent_def = None
+                if not resolved_identity and self.event_bus:
+                    try:
+                        agent_mgr = self.event_bus.get_service("agent_manager")
+                        agent_def = agent_mgr.get_agent(selected_type) if agent_mgr else None
+                    except Exception:
+                        agent_def = None
+
+                if agent_def is not None:
+                    # A recognized bundle with no persona bound to that bundle
+                    # may use the next free identity. If it has bound personas,
+                    # never substitute an identity belonging to another role.
+                    bound_personas = [
+                        persona for persona in personas
+                        if persona.agent == selected_type
+                    ]
+                    if bound_personas:
+                        busy = [
+                            persona.name for persona in bound_personas
+                            if persona.name in online_identities
+                        ]
+                        return (
+                            f"all {selected_type} agents are busy: "
+                            f"{', '.join(busy)}. use hub_msg to assign work to an existing one."
+                        )
+                    for persona in personas:
+                        if persona.name not in online_identities:
+                            resolved_identity = persona.name
+                            break
+                    if not resolved_identity:
+                        if not personas:
+                            return (
+                                f"no persona found with agent_type '{selected_type}'. "
+                                "check the roster configuration (plugins.hub.roster)."
+                            )
+                        return (
+                            f"all identities are busy for agent_type '{selected_type}'. "
+                            "use hub_msg to assign work to an existing one."
+                        )
+                elif not resolved_identity:
+                    # An unrecognized ACP name is a harness identity, not a
+                    # role. Keep the explicit name rather than guessing.
+                    resolved_identity = agent_name
+        elif requested_identity:
+            # An explicit identity wins over either a role name or a persona
+            # shorthand. The role/persona still selects the bundle when one is
+            # available, unless the caller supplied a type override.
+            resolved_identity = requested_identity
+            requested_persona = find_persona(requested_identity)
+            if requested_persona and requested_persona.name != split_ref(requested_identity)[1]:
+                requested_persona = None
+            if pool_match:
+                effective_agent_type = (
+                    agent_type_override or pool_match.agent or "coder"
+                )
+            else:
+                effective_agent_type = agent_type_override or agent_name
+                if requested_persona:
+                    effective_agent_type = (
+                        agent_type_override
+                        or requested_persona.agent
+                        or effective_agent_type
+                    )
         elif pool_match:
             # MODE 1 or 3: spawning by identity
             resolved_identity = pool_match.name
@@ -14489,20 +14709,8 @@ class HubPlugin(BasePlugin):
         else:
             # MODE 2: spawning by agent_type (e.g. "coder")
             # Find next available gem from pool with matching agent_type
-            effective_agent_type = agent_name
+            effective_agent_type = agent_type_override or agent_name
             resolved_identity = ""
-
-            if requested_identity:
-                requested_pool = find_persona(requested_identity)
-                if requested_pool and requested_pool.name != split_ref(requested_identity)[1]:
-                    requested_pool = None
-                resolved_identity = requested_identity
-                if requested_pool:
-                    effective_agent_type = (
-                        agent_type_override
-                        or requested_pool.agent
-                        or effective_agent_type
-                    )
 
             # Get online identities to exclude
             online_identities = set()
@@ -14530,11 +14738,24 @@ class HubPlugin(BasePlugin):
                 except Exception:
                     agent_def = None
                 if agent_def is not None:
-                    for gem in roster_personas():
-                        if gem.name not in online_identities:
-                            resolved_identity = gem.name
-                            break
+                    personas = roster_personas()
+                    bound_personas = [gem for gem in personas if gem.agent == agent_name]
+                    if not bound_personas:
+                        for gem in personas:
+                            if gem.name not in online_identities:
+                                resolved_identity = gem.name
+                                break
                     if not resolved_identity:
+                        if bound_personas:
+                            busy = [
+                                gem.name for gem in bound_personas
+                                if gem.name in online_identities
+                            ]
+                            return (
+                                f"all {agent_name} agents are busy: "
+                                f"{', '.join(busy)}. "
+                                "use hub_msg to assign work to an existing one."
+                            )
                         return (
                             f"all identities are busy for agent_type '{agent_name}'. "
                             f"use hub_msg to assign work to an existing one."
@@ -14594,13 +14815,10 @@ class HubPlugin(BasePlugin):
         # auto-detect, not an explicit provider selection.  Passing it to a
         # child can silently auto-select a billable provider, so never let it
         # override a real parent profile or escape this resolver.
-        def _explicit_profile(value: object) -> str:
-            if not isinstance(value, str):
-                return ""
-            profile = value.strip()
-            return profile if profile and profile != "default" else ""
-
-        resolved_profile = _explicit_profile(requested_llm)
+        # Keep the profile selected for harness detection identical to the
+        # profile passed to the child. This matters when the bundle's explicit
+        # profile overrides the parent's inherited profile.
+        resolved_profile = _explicit_profile(requested_llm) or profile_candidate
         try:
             agent_mgr = (
                 self.event_bus.get_service("agent_manager") if self.event_bus else None

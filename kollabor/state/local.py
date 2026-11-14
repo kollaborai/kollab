@@ -296,6 +296,22 @@ class LocalStateService(StateService):
         self._context_identity = context_identity
         self._startup_status = startup_status
 
+    def _code_settings(self) -> Any:
+        """The Code, Git and Terminal settings for this request: the active agent's ``agent.json`` ``code`` object,
+        then ``kollabor.code.*`` in the merged config (project over global), then the defaults
+        (``code_service/settings.py``). A broken config or agent file never closes the door: the default applies."""
+        from kollabor.code_service import settings as code_settings
+
+        config = getattr(self._llm_service, "config", None)
+        get = config.get if config is not None and hasattr(config, "get") else None
+        agent_code = None
+        try:
+            agent = self._agent_manager.get_active_agent() if self._agent_manager is not None else None
+            agent_code = code_settings.read_agent_code(getattr(agent, "directory", None))
+        except Exception:
+            agent_code = None
+        return code_settings.resolve(get, agent_code)
+
     def _mcp_enabled(self) -> bool:
         config = getattr(self._llm_service, "config", None)
         if config is not None and hasattr(config, "get"):
@@ -1343,6 +1359,34 @@ class LocalStateService(StateService):
         from kollabor.panels import require_panel
 
         return await require_panel(name).act(self, action, payload or {})
+
+    async def code_call(self, op: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Files, git and the terminal of this daemon's folder (``kollabor.code_service``)."""
+        from kollabor import code_service
+
+        answer = await code_service.call(op, params, settings=self._code_settings())
+        if op == "folders" and answer.get("status") == 200:
+            # Only an unambiguous delivered assignment to this identity may pick a worktree.
+            # Git discovery still determines which paths are valid on this daemon's machine.
+            try:
+                hub = self._resolve_hub_plugin()
+                identity = getattr(getattr(hub, "_identity", None), "identity", "")
+                ledger = getattr(hub, "_task_ledger", None)
+                if identity and ledger:
+                    import asyncio
+                    import os
+
+                    records = await asyncio.to_thread(ledger.get_in_flight_dispatches_for_assignee, identity)
+                    data = answer["body"]["data"]
+                    available = {entry["path"] for entry in data["folders"]}
+                    paths = [item.get("worktree") for item in records]
+                    if paths and all(isinstance(path, str) and os.path.isabs(path) for path in paths):
+                        assigned = {os.path.realpath(path) for path in paths}
+                        if len(assigned) == 1 and assigned <= available:
+                            data["default"] = next(iter(assigned))
+            except Exception:
+                logger.debug("could not determine assigned code folder", exc_info=True)
+        return answer
 
     async def open_generated_artifact(self, media_id: str) -> bool:
         """Open a generated image through the daemon-owned API service."""
@@ -2767,6 +2811,13 @@ class LocalStateService(StateService):
                 if callable(transition):
                     acp._conversation_transition = False
 
+    async def restart_agent(self) -> dict[str, Any]:
+        """Restart this detached agent on the installed code, same conversation (#968)."""
+        hub = self._event_bus.get_service("hub_plugin") if self._event_bus is not None else None
+        if hub is None or not hasattr(hub, "restart_in_place"):
+            raise ValueError("this agent is not on a hub, so it cannot restart itself")
+        return await hub.restart_in_place()
+
     async def restart_session(self) -> ConversationSnapshot:
         async with self._conversation_ownership("restart") as (acp, uses_acp, mark_changed):
             return await self._restart_session_owned(acp, uses_acp, mark_changed)
@@ -2777,10 +2828,10 @@ class LocalStateService(StateService):
         """Clear the live conversation and rebuild the system prompt.
 
         Mirrors kollabor/commands/system_commands/handlers/system.py
-        handle_restart: clears conversation_manager, re-initializes
+        handle_new: clears conversation_manager, re-initializes
         llm_service conversation, and returns the post-restart snapshot.
 
-        Used by /restart in both local and attach mode.
+        Used by /new (and /clear) in both local and attach mode.
 
         Raises:
             ValueError: if llm_service is not available.

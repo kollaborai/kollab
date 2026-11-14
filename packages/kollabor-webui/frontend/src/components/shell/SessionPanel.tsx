@@ -8,6 +8,8 @@ import {
 } from "react";
 import {
   CircleAlert,
+  Code,
+  GitBranch,
   Eraser,
   MessageSquare,
   PanelRightClose,
@@ -19,6 +21,7 @@ import {
   Settings2,
   ShieldCheck,
   ShieldOff,
+  SquareTerminal,
   Terminal,
   Trash2,
   Users,
@@ -81,12 +84,18 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-export type SessionView = "chat" | "trajectory";
+export type SessionView = "chat" | "trajectory" | "code" | "git" | "terminal";
 
 const VIEWS = [
   ["chat", "Chat", MessageSquare],
   ["trajectory", "Trajectory", Waypoints],
+  ["code", "Code Editor", Code],
+  ["git", "Git", GitBranch],
+  ["terminal", "Terminal", SquareTerminal],
 ] as const;
+
+// Code Editor, Git and Terminal work in the chat's folder, so a chat with no folder has none of them.
+const FOLDER_VIEWS: readonly SessionView[] = ["code", "git", "terminal"];
 
 // Whether the docked panel is open, per browser. Open unless closed here before.
 const PANEL_KEY = "kollab.session-panel";
@@ -156,6 +165,8 @@ export function SessionPanel({
   onSheetOpenChange: (open: boolean) => void;
 }) {
   const isMobile = useIsMobile(SIDEBAR_BREAKPOINT);
+  const hasFolder = Boolean(session.workspace);
+  const views = VIEWS.filter(([id]) => hasFolder || !FOLDER_VIEWS.includes(id));
   const [open, setOpen] = useState(storedOpen);
   const [clearOpen, setClearOpen] = useState(false);
   const opener = useRef<HTMLElement | null>(null);
@@ -380,7 +391,7 @@ export function SessionPanel({
       {status && <p className={statusError ? "text-destructive break-words" : "text-muted-foreground break-words"}>{status}</p>}
       {usage && <p className="text-muted-foreground break-words tabular-nums" title="Current harness context usage">{usage}</p>}
       <div className="flex flex-col gap-0.5" role="group" aria-label="Session view">
-        {VIEWS.map(([id, label, Icon]) => (
+        {views.map(([id, label, Icon]) => (
           <Button
             key={id}
             type="button"
@@ -513,7 +524,7 @@ export function SessionPanel({
           <TooltipIconButton tooltip="Show Session Panel" side="left" className="size-7 p-1.5" onClick={() => toggle(true)}>
             {statusError ? <CircleAlert className="text-destructive size-4" /> : <PanelRightOpen className="size-4" />}
           </TooltipIconButton>
-          {VIEWS.map(([id, label, Icon]) => (
+          {views.map(([id, label, Icon]) => (
             <TooltipIconButton
               key={id}
               tooltip={label}

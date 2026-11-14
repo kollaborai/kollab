@@ -1,0 +1,67 @@
+{
+  "id": "koordinator",
+  "title": "Koordinator",
+  "summary": "Use the coordinator to route bounded work, track progress and bring results back for review.",
+  "workflows": [
+    {
+      "id": "delegate-a-goal",
+      "label": "Delegate a bounded goal",
+      "summary": "Describe the outcome and acceptance evidence before delegating work.",
+      "entry": {
+        "ui": [
+          "Session Options",
+          "Agent",
+          "Koordinator"
+        ],
+        "command": "kollab --agent koordinator"
+      },
+      "commands": [
+        {
+          "syntax": "kollab --agent koordinator",
+          "example": "kollab --agent koordinator",
+          "description": "Start a terminal session with the Koordinator agent selected.",
+          "expect": "The Koordinator agent is the selected session agent."
+        }
+      ],
+      "steps": [
+        {
+          "action": "Open the coordinator in the workspace where the work belongs."
+        },
+        {
+          "action": "State the desired outcome, scope, constraints, and concrete acceptance checks; ask for a progress and evidence report."
+        },
+        {
+          "action": "Review proposed task ownership and wait for the coordinator's completion evidence."
+        },
+        {
+          "action": "Use /hub status to check active, open and stalled work, then ask for the next evidence report."
+        },
+        {
+          "action": "Verify the delivered changes and tests yourself before accepting the result."
+        }
+      ],
+      "media": {
+        "kind": "image",
+        "src": "/learn/koordinator/overview.webp",
+        "alt": "Kollab coordinator view organizing agent tasks and progress",
+        "caption": "Give the coordinator a bounded outcome and reviewable acceptance checks."
+      },
+      "success": "The coordinator routes work to agents, tracks reported progress and returns results for your review.",
+      "recovery": [
+        {
+          "symptom": "The coordinator returns only a plan",
+          "action": "Ask it to perform or assign the concrete work and report completed paths, test commands and observed results."
+        },
+        {
+          "symptom": "A task is stalled or lacks evidence",
+          "action": "Ask for current ownership, blockers and the next check; do not treat a planned or worker-reported step as independently verified."
+        },
+        {
+          "symptom": "The supervisor reports that coordinator turns have stopped",
+          "action": "Check the provider profile, /compact status and the app log before assigning more work."
+        }
+      ],
+      "note": "Delegation does not replace human review. Coordinator or worker claims still need evidence from the relevant files and checks."
+    }
+  ]
+}

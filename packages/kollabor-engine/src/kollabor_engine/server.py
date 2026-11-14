@@ -376,6 +376,10 @@ def create_app(port: Optional[int] = None) -> FastAPI:
 
     app.include_router(hub_ws_router)
 
+    from .routes.code import router as code_router
+
+    app.include_router(code_router)
+
     @app.get("/health")
     async def health():
         return {"status": "healthy", "uptime": int(time.time() - _start_time)}

@@ -95,6 +95,14 @@ Daemon-owned screens the web UI renders as Settings tabs (spec `docs/specs/webui
 
 An engine route that takes a folder (`workspace`, `folder`, the picker's `path`) calls `folder_or_400` from `packages/kollabor-engine/src/kollabor_engine/workspace_folder.py` first and uses what it returns, never the request's own text: one rule (the folder exists, is a directory, and is inside home, the engine's folder, a folder an agent runs in or a recent web session folder), one place for CodeQL's `py/path-injection` sanitizer. Spec `docs/specs/engine-folder-rule.md`; new routes join `FOLDER_ROUTES` in `tests/test_workspace_folder_routes.py`.
 
+The authenticated Code routes are an exception for folders on a session's daemon, which may be on another computer: the engine proxies the selection and never opens that path locally. The daemon resolves and validates the selected absolute directory on its own machine before serving files or Git (`docs/specs/floating-code-shell.md`).
+
+### Web UI Learn
+
+The Learn dialog uses one renderer (`frontend/src/components/learn/`) and the typed catalog in `frontend/src/learn/`, under `packages/kollabor-webui/`. Each topic's JSON defines workflows, exact entry points, steps, command examples, expected results, recovery, and product media. Keep topic IDs stable and change the shared renderer for repeated presentation changes. See [Learn maintenance](../../features/learn.md) for the content contract and recording process.
+
+Desktop images and optional recordings live in `frontend/public/learn/`. The phone-app build inlines only referenced image previews through `frontend/scripts/learn-phone-media-plugin.ts`; it uses those previews and written steps without requesting unsigned media or changing the portal CSP. Validate the catalog with `frontend/tests/learn-catalog.test.ts` and the actual browser surface with `tests/tmux/specs/learn_web_workflows.json` (requires the frontend dependencies and a Playwright-compatible Chromium executable).
+
 ## Project Structure
 
 ```

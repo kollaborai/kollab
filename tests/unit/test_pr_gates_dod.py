@@ -39,6 +39,7 @@ ALL_CHECKS = [
     "conventional_title",
     "linked_issue",
     "regression_test",
+    "spec_or_fix_brief",
 ]
 
 
@@ -144,6 +145,7 @@ def test_config_defaults_disabled(tmp_path: Path) -> None:
     assert cfg.check_name == "dod/ready-for-review"
     assert cfg.checks == ALL_CHECKS
     assert cfg.docs_paths == {}
+    assert cfg.spec_or_fix_brief_mode == "block"
     assert cfg.regression.finding_id_pattern == pr_gates_dod.DEFAULT_FINDING_PATTERN
     assert cfg.regression.test_paths == pr_gates_dod.DEFAULT_TEST_PATHS
     assert cfg.regression.trusted_reviewers == list(pr_gates_dod.DEFAULT_TRUSTED_REVIEWERS)
@@ -307,6 +309,107 @@ def test_linked_issue_pass_and_fail(tmp_path: Path) -> None:
     assert "linked_issue" in bad.failed_names()
 
 
+def spec_gate_config(tmp_path: Path, mode="warn"):
+    return pr_gates_dod.load_config(
+        make_config(
+            tmp_path,
+            ENABLED
+            + '\nchecks = ["spec_or_fix_brief"]\n'
+            + f'spec_or_fix_brief_mode = "{mode}"\n',
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        lambda: make_data(
+            title="feat(cli): add a command",
+            changed_files=["docs/specs/command.md"],
+        ),
+        lambda: make_data(
+            title="feat(cli): add a command",
+            body="Fixes #984",
+            linked_issue_bodies={984: "Spec: docs/specs/command.md"},
+        ),
+    ],
+)
+def test_spec_or_fix_brief_feature_passes_with_pr_or_issue_spec(tmp_path: Path, data) -> None:
+    report = pr_gates_dod.evaluate(spec_gate_config(tmp_path), data())
+    assert "spec_or_fix_brief" not in report.failed_names()
+    assert report.warnings == []
+
+
+def test_spec_or_fix_brief_feature_without_spec_warns(tmp_path: Path) -> None:
+    report = pr_gates_dod.evaluate(
+        spec_gate_config(tmp_path), make_data(title="feat(cli): add a command")
+    )
+    assert "spec_or_fix_brief" not in report.failed_names()
+    assert [name for name, _ in report.warnings] == ["spec_or_fix_brief"]
+    assert report.exit_code == 0
+    assert "warning" in report.summary().lower()
+
+
+@pytest.mark.parametrize(
+    "body,issue_bodies",
+    [
+        (
+            "Fixes #984\n\n## Fix brief\nRoot cause: wrong source.\nRegression test: tests/unit/test_x.py.",
+            {},
+        ),
+        ("Fixes #984", {984: "## Fix brief\nRoot cause: wrong source.\nRegression test: tests/unit/test_x.py."}),
+    ],
+)
+def test_spec_or_fix_brief_fix_passes_with_pr_or_issue_brief(
+    tmp_path: Path, body, issue_bodies
+) -> None:
+    report = pr_gates_dod.evaluate(
+        spec_gate_config(tmp_path),
+        make_data(title="fix(cli): correct the command", body=body, linked_issue_bodies=issue_bodies),
+    )
+    assert report.failed_names() == []
+    assert report.warnings == []
+
+
+def test_spec_or_fix_brief_fix_without_brief_warns_or_blocks(tmp_path: Path) -> None:
+    data = make_data(title="fix(cli): correct the command")
+    warn = pr_gates_dod.evaluate(spec_gate_config(tmp_path, "warn"), data)
+    assert warn.failed_names() == []
+    assert [name for name, _ in warn.warnings] == ["spec_or_fix_brief"]
+    block = pr_gates_dod.evaluate(spec_gate_config(tmp_path, "block"), data)
+    assert block.failed_names() == ["spec_or_fix_brief"]
+
+
+def test_warn_mode_posts_a_successful_check_with_warning_details(tmp_path, monkeypatch):
+    cfg = spec_gate_config(tmp_path, "warn")
+    report = pr_gates_dod.evaluate(
+        cfg, make_data(title="feat(cli): add a command")
+    )
+    payloads = []
+    monkeypatch.setattr(
+        pr_gates_dod,
+        "github_api",
+        lambda endpoint, payload: payloads.append(payload) or {"id": 1},
+    )
+    pr_gates_dod.post_check_run(cfg, report, repo="o/r", head_sha="c" * 40)
+    assert payloads[0]["conclusion"] == "success"
+    assert payloads[0]["output"]["title"] == "Definition of done: passed with warnings"
+    assert "WARNING spec_or_fix_brief" in payloads[0]["output"]["summary"]
+
+
+@pytest.mark.parametrize("title", [
+    "docs: clarify command guide",
+    "chore(ci): tidy workflow",
+    "test(cli): cover parser",
+    "ci: update checks",
+    "release: publish 1.2.3",
+])
+def test_spec_or_fix_brief_exempts_non_feature_and_fix_types(tmp_path: Path, title) -> None:
+    report = pr_gates_dod.evaluate(spec_gate_config(tmp_path), make_data(title=title))
+    assert report.failed_names() == []
+    assert report.warnings == []
+
+
 def test_regression_test_no_findings_passes(tmp_path: Path) -> None:
     cfg = pr_gates_dod.load_config(make_config(tmp_path, ENABLED))
     report = pr_gates_dod.evaluate(
@@ -428,6 +531,8 @@ def test_disabled_never_posts(tmp_path, monkeypatch) -> None:
 def test_repo_config_is_on_without_signed_commits() -> None:
     cfg = pr_gates_dod.load_config(CONFIG_FILE)
     assert cfg.enabled is True
+    assert cfg.spec_or_fix_brief_mode == "warn"
+    assert "spec_or_fix_brief" in cfg.checks
     # Agent commits are not signed yet (#755), so this would fail every agent PR.
     assert "signed_commits" not in cfg.checks
 
@@ -437,6 +542,7 @@ def test_workflow_file_exists_least_privilege() -> None:
     # Only what a check run needs; no comment posting, no admin surface.
     assert "checks: write" in text
     assert "pull-requests: write" not in text
+    assert "issues: read" in text
     assert "contents: read" in text
 
 
@@ -606,6 +712,30 @@ def test_collect_files_and_comments_read_every_page(monkeypatch):
     data = pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
     assert len(data.changed_files) == 101 and "late.py" in data.changed_files
     assert "late-finding" in data.review_comment_bodies
+
+
+def test_collect_reads_bodies_of_explicitly_linked_issues(monkeypatch, tmp_path):
+    calls: list[list] = []
+    pull = {
+        "title": "feat(cli): add a command",
+        "body": "Fixes #984 and references #985",
+        "base": {"ref": "main", "sha": BASE_TIP},
+        "head": {"sha": HEAD_SHA},
+    }
+    pages = {
+        "rest": {
+            "repos/o/r/issues/984": {1: {"body": "Spec: docs/specs/command.md"}},
+            "repos/o/r/issues/985": {1: {"body": "No specification link"}},
+        }
+    }
+    _install_fake_gh(monkeypatch, calls, pull, BASE_TIP, pages)
+    data = pr_gates_dod.collect_pr_data(
+        "o/r", PR_NUM, root="/nonexistent", need_spec_or_fix_brief=True
+    )
+    assert data.linked_issue_bodies == {984: "Spec: docs/specs/command.md", 985: "No specification link"}
+    assert "spec_or_fix_brief" not in pr_gates_dod.evaluate(
+        spec_gate_config(tmp_path, mode="warn"), data
+    ).failed_names()
 
 
 def test_collect_reads_test_blob_from_pr_head_not_base_checkout(monkeypatch, tmp_path):

@@ -197,6 +197,69 @@ async def test_a_default_that_cannot_be_read_leaves_no_config_poller_running(mon
     assert _pollers() == []
 
 
+async def _fetch_choices_five_times():
+    from kollabor_engine.server import create_app  # type: ignore[import-not-found]
+
+    async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
+        responses = [await client.get("/profiles/choices") for _ in range(5)]
+        await asyncio.sleep(0.05)  # a cancelled task ends on the loop's next turns
+    return responses
+
+
+@pytest.mark.asyncio
+async def test_listing_choices_leaves_no_config_poller_running(monkeypatch, saved_default):
+    # The model picker refreshes every few seconds while a New Session form stays open, so a poller
+    # left behind by each /profiles/choices request piles up exactly like the profile list's did (#961).
+    import kollabor_engine.routes.profiles as profile_routes
+
+    import kollabor_ai.loadout_manager as loadout_manager_module
+
+    async def no_catalog_refresh(self):
+        return {}
+
+    monkeypatch.setattr(profile_routes, "_get_profile_manager", lambda: _Manager())
+    monkeypatch.setattr(
+        loadout_manager_module.LoadoutManager, "refresh_catalogs", no_catalog_refresh
+    )
+
+    responses = await _fetch_choices_five_times()
+
+    assert [response.status_code for response in responses] == [200] * 5
+    assert isinstance(responses[-1].json()["choices"], list)
+    assert _pollers() == []
+
+
+@pytest.mark.asyncio
+async def test_choices_route_never_calls_the_layered_config_reader(monkeypatch, saved_default):
+    # The picker lists no saved loadouts, so the route never calls the layered config reader. It does
+    # still read profile definitions from the config files through ProfileManager, which is stubbed here.
+    import kollabor_engine.routes.profiles as profile_routes
+
+    import kollabor_ai.loadout_manager as loadout_manager_module
+    import kollabor_config.loader as config_loader
+
+    reads = []
+    real_load = config_loader.load_layered_user_config
+
+    def counting_load(*args, **kwargs):
+        reads.append(args)
+        return real_load(*args, **kwargs)
+
+    async def no_catalog_refresh(self):
+        return {}
+
+    monkeypatch.setattr(config_loader, "load_layered_user_config", counting_load)
+    monkeypatch.setattr(profile_routes, "_get_profile_manager", lambda: _Manager())
+    monkeypatch.setattr(
+        loadout_manager_module.LoadoutManager, "refresh_catalogs", no_catalog_refresh
+    )
+
+    responses = await _fetch_choices_five_times()
+
+    assert [response.status_code for response in responses] == [200] * 5
+    assert reads == []
+
+
 # --- the default of the folder New Session starts in, not of the folder the engine runs in ---
 
 

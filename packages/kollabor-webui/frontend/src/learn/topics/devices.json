@@ -1,0 +1,92 @@
+{
+  "id": "devices",
+  "title": "Devices",
+  "summary": "See which Kollab computers are connected and manage their names and trust.",
+  "workflows": [
+    {
+      "id": "find-a-device",
+      "label": "Find a connected computer",
+      "summary": "Open the network roster, then select a device to inspect its agents.",
+      "entry": {
+        "prerequisite": "At least one computer must be connected to your Kollab network.",
+        "ui": [
+          "Sidebar",
+          "Your network",
+          "Device name"
+        ],
+        "command": "/connect status"
+      },
+      "steps": [
+        {
+          "action": "Find your network in the sidebar, then expand the computer you want to use.",
+          "expect": "In the example, studio-laptop is a computer in Studio."
+        },
+        {
+          "action": "Open its workspace group and select an available agent.",
+          "expect": "The chat opens on the agent’s computer."
+        },
+        {
+          "action": "Use /connect status, or Settings → Network → Overview, to check connection and availability."
+        }
+      ],
+      "commands": [
+        {
+          "syntax": "/connect status",
+          "example": "/connect status",
+          "description": "List devices and agents on this computer's network.",
+          "expect": "Each online computer and its reachable agents are listed."
+        }
+      ],
+      "media": {
+        "kind": "image",
+        "src": "/learn/devices/overview.webp",
+        "alt": "Kollab sidebar grouping Koordinator on studio-mac and Lapis on studio-laptop under Studio",
+        "caption": "Expand a computer under its network to reach the agents it hosts."
+      },
+      "success": "You can distinguish online devices from unavailable ones and see which agents are reachable on each.",
+      "recovery": [
+        {
+          "symptom": "A computer is offline or missing",
+          "action": "Start Kollab on that computer, then refresh Connect status; verify both computers joined the intended network."
+        },
+        {
+          "symptom": "You cannot change network state in this window",
+          "action": "Use the Kollab window that owns the network daemon; another window may be read-only."
+        }
+      ],
+      "note": "Only the device running a given agent can start or stop that agent. Network trust rules determine who can message it."
+    },
+    {
+      "id": "rename-device",
+      "label": "Rename your computer",
+      "summary": "Give this device a recognizable name on its network.",
+      "entry": {
+        "prerequisite": "Open Connect on the computer whose device name you want to change.",
+        "command": "/connect name <name>"
+      },
+      "steps": [
+        {
+          "action": "On the computer being renamed, choose its device name in Connect and enter a clear name, or run /connect name <name>."
+        },
+        {
+          "action": "Check Connect status to confirm the updated name is shown."
+        }
+      ],
+      "commands": [
+        {
+          "syntax": "/connect name <name>",
+          "example": "/connect name design-laptop",
+          "description": "Set this computer's name on the agent network.",
+          "expect": "The new name appears in the device roster."
+        }
+      ],
+      "success": "The network roster shows the new device name.",
+      "recovery": [
+        {
+          "symptom": "The name is rejected or still looks wrong",
+          "action": "Use /connect help to check the current naming rules, then retry with a short, distinct name."
+        }
+      ]
+    }
+  ]
+}

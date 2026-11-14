@@ -321,6 +321,98 @@ def test_another_case_is_refused_where_the_volume_tells_the_cases_apart(machine,
     _refuses(str(machine.home).upper() + os.sep + "proj", saying="outside")
 
 
+# A volume that ignores case opens /Users/me/PROJ for /Users/me/proj, but a daemon started there reports the spelling
+# the volume stores (its working folder), and the engine finds the agent it launched by comparing folder strings
+# (HubBridge.get_agent_by_identity): the answer must be the stored spelling, or New Session waits 45 s for a daemon
+# it cannot find.
+
+
+@pytest.fixture
+def ignoring_case(monkeypatch):
+    """A volume that ignores case, wherever the tests run: two spellings of a path are one folder."""
+    monkeypatch.setattr(workspace_folder, "_ignores_case", lambda root: True, raising=False)
+    monkeypatch.setattr(os.path, "samefile", lambda a, b: a.casefold() == b.casefold())
+
+
+def _root_of(folder):
+    return os.path.join(str(folder), "")
+
+
+def test_a_folder_typed_in_another_case_comes_back_as_the_volume_stores_it(machine, monkeypatch):
+    typed = machine.home / "PROJ"
+    if not typed.is_dir():
+        pytest.skip("this volume tells the cases apart")
+
+    with monkeypatch.context() as inside:
+        inside.chdir(typed)  # where a daemon started in that folder lives
+        stored = os.path.realpath(os.getcwd())
+
+    assert stored == str(machine.proj)
+    assert checked_folder(str(typed)) == stored
+
+
+def test_the_answer_is_what_the_stored_spelling_step_makes_of_it_where_the_volume_ignores_case(machine, monkeypatch):
+    seen = []
+    monkeypatch.setattr(workspace_folder, "_ignores_case", lambda root: True, raising=False)
+    monkeypatch.setattr(
+        workspace_folder, "_on_disk", lambda checked, root: seen.append((checked, root)) or "as-stored", raising=False
+    )
+
+    assert checked_folder(str(machine.proj)) == "as-stored"
+    assert seen == [(str(machine.proj), _root_of(machine.home))]
+
+
+def test_the_answer_is_left_as_typed_where_the_volume_tells_the_cases_apart(machine, monkeypatch):
+    monkeypatch.setattr(workspace_folder, "_ignores_case", lambda root: False, raising=False)
+    monkeypatch.setattr(workspace_folder, "_on_disk", lambda *args: pytest.fail("looked up a spelling"), raising=False)
+
+    assert checked_folder(str(machine.proj)) == str(machine.proj)
+
+
+def test_a_part_below_the_root_is_spelled_the_way_the_folder_stores_it(machine, ignoring_case):
+    assert workspace_folder._on_disk(str(machine.home / "PROJ"), _root_of(machine.home)) == str(machine.proj)
+
+
+def test_every_part_below_the_root_is_spelled_the_way_its_folder_stores_it(machine, ignoring_case):
+    (machine.home / "Work" / "App").mkdir(parents=True)
+
+    typed = str(machine.home / "wORK" / "aPP")
+    assert workspace_folder._on_disk(typed, _root_of(machine.home)) == str(machine.home / "Work" / "App")
+
+
+def test_a_part_spelled_as_stored_is_not_looked_up(machine, ignoring_case, monkeypatch):
+    asked = []
+    monkeypatch.setattr(os.path, "samefile", lambda a, b: asked.append((a, b)) or True)
+
+    assert workspace_folder._on_disk(str(machine.proj), _root_of(machine.home)) == str(machine.proj)
+    assert asked == []
+
+
+def test_a_part_the_volume_does_not_call_the_same_entry_stays_as_typed(machine, monkeypatch):
+    def not_there(a, b):  # what samefile does for a name that is no entry: a mount that tells the cases apart
+        raise FileNotFoundError(b)
+
+    monkeypatch.setattr(os.path, "samefile", not_there)
+
+    typed = str(machine.home / "PROJ")
+    assert workspace_folder._on_disk(typed, _root_of(machine.home)) == typed
+
+
+def test_a_part_with_no_entry_stays_as_typed(machine, ignoring_case):
+    typed = str(machine.home / "nope")
+    assert workspace_folder._on_disk(typed, _root_of(machine.home)) == typed
+
+
+def test_a_folder_that_cannot_be_listed_leaves_what_is_typed(machine, ignoring_case, monkeypatch):
+    def refused(path):
+        raise PermissionError(path)
+
+    typed = str(machine.home / "PROJ")
+    with monkeypatch.context() as inside:
+        inside.setattr(os, "listdir", refused)
+        assert workspace_folder._on_disk(typed, _root_of(machine.home)) == typed
+
+
 # --- the HTTP face and the picker's Up button ---------------------------------------------------------
 
 

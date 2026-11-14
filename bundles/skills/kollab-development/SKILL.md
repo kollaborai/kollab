@@ -47,8 +47,11 @@ consumers or the maintainer, rather than inventing them.
 3. Trace producer, consumers, configuration, and runtime entrypoint. Check the
    active process/source artifact when diagnosing deployed behavior. Old docs,
    memory, a different checkout, or a helper's conclusion are leads, not proof.
-4. Read the current feature spec and name the concrete contract being changed.
-   Amend that spec in place alongside implementation. Record actual unresolved
+4. Before feature implementation, read its current spec and name the concrete
+   contract being changed. If none exists, write one from
+   `docs/specs/TEMPLATE.md` before coding; amend that spec in place with the
+   implementation. Bug fixes use the `Fix brief` shape in
+   `docs/specs/FIX_BRIEF.md` in the issue or PR body. Record actual unresolved
    decisions without inventing another version of the design.
 5. For DNS, `/connect`, relay, A2A, or deployment work, read
    [relay-change-guide.md](references/relay-change-guide.md) before editing.

@@ -196,6 +196,7 @@ class ACPHubTools:
         if name == "hub_spawn":
             result = await self.hub._handle_hub_spawn_tool({"id": uuid.uuid4().hex,
                 "input": {"name": arguments.get("name"), "task": arguments.get("task"),
+                          "identity": arguments.get("identity"),
                           "llm": arguments.get("llm")}})
             return {"success": result.success, "text": result.output, "error": result.error}
         if name not in {"hub_msg", "hub_ask"}:

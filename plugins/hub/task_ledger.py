@@ -475,6 +475,14 @@ class TaskLedger:
             ]
         return sorted(dispatches, key=lambda item: item.get("created_at", 0))
 
+    def get_in_flight_dispatches_for_assignee(self, assignee: str) -> List[Dict[str, Any]]:
+        """Return delivered assignments for an identity; failed or completed deliveries do not identify its work."""
+        if not assignee:
+            return []
+        with self._file_lock(self._dispatches_path()):
+            return [dict(item) for item in self._read_dispatches_unlocked()
+                    if item.get("assignee") == assignee and item.get("status") == "in_flight"]
+
     def get_dispatches_page(
         self, assigned_by: str, *, page: int = 1, per_page: int = 10
     ) -> tuple[List[Dict[str, Any]], int]:

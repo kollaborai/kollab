@@ -131,10 +131,12 @@ reduced motion.
 
 ## Working References
 
-The learning system remains under review. The first reference-browser and task-card
-mockups were rejected. Current prototypes explore a session walkthrough using the
-actual controls, and an interactive model of networks, devices, workspaces, and
-agents. Neither content direction has been selected for implementation. The [review prototypes](docs/design/learn-prototypes/README.md) preserve both concepts.
+Learn uses the native, media-led workflow pattern across the topic catalog: exact
+entry points, real product visuals, ordered actions, command examples, expected
+results, and subordinate recovery guidance. Workflow tabs fit each feature; Connect
+includes joining devices and Knocks. Keep the shared compact modal and plain topic
+navigation. The earlier reference-browser and task-card mockups were rejected; the
+[review prototypes](docs/design/learn-prototypes/README.md) remain historical context.
 
 - [LearnPage.tsx](packages/kollabor-webui/frontend/src/components/learn/LearnPage.tsx):
   compact headings, plain topic navigation, and borderless content groups.

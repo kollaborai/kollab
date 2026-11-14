@@ -559,9 +559,38 @@ class ConfigLoader:
                 "reviewer_pool": [],
             },
             "kollabor": {
+                # The web UI's Code Editor, Git and Terminal views. Every guard has a switch; the agent's own
+                # agent.json "code" object overrides these. Spec: docs/specs/code-shell-settings.md
+                "code": {
+                    "enabled": True,
+                    "read_only": False,
+                    "terminal": {
+                        "enabled": True,
+                        "pass_secret_env": False,
+                        "pass_kollab_env": False,
+                        "env_allow": [],
+                        "env_deny": [],
+                        "env_set": {},
+                        "shell": "",
+                        "login": True,
+                        "start_command": "",
+                        "max_shells": 8,
+                        "idle_reap_minutes": 10,
+                        "scrollback_kb": 256,
+                    },
+                    "files": {
+                        "max_file_kb": 2048,
+                        "show_hidden": False,
+                        "search_max_files": 20000,
+                        "extra_roots": [],
+                        "follow_symlinks": False,
+                    },
+                    "git": {"allow_outside_workspace": False, "read_only": False},
+                },
                 "updates": {
                     "check_enabled": True,
                     "auto_update_enabled": False,
+                    "restart_agents": False,
                     "check_interval_hours": 24,
                     "github_repo": "kollaborai/kollab",
                     "timeout_seconds": 5,

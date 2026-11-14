@@ -1,0 +1,217 @@
+{
+  "data_mode": "staged",
+  "backend_workflow_verified": false,
+  "captured_product_base": "5ed7159c1ac67bb7b721962ab12b478e60d2ef98",
+  "topics": {
+    "networks": {
+      "source_files": {
+        "packages/kollabor-webui/frontend/src/styles.css": "6f16e4b96fbd784385a6acf4ca22a829978ead526289c4aad117fafd65c3556f",
+        "packages/kollabor-webui/frontend/src/api.ts": "65401e2a2c66d4f9cd5004d205cd84c07d66f659b107a20139d6a29dfb4c2ec4",
+        "packages/kollabor-webui/frontend/src/components/panels/PanelHost.tsx": "35ddf8a7455a65ac65de5c7f6c14c79d4f50c17735de3aaeb0ea10d95b6d3623",
+        "packages/kollabor-webui/frontend/src/components/panels/NetworkPanel.tsx": "afd8b5ba763ed41cb4964372fcfaca92d5fb78a09cb9c26532ef1b38b3037205",
+        "kollabor/panels/connect.py": "85471522162493a94f8049671e13c3affe68b264af5caa5914b5b4b4b4a0bd60"
+      },
+      "recipe_sha256": "11a6c3e6e9c138a81d09053fd45856e460bb067331ac57b9445e707f487bde9a",
+      "recorder_sha256": "64819f6e3a79198010a20a80327077d7581c1a800634a009300707c7d911afb6",
+      "assets": {
+        "captions.vtt": {
+          "bytes": 293,
+          "sha256": "e4c0604ccb9cd0b008d4ec9a5ad779f1c05b4075fe6bdfdb97cde2c4bc9b7f73"
+        },
+        "knocks.webp": {
+          "bytes": 15442,
+          "sha256": "5a2a2307dd06f8e2db9d31ae32f5ec17089039725eec80c3154b463de0d6eb4d"
+        },
+        "overview.webp": {
+          "bytes": 13438,
+          "sha256": "3539e2d56a7525e8a139693a4c754efd205e957c7f1fc48d5d58eb15507af77b"
+        },
+        "walkthrough.mp4": {
+          "bytes": 233202,
+          "sha256": "e024d90152dccbfb82ac92772d1aa9bc4e699b2dc4ffc16302220c818a26f192"
+        }
+      },
+      "video": {
+        "duration_seconds": 12.958333,
+        "width": 1280,
+        "height": 800,
+        "playback_speed": 2,
+        "public_trim_start_seconds": 2.0,
+        "public_trim_reason": "first 2 seconds showed the Session tab with build and version rows; captions retimed by -2.0 s",
+        "source_capture_video_sha256": "8e524ec1f9e29b1b5fa0218b6db0125975f4beb60094e697adbf5ad615c3adcd",
+        "recipe_sha256": "951e1d272a47c9653e40bea4d0ec21800c6748b42afa81fdaedcd53bdaa4c37c",
+        "recorder_sha256": "8a0fa3a1f450774e6c22478414e9b8a6d6347a43b015cc91bf2f79fee832c174",
+        "fixed_viewport": true,
+        "cropping_after_recording": true
+      }
+    },
+    "devices": {
+      "source_files": {
+        "packages/kollabor-webui/frontend/src/styles.css": "6f16e4b96fbd784385a6acf4ca22a829978ead526289c4aad117fafd65c3556f",
+        "packages/kollabor-webui/frontend/src/api.ts": "65401e2a2c66d4f9cd5004d205cd84c07d66f659b107a20139d6a29dfb4c2ec4",
+        "packages/kollabor-webui/frontend/src/components/panels/PanelHost.tsx": "35ddf8a7455a65ac65de5c7f6c14c79d4f50c17735de3aaeb0ea10d95b6d3623",
+        "packages/kollabor-webui/frontend/src/components/panels/NetworkPanel.tsx": "afd8b5ba763ed41cb4964372fcfaca92d5fb78a09cb9c26532ef1b38b3037205",
+        "packages/kollabor-webui/frontend/src/components/shell/AppSidebar.tsx": "6de9b83b49cd442a1104db519460a55c37a0f9b55f81b552e1f040bfacd8cf20",
+        "packages/kollabor-webui/frontend/src/components/shell/agent-network.ts": "58c48752795564d10c456e70de0b41e0880f5f044ffbcd02dbf89b9ff929922c"
+      },
+      "recipe_sha256": "1d8e5efb42af38a95247203d072ab10c1b72261f03b2e9f739d5d4d6f94e0240",
+      "recorder_sha256": "8a0fa3a1f450774e6c22478414e9b8a6d6347a43b015cc91bf2f79fee832c174",
+      "assets": {
+        "overview.webp": {
+          "bytes": 5920,
+          "sha256": "4b83f6ae094627286d20d217e51e5170a4d27da2c2f4037f36ea8ac6f4fdb7ec"
+        }
+      }
+    },
+    "workspaces": {
+      "source_files": {
+        "packages/kollabor-webui/frontend/src/styles.css": "6f16e4b96fbd784385a6acf4ca22a829978ead526289c4aad117fafd65c3556f",
+        "packages/kollabor-webui/frontend/src/api.ts": "65401e2a2c66d4f9cd5004d205cd84c07d66f659b107a20139d6a29dfb4c2ec4",
+        "packages/kollabor-webui/frontend/src/components/panels/PanelHost.tsx": "35ddf8a7455a65ac65de5c7f6c14c79d4f50c17735de3aaeb0ea10d95b6d3623",
+        "packages/kollabor-webui/frontend/src/components/shell/WorkspacePicker.tsx": "64445e1ab4ec90a7c2ba0213eba44062280f1c23c6d394da2a20ca438d542175",
+        "packages/kollabor-webui/frontend/src/components/shell/AppSidebar.tsx": "6de9b83b49cd442a1104db519460a55c37a0f9b55f81b552e1f040bfacd8cf20"
+      },
+      "recipe_sha256": "130cdc12f6cbc91634f64d19a0a41c56707f2b9b0086b5c69f5dcd8d3cd53c00",
+      "recorder_sha256": "64819f6e3a79198010a20a80327077d7581c1a800634a009300707c7d911afb6",
+      "assets": {
+        "overview.webp": {
+          "sha256": "270d3ae104caa22a15ec96dcb251b948862e2b0a465ee42d783fec81021aeccd",
+          "bytes": 6432
+        }
+      }
+    },
+    "agents": {
+      "source_files": {
+        "packages/kollabor-webui/frontend/src/styles.css": "6f16e4b96fbd784385a6acf4ca22a829978ead526289c4aad117fafd65c3556f",
+        "packages/kollabor-webui/frontend/src/api.ts": "65401e2a2c66d4f9cd5004d205cd84c07d66f659b107a20139d6a29dfb4c2ec4",
+        "packages/kollabor-webui/frontend/src/components/panels/PanelHost.tsx": "35ddf8a7455a65ac65de5c7f6c14c79d4f50c17735de3aaeb0ea10d95b6d3623",
+        "packages/kollabor-webui/frontend/src/components/agents/AgentLibrary.tsx": "98aad5a23774de28e8c2752c8413b5948db8ee9f76ce46f282c78214b4b3f6b5"
+      },
+      "recipe_sha256": "9b4eeead2a8dde9ca3c3c9e0d9b5077f2ac80c43e0c944d63f14aba1116572da",
+      "recorder_sha256": "64819f6e3a79198010a20a80327077d7581c1a800634a009300707c7d911afb6",
+      "assets": {
+        "overview.webp": {
+          "sha256": "a1d6ae8b5622ad657a71c236fb2df7457d65bfb79b82faf6b8d8f1e89c8444e2",
+          "bytes": 10936
+        }
+      }
+    },
+    "profiles": {
+      "source_files": {
+        "packages/kollabor-webui/frontend/src/styles.css": "6f16e4b96fbd784385a6acf4ca22a829978ead526289c4aad117fafd65c3556f",
+        "packages/kollabor-webui/frontend/src/api.ts": "65401e2a2c66d4f9cd5004d205cd84c07d66f659b107a20139d6a29dfb4c2ec4",
+        "packages/kollabor-webui/frontend/src/components/panels/PanelHost.tsx": "35ddf8a7455a65ac65de5c7f6c14c79d4f50c17735de3aaeb0ea10d95b6d3623",
+        "packages/kollabor-webui/frontend/src/components/shell/ProfilesDialog.tsx": "856c66bc25d10ec7298ab9ed48736eaf3a0e726fe21953aaa92cae2869f6db29"
+      },
+      "recipe_sha256": "9ba628e78720b0ccee2938340a325bb5a1173c94d421047a1d4035a0cebf6799",
+      "recorder_sha256": "64819f6e3a79198010a20a80327077d7581c1a800634a009300707c7d911afb6",
+      "assets": {
+        "overview.webp": {
+          "sha256": "43d10efb06259faaa03fcc030da4137e997a0eb16d57c39adc7ae7c4d4e15024",
+          "bytes": 19788
+        }
+      }
+    },
+    "context-compaction": {
+      "source_files": {
+        "packages/kollabor-webui/frontend/src/styles.css": "6f16e4b96fbd784385a6acf4ca22a829978ead526289c4aad117fafd65c3556f",
+        "packages/kollabor-webui/frontend/src/api.ts": "65401e2a2c66d4f9cd5004d205cd84c07d66f659b107a20139d6a29dfb4c2ec4",
+        "packages/kollabor-webui/frontend/src/components/panels/PanelHost.tsx": "35ddf8a7455a65ac65de5c7f6c14c79d4f50c17735de3aaeb0ea10d95b6d3623",
+        "packages/kollabor-webui/frontend/src/App.tsx": "75d55da828e426a184fba948515ccace2df8fd2137803775e7fffc7f8d994cfa",
+        "packages/kollabor-webui/frontend/src/context-compaction-status.ts": "46ab4cf871f1977ec96c9f23c9a51b86e5549b85a4dc7ae8acd92a8d4b11f41f"
+      },
+      "recipe_sha256": "78d0dfd0503c794fce3e2a68b9ca2e21b36996a3d2d74a7cf41c733638f7128d",
+      "recorder_sha256": "64819f6e3a79198010a20a80327077d7581c1a800634a009300707c7d911afb6",
+      "assets": {
+        "overview.webp": {
+          "sha256": "df9ba072ed35265e5e6c17a8183caa413c3c8f56a08cf81071cef2b38fcacdf5",
+          "bytes": 7926
+        }
+      }
+    },
+    "koordinator": {
+      "source_files": {
+        "packages/kollabor-webui/frontend/src/styles.css": "6f16e4b96fbd784385a6acf4ca22a829978ead526289c4aad117fafd65c3556f",
+        "packages/kollabor-webui/frontend/src/api.ts": "65401e2a2c66d4f9cd5004d205cd84c07d66f659b107a20139d6a29dfb4c2ec4",
+        "packages/kollabor-webui/frontend/src/components/panels/PanelHost.tsx": "35ddf8a7455a65ac65de5c7f6c14c79d4f50c17735de3aaeb0ea10d95b6d3623",
+        "packages/kollabor-webui/frontend/src/runtime.tsx": "df7d974ecdf12f6ab629b427d3299ed2414ea126b7df2a0bbf5187a521026d41"
+      },
+      "recipe_sha256": "623d44603c0a0fedd45a787654b10e6bae98c82a695b7138aeb1028b92922034",
+      "recorder_sha256": "64819f6e3a79198010a20a80327077d7581c1a800634a009300707c7d911afb6",
+      "assets": {
+        "overview.webp": {
+          "sha256": "f1c7dfabe1882a482d45fb140724cda2b9da4870a5a353fb5c082c8bfd22cabb",
+          "bytes": 11302
+        }
+      }
+    },
+    "hub-messaging": {
+      "source_files": {
+        "packages/kollabor-webui/frontend/src/styles.css": "6f16e4b96fbd784385a6acf4ca22a829978ead526289c4aad117fafd65c3556f",
+        "packages/kollabor-webui/frontend/src/api.ts": "65401e2a2c66d4f9cd5004d205cd84c07d66f659b107a20139d6a29dfb4c2ec4",
+        "packages/kollabor-webui/frontend/src/components/panels/PanelHost.tsx": "35ddf8a7455a65ac65de5c7f6c14c79d4f50c17735de3aaeb0ea10d95b6d3623",
+        "packages/kollabor-webui/frontend/src/runtime.tsx": "df7d974ecdf12f6ab629b427d3299ed2414ea126b7df2a0bbf5187a521026d41",
+        "packages/kollabor-webui/frontend/src/hub-notes.ts": "6d5e704e63bfe2954cb6df854bb3c1182359deb4891586d9ecd90a7db57b3ec5"
+      },
+      "recipe_sha256": "72fffc9394de5a83cd1fb6cf38732e5a9fbd63a35ac18f8fc34e0eb9fb7ed596",
+      "recorder_sha256": "64819f6e3a79198010a20a80327077d7581c1a800634a009300707c7d911afb6",
+      "assets": {
+        "overview.webp": {
+          "sha256": "2a14cfc1a1a543d0e436c612db281a83406983732cf263eaadd1b7c2aa979910",
+          "bytes": 7196
+        }
+      }
+    },
+    "voice": {
+      "source_files": {
+        "packages/kollabor-webui/frontend/src/styles.css": "6f16e4b96fbd784385a6acf4ca22a829978ead526289c4aad117fafd65c3556f",
+        "packages/kollabor-webui/frontend/src/api.ts": "65401e2a2c66d4f9cd5004d205cd84c07d66f659b107a20139d6a29dfb4c2ec4",
+        "packages/kollabor-webui/frontend/src/components/panels/PanelHost.tsx": "35ddf8a7455a65ac65de5c7f6c14c79d4f50c17735de3aaeb0ea10d95b6d3623",
+        "kollabor/panels/voice.py": "9cba6b4b8d56d481839d44f5053265048801ece96fb2e7c145219c2b5c0f74ac",
+        "packages/kollabor-webui/frontend/src/components/panels/FormPanel.tsx": "b1994b1b05d0ea6e2b74497140010b5c6d333e5115b5724e78d2456c60b3baaf",
+        "kollabor/panels/base.py": "e9e03dd9aed1c9904707f60e71699cff25088ed4d6f74288902a483ff4880bda",
+        "packages/kollabor-webui/frontend/src/components/panels/FieldRenderer.tsx": "f3c11ffe70eeff4c231382580270ec968f91bdd4e434b6ff468fa50bfacece0f"
+      },
+      "recipe_sha256": "3a48e5ff13de43bb198928922fd84d2559914bac14928f25927159cba5950b6a",
+      "recorder_sha256": "64819f6e3a79198010a20a80327077d7581c1a800634a009300707c7d911afb6",
+      "assets": {
+        "overview.webp": {
+          "sha256": "c8cb762455421a216174bec5e9588912010dfa190a4ff30ca5cdfa057307ed09",
+          "bytes": 11346
+        }
+      }
+    },
+    "system-prompts": {
+      "source_files": {
+        "packages/kollabor-webui/frontend/src/styles.css": "6f16e4b96fbd784385a6acf4ca22a829978ead526289c4aad117fafd65c3556f",
+        "packages/kollabor-webui/frontend/src/api.ts": "65401e2a2c66d4f9cd5004d205cd84c07d66f659b107a20139d6a29dfb4c2ec4",
+        "packages/kollabor-webui/frontend/src/components/panels/PanelHost.tsx": "35ddf8a7455a65ac65de5c7f6c14c79d4f50c17735de3aaeb0ea10d95b6d3623",
+        "packages/kollabor-webui/frontend/src/components/prompts/PromptsPage.tsx": "b45d1554231022f211fb87693ecb99ae66cf45fff842c070db92bb80904a99bd"
+      },
+      "recipe_sha256": "b05ce7e514af672624d71342ce1ed55763f8beeb57442c53ebe22defbcc11e99",
+      "recorder_sha256": "64819f6e3a79198010a20a80327077d7581c1a800634a009300707c7d911afb6",
+      "assets": {
+        "overview.webp": {
+          "sha256": "a5ed46c77fb953dd6a5abf031ab6a4e78be87f0468857d1c52af6ac5f6d84e74",
+          "bytes": 19578
+        }
+      }
+    },
+    "phone-access": {
+      "source_files": {
+        "packages/kollabor-webui/frontend/src/styles.css": "6f16e4b96fbd784385a6acf4ca22a829978ead526289c4aad117fafd65c3556f",
+        "packages/kollabor-webui/frontend/src/api.ts": "65401e2a2c66d4f9cd5004d205cd84c07d66f659b107a20139d6a29dfb4c2ec4",
+        "packages/kollabor-webui/frontend/src/components/panels/PanelHost.tsx": "35ddf8a7455a65ac65de5c7f6c14c79d4f50c17735de3aaeb0ea10d95b6d3623",
+        "packages/kollabor-webui/frontend/src/components/panels/PhoneLinkPanel.tsx": "1500d1849747bdb41c49985ad22a74cf9007a1da235c3a5e6f7acc5f84e5fd2b"
+      },
+      "recipe_sha256": "06535235f91b4ca0f92a2e8d407b219cd6f30c338dae42b86a9b59bec69da153",
+      "recorder_sha256": "64819f6e3a79198010a20a80327077d7581c1a800634a009300707c7d911afb6",
+      "assets": {
+        "overview.webp": {
+          "sha256": "edc8d45db7817a089a32cfd04248dba43a07fb86176d5467dc9b4eee424f2908",
+          "bytes": 22364
+        }
+      }
+    }
+  }
+}

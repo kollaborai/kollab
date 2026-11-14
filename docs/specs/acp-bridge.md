@@ -152,6 +152,11 @@ Start one: `kollab --as claude --llm claude-code --detached`. `--as` names it on
 the hub. No `--agent`: a kollab bundle's system prompt means nothing to another
 harness. From chat, any agent starts one with `hub_spawn`, which gains an
 `llm` field for a profile or loadout name: `<hub_spawn name="claude" llm="claude-code"/>`.
+The name keeps `hub_spawn`'s regular resolution: an exact roster persona is the
+identity; a known bundle/role (such as `coder`) selects the next available
+roster identity; an unknown harness name remains an identity. `identity="..."`
+selects a specific identity explicitly. Choosing an ACP profile changes the
+turn runner, not the meaning of the name.
 
 ## 4. Outbound: an ACP agent as a kollab agent's brain
 

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { learnPhoneMediaPlugin } from "./scripts/learn-phone-media-plugin";
 import pkg from "./package.json";
 
 
@@ -80,6 +81,14 @@ export function buildIdentity(
 
 const BUILD_IDENTITY = buildIdentity();
 
+const phoneLearnMedia = (enabled: boolean) =>
+  learnPhoneMediaPlugin({
+    enabled,
+    topicsDir: path.resolve(frontendDir, "src/learn/topics"),
+    publicDir: path.resolve(frontendDir, "public"),
+  });
+
+
 const KOLLAB_CHANGELOG_MODULE = "virtual:kollab-changelog";
 const RESOLVED_KOLLAB_CHANGELOG_MODULE = `\0${KOLLAB_CHANGELOG_MODULE}`;
 
@@ -111,7 +120,7 @@ const PHONE_BUILDS: Record<string, { entry: string; name: string; plugins: Plugi
   "phone-app": {
     entry: "src/phonelink/app-main.tsx",
     name: "KollabPhoneApp",
-    plugins: [kollabCanonicalChangelogPlugin(), react(), tailwindcss()],
+    plugins: [kollabCanonicalChangelogPlugin(), phoneLearnMedia(true), react(), tailwindcss()],
   },
 };
 
@@ -144,7 +153,7 @@ export default defineConfig(({ mode }) => {
 });
 
 const mainConfig = defineConfig({
-  plugins: [kollabCanonicalChangelogPlugin(), react(), tailwindcss()],
+  plugins: [kollabCanonicalChangelogPlugin(), phoneLearnMedia(false), react(), tailwindcss()],
   base: "./",
   define: {
     __APP_VERSION__: __APP_VERSION__,
@@ -177,6 +186,11 @@ const mainConfig = defineConfig({
     // Vitest suites; Node's built-in test runner remains for older tests.
     include: [
       "tests/prompts-page.test.ts",
+      "tests/terminal-ws-protocol.test.ts",
+      "tests/lazy-file-list.test.ts",
+      "tests/code-fetch-session.test.ts",
+      "tests/terminal-env.test.ts",
+      "tests/file-save.test.ts",
       "tests/history-cache.test.ts",
       "tests/phone-frame.test.ts",
       "tests/phone-audio.test.ts",
@@ -193,11 +207,17 @@ const mainConfig = defineConfig({
       "src/components/assistant-ui/tool-fallback.test.tsx",
       "src/engine-version.test.ts",
       "tests/agent-type-glyph.test.tsx",
+      "tests/agent-version-notice.test.tsx",
       "tests/mobile-invite.test.mjs",
       "tests/phonelink-app-shell.test.ts",
       "tests/trajectory-detail-title.test.ts",
       "tests/sidebar-breakpoint.test.ts",
       "tests/session-refresh-gate.test.ts",
+      "tests/code-editor-store.test.ts",
+      "tests/code-open-file.test.ts",
+      "tests/workspace-ownership.test.ts",
+      "tests/file-mutations.test.ts",
+      "tests/editor-shortcuts.test.ts",
 
       "tests/team-model.test.ts",
       "tests/team-selection.test.ts",
