@@ -830,11 +830,14 @@ class ToolExecutor:
         # Fallback: simple underscore-to-hyphen
         return tool_type.replace("_", "-")
 
-    def _check_bundle_scope(self, tool_type: str) -> Optional[str]:
+    def _check_bundle_scope(
+        self, tool_type: str, tool_name: Optional[str] = None
+    ) -> Optional[str]:
         """Check if a tool_type is allowed by the bundle scope.
 
         Args:
             tool_type: The dispatch tool type to check.
+            tool_name: The concrete MCP tool name, when checking an MCP call.
 
         Returns:
             None if allowed, error message string if denied.
@@ -848,6 +851,24 @@ class ToolExecutor:
         # Internal dispatch types bypass scope
         if tool_type in self._INTERNAL_TYPES:
             return None
+
+        # MCP tools share one dispatch type, but bundle scopes may grant all
+        # MCP tools or a specific tool (optionally qualified by its server).
+        if tool_type == "mcp_tool":
+            if "mcp" in self._bundle_tools or "mcp-tool" in self._bundle_tools:
+                return None
+
+            if tool_name:
+                candidates = [tool_name]
+                tool_registry = getattr(self.mcp_integration, "tool_registry", None)
+                if isinstance(tool_registry, dict):
+                    tool_info = tool_registry.get(tool_name)
+                    if isinstance(tool_info, dict):
+                        server_name = tool_info.get("server")
+                        if server_name:
+                            candidates.append(f"mcp:{server_name}:{tool_name}")
+                if any(candidate in self._bundle_tools for candidate in candidates):
+                    return None
 
         registry_name = self._tool_type_to_registry_name(tool_type)
 
@@ -1146,7 +1167,10 @@ class ToolExecutor:
             )
 
         # Check bundle scope — reject tools not in the agent's allowed set
-        scope_error = self._check_bundle_scope(tool_type)
+        scope_error = self._check_bundle_scope(
+            tool_type,
+            tool_name=tool_data.get("name") if tool_type == "mcp_tool" else None,
+        )
         if scope_error:
             logger.warning(f"Tool {tool_id} rejected by bundle scope: {tool_type}")
             return ToolExecutionResult(

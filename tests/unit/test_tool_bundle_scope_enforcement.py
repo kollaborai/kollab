@@ -27,6 +27,20 @@ def _make_executor() -> ToolExecutor:
     )
 
 
+class _FakeEventBus:
+    async def emit_with_hooks(self, *args, **kwargs):
+        return {}
+
+
+class _FakeMCPIntegration:
+    tool_registry = {
+        "allowed_tool": {"server": "demo-server", "enabled": True},
+    }
+
+    async def call_mcp_tool(self, tool_name, arguments, timeout=None):
+        return {"output": f"called {tool_name}"}
+
+
 class TestBundleScopeEnforcement:
     """Tests for bundle scope enforcement in ToolExecutor.execute_tool."""
 
@@ -261,6 +275,80 @@ class TestInternalTypeBypass:
         executor = self._make_scoped_executor()
         executor.set_bundle_scope(["terminal", "mcp-tool"])
         assert executor._check_bundle_scope("mcp_tool") is None
+
+    def test_mcp_tool_is_allowed_by_concrete_tool_name(self):
+        executor = self._make_scoped_executor()
+        executor.set_bundle_scope(["terminal", "allowed_tool"])
+        assert (
+            executor._check_bundle_scope("mcp_tool", tool_name="allowed_tool") is None
+        )
+
+    def test_mcp_tool_is_allowed_by_server_qualified_name(self):
+        executor = ToolExecutor(
+            mcp_integration=_FakeMCPIntegration(),
+            event_bus=None,
+            terminal_timeout=30,
+            mcp_timeout=30,
+        )
+        executor.set_bundle_scope(["mcp:demo-server:allowed_tool"])
+        assert (
+            executor._check_bundle_scope("mcp_tool", tool_name="allowed_tool") is None
+        )
+
+    def test_execute_tool_uses_concrete_mcp_scope(self):
+        executor = ToolExecutor(
+            mcp_integration=_FakeMCPIntegration(),
+            event_bus=_FakeEventBus(),
+            terminal_timeout=30,
+            mcp_timeout=30,
+        )
+        executor.set_bundle_scope(["allowed_tool"])
+
+        result = _run_async(
+            executor.execute_tool(
+                {
+                    "id": "mcp-1",
+                    "type": "mcp_tool",
+                    "name": "allowed_tool",
+                    "arguments": {},
+                }
+            )
+        )
+
+        assert result.success is True
+        assert result.output == "called allowed_tool"
+        assert result.metadata.get("scope_denied") is None
+
+    def test_execute_tool_uses_server_qualified_mcp_scope(self):
+        executor = ToolExecutor(
+            mcp_integration=_FakeMCPIntegration(),
+            event_bus=_FakeEventBus(),
+            terminal_timeout=30,
+            mcp_timeout=30,
+        )
+        executor.set_bundle_scope(["mcp:demo-server:allowed_tool"])
+
+        result = _run_async(
+            executor.execute_tool(
+                {
+                    "id": "mcp-2",
+                    "type": "mcp_tool",
+                    "name": "allowed_tool",
+                    "arguments": {},
+                }
+            )
+        )
+
+        assert result.success is True
+        assert result.output == "called allowed_tool"
+        assert result.metadata.get("scope_denied") is None
+
+    def test_mcp_tool_rejects_unlisted_concrete_tool_name(self):
+        executor = self._make_scoped_executor()
+        executor.set_bundle_scope(["terminal", "other_tool"])
+        error = executor._check_bundle_scope("mcp_tool", tool_name="allowed_tool")
+        assert error is not None
+        assert "mcp-tool" in error
 
     def test_malformed_file_op_bypasses_scope(self):
         executor = self._make_scoped_executor()
