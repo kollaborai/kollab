@@ -202,6 +202,40 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(call.kwargs["cwd"], workspace.resolve())
             self.assertEqual(call.kwargs["max_output_bytes"], 8 * 1024)
 
+    async def test_terminal_read_resolves_executable_outside_writable_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            workspace.mkdir()
+            fake_bin = Path(temp_dir) / "bin"
+            fake_bin.mkdir()
+            fake_git = fake_bin / "git"
+            fake_git.write_text("#!/bin/sh\nexit 99\n")
+            fake_git.chmod(0o755)
+            self.executor.workspace = workspace
+            self.executor.shell_executor.run_argv = AsyncMock(
+                return_value=ShellResult(
+                    success=True, stdout="commit\n", stderr="", exit_code=0
+                )
+            )
+
+            path = os.pathsep.join(
+                [str(fake_bin), os.environ.get("PATH", "")]
+            )
+            with patch.dict(os.environ, {"PATH": path}):
+                result = await self.executor.execute_tool(
+                    {
+                        "type": "terminal_read",
+                        "id": "terminal-read-path-1",
+                        "command": "git log --oneline -1",
+                    }
+                )
+
+            self.assertTrue(result.success)
+            self.executor.shell_executor.run_argv.assert_awaited_once()
+            argv = self.executor.shell_executor.run_argv.await_args.args[0]
+            self.assertTrue(Path(argv[0]).is_absolute())
+            self.assertNotEqual(Path(argv[0]).resolve(), fake_git.resolve())
+
     async def test_terminal_output_uses_the_only_active_session_when_name_is_missing(self):
         plugin = MagicMock()
         plugin.get_session_status = AsyncMock(
