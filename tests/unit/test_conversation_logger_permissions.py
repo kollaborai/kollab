@@ -44,3 +44,23 @@ def test_existing_loose_modes_are_tightened_on_init(tmp_path):
     assert _mode(conversations / "memory") & 0o077 == 0
     assert _mode(old_session) & 0o077 == 0
     assert _mode(old_raw) & 0o077 == 0
+
+
+def test_lock_sidecars_do_not_exhaust_private_mode_walk_before_transcripts(tmp_path):
+    conversations = tmp_path / "conversations"
+    conversations.mkdir()
+    last_session = None
+    for index in range(1400):
+        session = conversations / f"session-{index:04d}.jsonl"
+        session.write_text("{}\n")
+        session.chmod(0o600)
+        (conversations / f".session-{index:04d}.jsonl.write.lock").touch()
+        (conversations / f".session-{index:04d}.reparent.lock").touch()
+        last_session = session
+
+    assert last_session is not None
+    last_session.chmod(0o644)
+
+    KollaborConversationLogger(conversations)
+
+    assert _mode(last_session) == 0o600
