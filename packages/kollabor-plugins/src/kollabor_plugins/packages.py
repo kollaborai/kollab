@@ -187,9 +187,18 @@ _COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z", re.ASCII)
 def _git(*args: str) -> bytes:
     completed = subprocess.run(["git", *args], capture_output=True, check=False)
     if completed.returncode:
-        # Git and remote helpers can return arbitrary credential-bearing diagnostics.
-        # Do not leak those diagnostics to the UI or logs.
-        raise ValueError(f"Git {args[0]} failed (exit {completed.returncode})")
+        diagnostic = completed.stderr.decode("utf-8", "replace")[:4096]
+        # URLs may contain arbitrary credentials in userinfo, paths, or queries.
+        diagnostic = re.sub(r"(?:https?|ssh)://[^\s'\"<>]+", "[redacted URL]", diagnostic)
+        diagnostic = re.sub(
+            r"(?i)\b(password|token|secret|credential|authorization)\s*[:=]\s*[^\s,;]+",
+            r"\1=[REDACTED]",
+            diagnostic,
+        )
+        diagnostic = re.sub(r"(?i)\b(bearer|basic)\s+[^\s,;]+", r"\1 [REDACTED]", diagnostic)
+        diagnostic = re.sub(r"\b(?:sk|ghp|gho|github_pat)-[A-Za-z0-9_-]+", "[REDACTED]", diagnostic).strip()
+        message = f"Git {args[0]} failed (exit {completed.returncode})"
+        raise ValueError(f"{message}: {diagnostic}" if diagnostic else message)
     return completed.stdout
 
 
