@@ -45,5 +45,5 @@ def test_loader_never_constructs_legacy_manager_and_manifest_settings_are_visibl
     config_loader = ConfigLoader(object(), Registry())
     assert config_loader.get_plugin_configs()["plugins"]["existing"]["enabled"]
     sections = ConfigWidgetDefinitions.get_plugin_config_sections()
-    hello = next(section for section in sections if section["title"] == "Hello")
+    hello = next(section for section in sections if section.get("title") == "Hello")
     assert hello["widgets"][0]["config_path"] == "plugin-values.hello.enabled"
