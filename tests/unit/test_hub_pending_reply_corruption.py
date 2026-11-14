@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,7 @@ from plugins.hub.task_ledger import TaskLedger
 )
 @pytest.mark.parametrize(
     "operation",
-    ["read", "expect", "resolve", "expire", "terminalize"],
+    ["read", "expect", "resolve", "resolve_evidence", "expire", "terminalize"],
 )
 def test_unreadable_pending_reply_envelope_is_never_treated_as_empty(
     tmp_path, payload, operation
@@ -38,6 +39,10 @@ def test_unreadable_pending_reply_envelope_is_never_treated_as_empty(
             )
         elif operation == "resolve":
             ledger.resolve_pending_reply("old-message", reason="resolved")
+        elif operation == "resolve_evidence":
+            ledger.resolve_reply(
+                assignee="lapis", evidence="task complete", message_id="reply"
+            )
         elif operation == "expire":
             ledger.pending_replies()
         else:
@@ -65,3 +70,22 @@ def test_pending_reply_read_io_failure_is_reported_without_content(tmp_path, mon
         ledger.pending_replies()
 
     assert "private payload" not in str(error.value)
+
+
+def test_pending_reply_expiry_still_prunes_valid_entries(tmp_path, monkeypatch):
+    ledger = TaskLedger(str(tmp_path))
+    ledger.expect_reply(
+        task_id="expired",
+        assignee="lapis",
+        requested_by="koordinator",
+        message_id="expired-message",
+        deadline_seconds=120,
+    )
+    path = ledger._pending_replies_path()
+    envelope = json.loads(path.read_text())
+    envelope["expected_replies"][0]["created_at"] = 0
+    path.write_text(json.dumps(envelope))
+    monkeypatch.setattr("plugins.hub.task_ledger.time.time", lambda: 200_000)
+
+    assert ledger.pending_replies() == []
+    assert json.loads(path.read_text()) == {"expected_replies": []}
