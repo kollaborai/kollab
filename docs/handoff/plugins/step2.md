@@ -21,6 +21,12 @@ and `assets-green.log`. Ruff and compilation passed. Further coverage is needed
 for dev/disabled/shadowed packages, root symlinks, traversals, CSP and the later
 import-map hash integration; no full-suite or live smoke has been run.
 
+Follow-up root-symlink test `51456285` was red and fix `65a3bccc` passed all
+7 web asset tests. The engine now starts and cancels the existing service
+supervisor with its lifespan: test `fb1bf7af` was red and implementation
+`f45f117a` passed. Logs are `<home>/backups/plugins-step2-work/assets-symlink-{red,green}.log`
+and `supervisor-{red,green}.log`. These are targeted checks, not a live smoke.
+
 ## Remaining and exact next step
 
 Step 2 is not complete. Next: implement engine routes, PluginContext, tokens,
