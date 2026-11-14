@@ -1,7 +1,12 @@
 """Profile management routes."""
 
 import asyncio
+import hashlib
+import hmac
 import logging
+import os
+import secrets
+import tempfile
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -29,6 +34,54 @@ from ..workspace_folder import folder_or_400
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/profiles", tags=["profiles"])
+_CHOICES_FINGERPRINT_KEYS: dict[Path, bytes] = {}
+
+
+def _choices_fingerprint_key() -> bytes:
+    """Load or create the private, stable key used to redact ACP launch inputs."""
+    from kollabor_config.private_fs import ensure_private_dir
+    from kollabor_engine.auth import _token_file
+
+    path = _token_file().with_name("model-choices-fingerprint.key")
+    cached = _CHOICES_FINGERPRINT_KEYS.get(path)
+    if cached is not None:
+        return cached
+
+    ensure_private_dir(path.parent)
+
+    def read_key() -> bytes:
+        if path.is_symlink():
+            raise RuntimeError("The model choices fingerprint key cannot be a symlink")
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as stream:
+            return stream.read()
+
+    try:
+        key = read_key()
+    except FileNotFoundError:
+        key = secrets.token_bytes(32)
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            if os.name != "nt":
+                os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(key)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(temporary, path)
+            except FileExistsError:  # another engine worker published the complete key first
+                key = read_key()
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+    if len(key) != 32:
+        raise RuntimeError("The model choices fingerprint key is invalid")
+    _CHOICES_FINGERPRINT_KEYS[path] = key
+    return key
 
 
 def _normalize_effort(value: Optional[str]) -> Optional[str]:
@@ -174,7 +227,10 @@ def _redacted_profile_dict(profile: LLMProfile) -> Dict[str, Any]:
     if str(getattr(profile, "provider", "")).lower() == "acp":
         from kollabor.llm import acp_discovery
 
-        result["choices_fingerprint"] = acp_discovery.launch_fingerprint(profile)
+        launch = acp_discovery.launch_fingerprint(profile).encode()
+        result["choices_fingerprint"] = hmac.new(
+            _choices_fingerprint_key(), launch, hashlib.sha256
+        ).hexdigest()
     # The key is dropped below, so the browser cannot resolve an auto profile itself.
     result["effort_provider"] = profile.get_effort_provider()
     for key in (
