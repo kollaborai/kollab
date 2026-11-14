@@ -6,7 +6,9 @@ file operations with proper error handling, logging, and result processing.
 
 import asyncio
 import logging
+import os
 import re
+import shlex
 import time
 import uuid
 from pathlib import Path
@@ -21,11 +23,19 @@ from .shell_executor import ShellExecutor
 from .tool_output_budget import ToolOutputArtifactStore
 from .voice_admission import is_voice_origin
 from .voice_tool_policy import (
+    _SHELL_OPERATOR_CHARS,
+    MAX_VOICE_COMMAND_BYTES,
     MAX_VOICE_COMMAND_SECONDS,
     MAX_VOICE_OUTPUT_BYTES,
     VoiceTerminalPlan,
     VoiceToolDecision,
     VoiceToolExecutionGuard,
+    _git_leaves_project,
+    _has_unsafe_ls_flags,
+    _is_hard_blocked,
+    _is_path_qualified_executable,
+    _is_read_only_action,
+    _resolve_trusted_executable,
 )
 from .yes_approval import NEEDS_YES, NOT_IN_HIDDEN_TURN, YesApprovals, call_approval
 
@@ -1259,6 +1269,7 @@ class ToolExecutor:
                         result = await self._plugin_handlers[_plugin_key](tool_data)
                     elif tool_type in (
                         "terminal",
+                        "terminal_read",
                         "terminal_status",
                         "terminal_output",
                         "terminal_send",
@@ -1543,6 +1554,9 @@ class ToolExecutor:
         tool_id = tool_data.get("id", "unknown")
         tool_type = tool_data.get("type", "terminal")
 
+        if tool_type == "terminal_read":
+            return await self._execute_read_only_terminal_command(tool_data)
+
         # Route to specific handler based on type
         if tool_type == "terminal_status":
             return await self._execute_terminal_status(tool_data)
@@ -1656,6 +1670,97 @@ class ToolExecutor:
             success=result.success,
             output=output,
             error=error,
+        )
+
+    async def _execute_read_only_terminal_command(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Run a classifier-approved terminal command without a shell."""
+        tool_id = tool_data.get("id", "unknown")
+        command = tool_data.get("command")
+
+        def refuse(reason: str) -> ToolExecutionResult:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_read",
+                success=False,
+                error=f"Read-only terminal refused command: {reason}",
+            )
+
+        if not isinstance(command, str) or not command.strip():
+            return refuse("command is empty or malformed")
+        try:
+            if len(command.encode("utf-8")) > MAX_VOICE_COMMAND_BYTES:
+                return refuse("command exceeds the read-only policy size limit")
+        except UnicodeEncodeError:
+            return refuse("command is not valid UTF-8")
+        if any(char in _SHELL_OPERATOR_CHARS for char in command):
+            return refuse("compound shell syntax is not supported")
+        if tool_data.get("background"):
+            return refuse("background sessions are not supported")
+
+        try:
+            argv = tuple(shlex.split(command, posix=True))
+        except ValueError:
+            return refuse("command could not be parsed safely")
+        if not argv or any(not part or "\\" in part for part in argv):
+            return refuse("command contains unsupported escaping")
+        if _has_unsafe_ls_flags(argv):
+            return refuse("recursive or symlink-following ls is not allowed")
+        if _is_path_qualified_executable(argv[0]):
+            return refuse("executable must use a trusted bare command name")
+
+        root = Path(self.workspace or Path.cwd()).expanduser().resolve()
+        cwd = self._resolve_terminal_cwd(tool_data.get("cwd")) or root
+        try:
+            cwd = cwd.resolve()
+            cwd.relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            return refuse("working directory must stay inside the project")
+
+        if _is_hard_blocked(argv):
+            return refuse("command is permanently blocked by the read-only policy")
+        if _git_leaves_project(argv, cwd, root):
+            return refuse("Git command must stay inside the project")
+        if not _is_read_only_action(argv, cwd, root):
+            return refuse("command is not classified as read-only")
+
+        executable = _resolve_trusted_executable(argv[0], root)
+        if executable is None:
+            return refuse("executable is not on the trusted system path")
+        argv = (str(executable), *argv[1:])
+        command_env = self.shell_executor._filter_env(os.environ.copy())
+        if Path(argv[0]).stem.lower() == "git":
+            command_env = {
+                name: value
+                for name, value in command_env.items()
+                if not name.upper().startswith("GIT_")
+            }
+
+        self._active_shell_executor = self.shell_executor
+        try:
+            result = await self.shell_executor.run_argv(
+                argv,
+                timeout=min(self.terminal_timeout, MAX_VOICE_COMMAND_SECONDS),
+                cwd=cwd,
+                env=command_env,
+                max_output_bytes=MAX_VOICE_OUTPUT_BYTES,
+            )
+        finally:
+            self._active_shell_executor = None
+
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            tool_type="terminal_read",
+            success=result.success,
+            output=result.stdout if result.success else result.stderr,
+            error=(
+                ""
+                if result.success
+                else result.error or f"Exit code {result.exit_code}: {result.stderr}"
+            ),
+            execution_time=result.execution_time,
+            metadata={"exit_code": result.exit_code},
         )
 
     async def _execute_terminal_status(

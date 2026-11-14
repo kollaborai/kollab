@@ -1,0 +1,38 @@
+{
+  "name": "agent-terminal-read",
+  "description": "An agent bundle with terminal-read can inspect Git history and cannot create files.",
+  "steps": [
+    {
+      "action": "shell",
+      "description": "prepare an isolated project, read-only agent bundle, and local fake model",
+      "command": "R=$(pwd); P=\"${TMPDIR:-/tmp}/kollab-spec-terminal-read.path\"; H=$(mktemp -d \"${TMPDIR:-/tmp}/kollab-spec-terminal-read.XXXXXX\"); printf %s \"$H\" > \"$P\"; mkdir -p \"$H/.kollab\" \"$H/ws/.kollab/agents/read-only-auditor\"; touch \"$H/.kollab/connect-guide-seen\"; (HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/tests/tmux/lib/fake_llm.py\" \"$H/fake.port\" >/dev/null 2>&1 & echo $! > \"$H/fake.pid\"); for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s \"$H/fake.port\" ] && break; sleep 0.3; done; printf '{\"application\":{\"setup_completed\":true},\"kollabor\":{\"llm\":{\"active_profile\":\"fake\",\"profiles\":{\"fake\":{\"provider\":\"custom\",\"model\":\"fake-echo\",\"base_url\":\"http://127.0.0.1:%s/v1\",\"api_key\":\"not-a-real-key\"}}}}}' \"$(cat \"$H/fake.port\")\" > \"$H/.kollab/config.json\"; printf '{\"tools\":[\"file-read\",\"file-grep\",\"terminal-read\"]}' > \"$H/ws/.kollab/agents/read-only-auditor/agent.json\"; printf 'You are a repository auditor. Use terminal-read for read-only terminal inspection.\\n' > \"$H/ws/.kollab/agents/read-only-auditor/system_prompt.md\"; git -C \"$H/ws\" init -q -b main; git -C \"$H/ws\" config user.email spec@example.invalid; git -C \"$H/ws\" config user.name Spec; printf 'temporary project\\n' > \"$H/ws/README.md\"; git -C \"$H/ws\" add README.md; git -C \"$H/ws\" commit -qm initial; echo 'isolated terminal-read project ready'",
+      "assert_contains": "isolated terminal-read project ready"
+    },
+    {
+      "action": "shell",
+      "description": "run the specified pipe-mode bundle command for read-only Git history",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-terminal-read.path\"); printf '%s' 'terminal-read-safe' | (cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" -p --agent read-only-auditor)",
+      "assert_contains": "initial"
+    },
+    {
+      "action": "shell",
+      "description": "run a write request through the same read-only bundle",
+      "command": "R=$(pwd); H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-terminal-read.path\"); printf '%s' 'terminal-read-write' | (cd \"$H/ws\" && HOME=\"$H\" KOLLAB_NO_KEYRING=1 \"$R/.venv/bin/python\" \"$R/main.py\" -p --agent read-only-auditor)",
+      "assert_contains": "read-only terminal refused command"
+    },
+    {
+      "action": "shell",
+      "description": "verify the refused command created no file",
+      "command": "H=$(cat \"${TMPDIR:-/tmp}/kollab-spec-terminal-read.path\"); test ! -e \"$H/ws/x.txt\" && echo 'x.txt was not created'",
+      "assert_contains": "x.txt was not created"
+    }
+  ],
+  "teardown": [
+    {
+      "action": "shell",
+      "description": "stop the local fake model and remove its exact temporary home",
+      "command": "P=\"${TMPDIR:-/tmp}/kollab-spec-terminal-read.path\"; if [ -s \"$P\" ]; then H=$(cat \"$P\"); if [ -n \"$H\" ] && [ -d \"$H\" ]; then kill \"$(cat \"$H/fake.pid\")\" 2>/dev/null || true; rm -r -- \"$H\"; fi; rm -- \"$P\"; fi",
+      "allow_failure": true
+    }
+  ]
+}

@@ -7,8 +7,10 @@ and result formatting functionality.
 import asyncio
 import os
 import sys
+import tempfile
 import unittest
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -154,6 +156,183 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.output.strip(), "Hello World")
         self.assertEqual(result.error, "")
         self.assertGreaterEqual(result.execution_time, 0)
+
+    async def test_terminal_read_only_tool_allows_reads_and_refuses_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            from kollabor_agent.tool_registry import get_registry
+
+            self.assertIsNotNone(get_registry().get("terminal-read"))
+            self.executor.workspace = workspace
+            self.executor.set_bundle_scope(
+                ["file-read", "file-grep", "terminal-read"]
+            )
+            self.executor.shell_executor.run_argv = AsyncMock(
+                return_value=ShellResult(
+                    success=True, stdout="commit\n", stderr="", exit_code=0
+                )
+            )
+
+            read_result = await self.executor.execute_tool(
+                {
+                    "type": "terminal_read",
+                    "id": "terminal-read-1",
+                    "command": "git log --oneline -1",
+                    "cwd": str(workspace),
+                }
+            )
+            write_result = await self.executor.execute_tool(
+                {
+                    "type": "terminal_read",
+                    "id": "terminal-read-2",
+                    "command": "touch x.txt",
+                    "cwd": str(workspace),
+                }
+            )
+
+            self.assertTrue(read_result.success)
+            self.assertEqual(read_result.output, "commit\n")
+            self.assertFalse(write_result.success)
+            self.assertIn("read-only", write_result.error.lower())
+            self.assertFalse((workspace / "x.txt").exists())
+            self.executor.shell_executor.run_argv.assert_awaited_once()
+            call = self.executor.shell_executor.run_argv.await_args
+            self.assertEqual(Path(call.args[0][0]).name, "git")
+            self.assertTrue(Path(call.args[0][0]).is_absolute())
+            self.assertEqual(call.args[0][1:], ("log", "--oneline", "-1"))
+            self.assertEqual(call.kwargs["timeout"], 10)
+            self.assertEqual(call.kwargs["cwd"], workspace.resolve())
+            self.assertEqual(call.kwargs["max_output_bytes"], 8 * 1024)
+
+    async def test_terminal_read_ignores_inherited_git_repository_overrides(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            workspace = temp_root / "workspace"
+            outside = temp_root / "outside"
+            for repository, message in (
+                (workspace, "workspace-marker"),
+                (outside, "outside-marker"),
+            ):
+                repository.mkdir()
+                subprocess.run(["git", "init", "-q", str(repository)], check=True)
+                (repository / "README.md").write_text(message)
+                subprocess.run(
+                    ["git", "-C", str(repository), "add", "README.md"], check=True
+                )
+                subprocess.run(
+                    [
+                        "git", "-C", str(repository), "-c", "user.name=Review",
+                        "-c", "user.email=review@example.invalid", "commit", "-qm", message,
+                    ],
+                    check=True,
+                )
+
+            self.executor.workspace = workspace
+            with patch.dict(os.environ, {"GIT_DIR": str(outside / ".git")}):
+                result = await self.executor.execute_tool(
+                    {
+                        "type": "terminal_read",
+                        "id": "terminal-read-inherited-git-dir",
+                        "command": "git log --format=%s -1",
+                    }
+                )
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.output.strip(), "workspace-marker")
+
+    async def test_terminal_read_filters_git_overrides_for_windows_executable_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self.executor.workspace = Path(temp_dir)
+            self.executor.shell_executor.run_argv = AsyncMock(
+                return_value=ShellResult(
+                    success=True, stdout="commit\n", stderr="", exit_code=0
+                )
+            )
+
+            with patch(
+                "kollabor_agent.tool_executor._resolve_trusted_executable",
+                return_value=Path("/trusted/git.exe"),
+            ), patch.dict(os.environ, {"GIT_DIR": "/outside/.git"}):
+                result = await self.executor.execute_tool(
+                    {
+                        "type": "terminal_read",
+                        "id": "terminal-read-windows-git-name",
+                        "command": "git log --oneline -1",
+                    }
+                )
+
+            self.assertTrue(result.success)
+            child_env = self.executor.shell_executor.run_argv.await_args.kwargs["env"]
+            self.assertFalse(
+                any(name.upper().startswith("GIT_") for name in child_env)
+            )
+
+    async def test_terminal_read_resolves_executable_outside_writable_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            workspace.mkdir()
+            fake_bin = Path(temp_dir) / "bin"
+            fake_bin.mkdir()
+            fake_git = fake_bin / "git"
+            fake_git.write_text("#!/bin/sh\nexit 99\n")
+            fake_git.chmod(0o755)
+            self.executor.workspace = workspace
+            self.executor.shell_executor.run_argv = AsyncMock(
+                return_value=ShellResult(
+                    success=True, stdout="commit\n", stderr="", exit_code=0
+                )
+            )
+
+            path = os.pathsep.join(
+                [str(fake_bin), os.environ.get("PATH", "")]
+            )
+            with patch.dict(os.environ, {"PATH": path}):
+                result = await self.executor.execute_tool(
+                    {
+                        "type": "terminal_read",
+                        "id": "terminal-read-path-1",
+                        "command": "git log --oneline -1",
+                    }
+                )
+
+            self.assertTrue(result.success)
+            self.executor.shell_executor.run_argv.assert_awaited_once()
+            argv = self.executor.shell_executor.run_argv.await_args.args[0]
+            self.assertTrue(Path(argv[0]).is_absolute())
+            self.assertNotEqual(Path(argv[0]).resolve(), fake_git.resolve())
+
+    async def test_terminal_read_refuses_recursive_symlink_following_ls(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            workspace = temp_root / "workspace"
+            private = temp_root / "private"
+            workspace.mkdir()
+            private.mkdir()
+            if os.name != "nt":
+                (private / "secret.txt").write_text("outside project")
+                (workspace / "external").symlink_to(
+                    private, target_is_directory=True
+                )
+            self.executor.workspace = workspace
+            self.executor.shell_executor.run_argv = AsyncMock(
+                return_value=ShellResult(
+                    success=True, stdout="", stderr="", exit_code=0
+                )
+            )
+
+            result = await self.executor.execute_tool(
+                {
+                    "type": "terminal_read",
+                    "id": "terminal-read-ls-1",
+                    "command": "ls -RL",
+                }
+            )
+
+            self.assertFalse(result.success)
+            self.assertIn("recursive", result.error.lower())
+            self.executor.shell_executor.run_argv.assert_not_awaited()
 
     async def test_terminal_output_uses_the_only_active_session_when_name_is_missing(self):
         plugin = MagicMock()
