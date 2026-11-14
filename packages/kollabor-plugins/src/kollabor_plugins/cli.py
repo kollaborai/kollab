@@ -160,6 +160,15 @@ def main(argv: list[str]) -> int:
             print(f"Commit: {staged['commit']}")
             print(f"Files SHA-256: {staged['files_sha256']}")
             print("Uses: " + (", ".join(manifest.get("uses", [])) or "none"))
+            print(
+                "Parts: "
+                + (", ".join(key for key in ("python", "settings", "web", "services") if manifest.get(key)) or "none")
+            )
+            for name, service in manifest.get("services", {}).items():
+                import shlex
+
+                print(f"Process {name}: {shlex.join(service['command'])}")
+                print("  Secrets: " + (", ".join(service.get("secrets", [])) or "none"))
             print("Plugin code runs as your user and can use your computer outside Kollab.")
             if input("Install this exact version? [yes/no] ").strip().lower() != "yes":
                 return 1
