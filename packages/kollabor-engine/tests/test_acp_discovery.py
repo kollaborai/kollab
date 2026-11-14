@@ -993,6 +993,26 @@ def test_launch_fingerprint_hides_values_and_follows_the_launch_inputs(monkeypat
     assert fingerprint(base) != one  # a passed-through variable is part of the account
 
 
+def test_profile_response_does_not_publish_the_unkeyed_launch_fingerprint(monkeypatch):
+    from kollabor_engine import auth
+
+    monkeypatch.setattr(auth, "get_token", lambda: "private-engine-token")
+    profile = FakeProfile("response-fingerprint")
+    profile.to_dict = lambda: {
+        "name": profile.name,
+        "provider": profile.provider,
+        "command": list(profile.command),
+        "env": profile.env,
+        "cwd": profile.cwd,
+        "workspace": profile.workspace,
+        "pass_env": profile.pass_env,
+    }
+    profile.get_effort_provider = lambda: "acp"
+    result = profiles_route._redacted_profile_dict(profile)
+
+    assert result["choices_fingerprint"] != acp_discovery.launch_fingerprint(profile)
+
+
 @pytest.mark.asyncio
 async def test_retry_probes_only_incomplete_profiles_and_only_the_models_that_failed(warm, monkeypatch):
     harness = _harness(monkeypatch, MODELS3, LEVELS3)
