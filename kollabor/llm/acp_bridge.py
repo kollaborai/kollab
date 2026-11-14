@@ -1815,6 +1815,12 @@ class ACPRunner:
                 if group_guard is not None:
                     with contextlib.suppress(asyncio.TimeoutError):
                         await asyncio.wait_for(group_guard.wait(), timeout=1)
+                loop = asyncio.get_running_loop()
+                group_members_remain = self._owned_process_group_exists()
+                deadline = loop.time() + 1
+                while group_members_remain and loop.time() < deadline:
+                    await asyncio.sleep(min(0.05, max(0, deadline - loop.time())))
+                    group_members_remain = self._owned_process_group_exists()
                 if tracker is not None:
                     tracker.cancel()
                     await asyncio.gather(tracker, return_exceptions=True)
@@ -1826,7 +1832,12 @@ class ACPRunner:
                 survivors = self._live_owned_processes()
                 unreaped_adapter = process is not None and process.returncode is None
                 group_guard_unreaped = group_guard is not None and group_guard.returncode is None
-                if not survivors and not unreaped_adapter and not group_guard_unreaped:
+                if (
+                    not survivors
+                    and not unreaped_adapter
+                    and not group_guard_unreaped
+                    and not group_members_remain
+                ):
                     self._owned_processes.clear()
                     self._adapter_pid = None
                     self._process_group_id = None
@@ -1834,7 +1845,7 @@ class ACPRunner:
                     detail = ", ".join(str(owner.pid) for owner in survivors)
                     if unreaped_adapter:
                         detail += f" (adapter {process.pid} not reaped)"
-                    if group_guard_unreaped:
+                    if group_guard_unreaped or group_members_remain:
                         detail += f" (process group {self._process_group_id} still has members)"
                     raise ACPError(
                         "ACP owned process cleanup incomplete: " + detail
