@@ -18,8 +18,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kollabor_agent.runtime import AgentRuntime
 from kollabor import daemon
+from kollabor_agent.runtime import AgentRuntime
 from plugins.hub.plugin import HubPlugin
 from plugins.hub.presence import PresenceManager
 
