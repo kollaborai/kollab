@@ -144,3 +144,7 @@ def main():
             os._exit(125)
         time.sleep(0.02)
     os._exit((shell_code if shell_code >= 0 else 128 - shell_code) & 0xff)
+
+
+if __name__ == "__main__":
+    main()
