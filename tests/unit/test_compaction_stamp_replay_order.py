@@ -305,6 +305,32 @@ def test_calculate_duration_all_bad_stamps_is_zero(tmp_path):
     assert mgr._calculate_duration() == "0m"
 
 
+@pytest.mark.parametrize(
+    ("timestamps", "expected_duration"),
+    [
+        (["2026-11-08T10:00:00+02:00", "2026-11-08T09:00:00+00:00"], "1.0h"),
+        (["2026-11-08T10:00:00+02:00", "2026-11-08T08:00:00+00:00"], "0m"),
+        (["2026-03-08T01:30:00-08:00", "2026-03-08T03:30:00-07:00"], "1.0h"),
+        (["2026-11-08T08:00:00+00:00", "2026-11-08T09:30:00+00:00"], "1.5h"),
+        (["2026-11-08T08:00:00", "2026-11-08T08:30:00"], "30m"),
+        ([None, "2026-11-08T08:00:00+00:00", "invalid", "2026-11-08T08:30:00+00:00"], "30m"),
+    ],
+)
+def test_saved_summary_duration_normalizes_timestamp_offsets(
+    tmp_path, timestamps, expected_duration
+):
+    mgr = manager(tmp_path)
+    mgr.messages = [
+        {"role": "user", "content": "hello", "timestamp": timestamp}
+        for timestamp in timestamps
+    ]
+
+    assert mgr.save_session("timestamp-duration") is True
+
+    saved = json.loads((tmp_path / "timestamp-duration.jsonl").read_text())
+    assert saved["summary"]["duration"] == expected_duration
+
+
 def test_save_session_survives_none_and_garbage_stamps(tmp_path):
     # A session whose records carry missing or unparseable stamps must
     # still save; the summary's duration calculation must not make the
