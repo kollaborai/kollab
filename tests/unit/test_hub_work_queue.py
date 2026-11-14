@@ -80,8 +80,17 @@ def test_sweep_scopes_same_upstream_ref_to_each_slot_repository(
 
     def fake_run(argv, **kwargs):
         calls.append(list(argv))
-        repo = argv[argv.index("-R") + 1] if "-R" in argv else "/repos/repo-b"
-        state = "OPEN" if repo == "/repos/repo-a" else "MERGED"
+        if argv[0] == "git":
+            remotes = {
+                "/repos/repo-a": "git@github.com:owner/repo-a.git\n",
+                "/repos/repo-b": "git@github.com:owner/repo-b.git\n",
+            }
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout=remotes[argv[2]],
+            )
+        repo = argv[argv.index("-R") + 1]
+        state = "OPEN" if repo == "github.com/owner/repo-a" else "MERGED"
         return types.SimpleNamespace(
             returncode=0,
             stdout=json.dumps({"state": state, "mergedAt": "now"}),
@@ -97,8 +106,10 @@ def test_sweep_scopes_same_upstream_ref_to_each_slot_repository(
     assert queue.get_pending() == [open_slot]
     assert calls
     assert all(
-        call[call.index("-R") + 1] in {"/repos/repo-a", "/repos/repo-b"}
+        call[call.index("-R") + 1]
+        in {"github.com/owner/repo-a", "github.com/owner/repo-b"}
         for call in calls
+        if call[0] == "gh"
     )
 
 

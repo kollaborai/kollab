@@ -3,9 +3,11 @@
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from kollabor_agent.runtime import AgentRuntime
 from kollabor_config.file_lock import locked_file, try_lock, unlock
@@ -33,6 +35,38 @@ def _append_stale_upstream_note(slot: WorkSlot, note: str) -> bool:
     existing.append(value)
     slot.stale_upstream_note = "\n".join(existing)
     return True
+
+
+def _github_repo_selector(project: str) -> Optional[str]:
+    """Return gh's HOST/OWNER/REPO selector for a local project directory."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", project, "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=_GH_TIMEOUT_SECS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    remote = proc.stdout.strip()
+    if not remote:
+        return None
+
+    if "://" in remote:
+        parsed = urlsplit(remote)
+        host = parsed.hostname
+        path = parsed.path
+    else:
+        match = re.fullmatch(r"(?:[^@]+@)?([^:/]+):(.+)", remote)
+        if not match:
+            return None
+        host, path = match.groups()
+    parts = [part for part in path.removesuffix(".git").split("/") if part]
+    if not host or len(parts) < 2:
+        return None
+    return "/".join((host, parts[-2], parts[-1]))
 
 
 class CoordinatorElection:
@@ -239,21 +273,25 @@ def github_terminal_state(ref: str, project: Optional[str] = None) -> Optional[s
     are cached per project for the process lifetime. Closed issues and unmerged
     closed PRs are re-checked each sweep because they can reopen.
     """
-    repository = os.getcwd() if project is None else project
-    if not repository:
+    project_path = os.getcwd() if project is None else project
+    if not project_path:
         return None
-    cache_key = (repository, ref)
+    cache_key = (project_path, ref)
     cached = _TERMINAL_CACHE.get(cache_key)
     if cached is not None:
         return cached
+    repository = _github_repo_selector(project_path) if project is not None else None
+    if project is not None and repository is None:
+        return None
     num = ref.lstrip("#")
+    repo_args = ["-R", repository] if repository else []
     attempts = (
         (
-            ["gh", "pr", "view", num, "--json", "state,mergedAt", "-R", repository],
+            ["gh", "pr", "view", num, "--json", "state,mergedAt", *repo_args],
             "pr",
         ),
         (
-            ["gh", "issue", "view", num, "--json", "state,stateReason", "-R", repository],
+            ["gh", "issue", "view", num, "--json", "state,stateReason", *repo_args],
             "issue",
         ),
     )
