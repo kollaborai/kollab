@@ -421,7 +421,7 @@ def _redaction_values(context) -> list[str]:
 
 
 @router.get("/{plugin_id}/services/{service_name}/log", response_class=PlainTextResponse)
-def plugin_service_log(plugin_id: str, service_name: str, lines: int = Query(default=200, ge=1, le=1000)):
+def plugin_service_log(plugin_id: str, service_name: str, tail: int = Query(default=200, ge=1, le=1000)):
     from kollabor_plugins.services import redact_log
 
     context = _service_context(plugin_id, service_name)
@@ -448,7 +448,7 @@ def plugin_service_log(plugin_id: str, service_name: str, lines: int = Query(def
             if not separator:
                 raw = b""
         scrubbed = redact_log(raw.decode("utf-8", errors="replace"), _redaction_values(context))
-        return "\n".join(scrubbed.splitlines()[-lines:])
+        return "\n".join(scrubbed.splitlines()[-tail:])
     except (ValueError, UnicodeError) as exc:
         raise HTTPException(status_code=409, detail="Cannot read plugin service log safely") from exc
     except OSError as exc:
