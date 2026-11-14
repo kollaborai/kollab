@@ -2478,6 +2478,32 @@ class ToolExecutor:
                 error="Missing required parameter: name",
             )
 
+        # A tool-load call may expose documentation, but it must not grant
+        # capabilities outside the bundle's declared tool list.
+        if (
+            tool_name.startswith("mcp:")
+            and self._enforce_bundle_scope
+            and self._bundle_tools is not None
+        ):
+            parts = tool_name.split(":", 2)
+            mcp_tool_name = parts[2] if len(parts) == 3 else ""
+            if not (
+                "mcp" in self._bundle_tools
+                or "mcp-tool" in self._bundle_tools
+                or mcp_tool_name in self._bundle_tools
+                or tool_name in self._bundle_tools
+            ):
+                allowed_tools = ", ".join(sorted(set(self._bundle_tools)))
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="tool_load",
+                    success=False,
+                    error=(
+                        f"Tool '{tool_name}' is not in this agent's allowed "
+                        f"tools list: {allowed_tools}"
+                    ),
+                )
+
         # Check if it's an MCP tool (format: mcp:server:tool_name)
         if tool_name.startswith("mcp:"):
             return await self._load_mcp_tool(tool_id, tool_name)
@@ -2512,12 +2538,21 @@ class ToolExecutor:
                 metadata={"available_tools": available},
             )
 
-        # Add to bundle scope if active
-        newly_loaded = False
-        if self._bundle_tools is not None and tool_def.name not in self._bundle_tools:
-            self._bundle_tools.append(tool_def.name)
-            newly_loaded = True
-            logger.info(f"Tool loaded into active set: {tool_def.name}")
+        if (
+            self._enforce_bundle_scope
+            and self._bundle_tools is not None
+            and tool_def.name not in self._bundle_tools
+        ):
+            allowed_tools = ", ".join(sorted(set(self._bundle_tools)))
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=(
+                    f"Tool '{tool_def.name}' is not in this agent's allowed "
+                    f"tools list: {allowed_tools}"
+                ),
+            )
 
         # Generate full documentation
         markdown = tool_def.to_markdown()
@@ -2540,7 +2575,7 @@ class ToolExecutor:
             metadata={
                 "loaded_tool": tool_def.name,
                 "category": tool_def.category,
-                "already_active": not newly_loaded,
+                "already_active": True,
             },
         )
 
