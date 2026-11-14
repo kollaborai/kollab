@@ -17,7 +17,7 @@ const MAX_WIDTH = 420;
 // one arrow-key press on the divider moves it this many pixels
 const KEY_STEP = 8;
 // below 640px the sidebar can be hidden behind a toggle in the code window's title bar
-const NARROW_QUERY = "(max-width: 639.98px)";
+export const NARROW_QUERY = "(max-width: 639.98px)";
 
 // ─── width (persisted per browser) ──────────────────────────
 
@@ -51,7 +51,11 @@ function saveWidth(width: number): void {
  * Whether the files sidebar shows. At 640px and wider it always shows. Below 640px it starts hidden,
  * and `toggle` shows or hides it. The caller renders the toggle in the window's title bar when `narrow`.
  */
-export function useFileSidebarVisibility(): { narrow: boolean; visible: boolean; toggle: () => void } {
+export function shouldHideSidebarAfterFileSelection(state: { narrow: boolean; visible: boolean }): boolean {
+  return state.narrow && state.visible;
+}
+
+export function useFileSidebarVisibility(): { narrow: boolean; visible: boolean; toggle: () => void; hide: () => void } {
   const [narrow, setNarrow] = useState(() => window.matchMedia(NARROW_QUERY).matches);
   const [hidden, setHidden] = useState(true);
 
@@ -66,6 +70,7 @@ export function useFileSidebarVisibility(): { narrow: boolean; visible: boolean;
     narrow,
     visible: !narrow || !hidden,
     toggle: () => setHidden((value) => !value),
+    hide: () => setHidden(true),
   };
 }
 
