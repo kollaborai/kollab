@@ -193,3 +193,15 @@ export function shouldAutoOpenGuide(raw: string | null): boolean {
     return true;
   }
 }
+
+/**
+ * Whether a guide state transition should be written to storage. The
+ * untouched first-run state is not a user decision: persisting it on mount
+ * is exactly what defeated App's first-run check (#1098). Identical states
+ * and reverts to the pristine state write nothing too, so no write can
+ * clobber an existing record with an undismissed-welcome entry.
+ */
+export function shouldPersistGuide(prev: GuideState, next: GuideState): boolean {
+  if (isInitialGuideState(next)) return false;
+  return prev.step !== next.step || prev.dismissed !== next.dismissed;
+}

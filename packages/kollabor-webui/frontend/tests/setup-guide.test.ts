@@ -123,3 +123,48 @@ test("each actionable step targets a real surface", () => {
 test("storage key is namespaced and stable", () => {
   assert.equal(STORAGE_KEY, "kollab.setup-guide.v1");
 });
+
+// Issue #1098: first-run auto-open decisions, both pure. No record is a
+// first run; a record stuck at an undismissed welcome is one too (old builds
+// wrote exactly that on mount, which is why auto-open never fired). Engaged
+// or dismissed records never reopen, and a corrupt record must not block the
+// guide forever. Persistence skips the untouched initial state: writing it on
+// mount is what defeated the first-run check in the first place.
+import { shouldAutoOpenGuide, shouldPersistGuide } from "../src/setup/guide-model.ts";
+
+test("shouldAutoOpenGuide: no record or stale welcome record is a first run", () => {
+  assert.equal(shouldAutoOpenGuide(null), true);
+  assert.equal(shouldAutoOpenGuide('{"step":"welcome","dismissed":false}'), true);
+  assert.equal(shouldAutoOpenGuide("not-json{"), true);
+});
+
+test("shouldAutoOpenGuide: engaged or dismissed records never reopen", () => {
+  assert.equal(shouldAutoOpenGuide('{"step":"provider","dismissed":false}'), false);
+  assert.equal(shouldAutoOpenGuide('{"step":"agent","dismissed":false}'), false);
+  assert.equal(shouldAutoOpenGuide('{"step":"done","dismissed":true}'), false);
+  assert.equal(shouldAutoOpenGuide('{"step":"welcome","dismissed":true}'), false);
+});
+
+test("shouldPersistGuide: the untouched initial state writes nothing", () => {
+  const initial = initialGuideState();
+  assert.equal(shouldPersistGuide(initial, initial), false);
+});
+
+test("shouldPersistGuide: engage, advance and dismiss all record", () => {
+  const initial = initialGuideState();
+  assert.equal(shouldPersistGuide(initial, { step: "provider", dismissed: false }), true);
+  assert.equal(shouldPersistGuide(initial, { step: "welcome", dismissed: true }), true);
+  const engaged: GuideState = { step: "provider", dismissed: false };
+  assert.equal(shouldPersistGuide(engaged, { step: "agent", dismissed: false }), true);
+  assert.equal(shouldPersistGuide(engaged, { step: "provider", dismissed: true }), true);
+});
+
+test("shouldPersistGuide: identical states and pristine reverts do not write", () => {
+  const engaged: GuideState = { step: "provider", dismissed: false };
+  assert.equal(shouldPersistGuide(engaged, engaged), false);
+  // A revert to the pristine state must not clobber the record with an
+  // undismissed-welcome entry (that record hides first runs from the check).
+  assert.equal(shouldPersistGuide(engaged, initialGuideState()), false);
+  const dismissed: GuideState = { step: "done", dismissed: true };
+  assert.equal(shouldPersistGuide(dismissed, initialGuideState()), false);
+});
