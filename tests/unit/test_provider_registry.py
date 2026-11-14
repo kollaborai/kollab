@@ -332,6 +332,25 @@ class TestProviderDetection:
         provider = detect_provider_from_profile(profile)
         assert provider == ProviderType.ANTHROPIC
 
+    @pytest.mark.parametrize(
+        ("api_base", "expected"),
+        [
+            ("https://gateway.example/anthropic.com/v1", None),
+            ("https://anthropic.com.mirror.example/v1", None),
+            ("https://api.anthropic.com/v1?via=azure.com", ProviderType.ANTHROPIC),
+            ("api.anthropic.com/v1", ProviderType.ANTHROPIC),
+        ],
+    )
+    def test_auto_provider_detection_matches_endpoint_host(self, api_base, expected):
+        """Auto detection uses the endpoint host, not other URL components."""
+        profile = {"provider": "auto", "api_key": "", "api_base": api_base}
+
+        if expected is None:
+            with pytest.raises(ValueError, match="No provider could be auto-detected"):
+                detect_provider_from_profile(profile)
+        else:
+            assert detect_provider_from_profile(profile) == expected
+
     def test_detect_default_anthropic(self):
         """Test default to Anthropic when cannot determine."""
         profile = {"api_key": "test-key", "model": "gpt-4"}
