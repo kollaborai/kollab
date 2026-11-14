@@ -434,6 +434,8 @@ export type NetworkAgent = {
   handle?: string;
   state?: string;
   is_coordinator?: boolean;
+  /** The agent bundle it runs, as its device reports it; absent from a device that does not say. */
+  agent_type?: string;
   harness?: string;
   acp_waiting?: boolean;
   /** The tool it runs now (bare name and type, no arguments), from its device's directory; null between tools. */
