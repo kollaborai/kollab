@@ -52,6 +52,41 @@ async def test_start_refuses_when_recorded_process_group_survives(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_terminate_waits_until_owned_process_group_is_empty_after_kill(tmp_path, monkeypatch):
+    runner = ACPRunner(
+        ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)),
+        persist_profile_resolution=False,
+    )
+    runner._process_group_id = 4242
+    runner._process_group_guard = SimpleNamespace(returncode=0)
+    checks = iter((True, False))
+    group_states = []
+    observed = []
+
+    async def wait_for_guard():
+        return 0
+
+    runner._process_group_guard.wait = wait_for_guard
+    monkeypatch.setattr(runner, "_live_owned_processes", lambda: [])
+    monkeypatch.setattr(
+        runner, "_signal_owned_process_group", lambda signum: observed.append(signum)
+    )
+
+    def group_exists():
+        exists = next(checks)
+        group_states.append(exists)
+        return exists
+
+    monkeypatch.setattr(runner, "_owned_process_group_exists", group_exists)
+
+    await runner._terminate_process()
+
+    assert observed[-1] == bridge_mod.signal.SIGKILL
+    assert group_states == [True, False]
+    assert runner._process_group_id is None
+
+
+@pytest.mark.asyncio
 async def test_process_group_guard_keeps_group_identity_after_adapter_exits(tmp_path):
     runner = ACPRunner(
         ACPProfile("owned", (sys.executable, "-c", FAKE_ADAPTER), cwd=str(tmp_path)),
