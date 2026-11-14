@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import logging
 import re
+import time
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -26,6 +27,7 @@ from plugins.hub.models import MessageScope
 from plugins.hub.plugin import HubCronJob, HubPlugin
 from plugins.hub.relay_agent import RelayAgentBridge
 from plugins.hub.relay_state import RelayError
+from plugins.hub.task_ledger import TaskLedger
 from tests.unit.test_relay_agent_bridge import handle as roster_handle
 from tests.unit.test_relay_network_trust import set_trust, warm_directory
 
@@ -564,6 +566,26 @@ async def _one_tick(plugin, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr("plugins.hub.plugin.asyncio.sleep", sleep)
         await plugin._cron_loop()
+
+
+@pytest.mark.asyncio
+async def test_task_cron_surfaces_incomplete_ledger_in_supervisor_alerts(
+    monkeypatch, tmp_path
+):
+    plugin, _ = _plugin()
+    ledger = TaskLedger(str(tmp_path / "tasks"))
+    card = ledger.enqueue("koordinator", "due reminder")
+    ledger.claim(card.id, "lapis")
+    ledger._mutate_locked(
+        card.id,
+        lambda current: setattr(current, "updated_at", time.time() - 600) or True,
+    )
+    (tmp_path / "tasks" / "corrupt.json").write_text("{")
+    plugin._task_ledger = ledger
+
+    await _one_tick(plugin, monkeypatch)
+
+    assert any("incomplete" in alert.lower() for _, alert in plugin._supervisor_alerts)
 
 
 @pytest.mark.asyncio
