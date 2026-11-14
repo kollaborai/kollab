@@ -9,6 +9,8 @@ export type ComposerDraftSubmission = Readonly<{
 const DRAFT_PREFIX = "kollab:webui:composer-draft:v1";
 const revisions = new Map<string, number>();
 const pendingSubmissions = new Map<string, ComposerDraftSubmission[]>();
+// Keep failed requests' tickets until a newer edit or a successful response.
+const inFlightSubmissions = new Map<string, ComposerDraftSubmission[]>();
 
 function browserStorage(): ComposerDraftStorage | null {
   try {
@@ -52,6 +54,15 @@ export function saveComposerDraft(
   storage?: ComposerDraftStorage | null,
 ): void {
   if (!key) return;
+  if (text.length > 0) inFlightSubmissions.delete(key);
+  if (text.length === 0) {
+    // The transport clears the visible composer before it knows whether send succeeded.
+    const submittedDraft = [
+      ...(pendingSubmissions.get(key) ?? []),
+      ...(inFlightSubmissions.get(key) ?? []),
+    ].some((submission) => loadComposerDraft(key, storage) === submission.text);
+    if (submittedDraft) return;
+  }
   revisions.set(key, (revisions.get(key) ?? 0) + 1);
   try {
     const target = resolveStorage(storage);
@@ -94,6 +105,12 @@ export function takeComposerDraftSubmission(
   const queue = pendingSubmissions.get(key);
   const submission = queue?.shift() ?? null;
   if (queue?.length === 0) pendingSubmissions.delete(key);
+  if (submission) {
+    inFlightSubmissions.set(key, [
+      ...(inFlightSubmissions.get(key) ?? []),
+      submission,
+    ]);
+  }
   return submission;
 }
 
@@ -110,6 +127,12 @@ export function completeComposerDraftSubmission(
     if (!target) return false;
     target.removeItem(submission.key);
     revisions.set(submission.key, submission.revision + 1);
+    const inFlight = inFlightSubmissions.get(submission.key);
+    const remaining = inFlight?.filter(
+      (candidate) => candidate !== submission,
+    ) ?? [];
+    if (remaining.length > 0) inFlightSubmissions.set(submission.key, remaining);
+    else inFlightSubmissions.delete(submission.key);
     return true;
   } catch {
     return false;
