@@ -217,6 +217,42 @@ class TestMCPServerConnection(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    def test_cancelling_one_request_explicitly_interrupts_other_pending_calls(self):
+        """A peer call must not look like an ordinary missing response."""
+
+        async def run_test():
+            connection = MCPServerConnection("test", "echo test")
+            connection.initialized = True
+            process = _FakeProcess(stdout=_HangingStdout())
+            connection.process = process
+
+            first = asyncio.create_task(
+                connection._send_request(
+                    {"jsonrpc": "2.0", "id": "req-1", "method": "tools/call"}
+                )
+            )
+            second = asyncio.create_task(
+                connection._send_request(
+                    {"jsonrpc": "2.0", "id": "req-2", "method": "tools/call"}
+                )
+            )
+            while len(process.stdin.writes) < 2:
+                await asyncio.sleep(0)
+
+            first.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+            with self.assertRaisesRegex(
+                Exception, "interrupted.*outcome may be unknown"
+            ):
+                await second
+
+            self.assertEqual(process.returncode, 0)
+            self.assertFalse(connection.initialized)
+            self.assertEqual(connection._pending_requests, {})
+
+        asyncio.run(run_test())
+
     def test_call_tool_timeout_closes_connection_with_clear_error(self):
         """The MCP connection owns call timeout cleanup and reports it clearly."""
 
