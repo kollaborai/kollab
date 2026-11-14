@@ -363,8 +363,8 @@ manage them.
   Plugin code on disk can read `~/.kollab/engine.token` too. Decision D1 accepts this; the add sheet says
   plugins run as the user.
 - The plugin token (`KOLLAB_PLUGIN_TOKEN`) is minted once per plugin, kept in `run/token`, and given to
-  background processes and the engine router. The engine accepts it only on its own id's routes marked
-  above. It narrows mistakes and attributes calls; it is not a boundary against plugin code.
+  background processes and the engine router (as `ctx.token`). The engine accepts it only on its own id's
+  routes marked above. It narrows mistakes and attributes calls; it is not a boundary against plugin code.
 - Agent runs are not a wall either. An agent with a shell runs as the user and can read
   `~/.kollab/engine.token` and call the engine itself. The agent file tools gain a read-side deny list
   for token files and `~/.kollab/plugins/` (the existing `is_protected_path` check,
