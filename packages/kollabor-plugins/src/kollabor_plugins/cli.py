@@ -24,6 +24,9 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="kollab plugin")
     subparsers = parser.add_subparsers(dest="action", required=True)
     subparsers.add_parser("list", help="List installed plugins")
+    for action in ("enable", "disable"):
+        command = subparsers.add_parser(action, help=f"{action.title()} an installed plugin")
+        command.add_argument("plugin_id")
     add = subparsers.add_parser("add", help="Install a Git plugin after confirmation")
     add.add_argument("source")
     dev = subparsers.add_parser("dev", help="Attach a local development checkout")
@@ -38,6 +41,20 @@ def main(argv: list[str]) -> int:
         from .services import run_service
 
         return run_service(args.plugin_id, args.service, args.nonce)
+    if args.action in {"add", "enable", "disable", "dev"} and not sys.stdin.isatty():
+        raise ValueError("Plugin management requires interactive confirmation")
+    if args.action in {"enable", "disable"}:
+        from .settings import set_enabled
+
+        print(f"{args.action.title()} {args.plugin_id}? Plugin code runs as your user.")
+        if input("Confirm? [yes/no] ").strip().lower() != "yes":
+            return 1
+        set_enabled(args.plugin_id, args.action == "enable")
+        return 0
+    if args.action == "dev":
+        print("Development code is unpinned and runs as your user with your computer's permissions.")
+        if input("Continue? [yes/no] ").strip().lower() != "yes":
+            return 1
     recover_installs()
     home = Path.home() / ".kollab"
     registry = _read_registry(home / "plugins.json")

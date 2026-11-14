@@ -8,7 +8,7 @@ def test_plugin_widget_list_uses_registry(monkeypatch):
     monkeypatch.setattr(
         registry,
         "plugin_entries",
-        lambda: [
+        lambda *_args: [
             {
                 "id": "hello",
                 "name": "Hello",

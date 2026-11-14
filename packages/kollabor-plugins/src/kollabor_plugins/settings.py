@@ -100,3 +100,52 @@ def set_enabled(plugin_id: str, enabled: bool) -> None:
         from .services import stop_services
 
         stop_services(plugin_id)
+
+
+def apply_config_changes(changes: dict) -> dict:
+    """Write installed-plugin rows and return the ordinary configuration changes.
+
+    The UI uses namespaced paths to distinguish the plugin's own settings from
+    application configuration.  Malformed reserved paths are rejected rather
+    than accidentally persisted to config.json.
+    """
+    ordinary = {}
+    values: dict[str, dict] = {}
+    enabled = {}
+    for path, value in changes.items():
+        if path.startswith("plugin-values."):
+            parts = path.split(".", 2)
+            if len(parts) != 3 or not parts[1] or not parts[2]:
+                raise ValueError("Invalid plugin settings path")
+            values.setdefault(parts[1], {})[parts[2]] = value
+        elif path.startswith("plugin-registry."):
+            parts = path.split(".")
+            if len(parts) != 3 or not parts[1] or parts[2] != "enabled":
+                raise ValueError("Invalid plugin registry path")
+            enabled[parts[1]] = value
+        elif path in {"plugin-values", "plugin-registry"}:
+            raise ValueError("Invalid plugin configuration path")
+        else:
+            ordinary[path] = value
+    for plugin_id, plugin_values in values.items():
+        save(plugin_id, plugin_values)
+    for plugin_id, value in enabled.items():
+        set_enabled(plugin_id, value)
+    return ordinary
+
+
+def config_value(path: str, default: object = None) -> object:
+    """Read a namespaced installed-plugin field from its authoritative store."""
+    parts = path.split(".", 2)
+    if len(parts) != 3 or not _ID.fullmatch(parts[1]):
+        raise ValueError("Invalid plugin configuration path")
+    home = Path.home() / ".kollab"
+    if parts[0] == "plugin-registry" and parts[2] == "enabled":
+        record = _read_registry(home / "plugins.json")["plugins"].get(parts[1])
+        if not isinstance(record, dict):
+            raise ValueError("Plugin is not installed")
+        return record.get("enabled", False)
+    if parts[0] == "plugin-values" and parts[2]:
+        file = home / "plugin-data" / parts[1] / "values.json"
+        return _read_json(file).get(parts[2], default) if file.exists() else default
+    raise ValueError("Invalid plugin configuration path")

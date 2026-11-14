@@ -38,9 +38,7 @@ class ConfigWidgetDefinitions:
             module_paths = getattr(module, "__path__", [])
             for module_path in module_paths:
                 resolved_path = Path(module_path).resolve()
-                if resolved_path == plugins_dir or resolved_path.is_relative_to(
-                    plugins_dir
-                ):
+                if resolved_path == plugins_dir or resolved_path.is_relative_to(plugins_dir):
                     return True
         except Exception as e:
             logger.debug(f"Could not verify config plugin module root: {e}")
@@ -65,10 +63,7 @@ class ConfigWidgetDefinitions:
             return
 
         for module_name in list(sys.modules):
-            if any(
-                module_name == stale_root or module_name.startswith(f"{stale_root}.")
-                for stale_root in stale_roots
-            ):
+            if any(module_name == stale_root or module_name.startswith(f"{stale_root}.") for stale_root in stale_roots):
                 del sys.modules[module_name]
 
     @staticmethod
@@ -179,7 +174,7 @@ class ConfigWidgetDefinitions:
                 try:
                     if importlib.util.find_spec(plugin_module) is not None:
                         targets.append((module_info.name, plugin_module))
-                except (ImportError, ModuleNotFoundError, ValueError):
+                except ImportError, ModuleNotFoundError, ValueError:
                     logger.debug(f"Could not find plugin module {plugin_module}")
 
         return ConfigWidgetDefinitions._dedupe_plugin_targets(targets)
@@ -200,16 +195,10 @@ class ConfigWidgetDefinitions:
         return deduped
 
     @staticmethod
-    def _find_plugin_class(
-        module: Any, require_config_widgets: bool = False
-    ) -> type | None:
+    def _find_plugin_class(module: Any, require_config_widgets: bool = False) -> type | None:
         for name in dir(module):
             obj = getattr(module, name)
-            if (
-                isinstance(obj, type)
-                and name.endswith("Plugin")
-                and name not in ("Plugin", "BasePlugin")
-            ):
+            if isinstance(obj, type) and name.endswith("Plugin") and name not in ("Plugin", "BasePlugin"):
                 if require_config_widgets and not hasattr(obj, "get_config_widgets"):
                     continue
                 return obj
@@ -218,79 +207,26 @@ class ConfigWidgetDefinitions:
 
     @staticmethod
     def get_available_plugins() -> List[Dict[str, Any]]:
-        """Dynamically discover available plugins for configuration.
+        """Build plugin rows from the same registry used by runtime loading."""
+        from kollabor_plugins.registry import plugin_entries
 
-        Scans the plugins package for plugin modules and extracts metadata
-        from each plugin class.
-
-        Returns:
-            List of plugin widget dictionaries.
-        """
-        plugins: list[dict[str, Any]] = []
-
-        for (
-            plugin_id,
-            module_name,
-        ) in ConfigWidgetDefinitions._discover_plugin_modules():
-            try:
-                try:
-                    ConfigWidgetDefinitions._prepare_plugin_module_import(module_name)
-                    module = importlib.import_module(module_name)
-                    plugin_class = ConfigWidgetDefinitions._find_plugin_class(module)
-
-                    if plugin_class:
-                        # Get name and description from class attributes
-                        instance_name = getattr(plugin_class, "name", None)
-                        if instance_name is None:
-                            # Try to get from a temporary instance or use default
-                            instance_name = plugin_id.replace("_", " ").title()
-
-                        description = getattr(plugin_class, "description", None)
-                        if description is None:
-                            description = f"{instance_name} plugin"
-
-                        # Use class-level name/description or instance defaults
-                        display_name = (
-                            instance_name
-                            if isinstance(instance_name, str)
-                            else plugin_id.replace("_", " ").title()
-                        )
-
-                        plugins.append(
-                            {
-                                "type": "checkbox",
-                                "label": (
-                                    display_name.replace("_", " ").title()
-                                    if display_name == plugin_id
-                                    else display_name
-                                ),
-                                "config_path": f"plugins.{plugin_id}.enabled",
-                                "help": (
-                                    description
-                                    if isinstance(description, str)
-                                    else f"{display_name} plugin"
-                                ),
-                            }
-                        )
-                        logger.debug(f"Discovered plugin: {plugin_id}")
-
-                except ImportError as e:
-                    logger.debug(f"Could not import plugin {module_name}: {e}")
-                    # Still add it with basic info
-                    plugins.append(
-                        {
-                            "type": "checkbox",
-                            "label": plugin_id.replace("_", " ").title(),
-                            "config_path": f"plugins.{plugin_id}.enabled",
-                            "help": f"{plugin_id.replace('_', ' ').title()} plugin",
-                        }
-                    )
-
-            except Exception as e:
-                logger.error(f"Error processing plugin {module_name}: {e}")
-
-        logger.info(f"Discovered {len(plugins)} plugins for configuration")
-        return plugins
+        rows = []
+        for entry in plugin_entries(ConfigWidgetDefinitions._packaged_plugins_dir()):
+            plugin_id = entry["id"]
+            name = entry.get("name") or plugin_id.replace("_", " ").title()
+            kind = entry.get("kind", "built-in")
+            path = f"plugin-registry.{plugin_id}.enabled" if kind == "installed" else f"plugins.{plugin_id}.enabled"
+            rows.append(
+                {
+                    "type": "checkbox",
+                    "label": name,
+                    "display_name": name,
+                    "plugin_kind": kind,
+                    "config_path": path,
+                    "help": f"{name} — {entry.get('state', 'unknown')}",
+                }
+            )
+        return rows
 
     @staticmethod
     def get_available_themes() -> List[str]:
@@ -338,9 +274,7 @@ class ConfigWidgetDefinitions:
                     theme_name = theme_data.get("name")
                     if theme_name and theme_name not in theme_names:
                         theme_names.append(theme_name)
-                        logger.debug(
-                            f"Loaded custom theme: {theme_name} from {theme_file}"
-                        )
+                        logger.debug(f"Loaded custom theme: {theme_name} from {theme_file}")
                 except Exception as e:
                     logger.warning(f"Error loading theme file {theme_file}: {e}")
 
@@ -348,34 +282,21 @@ class ConfigWidgetDefinitions:
 
     @staticmethod
     def get_plugin_config_sections() -> List[Dict[str, Any]]:
-        """Dynamically collect config widget sections from plugins.
+        """Collect plugin settings from the common registry listing."""
+        from kollabor_plugins.registry import plugin_entries
 
-        Looks for get_config_widgets() method on each plugin class.
-
-        Returns:
-            List of section definitions from plugins.
-        """
-        sections: List[Dict[str, Any]] = []
-
-        for _, module_name in ConfigWidgetDefinitions._discover_plugin_modules():
-            try:
-                ConfigWidgetDefinitions._prepare_plugin_module_import(module_name)
-                module = importlib.import_module(module_name)
-                plugin_class = ConfigWidgetDefinitions._find_plugin_class(
-                    module,
-                    require_config_widgets=True,
-                )
-
-                if plugin_class is None:
-                    continue
-
-                widget_section = plugin_class.get_config_widgets()
-                if widget_section:
-                    sections.append(widget_section)
-                    logger.debug(f"Loaded config widgets from {plugin_class.__name__}")
-            except Exception as e:
-                logger.debug(f"Could not load config widgets from {module_name}: {e}")
-
+        sections = []
+        for entry in plugin_entries(ConfigWidgetDefinitions._packaged_plugins_dir()):
+            if entry.get("kind") == "installed" and entry.get("settings"):
+                widgets = []
+                for widget in entry["settings"]:
+                    if isinstance(widget, dict) and isinstance(widget.get("config_path"), str):
+                        widgets.append(
+                            {**widget, "config_path": f"plugin-values.{entry['id']}.{widget['config_path']}"}
+                        )
+                sections.append({"title": entry.get("name", entry["id"]), "widgets": widgets})
+            elif isinstance(entry.get("settings_section"), dict):
+                sections.append(entry["settings_section"])
         return sections
 
     @staticmethod
@@ -805,9 +726,7 @@ class ConfigWidgetDefinitions:
         }
 
     @staticmethod
-    def create_widgets_from_definition(
-        config_service, definition: Dict[str, Any]
-    ) -> List[Any]:
+    def create_widgets_from_definition(config_service, definition: Dict[str, Any]) -> List[Any]:
         """Create widget instances from modal definition.
 
         Args:
@@ -860,8 +779,7 @@ class ConfigWidgetDefinitions:
                         **{
                             k: v
                             for k, v in widget_def.items()
-                            if k
-                            not in ["type", "label", "config_path", "help", "value"]
+                            if k not in ["type", "label", "config_path", "help", "value"]
                         },
                     )
 

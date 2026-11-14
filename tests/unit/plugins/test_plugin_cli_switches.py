@@ -1,4 +1,5 @@
 """Plugin management requires local, explicit terminal approval."""
+
 from unittest.mock import Mock
 
 import pytest

@@ -1,4 +1,5 @@
 """Installed plugin settings must not be persisted to ordinary config.json."""
+
 from unittest.mock import Mock
 
 from kollabor_tui.config_merger import ConfigMerger

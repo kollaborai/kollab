@@ -21,6 +21,77 @@ from .packages import _ID, _SYMBOL, _read_registry, _within, files_sha256, recov
 logger = logging.getLogger(__name__)
 
 
+class _RegistryDiscovery(PluginDiscovery):
+    """Legacy discovery that keeps registered and manifest packages isolated."""
+
+    @staticmethod
+    def _is_valid_module_name(module_name: str) -> bool:
+        return bool(module_name) and all(part.isidentifier() for part in module_name.split("."))
+
+    def _verify_plugin_location(self, module_name: str) -> bool:
+        if not self._is_valid_module_name(module_name):
+            return False
+        root = self.plugins_dir.resolve()
+        relative = Path(*module_name.split("."))
+        file = (root / relative).with_suffix(".py")
+        package = root / relative / "__init__.py"
+        candidate = file if file.is_file() else package
+        return candidate.is_file() and candidate.resolve().is_relative_to(root)
+
+    def scan_plugin_files(self) -> list[str]:
+        root = self.plugins_dir.resolve()
+        if not root.is_dir():
+            return []
+        found = []
+        blocked = getattr(self, "blocked_plugin_dirs", set())
+
+        def skip(path: Path) -> bool:
+            relative = path.relative_to(root)
+            if any(part.startswith(".") for part in relative.parts):
+                return True
+            if len(relative.parts) > 1 and (getattr(self, "block_all_subdirs", False) or relative.parts[0] in blocked):
+                return True
+            parent = path.parent
+            while parent != root and parent.is_relative_to(root):
+                if (parent / "kollab-plugin.json").is_file():
+                    return True
+                parent = parent.parent
+            return not path.resolve().is_relative_to(root)
+
+        for path in root.rglob("*_plugin.py"):
+            if not skip(path) and not path.name.startswith("_"):
+                module = ".".join(path.relative_to(root).with_suffix("").parts)
+                if self._is_valid_module_name(module):
+                    found.append(module)
+        for init in root.rglob("*/__init__.py"):
+            if skip(init):
+                continue
+            relative = init.parent.relative_to(root)
+            if any(part.startswith("_") for part in relative.parts):
+                continue
+            module = ".".join(relative.parts)
+            if (init.parent / "plugin.py").is_file():
+                module += ".plugin"
+            if self._is_valid_module_name(module):
+                found.append(module)
+        self.discovered_modules = list(dict.fromkeys(found))
+        return self.discovered_modules
+
+    def load_module(self, module_name: str) -> bool:
+        result = super().load_module(module_name)
+        if result:
+            return True
+        module = sys.modules.get(f"plugins.{module_name}") or sys.modules.get(module_name)
+        if module is None:
+            return False
+        for name, cls in inspect.getmembers(module, inspect.isclass):
+            if name.endswith("Plugin") and callable(getattr(cls, "get_config_widgets", None)):
+                self.loaded_classes[name] = cls
+                self.plugin_configs[name] = {}
+                return True
+        return False
+
+
 class PluginRegistry:
     """Simplified registry coordinating plugin discovery, instantiation, and status collection.
 
@@ -46,7 +117,7 @@ class PluginRegistry:
         self.plugins_dir = plugins_dir
         self.no_plugins = no_plugins
         self.plugin_dirs = self._resolve_plugin_dirs(plugins_dir, extra_plugin_dirs)
-        self.discoveries = [PluginDiscovery(plugin_dir) for plugin_dir in self.plugin_dirs]
+        self.discoveries = [_RegistryDiscovery(plugin_dir) for plugin_dir in self.plugin_dirs]
         self.discovery = self.discoveries[0]
         if not no_plugins:
             global_root = (Path.home() / ".kollab" / "plugins").resolve()
@@ -86,7 +157,7 @@ class PluginRegistry:
             resolved = candidate.expanduser().resolve()
             if resolved in seen:
                 continue
-            if candidate == plugins_dir or resolved.exists():
+            if candidate == plugins_dir or resolved.is_dir():
                 resolved_dirs.append(candidate)
                 seen.add(resolved)
 
@@ -440,6 +511,37 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
                 "services": service_entries,
                 "uses": manifest.get("uses", []),
                 "granted": record.get("granted", []),
+            }
+        )
+    for plugin_id, folder in data["dev"].items():
+        if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id) or not isinstance(folder, str):
+            continue
+        manifest = {}
+        error = registry.package_errors.get(plugin_id)
+        try:
+            manifest = json.loads((Path(folder) / "kollab-plugin.json").read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict):
+                raise ValueError("Invalid development manifest")
+        except (OSError, ValueError) as exc:
+            manifest, error = {}, str(exc)
+        entries.append(
+            {
+                "id": f"{plugin_id}@dev",
+                "name": f"{manifest.get('name', plugin_id)}@dev",
+                "version": manifest.get("version"),
+                "kind": "dev",
+                "source": folder,
+                "commit": None,
+                "enabled": True,
+                "shadowed": False,
+                "state": "error" if error else "ok",
+                "error": error,
+                "settings": [],
+                "web": manifest.get("web"),
+                "contributes": manifest.get("contributes", {}),
+                "services": [],
+                "uses": manifest.get("uses", []),
+                "granted": manifest.get("uses", []),
             }
         )
     return entries

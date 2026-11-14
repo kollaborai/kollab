@@ -1,4 +1,5 @@
 """Installed settings shown by the terminal panel use their own store."""
+
 import json
 from unittest.mock import Mock
 
@@ -16,7 +17,12 @@ def test_panel_reads_installed_enabled_and_values_from_plugin_store(tmp_path, mo
     service = Mock()
     service.get.return_value = None
     enabled = _field({"type": "checkbox", "config_path": "plugin-registry.hello.enabled"}, service, None, {})
-    setting = _field({"type": "text_input", "config_path": "plugin-values.hello.nested.value", "default": "default"}, service, None, {})
+    setting = _field(
+        {"type": "text_input", "config_path": "plugin-values.hello.nested.value", "default": "default"},
+        service,
+        None,
+        {},
+    )
     assert enabled["value"] is True
     assert setting["value"] == "saved"
     service.get.assert_not_called()

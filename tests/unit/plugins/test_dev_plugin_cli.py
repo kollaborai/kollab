@@ -6,7 +6,11 @@ import json
 def test_dev_registration_copies_settings_once_and_detaches(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
-    from kollabor_plugins.cli import main
+    from kollabor_plugins import cli
+
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "yes")
+    main = cli.main
 
     home = tmp_path / "home" / ".kollab"
     home.mkdir(parents=True)
