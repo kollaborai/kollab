@@ -216,7 +216,7 @@ class TestBundleScopeEnforcement:
         )
 
         assert result.success is True
-        assert shell.command == "GIT_PAGER=cat PAGER=cat git -p log -1"
+        assert shell.command == "git --no-pager -p log -1"
 
     def test_git_config_mutation_is_denied_without_terminal_grant(self):
         """A Git grant cannot persist command execution through local config."""
