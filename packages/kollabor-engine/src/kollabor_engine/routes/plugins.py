@@ -21,8 +21,8 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocketException
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, WebSocketException
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -342,6 +342,118 @@ def put_plugin_settings(request: Request, plugin_id: str, values: dict[str, Any]
         raise HTTPException(status_code=503, detail="Cannot save plugin settings") from exc
     request.app.state.plugin_events.publish_change()
     return saved
+
+
+
+def _service_context(plugin_id: str, service_name: str):
+    from kollabor_plugins.packages import _SERVICE
+
+    context = _package_context(plugin_id)
+    if context is None or not _SERVICE.fullmatch(service_name):
+        raise HTTPException(status_code=404, detail="Plugin service not found")
+    services = context.manifest.get("services", {})
+    if not isinstance(services, dict) or not isinstance(services.get(service_name), dict):
+        raise HTTPException(status_code=404, detail="Plugin service not found")
+    return context
+
+
+@router.post("/{plugin_id}/services/{service_name}/{action}")
+async def plugin_service_action(request: Request, plugin_id: str, service_name: str, action: str):
+    if action not in {"start", "stop", "restart"}:
+        raise HTTPException(status_code=404, detail="Plugin service action not found")
+    context = _service_context(plugin_id, service_name)
+    try:
+        pending = await request.app.state.plugin_service_controls.control(context, service_name, action)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="Cannot change plugin service state") from exc
+    except OSError as exc:
+        logger.warning("Cannot control plugin service %s/%s: %s", plugin_id, service_name, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Cannot control plugin service") from exc
+    return JSONResponse({"accepted": True}, status_code=202 if pending else 200)
+
+
+def _redaction_values(context) -> list[str]:
+    from kollabor_ai.profile_manager import _keyring_get
+    from kollabor_plugins.packages import _read_registry
+
+    home = Path.home() / ".kollab"
+    registry = _read_registry(home / "plugins.json")
+    if context.id.endswith("@dev"):
+        approval = _read_usage_json(context.data / "approval.json", {})
+        grants = approval.get("granted", [])
+    else:
+        grants = registry["plugins"].get(context.id, {}).get("granted", [])
+    if not isinstance(grants, list) or any(not isinstance(grant, str) for grant in grants):
+        raise ValueError("Invalid plugin grants")
+    secrets_to_hide = []
+    for grant in grants:
+        if grant.startswith("secret:"):
+            try:
+                value = _keyring_get(grant.removeprefix("secret:"))
+            except Exception as exc:
+                raise ValueError("Cannot safely load log redactions") from exc
+            if isinstance(value, str) and value:
+                secrets_to_hide.append(value)
+    token_path = PluginTokenStore._run(context, create=False) / "token"
+    if token_path.exists() or token_path.is_symlink():
+        secrets_to_hide.append(PluginTokenStore._read(token_path))
+    from ..auth import _token_file, get_token
+
+    current_token = get_token()
+    if current_token:
+        secrets_to_hide.append(current_token)
+    engine_token = _token_file()
+    if engine_token.is_symlink():
+        raise ValueError("Engine token cannot be a symlink")
+    try:
+        descriptor = os.open(engine_token, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        return secrets_to_hide
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError("Invalid engine token")
+        value = os.read(descriptor, 512).decode("utf-8").strip()
+    finally:
+        os.close(descriptor)
+    if value:
+        secrets_to_hide.append(value)
+    return secrets_to_hide
+
+
+@router.get("/{plugin_id}/services/{service_name}/log", response_class=PlainTextResponse)
+def plugin_service_log(plugin_id: str, service_name: str, lines: int = Query(default=200, ge=1, le=1000)):
+    from kollabor_plugins.services import redact_log
+
+    context = _service_context(plugin_id, service_name)
+    try:
+        run = PluginTokenStore._run(context, create=False)
+        path = run / f"{service_name}.log"
+        if path.is_symlink():
+            raise ValueError("Service log cannot be a symlink")
+        try:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except FileNotFoundError:
+            return ""
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("Invalid service log")
+            start = max(0, info.st_size - 262144)
+            os.lseek(descriptor, start, os.SEEK_SET)
+            raw = os.read(descriptor, 262144)
+        finally:
+            os.close(descriptor)
+        if start:
+            _, separator, raw = raw.partition(b"\n")
+            if not separator:
+                raw = b""
+        scrubbed = redact_log(raw.decode("utf-8", errors="replace"), _redaction_values(context))
+        return "\n".join(scrubbed.splitlines()[-lines:])
+    except (ValueError, UnicodeError) as exc:
+        raise HTTPException(status_code=409, detail="Cannot read plugin service log safely") from exc
+    except OSError as exc:
+        logger.warning("Cannot read plugin service log for %s/%s: %s", plugin_id, service_name, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Cannot read plugin service log") from exc
 
 
 
@@ -743,6 +855,83 @@ class _LoadedPlugin:
         self.module_name = module_name
         self.vendor = vendor
         self.active = 0
+
+
+class PluginServiceControls:
+    def __init__(self, hub: PluginEventHub):
+        self.hub = hub
+        self.tasks: dict[tuple[str, str], asyncio.Task] = {}
+        self._lock = asyncio.Lock()
+
+    async def control(self, context, service_name: str, action: str) -> bool:
+        async with self._lock:
+            return await self._control(context, service_name, action)
+
+    async def _control(self, context, service_name: str, action: str) -> bool:
+        from kollabor_plugins.services import control_service
+
+        key = (context.id, service_name)
+        task = self.tasks.get(key)
+        if task is not None and not task.done():
+            if action != "stop":
+                raise ValueError("Service restart is already pending")
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if action != "restart":
+            await asyncio.to_thread(control_service, context.id, service_name, action)
+            self.hub.publish_change()
+            return False
+        await asyncio.to_thread(control_service, context.id, service_name, "stop")
+        self.hub.publish_change()
+        task = asyncio.create_task(
+            self._finish_restart(context, service_name), name=f"plugin-restart-{context.id}-{service_name}"
+        )
+        self.tasks[key] = task
+
+        def forget(completed):
+            if self.tasks.get(key) is completed:
+                self.tasks.pop(key, None)
+
+        task.add_done_callback(forget)
+        return True
+
+    async def _finish_restart(self, context, service_name: str) -> None:
+        from kollabor_plugins.services import _recorded_process_alive, control_service
+
+        service = context.manifest["services"][service_name]
+        timeout = service.get("stop_timeout_s", 10)
+        if type(timeout) is not int or timeout < 0:
+            timeout = 10
+        deadline = time.monotonic() + timeout + 5
+        pid = context.data / "run" / f"{service_name}.pid"
+        try:
+            while await asyncio.to_thread(_recorded_process_alive, pid):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Service did not stop before the restart deadline")
+                await asyncio.sleep(0.25)
+            async with self._lock:
+                operation = asyncio.create_task(asyncio.to_thread(control_service, context.id, service_name, "start"))
+                try:
+                    await asyncio.shield(operation)
+                except asyncio.CancelledError:
+                    await operation
+                    raise
+        except Exception as exc:
+            logger.warning("Plugin service restart failed for %s/%s: %s", context.id, service_name, type(exc).__name__)
+            self.hub.publish(None, "notice", {
+                "plugin_id": context.id, "text": f"Service {service_name} could not restart.", "button": None,
+            })
+        finally:
+            self.hub.publish_change()
+
+    async def shutdown(self) -> None:
+        tasks = list(self.tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.tasks.clear()
+
 
 
 class PluginDispatcher:

@@ -232,6 +232,12 @@ async def _engine_lifespan(app: FastAPI):
             await acp_discovery.stop_warming()
         except Exception:
             logger.exception("Model picker warm-up shutdown failed")
+        controls = getattr(app.state, "plugin_service_controls", None)
+        if controls is not None:
+            try:
+                await controls.shutdown()
+            except Exception:
+                logger.exception("Plugin service controls shutdown failed")
         dispatcher = getattr(app.state, "plugin_dispatcher", None)
         if dispatcher is not None:
             try:
@@ -291,10 +297,11 @@ def create_app(port: Optional[int] = None) -> FastAPI:
         version="0.1.0",
         lifespan=_engine_lifespan,
     )
-    from .routes.plugins import PluginDispatcher, PluginEventHub, PluginTokenStore
+    from .routes.plugins import PluginDispatcher, PluginEventHub, PluginServiceControls, PluginTokenStore
 
     app.state.plugin_events = PluginEventHub()
     app.state.plugin_tokens = PluginTokenStore()
+    app.state.plugin_service_controls = PluginServiceControls(app.state.plugin_events)
     app.state.plugin_dispatcher = PluginDispatcher(app.state.plugin_events, app.state.plugin_tokens)
     _wire_voice(app, port)
     from .phone_link import PhoneLink
