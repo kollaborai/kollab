@@ -3641,6 +3641,8 @@ class TerminalLLMChat:
 
     def _initialize_fullscreen_commands(self) -> None:
         """Initialize dynamic fullscreen plugin commands."""
+        if getattr(self.args, "no_plugins", False):
+            return
         try:
             from kollabor.fullscreen.command_integration import (
                 FullScreenCommandIntegrator,
@@ -3684,6 +3686,8 @@ class TerminalLLMChat:
         period. Discovers plugins from plugins/altview/ and registers
         them as slash commands with CommandMode.ALTVIEW.
         """
+        if getattr(self.args, "no_plugins", False):
+            return
         try:
             from kollabor.altview.command_integration import (
                 AltViewCommandIntegrator,
