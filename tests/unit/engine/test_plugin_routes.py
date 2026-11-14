@@ -321,3 +321,58 @@ def test_finished_agent_run_usage_is_reconciled_once_per_day(tmp_path, monkeypat
                      "result": {"usage": {"input": 3, "output": 3}}})
         runs.write_text(json.dumps({"runs": rows}))
         assert restarted.get("/plugins/hello/usage").status_code == 409
+
+
+def test_dispatcher_loads_only_approved_enabled_plugin_and_respects_local_only(tmp_path, monkeypatch):
+    import json
+    import shutil
+    from pathlib import Path
+
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    source = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    home = tmp_path / ".kollab"
+    root = home / "plugins" / "hello"
+    shutil.copytree(source, root)
+    manifest_path = root / "kollab-plugin.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["engine"] = "python/engine.py:make_router"
+    manifest_path.write_text(json.dumps(manifest))
+    entry = root / "python" / "engine.py"
+    entry.write_text('''from fastapi import APIRouter
+
+def make_router(ctx):
+    ctx.data.mkdir(parents=True, exist_ok=True)
+    path = ctx.data / "loads"
+    count = int(path.read_text()) + 1 if path.exists() else 1
+    path.write_text(str(count))
+    router = APIRouter()
+    @router.get("/hello")
+    def hello():
+        return {"id": ctx.id, "load": count}
+    @router.post("/local")
+    @ctx.local_only
+    def local():
+        return {"ok": True}
+    return router
+''')
+    record = {"enabled": True, "files_sha256": files_sha256(root), "granted": []}
+    registry = home / "plugins.json"
+    registry.write_text(json.dumps({"plugins": {"hello": record}, "dev": {}}))
+    with TestClient(create_app()) as client:
+        assert client.get("/plugins/hello/api/hello").json() == {"id": "hello", "load": 1}
+        assert client.get("/plugins/hello/api/hello").json()["load"] == 1
+        assert client.post("/plugins/hello/api/local").status_code == 200
+        assert client.post("/plugins/hello/api/local", headers={"x-kollab-plugin-remote": "1"}).status_code == 403
+        record["enabled"] = False
+        registry.write_text(json.dumps({"plugins": {"hello": record}, "dev": {}}))
+        assert client.get("/plugins/hello/api/hello").status_code == 404
+        record["enabled"] = True
+        registry.write_text(json.dumps({"plugins": {"hello": record}, "dev": {}}))
+        assert client.get("/plugins/hello/api/hello").json()["load"] == 2
+        entry.write_text(entry.read_text() + "\n# changed without approval\n")
+        assert client.get("/plugins/hello/api/hello").status_code == 409
+        assert (home / "plugin-data" / "hello" / "loads").read_text() == "2"
