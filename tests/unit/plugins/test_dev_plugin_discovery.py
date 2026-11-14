@@ -20,9 +20,23 @@ def test_dev_checkout_shadows_installed_package(tmp_path, monkeypatch):
     marker = tmp_path / "installed-executed"
     (installed / "kollab-plugin.json").write_text(json.dumps({"id": "hello", "python": "entry.py:InstalledPlugin"}))
     (installed / "entry.py").write_text(
-        f"open({str(marker)!r},'w').close()\nfrom kollabor_plugins import BasePlugin\nclass InstalledPlugin(BasePlugin): pass\n"
+        f"open({str(marker)!r},'w').close()\n"
+        "from kollabor_plugins import BasePlugin\nclass InstalledPlugin(BasePlugin): pass\n"
     )
-    (dev / "kollab-plugin.json").write_text(json.dumps({"id": "hello", "python": "entry.py:DevPlugin"}))
+    (dev / "kollab-plugin.json").write_text(
+        json.dumps(
+            {
+                "format": 1,
+                "id": "hello",
+                "name": "Hello",
+                "version": "1.0",
+                "description": "Example",
+                "kollab": ">=0.1",
+                "uses": [],
+                "python": "entry.py:DevPlugin",
+            }
+        )
+    )
     (dev / "entry.py").write_text("from kollabor_plugins import BasePlugin\nclass DevPlugin(BasePlugin): pass\n")
     (home / "plugins.json").write_text(
         json.dumps(

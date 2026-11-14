@@ -1,5 +1,6 @@
 """Plugin registry system for Kollab."""
 
+import hashlib
 import importlib.util
 import inspect
 import json
@@ -15,7 +16,7 @@ from .base import BasePlugin
 from .collector import PluginStatusCollector
 from .discovery import PluginDiscovery
 from .factory import PluginFactory
-from .packages import _ID, _SYMBOL, _read_registry, _within, files_sha256, recover_installs
+from .packages import _ID, _SYMBOL, _read_registry, _within, files_sha256, recover_installs, validate_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -114,17 +115,32 @@ class PluginRegistry:
         except (OSError, ValueError) as exc:
             logger.warning("Cannot read installed plugins: %s", exc)
             return loaded
-        for plugin_id, record in registry["plugins"].items():
-            if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id):
+        candidates = [
+            (plugin_id, record, home / "plugins" / plugin_id, False)
+            for plugin_id, record in registry["plugins"].items()
+            if isinstance(plugin_id, str) and plugin_id not in registry["dev"]
+        ]
+        candidates.extend(
+            (plugin_id, {"enabled": True}, Path(folder), True)
+            for plugin_id, folder in registry["dev"].items()
+            if isinstance(plugin_id, str) and isinstance(folder, str)
+        )
+        for plugin_id, record, root, is_dev in candidates:
+            if not _ID.fullmatch(plugin_id):
                 continue
             if not isinstance(record, dict) or record.get("enabled") is not True:
                 continue
-            root = home / "plugins" / plugin_id
             try:
-                digest = record.get("files_sha256")
-                if not isinstance(digest, str) or files_sha256(root) != digest:
-                    raise ValueError("Changed on Disk")
-                manifest = json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
+                if is_dev:
+                    from kollabor.version import get_runtime_version
+
+                    digest = "dev_" + hashlib.sha256(str(root).encode()).hexdigest()
+                    manifest = validate_manifest(root, get_runtime_version())
+                else:
+                    digest = record.get("files_sha256")
+                    if not isinstance(digest, str) or files_sha256(root) != digest:
+                        raise ValueError("Changed on Disk")
+                    manifest = json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
                 if manifest.get("id") != plugin_id:
                     raise ValueError("Manifest id differs from registry")
                 entry = manifest.get("python")
