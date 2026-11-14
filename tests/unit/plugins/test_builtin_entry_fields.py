@@ -31,7 +31,7 @@ def test_builtin_entry_uses_effective_values(tmp_path, monkeypatch):
         def discover_classes_only(self):
             return [DemoPlugin]
 
-        def get_all_plugin_configs(self):
+        def get_merged_config(self):
             return {"plugins": {"demo": {"enabled": True, "greeting": "hi"}}}
 
     monkeypatch.setattr(registry, "PluginRegistry", FakeRegistry)

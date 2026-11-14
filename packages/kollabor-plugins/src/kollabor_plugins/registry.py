@@ -512,6 +512,13 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
         )
     registry = PluginRegistry(plugins_dir, no_plugins="--no-plugins" in sys.argv[1:])
     classes = registry.discover_classes_only()
+    from kollabor.panels.config import _field, read_managed_state
+    from kollabor_config.loader import ConfigLoader
+    from kollabor_config.manager import ConfigManager
+
+    config = ConfigManager(Path.home() / ".kollab" / "config.json")
+    config.config = ConfigLoader(config, registry, fast_mode=True).load_complete_config()
+    managed, global_settings = read_managed_state()
     entries: list[dict] = []
     for cls in classes:
         if cls.__module__.startswith("_kollab_package_"):
@@ -529,11 +536,14 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
         except Exception as exc:
             logger.warning("Cannot describe plugin %s settings: %s", plugin_id, exc)
             section = None
-        enabled = (
+        default_enabled = (
             plugin_defaults.get(plugin_id, {}).get("enabled", True)
             if isinstance(plugin_defaults.get(plugin_id), dict)
             else True
         )
+        enabled = config.get(f"plugins.{plugin_id}.enabled", default_enabled)
+        widgets = section.get("widgets", []) if isinstance(section, dict) else []
+        fields = [{**row, **_field(row, config, managed, global_settings)} for row in widgets if isinstance(row, dict)]
         entries.append(
             {
                 "id": plugin_id,
@@ -546,7 +556,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
                 "shadowed": False,
                 "state": "ok" if enabled else "off",
                 "error": None,
-                "settings": section.get("widgets", []) if isinstance(section, dict) else [],
+                "settings": fields,
                 "settings_section": section,
                 "web": None,
                 "contributes": {},
