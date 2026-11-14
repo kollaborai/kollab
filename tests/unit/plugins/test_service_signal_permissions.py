@@ -1,4 +1,5 @@
 """Inaccessible processes are never assumed safe to signal."""
+
 import json
 from unittest.mock import Mock
 

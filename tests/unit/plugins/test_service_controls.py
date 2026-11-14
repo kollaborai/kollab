@@ -45,6 +45,7 @@ def test_stop_signals_only_verified_target(tmp_path, monkeypatch):
     (run / "one.pid").write_text(json.dumps({"wrapper": {"pid": 123, "start_time": 1, "nonce": "abc"}}))
     signal = Mock()
     monkeypatch.setattr(services, "_identity_alive", lambda identity, wrapper=False: True)
+    monkeypatch.setattr(services, "_verified_wrapper", lambda identity: True)
     monkeypatch.setattr(services.os, "kill", signal)
     services.control_service("hello", "one", "stop")
     assert json.loads((run / "one.state").read_text())["desired"] == "stopped"

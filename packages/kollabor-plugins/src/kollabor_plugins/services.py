@@ -301,6 +301,31 @@ def _identity_alive(identity: object, *, wrapper: bool = False) -> bool:
         return True
 
 
+def _verified_wrapper(identity: object) -> bool:
+    """Return true only with positive pid, start-time, and nonce verification."""
+    if not isinstance(identity, dict):
+        return False
+    pid, started, nonce = identity.get("pid"), identity.get("start_time"), identity.get("nonce")
+    if (
+        type(pid) is not int
+        or pid <= 0
+        or not isinstance(started, (int, float))
+        or not isinstance(nonce, str)
+        or not nonce
+    ):
+        return False
+    try:
+        process = psutil.Process(pid)
+        return (
+            process.is_running()
+            and process.status() != psutil.STATUS_ZOMBIE
+            and abs(process.create_time() - started) <= 0.02
+            and nonce in process.cmdline()
+        )
+    except psutil.NoSuchProcess, psutil.AccessDenied:
+        return False
+
+
 def _recorded_process_alive(pid_path: Path) -> bool:
     if not pid_path.exists():
         return False
@@ -447,16 +472,17 @@ def control_service(plugin_id: str, service_name: str, action: str) -> None:
             raise ValueError("Invalid service identity")
     wrapper = identity.get("wrapper")
     child = identity.get("child")
-    if not _identity_alive(wrapper, wrapper=True) and _identity_alive(child):
-        raise ValueError("Service child is alive without a verified wrapper")
+    verified = _verified_wrapper(wrapper)
+    if not verified and (_identity_alive(wrapper, wrapper=True) or _identity_alive(child)):
+        raise ValueError("Service is alive without a verified wrapper")
     state.update(
         {
             "desired": "stopped",
-            "status": "stopping" if wrapper and _identity_alive(wrapper, wrapper=True) else "stopped",
+            "status": "stopping" if verified else "stopped",
         }
     )
     _write_state(state_path, state)
-    if wrapper and _identity_alive(wrapper, wrapper=True):
+    if verified:
         try:
             os.kill(wrapper["pid"], signal.SIGTERM)
         except ProcessLookupError:
@@ -473,8 +499,10 @@ def stop_services(plugin_id: str) -> None:
         try:
             identity = json.loads(pid_path.read_text(encoding="utf-8"))
             wrapper = identity.get("wrapper")
-            if _identity_alive(wrapper, wrapper=True):
+            if _verified_wrapper(wrapper):
                 os.kill(wrapper["pid"], signal.SIGTERM)
+            elif _identity_alive(wrapper, wrapper=True):
+                logger.warning("Refusing to signal unverifiable wrapper for %s", pid_path.name)
         except ProcessLookupError:
             continue
         except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
