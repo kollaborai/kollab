@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import secrets
 import selectors
 import signal
 import subprocess
@@ -94,6 +95,10 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
         os.close(fd)
         return 0
     pid_path = run_dir / f"{service_name}.pid"
+    if _recorded_process_alive(pid_path):
+        unlock(fd)
+        os.close(fd)
+        return 0
     state_path = run_dir / f"{service_name}.state"
     log_path = run_dir / f"{service_name}.log"
     wrapper = {"pid": os.getpid(), "start_time": _process_start(os.getpid()), "nonce": nonce}
@@ -190,3 +195,105 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
         signal.signal(signal.SIGTERM, old_handler)
         unlock(fd)
         os.close(fd)
+
+
+def _identity_alive(identity: object, *, wrapper: bool = False) -> bool:
+    if not isinstance(identity, dict):
+        return False
+    pid = identity.get("pid")
+    started = identity.get("start_time")
+    if type(pid) is not int or pid <= 0 or not isinstance(started, (int, float)):
+        return False
+    try:
+        process = psutil.Process(pid)
+        if not process.is_running() or abs(process.create_time() - started) > 0.02:
+            return False
+        if process.status() == psutil.STATUS_ZOMBIE:
+            return False
+        if wrapper:
+            nonce = identity.get("nonce")
+            return isinstance(nonce, str) and bool(nonce) and nonce in process.cmdline()
+        return True
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.AccessDenied:
+        # Unverifiable identity is not permission to launch a second process.
+        return True
+
+
+def _recorded_process_alive(pid_path: Path) -> bool:
+    if not pid_path.exists():
+        return False
+    try:
+        identity = json.loads(pid_path.read_text(encoding="utf-8"))
+        if not isinstance(identity, dict):
+            raise ValueError("Invalid pid record")
+        return _identity_alive(identity.get("wrapper"), wrapper=True) or _identity_alive(identity.get("child"))
+    except OSError, ValueError, TypeError:
+        logger.warning("Cannot safely inspect service pid file %s", pid_path)
+        return True
+
+
+def supervisor_tick() -> None:
+    """Start eligible installed services without scanning unrelated processes."""
+    from kollabor.binary import kollab_argv
+
+    home = Path.home() / ".kollab"
+    registry = _read_registry(home / "plugins.json")
+    for plugin_id, record in registry["plugins"].items():
+        if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id):
+            continue
+        if not isinstance(record, dict) or record.get("enabled") is not True:
+            continue
+        root = home / "plugins" / plugin_id
+        try:
+            manifest = json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
+            services = manifest.get("services", {})
+            if not isinstance(services, dict):
+                raise ValueError("Invalid services")
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning("Cannot load services for plugin %s: %s", plugin_id, exc)
+            continue
+        for service_name, service in services.items():
+            if (
+                not isinstance(service_name, str)
+                or not _SERVICE.fullmatch(service_name)
+                or not isinstance(service, dict)
+            ):
+                logger.warning("Invalid service declaration in plugin %s", plugin_id)
+                continue
+            run_dir = home / "plugin-data" / plugin_id / "run"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            fd = os.open(run_dir / f"{service_name}.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            try:
+                if not try_lock(fd):
+                    continue
+                try:
+                    state_path = run_dir / f"{service_name}.state"
+                    if state_path.exists():
+                        state = json.loads(state_path.read_text(encoding="utf-8"))
+                        if (
+                            not isinstance(state, dict)
+                            or state.get("desired") != "running"
+                            or state.get("status") in {"exited", "crash-stopped"}
+                        ):
+                            continue
+                    elif service.get("autostart", False) is not True:
+                        continue
+                    if _recorded_process_alive(run_dir / f"{service_name}.pid"):
+                        continue
+                    nonce = secrets.token_hex(16)
+                    subprocess.Popen(
+                        [*kollab_argv(), "plugin", "run-service", plugin_id, service_name, nonce],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                        close_fds=True,
+                    )
+                except (OSError, ValueError, TypeError) as exc:
+                    logger.warning("Could not start service %s/%s: %s", plugin_id, service_name, exc)
+                finally:
+                    unlock(fd)
+            finally:
+                os.close(fd)
