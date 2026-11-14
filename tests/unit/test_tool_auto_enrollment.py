@@ -560,8 +560,8 @@ class TestWildcardBundleScope(unittest.TestCase):
         self.assertIsNotNone(executor._check_bundle_scope("git"))
         self.assertIsNotNone(executor._check_bundle_scope("web_search"))
 
-    def test_tool_load_bypasses_scope_for_loaded_tools(self):
-        """After tool-load adds a tool, it should pass scope check."""
+    def test_tool_load_cannot_expand_declared_bundle_scope(self):
+        """tool-load must not grant tools omitted from the bundle scope."""
         from kollabor_agent.tool_executor import ToolExecutor
 
         mcp = MagicMock()
@@ -579,13 +579,37 @@ class TestWildcardBundleScope(unittest.TestCase):
         # git is blocked
         self.assertIsNotNone(executor._check_bundle_scope("git"))
 
-        # Load git
+        # Loading a tool omitted from the declaration must fail without
+        # changing the executor's allowed scope.
         result = _run(executor._execute_tool_load({
             "type": "tool_load", "id": "tl_0", "name": "git",
         }))
-        self.assertTrue(result.success)
+        self.assertFalse(result.success)
+        self.assertIn("terminal", result.error)
 
-        # Now git is allowed
+        # git remains blocked after the rejected load.
+        self.assertIsNotNone(executor._check_bundle_scope("git"))
+
+    def test_tool_load_remains_available_with_wildcard_scope(self):
+        """A wildcard declaration permits loading any registered tool."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        mcp = MagicMock()
+        mcp.tool_registry = {}
+        mcp.server_connections = {}
+        event_bus = MagicMock()
+        event_bus.emit_with_hooks = AsyncMock(return_value=None)
+        executor = ToolExecutor(
+            mcp_integration=mcp, event_bus=event_bus,
+            terminal_timeout=5, mcp_timeout=10,
+        )
+        executor.set_bundle_scope(["*"])
+
+        result = _run(executor._execute_tool_load({
+            "type": "tool_load", "id": "tl_0", "name": "git",
+        }))
+
+        self.assertTrue(result.success, result.error)
         self.assertIsNone(executor._check_bundle_scope("git"))
 
 
