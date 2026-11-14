@@ -288,10 +288,11 @@ class TestApplyProfileMirror:
     async def test_panel_refresh_preserves_acp_vision_capability(
         self, monkeypatch, supports_vision
     ):
-        import kollabor_ai
-        from kollabor.state.snapshots import ProfileSnapshot
         from kollabor_engine.routes.panels import _refresh_profile_mirror
         from kollabor_engine.session import EngineSession
+
+        import kollabor_ai
+        from kollabor.state.snapshots import ProfileSnapshot
 
         snapshot = ProfileSnapshot(
             name="acp",
