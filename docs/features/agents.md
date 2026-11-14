@@ -346,6 +346,62 @@ If Delete stops the agent but cannot update its saved record, the agent stays in
 the sidebar with a warning (also shown in its session panel) and a retried
 Delete clears it without stopping the agent again.
 
+## Restart After Upgrade
+
+A detached agent keeps the code it started with, so it can run an older Kollab
+than the engine after an upgrade. Each agent publishes the version and build it
+runs in its presence record; `GET /agents` (its `live` rows) and the agent
+network rows carry them. When the open chat's agent runs a version other than
+the engine's (`GET /version`), the web UI shows one line above the chat. An
+agent that publishes no version started before agents did and counts as older.
+
+| `kollabor.updates.restart_agents` | The line says | You do |
+|---|---|---|
+| on | "This agent runs an older version of Kollab." with a **Restart Agent** button | Click it |
+| off (default) | "Run /restart to update the agent version running." | Type `/restart` in the chat |
+| either, when the agent publishes no version (it started before Restart Agent existed) | "This agent started before Restart Agent existed. Run kollab --hub stop <name> in a terminal, then select its Offline row in the sidebar to start it again." No button | Stop it in a terminal, then select its Offline row in the sidebar |
+
+Both versions are in the line's hover text, never in the line. The setting is in
+`/config` under Updates as "Restart Agent Button".
+
+`/restart` (the button calls the same code through `POST /sessions/{id}/restart-agent`,
+the state RPC `state.restart_agent`) restarts the agent in place:
+
+1. The agent answers at once. If a turn is running it waits for the turn to end,
+   so a running tool is never cut.
+2. It saves the conversation and runs its normal graceful shutdown.
+3. It replaces its own process image with `kollab --detached ...` (same pid,
+   folder, identity and flags; the command comes from `kollabor.binary.kollab_argv()`,
+   so a binary install starts the file on disk, which holds the upgrade).
+4. The new image resumes the conversation it was told to pick back up. The hub
+   socket path is named by the identity, so the web UI reattaches to the same
+   path on its own and the open chat needs no reload.
+
+`/restart` no longer clears the conversation. `/new` (alias `/clear`) does that.
+A window started with `--no-daemon` has no daemon to replace: `/restart` there
+says so and changes nothing; quit and start Kollab again. An agent started
+before `/restart` existed answers that it is too old to restart itself. The web chat
+shows that agent the stop-and-start line above, with no button. A failed ask gets
+Try Again, except the engine's too-old answer, which gets the same line with Dismiss only.
+
+A terminal window attached to the agent stays open through the restart. Just
+before it shuts down, the agent publishes `daemon_restarting` to its attached
+terminal windows; the engine drops that event, so a web chat never receives it.
+The window prints "Restarting <agent>...", keeps its scrollback and tries to
+attach to the same socket again every half second while the agent's pid is alive
+or the restart was announced. When the new image answers, the window prints
+"Restarted on <version>" (the attach reply names the image's `version` and a new
+`agent_id`) and goes on. It shows an event once per image: the new image numbers
+its events from 1 again, so the window starts counting over. A connection that
+closes with no announcement while the pid is alive prints "lost connection to
+<agent>, reconnecting..." and tries the same way. After 30 seconds
+(`kollabor.daemon.REATTACH_WAIT`) without an answer it prints "Restarted. Run
+kollab again to attach." (or "lost connection to <agent>. Run kollab again to
+attach." when nothing announced a restart). A pid that is gone prints
+"<agent> disconnected — daemon exited", and Ctrl+Z (detach) or quitting never
+attaches again. `tests/tmux/specs/restart_window_reattaches.json` drives this
+end to end.
+
 
 ## Using Agents
 

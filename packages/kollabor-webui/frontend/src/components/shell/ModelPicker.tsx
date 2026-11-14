@@ -41,6 +41,7 @@ export function ModelPicker({
   onPick,
   disabled,
   className,
+  folder,
 }: {
   id?: string;
   api: EngineApi;
@@ -50,23 +51,27 @@ export function ModelPicker({
   onPick: (choice: ModelChoice) => void;
   disabled?: boolean;
   className?: string;
+  /** The workspace the picker lists for; empty is the engine's own folder. */
+  folder?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
-  // The page keeps the list (model-choices.ts): it was asked for when the shell loaded, so it is usually
-  // complete before this opens. Each opening asks again, quietly; the list held stays up until the answer lands.
-  const { choices: loaded, discovering, incomplete, failed } = useModelChoices(api);
+  // The page keeps one list per workspace (model-choices.ts): the engine folder's was asked for when the shell
+  // loaded, so it is usually complete before this opens. Each opening asks again, quietly; the list held stays
+  // up until the answer lands, and another folder's answer never lands in this one.
+  const workspace = folder?.trim() || "";
+  const { choices: loaded, discovering, incomplete, failed } = useModelChoices(api, workspace);
   const list = useRef<HTMLDivElement>(null);
   const search = useRef<HTMLInputElement>(null);
   const listId = useId();
 
   useEffect(() => {
-    if (open) void loadModelChoices(api);
-  }, [open, api]);
+    if (open) void loadModelChoices(api, { workspace });
+  }, [open, api, workspace]);
 
   const retry = () => {
-    void loadModelChoices(api, { retry: true });
+    void loadModelChoices(api, { retry: true, workspace });
     search.current?.focus();
   };
 

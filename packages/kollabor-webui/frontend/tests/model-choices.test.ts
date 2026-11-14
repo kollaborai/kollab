@@ -19,16 +19,19 @@ const ready = { status: "ready" } as const;
 
 /** An engine that answers with each given answer in turn (the last one repeats); an Error rejects. */
 function fakeApi(...answers: (Answer | Error)[]) {
+  /** The `refresh` argument of each ask; `workspaces` holds the folder of the same ask. */
   const calls: Array<boolean | undefined> = [];
+  const workspaces: Array<string | undefined> = [];
   const api = {
-    listModelChoices: vi.fn(async (retry?: boolean) => {
-      calls.push(retry);
+    listModelChoices: vi.fn(async (workspace?: string, refresh?: boolean) => {
+      workspaces.push(workspace);
+      calls.push(refresh);
       const next = answers[Math.min(calls.length - 1, answers.length - 1)];
       if (next instanceof Error) throw next;
       return next;
     }),
   } as unknown as EngineApi;
-  return { api, calls };
+  return { api, calls, workspaces };
 }
 
 afterEach(() => {
@@ -169,9 +172,9 @@ test("a Retry pressed during a final request still runs after that request settl
   let release!: (answer: Answer) => void;
   const calls: Array<boolean | undefined> = [];
   const api = {
-    listModelChoices: vi.fn((retry?: boolean) => {
-      calls.push(retry);
-      if (retry) return Promise.resolve({ choices: [row("p", "fresh")], discovery: { p: ready } });
+    listModelChoices: vi.fn((_workspace?: string, refresh?: boolean) => {
+      calls.push(refresh);
+      if (refresh) return Promise.resolve({ choices: [row("p", "fresh")], discovery: { p: ready } });
       return new Promise<Answer>((resolve) => { release = resolve; });
     }),
   } as unknown as EngineApi;
@@ -269,4 +272,41 @@ test("rows of a deleted profile never show; with no profile list yet every row s
   const rows = [row("kept", "a"), row("deleted", "b")];
   assert.deepEqual(rowsForProfiles(rows, [{ name: "kept" }]), [row("kept", "a")]);
   assert.deepEqual(rowsForProfiles(rows, []), rows);
+});
+
+test("each folder is asked for by its own trimmed path, and a Retry re-probes only that folder", async () => {
+  const { api, calls, workspaces } = fakeApi({ choices: [row("p", "a")], discovery: { p: ready } });
+  await loadModelChoices(api);
+  await loadModelChoices(api, { workspace: "  /work/a  " });
+  await loadModelChoices(api, { workspace: "/work/a", retry: true });
+
+  assert.deepEqual(workspaces, ["", "/work/a", "/work/a"]); // the engine's own folder is the empty string
+  assert.deepEqual(calls, [undefined, undefined, true]); // only the folder's own ask carried the re-probe
+  assert.equal(getModelChoices(api, "  /work/a  "), getModelChoices(api, "/work/a")); // one list per trimmed path
+});
+
+test("a folder's answer never lands in the engine folder's list, nor the other way round", async () => {
+  const waiting = new Map<string, (answer: Answer) => void>();
+  const api = {
+    listModelChoices: vi.fn(
+      (workspace = "") =>
+        new Promise<Answer>((resolve) => {
+          waiting.set(workspace, resolve);
+        }),
+    ),
+  } as unknown as EngineApi;
+
+  const engine = loadModelChoices(api);
+  const folder = loadModelChoices(api, { workspace: "/work/a" });
+  assert.deepEqual([...waiting.keys()].sort(), ["", "/work/a"]); // two loads: the second did not join the first
+
+  waiting.get("/work/a")?.({ choices: [row("p", "folder-a")], discovery: { p: ready } });
+  await folder;
+  assert.deepEqual(getModelChoices(api, "/work/a").choices, [row("p", "folder-a")]);
+  assert.equal(getModelChoices(api).choices, null); // the engine folder's own answer has not come yet
+
+  waiting.get("")?.({ choices: [row("p", "engine")], discovery: { p: ready } });
+  await engine;
+  assert.deepEqual(getModelChoices(api).choices, [row("p", "engine")]);
+  assert.deepEqual(getModelChoices(api, "/work/a").choices, [row("p", "folder-a")]); // the later answer left it be
 });

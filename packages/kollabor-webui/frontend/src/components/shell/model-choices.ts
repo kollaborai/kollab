@@ -4,7 +4,9 @@ import type { EngineApi, ModelChoice, Profile } from "@/api";
 /**
  * The model picker's list, kept for the whole page instead of one popover. The shell asks for it when it
  * loads (and the engine has been learning it since it started), so the first click shows it complete. Every
- * opening asks again, quietly: the list already held stays up until the new answer replaces it.
+ * opening asks again, quietly: the list already held stays up until the new answer replaces it. One list is
+ * kept per workspace (the folder whose own profiles a picker lists; empty is the engine's folder), so a picker
+ * never shows, and is never overwritten by, the rows another folder's answer carries.
  */
 export type ChoicesView = {
   /** The rows the engine last sent; null until its first answer. */
@@ -27,6 +29,8 @@ export const MAX_POLLS = 80;
 const EMPTY: ChoicesView = { choices: null, discovering: [], incomplete: [], failed: false };
 
 type Store = {
+  /** The folder this list is for, trimmed; empty is the engine's own. */
+  workspace: string;
   view: ChoicesView;
   listeners: Set<() => void>;
   running: Promise<void> | null;
@@ -36,7 +40,7 @@ type Store = {
   profileSignatures: Map<string, string> | null;
 };
 
-const stores = new WeakMap<EngineApi, Store>();
+const stores = new WeakMap<EngineApi, Map<string, Store>>();
 
 /** Profile changes that can alter the engine's model catalog or ACP warm result. */
 export function profileChoicesKey(
@@ -49,11 +53,24 @@ export function profileChoicesKey(
     .join("\n");
 }
 
-function storeOf(api: EngineApi): Store {
-  let store = stores.get(api);
+function storeOf(api: EngineApi, workspace = ""): Store {
+  const folder = workspace.trim();
+  let byFolder = stores.get(api);
+  if (!byFolder) {
+    byFolder = new Map();
+    stores.set(api, byFolder);
+  }
+  let store = byFolder.get(folder);
   if (!store) {
-    store = { view: EMPTY, listeners: new Set(), running: null, retryNext: false, profileSignatures: null };
-    stores.set(api, store);
+    store = {
+      workspace: folder,
+      view: EMPTY,
+      listeners: new Set(),
+      running: null,
+      retryNext: false,
+      profileSignatures: null,
+    };
+    byFolder.set(folder, store);
   }
   return store;
 }
@@ -63,12 +80,12 @@ function publish(store: Store, view: ChoicesView) {
   store.listeners.forEach((listener) => listener());
 }
 
-export function getModelChoices(api: EngineApi): ChoicesView {
-  return storeOf(api).view;
+export function getModelChoices(api: EngineApi, workspace = ""): ChoicesView {
+  return storeOf(api, workspace).view;
 }
 
-export function subscribeModelChoices(api: EngineApi, listener: () => void): () => void {
-  const { listeners } = storeOf(api);
+export function subscribeModelChoices(api: EngineApi, listener: () => void, workspace = ""): () => void {
+  const { listeners } = storeOf(api, workspace);
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
@@ -118,7 +135,9 @@ async function poll(api: EngineApi, store: Store): Promise<void> {
     store.retryNext = false;
     let answer: Awaited<ReturnType<EngineApi["listModelChoices"]>>;
     try {
-      answer = await (retry ? api.listModelChoices(true) : api.listModelChoices());
+      answer = await (
+        retry ? api.listModelChoices(store.workspace, true) : api.listModelChoices(store.workspace)
+      );
     } catch {
       const { view } = store;
       publish(store, {
@@ -147,16 +166,18 @@ async function poll(api: EngineApi, store: Store): Promise<void> {
 
 /**
  * Ask the engine for the list and keep asking while it reports a harness still loading. Joins a load that is
- * already running instead of starting a second. `retry` makes the engine probe the incomplete harnesses again.
+ * already running for the same `workspace` instead of starting a second. `retry` makes the engine probe the
+ * incomplete harnesses again.
  */
 export function loadModelChoices(
   api: EngineApi,
   options: {
     retry?: boolean;
     profiles?: readonly Pick<Profile, "name" | "provider" | "choices_fingerprint">[];
+    workspace?: string;
   } = {},
 ): Promise<void> {
-  const store = storeOf(api);
+  const store = storeOf(api, options.workspace);
   if (options.profiles) {
     const nextSignatures = new Map(
       options.profiles.map(({ name, provider, choices_fingerprint }) => [
@@ -190,8 +211,11 @@ export function loadModelChoices(
   return run;
 }
 
-export function useModelChoices(api: EngineApi): ChoicesView {
-  const subscribe = useCallback((listener: () => void) => subscribeModelChoices(api, listener), [api]);
-  const snapshot = useCallback(() => getModelChoices(api), [api]);
+export function useModelChoices(api: EngineApi, workspace = ""): ChoicesView {
+  const subscribe = useCallback(
+    (listener: () => void) => subscribeModelChoices(api, listener, workspace),
+    [api, workspace],
+  );
+  const snapshot = useCallback(() => getModelChoices(api, workspace), [api, workspace]);
   return useSyncExternalStore(subscribe, snapshot, snapshot);
 }

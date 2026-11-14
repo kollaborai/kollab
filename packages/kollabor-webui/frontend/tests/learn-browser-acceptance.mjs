@@ -302,6 +302,11 @@ export async function openVite() {
     root: frontendRoot,
     logLevel: "error",
     clearScreen: false,
+    // Each suite gets its own cache dir (the runner provisions a unique TMPDIR
+    // per suite) so concurrent suites never share the dep-optimizer cache in
+    // node_modules/.vite, which serializes cold starts and can trigger
+    // outdated-optimize-dep reloads mid-suite (#1022).
+    cacheDir: path.join(process.env.TMPDIR ?? os.tmpdir(), "kollab-vite-cache"),
     server: { host: "127.0.0.1", port: 0, strictPort: false, hmr: false },
   });
   await server.listen();
@@ -360,7 +365,7 @@ export async function openPage(browser, baseUrl, fixtures, options = {}) {
   return { context, externalRequests, fixture: fixtures, page, pageErrors, consoleErrors };
 }
 
-async function until(check, message, timeoutMs = 60_000) {
+export async function until(check, message, timeoutMs = 60_000) {
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) {
     const value = check();
@@ -370,7 +375,7 @@ async function until(check, message, timeoutMs = 60_000) {
   throw new Error(message);
 }
 
-async function waitForLesson(page, title) {
+export async function waitForLesson(page, title) {
   await page.getByRole("heading", { level: 1, name: title, exact: true }).waitFor({ state: "visible" });
 }
 
@@ -464,18 +469,25 @@ async function verifyMobileLearnLayout(browser, baseUrl) {
   if (failures.length) throw new AggregateError(failures, "Mobile Learn layout regressions");
 }
 
+// Every learn-suite script launches Chromium the same way. CHROME_PATH, when
+// set, selects the binary; otherwise playwright's own registry install is used
+// (the CI install step populates it). Linux runners need --no-sandbox.
+export async function launchAcceptanceBrowser() {
+  const executablePath = process.env.CHROME_PATH;
+  return chromium.launch({
+    headless: true,
+    ...(executablePath ? { executablePath } : {}),
+    args: process.platform === "linux" ? ["--no-sandbox"] : [],
+  });
+}
+
 async function main() {
   const captureCodeHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim();
   console.log(`Learn browser acceptance code head: ${captureCodeHead}`);
   const { server, baseUrl } = await openVite();
   let browser;
   try {
-    const executablePath = process.env.CHROME_PATH;
-    browser = await chromium.launch({
-      headless: true,
-      ...(executablePath ? { executablePath } : {}),
-      args: process.platform === "linux" ? ["--no-sandbox"] : [],
-    });
+    browser = await launchAcceptanceBrowser();
 
     await verifyMobileLearnLayout(browser, baseUrl);
 
@@ -604,383 +616,7 @@ async function main() {
     await shell.page.waitForFunction(() => location.pathname === "/learn" && location.search === "?topic=agents");
     await waitForLesson(shell.page, "Agents");
 
-    // Every current topic must load its JSON-backed workflow, not a blank placeholder.
-    await shell.page.emulateMedia({ reducedMotion: "reduce" });
 
-    for (const topicId of ["networks", "devices", "workspaces", "agents", "profiles", "context-compaction", "koordinator", "hub-messaging", "voice", "system-prompts", "phone-access"]) {
-      await shell.page.goto(`${baseUrl}/learn?topic=${topicId}`, { waitUntil: "domcontentloaded" });
-      const learn = shell.page.getByRole("main", { name: "Learn", exact: true });
-      const heading = learn.getByRole("heading", { level: 1 });
-      await heading.waitFor({ state: "visible" });
-      assert.notEqual(await heading.innerText(), "That topic is not available", `${topicId} route unexpectedly unresolved`);
-      await shell.page.getByRole("tabpanel").first().waitFor({ state: "visible" });
-      assert.ok((await shell.page.getByRole("tabpanel").first().innerText()).trim().length > 0, `${topicId} workflow is empty`);
-      const topicMedia = learn.locator("img, video").first();
-      await topicMedia.waitFor({ state: "visible" });
-      if (await topicMedia.evaluate((element) => element instanceof HTMLImageElement)) {
-        await shell.page.waitForFunction((id) => {
-          const image = document.querySelector('main[aria-label="Learn"] img');
-          return image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0 && image.src.endsWith(`/learn/${id}/overview.webp`);
-        }, topicId);
-      }
-
-      const workflowTabs = learn.getByRole("tab");
-      if (await workflowTabs.count() > 1) {
-        await workflowTabs.first().focus();
-        await shell.page.keyboard.press("ArrowRight");
-        await shell.page.waitForFunction(() => document.querySelectorAll('main[aria-label="Learn"] [role="tab"]')[1]?.getAttribute("aria-selected") === "true");
-        assert.equal(await workflowTabs.nth(1).getAttribute("aria-selected"), "true", `${topicId} workflow tabs are not keyboard navigable`);
-      }
-      const reducedMotion = await shell.page.evaluate(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches);
-      const video = shell.page.locator("main video").first();
-      if (reducedMotion && await video.count()) {
-        assert.equal(await video.getAttribute("autoplay"), null, `${topicId} video must not autoplay`);
-        assert.equal(await video.evaluate((element) => element.paused), true, `${topicId} video unexpectedly plays on load`);
-      }
-    }
-    await shell.page.emulateMedia({ reducedMotion: "no-preference" });
-
-    // The walkthrough starts from a readable poster; reduced motion waits for explicit play.
-    await shell.page.emulateMedia({ reducedMotion: "reduce" });
-    await shell.page.goto(`${baseUrl}/learn?topic=networks`, { waitUntil: "domcontentloaded" });
-    await waitForLesson(shell.page, "Connect");
-    // Escape pressed as soon as the enlarged preview opens closes only that preview, never the Learn dialog.
-    await shell.page.getByRole("button", { name: "Enlarge product preview", exact: true }).click();
-    await shell.page.getByRole("dialog", { name: "Product preview", exact: true }).waitFor();
-    await shell.page.keyboard.press("Escape");
-    await shell.page.getByRole("dialog", { name: "Product preview", exact: true }).waitFor({ state: "hidden" });
-    assert.equal(new URL(shell.page.url()).pathname, "/learn", "Escape on the enlarged preview also closed Learn");
-    await waitForLesson(shell.page, "Connect");
-    assert.equal(await shell.page.locator("main video").count(), 0);
-    await shell.page.getByRole("button", { name: "Watch walkthrough", exact: true }).click();
-    const walkthrough = shell.page.locator("main video");
-    await walkthrough.waitFor();
-    await walkthrough.evaluate(async (video) => {
-      if (!video.readyState) await new Promise((resolve, reject) => { video.onloadedmetadata = resolve; video.onerror = reject; });
-    });
-    assert.equal(await walkthrough.evaluate((video) => video.paused && video.controls && video.playsInline), true);
-    assert.equal(await walkthrough.getAttribute("autoplay"), null);
-    assert.equal(await walkthrough.locator('track[kind="captions"]').count(), 1);
-    await walkthrough.evaluate((video) => video.play());
-    await shell.page.waitForFunction(() => document.querySelector("main video")?.currentTime > 0.2);
-    await shell.page.emulateMedia({ reducedMotion: "no-preference" });
-    await shell.page.emulateMedia({ reducedMotion: "reduce" });
-    await shell.page.waitForFunction(() => document.querySelector("main video")?.paused);
-    await shell.page.getByRole("button", { name: "Show preview", exact: true }).click();
-    assert.equal(await shell.page.locator("main video").count(), 0);
-    await shell.page.getByRole("button", { name: "Enlarge product preview", exact: true }).click();
-    const enlargedPreview = shell.page.getByRole("dialog", { name: "Product preview", exact: true });
-    await enlargedPreview.waitFor();
-    await enlargedPreview.locator("img").evaluate((image) => image.decode());
-    await shell.page.keyboard.press("Escape");
-    await enlargedPreview.waitFor({ state: "hidden" });
-    await waitForLesson(shell.page, "Connect");
-    await shell.page.emulateMedia({ reducedMotion: "no-preference" });
-
-    // A failed overview image has an actionable recovery and a real retry re-requests the asset.
-    const mediaRecovery = await openPage(browser, baseUrl, makeFixtures());
-    let failOverviewOnce = true;
-    await mediaRecovery.page.route("**/learn/devices/overview.webp", async (route) => {
-      if (failOverviewOnce) {
-        failOverviewOnce = false;
-        await route.abort();
-      } else {
-        await route.continue();
-      }
-    });
-    await mediaRecovery.page.goto(`${baseUrl}/learn?topic=devices`, { waitUntil: "domcontentloaded" });
-    await waitForLesson(mediaRecovery.page, "Devices");
-    const mediaError = mediaRecovery.page.getByRole("group", { name: "Lesson media recovery" });
-    await mediaError.getByRole("status").waitFor({ state: "visible" });
-    await mediaError.getByRole("button", { name: "Try again" }).click();
-    const restoredImage = mediaRecovery.page.locator('main img[src="/learn/devices/overview.webp"]');
-    await restoredImage.waitFor({ state: "visible" });
-    await mediaRecovery.page.waitForFunction(() => {
-      const image = document.querySelector('main img[src="/learn/devices/overview.webp"]');
-      return image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0;
-    });
-    await mediaRecovery.context.close();
-
-
-    await shell.page.goto(`${baseUrl}/learn?topic=not-a-topic`, { waitUntil: "domcontentloaded" });
-    await shell.page.getByRole("heading", { name: "That topic is not available" }).waitFor({ state: "visible" });
-    await shell.page.getByRole("button", { name: "Browse topics" }).click();
-    await shell.page.waitForFunction(() => location.search === "?topic=networks");
-    await shell.page.getByRole("button", { name: "Close Learn", exact: true }).click();
-    await shell.page.waitForFunction(() => location.pathname === "/");
-
-    // New Session starts on the default loadout, not on the active profile's own saved model (#957).
-    const defaultLoadout = { name: "haiku-low", profile: "review", provider: "anthropic", model: "claude-haiku", effort: "low" };
-    const onDefault = makeFixtures({ defaultLoadout });
-    const defaultView = await openPage(browser, baseUrl, onDefault);
-    await defaultView.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await defaultView.page.getByTestId("new-session-options").click();
-    // The active profile is "default" (gpt-6-luna); the form shows the loadout before Start.
-    await defaultView.page.locator("#new-session-model", { hasText: "claude-haiku" }).waitFor({ state: "visible", timeout: 5000 });
-    assert.doesNotMatch(await defaultView.page.locator("#new-session-model").innerText(), /gpt-6-luna/);
-    const switchAnswered = defaultView.page.waitForResponse(
-      (response) => response.request().method() === "POST" && new URL(response.url()).pathname.endsWith("/profile"),
-    );
-    await defaultView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
-    const defaultPayload = await Promise.race([
-      onDefault.createRequest,
-      new Promise((_, reject) => setTimeout(() => reject(new Error("Default-loadout launch request did not arrive.")), 15000)),
-    ]);
-    assert.equal(defaultPayload.profile, "review");
-    const switches = await until(() => onDefault.profileSwitches().length && onDefault.profileSwitches(), "The loadout's model never reached the session.");
-    assert.deepEqual(switches, [{ name: "review", model: "claude-haiku", effort: "low" }]);
-    // The session adopted the pick: the engine's answer to the switch carries the loadout's model and level.
-    // The app compares that answer with the pick and flags a session that kept something else.
-    const answered = await (await switchAnswered).json();
-    assert.equal(answered.model, "claude-haiku");
-    assert.equal(answered.effort, "low");
-    await defaultView.context.close();
-
-    // A default loadout on a profile that no longer exists leaves the form on the active profile.
-    const staleFixtures = makeFixtures({ defaultLoadout: { ...defaultLoadout, profile: "deleted" } });
-    const stale = await openPage(browser, baseUrl, staleFixtures);
-    await stale.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await stale.page.getByTestId("new-session-options").click();
-    await stale.page.locator("#new-session-model", { hasText: "gpt-6-luna" }).waitFor({ state: "visible", timeout: 5000 });
-    await stale.context.close();
-
-    // A default loadout belongs to the folder a session starts in: the engine's folder may set one and another
-    // folder its own. The form follows the folder picked, a deliberate model pick stays, and Start Session never
-    // outruns the answer (the clean-room review of #961, round 3).
-    const demoDefault = { name: "luna-max", profile: "default", provider: "openai_responses", model: "gpt-6-luna", effort: "max" };
-    const otherFolderFixtures = (byFolder) =>
-      makeFixtures({ defaultLoadoutsByFolder: byFolder, recentFolders: ["/learn-other"] });
-    const chooseOtherFolder = async (page) => {
-      await page.locator("#new-session-workspace").click();
-      await page.locator('button[title="/learn-other"]').click();
-    };
-    const launchPayload = (fixture, what) =>
-      Promise.race([
-        fixture.createRequest,
-        new Promise((_, reject) => setTimeout(() => reject(new Error(`${what} launch request did not arrive.`)), 15000)),
-      ]);
-
-    const perFolder = otherFolderFixtures({ "": demoDefault, "/learn-other": defaultLoadout });
-    const folderView = await openPage(browser, baseUrl, perFolder);
-    await folderView.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await folderView.page.getByTestId("new-session-options").click();
-    await folderView.page.locator("#new-session-model", { hasText: "gpt-6-luna" }).waitFor({ state: "visible", timeout: 5000 });
-    await chooseOtherFolder(folderView.page);
-    // The other folder sets claude-haiku: the form shows it, not the engine folder's gpt-6-luna.
-    await folderView.page.locator("#new-session-model", { hasText: "claude-haiku" }).waitFor({ state: "visible", timeout: 5000 });
-    assert.doesNotMatch(await folderView.page.locator("#new-session-model").innerText(), /gpt-6-luna/);
-    assert.ok(perFolder.profileListings().includes("/learn-other"), "the other folder's default was never asked for");
-    await folderView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
-    const folderPayload = await launchPayload(perFolder, "Other-folder");
-    assert.equal(folderPayload.workspace, "/learn-other");
-    assert.equal(folderPayload.profile, "review");
-    const folderSwitches = await until(() => perFolder.profileSwitches().length && perFolder.profileSwitches(), "The other folder's model never reached the session.");
-    assert.deepEqual(folderSwitches, [{ name: "review", model: "claude-haiku", effort: "low" }]);
-    await folderView.context.close();
-
-    // A model picked by hand is not undone by a change of folder.
-    const keptPick = otherFolderFixtures({ "/learn-other": demoDefault });
-    const keptView = await openPage(browser, baseUrl, keptPick);
-    await keptView.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await keptView.page.getByTestId("new-session-options").click();
-    await keptView.page.locator("#new-session-model").click();
-    await keptView.page.getByRole("group", { name: "review", exact: true })
-      .getByRole("option", { name: /claude-haiku/ }).click();
-    await chooseOtherFolder(keptView.page);
-    await keptView.page.waitForTimeout(500); // an answer that replaced the pick would be drawn by now
-    assert.match(await keptView.page.locator("#new-session-model").innerText(), /claude-haiku/);
-    await keptView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
-    const keptPayload = await launchPayload(keptPick, "Kept-pick");
-    assert.equal(keptPayload.workspace, "/learn-other");
-    assert.equal(keptPayload.profile, "review");
-    await keptView.context.close();
-
-    // Start Session pressed before the new folder's default has arrived still starts on that default.
-    const racing = otherFolderFixtures({ "": demoDefault, "/learn-other": defaultLoadout });
-    const racingView = await openPage(browser, baseUrl, racing);
-    await racingView.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await racingView.page.getByTestId("new-session-options").click();
-    await racingView.page.locator("#new-session-model", { hasText: "gpt-6-luna" }).waitFor({ state: "visible", timeout: 5000 });
-    racing.holdFolderDefaults();
-    await chooseOtherFolder(racingView.page);
-    await racingView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
-    await racingView.page.waitForTimeout(300);
-    assert.equal(racing.createPayload(), null, "Start Session outran the other folder's default");
-    racing.releaseFolderDefaults();
-    const racingPayload = await launchPayload(racing, "Racing");
-    assert.equal(racingPayload.workspace, "/learn-other");
-    assert.equal(racingPayload.profile, "review");
-    const racingSwitches = await until(() => racing.profileSwitches().length && racing.profileSwitches(), "The other folder's model never reached the session.");
-    assert.deepEqual(racingSwitches, [{ name: "review", model: "claude-haiku", effort: "low" }]);
-    await racingView.context.close();
-
-    // Release updates have their own route, close control, and retry path.
-    await shell.page.getByRole("button", { name: "What’s New", exact: true }).click();
-    await shell.page.waitForFunction(() => location.pathname === "/whats-new");
-    await shell.page.getByRole("heading", { level: 1, name: "What’s New", exact: true }).waitFor();
-    // The first release section: "Unreleased" between releases, "Kollab X.Y.Z" right after one (#887).
-    await shell.page.getByRole("heading", { level: 2 }).first().waitFor({ state: "visible" });
-    await shell.page.getByRole("button", { name: "Close What’s New", exact: true }).click();
-    await shell.page.waitForFunction(() => location.pathname === "/" && document.activeElement?.id === "app-main-pane");
-    const changelogFailure = await openPage(browser, baseUrl, makeFixtures(), { failChangelogOnce: true });
-    await changelogFailure.page.goto(`${baseUrl}/whats-new`, { waitUntil: "domcontentloaded" });
-    await changelogFailure.page.getByRole("button", { name: "Retry", exact: true }).click();
-    await changelogFailure.page.getByRole("heading", { level: 2 }).first().waitFor({ state: "visible" });
-    await changelogFailure.context.close();
-
-    const delayed = await openPage(browser, baseUrl, makeFixtures(), { delayChangelogMs: 900, viewport: { width: 390, height: 844 }, isMobile: true });
-    await delayed.page.goto(`${baseUrl}/whats-new`, { waitUntil: "domcontentloaded" });
-    await delayed.page.getByRole("status").getByText("Loading release notes…").waitFor({ state: "visible" });
-    await delayed.page.getByRole("heading", { level: 2 }).first().waitFor({ state: "visible" });
-    await delayed.context.close();
-
-    // A pick that fails after New Session started the chat leaves it on another model: say so in one compact
-    // line and let the person try again (#956).
-    const failing = await openPage(browser, baseUrl, makeFixtures({ pickFails: 1 }));
-    await failing.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await failing.page.getByTestId("new-session-options").click();
-    await failing.page.locator("#new-session-model").click();
-    await failing.page.getByRole("group", { name: "review", exact: true })
-      .getByRole("option", { name: /claude-haiku/ }).click();
-    await failing.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
-    await failing.page.getByRole("complementary", { name: "Session Controls", exact: true })
-      .getByText("Learn regression session", { exact: true }).waitFor({ state: "visible", timeout: 60_000 });
-    const pickNotice = failing.page.getByRole("alert").filter({ hasText: "Couldn't switch to claude-haiku" });
-    await pickNotice.waitFor({ state: "visible", timeout: 5_000 });
-    const pickText = await pickNotice.innerText();
-    assert.match(pickText, /Couldn't switch to claude-haiku\. .*could not switch models/);
-    // What a person reads has no issue numbers, versions or build ids.
-    assert.doesNotMatch(pickText, /#\d|\bv?\d+\.\d+\.\d+|[0-9a-f]{7,}/);
-    assert.ok((await pickNotice.boundingBox()).height <= 40, "the notice is one compact line at desktop width");
-    // Try Again puts the session on the pick; the fixture answers it this time, so the notice goes away.
-    await pickNotice.getByRole("button", { name: "Try Again", exact: true }).click();
-    await pickNotice.waitFor({ state: "hidden", timeout: 5_000 });
-    assert.equal(
-      failing.fixture.requests.filter((request) => request.method === "POST" && request.endpoint.endsWith("/profile")).length,
-      2,
-    );
-    await failing.context.close();
-
-    // A page and an engine on different versions: one compact line with a Reload button. The versions
-    // are a hover away, never in the line.
-    const mismatch = await openPage(browser, baseUrl, makeFixtures({ engineVersion: "999.1.0+deadbeef" }));
-    await mismatch.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    const versionNotice = mismatch.page.getByRole("status")
-      .filter({ has: mismatch.page.getByRole("button", { name: "Reload", exact: true }) });
-    await versionNotice.waitFor({ state: "visible", timeout: 5_000 });
-    assert.doesNotMatch(await versionNotice.innerText(), /999|deadbeef|\bv\d/);
-    assert.match(await versionNotice.getAttribute("title"), /999\.1\.0\+deadbeef/);
-    assert.ok((await versionNotice.boundingBox()).height <= 40, "the notice is one compact line at desktop width");
-    await versionNotice.getByRole("button", { name: "Dismiss", exact: true }).click();
-    await versionNotice.waitFor({ state: "hidden", timeout: 5_000 });
-    await mismatch.context.close();
-
-    // The update notice is the same line, with its two actions.
-    const updating = await openPage(browser, baseUrl, makeFixtures({ update: { version: "999.2.0", url: "https://example.invalid/notes" } }));
-    await updating.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    const updateNotice = updating.page.getByRole("status").filter({ hasText: "999.2.0" });
-    await updateNotice.getByRole("button", { name: "Update now", exact: true }).waitFor({ state: "visible", timeout: 5_000 });
-    await updateNotice.getByRole("link", { name: "Release notes", exact: true }).waitFor({ state: "visible" });
-    assert.ok((await updateNotice.boundingBox()).height <= 40, "the notice is one compact line at desktop width");
-    await updateNotice.getByRole("button", { name: "Dismiss", exact: true }).click();
-    await updateNotice.waitFor({ state: "hidden", timeout: 5_000 });
-    await updating.context.close();
-
-    // A Try Again still in flight when its notice is dismissed must not bring the notice back when it fails
-    // (the clean-room review of #959).
-    const heldRetry = makeFixtures({ pickFails: true });
-    const heldView = await openPage(browser, baseUrl, heldRetry);
-    await heldView.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await heldView.page.getByTestId("new-session-options").click();
-    await heldView.page.locator("#new-session-model").click();
-    await heldView.page.getByRole("group", { name: "review", exact: true })
-      .getByRole("option", { name: /claude-haiku/ }).click();
-    await heldView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
-    const heldNotice = heldView.page.getByRole("alert").filter({ hasText: "Couldn't switch to claude-haiku" });
-    await heldNotice.waitFor({ state: "visible", timeout: 60_000 });
-    heldRetry.holdPicks();
-    await heldNotice.getByRole("button", { name: "Try Again", exact: true }).click();
-    await heldNotice.getByRole("button", { name: "Trying…", exact: true }).waitFor({ state: "visible", timeout: 5_000 });
-    await heldNotice.getByRole("button", { name: "Dismiss", exact: true }).click();
-    await heldNotice.waitFor({ state: "hidden", timeout: 5_000 });
-    // The held switch now fails, and the page reloads the sessions right after its catch has run. Record the
-    // order the page saw (the answer, then a session list request after it) so the assertion below waits for the
-    // retry's own end: any earlier session poll would not do.
-    const heldEvents = [];
-    heldView.page.on("response", (response) => {
-      if (response.request().method() === "POST" && new URL(response.url()).pathname.endsWith("/profile")) {
-        heldEvents.push("answer");
-      }
-    });
-    heldView.page.on("request", (request) => {
-      if (request.method() === "GET" && new URL(request.url()).pathname.endsWith("/sessions")) heldEvents.push("list");
-    });
-    heldRetry.releasePicks();
-    const heldListedAfterAnswer = () => {
-      const answeredAt = heldEvents.indexOf("answer");
-      return answeredAt >= 0 && heldEvents.indexOf("list", answeredAt) >= 0;
-    };
-    const heldDeadline = Date.now() + 10_000;
-    while (!heldListedAfterAnswer()) {
-      assert.ok(Date.now() < heldDeadline, "the held switch was never answered and followed by a session reload");
-      await heldView.page.waitForTimeout(25);
-    }
-    await heldView.page.waitForTimeout(300); // the notice, if it came back, is drawn by now
-    assert.equal(
-      await heldView.page.getByRole("alert").filter({ hasText: "Couldn't switch to" }).count(),
-      0,
-      "a dismissed notice came back when its retry failed",
-    );
-    await heldView.context.close();
-
-    // A model change made by hand that fails leaves the chat on the model it runs, so the notice for the failed
-    // New Session pick stays: it and Try Again are the way back to that pick (the clean-room review of #959).
-    const manualChange = makeFixtures({ pickFails: true });
-    const manualView = await openPage(browser, baseUrl, manualChange);
-    await manualView.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await manualView.page.getByTestId("new-session-options").click();
-    await manualView.page.locator("#new-session-model").click();
-    await manualView.page.getByRole("group", { name: "review", exact: true })
-      .getByRole("option", { name: /claude-haiku/ }).click();
-    await manualView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
-    const manualNotice = manualView.page.getByRole("alert").filter({ hasText: "Couldn't switch to claude-haiku" });
-    await manualNotice.waitFor({ state: "visible", timeout: 60_000 });
-    const manualPanel = manualView.page.getByRole("complementary", { name: "Session Controls", exact: true });
-    await manualPanel.getByRole("button", { name: "Model", exact: true }).click();
-    const manualAnswer = manualView.page.waitForResponse(
-      (response) => response.request().method() === "POST" && new URL(response.url()).pathname.endsWith("/profile"),
-    );
-    await manualView.page.getByRole("group", { name: "default", exact: true })
-      .getByRole("option", { name: /gpt-6-luna/ }).click();
-    assert.equal((await manualAnswer).status(), 502, "the model change made by hand was meant to fail");
-    await manualView.page.waitForTimeout(400);
-    await manualNotice.waitFor({ state: "visible", timeout: 5_000 });
-    await manualNotice.getByRole("button", { name: "Try Again", exact: true }).waitFor({ state: "visible", timeout: 5_000 });
-    await manualView.context.close();
-
-    // A model change made by hand that only partly applies (the profile's environment sets another model) leaves
-    // the chat on something the notice for the failed New Session pick no longer describes: the notice goes
-    // (the clean-room review of #959, round 2).
-    const partialChange = makeFixtures({ pickFails: 1, environmentModels: { default: "environment-model" } });
-    const partialView = await openPage(browser, baseUrl, partialChange);
-    await partialView.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await partialView.page.getByTestId("new-session-options").click();
-    await partialView.page.locator("#new-session-model").click();
-    await partialView.page.getByRole("group", { name: "review", exact: true })
-      .getByRole("option", { name: /claude-haiku/ }).click();
-    await partialView.page.getByRole("button", { name: "Start Session", exact: true }).last().click();
-    const partialNotice = partialView.page.getByRole("alert").filter({ hasText: "Couldn't switch to claude-haiku" });
-    await partialNotice.waitFor({ state: "visible", timeout: 60_000 });
-    const partialPanel = partialView.page.getByRole("complementary", { name: "Session Controls", exact: true });
-    await partialPanel.getByRole("button", { name: "Model", exact: true }).click();
-    const partialAnswer = partialView.page.waitForResponse(
-      (response) => response.request().method() === "POST" && new URL(response.url()).pathname.endsWith("/profile"),
-    );
-    await partialView.page.getByRole("group", { name: "default", exact: true })
-      .getByRole("option", { name: /gpt-6-luna/ }).click();
-    assert.equal((await partialAnswer).status(), 200, "the profile switch itself was meant to apply");
-    await partialNotice.waitFor({ state: "hidden", timeout: 5_000 });
-    await partialView.context.close();
 
     if (process.env.LEARN_CAPTURE_SCREENSHOTS !== "0") {
       const captures = [

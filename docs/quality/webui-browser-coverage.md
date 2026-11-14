@@ -18,11 +18,13 @@ npm run inventory:controls -- /tmp/kollab-control-candidates.json
 npm run test:e2e:parallel
 ```
 
-The runner executes six independent browser suites using two workers by
-default. Each has its own scratch home, temporary directory, browser context,
+The runner executes ten independent browser suites; locally it defaults to
+two workers, and CI fans the suites out across four parallel webui lane jobs
+(core, learn, topics, notices) selected with `KOLLAB_BROWSER_SUITES` (#1022). Each has its own scratch home, temporary directory, browser context,
 and dynamically allocated local listener. It does not inherit unrelated
-environment variables. `KOLLAB_BROWSER_WORKERS` accepts 1–4;
-`KOLLAB_BROWSER_TIMEOUT_MS` bounds each worker (360 seconds by default).
+environment variables. `KOLLAB_BROWSER_WORKERS` accepts 1–4
+(CI sets it to 4); `KOLLAB_BROWSER_TIMEOUT_MS` bounds each suite (900 seconds
+by default).
 `CHROME_PATH` may select an existing Chromium executable. Results, captured
 worker output, and suite screenshots go under a unique temporary directory or
 under `KOLLAB_BROWSER_RESULTS_DIR` when specified. A failed or timed-out suite makes
@@ -46,7 +48,7 @@ test a real remote agent or provider.
 
 ## Current evidence and gaps
 
-- Learn, navigation, new-session shell and mocked remote selection: `learn-browser-acceptance.mjs`. Still needed: real remote send/reply, switching, close/reopen, reconnect and history persistence.
+- Learn, navigation, new-session shell and mocked remote selection: `learn-browser-acceptance.mjs`; the 11-topic tour, walkthrough video and unknown-topic route in `learn-topics-browser-acceptance.mjs`; the default-loadout scenarios (#957/#961) in `learn-loadouts-browser-acceptance.mjs`; release notes and notice lines (#887/#956) in `learn-notices-browser-acceptance.mjs`; the dismissed-retry and hand-made model changes (#959) in `learn-retries-browser-acceptance.mjs`. Still needed: real remote send/reply, switching, close/reopen, reconnect and history persistence.
 - Profile rows: `acceptance/profile-rows.browser.mjs`. Still needed: full profile lifecycle and real authentication/error paths.
 - Profile copy: `acceptance/profile-copy.browser.mjs`. Still needed: real keyring, provider and provisioned-profile negative cases.
 - Agent sidebar glyphs and responsive layout: `agent-sidebar-glyph-browser-acceptance.mjs`. Still needed: agent launch, stop, deletion and remote failures.

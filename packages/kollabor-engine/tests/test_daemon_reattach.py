@@ -589,3 +589,112 @@ async def test_a_request_id_inside_a_tool_frame_names_no_request(monkeypatch):
               "more": {"request_id": "b"}}
     error, = await _pool_events([nested], 1)
     assert error["code"] == "frame_too_large" and "request_id" not in error
+
+
+async def _events_across_images(images, count):
+    """The (request_id, seq) the engine hands on while successive daemon images serve it.
+
+    ``images`` is a list of ``(agent_id, events)``. Each image acks with its agent_id and
+    sends its events; every image but the last then drops the attacher, as the exec that
+    /restart ends in does (same pid, same socket path; #968).
+    """
+    import shutil
+
+    attaches = []
+
+    async def daemon(reader, writer):
+        await reader.readline()
+        attaches.append("attach")
+        agent_id, events = images[min(len(attaches), len(images)) - 1]
+        writer.write((json.dumps({"type": "attach_ack", "agent_id": agent_id}) + "\n").encode())
+        for event in events:
+            writer.write((json.dumps(event) + "\n").encode())
+        await writer.drain()
+        if len(attaches) < len(images):
+            writer.close()
+            return
+        await reader.read()
+
+    folder = tempfile.mkdtemp(dir="/tmp")
+    server = await asyncio.start_unix_server(daemon, os.path.join(folder, "opal.sock"))
+    handle = DaemonHandle("s9", "opal", launcher=None)
+    handle.pid = os.getpid()
+    _fast_reattach(handle)
+    queue = handle.subscribe()
+    seen = []
+    try:
+        await handle.connect(os.path.join(folder, "opal.sock"))
+        for _ in range(count):
+            try:
+                seen.append(await asyncio.wait_for(queue.get(), timeout=2))
+            except asyncio.TimeoutError:
+                break
+        await asyncio.sleep(0.05)
+        while not queue.empty():
+            seen.append(queue.get_nowait())
+    finally:
+        handle._closed = True
+        handle._read_task.cancel()
+        server.close()
+        shutil.rmtree(folder, ignore_errors=True)
+    return [(e["request_id"], e["seq"]) for e in seen]
+
+
+def _done(request_id, seq):
+    return {"type": "turn_complete", "request_id": request_id, "seq": seq}
+
+
+@pytest.mark.asyncio
+async def test_a_restarted_daemon_image_numbers_its_events_from_one_again():
+    # #968: /restart execs the daemon (same pid, same socket) and the new image's
+    # display tap counts from seq 1 again. Its attach_ack names the image by agent_id.
+    # The fence that drops a reattach's replays belongs to one image; kept across the
+    # exec it dropped every event of the restarted agent, so the chat got no reply.
+    before = [_done("old", n) for n in (1, 2, 3, 4, 5)]
+    after = [_done("new-1", 1), _done("new-2", 2)]
+    seen = await _events_across_images([("image-one", before), ("image-two", after)], 7)
+    assert seen == [("old", 1), ("old", 2), ("old", 3), ("old", 4), ("old", 5),
+                    ("new-1", 1), ("new-2", 2)]
+
+
+@pytest.mark.asyncio
+async def test_the_same_daemon_image_replaying_after_a_reattach_is_still_fenced():
+    # The #543 fence stays for one image: an ack naming the same agent_id again is the
+    # same process replaying its recent events, which the engine already passed on.
+    first = [_done("a", 1), _done("a", 2)]
+    replay = [_done("a", 1), _done("a", 2), _done("b", 3)]
+    seen = await _events_across_images([("image-one", first), ("image-one", replay)], 3)
+    assert seen == [("a", 1), ("a", 2), ("b", 3)]
+
+
+@pytest.mark.asyncio
+async def test_a_restart_announcement_is_for_terminal_windows_only():
+    # The daemon tells its attached windows a restart is coming (#968) so a terminal
+    # window waits and attaches again. The engine reattaches by itself and its chats
+    # say it their own way: the web UI never receives the announcement.
+    announcement = {"type": "daemon_restarting", "identity": "citrine", "seq": 1}
+    after = {"type": "tool_start", "request_id": "r1", "seq": 2}
+
+    async def daemon(reader, writer):
+        await reader.readline()
+        writer.write(b'{"type": "attach_ack"}\n')
+        for event in (announcement, after):
+            writer.write((json.dumps(event) + "\n").encode())
+        await writer.drain()
+        await reader.read()
+
+    path = os.path.join(tempfile.mkdtemp(dir="/tmp"), "citrine.sock")
+    server = await asyncio.start_unix_server(daemon, path)
+    handle = DaemonHandle("s8", "citrine", launcher=None)
+    handle.pid = os.getpid()
+    queue = handle.subscribe()
+    try:
+        await handle.connect(path)
+        seen = await asyncio.wait_for(queue.get(), timeout=5)
+        assert seen["type"] == "tool_start"  # the announcement was dropped at the boundary
+        await asyncio.sleep(0.05)
+        assert queue.empty()
+    finally:
+        handle._closed = True
+        handle._read_task.cancel()
+        server.close()
