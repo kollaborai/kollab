@@ -126,6 +126,14 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
     if not try_lock(fd):
         os.close(fd)
         return 0
+    try:
+        current = _read_registry(home / "plugins.json")["plugins"].get(plugin_id)
+        if current != record or files_sha256(root) != expected_hash:
+            raise ValueError("Plugin approval or files changed while starting service")
+    except Exception:
+        unlock(fd)
+        os.close(fd)
+        raise
     pid_path = run_dir / f"{service_name}.pid"
     if _recorded_process_alive(pid_path):
         unlock(fd)

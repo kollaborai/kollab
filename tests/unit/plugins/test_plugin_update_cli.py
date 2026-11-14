@@ -1,6 +1,6 @@
 """Updates require approval of a pinned stage and preserve plugin state."""
+
 import json
-from pathlib import Path
 
 import pytest
 
@@ -19,7 +19,14 @@ def fixture(tmp_path, monkeypatch):
     data = home / "plugin-data" / "hello"
     data.mkdir(parents=True)
     (data / "values.json").write_text('{"message":"keep"}')
-    old = {"source": "https://example.invalid/repo", "ref": "main", "commit": "a" * 40, "enabled": False, "granted": [], "files_sha256": files_sha256(root)}
+    old = {
+        "source": "https://example.invalid/repo",
+        "ref": "main",
+        "commit": "a" * 40,
+        "enabled": False,
+        "granted": [],
+        "files_sha256": files_sha256(root),
+    }
     (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": old}, "dev": {}}))
 
     def stage(source, path, version):
@@ -28,7 +35,13 @@ def fixture(tmp_path, monkeypatch):
         manifest = {"id": "hello", "name": "Hello", "version": "2.0.0", "uses": [], "services": {}}
         (path / "kollab-plugin.json").write_text(json.dumps(manifest))
         (path / "new.txt").write_text("new")
-        return {"source": old["source"], "ref": "main", "commit": "b" * 40, "files_sha256": files_sha256(path), "manifest": manifest}
+        return {
+            "source": old["source"],
+            "ref": "main",
+            "commit": "b" * 40,
+            "files_sha256": files_sha256(path),
+            "manifest": manifest,
+        }
 
     monkeypatch.setattr(cli, "stage_git_source", stage)
     return home, root

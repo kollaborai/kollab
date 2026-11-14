@@ -35,6 +35,8 @@ def main(argv: list[str]) -> int:
     logs.add_argument("service", nargs="?")
     new = subparsers.add_parser("new", help="Create a plugin from the hello template")
     new.add_argument("plugin_id")
+    update = subparsers.add_parser("update", help="Update an installed Git plugin")
+    update.add_argument("plugin_id")
     add = subparsers.add_parser("add", help="Install a Git plugin after confirmation")
     add.add_argument("source")
     dev = subparsers.add_parser("dev", help="Attach a local development checkout")
@@ -97,7 +99,7 @@ def main(argv: list[str]) -> int:
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         print(f"Created {target}")
         return 0
-    if args.action in {"add", "enable", "disable", "dev"} and not sys.stdin.isatty():
+    if args.action in {"add", "update", "enable", "disable", "dev"} and not sys.stdin.isatty():
         raise ValueError("Plugin management requires interactive confirmation")
     if args.action in {"enable", "disable"}:
         from .settings import set_enabled
@@ -144,6 +146,96 @@ def main(argv: list[str]) -> int:
             _write_json(home / "plugins.json", registry)
             print(f"Attached {plugin_id}@dev from {folder}; local code runs as your user")
             return 0
+    if args.action == "update":
+        import hashlib
+        import shlex
+
+        from kollabor.version import get_runtime_version
+
+        from .services import _recorded_process_alive
+
+        plugin_id = args.plugin_id
+        if not _ID.fullmatch(plugin_id):
+            raise ValueError("Invalid plugin id")
+        prior = registry["plugins"].get(plugin_id)
+        if not isinstance(prior, dict) or not isinstance(prior.get("source"), str):
+            raise ValueError("Plugin is not installed from Git")
+        root = home / "plugins" / plugin_id
+        if root.is_symlink() or not root.is_dir():
+            raise ValueError("Invalid installed plugin folder")
+        if prior.get("enabled") is not False:
+            raise ValueError("Disable the plugin before updating so services cannot restart")
+        run_dir = home / "plugin-data" / plugin_id / "run"
+        if any(_recorded_process_alive(pid) for pid in run_dir.glob("*.pid")):
+            raise ValueError("Stop the plugin's running services before updating")
+        source = prior["source"]
+        if prior.get("ref"):
+            source += "#" + prior["ref"]
+        with tempfile.TemporaryDirectory(prefix=".plugin-update-", dir=home / "plugins") as temporary:
+            stage = Path(temporary) / "package"
+            staged = stage_git_source(source, stage, get_runtime_version())
+            manifest = staged["manifest"]
+            if manifest["id"] != plugin_id:
+                raise ValueError("Updated plugin id does not match installed plugin id")
+
+            def snapshot(folder):
+                files = {}
+                for path in folder.rglob("*"):
+                    if path.is_symlink():
+                        raise ValueError("Plugin folder contains a symlink")
+                    if path.is_file():
+                        with path.open("rb") as stream:
+                            files[path.relative_to(folder).as_posix()] = hashlib.file_digest(
+                                stream, "sha256"
+                            ).hexdigest()
+                return files
+
+            before, after = snapshot(root), snapshot(stage)
+            changed = sorted(
+                {str(Path(name).parent) for name in before.keys() | after.keys() if before.get(name) != after.get(name)}
+            )
+            print(f"Plugin: {manifest['name']} ({plugin_id})")
+            print(f"Source: {staged['source']}")
+            print(f"Commit: {prior.get('commit', 'unknown')}..{staged['commit']}")
+            print(f"Files SHA-256: {staged['files_sha256']}")
+            print("Changed folders: " + (", ".join(changed) or "none"))
+            print("Uses: " + (", ".join(manifest.get("uses", [])) or "none"))
+            for name, service in manifest.get("services", {}).items():
+                print(f"Process {name}: {shlex.join(service['command'])}")
+                print("  Secrets: " + (", ".join(service.get("secrets", [])) or "none"))
+            print("Plugin code runs as your user and can use your computer outside Kollab.")
+            if input("Update this plugin? [yes/no] ").strip().lower() != "yes":
+                return 1
+            from kollabor_config.file_lock import try_lock, unlock
+
+            if any(path.is_symlink() for path in (home / "plugin-data", run_dir.parent, run_dir)):
+                raise ValueError("Plugin data path may not be a symlink")
+            run_dir.mkdir(parents=True, exist_ok=True)
+            old_manifest = json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
+            old_services = old_manifest.get("services", {})
+            if not isinstance(old_services, dict):
+                raise ValueError("Invalid installed service declarations")
+            names = set(old_services) | set(manifest.get("services", {})) | {p.stem for p in run_dir.glob("*.pid")}
+            if any(not isinstance(name, str) or not _SERVICE.fullmatch(name) for name in names):
+                raise ValueError("Invalid installed service name")
+            locks = []
+            try:
+                for name in sorted(names):
+                    fd = os.open(run_dir / f"{name}.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                    if not try_lock(fd):
+                        os.close(fd)
+                        raise ValueError("A plugin service is running; stop it and try again")
+                    locks.append(fd)
+                    if _recorded_process_alive(run_dir / f"{name}.pid"):
+                        raise ValueError("A plugin service is running; stop it and try again")
+                install_stage(stage, staged, staged["commit"], staged["files_sha256"], expected_record=prior)
+            finally:
+                for fd in reversed(locks):
+                    unlock(fd)
+                    os.close(fd)
+            print(f"Updated {plugin_id}")
+            return 0
+
     if args.action == "add":
         if not sys.stdin.isatty():
             raise ValueError("Plugin installation requires interactive confirmation")

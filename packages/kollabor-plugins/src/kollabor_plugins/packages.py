@@ -338,7 +338,7 @@ def recover_installs() -> None:
         _recover_locked(home)
 
 
-def install_stage(stage: Path, staged: dict, commit: str, digest: str) -> None:
+def install_stage(stage: Path, staged: dict, commit: str, digest: str, *, expected_record: dict | None = None) -> None:
     """Atomically swap a confirmed staged package into the user's plugin store."""
     plugin_id = staged.get("manifest", {}).get("id")
     if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id):
@@ -355,6 +355,8 @@ def install_stage(stage: Path, staged: dict, commit: str, digest: str) -> None:
         verify_stage(stage, staged, commit, digest)
         registry = _read_registry(registry_path)
         prior = registry["plugins"].get(plugin_id)
+        if expected_record is not None and prior != expected_record:
+            raise ValueError("Plugin registry changed during approval; try again")
         if live.exists() != (prior is not None) or old.exists():
             raise ValueError("Plugin folder and registry disagree")
         transaction = {"id": plugin_id, "registry": registry, "committed": False}
