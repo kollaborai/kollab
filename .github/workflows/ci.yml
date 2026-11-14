@@ -20,14 +20,26 @@ permissions:
 
 jobs:
   tests:
-    name: ci/tests (unit shard ${{ matrix.shard }})
+    name: ci/tests (${{ matrix.shard.gem }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # 3.14 is the floor and the launch runtime.
+        # 3.14 is the floor and the launch runtime. Nine gem-named shards
+        # keep every leg under the three-minute run goal (#1022); the names are
+        # cosmetic (the hash split below decides content), the index feeds it,
+        # and SHARD_COUNT must match the list length.
         python-version: ["3.14"]
-        shard: [0, 1, 2, 3]
+        shard:
+          - { index: 0, gem: amber }
+          - { index: 1, gem: beryl }
+          - { index: 2, gem: coral }
+          - { index: 3, gem: diamond }
+          - { index: 4, gem: garnet }
+          - { index: 5, gem: jade }
+          - { index: 6, gem: opal }
+          - { index: 7, gem: ruby }
+          - { index: 8, gem: sapphire }
 
     steps:
       - uses: actions/checkout@v6
@@ -42,7 +54,7 @@ jobs:
         uses: astral-sh/setup-uv@v8.1.0
         with:
           # Matrix legs need separate caches; otherwise they race to save one key.
-          cache-suffix: ${{ github.job }}-${{ matrix.shard }}
+          cache-suffix: ${{ github.job }}-${{ matrix.shard.gem }}
 
       # Wheel/editable builds fail instead of substituting an older WebUI.
       - uses: actions/setup-node@v6
@@ -52,13 +64,13 @@ jobs:
       - name: Install workspace
         run: uv sync --all-packages --extra dev
 
-      # Hash test files across the matrix. Split the high-latency network
-      # membership module by test item so one file can't dominate a shard.
+      # Hash test files across the matrix. Files whose tests run multi-second
+      # each are hashed by test item so one file can't dominate a shard (#1022).
       # Keep the two parallel-sensitive tests serial in the support job (#470).
       - name: Run unit test shard
         env:
-          SHARD: ${{ matrix.shard }}
-          SHARD_COUNT: ${{ strategy.job-total }}
+          SHARD: ${{ matrix.shard.index }}
+          SHARD_COUNT: 9
         run: |
           set -euo pipefail
           selected_files=$(find tests/unit -type f -name 'test_*.py' -print |
@@ -68,11 +80,24 @@ jobs:
           import os
           import sys
 
+          # Files whose tests run multi-second each: hashed by test item so no
+          # one of them can land whole in one shard and bound the run (#1022).
+          # test_network_members.py is skipped here and absent from the
+          # item-split below: its revocation tests run minutes each and own
+          # the dedicated heavy job, so no shard picks the file up whole.
+          SLOW_FILES = {
+              b"tests/unit/test_network_members.py",
+              b"tests/unit/test_mesh_network.py",
+              b"tests/unit/test_kill_switch_f13.py",
+              b"tests/unit/test_crystal_store_cache.py",
+              b"tests/unit/test_config_hooks.py",
+              b"tests/unit/test_ghost_response.py",
+          }
           shard = int(sys.argv[1])
           shard_count = int(sys.argv[2])
           for path in sys.stdin.buffer:
               path = path.rstrip(b"\n")
-              if path == b"tests/unit/test_network_members.py":
+              if path in SLOW_FILES:
                   continue
               digest = hashlib.sha256(b"kollab-ci-tests:" + path).digest()
               if int.from_bytes(digest[:4], "big") % shard_count == shard:
@@ -83,10 +108,14 @@ jobs:
             mapfile -t test_files <<< "$selected_files"
           fi
 
-          network_tests=()
-          if [ -f tests/unit/test_network_members.py ]; then
-            selected_network_tests=$(
-              uv run python -m pytest tests/unit/test_network_members.py --collect-only -q |
+          slow_tests=()
+          selected_slow_tests=$(
+              uv run python -m pytest \
+                tests/unit/test_mesh_network.py \
+                tests/unit/test_kill_switch_f13.py \
+                tests/unit/test_crystal_store_cache.py \
+                tests/unit/test_config_hooks.py \
+                tests/unit/test_ghost_response.py --collect-only -q |
                 python -c '
           import hashlib
           import os
@@ -94,36 +123,106 @@ jobs:
 
           shard = int(sys.argv[1])
           shard_count = int(sys.argv[2])
-          prefix = b"tests/unit/test_network_members.py::"
           for nodeid in sys.stdin.buffer:
               nodeid = nodeid.rstrip(b"\n")
-              if not nodeid.startswith(prefix):
+              if b"::" not in nodeid:
                   continue
               digest = hashlib.sha256(b"kollab-ci-tests:" + nodeid).digest()
               if int.from_bytes(digest[:4], "big") % shard_count == shard:
                   print(os.fsdecode(nodeid))
           ' "$SHARD" "$SHARD_COUNT"
             )
-            if [ -z "$selected_network_tests" ]; then
-              echo "Network-membership shard $SHARD discovered no test items" >&2
-              exit 1
-            fi
-            mapfile -t network_tests <<< "$selected_network_tests"
+          if [ -z "$selected_slow_tests" ]; then
+            echo "Slow-file shard $SHARD discovered no test items" >&2
+            exit 1
           fi
+          mapfile -t slow_tests <<< "$selected_slow_tests"
 
-          test_targets=("${test_files[@]}" "${network_tests[@]}")
+          test_targets=("${test_files[@]}" "${slow_tests[@]}")
           if [ "${#test_targets[@]}" -eq 0 ]; then
             echo "Unit-test shard $SHARD discovered no test targets" >&2
             exit 1
           fi
-          printf 'Shard %s selected %s files and %s network-membership test items\n' \
-            "$SHARD" "${#test_files[@]}" "${#network_tests[@]}"
-          uv run python -m pytest "${test_targets[@]}" -q -n auto \
+          printf 'Shard %s selected %s files and %s slow-file test items\n' \
+            "$SHARD" "${#test_files[@]}" "${#slow_tests[@]}"
+          # --durations surfaces the real CI-runner hot spots in every shard log,
+          # so a slow shard can be rebalanced from evidence instead of guesses.
+          uv run python -m pytest "${test_targets[@]}" -q -n auto --durations=25 \
             --deselect=tests/unit/test_hub_email_bridge.py::test_disconnect_ends_a_poll_blocked_in_idle \
             --deselect=tests/unit/test_relay_build_allowlist.py::test_packaged_relay_imports_and_help_from_allowlist_alone
 
+  # The network-membership revocation tests run minutes each (one is ~140s on
+  # a runner); hashed into shards they made whichever shard drew them the
+  # slowest job of the run. These two dedicated lanes isolate them so the
+  # shards stay flat (#1022); each lane hashes the file's test items across
+  # itself, so the one ~140s test cannot stack with the other revocation
+  # tests behind a single job.
+  heavy_tests:
+    name: ci/tests (heavy ${{ matrix.lane }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [a, b]
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          cache-suffix: ${{ github.job }}-${{ matrix.lane }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Install workspace
+        run: uv sync --all-packages --extra dev
+
+      - name: Run this lane's network membership tests
+        env:
+          HEAVY_LANE: ${{ matrix.lane }}
+        run: |
+          set -euo pipefail
+          lane=0
+          [ "$HEAVY_LANE" = "b" ] && lane=1
+          selected=$(
+            uv run python -m pytest tests/unit/test_network_members.py --collect-only -q |
+            python -c '
+          import hashlib
+          import os
+          import sys
+
+          lane = int(sys.argv[1])
+          for nodeid in sys.stdin.buffer:
+              nodeid = nodeid.rstrip(b"\n")
+              if b"::" not in nodeid:
+                  continue
+              digest = hashlib.sha256(b"kollab-ci-heavy:" + nodeid).digest()
+              if int.from_bytes(digest[:4], "big") % 2 == lane:
+                  print(os.fsdecode(nodeid))
+          ' "$lane"
+          )
+          mapfile -t targets <<< "$selected"
+          if [ "${#targets[@]}" -eq 0 ]; then
+            echo "Heavy lane $HEAVY_LANE discovered no test items" >&2
+            exit 1
+          fi
+          printf 'Heavy lane %s selected %s test items\n' "$HEAVY_LANE" "${#targets[@]}"
+          uv run python -m pytest "${targets[@]}" -q -n auto --durations=25
+
+  # The support lanes are independent of each other, so they run as parallel
+  # jobs instead of serial steps inside one job (#1020): the web UI browser
+  # acceptance used to serialize behind the python and voice lanes.
   supporting_tests:
-    name: ci/tests (support)
+    name: ci/tests (support, python)
     runs-on: ubuntu-latest
 
     steps:
@@ -161,10 +260,28 @@ jobs:
       - name: Run engine and rpc package tests
         run: uv run python -m pytest -o asyncio_mode=auto packages/kollabor-engine/tests packages/kollabor-rpc/tests -q
 
-      # The voice package runs on its own 3.12/3.13 runtime and needs numpy,
-      # which the workspace venv lacks, so tests/unit never collected it.
-      # The LiveKit pins match the runtime in kollabor_voice/manifest.json;
-      # without them test_livekit_worker.py skips itself (#403).
+      - name: Validate bundled Agent Skills layout
+        run: uv run python scripts/validate_bundled_agent_skills.py
+
+  # The voice package runs on its own 3.12/3.13 runtime and needs numpy,
+  # which the workspace venv lacks, so tests/unit never collected it.
+  # The LiveKit pins match the runtime in kollabor_voice/manifest.json;
+  # without them test_livekit_worker.py skips itself (#403). uv fetches the
+  # runtime itself (--no-project), so this lane needs no workspace install.
+  support_voice_tests:
+    name: ci/tests (support, voice)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          cache-suffix: ${{ github.job }}
+
       - name: Run voice package tests
         run: >-
           uv run --no-project --python 3.12 --with numpy==2.5.3
@@ -174,12 +291,50 @@ jobs:
           --with livekit-local-inference==0.2.7
           python -m pytest packages/kollabor-voice/tests -q
 
-      # The web UI's own tests never ran in CI: four vitest files and the
-      # node:test files (Node 24 strips the types).
+  # The web UI's own tests never ran in CI: four vitest files and the
+  # node:test files (Node 24 strips the types). Node-only lane: no python,
+  # uv or workspace install.
+  support_webui_tests:
+    name: ci/tests (support, webui ${{ matrix.lane }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The browser suites fan out across four lane jobs so no single suite
+        # bounds the run (#1022). Every lane runs its slice through the same
+        # parallel runner; the core lane also owns the static web UI checks,
+        # the runner unit tests, the controls inventory and the dist build
+        # (team-launch needs the built frontend).
+        lane: [core, learn, topics, notices]
+        include:
+          - lane: core
+            suites: agent-sidebar,remote-chat-lifecycle,team-launch,profile-rows,profile-copy
+          - lane: learn
+            suites: learn,learn-loadouts
+          - lane: topics
+            suites: learn-topics
+          - lane: notices
+            suites: learn-notices,learn-retries
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: packages/kollabor-webui/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: packages/kollabor-webui/frontend
+        run: npm ci --no-audit --no-fund
+
       - name: Run web UI tests
+        if: matrix.lane == 'core'
         working-directory: packages/kollabor-webui/frontend
         run: |
-          npm ci --no-audit --no-fund
           npx tsc --noEmit
           node scripts/check-test-discovery.mjs
           npx vitest run
@@ -189,28 +344,31 @@ jobs:
         working-directory: packages/kollabor-webui/frontend
         run: npx playwright-core install --with-deps chromium
 
+      # The runner supports 1-4 workers and every suite gets an isolated
+      # HOME/TMPDIR and its own Chromium. KOLLAB_BROWSER_SUITES names this
+      # lane's slice; the runner fails fast on an unknown name.
       - name: Run web UI browser acceptance
         working-directory: packages/kollabor-webui/frontend
         env:
-          KOLLAB_BROWSER_WORKERS: "2"
+          KOLLAB_BROWSER_WORKERS: "4"
+          KOLLAB_BROWSER_SUITES: ${{ matrix.suites }}
           KOLLAB_BROWSER_RESULTS_DIR: ${{ runner.temp }}/kollab-browser-results
         run: |
           mkdir -p "$KOLLAB_BROWSER_RESULTS_DIR"
-          npm run build
-          npm run test:e2e:runner
-          npm run inventory:controls -- "$KOLLAB_BROWSER_RESULTS_DIR/control-candidates.json"
+          if [ "${{ matrix.lane }}" = "core" ]; then
+            npm run build
+            npm run test:e2e:runner
+            npm run inventory:controls -- "$KOLLAB_BROWSER_RESULTS_DIR/control-candidates.json"
+          fi
           npm run test:e2e:parallel
 
       - name: Upload browser acceptance evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: browser-acceptance-results
+          name: browser-acceptance-results-${{ matrix.lane }}
           path: ${{ runner.temp }}/kollab-browser-results
           if-no-files-found: ignore
-
-      - name: Validate bundled Agent Skills layout
-        run: uv run python scripts/validate_bundled_agent_skills.py
 
   # Keep the exact required "ci/tests" check name expected by branch
   # protection. It succeeds only when every unit shard and the support job do.
@@ -221,18 +379,21 @@ jobs:
     # is free-form: this resolves as the check "ci/tests", which is the exact
     # name the required rule expects.
     name: ci/tests
-    needs: [tests, supporting_tests]
+    needs: [tests, heavy_tests, supporting_tests, support_voice_tests, support_webui_tests]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Fail unless every required test job passed
         env:
           UNIT_RESULT: ${{ needs.tests.result }}
-          SUPPORT_RESULT: ${{ needs.supporting_tests.result }}
+          HEAVY_RESULT: ${{ needs.heavy_tests.result }}
+          SUPPORT_PYTHON_RESULT: ${{ needs.supporting_tests.result }}
+          SUPPORT_VOICE_RESULT: ${{ needs.support_voice_tests.result }}
+          SUPPORT_WEBUI_RESULT: ${{ needs.support_webui_tests.result }}
         run: |
-          case "$UNIT_RESULT:$SUPPORT_RESULT" in
-            success:success) echo "ci/tests: all required test jobs succeeded"; exit 0 ;;
-            *) echo "ci/tests: unit shards result '$UNIT_RESULT'; support result '$SUPPORT_RESULT'"; exit 1 ;;
+          case "$UNIT_RESULT:$HEAVY_RESULT:$SUPPORT_PYTHON_RESULT:$SUPPORT_VOICE_RESULT:$SUPPORT_WEBUI_RESULT" in
+            success:success:success:success:success) echo "ci/tests: all required test jobs succeeded"; exit 0 ;;
+            *) echo "ci/tests: unit shards '$UNIT_RESULT'; heavy '$HEAVY_RESULT'; support python '$SUPPORT_PYTHON_RESULT'; support voice '$SUPPORT_VOICE_RESULT'; support webui '$SUPPORT_WEBUI_RESULT'"; exit 1 ;;
           esac
 
   standards-check:

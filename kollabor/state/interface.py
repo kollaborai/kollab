@@ -536,6 +536,16 @@ class StateService(Protocol):
         """
         ...
 
+    async def restart_agent(self) -> dict[str, Any]:
+        """Restart this detached agent in place on the installed code, keeping its conversation (#968).
+
+        Returns at once with ``{"restarting": True, "waiting_for_turn": bool}``:
+        the daemon lets the turn in progress end, saves its state, then replaces
+        its process image. Raises ``ValueError`` when this agent cannot restart
+        itself (no daemon, not on a hub).
+        """
+        ...
+
     # === MCP writes (phase 4.5 step 7) ===
     #
     # MCP write methods mutate ~/.kollab/mcp/mcp_settings.json on
