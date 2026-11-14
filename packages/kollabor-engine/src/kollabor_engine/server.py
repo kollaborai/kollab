@@ -146,6 +146,18 @@ async def open_named_session(
         raise HTTPException(status_code=503, detail=f"could not open this agent: {e}")
 
 
+async def _warm_model_choices() -> None:
+    """Fill the model picker's cache in the background so no page waits for it (#953)."""
+    try:
+        from .routes.profiles import warm_model_choices
+
+        await warm_model_choices()
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 -- the picker still works; it warms on the first ask
+        logger.warning("model picker warm-up failed", exc_info=True)
+
+
 @asynccontextmanager
 async def _engine_lifespan(app: FastAPI):
     """Reown WebUI agents at startup; detach only those agents at shutdown."""
@@ -153,6 +165,7 @@ async def _engine_lifespan(app: FastAPI):
     from .routes.sessions import set_handover_store
 
     set_handover_store(store)
+    warm_task: Optional["asyncio.Task[None]"] = None
     try:
         if store is not None:
             pending = store.acquire()
@@ -190,6 +203,8 @@ async def _engine_lifespan(app: FastAPI):
                         # be retried on the next engine start; never stop it here.
                         logger.exception("could not reown WebUI session %s", session_id)
         logger.info("Engine started")
+        if getattr(app.state, "warm_model_choices", False):  # set by `serve`, never by a test's app
+            warm_task = asyncio.create_task(_warm_model_choices(), name="model-picker-warm")
         phone_link = getattr(app.state, "phone_link", None)
         if phone_link is not None:
             try:
@@ -198,6 +213,15 @@ async def _engine_lifespan(app: FastAPI):
                 logger.warning("PhoneLink is unavailable in this engine; local chat remains available")
         yield
     finally:
+        try:
+            if warm_task is not None:
+                warm_task.cancel()
+                await asyncio.gather(warm_task, return_exceptions=True)
+            from kollabor.llm import acp_discovery
+
+            await acp_discovery.stop_warming()
+        except Exception:
+            logger.exception("Model picker warm-up shutdown failed")
         phone_link = getattr(app.state, "phone_link", None)
         if phone_link is not None:
             try:
