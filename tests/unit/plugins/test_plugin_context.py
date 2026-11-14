@@ -23,3 +23,13 @@ async def test_plugin_context_grants_defaults_and_agent_stub(tmp_path, monkeypat
         await context.agents.run("hello")
     with pytest.raises(ValueError):
         context.lock("../escape")
+
+
+def test_plugin_context_creates_private_lock_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    root = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    manifest = json.loads((root / "kollab-plugin.json").read_text())
+    context = PluginContext("hello", root, tmp_path / "data", manifest)
+    with context.lock("chain"):
+        assert (tmp_path / "data" / "locks" / "chain.lock").is_file()
