@@ -40,6 +40,10 @@ TERMINAL_TASK_STATUSES = frozenset(
 )
 
 
+class PendingReplyLedgerError(ValueError):
+    """Raised when pending reply state cannot be safely read or repaired."""
+
+
 @dataclass
 class TaskCard:
     """A task assignment that survives context compaction."""
@@ -321,15 +325,33 @@ class TaskLedger:
 
     def _read_pending_replies_unlocked(self) -> List[Dict[str, Any]]:
         path = self._pending_replies_path()
-        if not path.exists():
-            return []
         try:
-            data = self._load_json_object(path)
-            replies = data.get("expected_replies", [])
-            return replies if isinstance(replies, list) else []
-        except Exception as e:
-            logger.debug(f"Failed to load pending replies: {e}")
+            raw = path.read_text()
+        except FileNotFoundError:
             return []
+        except (OSError, UnicodeError):
+            raise PendingReplyLedgerError(
+                "Pending reply ledger is unreadable; preserve a copy, repair "
+                "expected_replies, and retry."
+            ) from None
+
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            raise PendingReplyLedgerError(
+                "Pending reply ledger is unreadable; preserve a copy, repair "
+                "expected_replies, and retry."
+            ) from None
+        if (
+            not isinstance(data, dict)
+            or not isinstance(data.get("expected_replies"), list)
+            or any(not isinstance(reply, dict) for reply in data["expected_replies"])
+        ):
+            raise PendingReplyLedgerError(
+                "Pending reply ledger is unreadable; preserve a copy, repair "
+                "expected_replies, and retry."
+            )
+        return data["expected_replies"]
 
     def _write_pending_replies_unlocked(self, replies: List[Dict[str, Any]]) -> None:
         self._write_json_atomic(
