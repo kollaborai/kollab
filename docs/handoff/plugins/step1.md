@@ -150,3 +150,10 @@ and live terminal acceptance remain open. There is no final fixed-HEAD full-unit
 Ruff, py_compile or tmux pass, no final changelog, and no draft PR. Do not open a
 PR until those gates and the complete brief pass. Earlier passing results do not
 supersede the current failing tmux test.
+
+Follow-up: service output is now filtered before log storage as well as on CLI
+read, including after vault-secret rotation and across chunk boundaries. The
+focused redaction/vault/log tests passed (7 tests; see
+`review-log-rotation-red.log` and `review-log-rotation-green.log`). This does not
+retroactively sanitize logs written before the change. The live terminal restart
+scope blocker and final gates above remain open.
