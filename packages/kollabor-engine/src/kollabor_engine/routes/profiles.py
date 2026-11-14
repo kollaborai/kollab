@@ -605,7 +605,7 @@ async def create_profile(body: CreateProfileRequest):
         )
 
         reason = effort_unsupported_reason(
-            profile.get_effort_provider(), body.effort
+            profile.get_effort_provider(migrate_plaintext=False), body.effort
         )
         if reason:
             raise HTTPException(status_code=422, detail=reason)
