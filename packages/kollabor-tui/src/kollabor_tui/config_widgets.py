@@ -104,7 +104,7 @@ class ConfigWidgetDefinitions:
 
         sections = []
         for entry in plugin_entries(ConfigWidgetDefinitions._packaged_plugins_dir()):
-            if entry.get("kind") == "installed":
+            if entry.get("kind") in {"installed", "dev"}:
                 widgets = []
                 for service in entry.get("services", []):
                     if isinstance(service, dict) and isinstance(service.get("name"), str):
