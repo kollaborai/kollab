@@ -35,12 +35,17 @@ class ConfigWidgetDefinitions:
             path = f"plugin-registry.{plugin_id}.enabled" if kind == "installed" else f"plugins.{plugin_id}.enabled"
             rows.append(
                 {
-                    "type": "checkbox",
+                    "type": "label" if kind == "dev" else "checkbox",
                     "label": name,
                     "display_name": name,
                     "plugin_kind": kind,
-                    "config_path": path,
-                    "help": f"{name} — {entry.get('state', 'unknown')}",
+                    "config_path": "" if kind == "dev" else path,
+                    "value": entry.get("state", "unknown"),
+                    "help": (
+                        f"{name} — use kollab plugin dev off {plugin_id.removesuffix('@dev')} to detach"
+                        if kind == "dev"
+                        else f"{name} — {entry.get('state', 'unknown')}"
+                    ),
                 }
             )
         return rows
