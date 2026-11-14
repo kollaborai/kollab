@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
-import { BookOpen, ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Newspaper, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
+import { BookOpen, ChevronDown, Eye, EyeOff, GitPullRequest, LayoutGrid, Loader2, Newspaper, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
 import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, LiveAgent, ModelChoice, OfflineAgent, Profile, Session } from "@/api";
 import { ModelPicker } from "@/components/shell/ModelPicker";
 import { AgentPicker, choiceLabel } from "@/components/agents/AgentPicker";
@@ -159,6 +159,7 @@ export function AppSidebar({
   onSettings,
   onHalt,
   onLearn,
+  onPrChain,
   learnActive,
   onWhatsNew,
   whatsNewActive,
@@ -219,6 +220,8 @@ export function AppSidebar({
   /** Open Settings on the Halt and Resume screen (works with no chat open). */
   onHalt: () => void;
   onLearn: () => void;
+  /** Opens the PR Chain dialog; works without a session. */
+  onPrChain: () => void;
   learnActive: boolean;
   onWhatsNew: () => void;
   whatsNewActive: boolean;
@@ -604,6 +607,7 @@ export function AppSidebar({
                   value={{ profile: selectedProfile, model: selectedModel, effort: selectedEffort }}
                   onPick={onModelPick}
                   disabled={!profiles.length}
+                  folder={workspacePath.trim()}
                 />
                 <Label htmlFor="new-session-workspace" className="text-muted-foreground text-xs font-normal">
                   Workspace
@@ -870,10 +874,10 @@ export function AppSidebar({
             Could not save sidebar order: {sidebarOrder.error}
           </p>
         ) : null}
-        {/* Use one row when it fits, otherwise center four actions over three. */}
+        {/* Use one row when it fits, otherwise two rows of four. */}
         <div
           data-sidebar="footer-actions"
-          className="grid grid-cols-8 items-center justify-items-center gap-y-1 [&>button]:col-span-2 [&>button:nth-of-type(5)]:col-start-2 [&>button:nth-of-type(6)]:col-start-4 [&>button:nth-of-type(7)]:col-start-6 @min-[17rem]:flex @min-[17rem]:justify-between md:@min-[14rem]:flex md:@min-[14rem]:justify-between"
+          className="grid grid-cols-8 items-center justify-items-center gap-y-1 [&>button]:col-span-2 @min-[17rem]:flex @min-[17rem]:justify-between md:@min-[14rem]:flex md:@min-[14rem]:justify-between"
         >
           <Popover>
             <PopoverTrigger asChild>
@@ -934,6 +938,17 @@ export function AppSidebar({
             }}
           >
             <BookOpen className="size-4" />
+          </TooltipIconButton>
+          <TooltipIconButton
+            tooltip="PR Chain"
+            side="top"
+            className={FOOTER_BUTTON}
+            onClick={() => {
+              setOpenMobile(false);
+              onPrChain();
+            }}
+          >
+            <GitPullRequest className="size-4" />
           </TooltipIconButton>
           <TooltipIconButton
             tooltip="What’s New"

@@ -450,7 +450,10 @@ async def create_session(body: CreateSessionRequest, request: Request):
     else:
         from kollabor_ai import ProfileManager
 
-        pm = ProfileManager()
+        # A named workspace starts on its own folder's profiles, the same
+        # folder-scoped read GET /profiles uses; the engine's own folder only
+        # when none was named (#972).
+        pm = ProfileManager(local_folder=Path(workspace)) if workspace else ProfileManager()
         effective_profile = effective_profile or pm.active_profile_name
         profile = pm.get_profile(effective_profile)
         if not profile:
@@ -1382,6 +1385,25 @@ async def clear_history(session_id: str):
     await session.refresh_history()
     session.last_turn_error = None
     return {"ok": True, "session_id": session_id}
+
+
+@router.post("/{session_id}/restart-agent")
+async def restart_agent(session_id: str):
+    """Restart this chat's detached agent on the installed code, keeping its conversation (#968).
+
+    Answers at once: the agent lets the turn in progress end, saves its state and
+    replaces its process image. The chat's socket path stays the same, so the
+    engine reattaches on its own and the open page needs no reload.
+    """
+    registry = get_session_registry()
+    session = registry.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        outcome = await session.state.restart_agent()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"ok": True, "session_id": session_id, **outcome}
 
 
 @router.get("/{session_id}/system-prompt")
