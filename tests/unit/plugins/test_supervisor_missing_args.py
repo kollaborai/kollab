@@ -1,4 +1,4 @@
-"""Partially initialized app harnesses can start the plugin supervisor."""
+"""A partially initialized app does not start an unmanaged supervisor."""
 from kollabor.application import TerminalLLMChat
 
 
@@ -12,4 +12,4 @@ def test_supervisor_without_args(monkeypatch):
 
     monkeypatch.setattr(app, "create_background_task", collect)
     app._start_plugin_supervisor()
-    assert tasks == ["plugin_service_supervisor"]
+    assert tasks == []

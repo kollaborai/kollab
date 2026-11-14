@@ -1170,7 +1170,8 @@ class TerminalLLMChat:
 
     def _start_plugin_supervisor(self) -> None:
         """Schedule the shared service sweep as an app-owned background task."""
-        if getattr(self.args, "no_plugins", False):
+        args = getattr(self, "args", None)
+        if args is None or getattr(args, "no_plugins", False):
             return
         from kollabor_plugins.services import supervise_services
 
