@@ -122,7 +122,7 @@ async def test_create_auto_profile_validates_effort_against_environment_key(
     )
 
     assert response.status_code == 422
-    assert "unsupported reasoning effort" in response.text
+    assert "Anthropic has no reasoning effort" in response.text
     assert manager.get_profile("anthropic-auto") is None
 
 
