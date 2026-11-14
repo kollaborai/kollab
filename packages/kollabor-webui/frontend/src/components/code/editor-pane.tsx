@@ -88,13 +88,10 @@ function defineVoidTheme(monaco: typeof import("monaco-editor"), accent: string)
     ],
     colors: {
       ...activePalette.colors,
-      "editor.lineHighlightBackground": a(0.06),
       "editor.selectionBackground": a(0.22),
       "editor.selectionHighlightBackground": a(0.10),
       "editor.inactiveSelectionBackground": a(0.08),
       "editorCursor.foreground": accent + "e0",
-      "editorLineNumber.foreground": "#ffffff12",
-      "editorLineNumber.activeForeground": accent + "80",
       "minimapSlider.background": accent + "18",
       "minimapSlider.hoverBackground": accent + "30",
       "minimapSlider.activeBackground": accent + "40",
