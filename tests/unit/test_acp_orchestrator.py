@@ -154,6 +154,173 @@ async def test_peer_observations_keep_hub_history_without_echoing_as_human_input
 
 
 @pytest.mark.asyncio
+async def test_a_restart_hands_the_new_harness_what_the_old_one_never_heard(tmp_path, monkeypatch):
+    # Prehnite on #549 round 4: a peer's message arrived while a failed turn
+    # ended; the fallback switch restarted the harness, and start() dropped it.
+    monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
+    monkeypatch.setattr(mod, "publish_semantic", lambda bus, name, *args, **fields: None)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: (
+            False if key == "kollabor.llm.save_conversations" else default
+        ),
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    llm = SimpleNamespace(
+        conversation_manager=ConversationManager(configuration, conversation_logger),
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+        message_display_service=MagicMock(),
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(LLMProfile(name="fake", provider="acp", command=("fake",)))
+    try:
+        old = orchestrator.runner
+        old.is_processing = True  # the failed turn has not ended
+        orchestrator.observe_notification(
+            HubMessage(
+                action="message",
+                from_agent="peer-id-1",
+                from_identity="peer-1",
+                to="*",
+                content="HEARD_WHILE_FAILING",
+                thread_id=None,
+                reply_to="",
+            )
+        )
+        await orchestrator.start(LLMProfile(name="fallback", provider="acp", command=("fake",)))
+        await asyncio.gather(*orchestrator._completion_tasks)
+        assert old.closed and orchestrator.runner is not old
+        assert not any("HEARD_WHILE_FAILING" in update["text"] for update in old._updates)
+        assert [u for u in orchestrator.runner._updates if "HEARD_WHILE_FAILING" in u["text"]]
+        assert len([m for m in llm.conversation_history if m.role == "user"]) == 1  # written once
+    finally:
+        await orchestrator.close()
+
+
+def _observing(tmp_path):
+    """An orchestrator writing into a real conversation, and a peer's message."""
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: (
+            False if key == "kollabor.llm.save_conversations" else default
+        ),
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    llm = SimpleNamespace(
+        conversation_manager=ConversationManager(configuration, conversation_logger),
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+        message_display_service=MagicMock(),
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+
+    def peer(content):
+        return HubMessage(
+            action="message", from_agent="peer-id-1", from_identity="peer-1",
+            to="*", content=content, thread_id=None, reply_to="",
+        )
+
+    return mod.ACPOrchestrator(bus), llm, peer
+
+
+@pytest.mark.asyncio
+async def test_a_switch_hands_its_harness_the_peer_messages_the_failing_one_took(tmp_path, monkeypatch):
+    # Tanzanite on #549 round 5: a peer message flushed onto the failing harness
+    # was gone once that turn hit the limit too, and one kept while the switch
+    # waited was sent by nothing once the switch's fence came down.
+    class LimitRunner(FakeRunner):
+        def admit(self, text, *, request_id, source, thread_id=None, origin=None):
+            self._updates.append({"kind": "text", "text": text, "request_id": request_id})
+            future = asyncio.get_running_loop().create_future()
+            future.set_exception(mod.ACPError("claude-code: Claude AI usage limit reached", code=-32603))
+            return mod.ACPAdmission(request_id, source, thread_id, 1, 1, text, future, origin or {})
+
+    orchestrator, llm, peer = _observing(tmp_path)
+
+    def publish(event_bus, name, *args, **fields):
+        if name == "turn_complete" and fields.get("error"):
+            orchestrator.hold_observations()  # the fallback plugin, as its switch becomes pending
+
+    monkeypatch.setattr(mod, "publish_semantic", publish)
+    monkeypatch.setattr(mod, "ACPRunner", LimitRunner)
+    await orchestrator.start(LLMProfile(name="claude-code", provider="acp", command=("fake",)))
+    try:
+        failing = orchestrator.runner
+        orchestrator.observe_notification(peer("TAKEN_AND_FAILED"))  # idle: it goes now, and fails
+        await asyncio.gather(*orchestrator._completion_tasks)
+        assert [u for u in failing._updates if "TAKEN_AND_FAILED" in u["text"]]
+        orchestrator.observe_notification(peer("SENT_WHILE_IT_WAITS"))  # kept: the switch is pending
+        assert not [u for u in failing._updates if "SENT_WHILE_IT_WAITS" in u["text"]]
+
+        monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
+        orchestrator.closing_reason = "Switching to codex."  # the switch's fence
+        await orchestrator.start(LLMProfile(name="codex", provider="acp", command=("fake",)))
+        fallback = orchestrator.runner
+        assert fallback is not failing and fallback._updates == []  # its start ran behind the fence
+        orchestrator.closing_reason = ""
+        orchestrator.release_observations()
+        await asyncio.gather(*orchestrator._completion_tasks)
+        sent = "\n".join(u["text"] for u in fallback._updates)
+        assert "TAKEN_AND_FAILED" in sent and "SENT_WHILE_IT_WAITS" in sent
+        assert len([m for m in llm.conversation_history if m.role == "user"]) == 2  # each written once
+    finally:
+        await orchestrator.close()
+
+
+@pytest.mark.asyncio
+async def test_peer_messages_kept_for_a_switch_wait_or_go_to_a_native_profile(tmp_path, monkeypatch):
+    # Selenite on #549 round 6: with nothing switched they went straight back
+    # to the harness that had failed them, and a native fallback, which closes
+    # the harness, never answered them.
+    orchestrator, llm, peer = _observing(tmp_path)
+    monkeypatch.setattr(mod, "publish_semantic", lambda *args, **fields: None)
+    monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
+    await orchestrator.start(LLMProfile(name="claude-code", provider="acp", command=("fake",)))
+    try:
+        runner = orchestrator.runner
+        orchestrator.hold_observations()  # a switch is pending
+        orchestrator.observe_notification(peer("KEPT"))
+        orchestrator.release_observations(flush=False)  # nothing switched
+        assert runner._updates == []  # it waits for the harness's next prompt
+        orchestrator.hold_observations()  # the next failure's switch
+        await orchestrator.close()  # it goes to a native profile
+        assert await orchestrator.hand_over_to_native() is True
+        rows = [m.content for m in llm.conversation_history if m.role == "user"]
+        assert len(rows) == 1 and "KEPT" in rows[0]  # the native turn reads it there
+        await orchestrator.start(LLMProfile(name="codex", provider="acp", command=("fake",)))
+        assert orchestrator.runner._updates == []  # and no harness gets it again
+    finally:
+        await orchestrator.close()
+
+
+@pytest.mark.asyncio
+async def test_native_handover_keeps_an_observation_when_its_history_retry_fails(
+    tmp_path, monkeypatch
+):
+    # Round 7: a failed retry leaves the native continuation with no copy.
+    orchestrator, llm, peer = _observing(tmp_path)
+
+    def fail_write(*args, **kwargs):
+        raise OSError("history unavailable")
+
+    monkeypatch.setattr(orchestrator, "_record_user", fail_write)
+    orchestrator.hold_observations()
+    assert orchestrator.observe_notification(peer("MUST_REMAIN")) is True
+    assert len(orchestrator._unwritten_observations) == 1
+
+    handed_over = await orchestrator.hand_over_to_native()
+
+    assert handed_over is not True
+    assert len(orchestrator._unwritten_observations) == 1
+    assert orchestrator._unwritten_observations[0][1].content.endswith("MUST_REMAIN")
+    assert not [message for message in llm.conversation_history if message.role == "user"]
+
+
+@pytest.mark.asyncio
 async def test_busy_observation_is_written_on_arrival_and_sent_once(
     tmp_path, monkeypatch
 ):
@@ -722,12 +889,17 @@ class Hub:
 class Bus:
     def __init__(self):
         self.services = {"display_tap": Tap()}
+        self.emitted = []
 
     def get_service(self, name):
         return self.services.get(name)
 
     def register_service(self, name, service):
         self.services[name] = service
+
+    async def emit_with_hooks(self, event_type, data, source):
+        self.emitted.append((event_type, data))
+        return {}
 
 
 class FakeRunner:
