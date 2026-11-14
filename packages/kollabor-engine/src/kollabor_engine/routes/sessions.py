@@ -450,7 +450,10 @@ async def create_session(body: CreateSessionRequest, request: Request):
     else:
         from kollabor_ai import ProfileManager
 
-        pm = ProfileManager()
+        # A named workspace starts on its own folder's profiles, the same
+        # folder-scoped read GET /profiles uses; the engine's own folder only
+        # when none was named (#972).
+        pm = ProfileManager(local_folder=Path(workspace)) if workspace else ProfileManager()
         effective_profile = effective_profile or pm.active_profile_name
         profile = pm.get_profile(effective_profile)
         if not profile:

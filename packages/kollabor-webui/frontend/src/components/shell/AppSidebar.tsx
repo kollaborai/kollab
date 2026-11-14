@@ -607,6 +607,7 @@ export function AppSidebar({
                   value={{ profile: selectedProfile, model: selectedModel, effort: selectedEffort }}
                   onPick={onModelPick}
                   disabled={!profiles.length}
+                  folder={workspacePath.trim()}
                 />
                 <Label htmlFor="new-session-workspace" className="text-muted-foreground text-xs font-normal">
                   Workspace
