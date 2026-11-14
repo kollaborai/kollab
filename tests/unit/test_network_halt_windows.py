@@ -49,11 +49,28 @@ def test_win_read_process_exited_pid_is_none():
     assert nh._win_read_process(_exited_pid()) is None
 
 
-def test_win_caller_chain_starts_at_this_process():
-    chain = nh._win_caller_chain(os.getpid())
-    assert chain is not None
-    assert chain[0] == (os.getpid(), psutil.Process().username())
-    assert chain[1][0] == os.getppid()
+def test_win_caller_chain_starts_at_this_process(monkeypatch):
+    class ChainProcess:
+        def __init__(self, pid, username, parent=None):
+            self.pid = pid
+            self._username = username
+            self._parent = parent
+
+        def username(self):
+            return self._username
+
+        def parent(self):
+            return self._parent
+
+    kernel = ChainProcess(4, "SYSTEM")
+    parent = ChainProcess(200, "test-user", kernel)
+    current = ChainProcess(100, "test-user", parent)
+    monkeypatch.setattr(psutil, "Process", lambda _pid: current)
+
+    assert nh._win_caller_chain(current.pid) == [
+        (current.pid, "test-user"),
+        (parent.pid, "test-user"),
+    ]
 
 
 def test_win_caller_chain_exited_pid_is_none():

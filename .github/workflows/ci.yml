@@ -148,6 +148,7 @@ jobs:
           # --durations surfaces the real CI-runner hot spots in every shard log,
           # so a slow shard can be rebalanced from evidence instead of guesses.
           uv run python -m pytest "${test_targets[@]}" -q -n auto --durations=25 \
+            --allow-host-process-enumeration \
             --deselect=tests/unit/test_hub_email_bridge.py::test_disconnect_ends_a_poll_blocked_in_idle \
             --deselect=tests/unit/test_relay_build_allowlist.py::test_packaged_relay_imports_and_help_from_allowlist_alone
 
@@ -252,6 +253,7 @@ jobs:
       - name: Run isolation-sensitive unit tests
         run: >-
           uv run python -m pytest -q
+          --allow-host-process-enumeration
           tests/unit/test_hub_email_bridge.py::test_disconnect_ends_a_poll_blocked_in_idle
           tests/unit/test_relay_build_allowlist.py::test_packaged_relay_imports_and_help_from_allowlist_alone
 

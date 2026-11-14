@@ -9,9 +9,9 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, ClassVar
@@ -681,13 +681,13 @@ class ACPRunner:
         self.session_id: str | None = None
         self._connection: Any = None
         self._process: Any = None
+        self._process_group_guard: asyncio.subprocess.Process | None = None
         self._client = _Client(self)
         self._stderr_task: asyncio.Task[None] | None = None
         self._process_tracker: asyncio.Task[None] | None = None
         self._owned_processes: dict[int, psutil.Process] = {}
         self._adapter_pid: int | None = None
-        self._process_started_at: float | None = None
-        self._process_username: str | None = None
+        self._process_group_id: int | None = None
         self._teardown_lock = asyncio.Lock()
         self._queue: asyncio.Queue[ACPAdmission | None] = asyncio.Queue(maxsize=10)
         self._worker: asyncio.Task[None] | None = None
@@ -777,8 +777,8 @@ class ACPRunner:
         return self.advertised_config_options()
 
     async def _start_process(self) -> str:
-        if self._live_owned_processes():
-            raise ACPError("previous ACP processes still require cleanup")
+        if self._live_owned_processes() or self._owned_process_group_exists():
+            raise ACPError("previous ACP process group still requires cleanup")
         self._owned_processes.clear()
         self.state = "starting"
         if self.lifecycle_callback is not None:
@@ -799,28 +799,61 @@ class ACPRunner:
                 "The selected Codex adapter could not be identified for this saved session. "
                 "The existing binding was kept; select the previous adapter or start a new session."
             )
-        self._process_username = psutil.Process(os.getpid()).username()
-        # A rapidly exiting root may disappear before psutil can read it.
-        # Allow one second of kernel birth-time rounding in that fallback.
-        self._process_started_at = time.time() - 1
-        self._process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=cwd,
-            env=env,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
+        if os.name == "posix":
+            # Keep a stable process-group leader alive until the final group
+            # signal. Otherwise the OS may reuse the numeric PGID after the
+            # adapter exits, and a later cleanup signal could hit an unrelated
+            # process group.
+            self._process_group_guard = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                "import os, signal, time; parent = os.getppid(); "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "exec('while os.getppid() == parent: time.sleep(0.2)')",
+                cwd=cwd,
+                env={},
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                process_group=0,
+            )
+            self._process_group_id = self._process_group_guard.pid
+            try:
+                self._process = await asyncio.create_subprocess_exec(
+                    *command,
+                    cwd=cwd,
+                    env=env,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    process_group=self._process_group_id,
+                )
+            except BaseException:
+                self._process_group_guard.kill()
+                await self._process_group_guard.wait()
+                self._process_group_guard = None
+                self._process_group_id = None
+                raise
+        else:
+            self._process = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=cwd,
+                env=env,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
         self._adapter_pid = self._process.pid
+        if os.name == "posix" and self._process_group_id is None:
+            self._process_group_id = self._process.pid
         with contextlib.suppress(psutil.Error):
             owner = psutil.Process(self._process.pid)
-            birth = owner.create_time()
+            owner.create_time()
             if (
                 owner.ppid() == os.getpid() and self._process.returncode is None
                 and owner.is_running()
             ):
-                self._process_started_at = birth
                 self._owned_processes[owner.pid] = owner
         self._refresh_process_tree()
         self._process_tracker = asyncio.create_task(self._track_process_tree())
@@ -982,76 +1015,38 @@ class ACPRunner:
                 sys.stderr.buffer.flush()
 
     def _refresh_process_tree(self) -> None:
-        """Retain birth-checked descendants, including detached/orphaned roots."""
+        """Refresh only process identities already recorded by this runner."""
         for owner in tuple(self._owned_processes.values()):
             with contextlib.suppress(psutil.Error):
                 if not owner.is_running():
                     self._owned_processes.pop(owner.pid, None)
-        for owner in tuple(self._owned_processes.values()):
-            with contextlib.suppress(psutil.Error):
-                if owner.ppid() in self._owned_processes:
-                    continue
-                for child in owner.children(recursive=True):
-                    child.create_time()
-                    self._owned_processes[child.pid] = child
+        if os.name == "nt":
+            # Windows has no POSIX process group for the adapter. Retain the
+            # existing owned-root traversal there so descendants remain
+            # available to the direct process-handle cleanup path.
+            for owner in tuple(self._owned_processes.values()):
+                with contextlib.suppress(psutil.Error):
+                    if owner.ppid() in self._owned_processes:
+                        continue
+                    for child in owner.children(recursive=True):
+                        child.create_time()
+                        self._owned_processes[child.pid] = child
 
     async def _track_process_tree(self) -> None:
         while self._owned_processes:
+            if self._closing:
+                return
             self._refresh_process_tree()
+            if self._process is not None and self._process.returncode is not None:
+                # The adapter exited without a close request. Its descendants
+                # still belong to the recorded private process group.
+                self._signal_owned_process_group(signal.SIGTERM)
+                await asyncio.sleep(0.1)
+                self._signal_owned_process_group(getattr(signal, "SIGKILL", signal.SIGTERM))
+                return
             await asyncio.sleep(0.1)
 
-    def _recover_session_processes(self) -> None:
-        """Recover same-user newborns still in the adapter's session.
-
-        The adapter starts as a session leader, so descendants that lose
-        their parent keep its pid as their session id. Never read another
-        process's environment to decide ownership (#608). A descendant that
-        calls setsid() before a tree sample sees it is not recovered.
-        """
-        if self._adapter_pid is None or self._process_started_at is None or not hasattr(os, "getsid"):
-            return
-        adapter = self._owned_processes.get(self._adapter_pid)
-
-        def session_is_ours() -> bool:
-            # A live process at the adapter's pid that is not the recorded
-            # adapter means the number was reused: that session is not ours.
-            try:
-                return psutil.Process(self._adapter_pid) == adapter
-            except psutil.NoSuchProcess:
-                return True
-            except psutil.Error:
-                return False
-
-        if not session_is_ours():
-            return
-        found: list[psutil.Process] = []
-        for owner in psutil.process_iter(("pid", "create_time", "username")):
-            with contextlib.suppress(psutil.Error, OSError):
-                birth = owner.info.get("create_time")
-                if (
-                    owner.info.get("username") != self._process_username
-                    or birth is None or birth < self._process_started_at
-                ):
-                    continue
-                if self._owned_processes.get(owner.pid) == owner:
-                    continue
-                # Recheck birth identity across the session-id read.
-                if (
-                    owner.is_running()
-                    and os.getsid(owner.pid) == self._adapter_pid
-                    and owner.is_running()
-                ):
-                    owner.create_time()
-                    found.append(owner)
-        if session_is_ours():
-            for owner in found:
-                self._owned_processes[owner.pid] = owner
-
     def _live_owned_processes(self) -> list[psutil.Process]:
-        self._refresh_process_tree()
-        # Do the process-wide session lookup at lifecycle boundaries, rather
-        # than walking every same-user process on every 100ms tree sample.
-        self._recover_session_processes()
         self._refresh_process_tree()
         alive: list[psutil.Process] = []
         for owner in tuple(self._owned_processes.values()):
@@ -1072,6 +1067,34 @@ class ACPRunner:
                 # An unreadable recorded process is not proof of exit.
                 alive.append(owner)
         return alive
+
+    def _signal_owned_process_group(self, signum: int) -> bool:
+        """Signal only the POSIX group created with this adapter process."""
+        group_id = self._process_group_id
+        if group_id is None or not hasattr(os, "killpg"):
+            return False
+        try:
+            os.killpg(group_id, signum)
+        except ProcessLookupError:
+            return False
+        except PermissionError as exc:
+            raise ACPError(
+                f"cannot signal recorded ACP process group {group_id}"
+            ) from exc
+        return True
+
+    def _owned_process_group_exists(self) -> bool:
+        """Check the recorded group without enumerating its members."""
+        group_id = self._process_group_id
+        if group_id is None or not hasattr(os, "killpg"):
+            return False
+        try:
+            os.killpg(group_id, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
 
     def admit(
         self,
@@ -1758,6 +1781,10 @@ class ACPRunner:
                     close_task.cancel()
                 if process is not None and process.stdin is not None:
                     process.stdin.close()
+                # Descendants share the private group created for the adapter.
+                # Signal that recorded scope so cleanup still works after the
+                # adapter exits and its child handles are no longer available.
+                self._signal_owned_process_group(signal.SIGTERM)
                 deadline = loop.time() + 5
                 terminated: set[psutil.Process] = set()
                 while alive := self._live_owned_processes():
@@ -1770,9 +1797,9 @@ class ACPRunner:
                         break
                     await asyncio.sleep(min(0.1, max(0, deadline - loop.time())))
             finally:
-                # All exit paths, including cancellation of teardown, signal
-                # only retained PID/birth identities. Never signal by PGID:
-                # the dead adapter's PID may now name an unrelated group.
+                # All exit paths finish by stopping any surviving members of
+                # the recorded group, including children no longer discoverable
+                # through a live parent tree.
                 for owner in reversed(self._live_owned_processes()):
                     with contextlib.suppress(psutil.Error):
                         owner.kill()
@@ -1791,6 +1818,20 @@ class ACPRunner:
                     if asyncio.get_running_loop().time() >= deadline:
                         break
                     await asyncio.sleep(0.05)
+                # The guard remains the group leader through this one final
+                # group signal. Do not signal the numeric PGID after it exits.
+                self._signal_owned_process_group(getattr(signal, "SIGKILL", signal.SIGTERM))
+                group_guard = self._process_group_guard
+                self._process_group_guard = None
+                if group_guard is not None:
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(group_guard.wait(), timeout=1)
+                loop = asyncio.get_running_loop()
+                group_members_remain = self._owned_process_group_exists()
+                deadline = loop.time() + 1
+                while group_members_remain and loop.time() < deadline:
+                    await asyncio.sleep(min(0.05, max(0, deadline - loop.time())))
+                    group_members_remain = self._owned_process_group_exists()
                 if tracker is not None:
                     tracker.cancel()
                     await asyncio.gather(tracker, return_exceptions=True)
@@ -1801,15 +1842,22 @@ class ACPRunner:
                     await asyncio.wait({close_task}, timeout=0.1)
                 survivors = self._live_owned_processes()
                 unreaped_adapter = process is not None and process.returncode is None
-                if not survivors and not unreaped_adapter:
+                group_guard_unreaped = group_guard is not None and group_guard.returncode is None
+                if (
+                    not survivors
+                    and not unreaped_adapter
+                    and not group_guard_unreaped
+                    and not group_members_remain
+                ):
                     self._owned_processes.clear()
                     self._adapter_pid = None
-                    self._process_started_at = None
-                    self._process_username = None
+                    self._process_group_id = None
                 else:
                     detail = ", ".join(str(owner.pid) for owner in survivors)
                     if unreaped_adapter:
                         detail += f" (adapter {process.pid} not reaped)"
+                    if group_guard_unreaped or group_members_remain:
+                        detail += f" (process group {self._process_group_id} still has members)"
                     raise ACPError(
                         "ACP owned process cleanup incomplete: " + detail
                     )

@@ -4,6 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
 addopts = "-p no:warnings"
+markers = [
+    "host_process_enumeration: live host process scan allowed only in the guarded CI/tests job",
+]
 testpaths = ["tests"]
 # pytest-asyncio: silence the unset-scope deprecation nag that -W error turns
 # into an INTERNALERROR at configure time; "function" is the upstream default
