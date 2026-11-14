@@ -420,21 +420,21 @@ def _recorded_process_alive(pid_path: Path) -> bool:
 
 
 def supervisor_tick() -> None:
-    """Start eligible installed services without scanning unrelated processes."""
+    """Start eligible installed and approved development services."""
     from kollabor.binary import kollab_argv
 
     home = Path.home() / ".kollab"
     registry = _read_registry(home / "plugins.json")
-    for plugin_id, record in registry["plugins"].items():
-        if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id):
+    candidates = list(registry["plugins"].items()) + [
+        (f"{plugin_id}@dev", None) for plugin_id in registry["dev"] if isinstance(plugin_id, str)
+    ]
+    for plugin_id, record in candidates:
+        if not _valid_plugin_id(plugin_id):
             continue
-        if not isinstance(record, dict) or record.get("enabled") is not True:
+        if not plugin_id.endswith("@dev") and (not isinstance(record, dict) or record.get("enabled") is not True):
             continue
-        root = home / "plugins" / plugin_id
         try:
-            expected_hash = record.get("files_sha256")
-            if not isinstance(expected_hash, str) or files_sha256(root) != expected_hash:
-                raise ValueError("Plugin files changed since approval")
+            root, _ = _approved_service_root(home, registry, plugin_id)
             manifest = json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
             services = manifest.get("services", {})
             if not isinstance(services, dict):
