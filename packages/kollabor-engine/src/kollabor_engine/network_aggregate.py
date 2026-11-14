@@ -147,8 +147,8 @@ def _ingest_remote_rows(
     """Fold live daemon rows into their network's block, flat-list shaped.
 
     Rows are the ``agents`` a daemon's ``network_status`` answered: ``name``,
-    ``device``, ``handle``, optional ``state``/``workspace``/``device_id``, a
-    harness agent's ``harness``/``acp_waiting`` and the ``current_tool``
+    ``device``, ``handle``, optional ``state``/``workspace``/``device_id``,
+    ``agent_type`` (the bundle it runs), a harness agent's ``harness``/``acp_waiting`` and the ``current_tool``
     ({name, type}) the agent runs now, which its sidebar gem acts out.
     This device's own row is skipped (the sidebar's local group is its own).
     """
@@ -178,6 +178,8 @@ def _ingest_remote_rows(
         }
         if row.get("last_seen"):
             agent["last_seen"] = row["last_seen"]  # "Seen 2h ago" on a row that is not up
+        if row.get("agent_type"):
+            agent["agent_type"] = str(row["agent_type"])
         if row.get("harness"):
             agent["harness"] = str(row["harness"])
             agent["acp_waiting"] = bool(row.get("acp_waiting"))
