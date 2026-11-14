@@ -114,6 +114,27 @@ class TestBundleScopeEnforcement:
         assert executor._tool_type_to_registry_name("terminal") == "terminal"
         assert executor._tool_type_to_registry_name("scratchpad") == "scratchpad"
 
+    def test_git_native_tool_is_allowed_without_granting_terminal(self):
+        """A git grant should allow native git calls, not arbitrary terminal calls."""
+        from kollabor_agent.tool_call_contract import normalize_native_tool_call
+
+        executor = _make_executor()
+        executor.set_bundle_scope(["file-read", "file-grep", "git"])
+
+        git_call = normalize_native_tool_call(
+            {"id": "git-call", "name": "git", "input": {"command": "git status"}}
+        )
+        git_result = _run_async(executor.execute_tool(git_call))
+
+        assert git_result.metadata.get("scope_denied") is None
+
+        terminal_result = _run_async(
+            executor.execute_tool(
+                {"id": "shell-call", "type": "terminal", "command": "pwd"}
+            )
+        )
+        assert terminal_result.metadata.get("scope_denied") is True
+
     def test_execute_tool_rejects_out_of_scope(self):
         """execute_tool returns error for out-of-scope tools."""
         executor = _make_executor()
