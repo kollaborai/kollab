@@ -415,6 +415,8 @@ class TestConfigMigration:
             ("https://anthropic.com.mirror.example/v1", "auto"),
             ("https://api.anthropic.com/v1?via=azure.com", "anthropic"),
             ("api.anthropic.com/v1", "anthropic"),
+            ("api.anthropic.com:443/v1", "anthropic"),
+            ("azure.openai.com/v1", "azure_openai"),
         ],
     )
     def test_migration_provider_detection_matches_endpoint_host(self, api_base, expected):

@@ -339,6 +339,8 @@ class TestProviderDetection:
             ("https://anthropic.com.mirror.example/v1", None),
             ("https://api.anthropic.com/v1?via=azure.com", ProviderType.ANTHROPIC),
             ("api.anthropic.com/v1", ProviderType.ANTHROPIC),
+            ("api.anthropic.com:443/v1", ProviderType.ANTHROPIC),
+            ("azure.openai.com/v1", ProviderType.AZURE_OPENAI),
         ],
     )
     def test_auto_provider_detection_matches_endpoint_host(self, api_base, expected):
