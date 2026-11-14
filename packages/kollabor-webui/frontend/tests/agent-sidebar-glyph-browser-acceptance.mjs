@@ -9,9 +9,11 @@ import { makeFixtures, openPage, openVite } from "./learn-browser-acceptance.mjs
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = path.resolve(scriptDir, "..");
 const repoRoot = path.resolve(frontendRoot, "../../..");
-const screenshotDir = process.env.KOLLAB_BROWSER_ARTIFACT_DIR
-  ? path.resolve(process.env.KOLLAB_BROWSER_ARTIFACT_DIR)
-  : path.join(repoRoot, "docs/screenshots");
+const screenshotDir = process.env.AGENT_SIDEBAR_SCREENSHOT_DIR
+  ? path.resolve(process.env.AGENT_SIDEBAR_SCREENSHOT_DIR)
+  : process.env.KOLLAB_BROWSER_ARTIFACT_DIR
+    ? path.resolve(process.env.KOLLAB_BROWSER_ARTIFACT_DIR)
+    : path.join(repoRoot, "docs/screenshots");
 const agentTypes = [
   "coder",
   "community",
@@ -88,6 +90,17 @@ function sidebarFixtures() {
     state: "idle",
     last_seen: 2,
   };
+  // A device that reports the bundle its agent runs (#662).
+  const remoteTypedAgent = {
+    name: "remote-typed-agent",
+    device: "remote-build",
+    network: "learn-test",
+    workspace: "/remote/demo",
+    handle: "remote-session-3",
+    state: "idle",
+    last_seen: 3,
+    agent_type: "research",
+  };
   const offlineWithoutType = {
     identity: "offline-without-type",
     display_name: "Offline Without Type",
@@ -101,7 +114,7 @@ function sidebarFixtures() {
     sessions,
     offline,
     additionalOfflineAgents: [offlineWithoutType],
-    additionalRemoteAgents: [remoteOnlyAgent],
+    additionalRemoteAgents: [remoteOnlyAgent, remoteTypedAgent],
   });
 }
 
@@ -118,13 +131,14 @@ async function main() {
     });
 
     const captures = [
-      { width: 390, height: 844, isMobile: true, file: "agent-sidebar-glyph-390.png" },
-      { width: 820, height: 1180, isMobile: false, file: "agent-sidebar-glyph-820.png" },
-      { width: 1280, height: 900, isMobile: false, file: "agent-sidebar-glyph-1280.png" },
+      { width: 390, height: 844, isMobile: true },
+      { width: 820, height: 1180, isMobile: false },
+      { width: 1440, height: 900, isMobile: false },
     ];
+    const themes = ["dark", "light"];
     let expectedOrder;
 
-    for (const capture of captures) {
+    for (const theme of themes) for (const capture of captures) {
       const view = await openPage(
         browser,
         baseUrl,
@@ -133,6 +147,9 @@ async function main() {
       );
       try {
         await view.page.goto(`${baseUrl}/`, { waitUntil: "domcontentloaded" });
+        if (theme === "light") {
+          await view.page.evaluate(() => document.documentElement.classList.remove("dark"));
+        }
         const trigger = view.page.locator('[data-sidebar="trigger"]');
         const glyphsLocator = view.page.locator("[data-agent-type-glyph]");
         if (capture.width < 1024) {
@@ -173,7 +190,8 @@ async function main() {
         for (const type of expectedTypes) {
           assert.ok(labels.includes(type), `${type} glyph missing at ${capture.width}px`);
         }
-        assert.equal(glyphs.length, expectedTypes.length, `unexpected glyph count at ${capture.width}px`);
+        // The local rows' types, plus the one remote row whose device reported its type.
+        assert.equal(glyphs.length, expectedTypes.length + 1, `unexpected glyph count at ${capture.width}px`);
 
         const remoteRows = await view.page
           .locator('[data-sidebar="sidebar"] button[title*=" on remote-build"]')
@@ -181,16 +199,26 @@ async function main() {
             rows.map((row) => ({
               title: row.getAttribute("title"),
               glyphCount: row.querySelectorAll("[data-agent-type-glyph]").length,
+              glyphType: row.querySelector("[data-agent-type-glyph]")?.getAttribute("aria-label") ?? null,
             })),
           );
         assert.deepEqual(
           remoteRows.map(({ title }) => title).sort(),
-          ["Open Remote Coordinator on remote-build", "Open Remote Only Agent on remote-build"].sort(),
-          "both the colliding and remote-only rows should be present",
+          [
+            "Open Remote Coordinator on remote-build",
+            "Open Remote Only Agent on remote-build",
+            "Open Remote Typed Agent on remote-build",
+          ].sort(),
+          "the colliding, remote-only and typed remote rows should be present",
         );
-        assert.ok(
-          remoteRows.every(({ glyphCount }) => glyphCount === 0),
-          "remote rows must not infer a type glyph from local roster names",
+        assert.deepEqual(
+          Object.fromEntries(remoteRows.map(({ title, glyphType }) => [title, glyphType])),
+          {
+            "Open Remote Coordinator on remote-build": null,
+            "Open Remote Only Agent on remote-build": null,
+            "Open Remote Typed Agent on remote-build": "research",
+          },
+          "a remote row shows the type its device reported and never one inferred from local roster names",
         );
 
         const untypedOfflineRows = view.page
@@ -237,11 +265,12 @@ async function main() {
           await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         });
         fs.mkdirSync(screenshotDir, { recursive: true });
-        await view.page.screenshot({ path: path.join(screenshotDir, capture.file), animations: "disabled" });
+        const screenshot = `agent-sidebar-glyph-${theme}-${capture.width}.png`;
+        await view.page.screenshot({ path: path.join(screenshotDir, screenshot), animations: "disabled" });
         assert.deepEqual(view.pageErrors, [], view.pageErrors.join(" | "));
         assert.deepEqual(view.consoleErrors, [], view.consoleErrors.join(" | "));
         assert.equal(view.externalRequests.length, 0, "browser attempted an external API request");
-        console.log(`Captured ${capture.width}x${capture.height}: ${capture.file} (${glyphs.length} glyphs)`);
+        console.log(`Captured ${theme} ${capture.width}x${capture.height}: ${screenshot} (${glyphs.length} glyphs)`);
       } finally {
         await view.context.close();
       }

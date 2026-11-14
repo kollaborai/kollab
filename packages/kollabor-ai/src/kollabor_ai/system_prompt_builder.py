@@ -627,10 +627,13 @@ class SystemPromptBuilder:
             # emitted only for providers without native tools.
             if self.profile_manager is not None:
                 try:
-                    if self.profile_manager.get_supports_tools():
+                    profile = self.profile_manager.get_active_profile()
+                    if profile.get_supports_tools():
                         return None
-                except Exception:
-                    pass
+                except AttributeError as e:
+                    logger.debug(
+                        "Unable to check active profile tool support: %s", e
+                    )
 
             # Determine which tools the active agent has access to
             allowed_tools = None
