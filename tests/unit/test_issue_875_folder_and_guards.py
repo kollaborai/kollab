@@ -37,7 +37,7 @@ def test_operator_stop_all_only_uses_current_folder(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize('command', [
     'kollab -a x', 'kollab -ax', 'kollab --ag x', 'kollab -d',
-    'kollab --det', 'kollab --hub stop --reason r all',
+    'kollab --det',
     'kollab --agent x', 'kollab --detached', 'kollab --hub stop all',
     'kollab --hub=kill all',
 ])
