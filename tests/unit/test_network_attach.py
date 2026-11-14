@@ -360,6 +360,8 @@ def test_a_withdrawal_and_the_cap_count_only_the_agents_the_peer_holds_here():
             await pair.server.open(MAC, AGENT_ID, "lapis")  # the server opens 4 of the mac's agents
         await pair.mac.open(SERVER, AGENT_ID, "lapis")  # the mac still opens one of the server's
         pair.refuse = "mac is not a member of server's network"  # the server withdraws the mac's access
+        # Let the mac's hosting channels pass their post-greeting rule check first (#1076).
+        await asyncio.sleep(network_attach.FLUSH_SECONDS * 5)
         await pair.server.recheck()
         assert [ch.requester for ch in pair.server._channels.values()] == [True] * 4
         await pair.stop()
