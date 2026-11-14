@@ -164,6 +164,19 @@ try {
       await t.waitShown("AlphaBetaGamma");
       await t.page.close();
     },
+    // Reconnect reconciliation can recover text the stream missed while the
+    // local send owned the thread; the new canonical history must be applied
+    // after that send ends.
+    async "reconciles history refreshed during a pending submission"() {
+      const t = await open();
+      await t.emit(token("Alpha"));
+      await t.waitShown("Alpha");
+      await t.submit();
+      await t.page.evaluate(() => window.refreshHistory());
+      await t.finishSubmission();
+      await t.waitShown("AlphaBeta");
+      await t.page.close();
+    },
     // Output of a turn this page never saw start is not guessed at.
     async "ignores events of an unseen turn while pending"() {
       const t = await open();
