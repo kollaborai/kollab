@@ -110,10 +110,17 @@ not. No change was made to `services.py`. A lead decision for minimal token/URL
 provisioning and redaction remains queued as 6ba1d8d9, but the owned token and route
 work can proceed independently.
 
-Next: implement item 4 token validation and provisioning within owned files,
-spoof-proof remote headers plus PhoneLink filtering; item 5 management routes;
-then run every specified test and isolated live smoke. Current branch is not ready
-to deploy: plugin-only token authorization and PhoneLink management blocking are absent. The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
+Token progress: tests `921d01c6`, `90ae0f15`, and `1a6918b2` were red before
+`6d389eff` added per-plugin stable 0600 token files, scoped HTTP authorization,
+router `ctx.token`, and plugin-WebSocket authentication. `42046844` specifies
+the previously unnamed router token accessor. Twenty-six focused tests passed
+(`plugin-token-green.log`); Ruff and compilation passed. These do not provision
+the two environment variables to service children: that ownership gap remains.
+
+Next: finish the item 4 token-path/normalization audit and spoof-proof remote
+headers, implement item 5 management routes, then PhoneLink filtering and the
+remaining specified tests and smoke. Current branch is not ready to deploy:
+service-child environment provisioning and PhoneLink management blocking are absent. The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
 `packages/kollabor-engine/src/kollabor_engine/phone_link.py` is in scope only
 for refusing the spec's remote-disallowed plugin routes and its tests;
 `routes/phonelink.py` stays unchanged unless that refusal requires it. Audit the file deny list
