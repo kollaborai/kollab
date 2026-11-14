@@ -78,7 +78,10 @@ async def test_explicit_as_refuses_identity_held_by_busy_agent(tmp_path, monkeyp
                 await plugin._start_hub()
 
         mock_exit.assert_called_once_with(1)
-        os.close(write_fd)
+        try:
+            os.close(write_fd)
+        except OSError:
+            pass
         assert os.read(read_fd, 128) == b"error:jasper is already running\n"
         assert holder_file.exists(), "the busy agent's presence file must stay"
     finally:
