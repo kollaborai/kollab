@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 import { EmptyEditorState } from "../src/components/code/empty-editor-state";
 import { editorThemeColors } from "../src/components/code/editor-theme";
-import { shouldHideSidebarAfterFileSelection } from "../src/components/code/floating-sidebar";
+import { NARROW_QUERY, shouldHideSidebarAfterFileSelection } from "../src/components/code/floating-sidebar";
 import { NarrowPaneSwitcher } from "../src/components/code/split-container";
 import { visibleSplitTree } from "../src/components/code/split-layout";
 import {
@@ -42,6 +42,10 @@ test("file selection hides an open narrow sidebar but preserves wider sidebars",
   expect(shouldHideSidebarAfterFileSelection({ narrow: true, visible: true })).toBe(true);
   expect(shouldHideSidebarAfterFileSelection({ narrow: true, visible: false })).toBe(false);
   expect(shouldHideSidebarAfterFileSelection({ narrow: false, visible: true })).toBe(false);
+});
+
+test("split panes stay visible at the switcher's 640px hide breakpoint", () => {
+  expect(NARROW_QUERY).toBe("(max-width: 639.98px)");
 });
 
 beforeEach(() => {
