@@ -268,6 +268,31 @@ class FileOperationsExecutor:
         except (ValueError, OSError):
             return False
 
+    def is_read_denied_path(self, filepath: str) -> bool:
+        """Deny agent file tools access to plugin code and runtime tokens.
+
+        This is not a shell sandbox. Resolve symlinks before checking so aliases
+        cannot be used to read the protected paths.
+        """
+        try:
+            path = Path(filepath).expanduser()
+            if not path.is_absolute():
+                path = self.project_root / path
+            path = path.resolve()
+            root = Path.home().joinpath(".kollab").resolve()
+            token_root = Path(os.environ.get("KOLLAB_CONFIG_DIR") or root).expanduser().resolve()
+            if path == token_root / "engine.token" or path == root / "engine.token":
+                return True
+            if path.is_relative_to(root / "plugins"):
+                return True
+            data = root / "plugin-data"
+            if path.is_relative_to(data):
+                parts = path.relative_to(data).parts
+                return len(parts) == 3 and parts[1:] == ("run", "token")
+            return False
+        except (OSError, RuntimeError, ValueError):
+            return True
+
     def is_protected_path(self, filepath: str) -> bool:
         """Check if file path is protected from deletion/modification.
 
@@ -610,6 +635,14 @@ class FileOperationsExecutor:
                 )
 
             return {"success": False, "error": "\n".join(error_lines)}
+
+        # Several file operations read contents indirectly (copy, edit and ACP
+        # snapshots as well as read/grep). Check both paths before any snapshot.
+        if op_type.startswith("file_"):
+            for key in ("file", "from", "to"):
+                candidate = operation.get(key)
+                if isinstance(candidate, str) and self.is_read_denied_path(candidate):
+                    return {"success": False, "error": "Access to protected file denied"}
 
         # Single chokepoint for every write: refuse hand-rolled backup files.
         # Backups are automatic, live outside the project, and are dropped on
