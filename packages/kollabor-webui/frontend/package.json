@@ -19,6 +19,7 @@
     "test:e2e:todo-card": "node tests/todo-card-browser-acceptance.mjs",
     "test:e2e:composer-draft-rebuild": "node tests/composer-draft-rebuild-browser-acceptance.mjs",
     "test:e2e:profile-rows": "node tests/acceptance/profile-rows.browser.mjs",
+    "test:e2e:live-pending-input": "node tests/acceptance/live-pending-input.browser.mjs",
     "test:e2e:runner": "node --test tests/browser-acceptance-runner.test.mjs tests/inventory-webui-controls.test.mjs",
     "test:e2e:parallel": "node scripts/browser-acceptance-runner.mjs",
     "inventory:controls": "node scripts/inventory-webui-controls.mjs"
