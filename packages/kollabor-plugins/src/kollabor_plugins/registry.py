@@ -501,10 +501,9 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
             manifest = json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
             if not isinstance(manifest, dict):
                 raise ValueError("Invalid manifest")
-            if manifest.get("settings"):
-                section_path = _within(root.resolve(), manifest["settings"], "settings")
-                section = json.loads(section_path.read_text(encoding="utf-8"))
-                settings = section.get("widgets", []) if isinstance(section, dict) else []
+            from .settings import setting_widgets
+
+            settings = setting_widgets(root, manifest)
         except (OSError, ValueError, TypeError) as exc:
             state, error = "error", str(exc)
         if plugin_id in registry.package_errors and state == "ok":

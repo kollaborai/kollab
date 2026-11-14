@@ -40,6 +40,41 @@ def _validate(widget: dict, value: object) -> None:
         raise ValueError(f"Invalid value for {widget.get('config_path', 'setting')}")
 
 
+def setting_widgets(root: Path, manifest: dict) -> list[dict]:
+    """Return the declared form plus the shared agent limits, when applicable."""
+    settings_path = manifest.get("settings")
+    if settings_path:
+        section = _read_json(_within(root.resolve(), settings_path, "settings"))
+        widgets = section.get("widgets")
+        if not isinstance(widgets, list):
+            raise ValueError("Invalid settings widgets")
+        widgets = list(widgets)
+    else:
+        widgets = []
+    if "agents" in manifest.get("uses", []):
+        widgets.extend(
+            [
+                {
+                    "type": "spinbox",
+                    "label": "Daily Token Cap",
+                    "config_path": "max_tokens_per_day",
+                    "default": 2_000_000,
+                    "min_value": 0,
+                    "max_value": 2**63 - 1,
+                },
+                {
+                    "type": "spinbox",
+                    "label": "Max Agent Runs At Once",
+                    "config_path": "max_concurrent_runs",
+                    "default": 4,
+                    "min_value": 1,
+                    "max_value": 2**31 - 1,
+                },
+            ]
+        )
+    return widgets
+
+
 def save(plugin_id: str, values: dict) -> None:
     """Merge validated values under the installed plugin's sibling lock."""
     if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id):
@@ -52,10 +87,7 @@ def save(plugin_id: str, values: dict) -> None:
         raise ValueError("Plugin is not installed")
     root = home / "plugins" / plugin_id
     manifest = _read_json(root / "kollab-plugin.json")
-    section = _read_json(_within(root.resolve(), manifest.get("settings"), "settings"))
-    widgets = section.get("widgets")
-    if not isinstance(widgets, list):
-        raise ValueError("Invalid settings widgets")
+    widgets = setting_widgets(root, manifest)
     definitions = {}
     for widget in widgets:
         if not isinstance(widget, dict) or not isinstance(widget.get("config_path"), str):
