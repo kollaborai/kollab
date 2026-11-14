@@ -235,9 +235,8 @@ def main(argv: list[str]) -> int:
             dev_id = f"{args.plugin_id}@dev"
             from .services import _approved_service_root
 
-            dev_root, _ = _approved_service_root(home, registry, dev_id)
-            dev_manifest = json.loads((dev_root / "kollab-plugin.json").read_text(encoding="utf-8"))
-            dev_services = dev_manifest.get("services", {})
+            _, dev_approval = _approved_service_root(home, registry, dev_id, stopping=True)
+            dev_services = dev_approval.get("services", {})
             _stop_for_change(home, dev_id, dev_services)
         with locked_file(home / "plugins.json.lock", private=True):
             _recover_locked(home)
@@ -283,6 +282,7 @@ def main(argv: list[str]) -> int:
                     "manifest_sha256": manifest_digest,
                     "enabled_path": os.environ.get("PATH", os.defpath),
                     "granted": manifest.get("uses", []),
+                    "services": manifest.get("services", {}),
                 },
             )
             registry["dev"][plugin_id] = str(folder)

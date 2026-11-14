@@ -115,21 +115,25 @@ def _valid_plugin_id(plugin_id: str) -> bool:
     return isinstance(plugin_id, str) and bool(_ID.fullmatch(plugin_id.removesuffix("@dev")))
 
 
-def _approved_service_root(home: Path, registry: dict, plugin_id: str) -> tuple[Path, dict]:
+def _approved_service_root(home: Path, registry: dict, plugin_id: str, *, stopping: bool = False) -> tuple[Path, dict]:
     if plugin_id.endswith("@dev"):
         folder = registry["dev"].get(plugin_id.removesuffix("@dev"))
         if not isinstance(folder, str):
             raise ValueError("Development plugin is not attached")
-        root = Path(folder).resolve(strict=True)
+        root = Path(folder).resolve(strict=not stopping)
         approval = home / "plugin-data" / plugin_id / "approval.json"
         if approval.is_symlink():
             raise ValueError("Invalid development approval")
         try:
             record = json.loads(approval.read_text(encoding="utf-8"))
-            digest = hashlib.sha256((root / "kollab-plugin.json").read_bytes()).hexdigest()
+            digest = None if stopping else hashlib.sha256((root / "kollab-plugin.json").read_bytes()).hexdigest()
         except (OSError, ValueError) as exc:
             raise ValueError("Cannot read development approval") from exc
-        if not isinstance(record, dict) or record.get("folder") != str(root) or record.get("manifest_sha256") != digest:
+        if (
+            not isinstance(record, dict)
+            or record.get("folder") != str(root)
+            or (not stopping and record.get("manifest_sha256") != digest)
+        ):
             raise ValueError("Development manifest changed since approval; attach again")
         return root, record
     record = registry["plugins"].get(plugin_id)
@@ -491,11 +495,15 @@ def control_service(plugin_id: str, service_name: str, action: str) -> None:
         raise ValueError("Invalid service action")
     home = Path.home() / ".kollab"
     registry = _read_registry(home / "plugins.json")
-    root, record = _approved_service_root(home, registry, plugin_id)
+    root, record = _approved_service_root(home, registry, plugin_id, stopping=action == "stop")
     if action == "start" and not plugin_id.endswith("@dev") and record.get("enabled") is not True:
         raise ValueError("Enable the plugin before starting its service")
     try:
-        manifest = json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
+        manifest = (
+            {"services": record.get("services", {})}
+            if plugin_id.endswith("@dev") and action == "stop"
+            else json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
+        )
         if service_name not in manifest["services"]:
             raise ValueError("Unknown plugin service")
     except (OSError, KeyError, TypeError) as exc:
