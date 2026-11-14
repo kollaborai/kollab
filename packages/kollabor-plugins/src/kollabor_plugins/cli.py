@@ -167,8 +167,21 @@ def main(argv: list[str]) -> int:
             print(f"Installed {manifest['id']}")
             return 0
     for plugin_id, record in sorted(registry["plugins"].items()):
+        if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id) or not isinstance(record, dict):
+            print(f"{plugin_id}  invalid registry entry")
+            continue
         status = "enabled" if record.get("enabled") else "disabled"
-        print(f"{plugin_id}  {status}")
+        try:
+            root = home / "plugins" / plugin_id
+            if root.is_symlink():
+                raise ValueError("Plugin directory is a symlink")
+            manifest = json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
+            version = manifest.get("version", "unknown")
+            services = manifest.get("services", {})
+            processes = ", ".join(sorted(services)) if isinstance(services, dict) else "invalid"
+            print(f"{plugin_id}  {version}  {status}  {processes or 'no processes'}  {record.get('source', 'unknown')}")
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            print(f"{plugin_id}  {status}  manifest unavailable: {exc}")
     for plugin_id, folder in sorted(registry["dev"].items()):
         print(f"{plugin_id}@dev  dev  {folder}")
     return 0
