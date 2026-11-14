@@ -1,6 +1,5 @@
 """Configuration widget definitions for modal UI."""
 
-import importlib
 import json
 import logging
 from pathlib import Path
