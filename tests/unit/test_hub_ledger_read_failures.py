@@ -1,6 +1,8 @@
 """Task ledger read failures remain visible to callers (#912)."""
 
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -114,6 +116,25 @@ def test_work_status_does_not_call_an_incomplete_ledger_empty(tmp_path):
     assert "incomplete" in status.lower()
     assert "empty" not in status.lower()
     assert valid.id in status
+
+
+@pytest.mark.asyncio
+async def test_live_context_surfaces_incomplete_active_task_view(tmp_path):
+    ledger = TaskLedger(str(tmp_path / "tasks"))
+    valid = ledger.create("coordinator", "worker", "known assignment")
+    (tmp_path / "tasks" / "corrupt.json").write_text("{")
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._refresh_remote_agent_rows = AsyncMock(return_value=[])
+    plugin._roster = []
+    plugin._identity = SimpleNamespace(identity="worker")
+    plugin._task_ledger = ledger
+    plugin.config = None
+    plugin._change_feed = None
+
+    context = await plugin._hub_live_context()
+
+    assert valid.id in context
+    assert "active task view incomplete" in context.lower()
 
 
 def test_claim_does_not_treat_a_corrupt_card_as_missing_or_overwrite_it(tmp_path):
