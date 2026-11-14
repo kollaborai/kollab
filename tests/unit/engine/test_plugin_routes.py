@@ -552,13 +552,18 @@ def test_plugin_tokens_are_private_stable_and_scoped(tmp_path, monkeypatch):
         manifest = json.loads(manifest_path.read_text())
         manifest.update({"id": plugin_id, "engine": "python/engine.py:make_router"})
         manifest_path.write_text(json.dumps(manifest))
-        (root / "python" / "engine.py").write_text('''from fastapi import APIRouter
+        (root / "python" / "engine.py").write_text('''from fastapi import APIRouter, WebSocket
 
 def make_router(ctx):
     router = APIRouter()
     @router.get("/who")
     def who():
         return {"id": ctx.id, "has_token": bool(ctx.token)}
+    @router.websocket("/socket")
+    async def socket(ws: WebSocket):
+        await ws.accept()
+        await ws.send_json({"id": ctx.id})
+        await ws.close()
     return router
 ''')
         records[plugin_id] = {"enabled": True, "files_sha256": files_sha256(root), "granted": []}
@@ -572,6 +577,12 @@ def make_router(ctx):
         assert stat.S_IMODE(hello_path.stat().st_mode) == 0o600
         own = {"Authorization": f"Bearer {hello_token}"}
         assert client.get("/plugins/hello/api/who", headers=own).json() == {"id": "hello", "has_token": True}
+        from starlette.websockets import WebSocketDisconnect
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/plugins/hello/api/socket"):
+                pass
+        with client.websocket_connect("/plugins/hello/api/socket", headers=own) as websocket:
+            assert websocket.receive_json() == {"id": "hello"}
         assert client.get("/plugins/hello/settings", headers=own).status_code == 200
         assert client.get("/plugins/hello/usage", headers=own).status_code == 200
         assert client.post("/plugins/hello/events", headers=own, json={"topic": "ready", "data": {}}).status_code == 200
@@ -583,3 +594,49 @@ def make_router(ctx):
     with TestClient(create_app()):
         assert hello_path.read_text().strip() == hello_token
         assert other_path.read_text().strip() == other_token
+
+
+def test_plugin_websocket_cannot_bypass_engine_auth(tmp_path, monkeypatch):
+    import json
+    import shutil
+    from pathlib import Path
+
+    from kollabor_engine import server
+    from starlette.websockets import WebSocketDisconnect
+
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.delenv("KOLLAB_ENGINE_BYPASS_AUTH", raising=False)
+    monkeypatch.setattr(server, "validate_token", lambda token: token == "full-user-token")
+    source = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    home = tmp_path / ".kollab"
+    root = home / "plugins" / "hello"
+    shutil.copytree(source, root)
+    manifest_path = root / "kollab-plugin.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["engine"] = "python/engine.py:make_router"
+    manifest_path.write_text(json.dumps(manifest))
+    (root / "python" / "engine.py").write_text('''from fastapi import APIRouter, WebSocket
+
+def make_router(ctx):
+    router = APIRouter()
+    @router.websocket("/socket")
+    async def socket(ws: WebSocket):
+        await ws.accept()
+        await ws.send_text("ok")
+        await ws.close()
+    return router
+''')
+    (home / "plugins.json").write_text(json.dumps({
+        "plugins": {"hello": {"enabled": True, "files_sha256": files_sha256(root), "granted": []}}, "dev": {},
+    }))
+    with TestClient(create_app()) as client:
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/plugins/hello/api/socket"):
+                pass
+        with client.websocket_connect(
+            "/plugins/hello/api/socket", headers={"Authorization": "Bearer full-user-token"}
+        ) as websocket:
+            assert websocket.receive_text() == "ok"
