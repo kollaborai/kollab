@@ -787,3 +787,62 @@ def test_builtin_plugin_settings_preserve_unrelated_config(tmp_path, monkeypatch
         for key in ("plugins.example.enabled", "plugins.example.secret", "plugins.example.managed", "other.keep"):
             assert client.put("/plugins/example/settings", json={key: "leak"}).status_code == 422
         assert json.loads(path.read_text()) == saved
+
+
+def test_service_actions_restart_and_redacted_log(tmp_path, monkeypatch):
+    import asyncio
+    import json
+    import shutil
+    from pathlib import Path
+
+    from kollabor_ai import profile_manager
+    from kollabor_plugins import services
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    source = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    home = tmp_path / ".kollab"
+    root = home / "plugins" / "hello"
+    shutil.copytree(source, root)
+    (home / "plugins.json").write_text(json.dumps({
+        "plugins": {"hello": {"enabled": True, "files_sha256": files_sha256(root),
+                              "granted": ["secret:EXAMPLE"]}}, "dev": {},
+    }))
+    calls = []
+    monkeypatch.setattr(services, "control_service", lambda plugin, service, action: calls.append((plugin, service, action)))
+    monkeypatch.setattr(services, "_recorded_process_alive", lambda path: False)
+    monkeypatch.setattr(profile_manager, "_keyring_get", lambda name: "secret-value" if name == "EXAMPLE" else None)
+    app = create_app()
+    with TestClient(app) as client:
+        run = home / "plugin-data" / "hello" / "run"
+        token = (run / "token").read_text()
+        log = run / "hello.log"
+        log.write_text(f"first secret-value {token}\nsecond\n")
+        response = client.get("/plugins/hello/services/hello/log?lines=2")
+        assert response.status_code == 200
+        assert "first" in response.text and "second" in response.text
+        assert "secret-value" not in response.text and token not in response.text
+        assert client.post("/plugins/hello/services/hello/start").status_code == 200
+        assert client.post("/plugins/hello/services/hello/stop").status_code == 200
+        assert client.post("/plugins/hello/services/hello/restart").status_code == 202
+
+        async def wait_for_restart():
+            for _ in range(100):
+                if len(calls) >= 4:
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError("restart did not finish")
+
+        client.portal.call(wait_for_restart)
+        assert calls == [("hello", "hello", "start"), ("hello", "hello", "stop"),
+                         ("hello", "hello", "stop"), ("hello", "hello", "start")]
+        assert client.post("/plugins/hello/services/missing/start").status_code == 404
+        assert client.post("/plugins/hello/services/hello/start", headers={"x-kollab-plugin-remote": "1"}).status_code == 403
+        outside = tmp_path / "outside-log"
+        outside.write_text("private outside contents")
+        log.rename(run / "hello.log.saved")
+        log.symlink_to(outside)
+        assert client.get("/plugins/hello/services/hello/log").status_code == 409
+        assert outside.read_text() == "private outside contents"
