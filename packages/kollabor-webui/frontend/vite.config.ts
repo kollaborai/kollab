@@ -206,6 +206,7 @@ const mainConfig = defineConfig({
       "tests/hub-note-recipient.test.tsx",
       "src/components/assistant-ui/tool-fallback.test.tsx",
       "tests/agent-type-glyph.test.tsx",
+      "tests/agent-version-notice.test.tsx",
       "tests/mobile-invite.test.mjs",
       "tests/phonelink-app-shell.test.ts",
       "tests/trajectory-detail-title.test.ts",

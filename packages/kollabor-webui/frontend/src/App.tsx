@@ -45,6 +45,7 @@ import {
 } from "./context-compaction-status";
 import { AppSidebar } from "@/components/shell/AppSidebar";
 import { networkOf, prepareRemoteOpen, targetsOn } from "@/components/shell/agent-network";
+import { AgentVersionNotice, agentVersionNotice } from "@/components/shell/AgentVersionNotice";
 import { liveAgentOf, poolSeenBy } from "@/components/shell/live-agent";
 import { PanelHost } from "@/components/panels/PanelHost";
 import { WaiterChat } from "@/components/shell/WaiterChat";
@@ -77,6 +78,7 @@ import {
   type NetworkAgent,
   DEFAULT_SLASH_COMMANDS,
   errorText,
+  isAgentTooOld,
   type ModelChoice,
   type Profile,
   type SlashCommand,
@@ -437,6 +439,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [agents, setAgents] = useState<AgentPoolEntry[]>([]);
   const [liveAgents, setLiveAgents] = useState<LiveAgent[]>([]);
+  // kollabor.updates.restart_agents, as GET /agents last said it.
+  const [restartAgents, setRestartAgents] = useState(false);
   // What New Session can start in the chosen folder: every folder has its own hub, so a
   // gem running elsewhere is free here. `agents` stays the whole computer's live state.
   const [launchPool, setLaunchPool] = useState<AgentPoolEntry[]>([]);
@@ -687,6 +691,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       const next = result.agents || [];
       setAgents(next);
       setLiveAgents(result.live || []);
+      setRestartAgents(result.restart_agents === true);
       applyLaunchPool(launch.agents || []);
       return next;
     } catch {
@@ -1162,6 +1167,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         try {
           await api.streamEvents(activeId, controller.signal, (event) => {
             const type = event.type ?? "";
+            if (type === "agent_restart_failed" && event.session_id === activeId) {
+              setAgentRestart({
+                sessionId: activeId,
+                waiting: false,
+                failure: "The conversation could not be saved.",
+                tooOld: false,
+              });
+            }
             if (type === "supervisor_alert") setSupervisorEvents((prev) => [...prev.slice(-19), event]);
 
             const compactionStatus = parseContextCompactionStatus(event);
@@ -1254,8 +1267,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           }
           // Live hub state for the sidebar gems; skip the update when nothing
           // moved so the chat does not re-render every poll.
-          const { agents: pool = [], live: running = [] } = await api.listAgentPool(true);
+          const { agents: pool = [], live: running = [], restart_agents: restartFlag } = await api.listAgentPool(true);
           if (!controller.signal.aborted) {
+            setRestartAgents(restartFlag === true);
             setAgents((current) => (JSON.stringify(current) === JSON.stringify(pool) ? current : pool));
             setLiveAgents((current) => (JSON.stringify(current) === JSON.stringify(running) ? current : running));
           }
@@ -1279,6 +1293,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [versionMismatch, setVersionMismatch] = useState<{ page: string; engine: string } | null>(null);
   const [updateInfo, setUpdateInfo] = useState<Awaited<ReturnType<EngineApi["checkForUpdate"]>> | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
+  // The engine's own version (GET /version): what a chat's agent is compared with.
+  const [engineVersion, setEngineVersion] = useState("");
+  // One restart asked for from a chat's notice, until that agent publishes the engine's version.
+  const [agentRestart, setAgentRestart] = useState<{ sessionId: string; waiting: boolean; failure: string; tooOld: boolean } | null>(null);
+  // Notices put away for this page load, by chat and agent process.
+  const [dismissedVersionNotices, setDismissedVersionNotices] = useState<ReadonlySet<string>>(() => new Set());
 
   useEffect(() => {
     let active = true;
@@ -1299,6 +1319,27 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       window.alert(errorText(error));
     } finally { setUpdateBusy(false); }
   };
+
+  // The open chat's agent against the engine: older code gets a line above the chat (#968).
+  const activeAgent = activeSession ? liveAgentOf(activeSession, liveAgents) : undefined;
+  const versionNotice = agentVersionNotice({ engineVersion, agent: activeAgent, restartAgents });
+  const versionNoticeKey = activeSession && activeAgent ? `${activeSession.session_id}|${activeAgent.agent_id}` : "";
+  const restartHere = agentRestart && agentRestart.sessionId === activeId ? agentRestart : null;
+  const restartActiveAgent = async () => {
+    if (!activeSession) return;
+    const sessionId = activeSession.session_id;
+    setAgentRestart({ sessionId, waiting: false, failure: "", tooOld: false });
+    try {
+      const result = await api.restartAgent(sessionId);
+      setAgentRestart({ sessionId, waiting: result.waiting_for_turn, failure: "", tooOld: false });
+    } catch (error) {
+      setAgentRestart({ sessionId, waiting: false, failure: errorText(error), tooOld: isAgentTooOld(error) });
+    }
+  };
+  // Once the agent runs the engine's version (or is gone from presence) the ask is over.
+  useEffect(() => {
+    if (!versionNotice && agentRestart) setAgentRestart(null);
+  }, [versionNotice, agentRestart]);
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -1307,6 +1348,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         if (!mounted) return;
         const bundle = __APP_VERSION__;
         const engine = (config?.engine_version || "").trim();
+        setEngineVersion(engine);
         if (!engine || !bundle || engine === bundle) return;
         setVersionMismatch({ page: bundle, engine });
       } catch {
@@ -1850,6 +1892,17 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             >
               This page and Kollab are on different versions. Reload once the update finishes.
             </NoticeBar>
+          ) : null}
+          {versionNotice && !dismissedVersionNotices.has(versionNoticeKey) ? (
+            <AgentVersionNotice
+              notice={versionNotice}
+              busy={Boolean(restartHere) && !restartHere?.failure}
+              waiting={restartHere?.waiting ?? false}
+              failure={restartHere?.failure ?? ""}
+              tooOld={restartHere?.tooOld ?? false}
+              onRestart={() => void restartActiveAgent()}
+              onDismiss={() => setDismissedVersionNotices((current) => new Set(current).add(versionNoticeKey))}
+            />
           ) : null}
           {pickFailure && pickFailure.sessionId === activeId ? (
             <NoticeBar
