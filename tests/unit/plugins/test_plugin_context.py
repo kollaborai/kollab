@@ -50,3 +50,16 @@ def test_plugin_context_refuses_lock_directory_symlink(tmp_path, monkeypatch):
         with context.lock("chain"):
             pass
     assert not (outside / "chain.lock").exists()
+
+
+def test_plugin_context_reports_corrupt_settings(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    root = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    manifest = json.loads((root / "kollab-plugin.json").read_text())
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "values.json").write_text("{bad json", encoding="utf-8")
+    context = PluginContext("hello", root, data, manifest)
+    with pytest.raises(ValueError, match="Invalid plugin settings"):
+        context.settings.get()
