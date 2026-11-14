@@ -451,6 +451,7 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
                 "since": None,
                 "restarts": len(history) if isinstance(history, list) else 0,
                 "heartbeat": None,
+                "error": state.get("error"),
             }
         )
     return result

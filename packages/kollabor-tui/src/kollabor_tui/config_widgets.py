@@ -33,6 +33,8 @@ class ConfigWidgetDefinitions:
             name = entry.get("name") or plugin_id.replace("_", " ").title()
             kind = entry.get("kind", "built-in")
             path = f"plugin-registry.{plugin_id}.enabled" if kind == "installed" else f"plugins.{plugin_id}.enabled"
+            error = entry.get("error")
+            detail = f"; {error}" if isinstance(error, str) and error else ""
             rows.append(
                 {
                     "type": "label" if kind == "dev" else "checkbox",
@@ -42,9 +44,9 @@ class ConfigWidgetDefinitions:
                     "config_path": "" if kind == "dev" else path,
                     "value": entry.get("state", "unknown"),
                     "help": (
-                        f"{name} — use kollab plugin dev off {plugin_id.removesuffix('@dev')} to detach"
+                        f"{name} — use kollab plugin dev off {plugin_id.removesuffix('@dev')} to detach{detail}"
                         if kind == "dev"
-                        else f"{name} — {entry.get('state', 'unknown')}"
+                        else f"{name} — {entry.get('state', 'unknown')}{detail}"
                     ),
                 }
             )
@@ -113,12 +115,14 @@ class ConfigWidgetDefinitions:
                 widgets = []
                 for service in entry.get("services", []):
                     if isinstance(service, dict) and isinstance(service.get("name"), str):
+                        error = service.get("error")
+                        detail = f"; {error}" if isinstance(error, str) and error else ""
                         widgets.append(
                             {
                                 "type": "checkbox",
                                 "label": f"Background: {service['name']}",
                                 "config_path": f"plugin-service.{entry['id']}.{service['name']}",
-                                "help": f"State: {service.get('state', 'unknown')}; toggle to start or stop",
+                                "help": f"State: {service.get('state', 'unknown')}{detail}; toggle to start or stop",
                             }
                         )
                 for widget in entry.get("settings", []):
