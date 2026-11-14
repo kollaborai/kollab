@@ -14,10 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from kollabor_config.atomic_write import write_text_atomic
-from kollabor_config.file_lock import locked_file
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
+
+from kollabor_config.atomic_write import write_text_atomic
+from kollabor_config.file_lock import locked_file
 
 logger = logging.getLogger(__name__)
 
