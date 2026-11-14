@@ -891,7 +891,9 @@ def test_package_enable_disable_remove_are_guarded_and_preserve_data(tmp_path, m
     monkeypatch.setattr(services, "stop_services", lambda plugin_id: calls.append(("stop", plugin_id)))
     monkeypatch.setattr(services, "supervisor_tick", lambda: calls.append(("tick",)))
     monkeypatch.setattr(services, "_recorded_process_alive", lambda path: False)
-    monkeypatch.setattr(packages, "remove_package", lambda plugin_id, **kwargs: calls.append(("remove", plugin_id, kwargs)))
+    monkeypatch.setattr(
+        packages, "remove_package", lambda plugin_id, **kwargs: calls.append(("remove", plugin_id, kwargs))
+    )
     app = create_app()
     with TestClient(app) as client:
         assert client.post("/plugins/hello/enable").status_code == 200
@@ -899,6 +901,8 @@ def test_package_enable_disable_remove_are_guarded_and_preserve_data(tmp_path, m
         (run / "runs.json").write_text(json.dumps({"runs": [{"run_id": "active", "status": "running"}]}))
         assert client.post("/plugins/hello/disable").status_code == 409
         assert json.loads(registry_path.read_text())["plugins"]["hello"]["enabled"] is True
+        (run / "runs.json").write_text(json.dumps({"runs": [{"run_id": "uncertain", "status": []}]}))
+        assert client.post("/plugins/hello/disable").status_code == 409
         (run / "runs.json").write_text(json.dumps({"runs": []}))
         assert client.post("/plugins/hello/disable").status_code == 200
         assert json.loads(registry_path.read_text())["plugins"]["hello"]["enabled"] is False

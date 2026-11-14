@@ -457,6 +457,123 @@ def plugin_service_log(plugin_id: str, service_name: str, lines: int = Query(def
 
 
 
+def _with_inactive_runs(context, operation):
+    run = PluginTokenStore._run(context, create=True)
+    with locked_file(run / "runs.json.lock", private=True):
+        state = _read_usage_json(run / "runs.json", {"runs": []})
+        rows = state.get("runs")
+        statuses = {"running", "done", "timeout", "capped", "failed", "cancelled"}
+        if not isinstance(rows, list) or any(
+            not isinstance(row, dict) or not isinstance(row.get("status"), str) or row["status"] not in statuses
+            for row in rows
+        ):
+            raise ValueError("Cannot determine whether plugin runs are active")
+        if any(row["status"] == "running" for row in rows):
+            raise ValueError("Cancel active plugin agent runs first")
+        return operation()
+
+
+def _set_package_enabled(context, enabled: bool) -> None:
+    from kollabor_plugins.packages import _read_registry
+    from kollabor_plugins.services import _approved_service_root
+    from kollabor_plugins.settings import set_enabled
+
+    home = Path.home() / ".kollab"
+    if enabled:
+        _approved_service_root(home, _read_registry(home / "plugins.json"), context.id)
+        set_enabled(context.id, True)
+    else:
+        _with_inactive_runs(context, lambda: set_enabled(context.id, False))
+
+
+def _remove_package_checked(context, purge: bool) -> None:
+    from kollabor_plugins.packages import _read_registry, remove_package
+    from kollabor_plugins.services import _recorded_process_alive
+    from kollabor_plugins.settings import set_enabled
+
+    home = Path.home() / ".kollab"
+
+    def remove_when_stopped():
+        registry_path = home / "plugins.json"
+        registry = _read_registry(registry_path)
+        record = registry["plugins"].get(context.id)
+        if not isinstance(record, dict):
+            raise ValueError("Plugin is not installed")
+        if record.get("enabled") is True:
+            set_enabled(context.id, False)
+        for service_name in context.manifest.get("services", {}):
+            pid = context.data / "run" / f"{service_name}.pid"
+            if pid.is_symlink() or _recorded_process_alive(pid):
+                raise ValueError("Plugin services are stopping; retry removal when stopped")
+        record = _read_registry(registry_path)["plugins"].get(context.id)
+        if not isinstance(record, dict):
+            raise ValueError("Plugin is not installed")
+        remove_package(context.id, expected_record=record, purge=purge)
+
+    _with_inactive_runs(context, remove_when_stopped)
+
+
+class RemovePluginOptions(BaseModel):
+    purge: bool = False
+    confirm_purge: bool = False
+
+
+@router.post("/{plugin_id}/enable")
+@router.post("/{plugin_id}/disable")
+async def set_plugin_enabled(request: Request, plugin_id: str):
+    from kollabor_plugins.services import supervisor_tick
+
+    context = _package_context(plugin_id)
+    if context is None:
+        raise HTTPException(status_code=404, detail="Plugin not found")
+    enabled = request.scope["path"].rstrip("/").endswith("/enable")
+    try:
+        await asyncio.to_thread(_set_package_enabled, context, enabled)
+        if enabled:
+            try:
+                loaded = await request.app.state.plugin_dispatcher._acquire(plugin_id)
+                await request.app.state.plugin_dispatcher._release(plugin_id, loaded)
+            except HTTPException as exc:
+                if exc.status_code not in {404, 503}:
+                    raise
+            await asyncio.to_thread(supervisor_tick)
+        else:
+            await request.app.state.plugin_service_controls.cancel_plugin(plugin_id)
+            await request.app.state.plugin_dispatcher.invalidate(plugin_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError as exc:
+        logger.warning("Cannot change plugin state for %s: %s", plugin_id, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Cannot change plugin state") from exc
+    request.app.state.plugin_events.publish_change()
+    return {"enabled": enabled}
+
+
+@router.post("/{plugin_id}/remove")
+async def remove_plugin(request: Request, plugin_id: str, options: RemovePluginOptions = RemovePluginOptions()):
+    context = _package_context(plugin_id)
+    if context is None:
+        raise HTTPException(status_code=404, detail="Plugin not found")
+    if options.purge and not options.confirm_purge:
+        raise HTTPException(status_code=422, detail="Confirm data purge explicitly")
+    try:
+        await asyncio.to_thread(_set_package_enabled, context, False)
+        await request.app.state.plugin_service_controls.cancel_plugin(plugin_id)
+        if await request.app.state.plugin_dispatcher.invalidate(plugin_id):
+            raise ValueError("Plugin requests are still running; retry removal when they finish")
+        await asyncio.to_thread(_remove_package_checked, context, options.purge)
+    except ValueError as exc:
+        await request.app.state.plugin_dispatcher.invalidate(plugin_id)
+        request.app.state.plugin_events.publish_change()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError as exc:
+        logger.warning("Cannot remove plugin %s: %s", plugin_id, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Cannot remove plugin") from exc
+    request.app.state.plugin_events.publish_change()
+    return {"removed": True, "purged": options.purge}
+
+
+
 def _read_usage_json(path: Path, default: dict) -> dict:
     if path.is_symlink():
         raise ValueError("Usage state cannot be a symlink")
@@ -924,6 +1041,15 @@ class PluginServiceControls:
         finally:
             self.hub.publish_change()
 
+    async def cancel_plugin(self, plugin_id: str) -> None:
+        async with self._lock:
+            tasks = [task for (owner, _), task in self.tasks.items() if owner == plugin_id]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+
     async def shutdown(self) -> None:
         tasks = list(self.tasks.values())
         for task in tasks:
@@ -1064,6 +1190,13 @@ class PluginDispatcher:
                 if not retired:
                     self._retired.pop(plugin_id, None)
                 self._condition.notify_all()
+
+    async def invalidate(self, plugin_id: str) -> bool:
+        async with self._condition:
+            await self._retire(plugin_id)
+            self.errors.pop(plugin_id, None)
+            return bool(self._retired.get(plugin_id))
+
 
     async def warm(self) -> None:
         """Load enabled routers so startup failures appear in plugin inventory."""
