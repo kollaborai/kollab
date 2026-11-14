@@ -317,6 +317,12 @@ def create_app(port: Optional[int] = None) -> FastAPI:
         import os
         import sys
 
+        from .routes.plugins import remote_plugin_route_allowed
+
+        if any(value.strip() == "1" for value in request.headers.getlist("x-kollab-plugin-remote")):
+            if not remote_plugin_route_allowed(request.method, request.scope["path"]):
+                return JSONResponse(status_code=403, content={"detail": "Plugin management is local only"})
+
         # Skip auth for tests if env var is set
         if os.environ.get("KOLLAB_ENGINE_BYPASS_AUTH") == "1" and "pytest" in sys.modules:
             return await call_next(request)

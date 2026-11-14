@@ -43,20 +43,27 @@ def remote_plugin_route_allowed(method: str, path: str) -> bool:
     parts = path.strip("/").split("/")
     if not parts or parts[0] != "plugins":
         return True
+    if "\\" in path or "\x00" in path or "%" in path or any(part in {"", ".", ".."} for part in parts):
+        return False
+    method = method.upper()
     if len(parts) == 1:
         return method == "GET"
     if len(parts) == 2:
         return method == "GET" and parts[1] == "events"
-    if parts[1] in {"install", "jobs", "dev", "catalog", "update"}:
+    if parts[1] == "jobs" and (len(parts) == 3 or (len(parts) == 4 and parts[3] == "confirm")):
         return False
     tail = parts[2:]
     if tail[0] == "api" and len(tail) >= 2:
         return True
     if tail == ["events"]:
         return method in {"GET", "POST"}
+    if tail == ["agents"]:
+        return method == "POST"
+    if len(tail) == 2 and tail[0] == "agents":
+        return method in {"GET", "DELETE"}
     if method != "GET":
         return False
-    return tail in (["settings"], ["agents"], ["usage"]) or (
+    return tail in (["settings"], ["usage"]) or (
         len(tail) == 3 and tail[0] == "services" and tail[2] == "log"
     )
 
