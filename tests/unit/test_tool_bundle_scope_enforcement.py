@@ -217,7 +217,9 @@ class TestBundleScopeEnforcement:
         )
 
         assert result.success is True
-        assert shell.command == "git --no-pager -p log -1"
+        assert shell.command == (
+            f"git -c core.hooksPath={os.devnull} --no-pager -p log -1"
+        )
 
     def test_git_only_terminal_call_disables_repository_hooks(self):
         """Git-only grants must not run repository-configured hooks."""
