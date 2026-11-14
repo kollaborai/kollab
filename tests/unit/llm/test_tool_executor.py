@@ -197,7 +197,9 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
             self.assertFalse((workspace / "x.txt").exists())
             self.executor.shell_executor.run_argv.assert_awaited_once()
             call = self.executor.shell_executor.run_argv.await_args
-            self.assertEqual(call.args[0], ("git", "log", "--oneline", "-1"))
+            self.assertEqual(Path(call.args[0][0]).name, "git")
+            self.assertTrue(Path(call.args[0][0]).is_absolute())
+            self.assertEqual(call.args[0][1:], ("log", "--oneline", "-1"))
             self.assertEqual(call.kwargs["timeout"], 10)
             self.assertEqual(call.kwargs["cwd"], workspace.resolve())
             self.assertEqual(call.kwargs["max_output_bytes"], 8 * 1024)
