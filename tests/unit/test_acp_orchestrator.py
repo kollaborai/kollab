@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from kollabor_voice.voice_context import VOICE_NUDGE, VOICE_RULES_MARK, voice_preamble
 
 from kollabor.llm import acp_orchestrator as mod
 from kollabor.state.local import LocalStateService
@@ -15,7 +16,6 @@ from kollabor_ai.conversation_manager import ConversationManager
 from kollabor_ai.profile_manager import LLMProfile
 from kollabor_events.data_models import ConversationMessage
 from kollabor_tui.display_tap import DisplayTap
-from kollabor_voice.voice_context import VOICE_NUDGE, VOICE_RULES_MARK, voice_preamble
 from plugins.hub.models import HubMessage
 
 
