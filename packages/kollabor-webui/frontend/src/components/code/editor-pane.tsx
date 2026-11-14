@@ -75,17 +75,7 @@ function defineVoidTheme(monaco: typeof import("monaco-editor"), accent: string)
   monaco.editor.defineTheme("kollab-void", {
     base: activePalette.base,
     inherit: true,
-    rules: [
-      { token: "comment", foreground: "4a4a55", fontStyle: "italic" },
-      { token: "string", foreground: "e8b661" },
-      { token: "keyword", foreground: "7eb8da" },
-      { token: "number", foreground: "6dd4c8" },
-      { token: "type", foreground: "7eb8da" },
-      { token: "function", foreground: "e0e0e8" },
-      { token: "variable", foreground: "c8c8d0" },
-      { token: "operator", foreground: "ffffff66" },
-      { token: "delimiter", foreground: "ffffff40" },
-    ],
+    rules: activePalette.rules.map((rule) => ({ ...rule, foreground: rule.foreground.slice(1) })),
     colors: {
       ...activePalette.colors,
       "editor.selectionBackground": a(0.22),

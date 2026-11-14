@@ -3,6 +3,36 @@ export interface EditorThemePalette {
   foreground: string;
 }
 
+interface EditorThemeRule {
+  token: string;
+  foreground: string;
+  fontStyle?: string;
+}
+
+const DARK_SYNTAX_RULES: EditorThemeRule[] = [
+  { token: "comment", foreground: "#4a4a55", fontStyle: "italic" },
+  { token: "string", foreground: "#e8b661" },
+  { token: "keyword", foreground: "#7eb8da" },
+  { token: "number", foreground: "#6dd4c8" },
+  { token: "type", foreground: "#7eb8da" },
+  { token: "function", foreground: "#e0e0e8" },
+  { token: "variable", foreground: "#c8c8d0" },
+  { token: "operator", foreground: "#ffffff66" },
+  { token: "delimiter", foreground: "#ffffff40" },
+];
+
+const LIGHT_SYNTAX_RULES: EditorThemeRule[] = [
+  { token: "comment", foreground: "#52525b", fontStyle: "italic" },
+  { token: "string", foreground: "#854d0e" },
+  { token: "keyword", foreground: "#1d4ed8" },
+  { token: "number", foreground: "#0f766e" },
+  { token: "type", foreground: "#1e40af" },
+  { token: "function", foreground: "#6b21a8" },
+  { token: "variable", foreground: "#292524" },
+  { token: "operator", foreground: "#52525b" },
+  { token: "delimiter", foreground: "#404040" },
+];
+
 function mixHexColors(background: string, foreground: string, foregroundWeight: number): string {
   const channels = (color: string) => [1, 3, 5].map((start) => Number.parseInt(color.slice(start, start + 2), 16));
   const backgroundChannels = channels(background);
@@ -42,6 +72,7 @@ export function editorThemeColors(isDark: boolean, palette: EditorThemePalette) 
 
   return {
     base: isDark ? "vs-dark" as const : "vs" as const,
+    rules: isDark ? DARK_SYNTAX_RULES : LIGHT_SYNTAX_RULES,
     colors: {
       "editor.background": activePalette.background,
       "editor.foreground": activePalette.foreground,
