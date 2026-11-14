@@ -289,6 +289,40 @@ class TestMCPServerConnection(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    def test_request_reader_discards_oversized_frame_and_reads_next_response(self):
+        """An over-limit JSON-RPC line is discarded without poisoning later frames."""
+
+        async def run_test():
+            oversized = (
+                b'{"jsonrpc":"2.0","id":"too-big","result":{"text":"'
+                + b"x" * MCPServerConnection.MAX_MESSAGE_BYTES
+                + b'"}}\n'
+            )
+            valid = (
+                b'{"jsonrpc":"2.0","id":"good","result":{"text":"ok"}}\n'
+            )
+            chunks = [
+                oversized[index : index + 4096]
+                for index in range(0, len(oversized), 4096)
+            ]
+            chunks.append(valid)
+            connection = MCPServerConnection("test", "fake")
+            connection.initialized = True
+            connection.process = _FakeProcess(
+                stdout=_ChunkedStdout(chunks, hold_open=True)
+            )
+
+            response = await connection._send_request(
+                {"jsonrpc": "2.0", "id": "good", "method": "tools/call"}
+            )
+
+            self.assertEqual(response["result"]["text"], "ok")
+            self.assertTrue(connection.initialized)
+            self.assertEqual(connection._read_buffer, b"")
+            await connection.close()
+
+        asyncio.run(run_test())
+
     def test_request_reader_decodes_utf8_split_across_real_pipe_reads(self):
         """A child process pipe can split a valid UTF-8 code point between writes."""
 
