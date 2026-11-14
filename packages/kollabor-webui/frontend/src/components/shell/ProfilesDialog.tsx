@@ -529,7 +529,7 @@ export function ProfilesDialog({
                       (level !== "none" && level !== "minimal"),
                   ).map((level) => (
                     <SelectItem key={level} value={level}>
-                      {level}
+                      {level === "none" ? "none (no reasoning)" : level}
                     </SelectItem>
                   ))}
                 </SelectContent>
