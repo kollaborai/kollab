@@ -789,6 +789,7 @@ export function AppSidebar({
                               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                                 <span className="flex min-w-0 items-baseline text-sm leading-snug font-medium">
                                   <span className="min-w-0 truncate">{remoteName(agent.name)}</span>
+                                  <AgentTypeGlyph type={agent.agent_type} />
                                 </span>
                                 <span className="text-muted-foreground truncate text-[0.8125rem] leading-snug">
                                   {note && !note.error
