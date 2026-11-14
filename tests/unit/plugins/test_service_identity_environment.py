@@ -1,4 +1,5 @@
 """Service subprocesses know their plugin identity and package root."""
+
 import json
 import sys
 

@@ -128,6 +128,8 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
                 if key in {"HOME", "USER", "LANG", "TERM", "TMPDIR", "SHELL"} or key.startswith("LC_")
             }
             env["PATH"] = path
+            env["KOLLAB_PLUGIN_ID"] = plugin_id
+            env["KOLLAB_PLUGIN_ROOT"] = str(root)
             env["KOLLAB_PLUGIN_DATA"] = str(home / "plugin-data" / plugin_id)
             try:
                 child = subprocess.Popen(
