@@ -166,6 +166,7 @@ async def _engine_lifespan(app: FastAPI):
 
     set_handover_store(store)
     warm_task: Optional["asyncio.Task[None]"] = None
+    supervisor_task: Optional["asyncio.Task[None]"] = None
     try:
         if store is not None:
             pending = store.acquire()
@@ -203,6 +204,9 @@ async def _engine_lifespan(app: FastAPI):
                         # be retried on the next engine start; never stop it here.
                         logger.exception("could not reown WebUI session %s", session_id)
         logger.info("Engine started")
+        from kollabor_plugins.services import supervise_services
+
+        supervisor_task = asyncio.create_task(supervise_services(), name="plugin-supervisor")
         if getattr(app.state, "warm_model_choices", False):  # set by `serve`, never by a test's app
             warm_task = asyncio.create_task(_warm_model_choices(), name="model-picker-warm")
         phone_link = getattr(app.state, "phone_link", None)
@@ -213,6 +217,9 @@ async def _engine_lifespan(app: FastAPI):
                 logger.warning("PhoneLink is unavailable in this engine; local chat remains available")
         yield
     finally:
+        if supervisor_task is not None:
+            supervisor_task.cancel()
+            await asyncio.gather(supervisor_task, return_exceptions=True)
         try:
             if warm_task is not None:
                 warm_task.cancel()
