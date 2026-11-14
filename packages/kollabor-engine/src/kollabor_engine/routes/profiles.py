@@ -587,13 +587,6 @@ async def create_profile(body: CreateProfileRequest):
             )
         if not model:
             raise HTTPException(status_code=422, detail="Model is required")
-        reason = effort_unsupported_reason(
-            resolve_effort_provider(provider, body.api_key or "", body.base_url or ""),
-            body.effort,
-        )
-        if reason:
-            raise HTTPException(status_code=422, detail=reason)
-
         profile = LLMProfile(
             name=name,
             provider=provider,
@@ -610,6 +603,12 @@ async def create_profile(body: CreateProfileRequest):
             supports_tools=body.supports_tools,
             extra_headers=body.extra_headers,
         )
+
+        reason = effort_unsupported_reason(
+            profile.get_effort_provider(migrate_plaintext=False), body.effort
+        )
+        if reason:
+            raise HTTPException(status_code=422, detail=reason)
 
         if not pm.add_profile(profile, save_to_config=True):
             if pm.get_profile(name) is not None:
