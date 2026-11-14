@@ -11,8 +11,8 @@ from typing import Any, Dict, List, Sequence, Type
 
 from kollabor_events.dict_utils import deep_merge
 
-from .collector import PluginStatusCollector
 from .base import BasePlugin
+from .collector import PluginStatusCollector
 from .discovery import PluginDiscovery
 from .factory import PluginFactory
 from .packages import _ID, _SYMBOL, _read_registry, _within, files_sha256, recover_installs
