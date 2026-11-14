@@ -5,7 +5,19 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .packages import _read_registry, install_stage, recover_installs, stage_git_source
+from kollabor_config.atomic_write import write_text_atomic
+from kollabor_config.file_lock import locked_file
+
+from .packages import (
+    _ID,
+    _read_registry,
+    _recover_locked,
+    _write_json,
+    install_stage,
+    recover_installs,
+    stage_git_source,
+    validate_manifest,
+)
 
 
 def main(argv: list[str]) -> int:
@@ -14,6 +26,9 @@ def main(argv: list[str]) -> int:
     subparsers.add_parser("list", help="List installed plugins")
     add = subparsers.add_parser("add", help="Install a Git plugin after confirmation")
     add.add_argument("source")
+    dev = subparsers.add_parser("dev", help="Attach a local development checkout")
+    dev.add_argument("folder_or_off")
+    dev.add_argument("plugin_id", nargs="?")
     run = subparsers.add_parser("run-service", help=argparse.SUPPRESS)
     run.add_argument("plugin_id")
     run.add_argument("service")
@@ -26,6 +41,36 @@ def main(argv: list[str]) -> int:
     recover_installs()
     home = Path.home() / ".kollab"
     registry = _read_registry(home / "plugins.json")
+    if args.action == "dev":
+        with locked_file(home / "plugins.json.lock", private=True):
+            _recover_locked(home)
+            registry = _read_registry(home / "plugins.json")
+            if args.folder_or_off == "off":
+                if not args.plugin_id or not _ID.fullmatch(args.plugin_id):
+                    raise ValueError("A valid plugin id is required")
+                if args.plugin_id not in registry["dev"]:
+                    raise ValueError("Development plugin is not attached")
+                del registry["dev"][args.plugin_id]
+                _write_json(home / "plugins.json", registry)
+                print(f"Detached {args.plugin_id}@dev; development data retained")
+                return 0
+            if args.plugin_id is not None:
+                raise ValueError("Unexpected extra argument")
+            from kollabor.version import get_runtime_version
+
+            folder = Path(args.folder_or_off).expanduser().resolve(strict=True)
+            manifest = validate_manifest(folder, get_runtime_version())
+            plugin_id = manifest["id"]
+            target = home / "plugin-data" / f"{plugin_id}@dev"
+            target.mkdir(parents=True, exist_ok=True)
+            with locked_file(target / "values.json.lock", private=True):
+                old_values = home / "plugin-data" / plugin_id / "values.json"
+                if old_values.is_file() and not (target / "values.json").exists():
+                    write_text_atomic(target / "values.json", old_values.read_text(encoding="utf-8"))
+            registry["dev"][plugin_id] = str(folder)
+            _write_json(home / "plugins.json", registry)
+            print(f"Attached {plugin_id}@dev from {folder}; local code runs as your user")
+            return 0
     if args.action == "add":
         if not sys.stdin.isatty():
             raise ValueError("Plugin installation requires interactive confirmation")
