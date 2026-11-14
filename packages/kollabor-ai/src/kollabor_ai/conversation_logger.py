@@ -189,24 +189,25 @@ class KollaborConversationLogger:
             except OSError:
                 continue
         try:
-            entries = 0
-            for directory in directories:
-                for child in sorted(directory.iterdir()):
-                    entries += 1
-                    if entries > _TIGHTEN_ENTRY_LIMIT:
-                        return
-                    try:
-                        info = child.lstat()
-                    except OSError:
-                        continue
-                    if info.st_uid != os.getuid():
-                        continue
-                    if stat.S_ISDIR(info.st_mode):
-                        if stat.S_IMODE(info.st_mode) & 0o077:
-                            os.chmod(child, 0o700)
-                    elif stat.S_ISREG(info.st_mode):
-                        if stat.S_IMODE(info.st_mode) & 0o077:
-                            os.chmod(child, 0o600)
+            children = sorted(
+                (child for directory in directories for child in directory.iterdir()),
+                key=lambda child: (not child.name.endswith(".jsonl"), str(child)),
+            )
+            for entries, child in enumerate(children, start=1):
+                if entries > _TIGHTEN_ENTRY_LIMIT:
+                    return
+                try:
+                    info = child.lstat()
+                except OSError:
+                    continue
+                if info.st_uid != os.getuid():
+                    continue
+                if stat.S_ISDIR(info.st_mode):
+                    if stat.S_IMODE(info.st_mode) & 0o077:
+                        os.chmod(child, 0o700)
+                elif stat.S_ISREG(info.st_mode):
+                    if stat.S_IMODE(info.st_mode) & 0o077:
+                        os.chmod(child, 0o600)
         except OSError:
             pass
 

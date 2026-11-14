@@ -1025,7 +1025,12 @@ def apply_profile_mirror(
         from kollabor_ai import ProfileManager
 
         selected = ProfileManager().get_profile(name)
-        if selected is None and getattr(snapshot, "name", None):
+        # ACP capabilities come from the daemon handshake, not the local
+        # redacted profile mirror. Keep its snapshot so serialization and
+        # later capability events retain the authoritative value.
+        if getattr(snapshot, "provider", None) == "acp":
+            selected = snapshot
+        elif selected is None and getattr(snapshot, "name", None):
             selected = snapshot
         if selected is not None:
             session.profile = selected
