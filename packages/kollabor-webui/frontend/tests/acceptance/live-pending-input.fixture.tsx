@@ -23,7 +23,9 @@ const api = {
   cancelOwned: async () => undefined,
 } as unknown as EngineApi;
 
-const initialState: EngineState = { sessionId: "s1", sessions: [], messages: [] };
+const initialState: EngineState = {
+  sessionId: "s1", sessions: [], messages: [], synced: { history: 0, messages: 0 },
+};
 const liveEvents: { current: ((event: SessionEvent) => void) | null } = { current: null };
 window.liveEvent = (event) => liveEvents.current?.(event);
 
@@ -54,7 +56,9 @@ function Fixture() {
       id: "history-r1",
       role: "assistant",
       content: [{ type: "text", text: "AlphaBeta" }],
+      metadata: { custom: { requestId: "r1" } },
     }],
+    synced: { history: 1, messages: 1 },
   });
   window.refreshHistory = refreshHistory;
   return (
