@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -11,6 +12,7 @@ from kollabor_config.file_lock import locked_file
 
 from .packages import (
     _ID,
+    _SERVICE,
     _read_registry,
     _recover_locked,
     _write_json,
@@ -28,6 +30,9 @@ def main(argv: list[str]) -> int:
     for action in ("enable", "disable"):
         command = subparsers.add_parser(action, help=f"{action.title()} an installed plugin")
         command.add_argument("plugin_id")
+    logs = subparsers.add_parser("logs", help="Show plugin service logs")
+    logs.add_argument("plugin_id")
+    logs.add_argument("service", nargs="?")
     new = subparsers.add_parser("new", help="Create a plugin from the hello template")
     new.add_argument("plugin_id")
     add = subparsers.add_parser("add", help="Install a Git plugin after confirmation")
@@ -44,6 +49,36 @@ def main(argv: list[str]) -> int:
         from .services import run_service
 
         return run_service(args.plugin_id, args.service, args.nonce)
+    if args.action == "logs":
+        if not _ID.fullmatch(args.plugin_id):
+            raise ValueError("Invalid plugin id")
+        home = Path.home() / ".kollab"
+        record = _read_registry(home / "plugins.json")["plugins"].get(args.plugin_id)
+        if not isinstance(record, dict):
+            raise ValueError("Plugin is not installed")
+        root = home / "plugins" / args.plugin_id
+        if root.is_symlink():
+            raise ValueError("Plugin directory may not be a symlink")
+        manifest = json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
+        services = manifest.get("services", {})
+        if not isinstance(services, dict):
+            raise ValueError("Invalid plugin services")
+        names = [args.service] if args.service else sorted(services)
+        if any(not _SERVICE.fullmatch(name) or name not in services for name in names):
+            raise ValueError("Unknown or invalid service")
+        run = home / "plugin-data" / args.plugin_id / "run"
+        if any(path.is_symlink() for path in (home / "plugin-data", run.parent, run)):
+            raise ValueError("Plugin data path may not be a symlink")
+        for name in names:
+            log = run / f"{name}.log"
+            if not log.exists() and not log.is_symlink():
+                print(f"{name}: no log yet")
+                continue
+            fd = os.open(log, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as stream:
+                print(f"--- {name} ---")
+                print(stream.read(10 * 1024 * 1024), end="")
+        return 0
     if args.action == "new":
         import shutil
 

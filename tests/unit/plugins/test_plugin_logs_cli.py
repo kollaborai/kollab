@@ -1,4 +1,5 @@
 """Read service logs without allowing path traversal."""
+
 import json
 
 import pytest
