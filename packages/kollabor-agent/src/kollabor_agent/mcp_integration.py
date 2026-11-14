@@ -34,6 +34,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Keep large MCP tool results usable while bounding per-connection stdout memory.
+MAX_MCP_FRAME_BYTES = 16 * 1024 * 1024
+
 
 def split_command(command: str) -> list[str]:
     """Split a configured MCP command into the argv that starts it.
@@ -143,7 +146,7 @@ class MCPServerConnection:
         self.startup_timeout = startup_timeout
         self.process: Optional[asyncio.subprocess.Process] = None
         self.initialized = False
-        self._read_buffer = ""
+        self._read_buffer = b""
         self._pending_requests: Dict[str, asyncio.Future] = {}
         self._reader_task: Optional[asyncio.Task] = None
         self._write_lock = asyncio.Lock()
@@ -392,25 +395,62 @@ class MCPServerConnection:
 
         try:
             while True:
-                while "\n" in self._read_buffer:
-                    line, self._read_buffer = self._read_buffer.split("\n", 1)
+                oversized_frame = False
+                while b"\n" in self._read_buffer:
+                    line, self._read_buffer = self._read_buffer.split(b"\n", 1)
+                    if len(line) > MAX_MCP_FRAME_BYTES:
+                        oversized_frame = True
+                        break
                     if not line.strip():
                         continue
                     try:
-                        message = json.loads(line)
+                        message = json.loads(line.decode("utf-8"))
+                    except UnicodeDecodeError:
+                        logger.debug(
+                            "Ignoring MCP frame with invalid UTF-8 from %s",
+                            self.server_name,
+                        )
+                        continue
                     except json.JSONDecodeError:
                         logger.debug(
                             "Ignoring invalid JSON from MCP server %s: %s",
                             self.server_name,
-                            line[:120],
+                            line[:120].decode("utf-8", errors="replace"),
                         )
                         continue
                     self._dispatch_incoming_message(message)
 
-                chunk = await self.process.stdout.read(4096)
+                if len(self._read_buffer) > MAX_MCP_FRAME_BYTES:
+                    oversized_frame = True
+                if oversized_frame:
+                    error_message = (
+                        "MCP server frame exceeded the "
+                        f"{MAX_MCP_FRAME_BYTES}-byte limit"
+                    )
+                    logger.warning(
+                        "MCP server %s sent a frame over the %d-byte limit",
+                        self.server_name,
+                        MAX_MCP_FRAME_BYTES,
+                    )
+                    for request_id, future in list(self._pending_requests.items()):
+                        if not future.done():
+                            future.set_result(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": request_id,
+                                    "error": {"code": -32000, "message": error_message},
+                                }
+                            )
+                    break
+
+                read_size = min(
+                    4096,
+                    MAX_MCP_FRAME_BYTES - len(self._read_buffer) + 1,
+                )
+                chunk = await self.process.stdout.read(read_size)
                 if not chunk:
                     break
-                self._read_buffer += chunk.decode()
+                self._read_buffer += chunk
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -430,7 +470,7 @@ class MCPServerConnection:
                     self.server_name,
                 )
             self.initialized = False
-            self._read_buffer = ""
+            self._read_buffer = b""
 
     def _dispatch_incoming_message(self, message: Dict[str, Any]) -> None:
         """Resolve matched responses and ignore notifications."""
