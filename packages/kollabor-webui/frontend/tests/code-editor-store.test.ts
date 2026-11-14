@@ -4,6 +4,7 @@ import { createElement } from "react";
 import { EmptyEditorState } from "../src/components/code/empty-editor-state";
 import { editorThemeColors } from "../src/components/code/editor-theme";
 import { shouldHideSidebarAfterFileSelection } from "../src/components/code/floating-sidebar";
+import { NarrowPaneSwitcher } from "../src/components/code/split-container";
 import { visibleSplitTree } from "../src/components/code/split-layout";
 import {
   CODE_EDITOR_LAYOUT_KEY,
@@ -133,6 +134,21 @@ test("a narrow editor keeps only the active pane while desktop keeps the split",
 
   expect(visibleSplitTree(split, "bottom-right", true)).toEqual({ type: "leaf", paneId: "bottom-right" });
   expect(visibleSplitTree(split, "bottom-right", false)).toBe(split);
+});
+
+test("split panes remain reachable through visible narrow-screen pane controls", () => {
+  const markup = renderToStaticMarkup(
+    createElement(NarrowPaneSwitcher, {
+      paneIds: ["left", "right"],
+      activePaneId: "left",
+      onSelect: () => {},
+    })
+  );
+
+  expect(markup).toContain('aria-label="Show pane 1"');
+  expect(markup).toContain('aria-label="Show pane 2"');
+  expect(markup).toContain('aria-pressed="true"');
+  expect(markup).toContain('aria-pressed="false"');
 });
 
 // a pinned tab is never replaced by a later preview open
