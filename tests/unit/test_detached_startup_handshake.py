@@ -21,6 +21,24 @@ def test_wait_for_detached_startup_reads_child_result(monkeypatch, payload, expe
         os.close(write_fd)
 
 
+def test_wait_for_detached_startup_ignores_windows_stderr_before_result(monkeypatch):
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(
+            write_fd,
+            b"[kollab] 'jasper' is already running (pid=12345).\n"
+            b"error:name already held\n",
+        )
+        monkeypatch.setattr(os, "waitpid", lambda *args: (0, 0))
+        assert (
+            daemon.wait_for_detached_startup(read_fd, 12345, timeout=0.1)
+            == "name already held"
+        )
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
 def test_report_detached_startup_clears_channel(monkeypatch):
     read_fd, write_fd = os.pipe()
     monkeypatch.setenv(daemon.DETACHED_READY_FD_ENV, str(write_fd))

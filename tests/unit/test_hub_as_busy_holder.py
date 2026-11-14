@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from kollabor_agent.runtime import AgentRuntime
+from kollabor import daemon
 from plugins.hub.plugin import HubPlugin
 from plugins.hub.presence import PresenceManager
 
@@ -68,13 +69,24 @@ def _plugin(as_identity=None, configured=""):
 async def test_explicit_as_refuses_identity_held_by_busy_agent(tmp_path, monkeypatch):
     holder_file = _busy_holder(tmp_path, monkeypatch)
     plugin = _plugin(as_identity="jasper")
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setenv(daemon.DETACHED_READY_FD_ENV, str(write_fd))
 
-    with patch("os._exit", side_effect=SystemExit(1)) as mock_exit:
-        with pytest.raises(SystemExit):
-            await plugin._start_hub()
+    try:
+        with patch("os._exit", side_effect=SystemExit(1)) as mock_exit:
+            with pytest.raises(SystemExit):
+                await plugin._start_hub()
 
-    mock_exit.assert_called_once_with(1)
-    assert holder_file.exists(), "the busy agent's presence file must stay"
+        mock_exit.assert_called_once_with(1)
+        os.close(write_fd)
+        assert os.read(read_fd, 128) == b"error:jasper is already running\n"
+        assert holder_file.exists(), "the busy agent's presence file must stay"
+    finally:
+        os.close(read_fd)
+        try:
+            os.close(write_fd)
+        except OSError:
+            pass
 
 
 @pytest.mark.asyncio
