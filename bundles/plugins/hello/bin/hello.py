@@ -12,6 +12,7 @@ def shutdown(signum, frame):
 
 
 def main():
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
     logger.info("Hello service started")
