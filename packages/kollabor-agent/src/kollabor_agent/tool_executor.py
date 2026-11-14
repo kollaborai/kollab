@@ -853,12 +853,11 @@ class ToolExecutor:
         if self._bundle_tools is None:
             return None  # Legacy: all tools allowed
 
-        # The native git tool dispatches through terminal. A git-only grant
-        # must preserve that distinction and must not grant arbitrary shell
-        # commands through the shared terminal handler.
+        # The git tool is advertised through the shared terminal tag, so XML
+        # calls may not carry a native tool name. A git-only grant must still
+        # reject shell commands through that handler.
         if (
             tool_type == "terminal"
-            and tool_name == "git"
             and "terminal" not in self._bundle_tools
             and "git" in self._bundle_tools
         ):
