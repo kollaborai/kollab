@@ -3,6 +3,7 @@ import { useRef, useCallback, useState, useEffect } from "react";
 import { useEditorStore, type SplitNode } from "@/components/code/editor-store";
 import { TabBar } from "./tab-bar";
 import { EditorPane } from "./editor-pane";
+import { visibleSplitTree } from "./split-layout";
 
 interface SplitContainerProps {
   workspace: string;
@@ -16,6 +17,15 @@ export function SplitContainer({ workspace, showFilePicker = false, onOpenFiles 
   const setActivePane = useEditorStore((s) => s.setActivePane);
   const splitRight = useEditorStore((s) => s.splitRight);
   const splitDown = useEditorStore((s) => s.splitDown);
+  const [isNarrow, setIsNarrow] = useState(false);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 640px)");
+    const update = () => setIsNarrow(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
 
   // keyboard shortcuts: cmd+\ split right, cmd+shift+\ split down
   useEffect(() => {
@@ -54,7 +64,7 @@ export function SplitContainer({ workspace, showFilePicker = false, onOpenFiles 
       onClick={handleContainerClick}
       onFocus={handleContainerClick}
     >
-      <SplitRender node={splitTree} workspace={workspace} isActivePaneId={activePaneId} showFilePicker={showFilePicker} onOpenFiles={onOpenFiles} />
+      <SplitRender node={visibleSplitTree(splitTree, activePaneId, isNarrow)} workspace={workspace} isActivePaneId={activePaneId} showFilePicker={showFilePicker} onOpenFiles={onOpenFiles} />
     </div>
   );
 }
