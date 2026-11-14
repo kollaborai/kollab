@@ -577,7 +577,8 @@ class WorkQueue:
 
         Returns retired WorkSlot snapshots. Paired retired slots are returned
         until their linked TaskLedger cleanup succeeds. Retired slots are kept
-        in ``work-queue.json`` for 30 days after retirement.
+        in ``work-queue.json`` for 30 days after retirement, and longer while
+        linked TaskLedger cleanup remains unhandled.
         """
         repository_checker = checker is None
         if checker is None:
@@ -697,6 +698,10 @@ class WorkQueue:
                         slot.retired_at = retired_at
                         changed = True
                     if retired_at - slot.retired_at >= RETIRED_SLOT_RETENTION_SECONDS:
+                        if slot.task_card_id and not slot.task_card_terminalized:
+                            retained.append(slot)
+                            retired.append(slot)
+                            continue
                         changed = True
                         continue
                     retained.append(slot)
