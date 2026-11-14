@@ -6,6 +6,11 @@ import pytest
 from kollabor import daemon
 
 
+def test_detached_startup_timeout_covers_acp_hub_readiness_budget():
+    # ACP startup may wait up to 30 seconds for the Hub after initialization.
+    assert daemon.DETACHED_STARTUP_TIMEOUT > 30.0
+
+
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [(b"ready\n", None), (b"error:name already held\n", "name already held")],
