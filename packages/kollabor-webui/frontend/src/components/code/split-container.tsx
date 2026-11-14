@@ -2,6 +2,7 @@ import { editorShortcutEnabled } from "@/components/code/editor-shortcuts";
 import { useRef, useCallback, useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { leafPaneIds, useEditorStore, type SplitNode } from "@/components/code/editor-store";
+import { NARROW_QUERY } from "./floating-sidebar";
 import { TabBar } from "./tab-bar";
 import { EditorPane } from "./editor-pane";
 import { visibleSplitTree } from "./split-layout";
@@ -52,7 +53,7 @@ export function SplitContainer({ workspace, showFilePicker = false, onOpenFiles 
   const [isNarrow, setIsNarrow] = useState(false);
 
   useEffect(() => {
-    const media = window.matchMedia("(max-width: 640px)");
+    const media = window.matchMedia(NARROW_QUERY);
     const update = () => setIsNarrow(media.matches);
     update();
     media.addEventListener("change", update);

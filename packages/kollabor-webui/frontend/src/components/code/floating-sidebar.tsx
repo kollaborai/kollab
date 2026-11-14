@@ -17,7 +17,7 @@ const MAX_WIDTH = 420;
 // one arrow-key press on the divider moves it this many pixels
 const KEY_STEP = 8;
 // below 640px the sidebar can be hidden behind a toggle in the code window's title bar
-const NARROW_QUERY = "(max-width: 639.98px)";
+export const NARROW_QUERY = "(max-width: 639.98px)";
 
 // ─── width (persisted per browser) ──────────────────────────
 
