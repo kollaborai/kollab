@@ -2,11 +2,12 @@
 
 ## Done
 
-- Added a source syntax validator in `kollabor_plugins.packages.parse_git_source`.
-  It accepts HTTPS, SSH, and `git@host:path` sources with an optional syntactically
-  valid ref, and refuses local sources, URL credentials, and URL queries. It is
-  not yet connected to an installer.
-- Added one parametrized red-first test, committed before the implementation.
+- Added Git source syntax and manifest validation, pinned Git archive staging,
+  files hashing, confirmation checks, and journaled package swap/recovery APIs
+  in `kollabor_plugins.packages`. They are not connected to the CLI or runtime.
+- Added the installed-package `settings.save` writer; it is not yet wired to
+  the configuration panel or other consumers.
+- Added red-first tests for these pieces, each committed before its implementation.
 
 ## Evidence
 
@@ -19,17 +20,23 @@
   the same environment.
 - `ruff check` passed for both touched Python files; `python -m py_compile`
   passed for both.
+- Red-first test commits `652cec0f`, `b6eddb3c`, `97f569f5`, and `83cbf1ef`
+  failed respectively on missing manifest validator, staging API, installation
+  API, and settings module before their implementation.
+- After those changes `python -m pytest tests/unit/plugins -q` passed 92, skipped 1
+  with the same throwaway-home environment. Ruff passed on touched Python files.
 - Docker was unavailable (`docker info` failed). No Docker tests ran.
 
 ## Not done
 
-This is not step 1 completion. Source resolution, credential-redacted Git errors,
-Git archive and hashing, manifest validation, transactional install/update/remove,
-recovery and registry persistence remain. The service wrapper and supervisor,
-settings writer, registry/config unification, CLI and application integration,
-hello bundle, changelog and tmux spec are not implemented. The source validator
-has not been integrated or tested against a local bare Git repository. The full
-unit suite and tmux spec have not been run. No draft PR has been opened or pushed.
+This is not step 1 completion. The current APIs are not integrated; remove,
+complete update behavior, conflict and crash recovery edge cases, and detailed
+manifest/contribution validation remain. Git diagnostics are suppressed rather
+than displayed with credentials redacted. The service wrapper and supervisor,
+`set_enabled`, registry/config unification, CLI and application integration,
+hello bundle, changelog and tmux spec are not implemented. A local bare Git
+repository was used for the staging test. The full unit suite and tmux spec have
+not been run. No draft PR has been opened or pushed.
 
 ## Next
 
