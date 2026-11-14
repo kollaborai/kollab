@@ -28,7 +28,8 @@ class _Settings:
                 raise ValueError("Invalid plugin settings") from exc
             if not isinstance(saved, dict):
                 raise ValueError("Invalid plugin settings")
-            values.update(saved)
+            values.update({key: value for key, value in saved.items() if key in values and key != "enabled"})
+        values.pop("enabled", None)
         return values
 
     def save(self, values):
