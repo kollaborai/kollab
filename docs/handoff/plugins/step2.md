@@ -127,6 +127,12 @@ persist in config.json. Its owner file `packages/kollabor-plugins/.../settings.p
 is outside this lane; lead queue 0824d3f7 requests the writer and enable fix or
 expanded ownership. Do not introduce a second built-in writer.
 
+Service controls/logs: `a03a6d81` was red before `8513aabf` added start, stop,
+async restart with shutdown cleanup, and bounded service-log reads with symlink
+checks and secret/plugin/user-token redaction. Twenty-nine focused tests passed
+with the known built-in settings test deselected (`plugin-service-routes-green.log`);
+Ruff and compilation passed. All route tests mock service supervision/control.
+
 Next: continue item 5 management routes using the existing APIs, then PhoneLink
 filtering, spoofing/normalization tests, all gates and smoke. Current branch is
 not ready to deploy: the built-in test is red; service-child environment
