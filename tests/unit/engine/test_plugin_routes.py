@@ -130,3 +130,12 @@ async def test_global_plugin_change_stream(tmp_path, monkeypatch):
     assert event["ts"] > 0
     await response.body_iterator.aclose()
     assert app.state.plugin_events.subscriber_count(None) == 0
+
+
+def test_plugin_events_are_available_to_remote_pages():
+    from kollabor_engine.routes.plugins import remote_plugin_route_allowed
+
+    assert remote_plugin_route_allowed("GET", "/plugins/hello/events")
+    assert remote_plugin_route_allowed("POST", "/plugins/hello/events")
+    assert not remote_plugin_route_allowed("DELETE", "/plugins/hello/events")
+    assert not remote_plugin_route_allowed("PUT", "/plugins/hello/settings")
