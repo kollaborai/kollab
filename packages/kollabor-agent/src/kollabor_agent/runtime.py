@@ -16,6 +16,7 @@ Field groups:
   vault        persistent memory reference (stream, working, crystallized)
 """
 
+import logging
 import os
 import sys
 import time
@@ -24,6 +25,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, cast
+
+logger = logging.getLogger(__name__)
 
 
 def _presence_tags(tags: Any) -> Dict[str, Any]:
@@ -106,7 +109,7 @@ def get_agent_tool_scope(agent: Any) -> Optional[List[str]]:
     Returns None (all tools allowed) when:
     - agent is None
     - no tools field is defined
-    - tools is ["*"] (wildcard = allow all)
+    - tools contains "*" (wildcard = allow all)
     """
     if agent is None:
         return None
@@ -122,7 +125,13 @@ def get_agent_tool_scope(agent: Any) -> Optional[List[str]]:
         return None
 
     # Wildcard: allow all tools (same as no scope)
-    if isinstance(tools, list) and len(tools) == 1 and tools[0] == "*":
+    if isinstance(tools, list) and "*" in tools:
+        redundant_names = [name for name in tools if name != "*"]
+        if redundant_names:
+            logger.warning(
+                "Agent bundle tools include '*' alongside redundant tool names: %s",
+                ", ".join(redundant_names),
+            )
         return None
 
     return list(tools)

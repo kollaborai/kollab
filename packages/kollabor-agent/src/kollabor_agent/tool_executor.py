@@ -767,9 +767,9 @@ class ToolExecutor:
             allowed_tools: List of registry tool names (e.g. ['file-read',
                 'terminal', 'hub-msg']) this agent has access to.
                 None = all tools allowed (legacy default).
-                ["*"] = wildcard, treated as None (all tools allowed).
+                Any list containing "*" = wildcard, treated as None (all tools allowed).
         """
-        if allowed_tools == ["*"]:
+        if allowed_tools is not None and "*" in allowed_tools:
             allowed_tools = None
         self._bundle_tools = allowed_tools
         logger.debug(
