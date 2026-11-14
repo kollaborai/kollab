@@ -1400,10 +1400,19 @@ async def async_main() -> None:
                 done, _ = await asyncio.wait(
                     (app_start, ready_wait), return_when=asyncio.FIRST_COMPLETED
                 )
-                if ready_wait in done and getattr(app, "_startup_complete", False):
+                if ready_wait in done:
                     from kollabor.daemon import report_detached_startup
 
-                    report_detached_startup(ready=True)
+                    startup_complete = getattr(app, "_startup_complete", False)
+                    report_detached_startup(
+                        ready=startup_complete,
+                        reason=(
+                            ""
+                            if startup_complete
+                            else getattr(app, "_startup_error", "")
+                            or "Application startup failed"
+                        ),
+                    )
                 if not ready_wait.done():
                     ready_wait.cancel()
                 await app_start
@@ -3492,12 +3501,12 @@ def cli_main() -> None:
                             f"[detached] child {pid} exited before reporting ready (status 0)",
                             file=sys.stderr,
                         )
-                    sys.exit(1)
+                        sys.exit(1)
                     print(
                         f"detached child {pid} exited before startup (status {exc.exit_code})",
                         file=sys.stderr,
                     )
-                    sys.exit(exc.exit_code or 1)
+                    sys.exit(exc.exit_code)
                 except TimeoutError as exc:
                     print(f"detached startup failed: {exc}", file=sys.stderr)
                     sys.exit(1)
