@@ -225,7 +225,8 @@ def main(argv: list[str]) -> int:
     registry = _read_registry(home / "plugins.json")
     if args.action == "dev":
         dev_folder = None
-        dev_services = []
+        dev_services = {}
+        prior_approval = None
         if args.folder_or_off == "off":
             if not args.plugin_id or not _ID.fullmatch(args.plugin_id):
                 raise ValueError("A valid plugin id is required")
@@ -235,10 +236,20 @@ def main(argv: list[str]) -> int:
             dev_id = f"{args.plugin_id}@dev"
             from .services import _approved_service_root
 
-            _, dev_approval = _approved_service_root(home, registry, dev_id, stopping=True)
-            dev_services = dev_approval.get("services", {})
+            _, prior_approval = _approved_service_root(home, registry, dev_id, stopping=True)
+            dev_services = prior_approval.get("services", {})
             _stop_for_change(home, dev_id, dev_services)
-        with locked_file(home / "plugins.json.lock", private=True):
+        else:
+            dev_id = f"{manifest['id']}@dev"
+            dev_folder = registry["dev"].get(manifest["id"])
+            if dev_folder is not None:
+                from .services import _approved_service_root
+
+                _, prior_approval = _approved_service_root(home, registry, dev_id, stopping=True)
+                dev_services = prior_approval.get("services", {})
+                _stop_for_change(home, dev_id, dev_services)
+            dev_services = {**dev_services, **manifest.get("services", {})}
+        with _locked_service_files(home, dev_id, dev_services), locked_file(home / "plugins.json.lock", private=True):
             _recover_locked(home)
             registry = _read_registry(home / "plugins.json")
             if args.folder_or_off == "off":
@@ -247,12 +258,16 @@ def main(argv: list[str]) -> int:
                 if registry["dev"].get(args.plugin_id) != dev_folder:
                     raise ValueError("Development plugin changed during detach; try again")
                 dev_data = home / "plugin-data" / f"{args.plugin_id}@dev"
-                with _locked_service_files(home, f"{args.plugin_id}@dev", dev_services):
-                    with locked_file(dev_data / "values.json.lock", private=True):
-                        del registry["dev"][args.plugin_id]
-                        _write_json(home / "plugins.json", registry)
-                        (dev_data / "values.json").unlink(missing_ok=True)
-                        (dev_data / "approval.json").unlink(missing_ok=True)
+                from .services import _approved_service_root
+
+                _, current_approval = _approved_service_root(home, registry, dev_id, stopping=True)
+                if current_approval != prior_approval:
+                    raise ValueError("Development approval changed during detach; try again")
+                with locked_file(dev_data / "values.json.lock", private=True):
+                    del registry["dev"][args.plugin_id]
+                    _write_json(home / "plugins.json", registry)
+                    (dev_data / "values.json").unlink(missing_ok=True)
+                    (dev_data / "approval.json").unlink(missing_ok=True)
                 print(f"Detached {args.plugin_id}@dev; staged settings discarded")
                 return 0
             if args.plugin_id is not None:
@@ -264,6 +279,14 @@ def main(argv: list[str]) -> int:
             if hashlib.sha256((folder / "kollab-plugin.json").read_bytes()).hexdigest() != manifest_digest:
                 raise ValueError("Development manifest changed during approval; try again")
             plugin_id = manifest["id"]
+            if registry["dev"].get(plugin_id) != dev_folder:
+                raise ValueError("Development plugin changed during approval; try again")
+            if prior_approval is not None:
+                from .services import _approved_service_root
+
+                _, current_approval = _approved_service_root(home, registry, dev_id, stopping=True)
+                if current_approval != prior_approval:
+                    raise ValueError("Development approval changed; try again")
             target = home / "plugin-data" / f"{plugin_id}@dev"
             target.mkdir(parents=True, exist_ok=True)
             with locked_file(target / "values.json.lock", private=True):
