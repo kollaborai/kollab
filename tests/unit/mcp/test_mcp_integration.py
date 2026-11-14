@@ -195,28 +195,26 @@ class TestMCPServerConnection(unittest.TestCase):
         """Partial JSON lines and multiple frames retain out-of-order correlation."""
 
         async def run_test():
-            frames = b"".join(
-                (
-                    json.dumps(
-                        {
-                            "jsonrpc": "2.0",
-                            "id": "second",
-                            "result": {"text": "two €"},
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                    + json.dumps(
-                        {
-                            "jsonrpc": "2.0",
-                            "id": "first",
-                            "result": {"text": "one 😀"},
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                ).encode("utf-8")
-            )
+            frames = (
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "second",
+                        "result": {"text": "two €"},
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "first",
+                        "result": {"text": "one 😀"},
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            ).encode("utf-8")
             connection = MCPServerConnection("test", "fake")
             connection.initialized = True
             connection.process = _FakeProcess(
