@@ -242,6 +242,27 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result.success)
             self.assertEqual(result.output.strip(), "workspace-marker")
 
+    async def test_terminal_read_refuses_git_diff_no_index_outside_project(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self.executor.workspace = Path(temp_dir)
+            self.executor.shell_executor.run_argv = AsyncMock(
+                return_value=ShellResult(
+                    success=True, stdout="outside contents", stderr="", exit_code=0
+                )
+            )
+
+            result = await self.executor.execute_tool(
+                {
+                    "type": "terminal_read",
+                    "id": "terminal-read-no-index-outside",
+                    "command": "git diff --no-index /etc/passwd /etc/hosts",
+                }
+            )
+
+            self.assertFalse(result.success)
+            self.assertIn("project", result.error.lower())
+            self.executor.shell_executor.run_argv.assert_not_awaited()
+
     async def test_terminal_read_filters_git_overrides_for_windows_executable_name(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             self.executor.workspace = Path(temp_dir)
