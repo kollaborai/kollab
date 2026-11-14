@@ -325,35 +325,46 @@ def _ingest_plugin_usage(run: Path, today: str) -> int:
                     position, generation = 0, generation + 1
                 source = f"{identity}:{generation}"
                 stream.seek(position)
-                pending: dict[str, list[tuple[int, int]]] = {}
                 while True:
-                    line = stream.readline(1_048_577)
-                    if not line:
+                    pending: dict[str, list[tuple[int, int]]] = {}
+                    reached_end = False
+                    for _ in range(512):
+                        remaining = stat.st_size - stream.tell()
+                        if remaining <= 0:
+                            reached_end = True
+                            break
+                        line = stream.readline(min(1_048_577, remaining))
+                        if not line:
+                            reached_end = True
+                            break
+                        if len(line) > 1_048_576:
+                            raise ValueError("Plugin usage line is too large")
+                        if not line.endswith(b"\n"):
+                            reached_end = True
+                            break
+                        date, tokens = _usage_day_and_tokens(line)
+                        position = stream.tell()
+                        pending.setdefault(date, []).append((position, tokens))
+                    for date, records in pending.items():
+                        counter_path = run / f"usage-{date}.json"
+                        with locked_file(run / f"usage-{date}.json.lock", private=True):
+                            counter = _daily_usage(run, date)
+                            sources = counter.setdefault("usage_sources", {})
+                            last = sources.get(source, 0)
+                            if type(last) is not int or last < 0:
+                                raise ValueError("Invalid daily usage offset")
+                            new = [(end, amount) for end, amount in records if end > last]
+                            if new:
+                                counter["total"] += sum(amount for _, amount in new)
+                                sources[source] = new[-1][0]
+                                _write_usage_json(counter_path, counter)
+                    anchor = _usage_anchor(stream, position)
+                    next_offset = {"source": identity, "generation": generation, "offset": position, "anchor": anchor}
+                    if next_offset != offset_state:
+                        _write_usage_json(offset_path, next_offset)
+                        offset_state = next_offset
+                    if reached_end:
                         break
-                    if len(line) > 1_048_576:
-                        raise ValueError("Plugin usage line is too large")
-                    if not line.endswith(b"\n"):
-                        break
-                    date, tokens = _usage_day_and_tokens(line)
-                    position = stream.tell()
-                    pending.setdefault(date, []).append((position, tokens))
-                anchor = _usage_anchor(stream, position)
-            for date, records in pending.items():
-                counter_path = run / f"usage-{date}.json"
-                with locked_file(run / f"usage-{date}.json.lock", private=True):
-                    counter = _daily_usage(run, date)
-                    sources = counter.setdefault("usage_sources", {})
-                    last = sources.get(source, 0)
-                    if type(last) is not int or last < 0:
-                        raise ValueError("Invalid daily usage offset")
-                    new = [(end, amount) for end, amount in records if end > last]
-                    if new:
-                        counter["total"] += sum(amount for _, amount in new)
-                        sources[source] = new[-1][0]
-                        _write_usage_json(counter_path, counter)
-            next_offset = {"source": identity, "generation": generation, "offset": position, "anchor": anchor}
-            if next_offset != offset_state:
-                _write_usage_json(offset_path, next_offset)
         with locked_file(run / f"usage-{today}.json.lock", private=True):
             return _daily_usage(run, today)["total"]
 
