@@ -78,8 +78,11 @@ logger = logging.getLogger(__name__)
 
 def _acp_unavailable_result(acp: Any) -> Dict[str, Any]:
     result = {"status": "rejected", "reason": "acp_unavailable"}
+    closing = getattr(acp, "closing_reason", None)
     error = getattr(acp, "startup_error", None)
-    if isinstance(error, str) and error:
+    if isinstance(closing, str) and closing:
+        result["message"] = closing  # the model fallback is switching away (#548)
+    elif isinstance(error, str) and error:
         result["message"] = f"ACP could not start: {error}"
     return result
 
