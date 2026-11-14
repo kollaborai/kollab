@@ -376,3 +376,50 @@ def make_router(ctx):
         entry.write_text(entry.read_text() + "\n# changed without approval\n")
         assert client.get("/plugins/hello/api/hello").status_code == 409
         assert (home / "plugin-data" / "hello" / "loads").read_text() == "2"
+
+
+def test_dispatcher_reloads_development_python_and_rejects_manifest_changes(tmp_path, monkeypatch):
+    import hashlib
+    import json
+    import shutil
+    from pathlib import Path
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    source = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    home = tmp_path / ".kollab"
+    home.mkdir()
+    root = tmp_path / "hello-development"
+    shutil.copytree(source, root)
+    manifest_path = root / "kollab-plugin.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["engine"] = "python/engine.py:make_router"
+    manifest_path.write_text(json.dumps(manifest))
+    entry = root / "python" / "engine.py"
+
+    def write_version(version):
+        entry.write_text(
+            "from fastapi import APIRouter\n"
+            "def make_router(ctx):\n"
+            "    router = APIRouter()\n"
+            "    @router.get('/version')\n"
+            "    def version():\n"
+            f"        return {{'version': {version}}}\n"
+            "    return router\n"
+        )
+
+    write_version(1)
+    (home / "plugins.json").write_text(json.dumps({"plugins": {}, "dev": {"hello": str(root)}}))
+    data = home / "plugin-data" / "hello@dev"
+    data.mkdir(parents=True)
+    (data / "approval.json").write_text(json.dumps({
+        "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(), "granted": [],
+    }))
+    with TestClient(create_app()) as client:
+        assert client.get("/plugins/hello@dev/api/version").json() == {"version": 1}
+        write_version(2)
+        assert client.get("/plugins/hello@dev/api/version").json() == {"version": 2}
+        manifest["description"] = "Modified without approval"
+        manifest_path.write_text(json.dumps(manifest))
+        assert client.get("/plugins/hello@dev/api/version").status_code == 409
