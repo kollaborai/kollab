@@ -13,11 +13,19 @@ Tests used the existing environment at `<home>/dev/kollab/.venv`,
 with this worktree's package source directories prepended to `PYTHONPATH`, an
 isolated HOME, and `KOLLAB_NO_KEYRING=1`; no packages were installed.
 
+Web asset test commit `40474533` failed six checks first; implementation
+commit `74ead5fe` passed all six. The route is before the SPA catch-all, limits
+extensions and dotfiles, and checks containment; it sets nosniff. The web
+boundary also sets `script-src 'self'`. Logs: `<home>/backups/plugins-step2-work/assets-red.log`
+and `assets-green.log`. Ruff and compilation passed. Further coverage is needed
+for dev/disabled/shadowed packages, root symlinks, traversals, CSP and the later
+import-map hash integration; no full-suite or live smoke has been run.
+
 ## Remaining and exact next step
 
-Step 2 is not complete. Next: implement the web asset route red-first, then
-engine routes, PluginContext, tokens, proxy and PhoneLink remote restrictions,
-supervisor tick, and all tests specified in the brief. Audit the file deny list
+Step 2 is not complete. Next: implement engine routes, PluginContext, tokens,
+proxy and PhoneLink remote restrictions, supervisor tick, and all tests
+specified in the brief. Audit the file deny list
 against all actual token paths and tool entrypoints. Run the full unit suite on a
 fixed HEAD, Ruff, compilation, and the specified isolated live smoke; record
 results. Append the changelog line. Check PR #1065 only once step 2 is green;
