@@ -1,6 +1,11 @@
 """Plugin registry system for Kollab."""
 
+import importlib.util
+import inspect
+import json
 import logging
+import sys
+import types
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Type
 
@@ -9,6 +14,7 @@ from kollabor_events.dict_utils import deep_merge
 from .collector import PluginStatusCollector
 from .discovery import PluginDiscovery
 from .factory import PluginFactory
+from .packages import _ID, _SYMBOL, _read_registry, _within, files_sha256, recover_installs
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +47,8 @@ class PluginRegistry:
         self.discovery = self.discoveries[0]
         self.factory = PluginFactory()
         self.collector = PluginStatusCollector()
+        self.package_errors: dict[str, str] = {}
+        self._packages_loaded = False
         logger.info(
             "Plugin registry initialized with specialized components: "
             f"{', '.join(str(plugin_dir) for plugin_dir in self.plugin_dirs)}"
@@ -54,8 +62,6 @@ class PluginRegistry:
         candidates = [
             plugins_dir,
             *(extra_plugin_dirs or []),
-            Path.home() / ".kollab" / "plugins",
-            Path.cwd() / ".kollab" / "plugins",
         ]
 
         resolved_dirs: list[Path] = []
@@ -79,6 +85,72 @@ class PluginRegistry:
                     primary.discovered_modules.append(module_name)
             primary.loaded_classes.update(discovery.loaded_classes)
             primary.plugin_configs.update(discovery.plugin_configs)
+
+    def _load_packages(self) -> list[Type]:
+        """Import registered package entries only after integrity verification."""
+        if self._packages_loaded:
+            return []
+        self._packages_loaded = True
+        loaded: list[Type] = []
+        home = Path.home() / ".kollab"
+        try:
+            recover_installs()
+            registry = _read_registry(home / "plugins.json")
+        except (OSError, ValueError) as exc:
+            logger.warning("Cannot read installed plugins: %s", exc)
+            return loaded
+        for plugin_id, record in registry["plugins"].items():
+            if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id):
+                continue
+            if not isinstance(record, dict) or record.get("enabled") is not True:
+                continue
+            root = home / "plugins" / plugin_id
+            try:
+                digest = record.get("files_sha256")
+                if not isinstance(digest, str) or files_sha256(root) != digest:
+                    raise ValueError("Changed on Disk")
+                manifest = json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
+                if manifest.get("id") != plugin_id:
+                    raise ValueError("Manifest id differs from registry")
+                entry = manifest.get("python")
+                if not entry:
+                    continue
+                if not isinstance(entry, str) or entry.count(":") != 1:
+                    raise ValueError("Invalid Python entry")
+                filename, symbol = entry.split(":")
+                if not _SYMBOL.fullmatch(symbol):
+                    raise ValueError("Invalid Python entry symbol")
+                path = _within(root.resolve(), filename, "python")
+                module_name = f"_kollab_package_{plugin_id.replace('-', '_')}_{digest}"
+                package = types.ModuleType(module_name)
+                package.__path__ = [str(path.parent)]
+                package.__package__ = module_name
+                sys.modules[module_name] = package
+                spec = importlib.util.spec_from_file_location(f"{module_name}.entry", path)
+                if spec is None or spec.loader is None:
+                    raise ValueError("Cannot load Python entry")
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[spec.name] = module
+                previous_bytecode = sys.dont_write_bytecode
+                try:
+                    sys.dont_write_bytecode = True
+                    spec.loader.exec_module(module)
+                finally:
+                    sys.dont_write_bytecode = previous_bytecode
+                plugin_class = getattr(module, symbol)
+                if not inspect.isclass(plugin_class):
+                    raise ValueError("Python entry is not a class")
+                if symbol in self.discovery.loaded_classes:
+                    raise ValueError("Python entry class conflicts with another plugin")
+                get_config = getattr(plugin_class, "get_default_config", None)
+                config = get_config() if callable(get_config) else {}
+                self.discovery.loaded_classes[symbol] = plugin_class
+                self.discovery.plugin_configs[symbol] = config
+                loaded.append(plugin_class)
+            except Exception as exc:
+                self.package_errors[plugin_id] = str(exc)
+                logger.warning("Plugin %s could not be loaded: %s", plugin_id, exc)
+        return loaded
 
     def discover_plugins(self) -> List[str]:
         """Discover available plugins in the plugins directory.
@@ -105,6 +177,7 @@ class PluginRegistry:
         for discovery in self.discoveries:
             discovery.discover_and_load()
         self._merge_discovery_results()
+        self._load_packages()
         logger.info(
             f"Plugin registry loaded {len(self.discovery.loaded_classes)} plugins"
         )
@@ -119,6 +192,7 @@ class PluginRegistry:
                     plugin_classes.append(plugin_class)
 
         self._merge_discovery_results()
+        plugin_classes.extend(self._load_packages())
         return plugin_classes
 
     def get_merged_config(self) -> Dict[str, Any]:
