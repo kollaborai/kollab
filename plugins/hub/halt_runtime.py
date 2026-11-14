@@ -516,6 +516,9 @@ def run_waiter(
     os.environ[WAITER_ENV] = "1"
     register_waiter(root)
     presence, server = _waiter_presence(argv, folder, root)
+    from kollabor.daemon import DETACHED_READY_FD_ENV, report_detached_startup
+
+    report_detached_startup(ready=True)
     polls = 0
     try:
         while True:
@@ -534,7 +537,9 @@ def run_waiter(
         if presence is not None:
             presence.unlink(missing_ok=True)
     new_argv = restart_argv(argv)
-    clean_env = {k: v for k, v in env.items() if k != WAITER_ENV}
+    clean_env = {
+        k: v for k, v in env.items() if k not in {WAITER_ENV, DETACHED_READY_FD_ENV}
+    }
     if os.name == "nt" and execve is os.execve:
         # Windows exec starts a new process and ends this one: run the launch as a child instead, so
         # whoever started this launch keeps a live process.
