@@ -830,11 +830,14 @@ class ToolExecutor:
         # Fallback: simple underscore-to-hyphen
         return tool_type.replace("_", "-")
 
-    def _check_bundle_scope(self, tool_type: str) -> Optional[str]:
+    def _check_bundle_scope(
+        self, tool_type: str, tool_name: Optional[str] = None
+    ) -> Optional[str]:
         """Check if a tool_type is allowed by the bundle scope.
 
         Args:
             tool_type: The dispatch tool type to check.
+            tool_name: Optional MCP tool name for per-tool scope checks.
 
         Returns:
             None if allowed, error message string if denied.
@@ -858,6 +861,20 @@ class ToolExecutor:
         # Direct match against bundle tools
         if registry_name in self._bundle_tools:
             return None
+
+        # MCP schemas can be scoped to a single tool name as well as to the
+        # generic mcp-tool capability. Keep execution aligned with that list.
+        if tool_type == "mcp_tool" and isinstance(tool_name, str):
+            if tool_name in self._bundle_tools:
+                return None
+            mcp_tool = (
+                self.mcp_integration.tool_registry.get(tool_name)
+                if self.mcp_integration is not None
+                else None
+            )
+            server = mcp_tool.get("server", "") if mcp_tool else ""
+            if server and f"mcp:{server}:{tool_name}" in self._bundle_tools:
+                return None
 
         # Also check the original tool_type (some tools like 'terminal'
         # are the same in both forms)
@@ -1146,7 +1163,7 @@ class ToolExecutor:
             )
 
         # Check bundle scope — reject tools not in the agent's allowed set
-        scope_error = self._check_bundle_scope(tool_type)
+        scope_error = self._check_bundle_scope(tool_type, tool_data.get("name"))
         if scope_error:
             logger.warning(f"Tool {tool_id} rejected by bundle scope: {tool_type}")
             return ToolExecutionResult(
