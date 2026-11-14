@@ -147,7 +147,7 @@ class TestMCPServerConnection(unittest.TestCase):
             await connection._reader_task
 
             self.assertFalse(connection.initialized)
-            self.assertEqual(connection._read_buffer, "")
+            self.assertEqual(connection._read_buffer, b"")
 
         asyncio.run(run_test())
 
@@ -283,7 +283,7 @@ class TestMCPServerConnection(unittest.TestCase):
             )
             self.assertIsNone(response)
             self.assertFalse(connection.initialized)
-            self.assertEqual(connection._read_buffer, "")
+            self.assertEqual(connection._read_buffer, b"")
 
         asyncio.run(run_test())
 
