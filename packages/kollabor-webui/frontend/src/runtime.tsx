@@ -1057,6 +1057,13 @@ export function EngineRuntimeProvider({
     if (ownsPendingInput(thread)) {
       if (initialState.messages === reloaded.current) return;
       if (initialState.synced?.olderWindow) deferredOlderWindow.current = initialState;
+      // A reconnect can recover a followed reply from canonical history even
+      // when its token events were missed. Keep that snapshot pending until
+      // this page's own input releases the thread, then reconcile it normally.
+      if (historyHasAssistantRequestId(initialState.messages, liveTurn.current.requestId)) {
+        deferredHistorySync.current = true;
+        return;
+      }
       // As before, an event refresh received during our own run is consumed;
       // replaying it later as authoritative can remove that run's messages
       // when the engine mirror has not caught up. Only retry the older-page
