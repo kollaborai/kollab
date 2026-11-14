@@ -68,7 +68,7 @@ def detect_provider_from_profile(profile: Dict[str, Any]) -> str:
     if isinstance(api_base, str) and api_base.strip():
         try:
             endpoint = urlsplit(api_base)
-            if not endpoint.scheme:
+            if not endpoint.netloc:
                 endpoint = urlsplit(f"//{api_base}")
             api_host = (endpoint.hostname or "").lower()
         except ValueError:

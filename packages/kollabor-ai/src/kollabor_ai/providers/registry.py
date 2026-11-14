@@ -363,7 +363,7 @@ def detect_provider_from_profile(profile: Dict[str, Any]) -> ProviderType:
     if isinstance(api_base, str) and api_base.strip():
         try:
             endpoint = urlsplit(api_base)
-            if not endpoint.scheme:
+            if not endpoint.netloc:
                 endpoint = urlsplit(f"//{api_base}")
             api_host = (endpoint.hostname or "").lower()
         except ValueError:
@@ -376,7 +376,10 @@ def detect_provider_from_profile(profile: Dict[str, Any]) -> ProviderType:
         return ProviderType.ANTHROPIC
 
     # Azure OpenAI (specific format)
-    if api_host == "azure.com" or api_host.endswith(".azure.com"):
+    if any(
+        api_host == domain or api_host.endswith(f".{domain}")
+        for domain in ("azure.com", "azure.openai.com", "openai.azure.com")
+    ):
         return ProviderType.AZURE_OPENAI
 
     # OpenAI (generic sk- prefix)
