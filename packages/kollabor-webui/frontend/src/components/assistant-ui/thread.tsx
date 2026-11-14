@@ -561,9 +561,11 @@ const Composer: FC<{
     saveComposerDraft(key, composerText);
   }, [composerText, draftKey]);
 
-  const lastBusySubmit = useRef<{ fingerprint: string; at: number } | null>(
-    null,
-  );
+  const lastBusySubmit = useRef<{
+    fingerprint: string;
+    at: number;
+    inFlight: Set<string>;
+  } | null>(null);
 
   // A bare /config, /llm, /model, /setup or /connect (also /connect code and
   // /connect knocks) opens its Settings tab and posts no text. Any other line is
@@ -592,8 +594,13 @@ const Composer: FC<{
     const fingerprint = `${state.text}\u0000${state.attachments
       .map((attachment) => attachment.id)
       .join(",")}`;
-    const now = Date.now();
     const previous = lastBusySubmit.current;
+    const inFlight = previous?.inFlight ?? new Set();
+    if (inFlight.has(fingerprint)) {
+      event.preventDefault();
+      return;
+    }
+    const now = Date.now();
     if (
       previous &&
       previous.fingerprint === fingerprint &&
@@ -602,7 +609,8 @@ const Composer: FC<{
       event.preventDefault();
       return;
     }
-    lastBusySubmit.current = { fingerprint, at: now };
+    lastBusySubmit.current = { fingerprint, at: now, inFlight };
+    inFlight.add(fingerprint);
     event.preventDefault();
     setBusySubmitError(null);
     try {
@@ -640,8 +648,15 @@ const Composer: FC<{
       });
       void aui.composer.reset();
     } catch {
-      lastBusySubmit.current = null;
+      if (lastBusySubmit.current?.fingerprint === fingerprint) {
+        lastBusySubmit.current = {
+          ...lastBusySubmit.current,
+          at: Number.NEGATIVE_INFINITY,
+        };
+      }
       setBusySubmitError("Could not send the message. Retry or remove the attachment.");
+    } finally {
+      inFlight.delete(fingerprint);
     }
   };
 
