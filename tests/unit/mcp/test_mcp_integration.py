@@ -318,7 +318,7 @@ class TestMCPServerConnection(unittest.TestCase):
 
             self.assertEqual(response["result"]["text"], "ok")
             self.assertTrue(connection.initialized)
-            self.assertEqual(connection._read_buffer, b"")
+            self.assertEqual(connection._read_buffer, "")
             await connection.close()
 
         asyncio.run(run_test())
