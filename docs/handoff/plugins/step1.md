@@ -112,7 +112,7 @@ Evidence at commit `24ee173c` (throwaway HOME and `KOLLAB_NO_KEYRING=1`):
 Known gaps needing investigation include dev background services and detach
 lifecycle, live `/config` operation and error reporting, plugin settings
 concurrency/removal, import-error and vendor edge cases, remaining D12 fields,
-and the brief's agent tool boundary (outside the currently authorized file
-scope). The hello web template, remaining security and full spec acceptance also
-need independent verification. No final full-unit gate, final handoff, changelog,
+and remaining step 1 security and acceptance behavior. The agent file-tool
+read deny list is explicitly scheduled for step 2 in the spec, outside this
+step's authorized scope. The hello web implementation is scheduled for step 3. No final full-unit gate, final handoff, changelog,
 push or draft PR has been completed. Docker was unavailable; no Docker tests ran.
