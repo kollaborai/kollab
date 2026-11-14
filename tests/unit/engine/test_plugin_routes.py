@@ -241,6 +241,7 @@ async def test_engine_context_routes_events_notices_and_heartbeats(tmp_path, mon
 
     from fastapi import HTTPException
     from kollabor_engine.routes import plugins as plugin_routes
+
     from kollabor_plugins.packages import files_sha256
 
     monkeypatch.setenv("HOME", str(tmp_path))

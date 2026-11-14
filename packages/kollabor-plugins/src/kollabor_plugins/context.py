@@ -71,7 +71,11 @@ class _Services:
     def status(self):
         from .registry import _service_entries
 
-        return _service_entries(Path.home() / ".kollab", self.context.id, self.context.manifest)
+        services = _service_entries(Path.home() / ".kollab", self.context.id, self.context.manifest)
+        if self.context._heartbeat is not None:
+            for service in services:
+                service["heartbeat"] = self.context._heartbeat(self.context.id, service["name"])
+        return services
 
 
 class PluginContext:
@@ -85,6 +89,7 @@ class PluginContext:
         grants=(),
         publish: Callable | None = None,
         notify: Callable | None = None,
+        heartbeat: Callable | None = None,
     ):
         if not _valid_data_id(plugin_id):
             raise ValueError("Invalid plugin id")
@@ -98,6 +103,7 @@ class PluginContext:
         self.services = _Services(self)
         self.agents = _Agents()
         self._notify = notify
+        self._heartbeat = heartbeat
 
     def notify(self, text, button=None):
         if self._notify is None:

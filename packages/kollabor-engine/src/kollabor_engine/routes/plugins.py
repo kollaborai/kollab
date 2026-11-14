@@ -153,17 +153,12 @@ async def post_plugin_event(request: Request, plugin_id: str, event: PluginEvent
     context = _package_context(plugin_id)
     if context is None:
         raise HTTPException(status_code=404, detail="Plugin not found")
-    if event.topic == "heartbeat":
-        services = context.manifest.get("services", {})
-        service = event.data.get("service") if isinstance(event.data, dict) else None
-        if not isinstance(services, dict) or not isinstance(service, str) or service not in services:
-            raise HTTPException(status_code=422, detail="Unknown heartbeat service")
     try:
-        serialized = json.dumps(event.data, ensure_ascii=False, allow_nan=False)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail="Invalid plugin event data") from exc
-    if len(serialized.encode("utf-8")) > 65536:
-        raise HTTPException(status_code=413, detail="Plugin event data is too large")
+        _validate_plugin_event(context.manifest, event.topic, event.data)
+    except OverflowError as exc:
+        raise HTTPException(status_code=413, detail="Plugin event data is too large") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     request.app.state.plugin_events.publish(plugin_id, event.topic, event.data)
     return {"ok": True}
 
@@ -197,6 +192,63 @@ def _package_context(plugin_id: str):
     except (OSError, UnicodeError, ValueError) as exc:
         raise HTTPException(status_code=409, detail="Cannot read plugin manifest") from exc
     return PluginContext(plugin_id, root, home / "plugin-data" / plugin_id, manifest)
+
+
+def _validate_plugin_event(manifest: dict, topic: str, data: Any) -> None:
+    if not isinstance(topic, str) or not 1 <= len(topic) <= 200:
+        raise ValueError("Invalid plugin event topic")
+    if topic == "heartbeat":
+        services = manifest.get("services", {})
+        service = data.get("service") if isinstance(data, dict) else None
+        if not isinstance(services, dict) or not isinstance(service, str) or service not in services:
+            raise ValueError("Unknown heartbeat service")
+    try:
+        serialized = json.dumps(data, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Invalid plugin event data") from exc
+    if len(serialized.encode("utf-8")) > 65536:
+        raise OverflowError("Plugin event data is too large")
+
+
+def _engine_context(plugin_id: str, hub: PluginEventHub):
+    """Create capabilities only for an enabled, still-approved package."""
+    from kollabor_plugins.context import PluginContext
+    from kollabor_plugins.packages import _read_registry
+    from kollabor_plugins.services import _approved_service_root
+
+    context = _package_context(plugin_id)
+    if context is None:
+        raise HTTPException(status_code=404, detail="Plugin not found")
+    home = Path.home() / ".kollab"
+    try:
+        registry = _read_registry(home / "plugins.json")
+        root, record = _approved_service_root(home, registry, plugin_id)
+        if not plugin_id.endswith("@dev") and record.get("enabled") is not True:
+            raise HTTPException(status_code=403, detail="Plugin is disabled")
+        granted = record.get("granted", [])
+        if not isinstance(granted, list) or any(not isinstance(grant, str) for grant in granted):
+            raise ValueError("Invalid plugin grants")
+        if root.resolve() != context.root.resolve():
+            raise ValueError("Plugin root changed")
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail="Plugin approval or files changed") from exc
+
+    def publish(own_id, topic, data):
+        _validate_plugin_event(context.manifest, topic, data)
+        return hub.publish(own_id, topic, data)
+
+    def notify(own_id, text, button):
+        if not isinstance(text, str) or not text.strip() or "\n" in text or "\r" in text:
+            raise ValueError("Invalid plugin notice text")
+        payload = {"plugin_id": own_id, "text": text, "button": button}
+        _validate_plugin_event(context.manifest, "notice", payload)
+        return hub.publish(None, "notice", payload)
+
+    return PluginContext(
+        plugin_id, root, context.data, context.manifest, grants=granted,
+        publish=publish, notify=notify, heartbeat=hub.heartbeat,
+    )
+
 
 
 @router.get("/{plugin_id}/settings")
