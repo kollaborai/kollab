@@ -101,6 +101,38 @@ describe("sendBusyMessage pending image attachments", () => {
     expect(reset).toHaveBeenCalledOnce();
   });
 
+  it("suppresses duplicates while a pending image is still converting", async () => {
+    const image = await pendingImage();
+    const attachmentAdapter = new SimpleImageAttachmentAdapter();
+    let resolveConversion!: (
+      value: Awaited<ReturnType<typeof attachmentAdapter.send>>,
+    ) => void;
+    vi.spyOn(attachmentAdapter, "send").mockReturnValue(
+      new Promise((resolve) => {
+        resolveConversion = resolve;
+      }),
+    );
+    const { sendBusyMessage, sendTransportCommand } = harness(
+      { text: "inspect", attachments: [image] },
+      attachmentAdapter,
+    );
+    vi.spyOn(Date, "now")
+      .mockReturnValueOnce(1000)
+      .mockReturnValueOnce(1501);
+
+    const first = sendBusyMessage({ preventDefault: vi.fn() });
+    const duplicate = sendBusyMessage({ preventDefault: vi.fn() });
+    resolveConversion({
+      ...image,
+      content: [{ type: "image", image: "data:image/png;base64,cG5n" }],
+    });
+    await Promise.all([first, duplicate]);
+
+    expect(attachmentAdapter.send).toHaveBeenCalledOnce();
+    expect(sendTransportCommand).toHaveBeenCalledOnce();
+    vi.restoreAllMocks();
+  });
+
   it("keeps text-only submission and duplicate suppression working", async () => {
     const { sendBusyMessage, sendTransportCommand, reset } = harness({
       text: "inspect",
