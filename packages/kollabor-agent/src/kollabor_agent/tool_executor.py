@@ -1729,6 +1729,30 @@ class ToolExecutor:
         if not _is_read_only_action(argv, cwd, root):
             return refuse("command is not classified as read-only")
 
+        if Path(argv[0]).name.lower() == "git" and len(argv) > 1:
+            subcommand = argv[1].lower()
+            emits_diff = subcommand in {"diff", "show"} or (
+                subcommand == "log"
+                and any(token.lower() in {"-p", "--patch"} for token in argv[2:])
+            )
+            if emits_diff:
+                if any(
+                    token.split("=", 1)[0].lower() in {"--ext-diff", "--textconv"}
+                    for token in argv[2:]
+                ):
+                    return refuse("external Git helpers are not allowed")
+                argv = (
+                    argv[0],
+                    argv[1],
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    *argv[2:],
+                )
+            elif subcommand == "blame" and any(
+                token.split("=", 1)[0].lower() == "--textconv" for token in argv[2:]
+            ):
+                return refuse("external Git helpers are not allowed")
+
         executable = _resolve_trusted_executable(argv[0], root)
         if executable is None:
             return refuse("executable is not on the trusted system path")
