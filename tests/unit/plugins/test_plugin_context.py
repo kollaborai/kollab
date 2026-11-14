@@ -33,3 +33,20 @@ def test_plugin_context_creates_private_lock_directory(tmp_path, monkeypatch):
     context = PluginContext("hello", root, tmp_path / "data", manifest)
     with context.lock("chain"):
         assert (tmp_path / "data" / "locks" / "chain.lock").is_file()
+
+
+def test_plugin_context_refuses_lock_directory_symlink(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    root = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    manifest = json.loads((root / "kollab-plugin.json").read_text())
+    data = tmp_path / "data"
+    data.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (data / "locks").symlink_to(outside, target_is_directory=True)
+    context = PluginContext("hello", root, data, manifest)
+    with pytest.raises(ValueError, match="lock"):
+        with context.lock("chain"):
+            pass
+    assert not (outside / "chain.lock").exists()
