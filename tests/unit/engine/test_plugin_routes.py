@@ -907,6 +907,10 @@ def test_package_enable_disable_remove_are_guarded_and_preserve_data(tmp_path, m
         assert client.post("/plugins/hello/disable").status_code == 200
         assert json.loads(registry_path.read_text())["plugins"]["hello"]["enabled"] is False
         assert client.post("/plugins/hello/remove", json={"purge": True}).status_code == 422
+        from kollabor_config.file_lock import locked_file
+        with locked_file(run / "hello.lock", private=True):
+            assert client.post("/plugins/hello/remove").status_code == 409
+        assert not any(call[0] == "remove" for call in calls)
         assert client.post("/plugins/hello/remove").status_code == 200
         assert (data / "values.json").read_text() == '{"greeting":"keep"}'
         assert any(call[0] == "remove" and call[2]["purge"] is False for call in calls)
