@@ -30,6 +30,28 @@ def test_live_owned_processes_do_not_scan_host_process_table(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_start_refuses_when_recorded_process_group_survives(tmp_path, monkeypatch):
+    runner = ACPRunner(
+        ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)),
+        persist_profile_resolution=False,
+    )
+    runner._process_group_id = 4242
+    monkeypatch.setattr(runner, "_owned_process_group_exists", lambda: True)
+    monkeypatch.setattr(
+        ACPProfile,
+        "resolve",
+        lambda _profile, **_kwargs: ((sys.executable,), {}, str(tmp_path)),
+    )
+
+    async def unexpected_spawn(*_args, **_kwargs):
+        pytest.fail("a new adapter must not overwrite the surviving process-group record")
+
+    monkeypatch.setattr(bridge_mod.asyncio, "create_subprocess_exec", unexpected_spawn)
+    with pytest.raises(ACPError, match="previous ACP process group still requires cleanup"):
+        await runner._start_process()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("message, login_guidance", [
     ("Authentication required", True),
     ("This client is no longer supported for Gemini Code Assist for individuals", False),
