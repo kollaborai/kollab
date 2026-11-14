@@ -20,6 +20,30 @@ from .packages import _ID, _SYMBOL, _read_registry, _within, files_sha256, recov
 
 logger = logging.getLogger(__name__)
 
+# These paths remain available for imports performed after plugin initialization.
+_vendor_owners: dict[str, Path] = {}
+
+
+def _prepare_vendor(root: Path) -> tuple[Path | None, set[str]]:
+    vendor = root / "python" / "vendor"
+    if not vendor.is_dir():
+        return None, set()
+    vendor = vendor.resolve()
+    if not vendor.is_relative_to(root.resolve()):
+        raise ValueError("Vendor directory escapes the plugin")
+    names = set()
+    for item in vendor.iterdir():
+        name = item.stem if item.is_file() and item.suffix == ".py" else item.name if item.is_dir() else ""
+        if not name.isidentifier() or name == "__pycache__":
+            continue
+        if not item.resolve().is_relative_to(vendor):
+            raise ValueError(f"Vendored module escapes the plugin: {name}")
+        owner = _vendor_owners.get(name)
+        if (owner is not None and owner != vendor) or (name in sys.modules and owner != vendor):
+            raise ValueError(f"Vendored module name clashes: {name}")
+        names.add(name)
+    return vendor, names
+
 
 class _RegistryDiscovery(PluginDiscovery):
     """Legacy discovery that keeps registered and manifest packages isolated."""
@@ -200,6 +224,8 @@ class PluginRegistry:
                 continue
             if not isinstance(record, dict) or record.get("enabled") is not True:
                 continue
+            added_vendor: Path | None = None
+            reserved_names: set[str] = set()
             try:
                 if is_dev:
                     from kollabor.version import get_runtime_version
@@ -222,6 +248,15 @@ class PluginRegistry:
                 if not _SYMBOL.fullmatch(symbol):
                     raise ValueError("Invalid Python entry symbol")
                 path = _within(root.resolve(), filename, "python")
+                vendor, vendor_names = _prepare_vendor(root)
+                if vendor is not None:
+                    if str(vendor) not in sys.path:
+                        sys.path.insert(0, str(vendor))
+                        added_vendor = vendor
+                    for name in vendor_names:
+                        if name not in _vendor_owners:
+                            reserved_names.add(name)
+                        _vendor_owners[name] = vendor
                 module_name = f"_kollab_package_{plugin_id.replace('-', '_')}_{digest}"
                 package = types.ModuleType(module_name)
                 package.__path__ = [str(path.parent)]
@@ -249,6 +284,10 @@ class PluginRegistry:
                 self.discovery.plugin_configs[symbol] = config
                 loaded.append(plugin_class)
             except Exception as exc:
+                for name in reserved_names:
+                    _vendor_owners.pop(name, None)
+                if added_vendor is not None:
+                    sys.path.remove(str(added_vendor))
                 self.package_errors[plugin_id] = str(exc)
                 logger.warning("Plugin %s could not be loaded: %s", plugin_id, exc)
         return loaded

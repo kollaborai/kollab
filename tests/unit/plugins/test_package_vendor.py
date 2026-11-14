@@ -25,7 +25,8 @@ def test_vendored_modules_load_and_clashes_are_reported(tmp_path, monkeypatch):
         (vendor / f"{vendor_name}.py").write_text("VALUE = 42\n")
         (root / "kollab-plugin.json").write_text(json.dumps({"id": plugin_id, "python": f"python/entry.py:{symbol}"}))
         (root / "python" / "entry.py").write_text(
-            f"import {vendor_name}\nfrom kollabor_plugins import BasePlugin\nclass {symbol}(BasePlugin):\n    value = {vendor_name}.VALUE\n"
+            f"import {vendor_name}\nfrom kollabor_plugins import BasePlugin\n"
+            f"class {symbol}(BasePlugin):\n    value = {vendor_name}.VALUE\n"
         )
         records[plugin_id] = {"enabled": True, "files_sha256": files_sha256(root)}
     (home / "plugins.json").write_text(json.dumps({"plugins": records, "dev": {}}))
