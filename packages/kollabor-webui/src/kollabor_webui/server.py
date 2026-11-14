@@ -387,7 +387,10 @@ def create_app(
                 record = registry["plugins"].get(base_id)
                 if not isinstance(record, dict) or not record.get("enabled") or base_id in registry["dev"]:
                     return missing
-                root = (home / "plugins" / base_id).resolve()
+                installed_root = (home / "plugins").resolve()
+                root = (installed_root / base_id).resolve()
+                if root.parent != installed_root:
+                    return missing
             dist = root / "web" / "dist"
             if not dist.resolve().is_relative_to(root):
                 return missing
