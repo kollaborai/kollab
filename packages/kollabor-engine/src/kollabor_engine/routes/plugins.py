@@ -487,6 +487,7 @@ def _set_package_enabled(context, enabled: bool) -> None:
 
 
 def _remove_package_checked(context, purge: bool) -> None:
+    from kollabor_plugins.cli import _locked_service_files
     from kollabor_plugins.packages import _read_registry, remove_package
     from kollabor_plugins.services import _recorded_process_alive
     from kollabor_plugins.settings import set_enabled
@@ -505,10 +506,17 @@ def _remove_package_checked(context, purge: bool) -> None:
             pid = context.data / "run" / f"{service_name}.pid"
             if pid.is_symlink() or _recorded_process_alive(pid):
                 raise ValueError("Plugin services are stopping; retry removal when stopped")
-        record = _read_registry(registry_path)["plugins"].get(context.id)
-        if not isinstance(record, dict):
-            raise ValueError("Plugin is not installed")
-        remove_package(context.id, expected_record=record, purge=purge)
+        run = context.data / "run"
+        if any(pid.is_symlink() for pid in run.glob("*.pid")):
+            raise ValueError("Plugin service pid cannot be a symlink")
+        services = context.manifest.get("services", {})
+        if not isinstance(services, dict):
+            raise ValueError("Invalid plugin service declarations")
+        with _locked_service_files(home, context.id, services):
+            record = _read_registry(registry_path)["plugins"].get(context.id)
+            if not isinstance(record, dict):
+                raise ValueError("Plugin is not installed")
+            remove_package(context.id, expected_record=record, purge=purge)
 
     _with_inactive_runs(context, remove_when_stopped)
 
