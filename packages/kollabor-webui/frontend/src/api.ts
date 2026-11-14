@@ -771,6 +771,35 @@ export type AppsPicker = Omit<PanelPicker, "rows"> & {
   sections?: AppsSection[] | null;
 };
 
+export type PrChainItem = {
+  kind: "pr" | "issue";
+  number: number;
+  status?: string;
+  started?: string;
+  updated?: string;
+  round?: number;
+  head?: string;
+  last_verdict?: string;
+  why?: string;
+  branch?: string;
+  pr?: number;
+  claimed: boolean;
+};
+
+export type PrChainEvent = {
+  ts?: string;
+  pr?: number | string;
+  issue?: number;
+  stage?: string;
+  status?: string;
+  verdict?: string;
+  why?: string;
+  round?: number;
+  n?: number;
+};
+
+export type PrChainSnapshot = { root_found: boolean; items: PrChainItem[]; events: PrChainEvent[]; truncated?: boolean };
+
 export type AppsRegistryResult = AppsPicker & {
   query?: string | null;
   note?: string | null;
@@ -1068,6 +1097,11 @@ export class EngineApi {
   /** Hide a sidebar row for every client of this engine; resolves to the rows hidden now. */
   hideAgent(entry: HiddenAgent) {
     return this.json<{ hidden: HiddenAgent[] }>("/sidebar/hide", { method: "POST", body: JSON.stringify(entry) });
+  }
+
+  /** Read the pr-chain workflow's state: every PR and issue it tracks, plus its latest ledger events. */
+  getPrChain(signal?: AbortSignal) {
+    return this.json<PrChainSnapshot>("/pr-chain", { cache: "no-store", signal });
   }
 
   /** Read the engine-owned sidebar order and any recovery warning. */
