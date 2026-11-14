@@ -85,7 +85,9 @@ def test_stale_sweep_terminalizes_paired_card_and_keeps_retry_state(
     plugin._handle_queue_command("work tied to #640", upstream_refs=["#640"])
     card = plugin._task_ledger.get_open(project="test-project")[0]
     monkeypatch.setattr(
-        coordinator, "github_terminal_state", lambda ref: f"{ref} merged"
+        coordinator,
+        "github_terminal_state",
+        lambda ref, project=None: f"{ref} merged",
     )
 
     retired = plugin._sweep_stale_work_queue()
@@ -124,7 +126,9 @@ def test_stale_sweep_retries_card_terminalization_after_failure(tmp_path, monkey
     plugin._handle_queue_command("work tied to #640", upstream_refs=["#640"])
     card = plugin._task_ledger.get_open(project="test-project")[0]
     monkeypatch.setattr(
-        coordinator, "github_terminal_state", lambda ref: f"{ref} merged"
+        coordinator,
+        "github_terminal_state",
+        lambda ref, project=None: f"{ref} merged",
     )
     original_terminalize = plugin._task_ledger.terminalize
     attempts = []
@@ -187,7 +191,9 @@ async def test_claiming_linked_task_card_assigns_its_work_slot(tmp_path, monkeyp
     assert claimed_card.status == "active"
     assert claimed_card.assignee == "lapis"
     monkeypatch.setattr(
-        coordinator, "github_terminal_state", lambda ref: f"{ref} merged"
+        coordinator,
+        "github_terminal_state",
+        lambda ref, project=None: f"{ref} merged",
     )
     assert plugin._sweep_stale_work_queue() == []
     slot = plugin._work_queue.get_all()[0]
@@ -206,7 +212,9 @@ def test_stale_sweep_keeps_active_paired_card_pending_with_note(
     assert claimed.status == "active"
     assert claimed.assignee == "ruby"
     monkeypatch.setattr(
-        coordinator, "github_terminal_state", lambda ref: f"{ref} merged"
+        coordinator,
+        "github_terminal_state",
+        lambda ref, project=None: f"{ref} merged",
     )
 
     retired = plugin._sweep_stale_work_queue()
@@ -230,7 +238,9 @@ def test_claim_racing_stale_cleanup_preserves_pending_slot_and_card(
     plugin._handle_queue_command("work tied to #640", upstream_refs=["#640"])
     card = plugin._task_ledger.get_open(project="test-project")[0]
     monkeypatch.setattr(
-        coordinator, "github_terminal_state", lambda ref: f"{ref} merged"
+        coordinator,
+        "github_terminal_state",
+        lambda ref, project=None: f"{ref} merged",
     )
     original_sweep = plugin._work_queue.sweep_stale
 
