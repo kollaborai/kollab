@@ -116,3 +116,37 @@ and remaining step 1 security and acceptance behavior. The agent file-tool
 read deny list is explicitly scheduled for step 2 in the spec, outside this
 step's authorized scope. The hello web implementation is scheduled for step 3. No final full-unit gate, final handoff, changelog,
 push or draft PR has been completed. Docker was unavailable; no Docker tests ran.
+
+## Continuation checkpoint — 2026-11-14
+
+Merged `origin/main` at `8dc920e5` without conflicts. The immediate post-merge
+plugin test run passed: 181 passed, 1 skipped. On subsequent changes, the plugin
+suite passed 185 tests, 1 skipped (`review-plugins-green.log`, in
+`$HOME/backups/plugins-step1-work/`). These are not final-head gates.
+Docker was checked and is unavailable (`docker-info.log`).
+
+The three accepted findings in `review-r1-triage.md` have red-first tests and
+fixes: log output redaction, compare-and-swap absence on add, and removal of the
+second PluginConfigManager discovery path. A real encrypted fallback-vault test
+also led to correcting service secret retrieval. Dev detach discards the staged
+settings and checks its registry binding on writes. Git diagnostics now provide
+redacted details. Logs for individual red/green runs are in the same directory.
+The old config package README and validate-config skill still reference removed
+manager APIs; those files are outside the allowed paths and need separate scope.
+
+The expanded tmux spec is currently red. Live `/config` successfully saved a
+plugin setting and stopped the service, but it cannot restart it on a second save:
+`config-actions-start2.log` shows desired state remaining stopped. The terminal
+view (`plugins/altview/config_altview.py`) clears pending values on save without
+updating widget baselines and reads plugin-specific paths through ConfigService
+rather than the plugin store. This file is not named in the ownership list;
+authorization is needed before editing it. A `plugins-step1` tmux session is
+present but its ownership has not been established; leave it and all external
+logs, homes, backups and worktrees untouched.
+
+Step 1 remains incomplete: dev service lifecycle/detach and permission handling,
+settings concurrency, vendor isolation edge cases, diagnostics redaction review,
+and live terminal acceptance remain open. There is no final fixed-HEAD full-unit,
+Ruff, py_compile or tmux pass, no final changelog, and no draft PR. Do not open a
+PR until those gates and the complete brief pass. Earlier passing results do not
+supersede the current failing tmux test.
