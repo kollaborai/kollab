@@ -164,6 +164,110 @@ async def test_join_notice_includes_the_active_model():
     assert "profile: anthropic-main" in message.content
 
 
+@pytest.mark.asyncio
+async def test_acp_join_notice_reports_the_model_and_effort_the_harness_runs():
+    profile = SimpleNamespace(
+        name="main",
+        get_provider=lambda: "acp",
+        get_model=lambda: "profile-model",
+        get_effort=lambda: "low",
+    )
+    harness = SimpleNamespace(
+        active=True,
+        advertised_config_options=lambda: [
+            {"id": "model", "category": "model", "currentValue": "haiku"},
+            {"id": "thought_level", "category": "thought_level", "currentValue": "max"},
+        ],
+    )
+    event_bus = _EventBus(
+        {
+            "profile_manager": SimpleNamespace(get_active_profile=lambda: profile),
+            "acp_orchestrator": harness,
+        }
+    )
+    plugin = HubPlugin(event_bus=event_bus)
+    plugin._identity = _runtime("lapis", "lapis-id")
+    peer = _runtime("koordinator", "koordinator-id", name="koordinator")
+    plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+    await plugin._announce_to_peers([peer])
+
+    content = plugin._deliver_to_agent.await_args.args[1].content
+    assert "model: haiku\n" in content
+    assert "effort: max\n" in content
+    assert "profile-model" not in content
+
+
+@pytest.mark.asyncio
+async def test_join_notice_names_the_agent_bundle_and_its_description():
+    agent = SimpleNamespace(name="community", description="Answers community forum questions.")
+    event_bus = _EventBus({"agent_manager": SimpleNamespace(get_active_agent=lambda: agent)})
+    plugin = HubPlugin(event_bus=event_bus)
+    plugin._identity = _runtime("lapis", "lapis-id")
+    peer = _runtime("koordinator", "koordinator-id", name="koordinator")
+    plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+    await plugin._announce_to_peers([peer])
+
+    content = plugin._deliver_to_agent.await_args.args[1].content
+    assert "agent: community\n" in content
+    assert "agent description: Answers community forum questions.\n" in content
+
+
+@pytest.mark.asyncio
+async def test_native_join_notice_keeps_its_lines_and_adds_only_the_agent_line():
+    profile = SimpleNamespace(
+        name="anthropic-main",
+        get_provider=lambda: "anthropic",
+        get_model=lambda: "anthropic/claude-sonnet-4",
+        get_effort=lambda: "high",
+    )
+    agent = SimpleNamespace(name="community", description="Answers community forum questions.")
+    event_bus = _EventBus(
+        {
+            "profile_manager": SimpleNamespace(get_active_profile=lambda: profile),
+            "agent_manager": SimpleNamespace(get_active_agent=lambda: agent),
+        }
+    )
+    plugin = HubPlugin(event_bus=event_bus)
+    plugin._identity = _runtime("lapis", "lapis-id")
+    peer = _runtime("koordinator", "koordinator-id", name="koordinator")
+    plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+    await plugin._announce_to_peers([peer])
+
+    content = plugin._deliver_to_agent.await_args.args[1].content
+    assert (
+        "agent: community\n"
+        "agent description: Answers community forum questions.\n"
+        "model: anthropic/claude-sonnet-4\n"
+        "effort: high\n"
+        "provider: anthropic\n"
+        "profile: anthropic-main\n"
+    ) in content
+
+
+@pytest.mark.asyncio
+async def test_join_notice_leaves_out_values_it_does_not_know():
+    profile = SimpleNamespace(
+        name="", get_provider=lambda: "", get_model=lambda: "gpt-a", get_effort=lambda: ""
+    )
+    event_bus = _EventBus({"profile_manager": SimpleNamespace(get_active_profile=lambda: profile)})
+    plugin = HubPlugin(event_bus=event_bus)
+    plugin._identity = _runtime("lapis", "lapis-id")
+    peer = _runtime("koordinator", "koordinator-id", name="koordinator")
+    plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+    await plugin._announce_to_peers([peer])
+
+    content = plugin._deliver_to_agent.await_args.args[1].content
+    assert "model: gpt-a\n" in content
+    assert "unknown" not in content
+    assert "effort:" not in content
+    assert "provider:" not in content
+    assert "profile:" not in content
+
+
 def test_startup_status_shows_stop_all_only_to_callers_that_started_agents(monkeypatch):
     """Issue #669: the stop-all hint is gated on owning started agents."""
     renderer = SimpleNamespace(
