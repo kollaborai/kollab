@@ -114,8 +114,6 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
 
         try:
             asyncio.run(load_secrets())
-        except ValueError:
-            raise
         except Exception:
             raise ValueError("Cannot read service secrets from the secure store") from None
     path = record.get("enabled_path")
