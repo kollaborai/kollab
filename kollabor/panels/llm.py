@@ -411,6 +411,7 @@ def _form(ctx: Any, manager: Any, base: Any, mode: str, style: str) -> dict:
         make_field(
             "effort", "dropdown", "Reasoning Effort",
             value=base.effort or "default", options=list(effort_options(provider)),
+            option_labels={"none": "none (no reasoning)"},
         ),
         make_field(
             "max_tokens", "text_input", "Max Output Tokens",
