@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
+import { readFileSync } from "node:fs";
 import { EmptyEditorState } from "../src/components/code/empty-editor-state";
 import { editorThemeColors } from "../src/components/code/editor-theme";
 import { NARROW_QUERY, shouldHideSidebarAfterFileSelection } from "../src/components/code/floating-sidebar";
@@ -356,4 +357,14 @@ test("save acknowledgement preserves edits made while the save was pending", () 
   expect(fileState("a.ts").content).toBe("typed while saving");
   expect(fileState("a.ts").savedContent).toBe("sent");
   expect(isDirty(fileState("a.ts"))).toBe(true);
+});
+
+test("markdown preview keeps long code lines in a scrollable block", () => {
+  const editorPane = readFileSync(
+    new URL("../src/components/code/editor-pane.tsx", import.meta.url),
+    "utf8",
+  );
+
+  expect(editorPane).toContain("[&_pre]:max-w-full");
+  expect(editorPane).toContain("[&_pre]:overflow-x-auto");
 });
