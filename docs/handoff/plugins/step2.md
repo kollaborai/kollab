@@ -104,16 +104,16 @@ Step 2 is not complete. Item 4 requires each background process to receive
 `KOLLAB_ENGINE_URL` and its plugin-only `KOLLAB_PLUGIN_TOKEN`. The service wrapper
 at `packages/kollabor-plugins/src/kollabor_plugins/services.py:251-264` constructs
 a strict child environment that omits both, and the supervisor at lines 473-480
-starts that wrapper independently. `services.py` is outside the brief's listed
-file ownership. The brief says to stop and tell the lead before touching files
-owned by another lane; no lead or peer is currently online. Request a lead-owned
-change or explicit expanded ownership for the minimal token/URL provisioning and
-redaction plus its tests. No change was made to `services.py`.
+starts that wrapper independently. `services.py` is outside the brief's listed file ownership. The earlier handoff
+incorrectly claimed the brief explicitly says to stop and tell the lead; it does
+not. No change was made to `services.py`. A lead decision for minimal token/URL
+provisioning and redaction remains queued as 6ba1d8d9, but the owned token and route
+work can proceed independently.
 
-Once resolved: implement item 4 token validation and provisioning, spoof-proof
-remote headers plus PhoneLink filtering; item 5 management routes; then run every
-specified test and isolated live smoke. Current branch is not ready to deploy:
-plugin-only token authorization and PhoneLink management blocking are absent. The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
+Next: implement item 4 token validation and provisioning within owned files,
+spoof-proof remote headers plus PhoneLink filtering; item 5 management routes;
+then run every specified test and isolated live smoke. Current branch is not ready
+to deploy: plugin-only token authorization and PhoneLink management blocking are absent. The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
 `packages/kollabor-engine/src/kollabor_engine/phone_link.py` is in scope only
 for refusing the spec's remote-disallowed plugin routes and its tests;
 `routes/phonelink.py` stays unchanged unless that refusal requires it. Audit the file deny list
