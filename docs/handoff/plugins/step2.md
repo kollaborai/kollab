@@ -40,6 +40,15 @@ need complete contract and error-path tests. Do not treat the context as done.
 The first lock-use test `a3d0c671` failed before fix `3b336d45`; both context
 tests pass afterward (`<home>/backups/plugins-step2-work/context-lock-{red,green}.log`).
 
+Remote WebUI management proxy restriction: red test `a647227f` produced four
+failures; `ddb4e797` passed 12 targeted proxy/asset/engine checks. Logs:
+`<home>/backups/plugins-step2-work/proxy-{red,green}.log`. The proxy strips any
+client-supplied remote marker and sets its own for allowed remote plugin calls.
+The engine does not yet enforce that marker for `ctx.local_only`, so remote
+plugin API dispatch must not be considered safe until that is implemented.
+PhoneLink enforcement is also outstanding. Add tests for allowed routes,
+forwarded markers, normalization and spoofing.
+
 ## Remaining and exact next step
 
 Step 2 is not complete. Next: wire and test PluginContext, then implement the
