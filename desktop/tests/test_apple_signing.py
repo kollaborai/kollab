@@ -294,6 +294,20 @@ class SigningContractTests(unittest.TestCase):
                 self.assertEqual(result.returncode == 0, mask in (0b00011, 0b11100), result.stderr)
         self.assertEqual(self.calls(), [])
 
+    def test_empty_api_secret_strings_fall_back_to_apple_id_auth(self):
+        # The workflow step passes all nine env entries; the API ones are
+        # empty strings when only Apple ID secrets exist, and the helper
+        # must treat them exactly like unset variables.
+        self.signed()
+        self.env.update(APPLE_API_KEY="", APPLE_API_ISSUER="", APPLE_API_PRIVATE_KEY="")
+        self.assertEqual(self.run_script("preflight").returncode, 0)
+        result = self.run_build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        submit = next(args for tool, args in self.calls() if tool == "xcrun" and args[:2] == ["notarytool", "submit"])
+        self.assertIn("--apple-id", submit)
+        self.assertNotIn("--key", submit)
+        self.assertFalse(self.state.exists())
+
     def test_development_certificate_is_rejected(self):
         self.signed()
         self.env["APPLE_SIGNING_IDENTITY"] = "Apple Development: Fixture"
