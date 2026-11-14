@@ -52,6 +52,11 @@ Mentiko's request and response shapes are kept, so its callers port unchanged.
   `terminal.env_allow`, `terminal.env_deny` and `terminal.env_set` adjust the list. Up to `terminal.max_shells` shells
   (default 8) and 64 links per daemon (fixed). A shell outlives its socket and is reaped `terminal.idle_reap_minutes`
   (default 10) after its last link detaches; a reconnecting client resumes it with the `sessionId` from `ready`.
+  Closing, idle reaping, or daemon shutdown signals terminal jobs and escalates survivors after a bounded grace period.
+  On Linux, a per-terminal subreaper owns and reaps descendants even when they detach. On macOS, captured descendants
+  and processes holding the terminal slave are tracked by process identity; a job that detaches and closes all PTY
+  descriptors between scans can escape. Process inspection permissions are required to discover macOS jobs.
+  Teardown waits are bounded; if inspection or reaping times out, jobs can survive and the daemon logs a warning.
   `enabled` refuses every call, `terminal.enabled` opens no shells, `read_only` refuses terminal input
   (`code-shell-settings.md`).
 - The WebSocket is outside the HTTP bearer middleware, so the first message must be `{"type":"auth","token"}` within
@@ -86,7 +91,7 @@ Mentiko's request and response shapes are kept, so its callers port unchanged.
 
 File reads return an opaque revision token. Saves send that token and refuse a changed or deleted file detected before the replacement unless the user explicitly overwrites it. External writers are not serialized by this check and can still race the replacement. Dirty buffers retained when switching devices or folders remain owned by their original workspace and can only be saved there. The tab-bar save control reports failures.
 
-When `git.allow_outside_workspace` is false, commits from a subfolder are refused: a separate Git process or hook can change the checked index before commit. Commit from the repository root, or explicitly opt in to outside-workspace changes. Stash deletion is refused because Git's positional reflog deletion cannot be guarded by the selected object identity against concurrent writers. Applying a stash from a workspace inside a repository checks tracked and untracked stash paths and refuses one that reaches outside the workspace unless `git.allow_outside_workspace` is enabled.
+When `git.allow_outside_workspace` is false, commits from a subfolder are refused: a separate Git process or hook can change the checked index before commit. Commit from the repository root, or explicitly opt in to outside-workspace changes. Creating a stash from a subfolder is refused because Git can include staged files outside that folder; select the repository root to create one. Stash deletion is refused because Git's positional reflog deletion cannot be guarded by the selected object identity against concurrent writers. Applying a stash from a workspace inside a repository checks tracked and untracked stash paths and refuses one that reaches outside the workspace unless `git.allow_outside_workspace` is enabled.
 
 ## Folder selection
 
