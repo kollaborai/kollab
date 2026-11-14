@@ -826,11 +826,12 @@ def test_service_actions_restart_and_redacted_log(tmp_path, monkeypatch):
         token = (run / "token").read_text()
         log = run / "hello.log"
         log.write_text(f"first secret-value {token} user-token-value\nsecond\n")
-        response = client.get("/plugins/hello/services/hello/log?lines=2")
+        response = client.get("/plugins/hello/services/hello/log?tail=2")
         assert response.status_code == 200
         assert "first" in response.text and "second" in response.text
         assert "secret-value" not in response.text and token not in response.text
         assert "user-token-value" not in response.text
+        assert client.get("/plugins/hello/services/hello/log?tail=1").text == "second"
         assert client.post("/plugins/hello/services/hello/start").status_code == 200
         assert client.post("/plugins/hello/services/hello/stop").status_code == 200
         assert client.post("/plugins/hello/services/hello/restart").status_code == 202
