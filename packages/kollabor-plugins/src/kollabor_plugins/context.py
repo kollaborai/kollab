@@ -103,7 +103,9 @@ class PluginContext:
     def lock(self, name):
         if not isinstance(name, str) or not _SERVICE.fullmatch(name):
             raise ValueError("Invalid plugin lock name")
-        return locked_file(self.data / "locks" / f"{name}.lock", private=True)
+        directory = self.data / "locks"
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return locked_file(directory / f"{name}.lock", private=True)
 
     @staticmethod
     def local_only(endpoint):
