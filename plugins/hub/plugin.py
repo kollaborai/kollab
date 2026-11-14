@@ -8479,6 +8479,20 @@ class HubPlugin(BasePlugin):
             return
 
         profile_name, provider, model, effort = self._active_model_details()
+        agent_name, agent_description = self._active_agent_details()
+        # Only the values this agent has go out; an unknown one is left out.
+        details = "".join(
+            f"{label}: {value}\n"
+            for label, value in (
+                ("agent", agent_name),
+                ("agent description", agent_description),
+                ("model", model),
+                ("effort", effort),
+                ("provider", provider),
+                ("profile", profile_name),
+            )
+            if value
+        )
 
         # Build a summary of everyone on the hub for the announcement
         roster_lines = []
@@ -8499,10 +8513,7 @@ class HubPlugin(BasePlugin):
                     f"agent '{self._identity.identity}' just came online "
                     f"in project {self._identity.project}.\n"
                     f"cwd: {os.getcwd()}\n"
-                    f"model: {model or 'unknown'}\n"
-                    f"effort: {effort or 'default'}\n"
-                    f"provider: {provider or 'unknown'}\n"
-                    f"profile: {profile_name or 'unknown'}\n"
+                    f"{details}"
                     f"current hub roster:\n{roster_summary}\n"
                     f"if you need help with anything, let them know.\n"
                     f"respond back using: "
@@ -8517,7 +8528,61 @@ class HubPlugin(BasePlugin):
             logger.info(f"Announced to {peer.identity}")
 
     def _active_model_details(self) -> Tuple[str, str, str, str]:
-        """Return the active profile name, provider, model, and effort for notices."""
+        """Return the active profile name, provider, model, and effort for notices.
+
+        A running ACP harness is authoritative for model and effort, as in the
+        state overlay: the profile's fields do not describe what it runs.
+        """
+        profile_name, provider, model, effort = self._profile_model_details()
+        harness = self._acp_harness_model_effort()
+        if harness is not None:
+            model, effort = harness
+        return profile_name, provider, model, effort
+
+    def _acp_harness_model_effort(self) -> Optional[Tuple[str, str]]:
+        """Return (model, effort) the active ACP harness runs, or None without one."""
+        if not self.event_bus or not hasattr(self.event_bus, "get_service"):
+            return None
+        try:
+            acp = self.event_bus.get_service("acp_orchestrator")
+            if acp is None or getattr(acp, "active", False) is not True:
+                return None
+            from kollabor_ai.acp_options import find_option
+
+            options = acp.advertised_config_options()
+            model_option = find_option(options, "model") or {}
+            effort_option = (
+                find_option(options, "thought_level")
+                or find_option(options, "effort")
+                or {}
+            )
+            return (
+                str(model_option.get("currentValue") or ""),
+                str(effort_option.get("currentValue") or ""),
+            )
+        except Exception as exc:
+            logger.debug("ACP harness model for hub notice unavailable: %s", exc)
+            return None
+
+    def _active_agent_details(self) -> Tuple[str, str]:
+        """Return the active agent bundle's name and one-line description, or blanks."""
+        if not self.event_bus or not hasattr(self.event_bus, "get_service"):
+            return "", ""
+        try:
+            agent_mgr = self.event_bus.get_service("agent_manager")
+            agent = agent_mgr.get_active_agent() if agent_mgr else None
+        except Exception as exc:
+            logger.debug("active agent lookup for hub notice failed: %s", exc)
+            return "", ""
+        if agent is None:
+            return "", ""
+        return (
+            str(getattr(agent, "name", "") or ""),
+            str(getattr(agent, "description", "") or ""),
+        )
+
+    def _profile_model_details(self) -> Tuple[str, str, str, str]:
+        """Return the active profile name, provider, model, and effort."""
         if not self.event_bus or not hasattr(self.event_bus, "get_service"):
             return "", "", "", ""
         try:

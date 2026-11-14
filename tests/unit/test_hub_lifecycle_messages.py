@@ -200,8 +200,12 @@ async def test_acp_join_notice_reports_the_model_and_effort_the_harness_runs():
 
 @pytest.mark.asyncio
 async def test_join_notice_names_the_agent_bundle_and_its_description():
-    agent = SimpleNamespace(name="community", description="Answers community forum questions.")
-    event_bus = _EventBus({"agent_manager": SimpleNamespace(get_active_agent=lambda: agent)})
+    agent = SimpleNamespace(
+        name="community", description="Answers community forum questions."
+    )
+    event_bus = _EventBus(
+        {"agent_manager": SimpleNamespace(get_active_agent=lambda: agent)}
+    )
     plugin = HubPlugin(event_bus=event_bus)
     plugin._identity = _runtime("lapis", "lapis-id")
     peer = _runtime("koordinator", "koordinator-id", name="koordinator")
@@ -222,7 +226,9 @@ async def test_native_join_notice_keeps_its_lines_and_adds_only_the_agent_line()
         get_model=lambda: "anthropic/claude-sonnet-4",
         get_effort=lambda: "high",
     )
-    agent = SimpleNamespace(name="community", description="Answers community forum questions.")
+    agent = SimpleNamespace(
+        name="community", description="Answers community forum questions."
+    )
     event_bus = _EventBus(
         {
             "profile_manager": SimpleNamespace(get_active_profile=lambda: profile),
@@ -250,9 +256,14 @@ async def test_native_join_notice_keeps_its_lines_and_adds_only_the_agent_line()
 @pytest.mark.asyncio
 async def test_join_notice_leaves_out_values_it_does_not_know():
     profile = SimpleNamespace(
-        name="", get_provider=lambda: "", get_model=lambda: "gpt-a", get_effort=lambda: ""
+        name="",
+        get_provider=lambda: "",
+        get_model=lambda: "gpt-a",
+        get_effort=lambda: "",
     )
-    event_bus = _EventBus({"profile_manager": SimpleNamespace(get_active_profile=lambda: profile)})
+    event_bus = _EventBus(
+        {"profile_manager": SimpleNamespace(get_active_profile=lambda: profile)}
+    )
     plugin = HubPlugin(event_bus=event_bus)
     plugin._identity = _runtime("lapis", "lapis-id")
     peer = _runtime("koordinator", "koordinator-id", name="koordinator")
