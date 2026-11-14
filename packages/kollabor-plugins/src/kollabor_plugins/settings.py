@@ -117,6 +117,10 @@ def save(plugin_id: str, values: dict) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     path = data_dir / "values.json"
     with locked_file(data_dir / "values.json.lock", private=True):
+        if plugin_id.endswith("@dev"):
+            current_folder = _read_registry(home / "plugins.json")["dev"].get(plugin_id.removesuffix("@dev"))
+            if current_folder != folder:
+                raise ValueError("Development plugin is no longer attached to this folder")
         current = _read_json(path) if path.exists() else {}
         current.update(values)
         write_text_atomic(path, json.dumps(current, indent=2, ensure_ascii=False) + "\n")

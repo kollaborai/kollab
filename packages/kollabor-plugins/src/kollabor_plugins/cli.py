@@ -145,7 +145,7 @@ def main(argv: list[str]) -> int:
         if args.folder_or_off == "off":
             if not args.plugin_id or not _ID.fullmatch(args.plugin_id):
                 raise ValueError("A valid plugin id is required")
-            print(f"Detach {args.plugin_id}@dev? Development data will be retained.")
+            print(f"Detach {args.plugin_id}@dev? Staged settings will be discarded; other data is retained.")
         else:
             import shlex
 
@@ -176,9 +176,12 @@ def main(argv: list[str]) -> int:
                     raise ValueError("A valid plugin id is required")
                 if args.plugin_id not in registry["dev"]:
                     raise ValueError("Development plugin is not attached")
-                del registry["dev"][args.plugin_id]
-                _write_json(home / "plugins.json", registry)
-                print(f"Detached {args.plugin_id}@dev; development data retained")
+                dev_data = home / "plugin-data" / f"{args.plugin_id}@dev"
+                with locked_file(dev_data / "values.json.lock", private=True):
+                    del registry["dev"][args.plugin_id]
+                    _write_json(home / "plugins.json", registry)
+                    (dev_data / "values.json").unlink(missing_ok=True)
+                print(f"Detached {args.plugin_id}@dev; staged settings discarded")
                 return 0
             if args.plugin_id is not None:
                 raise ValueError("Unexpected extra argument")
@@ -191,8 +194,13 @@ def main(argv: list[str]) -> int:
             target.mkdir(parents=True, exist_ok=True)
             with locked_file(target / "values.json.lock", private=True):
                 old_values = home / "plugin-data" / plugin_id / "values.json"
-                if old_values.is_file() and not (target / "values.json").exists():
-                    write_text_atomic(target / "values.json", old_values.read_text(encoding="utf-8"))
+                if not (target / "values.json").exists() and old_values.parent.is_dir():
+                    with locked_file(old_values.parent / "values.json.lock", private=True):
+                        if old_values.is_file():
+                            from .settings import _read_json
+
+                            source_values = _read_json(old_values)
+                            write_text_atomic(target / "values.json", json.dumps(source_values, indent=2) + "\n")
             registry["dev"][plugin_id] = str(folder)
             _write_json(home / "plugins.json", registry)
             print(f"Attached {plugin_id}@dev from {folder}; local code runs as your user")
