@@ -57,6 +57,15 @@ test("the first load fills the store and tells the pickers listening", async () 
   stop();
 });
 
+test("a response without choices does not crash the picker", async () => {
+  const { api } = fakeApi({} as Answer);
+
+  await loadModelChoices(api);
+
+  assert.deepEqual(getModelChoices(api).choices, []);
+  assert.equal(getModelChoices(api).failed, false);
+});
+
 test("a harness still loading is polled every 1.5 s until it is done", async () => {
   vi.useFakeTimers();
   const { api, calls } = fakeApi(
