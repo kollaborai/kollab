@@ -1,4 +1,5 @@
 """The hello template supplies the terminal command used by acceptance."""
+
 import asyncio
 import importlib.util
 from pathlib import Path
@@ -12,7 +13,7 @@ def test_hello_registers_command_and_answers(capsys):
     spec.loader.exec_module(module)
     plugin = module.HelloPlugin()
     registry = Mock()
-    asyncio.run(plugin.initialize(command_registry=registry))
+    asyncio.run(plugin.initialize(None, None, command_registry=registry))
     definition = registry.register_command.call_args.args[0]
     assert definition.name == "hello"
     result = asyncio.run(definition.handler(Mock()))
