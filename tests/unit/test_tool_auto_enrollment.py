@@ -574,7 +574,7 @@ class TestWildcardBundleScope(unittest.TestCase):
             terminal_timeout=5, mcp_timeout=10,
         )
 
-        executor.set_bundle_scope(["terminal"])
+        executor.set_bundle_scope(["terminal", "tool-load"])
 
         # git is blocked
         self.assertIsNotNone(executor._check_bundle_scope("git"))
@@ -611,6 +611,35 @@ class TestWildcardBundleScope(unittest.TestCase):
 
         self.assertTrue(result.success, result.error)
         self.assertIsNone(executor._check_bundle_scope("git"))
+
+    def test_tool_load_cannot_enable_mcp_tool_outside_declared_scope(self):
+        """MCP tools omitted from the bundle scope remain disabled."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        mcp = MagicMock()
+        mcp.tool_registry = {
+            "create_issue": {
+                "server": "github",
+                "enabled": False,
+                "definition": {"description": "Create issue", "parameters": {}},
+            },
+        }
+        mcp.server_connections = {"github": MagicMock()}
+        event_bus = MagicMock()
+        event_bus.emit_with_hooks = AsyncMock(return_value=None)
+        executor = ToolExecutor(
+            mcp_integration=mcp, event_bus=event_bus,
+            terminal_timeout=5, mcp_timeout=10,
+        )
+        executor.set_bundle_scope(["file-read", "tool-load"])
+
+        result = _run(executor._execute_tool_load({
+            "type": "tool_load", "id": "tl_1", "name": "mcp:github:create_issue",
+        }))
+
+        self.assertFalse(result.success)
+        self.assertIn("file-read", result.error)
+        self.assertFalse(mcp.tool_registry["create_issue"]["enabled"])
 
 
 if __name__ == "__main__":
