@@ -75,12 +75,20 @@ Fifteen focused tests passed (`engine-events-green.log`); Ruff and compilation
 passed. These streams are not yet wired to management changes or PluginContext,
 and the heartbeat overlay currently applies to engine inventory only.
 
+Usage-log reads: `f865f00f` was red before `50ec8736` added GET usage, local-day
+line attribution, partial-line handling, atomic counter/offset replay and
+truncation detection. Six engine route tests passed (`engine-usage-green.log`);
+Ruff and compilation passed. Counter metadata records per-source high-water
+marks so a crash before the offset write does not duplicate a line. This does
+not yet reconcile finished agent runs from runs.json; the step-4 run record's
+container and finish-time field are not specified or implemented in this tree.
+
 ## Remaining and exact next step
 
-Step 2 is not complete. Next: finish item 2: restart-safe usage accounting and
-GET usage; wire PluginContext events/notices and service heartbeat status; then
-the dispatcher, tokens, proxy and PhoneLink remote restrictions, and all tests
-specified in the brief. The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
+Step 2 is not complete. Next: finish item 2: reconcile finished agent-run usage
+without inventing a conflicting step-4 run schema; wire PluginContext events,
+notices and service heartbeat status. Then implement the dispatcher, tokens,
+proxy and PhoneLink remote restrictions, and all tests specified in the brief. The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
 `packages/kollabor-engine/src/kollabor_engine/phone_link.py` is in scope only
 for refusing the spec's remote-disallowed plugin routes and its tests;
 `routes/phonelink.py` stays unchanged unless that refusal requires it. Audit the file deny list
