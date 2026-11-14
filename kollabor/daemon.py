@@ -126,13 +126,15 @@ def wait_for_detached_startup(
                 return "detached child closed its startup channel"
             if chunk:
                 buf += chunk
-                if b"\n" in buf:
-                    message = buf.split(b"\n", 1)[0].decode(errors="replace")
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    message = line.decode(errors="replace")
                     if message == "ready":
                         return None
                     if message.startswith("error:"):
                         return message.partition(":")[2] or "startup failed"
-                    return f"detached child sent an invalid startup response: {message}"
+                    # Windows reuses stderr as the startup channel. Ignore
+                    # ordinary child diagnostics until its protocol line arrives.
         if child_process is not None:
             exit_code = child_process.poll()
             if exit_code is not None:

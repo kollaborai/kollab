@@ -6051,6 +6051,11 @@ class HubPlugin(BasePlugin):
                             preferred,
                             holder.pid,
                         )
+                        from kollabor.daemon import report_detached_startup
+
+                        report_detached_startup(
+                            ready=False, reason=f"{preferred} is already running"
+                        )
                         _os._exit(1)
 
             self._identity.identity = self._designator.assign(taken, preferred)
