@@ -3,17 +3,23 @@
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import tarfile
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from kollabor_config.atomic_write import write_text_atomic
+from kollabor_config.file_lock import locked_file
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
+
+logger = logging.getLogger(__name__)
 
 _REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z", re.ASCII)
 _SCP_SOURCE = re.compile(r"git@[A-Za-z0-9.-]+:[^\s?#]+\Z", re.ASCII)
@@ -266,3 +272,116 @@ def verify_stage(stage: Path, staged: dict, commit: str, digest: str) -> None:
         raise ValueError("Plugin commit changed")
     if digest != staged.get("files_sha256") or files_sha256(stage) != digest:
         raise ValueError("Plugin files changed after staging")
+
+
+def _read_registry(path: Path) -> dict:
+    if not path.exists():
+        return {"plugins": {}, "dev": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Cannot read plugin registry") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("plugins"), dict) or not isinstance(data.get("dev"), dict):
+        raise ValueError("Invalid plugin registry")
+    return data
+
+
+def _write_json(path: Path, data: dict) -> None:
+    write_text_atomic(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+
+def _recover_locked(home: Path) -> None:
+    plugins_dir = home / "plugins"
+    registry_path = home / "plugins.json"
+    for journal in sorted(plugins_dir.glob(".*.transaction.json")):
+        try:
+            transaction = json.loads(journal.read_text(encoding="utf-8"))
+            plugin_id = transaction["id"]
+            if (
+                not isinstance(plugin_id, str)
+                or not _ID.fullmatch(plugin_id)
+                or journal.name != f".{plugin_id}.transaction.json"
+            ):
+                raise ValueError("Invalid transaction id")
+            previous = transaction["registry"]
+            if (
+                not isinstance(previous, dict)
+                or not isinstance(previous.get("plugins"), dict)
+                or not isinstance(previous.get("dev"), dict)
+            ):
+                raise ValueError("Invalid transaction registry")
+            live = plugins_dir / plugin_id
+            old = plugins_dir / f"{plugin_id}.old"
+            if transaction.get("committed") is True:
+                if old.exists():
+                    shutil.rmtree(old)
+            else:
+                if old.exists():
+                    if live.exists():
+                        shutil.rmtree(live)
+                    os.replace(old, live)
+                elif plugin_id not in previous["plugins"] and live.exists():
+                    shutil.rmtree(live)
+                if _read_registry(registry_path) != previous:
+                    _write_json(registry_path, previous)
+            journal.unlink()
+        except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Cannot recover plugin transaction {journal.name}") from exc
+
+
+def recover_installs() -> None:
+    """Finish or roll back interrupted swaps before reading the registry."""
+    home = Path.home() / ".kollab"
+    (home / "plugins").mkdir(parents=True, exist_ok=True)
+    with locked_file(home / "plugins.json.lock", private=True):
+        _recover_locked(home)
+
+
+def install_stage(stage: Path, staged: dict, commit: str, digest: str) -> None:
+    """Atomically swap a confirmed staged package into the user's plugin store."""
+    plugin_id = staged.get("manifest", {}).get("id")
+    if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id):
+        raise ValueError("Invalid plugin id")
+    home = Path.home() / ".kollab"
+    plugins_dir = home / "plugins"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    registry_path = home / "plugins.json"
+    live = plugins_dir / plugin_id
+    old = plugins_dir / f"{plugin_id}.old"
+    journal = plugins_dir / f".{plugin_id}.transaction.json"
+    with locked_file(home / "plugins.json.lock", private=True):
+        _recover_locked(home)
+        verify_stage(stage, staged, commit, digest)
+        registry = _read_registry(registry_path)
+        prior = registry["plugins"].get(plugin_id)
+        if live.exists() != (prior is not None) or old.exists():
+            raise ValueError("Plugin folder and registry disagree")
+        transaction = {"id": plugin_id, "registry": registry, "committed": False}
+        _write_json(journal, transaction)
+        try:
+            if live.exists():
+                os.replace(live, old)
+            os.replace(stage, live)
+            now = datetime.now(timezone.utc).isoformat()
+            record = {
+                "source": staged["source"],
+                "ref": staged["ref"],
+                "commit": commit,
+                "files_sha256": digest,
+                "enabled": prior.get("enabled", True) if prior else True,
+                "granted": staged["manifest"].get("uses", []),
+                "added": prior.get("added", now) if prior else now,
+                "updated": now,
+            }
+            next_registry = {**registry, "plugins": {**registry["plugins"], plugin_id: record}}
+            _write_json(registry_path, next_registry)
+            transaction["committed"] = True
+            _write_json(journal, transaction)
+            _recover_locked(home)
+        except BaseException:
+            # Leave the journal if recovery itself fails; next startup retries.
+            try:
+                _recover_locked(home)
+            except Exception:
+                logger.exception("Plugin installation rollback failed; recovery will retry")
+            raise
