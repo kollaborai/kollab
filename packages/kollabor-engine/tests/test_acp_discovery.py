@@ -1257,3 +1257,19 @@ async def test_serve_starts_the_warm_and_shutdown_stops_it(monkeypatch):
     async with server._engine_lifespan(served):
         await _until(lambda: warmed == [True])
     assert stopped == [True]
+
+
+@pytest.mark.asyncio
+async def test_warming_one_workspace_preserves_another_workspace_cache(warm, monkeypatch):
+    harness = _harness(monkeypatch, MODELS3, LEVELS3)
+    folder_a = _warmable("shared")
+    folder_b = _warmable("shared")
+
+    acp_discovery.warm_in_background([folder_a], scope="/work/a")
+    await _until(_idle)
+    acp_discovery.warm_in_background([folder_b], scope="/work/b")
+    await _until(_idle)
+
+    assert acp_discovery.known_outcomes([folder_a], scope="/work/a")["shared"].status == "ready"
+    assert acp_discovery.known_outcomes([folder_b], scope="/work/b")["shared"].status == "ready"
+    assert harness.starts["shared"] == 2
