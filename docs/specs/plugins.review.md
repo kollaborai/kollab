@@ -90,3 +90,50 @@ Mockup fixes in this round: one `Build Issues Into PRs` switch on the Config tab
 matches the spec, modal tabs carry tab roles, accent options limited to the app's own pair, a visible
 focus ring, darker light-theme warning text, the gate copy says a comment sends a PR back to a fixer,
 and the phone notice button is 44 px.
+
+## Round 2: twelve lanes again, on the round 1 commit
+
+| Reviewers | Findings | Verdicts |
+|---|---|---|
+| 12 Haiku lanes, 1 Codex adversarial | about 70 + 1 | all FAIL; 5 P0 |
+
+What each lane caught, and what changed:
+
+- **Security, the boundary that was not one.** Three lanes showed that round 1's promise ("agents cannot
+  install plugins") was false: an agent with a shell can read `~/.kollab/engine.token` whatever the file
+  tools block, and the management routes' "local caller" check passes every request the web UI proxies.
+  Changed: the spec now says plainly that an agent with a shell can do anything the user can; the
+  defaults carry the weight (`approval: "ask"`, unattended runs only with a declared grant the sheet
+  shows); management routes are refused for remote callers at the web UI proxy, which sees the real
+  client; agent runs get a scratch HOME (config through `KOLLAB_CONFIG_DIR`) and an allowlisted
+  environment. An OS sandbox for agent shells is named as the real fix and filed as #1037.
+- **Security, install integrity.** Confirm checked the manifest, not the code. Changed: the install is
+  `git archive` of the commit, its tree hash shows on the sheet, and confirm and every load check it;
+  URLs with credentials are refused; refs match `refs/heads` or `refs/tags` exactly; `.svg` is no longer
+  served; the asset route sits above the app's catch-all.
+- **Security, pr-chain's guard.** The current script does not give command stages a scratch HOME or
+  strip `SSH_AUTH_SOCK`, so the spec's "keeps its guard" was untrue. Changed: the port adds both.
+- **Data.** The import would copy worktrees and the `STOP` file, read the issue switch from a key that
+  does not exist (it is a `NO-BUILD` file), keep old absolute paths in the ledger, and let a restart
+  double-count usage. Changed: named sources and skip list, path rewrite, `NO-BUILD` mapping, one counter
+  file with an offset and counted run ids, sibling lock files, atomic `STATE.json` writes in the port,
+  values in `values.json` beside the declaration.
+- **Design.** Menu rows existed only after the bundle ran, so `Failed to Load` had nothing to show on a
+  fresh boot; Turn Off removed the plugin while its loop drained for 40 minutes; state mockups are
+  missing. Changed: menu rows are declared in the manifest; a `Stopping` state keeps the row and page
+  until the process exits; the status line now says state mockups are still owed before build step 3.
+- **Other, SRE.** The 30 s tick would restart a process the user stopped; a killed wrapper could leave
+  its child running while a second one started; services might start without the user's `PATH`.
+  Changed: a desired state per process, a live recorded child blocks a new start, the wrapper gets the
+  `PATH` captured at enable and `run:` programs resolve to absolute paths.
+- **Other, builder.** pr-chain's repo, checkout, interpreter and owner list had no home; no secret could
+  reach a background process; `dev` reloaded only the web bundle. Changed: those become pr-chain
+  settings, services can name granted secrets, `dev` restarts services and remounts routes on change.
+- **Codex.** pr-chain's routes would have become `/plugins/pr-chain/api/api/state`. Changed: the plugin
+  router drops the old `/api` prefix.
+
+Rejected in round 2:
+
+- Move tab, modal, command and chat cards out of build step 3: rejected again, the owner asked for them.
+- A one-time code from the page for every management call: rejected; an agent with the engine token can
+  fetch anything the page can, so it would be a check that looks like a boundary and is not one.
