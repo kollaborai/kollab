@@ -128,3 +128,16 @@ def test_tool_executor_spawn_guard_blocks_encoded_command_alias_and_malformed():
 )
 def test_tool_executor_spawn_guard_allows_windows_shell_text_mentions(command):
     assert not _is_blocked_kollab_spawn(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "kollab --hub msg lapis -d is the flag",
+        "kollab --hub msg lapis -a is the flag",
+        "kollab --hub stop lapis all",
+        "kollab --hub stop --reason r all",
+    ],
+)
+def test_tool_executor_spawn_guard_allows_hub_free_text(command):
+    assert not _is_blocked_kollab_spawn(command)
