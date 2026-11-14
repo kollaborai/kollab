@@ -1,7 +1,14 @@
 """Git sources for installable plugin packages."""
 
+import hashlib
+import io
 import json
+import os
 import re
+import shutil
+import subprocess
+import tarfile
+import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -165,3 +172,97 @@ def validate_manifest(root: Path, kollab_version: str) -> dict:
         if path.is_symlink() and not path.resolve().is_relative_to(root):
             raise ValueError("Symlink must resolve inside the plugin")
     return manifest
+
+
+_COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z", re.ASCII)
+
+
+def _git(*args: str) -> bytes:
+    completed = subprocess.run(["git", *args], capture_output=True, check=False)
+    if completed.returncode:
+        # Git and remote helpers can return arbitrary credential-bearing diagnostics.
+        # Do not leak those diagnostics to the UI or logs.
+        raise ValueError(f"Git {args[0]} failed (exit {completed.returncode})")
+    return completed.stdout
+
+
+def resolve_git_commit(url: str, ref: str | None) -> str:
+    """Resolve exactly one remote branch or tag, or the remote's HEAD."""
+    lines = _git("ls-remote", "--", url).decode("utf-8", "strict").splitlines()
+    refs = {}
+    for line in lines:
+        parts = line.split("\t", 1)
+        if len(parts) == 2 and _COMMIT.fullmatch(parts[0]):
+            refs[parts[1]] = parts[0]
+    if ref is None:
+        commit = refs.get("HEAD")
+    else:
+        branch = refs.get(f"refs/heads/{ref}")
+        tag = refs.get(f"refs/tags/{ref}")
+        if bool(branch) == bool(tag):
+            raise ValueError("Git ref is missing or ambiguous")
+        commit = branch or refs.get(f"refs/tags/{ref}^{{}}") or tag
+    if not commit or not _COMMIT.fullmatch(commit):
+        raise ValueError("Git source has no resolvable commit")
+    return commit
+
+
+def files_sha256(root: Path) -> str:
+    """Hash relative paths, entry types, executable bits, and file contents."""
+    root = Path(root).resolve()
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        if path.is_symlink():
+            target = os.readlink(path).encode("utf-8")
+            entry_type = b"l"
+            content = target
+        elif path.is_dir():
+            entry_type = b"d"
+            content = b""
+        elif path.is_file():
+            entry_type = b"x" if path.stat().st_mode & 0o111 else b"f"
+            content = path.read_bytes()
+        else:
+            raise ValueError("Unsupported file type in plugin")
+        digest.update(entry_type)
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
+def stage_git_source(source: str, stage: Path, kollab_version: str) -> dict:
+    """Stage a checked Git commit without exposing its Git metadata to plugins."""
+    url, ref = parse_git_source(source)
+    commit = resolve_git_commit(url, ref)
+    stage = Path(stage)
+    stage.parent.mkdir(parents=True, exist_ok=True)
+    stage.mkdir()
+    try:
+        with tempfile.TemporaryDirectory(prefix=".plugin-clone-", dir=stage.parent) as temporary:
+            clone = Path(temporary) / "repo"
+            _git("clone", "--no-checkout", "--", url, str(clone))
+            archive = _git("-C", str(clone), "archive", commit)
+            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
+                tar.extractall(stage, filter="data")
+        manifest = validate_manifest(stage, kollab_version)
+        return {
+            "source": url,
+            "ref": ref,
+            "commit": commit,
+            "files_sha256": files_sha256(stage),
+            "manifest": manifest,
+        }
+    except BaseException:
+        shutil.rmtree(stage)
+        raise
+
+
+def verify_stage(stage: Path, staged: dict, commit: str, digest: str) -> None:
+    """Refuse confirmation if the pinned revision or any staged file changed."""
+    if not _COMMIT.fullmatch(commit) or commit != staged.get("commit"):
+        raise ValueError("Plugin commit changed")
+    if digest != staged.get("files_sha256") or files_sha256(stage) != digest:
+        raise ValueError("Plugin files changed after staging")
