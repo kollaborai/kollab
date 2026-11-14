@@ -214,12 +214,12 @@ const mainConfig = defineConfig({
       "tests/trajectory-detail-title.test.ts",
       "tests/sidebar-breakpoint.test.ts",
       "tests/session-refresh-gate.test.ts",
+      "tests/compaction-ux.test.ts",
       "tests/code-editor-store.test.ts",
       "tests/code-open-file.test.ts",
       "tests/workspace-ownership.test.ts",
       "tests/file-mutations.test.ts",
       "tests/editor-shortcuts.test.ts",
-
       "tests/team-model.test.ts",
       "tests/team-selection.test.ts",
       "tests/team-launch-api.test.ts",

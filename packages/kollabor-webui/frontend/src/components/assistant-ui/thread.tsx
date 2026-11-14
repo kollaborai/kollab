@@ -30,6 +30,11 @@ import { agentStatus, bundleName } from "@/components/panels/panel-model";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
+  loadComposerDraft,
+  queueComposerDraftSubmission,
+  saveComposerDraft,
+} from "@/composer-draft";
+import {
   useVoiceMode,
   type VoiceActivity,
   type VoiceMode,
@@ -124,6 +129,8 @@ export type ThreadProps = {
   onLoadOlder?: (() => Promise<boolean | void>) | undefined;
   onRetryHistory?: (() => void) | undefined;
   historyStartIndex?: number | undefined;
+  /** Per-agent/conversation localStorage key for the unsent composer text. */
+  draftKey?: string | null | undefined;
 };
 
 
@@ -160,6 +167,7 @@ export const Thread: FC<ThreadProps> = ({
   onLoadOlder,
   onRetryHistory,
   historyStartIndex = 0,
+  draftKey,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
@@ -175,6 +183,7 @@ export const Thread: FC<ThreadProps> = ({
         onLoadOlder={onLoadOlder}
         onRetryHistory={onRetryHistory}
         historyStartIndex={historyStartIndex}
+        draftKey={draftKey}
       />
     </ThreadComponentsContext.Provider>
   );
@@ -190,6 +199,7 @@ const ThreadRoot: FC<{
   onLoadOlder: ThreadProps["onLoadOlder"];
   onRetryHistory: ThreadProps["onRetryHistory"];
   historyStartIndex: number;
+  draftKey: ThreadProps["draftKey"];
 }> = ({
   isEmpty,
   agents,
@@ -200,6 +210,7 @@ const ThreadRoot: FC<{
   onLoadOlder,
   onRetryHistory,
   historyStartIndex,
+  draftKey,
 }) => {
   const { Welcome = ThreadWelcome, ComposerLeading } = useContext(ThreadComponentsContext);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -398,6 +409,7 @@ const ThreadRoot: FC<{
                 commands={commands}
                 onOpenPanel={onOpenPanel}
                 attachmentsEnabled={attachmentsEnabled}
+                draftKey={draftKey}
               />
             </div>
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
@@ -489,7 +501,8 @@ const Composer: FC<{
   commands: readonly SlashCommand[];
   onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
   attachmentsEnabled: boolean;
-}> = ({ agents, commands, onOpenPanel, attachmentsEnabled }) => {
+  draftKey: ThreadProps["draftKey"];
+}> = ({ agents, commands, onOpenPanel, attachmentsEnabled, draftKey }) => {
   const aui = useAui();
   const sendTransportCommand = useAssistantTransportSendCommand();
   // The mic starts the LiveKit room in this browser; /voice (the computer
@@ -510,6 +523,38 @@ const Composer: FC<{
     composerSlotMode(s, voiceAvailable ? voice : null, Boolean(permissionStop)),
   );
   const isRunning = useAuiState((s) => s.thread.isRunning);
+  const composerText = useAuiState((s) => s.composer.text);
+  const restoredDraft = useRef<{ key: string | null; text: string } | null>(null);
+  const skipEmptyDraftPersist = useRef(false);
+
+  useLayoutEffect(() => {
+    const key = draftKey ?? null;
+    const text = loadComposerDraft(key) ?? "";
+    restoredDraft.current = { key, text };
+    skipEmptyDraftPersist.current = false;
+    if (aui.composer.getState().text !== text) aui.composer.setText(text);
+  }, [aui, draftKey]);
+
+  useEffect(() => {
+    const key = draftKey ?? null;
+    const restore = restoredDraft.current;
+    if (restore?.key === key) {
+      // setText publishes through the external store; don't let this effect's
+      // stale render write an empty value over a draft being restored.
+      if (composerText !== restore.text) return;
+      restoredDraft.current = null;
+    }
+    if (!key) return;
+    if (composerText.length === 0 && skipEmptyDraftPersist.current) {
+      // assistant-ui clears the input as soon as submit starts. Keep the
+      // durable copy until the transport confirms that add-message succeeded.
+      skipEmptyDraftPersist.current = false;
+      return;
+    }
+    if (composerText.length > 0) skipEmptyDraftPersist.current = false;
+    saveComposerDraft(key, composerText);
+  }, [composerText, draftKey]);
+
   const lastBusySubmit = useRef<{ fingerprint: string; at: number } | null>(
     null,
   );
@@ -565,6 +610,8 @@ const Composer: FC<{
       }
     }
     if (parts.length === 0) return;
+    queueComposerDraftSubmission(draftKey, state.text);
+    if (state.text.length > 0) skipEmptyDraftPersist.current = true;
     sendTransportCommand({
       type: "add-message",
       message: { role: "user", parts },
@@ -590,7 +637,16 @@ const Composer: FC<{
     // disabled-send predicate while a turn is running. The transport already
     // queues this append message behind the active run.
     openPanelFromComposer(event);
-    sendBusyMessage(event);
+    if (event.defaultPrevented) return;
+    if (isRunning) {
+      sendBusyMessage(event);
+      return;
+    }
+    const text = aui.composer.getState().text;
+    if (text.length > 0) {
+      queueComposerDraftSubmission(draftKey, text);
+      skipEmptyDraftPersist.current = true;
+    }
   };
 
   const openPanelForItem = (item: {
