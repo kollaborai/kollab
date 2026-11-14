@@ -238,7 +238,7 @@ function CodeEditorFolder({ sessionId, device = "", workspace, mode = "code", fo
         </FloatingFileSidebar>
 
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <SplitContainer workspace={workspace} />
+          <SplitContainer workspace={workspace} showFilePicker={sidebar.narrow && !sidebar.visible} onOpenFiles={sidebar.toggle} />
         </div>
       </div>
 
