@@ -191,6 +191,7 @@ const mainConfig = defineConfig({
       "tests/code-fetch-session.test.ts",
       "tests/terminal-env.test.ts",
       "tests/file-save.test.ts",
+      "tests/pr-chain.test.ts",
       "tests/history-cache.test.ts",
       "tests/phone-frame.test.ts",
       "tests/phone-audio.test.ts",
