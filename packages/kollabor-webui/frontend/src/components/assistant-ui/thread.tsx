@@ -646,7 +646,13 @@ const Composer: FC<{
         parentId: null,
         sourceId: null,
       });
-      void aui.composer.reset();
+      const currentState = aui.composer.getState();
+      const currentFingerprint = `${currentState.text}\u0000${currentState.attachments
+        .map((attachment) => attachment.id)
+        .join(",")}`;
+      if (currentFingerprint === fingerprint) {
+        void aui.composer.reset();
+      }
     } catch {
       if (lastBusySubmit.current?.fingerprint === fingerprint) {
         lastBusySubmit.current = {
