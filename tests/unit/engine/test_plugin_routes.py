@@ -1,5 +1,6 @@
 """Engine plugin list delegates to the shared plugin inventory."""
 
+import pytest
 from fastapi.testclient import TestClient
 from kollabor_engine.server import create_app
 
@@ -59,3 +60,52 @@ def test_plugin_settings_read_installed_development_and_builtin(tmp_path, monkey
         assert client.get("/plugins/hello/settings").status_code == 409
         (installed / "kollab-plugin.json").write_text("{broken", encoding="utf-8")
         assert client.get("/plugins/hello/settings").status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_plugin_event_streams_heartbeat_and_disconnect(tmp_path, monkeypatch):
+    import asyncio
+    import json
+    import shutil
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    import httpx
+    from kollabor_engine.routes import plugins as plugin_routes
+    from kollabor_plugins import registry
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    source = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    home = tmp_path / ".kollab"
+    shutil.copytree(source, home / "plugins" / "hello")
+    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {}}, "dev": {}}))
+    monkeypatch.setattr(registry, "plugin_entries", lambda: [{
+        "id": "hello", "services": [{"name": "hello", "heartbeat": None}],
+    }])
+    app = create_app()
+    hub = app.state.plugin_events
+    response = await plugin_routes.plugin_events(SimpleNamespace(app=app), "hello")
+    other = hub.subscribe("other")
+    assert hub.subscriber_count("hello") == 1
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        received = asyncio.create_task(anext(response.body_iterator))
+        sent = await client.post("/plugins/hello/events", json={
+            "topic": "heartbeat", "data": {"service": "hello"}, "ts": -1,
+        })
+        assert sent.status_code == 200
+        event = json.loads((await asyncio.wait_for(received, timeout=1))["data"])
+        assert event["topic"] == "heartbeat"
+        assert event["data"] == {"service": "hello"}
+        assert event["ts"] > 0
+        assert other.empty()
+        assert (await client.get("/plugins")).json()["plugins"][0]["services"][0]["heartbeat"] == event["ts"]
+        assert (await client.post("/plugins/hello/events", json={
+            "topic": "heartbeat", "data": {"service": "unknown"},
+        })).status_code == 422
+        assert (await client.post("/plugins/missing/events", json={"topic": "x", "data": {}})).status_code == 404
+    await response.body_iterator.aclose()
+    hub.unsubscribe("other", other)
+    assert hub.subscriber_count("hello") == 0
+    assert hub.subscriber_count("other") == 0
