@@ -1,8 +1,8 @@
 # Apple Signing Workflow
 
-Issue: #1086  
-Status: Implemented  
-Owner: Desktop packaging
+- Issue: #1086
+- Status: Implemented
+- Owner: Desktop packaging
 
 ## Problem
 
