@@ -5458,12 +5458,13 @@ class HubPlugin(BasePlugin):
         """Execute a hub_work tool."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
-        result = self._format_work()
+        result, ledger_available = self._format_work_report()
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="hub_work",
-            success=True,
+            success=ledger_available,
             output=result,
+            error="" if ledger_available else "TaskLedger unavailable",
         )
 
     async def _handle_hub_vault_tool(self, tool_data: dict):
@@ -16829,26 +16830,49 @@ class HubPlugin(BasePlugin):
         return sum(await asyncio.gather(*sends))
 
     def _format_work(self) -> str:
+        return self._format_work_report()[0]
+
+    def _format_work_report(self) -> Tuple[str, bool]:
         lines: List[str] = []
-        if self._work_queue:
-            slots = self._work_queue.get_all()
-            if slots:
-                lines.append(f"work queue: {len(slots)} slot(s)")
-                for s in slots:
-                    assigned = f" -> {s.assigned_to}" if s.assigned_to else ""
-                    lines.append(f"  [{s.id}] {s.status}{assigned}: {s.task[:60]}")
-        if self._task_ledger:
+        slots = self._work_queue.get_all() if self._work_queue else []
+        ledger_available = self._task_ledger is not None
+
+        if self._task_ledger is not None:
             try:
                 open_cards = self._task_ledger.get_open()
-                if open_cards:
-                    lines.append(f"open ledger cards: {len(open_cards)}")
-                    for c in open_cards:
-                        lines.append(f"  [{c.id}] open (p{c.priority}): {c.directive[:60]}")
-            except Exception as e:
-                logger.debug(f"open card listing failed: {e}")
+            except Exception:
+                logger.warning("TaskLedger read failed while formatting hub work")
+                open_cards = None
+                ledger_available = False
+        else:
+            open_cards = None
+
+        if slots:
+            queue_status = "work queue: {} slot(s)".format(len(slots))
+            if not ledger_available:
+                queue_status += " (partial; TaskLedger unavailable)"
+            lines.append(queue_status)
+            for s in slots:
+                assigned = f" -> {s.assigned_to}" if s.assigned_to else ""
+                lines.append(f"  [{s.id}] {s.status}{assigned}: {s.task[:60]}")
+        elif not ledger_available:
+            lines.append("in-memory queue: empty (partial; TaskLedger unavailable)")
+
+        if ledger_available and open_cards:
+            lines.append(f"open ledger cards: {len(open_cards)}")
+            for c in open_cards:
+                lines.append(f"  [{c.id}] open (p{c.priority}): {c.directive[:60]}")
+
+        if not ledger_available:
+            reason = "read failed" if self._task_ledger is not None else "not configured"
+            lines.append(
+                f"TaskLedger: unavailable ({reason}; do not assume empty)"
+            )
+            return "\n".join(lines), False
+
         if not lines:
-            return "work queue: empty"
-        return "\n".join(lines)
+            return "work queue: empty", True
+        return "\n".join(lines), True
 
     def _handle_queue_command(
         self, task: str, upstream_refs: Optional[List[str]] = None
