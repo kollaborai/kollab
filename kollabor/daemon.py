@@ -79,7 +79,8 @@ def report_detached_startup(ready: bool, reason: str = "") -> None:
         if os.name == "nt" and fd == 2:
             devnull = os.open(os.devnull, os.O_WRONLY)
             os.dup2(devnull, 2)
-            os.close(devnull)
+            if devnull != 2:
+                os.close(devnull)
 
 
 def wait_for_detached_startup(
