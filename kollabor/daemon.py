@@ -38,7 +38,7 @@ SERVICE_PID_ENV = "KOLLAB_SERVICE_PID"
 DETACHED_CHILD_ENV = "KOLLAB_DETACHED_CHILD"
 # Parent/child startup handshake for a direct ``--detached`` launch.
 DETACHED_READY_FD_ENV = "KOLLAB_DETACHED_READY_FD"
-DETACHED_STARTUP_TIMEOUT = 15.0
+DETACHED_STARTUP_TIMEOUT = 60.0
 # A restart in place (#968) names the conversation the new image resumes; the new
 # image reads it once at boot and drops it, so a later restart names its own.
 RESUME_SESSION_ENV = "KOLLAB_RESUME_SESSION"
