@@ -423,3 +423,58 @@ def test_dispatcher_reloads_development_python_and_rejects_manifest_changes(tmp_
         manifest["description"] = "Modified without approval"
         manifest_path.write_text(json.dumps(manifest))
         assert client.get("/plugins/hello@dev/api/version").status_code == 409
+
+
+def test_dispatcher_vendor_collisions_are_reported_and_released(tmp_path, monkeypatch):
+    import json
+    import shutil
+    import sys
+    from pathlib import Path
+
+    from kollabor_plugins import registry
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    source = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    home = tmp_path / ".kollab"
+    records = {}
+    for plugin_id, value in (("hello", 1), ("other", 2)):
+        root = home / "plugins" / plugin_id
+        shutil.copytree(source, root)
+        path = root / "kollab-plugin.json"
+        manifest = json.loads(path.read_text())
+        manifest.update({"id": plugin_id, "engine": "python/engine.py:make_router"})
+        path.write_text(json.dumps(manifest))
+        vendor = root / "python" / "vendor"
+        vendor.mkdir()
+        (vendor / "plugin_vendor_collision_1028.py").write_text(f"VALUE = {value}\n")
+        (root / "python" / "engine.py").write_text('''from fastapi import APIRouter
+import plugin_vendor_collision_1028 as vendor
+
+def make_router(ctx):
+    router = APIRouter()
+    @router.get("/value")
+    def value():
+        return {"value": vendor.VALUE}
+    return router
+''')
+        records[plugin_id] = {"enabled": True, "files_sha256": files_sha256(root), "granted": []}
+    path = home / "plugins.json"
+    path.write_text(json.dumps({"plugins": records, "dev": {}}))
+    monkeypatch.setattr(registry, "plugin_entries", lambda: [
+        {"id": plugin_id, "state": "ok", "error": None, "services": []} for plugin_id in records
+    ])
+    with TestClient(create_app()) as client:
+        assert client.get("/plugins/hello/api/value").json() == {"value": 1}
+        assert client.get("/plugins/hello/api/value").json() == {"value": 1}
+        assert client.get("/plugins/other/api/value").status_code == 503
+        other = next(row for row in client.get("/plugins").json()["plugins"] if row["id"] == "other")
+        assert other["state"] == "error"
+        assert "clash" in other["error"].lower()
+        records["hello"]["enabled"] = False
+        path.write_text(json.dumps({"plugins": records, "dev": {}}))
+        assert client.get("/plugins/hello/api/value").status_code == 404
+        assert client.get("/plugins/other/api/value").json() == {"value": 2}
+    assert "plugin_vendor_collision_1028" not in sys.modules
