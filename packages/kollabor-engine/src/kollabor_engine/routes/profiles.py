@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from dataclasses import replace
+from pathlib import Path
 from typing import Annotated, Any, Dict, Optional
 
 import httpx
@@ -121,6 +122,19 @@ def _get_profile_manager() -> ProfileManager:
     ProfileManager reads from ~/.kollab/config.json by default.
     """
     return ProfileManager()
+
+
+def _folder_profile_manager(raw_workspace: str) -> ProfileManager:
+    """The profiles of ``raw_workspace``: its own ``.kollab`` local layer
+    overrides the shared ones, so a folder-private profile is listed and can
+    run. An empty workspace is the engine's own folder (the shared manager).
+
+    Takes the raw query value: ``folder_or_400`` resolves empty to this
+    engine's cwd, and only an actually named folder gets its own manager.
+    """
+    if not raw_workspace.strip():
+        return _get_profile_manager()
+    return ProfileManager(local_folder=Path(folder_or_400(raw_workspace.strip())))
 
 
 def _safe_acp_adapter(command: Any) -> Optional[str]:
@@ -296,8 +310,8 @@ _Workspace = Annotated[str, Query(description="Folder whose default loadout appl
 @router.get("")
 async def list_profiles(workspace: _Workspace = ""):
     """List all available profiles."""
+    pm = _folder_profile_manager(workspace)
     workspace = folder_or_400(workspace.strip())
-    pm = _get_profile_manager()
     profiles = pm.list_profiles()
 
     return {
@@ -311,15 +325,20 @@ async def list_profiles(workspace: _Workspace = ""):
 
 
 @router.get("/choices")
-async def list_choices():
+async def list_choices(workspace: _Workspace = ""):
     """Every provider profile x model x effort to start or switch a session
-    on, for the web UI's searchable model picker. ACP choices are discovered
-    in a short-lived, isolated session when a harness has no fresh options."""
+    on, for the web UI's searchable model picker, for ``workspace``'s own
+    profiles (empty is the engine's folder; saved loadouts are not rows, so
+    none is read). ACP choices are discovered in a short-lived, isolated
+    session when a harness has no fresh options."""
     from kollabor_ai.loadout_manager import LoadoutManager
 
+    pm = _folder_profile_manager(workspace)
+    workspace = folder_or_400(workspace.strip())
     # no config handle: the picker lists no saved loadouts, so no layered config read happens here. Profile
-    # definitions still come from the config files through ProfileManager, as GET /profiles reads them (#966)
-    manager = LoadoutManager(_get_profile_manager())
+    # definitions still come from the config files through ProfileManager, as GET /profiles reads them (#966);
+    # a named workspace gets that folder's own manager (#972)
+    manager = LoadoutManager(pm)
     profiles = manager.provider_profiles()
 
     async def refresh_catalogs() -> None:
