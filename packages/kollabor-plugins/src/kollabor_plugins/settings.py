@@ -1,12 +1,13 @@
 """Validated storage for installed package settings."""
 
 import json
+import os
 from pathlib import Path
 
 from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.file_lock import locked_file
 
-from .packages import _ID, _read_registry, _within
+from .packages import _ID, _read_registry, _recover_locked, _within, _write_json
 
 
 def _read_json(path: Path) -> dict:
@@ -74,3 +75,24 @@ def save(plugin_id: str, values: dict) -> None:
         current = _read_json(path) if path.exists() else {}
         current.update(values)
         write_text_atomic(path, json.dumps(current, indent=2, ensure_ascii=False) + "\n")
+
+
+def set_enabled(plugin_id: str, enabled: bool) -> None:
+    """Set an installed package's enabled state and capture PATH on enable."""
+    if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id):
+        raise ValueError("Invalid plugin id")
+    if type(enabled) is not bool:
+        raise ValueError("Enabled state must be a boolean")
+    home = Path.home() / ".kollab"
+    home.mkdir(parents=True, exist_ok=True)
+    with locked_file(home / "plugins.json.lock", private=True):
+        _recover_locked(home)
+        path = home / "plugins.json"
+        registry = _read_registry(path)
+        record = registry["plugins"].get(plugin_id)
+        if not isinstance(record, dict):
+            raise ValueError("Plugin is not installed")
+        record["enabled"] = enabled
+        if enabled:
+            record["enabled_path"] = os.environ.get("PATH", os.defpath)
+        _write_json(path, registry)
