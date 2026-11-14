@@ -52,6 +52,24 @@ async def test_start_refuses_when_recorded_process_group_survives(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_process_group_guard_keeps_group_identity_after_adapter_exits(tmp_path):
+    runner = ACPRunner(
+        ACPProfile("owned", (sys.executable, "-c", FAKE_ADAPTER), cwd=str(tmp_path)),
+        persist_profile_resolution=False,
+    )
+    try:
+        await runner._start_process()
+        assert runner._process is not None
+        assert runner._process_group_guard is not None
+        assert runner._process_group_id == runner._process_group_guard.pid
+        runner._process.terminate()
+        await runner._process.wait()
+        assert os.getpgid(runner._process_group_guard.pid) == runner._process_group_id
+    finally:
+        await runner._terminate_process()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("message, login_guidance", [
     ("Authentication required", True),
     ("This client is no longer supported for Gemini Code Assist for individuals", False),
