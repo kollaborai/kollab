@@ -184,9 +184,11 @@ export function SetupGuide({
           </ol>
         </div>
         <footer className="flex shrink-0 items-center justify-between gap-2 pt-3">
-          <Button type="button" variant="ghost" onClick={dismiss}>
-            Skip
-          </Button>
+          {target ? (
+            <Button type="button" variant="ghost" onClick={dismiss}>
+              Skip
+            </Button>
+          ) : null}
           <Button
             type="button"
             data-testid="setup-guide-next"
