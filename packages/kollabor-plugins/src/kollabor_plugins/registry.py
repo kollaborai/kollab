@@ -610,7 +610,16 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
         root = Path(folder)
         manifest = {}
         dev_settings = []
+        granted = []
         error = registry.package_errors.get(plugin_id)
+        try:
+            from .services import _approved_service_root
+
+            _, approval = _approved_service_root(home, data, f"{plugin_id}@dev", stopping=True)
+            if isinstance(approval.get("granted"), list):
+                granted = approval["granted"]
+        except (OSError, ValueError):
+            pass
         try:
             manifest = json.loads((Path(folder) / "kollab-plugin.json").read_text(encoding="utf-8"))
             if not isinstance(manifest, dict):
@@ -637,7 +646,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
                 "contributes": manifest.get("contributes", {}),
                 "services": _service_entries(home, f"{plugin_id}@dev", manifest),
                 "uses": manifest.get("uses", []),
-                "granted": manifest.get("uses", []),
+                "granted": granted,
             }
         )
     return entries
