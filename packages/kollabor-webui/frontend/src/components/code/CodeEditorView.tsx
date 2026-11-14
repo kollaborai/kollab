@@ -12,7 +12,7 @@ import { openWorkspaceDiff } from "@/components/code/open-file";
 import { EditorConfigPanel } from "@/components/code/editor-config";
 import { isDirty, useEditorStore } from "@/components/code/editor-store";
 import { FileTree } from "@/components/code/file-tree";
-import { FloatingFileSidebar, useFileSidebarVisibility } from "@/components/code/floating-sidebar";
+import { FloatingFileSidebar, shouldHideSidebarAfterFileSelection, useFileSidebarVisibility } from "@/components/code/floating-sidebar";
 import { QuickOpen } from "@/components/code/quick-open";
 import { SearchPanel } from "@/components/code/search-panel";
 import { SplitContainer } from "@/components/code/split-container";
@@ -230,7 +230,13 @@ function CodeEditorFolder({ sessionId, device = "", workspace, mode = "code", fo
                 </SidebarToggle>
               </div>
 
-              {sidebarView === "files" && <FileTree workspace={workspace} filterOpen={fileFilterOpen} />}
+              {sidebarView === "files" && <FileTree
+                workspace={workspace}
+                filterOpen={fileFilterOpen}
+                onFileSelect={() => {
+                  if (shouldHideSidebarAfterFileSelection(sidebar)) sidebar.hide();
+                }}
+              />}
               {sidebarView === "search" && <SearchPanel workspace={workspace} />}
               {sidebarView === "config" && <EditorConfigPanel />}
             </>
@@ -238,7 +244,7 @@ function CodeEditorFolder({ sessionId, device = "", workspace, mode = "code", fo
         </FloatingFileSidebar>
 
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <SplitContainer workspace={workspace} />
+          <SplitContainer workspace={workspace} showFilePicker={sidebar.narrow && !sidebar.visible} onOpenFiles={sidebar.toggle} />
         </div>
       </div>
 
