@@ -71,6 +71,26 @@ class _HangingStdout:
         pass
 
 
+class _ChunkedStdout:
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+
+    async def read(self, size):
+        await asyncio.sleep(0)
+        if not self._chunks:
+            return b""
+        chunk = self._chunks[0]
+        result, remainder = chunk[:size], chunk[size:]
+        if remainder:
+            self._chunks[0] = remainder
+        else:
+            self._chunks.pop(0)
+        return result
+
+    def close(self):
+        pass
+
+
 class _FakeStderr:
     async def read(self):
         return b""
@@ -129,7 +149,7 @@ class TestMCPServerConnection(unittest.TestCase):
             await connection._reader_task
 
             self.assertFalse(connection.initialized)
-            self.assertEqual(connection._read_buffer, "")
+            self.assertEqual(connection._read_buffer, b"")
 
         asyncio.run(run_test())
 
@@ -159,6 +179,111 @@ class TestMCPServerConnection(unittest.TestCase):
                 response,
                 {"jsonrpc": "2.0", "id": "req-1", "result": {"ok": True}},
             )
+
+        asyncio.run(run_test())
+
+    def test_reader_accepts_a_frame_at_the_byte_limit(self):
+        """A valid response whose encoded frame is exactly the cap is accepted."""
+
+        async def run_test():
+            response = {"jsonrpc": "2.0", "id": "req-1", "result": {"value": ""}}
+            response["result"]["value"] = "é" * 40
+            frame = json.dumps(response, ensure_ascii=False).encode("utf-8")
+            limit = len(frame)
+            connection = MCPServerConnection("test", "echo test")
+            connection.process = _FakeProcess(
+                stdout=_ChunkedStdout([frame + b"\n"])
+            )
+
+            with patch("kollabor_agent.mcp_integration.MAX_MCP_FRAME_BYTES", limit):
+                result = await connection._send_request(
+                    {"jsonrpc": "2.0", "id": "req-1", "method": "tools/call"}
+                )
+
+            self.assertEqual(result, response)
+
+        asyncio.run(run_test())
+
+    def test_reader_rejects_oversized_frame_split_across_chunks(self):
+        """Oversized frames fail pending calls and retire the reader connection."""
+
+        async def run_test():
+            response = {
+                "jsonrpc": "2.0",
+                "id": "req-1",
+                "result": {"padding": "x" * 200},
+            }
+            frame = json.dumps(response).encode("utf-8") + b"\n"
+            chunks = [frame[index : index + 7] for index in range(0, len(frame), 7)]
+            connection = MCPServerConnection("test", "echo test")
+            connection.initialized = True
+            connection.process = _FakeProcess(stdout=_ChunkedStdout(chunks))
+
+            with self.assertLogs(
+                "kollabor_agent.mcp_integration", level="WARNING"
+            ) as captured_logs:
+                with patch("kollabor_agent.mcp_integration.MAX_MCP_FRAME_BYTES", 128):
+                    results = await asyncio.gather(
+                        connection._send_request(
+                            {"jsonrpc": "2.0", "id": "req-1", "method": "tools/call"}
+                        ),
+                        connection._send_request(
+                            {"jsonrpc": "2.0", "id": "req-2", "method": "tools/call"}
+                        ),
+                    )
+
+            for result in results:
+                self.assertIsNotNone(result)
+                self.assertIn("error", result)
+                self.assertIn("exceeded the 128-byte limit", result["error"]["message"])
+            self.assertNotIn("x" * 200, " ".join(captured_logs.output))
+            self.assertFalse(connection.initialized)
+            self.assertEqual(connection._read_buffer, b"")
+            self.assertEqual(connection._pending_requests, {})
+
+        asyncio.run(run_test())
+
+    def test_reader_handles_multiple_frames_and_malformed_bytes(self):
+        """Bad UTF-8 frames are discarded without losing later correlated replies."""
+
+        async def run_test():
+            frames = (
+                b'{"jsonrpc":"2.0","method":"notifications/progress"}\n'
+                + b"\xff\xfe\n"
+                + '{"jsonrpc":"2.0","id":"req-1","result":{"text":"é"}}\n'.encode(
+                    "utf-8"
+                )
+            )
+            chunks = [frames[index : index + 1] for index in range(len(frames))]
+            connection = MCPServerConnection("test", "echo test")
+            connection.process = _FakeProcess(stdout=_ChunkedStdout(chunks))
+
+            result = await connection._send_request(
+                {"jsonrpc": "2.0", "id": "req-1", "method": "tools/call"}
+            )
+
+            self.assertEqual(result["result"]["text"], "é")
+
+        asyncio.run(run_test())
+
+    def test_reader_discards_partial_frame_on_eof(self):
+        """An unterminated response at EOF cannot leave its request pending."""
+
+        async def run_test():
+            connection = MCPServerConnection("test", "echo test")
+            connection.initialized = True
+            connection.process = _FakeProcess(
+                stdout=_ChunkedStdout([b'{"jsonrpc":"2.0","id":"req-1"'])
+            )
+
+            result = await connection._send_request(
+                {"jsonrpc": "2.0", "id": "req-1", "method": "tools/call"}
+            )
+
+            self.assertIsNone(result)
+            self.assertFalse(connection.initialized)
+            self.assertEqual(connection._read_buffer, b"")
+            self.assertEqual(connection._pending_requests, {})
 
         asyncio.run(run_test())
 
