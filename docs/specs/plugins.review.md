@@ -6,7 +6,9 @@ round commits shows exactly what a round changed. Reviewers were read-only and d
 | Round | Reviewers | Findings | Verdicts | Commit |
 |---|---|---|---|---|
 | 0 | role panel, 5 Haiku roles, run twice | 25, then 15 | all CHANGES | `e31c7de5` (first commit) |
-| 1 | 12 Haiku lanes (3 security, 3 design, 3 data, 3 other), 1 Codex adversarial, 3 brutal Haiku critics | 66 + 4 + 24 | all FAIL | this round's commit |
+| 1 | 12 Haiku lanes (3 security, 3 design, 3 data, 3 other), 1 Codex adversarial, 3 brutal Haiku critics | 66 + 4 + 24 | all FAIL | `6a358476` |
+| 2 | 12 Haiku lanes, 1 Codex adversarial | about 70 + 1 | all FAIL | `860a949e` |
+| 3 | 12 Haiku lanes, 1 Codex adversarial | 51 + 3 | all FAIL | the round 3 commit |
 
 ## Round 0: role panel
 
@@ -137,3 +139,61 @@ Rejected in round 2:
 - Move tab, modal, command and chat cards out of build step 3: rejected again, the owner asked for them.
 - A one-time code from the page for every management call: rejected; an agent with the engine token can
   fetch anything the page can, so it would be a check that looks like a boundary and is not one.
+
+## Round 3: the last of three
+
+| Reviewers | Findings | Verdicts |
+|---|---|---|
+| 12 Haiku lanes, 1 Codex adversarial | 51 + 3 | all FAIL; 3 P0 |
+
+What each lane caught, and what changed:
+
+- **Data.** Round 2's rename left background processes reading `settings.json`, a file nothing writes
+  (also found by Codex). The cutover dropped pr-chain's skip lists, so the new loop would pick PRs the
+  owner had held back. The usage offset could not cross midnight. Changed: processes read `values.json`;
+  `exclude.txt` and `exclude-issues.txt` are imported and read by the plugin's pick; a separate
+  `usage.offset` with lines counted by their own date; `prs/**/wt/` skipped and `ui_seed` paths
+  rewritten; install keeps `<id>.old` until `plugins.json` is written.
+- **Schema.** The manifest declared the menu row and the SDK registered it again (also Codex); eight
+  manifest keys had no definition; process names became file paths unchecked. Changed: one
+  `contributes` block is the source for rows, pages, views, modals, slash commands and chat cards, and the
+  bundle binds to its ids; every manifest key is defined; process names have a pattern.
+- **Security.** Phones could save settings that set the interpreter and checkout; pr-chain's config
+  writes change the commands its chains run; the asset route did not name its containment check; stage
+  shells could still use the system git credential helper. Changed: settings saves and plugin routes
+  marked `@ctx.local_only` refuse remote callers through the proxy and the PhoneLink bridge; `_safe_asset`
+  and a script CSP; command stages get the agent-run allowlist plus `GIT_CONFIG_NOSYSTEM=1`; absent
+  `approval` means ask; secrets never go to a run with a shell or network tool; the sheet now says the
+  loop holds the token and the stage agents run as the user.
+- **Design.** A stopped process showed Stop and no Start; the Failed to Load row had nothing to open; a
+  plugin that froze the tab could only be escaped by editing the URL; the needs-you count was hover-only.
+  Changed: buttons follow the state, a kollab-drawn panel opens from a failed row, a plugin whose last
+  boot never finished is skipped with a notice, and the row text shows `4 · 1 needs you` everywhere.
+- **SRE.** Two wrappers could run one process; agent-run daemons' fate across an engine restart was
+  unstated; disable and update left old Python in running agents (Codex). Changed: the wrapper holds its
+  lock for life; run daemons are detached and adopted or stopped by the next engine; Settings shows
+  which agents still run the old version, with Restart Agents.
+- **Builder and owner rules.** pr-chain's port waited on agent-run work its default path never uses; the
+  cutover had no way back; the owner accounts would ship inside a plugin that may be public. Changed:
+  pr-chain is built in step 3 on command-line stages and gains loadout stages in step 4; the old loop is
+  kept stopped, not deleted, for 7 days; `owners` ships empty.
+
+Rejected in round 3:
+
+- A one-time code for install, confirm and enable (asked a third time): an agent holding the engine
+  token can request the same sheet the page sees, so it would look like a wall and not be one. The
+  terminal path already needs a real terminal, and #1037 is the actual fix.
+- Rename `Build Issues Into PRs` to `Issue Intake`: kept the name, added help text that Off also stops
+  scouting.
+- Stop `/config` from returning the engine token to remote pages: existing behavior outside this spec,
+  which states plainly that page scripts hold the token (D1).
+- Mockup accessibility details (stage map as a list, chips as buttons, roving tab focus): fixed with the
+  state mockups before build step 3; the spec already requires real controls and live regions.
+
+## Where the rounds left it
+
+Three rounds turned up 15 P0 and about 170 P1/P2 findings in all; every round's P0s are fixed or rejected
+above with a reason. The design held across all three rounds: trusted plugins with an honest sheet, a
+manifest that declares everything, a wrapper per background process, daemon-enforced agent limits, one
+settings store per plugin, and pr-chain as the acceptance test. What moved was the truth of each claim
+and the failure handling around it.

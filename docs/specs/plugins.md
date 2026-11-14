@@ -80,15 +80,16 @@ Title Case label and a short count on the right, like MCP Servers' `2/5`. PR Cha
 the chains running now. Hovering shows `4 chains running, 1 chain needs you`; the second part shows
 only when something needs you, and both parts use the singular for 1. When kollab itself knows the
 plugin is unwell, kollab sets the count: `Stopped` after the crash limit, `Failed to Load` when its code
-failed. Plugin rows sort by plugin name. A touch screen has no hover, so there the row text itself reads
-`4 · 1 needs you`. On a touch screen every row, tab and button is at least 44 px
-tall. On a phone the menu is the existing right-hand sheet and the rows are there too.
+failed. Plugin rows sort by plugin name. The row text itself reads `4 · 1 needs you` whenever something needs you, on every device. On a
+touch screen (`pointer: coarse`) every plugin row, tab and button is at least 44 px tall; the plugin host
+sets that size for everything inside `[data-plugin]`. On a phone the menu is the existing right-hand sheet and the rows are there too.
 
 **What a row opens.** The plugin picks one of three per row, or an external link:
 
 - **Tab**: a main-area view beside Chat, Trajectory, Code Editor, Git and Terminal. It belongs to the
   open chat and receives its session and folder. The view list at the top of the right-hand menu shows
-  it with the plugin's icon. A tab that needs a folder hides for a chat with none, like Code Editor.
+  it with the plugin's icon. A tab that needs a folder hides for a chat with none, like Code Editor. Each chat remembers its own tab;
+  a chat that does not offer the plugin's tab shows Chat.
 - **Modal**: a dialog with the plugin's tabs, the same shape as Settings. On a phone it fills the screen.
 - **Page**: the whole main area with the plugin's own tab bar. PR Chain opens a page with Board, Pull
   Requests, Issues, Spend and Config. Picking an agent in the left sidebar leaves the page.
@@ -110,7 +111,8 @@ computer; over PhoneLink the tab is read-only and says `Manage plugins on this c
 
 Background process states: `Running · 2 h`; `Stopping · 12 min left`; `Running · No Heartbeat for 6 min` (a process that
 promised a heartbeat and went quiet); `Exited`; `Stopped` (stopped by you); `Stopped After 5 Crashes ·
-View Log`. The list row shows the same text.
+View Log`. The list row shows the same text. A running process offers Restart and Stop; a stopped, exited
+or crash-stopped one offers Start.
 
 **Add sheet.** Shown before anything is copied or run:
 
@@ -122,8 +124,9 @@ Adds            a right-menu row and a page · code that runs in every agent · 
                 1 background process · 1 slash command · 6 agents · no hooks · no MCP servers
 Through Kollab  runs agents with your loadouts
                 agents that run tools without asking; they can do anything you can
-                its own code and its loop read the secret GITHUB_TOKEN; its agents never get it
-On Its Own      runs gh, git, codex and claude; its coding agents use a shell without asking
+                its loop holds the secret GITHUB_TOKEN; its stage agents run without it, as you
+On Its Own      runs gh, git, codex, claude, python3 and pgrep; its coding agents use a shell without asking
+                reads ~/.kollab/config.json to stop a chain when it changes
                 talks to github.com and raw.githubusercontent.com
 Limits          250,000 tokens and 1 hour per agent run · 4 runs at once
                 Daily Token Cap 2,000,000 tokens: kollab agent runs plus the usage the plugin reports;
@@ -152,8 +155,10 @@ numbers in the text: `A pull request is waiting for your review.  [Open]`.
 card for a tool or message it owns, such as a PR status card.
 
 **Failures.** A plugin whose code fails while loading keeps its row as `PR Chain  Failed to Load`, and
-one that fails while drawing shows `Failed to Render`; both offer Retry and View Error, and everything
-else keeps working. `?plugins=off` in the page URL loads the web UI with no plugin code and Settings →
+one that fails while drawing shows `Failed to Render`; both open a small kollab-drawn panel with Retry,
+View Error and Turn Off, and everything else keeps working. A plugin whose last boot never finished (the
+tab froze or closed during it) is skipped on the next load with the notice `PR Chain was skipped: it
+froze the page last time.  [Turn On Again]`. `?plugins=off` in the page URL loads the web UI with no plugin code and Settings →
 Plugins says `Plugins are off for this page`. When the daily cap is reached, agent runs fail with
 `Daily Token Cap reached. Agent runs start again at 00:00 local time.`
 
@@ -217,16 +222,17 @@ as `kollab_plugin_pr_chain` and two packages never collide.
       "secrets": ["GITHUB_TOKEN"]
     }
   },
-  "web": {
-    "entry": "web/dist/index.js",
-    "style": "web/dist/index.css",
-    "menu": [{ "id": "pr-chain", "label": "PR Chain", "icon": "git-pull-request", "open": { "page": "board" } }]
+  "web": { "entry": "web/dist/index.js", "style": "web/dist/index.css" },
+  "contributes": {
+    "menu": [{ "id": "pr-chain", "label": "PR Chain", "icon": "git-pull-request", "open": { "page": "board" } }],
+    "pages": [{ "id": "board", "title": "PR Chain" }],
+    "slash": ["pr-chain"]
   },
   "agents": "agents", "skills": "skills", "commands": "commands",
   "hooks": "hooks/hooks.json", "mcp": ".mcp.json",
   "settings": "settings.json",
-  "uses": ["agents", "agents:unattended", "secret:GITHUB_TOKEN", "run:gh,git,codex,claude",
-           "net:github.com,raw.githubusercontent.com"]
+  "uses": ["agents", "agents:unattended", "secret:GITHUB_TOKEN", "run:gh,git,codex,claude,python3,pgrep",
+           "net:github.com,raw.githubusercontent.com", "files:~/.kollab/config.json"]
 }
 ```
 
@@ -238,8 +244,11 @@ as `kollab_plugin_pr_chain` and two packages never collide.
 | `kollab` | version range; `add` refuses a kollab outside it |
 | `python` | a `BasePlugin` class that loads in every agent daemon |
 | `engine` | `make_router(ctx: PluginContext) -> APIRouter`, mounted under `/plugins/{id}/api/` |
-| `services.<name>` | `command` (run from the plugin folder); `autostart`; `restart` (`on-failure` default, `always`, `never`); `stop_timeout_s` (default 30); `heartbeat_s` (optional); `secrets` (granted secrets the wrapper puts in its environment) |
-| `web` | the entry module and stylesheet, both inside `web/dist/`, and `menu`: rows declared up front, so a row exists even when the bundle fails; the bundle adds counts |
+| `services.<name>` | `<name>` matches `^[a-z0-9][a-z0-9-]{0,39}$`; `command` (run from the plugin folder); `autostart`; `restart` (`on-failure` default, `always`, `never`); `stop_timeout_s` (default 30); `heartbeat_s` (optional); `secrets` (granted secrets the wrapper puts in its environment) |
+| `web` | the entry module and stylesheet, both inside `web/dist/` |
+| `contributes` | everything the plugin adds, by id: `menu` rows, `views`, `pages`, `modals`, `slash` commands and chat `renderers`. The sheet's Adds line and the app's rows come from here, so a row exists even when the bundle fails; the bundle's `k.*` calls bind to these ids, and an undeclared id is ignored with a warning |
+| `version`, `description` | strings |
+| `agents`, `skills`, `commands`, `hooks`, `mcp`, `settings` | paths inside the plugin, in the formats kollab already reads |
 | `uses` | see the next section |
 
 Every path resolves inside the plugin folder (by realpath; a symlink that leads out is refused).
@@ -257,7 +266,8 @@ the UI calls them Background Processes.
 | `net:<hosts>` | talk to these hosts | no |
 | `files:<paths>` | read or write outside its data folder | no |
 
-A request through kollab without its entry fails with 403 naming the missing entry (`pr-chain did not
+The sheet's lines come from `uses`, `contributes` and each process's `secrets`; a process secret with no
+matching `secret:` entry is refused at add. A request through kollab without its entry fails with 403 naming the missing entry (`pr-chain did not
 declare agents:unattended`). That refusal covers only requests that go through kollab's routes and
 `ctx`. Plugin code runs as the user, so it could go around kollab; the add sheet says so. When a plugin
 runs coding agents of its own (pr-chain's `codex exec` and `claude -p` stages), the sheet says what they
@@ -288,8 +298,9 @@ follows the ref recorded at add.
 | `~/.kollab/plugin-data/<id>/run/` | `token` (0600), `<process>.pid`, `<process>.state`, `<process>.log`, `runs.json`, `usage.jsonl`, `usage-<date>.json` | kollab, and `usage.jsonl` appends from the plugin |
 | `~/.kollab/plugin-data/<id>@dev/` | a dev run's own data folder; its `values.json` starts as a copy of the installed values | the dev run |
 
-Install and update are one unit: the clean folder is staged, renamed into place, and `plugins.json` is
-written last, so a failure part-way leaves the old version in force.
+Install and update are one unit: the old folder moves to `<id>.old`, the clean folder is renamed into
+place, `plugins.json` is written under its sibling `plugins.json.lock`, and `<id>.old` is deleted. A
+failure part-way is rolled back on the next start by restoring `<id>.old`.
 
 A folder in `~/.kollab/plugins/` with a `kollab-plugin.json` is a package and loads only through its
 manifest; a loose `.py` file there loads as today. A dev run has its own data folder and its own process
@@ -327,18 +338,20 @@ All sit behind the existing bearer-token middleware.
 |---|---|---|---|
 | `GET /plugins` | `{schema: 1, plugins: [PluginEntry]}` (below) | no | yes |
 | `GET /plugins/events` | SSE: `plugins-changed` after any install, update, remove, enable or disable | no | yes |
-| `ANY /plugins/{id}/api/{path}` | the plugin's router, through one dispatcher to a per-plugin sub-app, so enable and disable need no engine restart | own id | yes |
+| `ANY /plugins/{id}/api/{path}` | the plugin's router, through one dispatcher to a per-plugin sub-app, so enable and disable need no engine restart | own id | yes, except routes the plugin marks `@ctx.local_only` (pr-chain marks its config and profile writes, which change the commands its chains run) |
 | `GET`, `POST /plugins/{id}/events` | the plugin's SSE stream of `{topic, data, ts}`; the engine sets `ts`. Topic `heartbeat` with `{service}` feeds the process state; with no engine, heartbeats are dropped and the state reads unknown | own id | yes |
 | `GET /plugins/{id}/usage` | today's `{date, total, cap, remaining}` | own id | yes |
-| `GET`, `PUT /plugins/{id}/settings` | read and save its settings (Settings below) | own id | yes |
+| `GET /plugins/{id}/settings` | read its settings | own id | yes |
+| `PUT /plugins/{id}/settings` | save its settings (Settings below) | own id | no |
 | `POST /plugins/{id}/agents` → `{run_id, session_id}` at once; `GET`, `DELETE .../agents/{run_id}` | agent runs | own id | yes |
-| `POST /plugins/{id}/services/{name}/start`, `/stop`, `/restart`; `GET .../log?tail=200` | background processes | own id | yes |
+| `POST /plugins/{id}/services/{name}/start`, `/stop`, `/restart` | background processes | own id | no |
+| `GET /plugins/{id}/services/{name}/log?tail=200` | the process log, redacted like Agent Output | own id | yes |
 | `POST /plugins/install`, `POST /plugins/{id}/update` → `{job_id}`; `GET /plugins/jobs/{job_id}` | clone or fetch into staging, check, then report the sheet facts | no | no |
 | `POST /plugins/jobs/{job_id}/confirm` | `{commit, files_sha256}`: refused unless both match the staged copy; then move into place | no | no |
 | `POST /plugins/{id}/enable`, `/disable`, `/remove` | manage | no | no |
 
 "Plugin token: no" means only the user's engine token works. "Remote page: no" means the web UI's
-`/engine` proxy refuses the route for any client that is not on this computer (the proxy sees the real
+`/engine` proxy and the PhoneLink bridge refuse the route for any client that is not on this computer (the proxy sees the real
 client address; the engine behind it only ever sees the proxy), and the engine refuses it on requests the
 proxy marks as forwarded. A page opened over PhoneLink or the relay can use plugins but never install or
 manage them.
@@ -364,7 +377,10 @@ manage them.
 
 The web UI server serves `GET /plugins/{id}/web/{path}` only from the plugin's `web/dist/` folder, only
 files ending in `.js`, `.mjs`, `.css`, `.png`, `.woff2` or `.json`, never a dotfile, and with
-`X-Content-Type-Options: nosniff`. The route is registered before the app's catch-all route. An HTML file is never served, so nothing in a plugin folder can open
+`X-Content-Type-Options: nosniff`. The route is registered before the app's catch-all route and uses the
+same `_safe_asset` containment check as the app's own files, so a symlink that leaves `web/dist/` is
+refused. The web UI sends `Content-Security-Policy: script-src 'self'` plus the import map's hash, so no
+inline script or `eval` runs on the page. An HTML file is never served, so nothing in a plugin folder can open
 a page of its own on the web UI's origin. Asset URLs carry `?v=<hash of the file>`.
 
 ### Engine-side context (`kollabor_plugins.context.PluginContext`)
@@ -383,7 +399,7 @@ Passed to `make_router(ctx)`:
 | `ctx.lock(name)` | a `kollabor_config.file_lock` lock in its data folder |
 
 Background processes get `KOLLAB_PLUGIN_ID`, `KOLLAB_PLUGIN_ROOT`, `KOLLAB_PLUGIN_DATA`,
-`KOLLAB_ENGINE_URL` and `KOLLAB_PLUGIN_TOKEN`, and read settings from `<data>/settings.json`.
+`KOLLAB_ENGINE_URL` and `KOLLAB_PLUGIN_TOKEN`, and read settings from `<data>/values.json`, the file every save writes.
 
 ### Agent runs
 
@@ -406,8 +422,11 @@ Background processes get `KOLLAB_PLUGIN_ID`, `KOLLAB_PLUGIN_ROOT`, `KOLLAB_PLUGI
 - `POST /plugins/{id}/agents` answers at once with `{run_id, session_id}`. The run's result is read with
   `GET .../agents/{run_id}`: `{status: "running" | "done" | "timeout" | "capped" | "failed" | "cancelled",
   final_text, transcript, usage: {input, output, cost, model}}`.
-- `folder` goes through `folder_or_400`. `approval: "trust_all"` needs `agents:unattended`; each name in
-  `secrets` needs `secret:<NAME>`.
+- `folder` goes through `folder_or_400`. `approval` is `ask` when absent; `trust_all` needs
+  `agents:unattended`. Each name in `secrets` needs `secret:<NAME>`, and secrets are refused for a run
+  whose tools include a shell or network tool.
+- Plugin run daemons are detached: an engine shutdown or crash leaves them running, and the next engine
+  adopts each live one from `runs.json` by pid and start time, or stops it when it is past its deadline.
 - Environment: built from an allowlist (`PATH`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `USER`, `SHELL`), with
   `HOME` set to a scratch folder inside the plugin's data folder and `KOLLAB_CONFIG_DIR` set to the real
   config folder so the daemon still finds its loadouts; then `env`, whose names must not be
@@ -432,13 +451,15 @@ Background processes get `KOLLAB_PLUGIN_ID`, `KOLLAB_PLUGIN_ROOT`, `KOLLAB_PLUGI
 ### Usage and the daily cap
 
 The engine keeps one counter per plugin per day in `run/usage-<date>.json` (local date):
-`{date, total, offset, run_ids}`, written atomically under its sibling lock. It adds each finished agent
-run once (by run id) and each complete line a plugin appends to `run/usage.jsonl`
-(`{ts, model, input, output, labels}`) from the saved byte offset; appending works with or without an
+`{date, total, run_ids}`, written atomically under its sibling lock, while `run/usage.offset` records how
+far `run/usage.jsonl` has been read. It adds each finished agent run once (by run id) and each complete
+line a plugin appends to `run/usage.jsonl` (`{ts, model, input, output, labels}`) to the day of that
+line's own `ts`; appending works with or without an
 engine. `max_tokens_per_day` (default 2,000,000) refuses the next agent run with 429 once the counter
 reaches it, and resets at 00:00 local time. Tokens a plugin spends without appending them are not
 counted; pr-chain appends one line per command stage from the transcript it already reads, and its loop
-reads `GET /plugins/pr-chain/usage` before each stage and starts none past the cap.
+reads `GET /plugins/pr-chain/usage` before each stage, sums today's `usage.jsonl` lines itself when no
+engine answers, and starts no stage past the cap or when it cannot tell.
 
 ### Web plugin API
 
@@ -460,24 +481,19 @@ export default definePlugin((k) => {
       { id: "config", label: "Config", render: Config },
     ],
   });
-  k.menu({
-    id: "pr-chain",
-    label: "PR Chain",
-    icon: "git-pull-request",
-    count: { path: "/badge", refreshOn: "chain" },
-    open: { page: "board" },
-  });
+  k.menu("pr-chain", { count: { path: "/badge", refreshOn: "chain" } });
 });
 ```
 
 Every `render` is a React component that receives `{ k, session }` as props (`session` only inside a
-`view`). The `/badge` route answers `{text, hint}`.
+`view`). The `/badge` route answers `{text, hint}`. Paths in `k.api`, `k.useApi` and `count.path` are
+relative to `/plugins/{id}/api/`.
 
 Contribution points. Each is one existing component that also reads the plugin registry:
 
 | Call | Shows in | Existing owner |
 |---|---|---|
-| `k.menu({id, label, icon, count?, open})` | a right-hand menu row | menu rows in `SessionPanel.tsx` |
+| `k.menu(id, {count})` | a live count on a declared right-hand menu row | menu rows in `SessionPanel.tsx` |
 | `k.view({id, label, icon, render, needs_folder?})` | a main-area tab for the open chat | `VIEWS` in `SessionPanel.tsx` |
 | `k.page({id, title, tabs})` | the whole main area with a plugin tab bar | main column in `App.tsx` |
 | `k.modal({id, title, tabs})` | a dialog with tabs; full screen on a phone | `components/ui/dialog` |
@@ -522,14 +538,15 @@ carries its own React (`web/dist/index.js bundles its own React: mark react as e
 The hello plugin template carries the dev loop: `package.json` with `npm run build` (Vite library build
 into `web/dist/`) and `npm run dev` (the same build in watch mode), and `web/src/kollab-plugin.d.ts`,
 generated from `frontend/src/plugins/sdk.ts`. Under `kollab plugin dev`, a page reload picks up the
-rebuilt `web/dist/`.
+rebuilt `web/dist/`; a change under `python/` remounts the engine router and restarts the plugin's
+background processes; the `python` part reaches agents when they restart.
 
 ### Settings
 
 A plugin's settings are one section in the shape `get_config_widgets()` already returns:
 `{"title": "PR Chain", "widgets": [{"type", "label", "config_path", "help", ...}]}`. For a package,
-`config_path` is relative to the plugin; for a built-in plugin the conversion adds `plugins.<name>.` in
-front, as today. `settings.json` holds exactly that section, so a package plugin and a `BasePlugin`
+`config_path` is relative to the plugin; a built-in plugin's widgets keep the full paths they already
+use, and the conversion adds nothing to them. `settings.json` holds exactly that section, so a package plugin and a `BasePlugin`
 declare settings the same way. Values are `{"<config_path>": value}` in `values.json`.
 
 ```json
@@ -538,7 +555,8 @@ declare settings the same way. Values are `{"<config_path>": value}` in `values.
   "widgets": [
     { "type": "spinbox", "label": "Max Threads", "config_path": "loop.threads", "help": "Chains that run at once.",
       "min_value": 1, "max_value": 4, "step": 1, "default": 1 },
-    { "type": "checkbox", "label": "Build Issues Into PRs", "config_path": "issues.build", "default": true }
+    { "type": "checkbox", "label": "Build Issues Into PRs", "config_path": "issues.build", "default": true,
+      "help": "Off also stops scouting for new issues; open PRs keep flowing." }
   ]
 }
 ```
@@ -568,7 +586,7 @@ registry replaces it, and `GET /plugins` serves the same entries:
 
 ```
 PluginEntry = {id, name, version, kind: "built-in" | "installed" | "dev", source, commit, enabled, shadowed,
-               state: "ok" | "error" | "off" | "stopping", error, settings: [make_field fields],
+               state: "ok" | "error" | "off" | "stopping" | "changed-on-disk" | "skipped", error, settings: [make_field fields],
                web: {entry, style, hash} | null, contributes: {menu, views, pages, modals, commands},
                services: [{name, state: "running" | "stopping" | "exited" | "stopped" | "crash-stopped" | "unknown",
                            desired, pid, since, restarts, heartbeat}], uses, granted}
@@ -593,7 +611,10 @@ with `kollabor.binary.kollab_argv()` in its own session:
   recorded child is alive; then nothing new starts until that child exits. Nothing is found by scanning
   other processes, so a stage child or a test install can never be mistaken for the service. Otherwise
   the supervisor starts a wrapper with a fresh nonce, and the wrapper writes the pid file before and
-  right after it starts the command.
+  right after it starts the command. The wrapper holds `run/<process>.lock` for its whole life and exits
+  at once if another wrapper holds it, so the supervisor's `try_lock` failing means a wrapper is running.
+  The wrapper is the only writer of the pid and state files and writes them atomically; its nonce is in
+  its command line, so `ps` shows which start it is.
 - **Desired state.** `run/<process>.state` holds `desired` (`running` or `stopped`) and the exit history.
   The tick starts only processes whose desired state is running and that are not crash-stopped. Start
   sets running; Stop, Turn Off and the crash limit set stopped; an `on-failure` process that exits 0 stays
@@ -620,6 +641,9 @@ with `kollabor.binary.kollab_argv()` in its own session:
   file and opens a new one, keeping 3.
 
 Disable and remove first ask about live agent runs, cancel them, then stop the plugin's processes.
+Running agent daemons keep a plugin's `python` part until they restart: after Off or Update, Settings →
+Plugins shows `3 agents still run the old version` with Restart Agents, and each daemon picks up the
+change when it restarts.
 Update stops processes the same way, swaps the folder, and starts them again.
 
 ### pr-chain as a plugin
@@ -629,12 +653,13 @@ repository exists, step 4 develops it with `kollab plugin dev`.
 
 | pr-chain today | As a plugin |
 |---|---|
-| the `pr-chain` command, `ui_stack.py`, `ui_shoot.py` and the shared helpers it calls from outside its folder (`fold.py`, `land_pr.py`, `kit.py`) | all inside the plugin: `bin/` and `python/`; every path resolves from `KOLLAB_PLUGIN_ROOT` or `KOLLAB_PLUGIN_DATA`, never the home folder |
-| the repo, checkout, Python interpreter and owner accounts set in `kit.py` and the script | plugin settings `repo`, `checkout`, `python` and `owners` |
+| the `pr-chain` command, `ui_stack.py`, `ui_shoot.py` and the shared helpers it calls from outside its folder (`fold.py`, `land_pr.py`, `kit.py`) | all inside the plugin: `bin/` and `python/`, as the plugin's own copies (the shared ones stay for other tools); every path resolves from `KOLLAB_PLUGIN_ROOT` or `KOLLAB_PLUGIN_DATA`, apart from the declared `~/.kollab/config.json` read |
+| the repo, checkout, Python interpreter and owner accounts set in `kit.py` and the script | plugin settings `repo`, `checkout`, `python` and `owners` (empty by default; the plugin lands nothing until it is set) |
 | the stage prompts | seeded into the data folder from the plugin's defaults on first run, so edits survive updates |
 | `STATE.json` written in place | written with a temp file and rename (a small atomic-write function vendored in `python/`, since the loop runs as plain `python3`) |
 | the config tripwire: a chain stops when `~/.kollab/config.json` changes | kept, comparing key by key and ignoring the keys kollab stamps itself |
-| the loop kept alive with `nohup` | background process `loop`; it gains a SIGTERM handler that starts no new lap, passes SIGTERM to its chains and exits when they stop; `stop_timeout_s` 2400 covers one stage |
+| the `pr-chain` command from a terminal | also `/pr-chain <args>` in a chat, through the plugin's `python` entry (a `BasePlugin` command) |
+| the loop kept alive with `nohup` | background process `loop`; it gains a SIGTERM handler that starts no new lap and passes SIGTERM to its chains, which record each stage's process group in their claim and stop it; `stop_timeout_s` 2400 covers one stage. A `STOP` file shows as `Stopped by STOP File` with Clear |
 | `board-config.json` (thread cap) and the `NO-BUILD` file (issue building off) | plugin settings `loop.threads` and `issues.build` (on unless `NO-BUILD` existed); the Config tab and Settings → Plugins edit the same values |
 | `models.json`, `profiles.json`, `commands.json` | files in the data folder, edited by the Config tab through the plugin's routes |
 | `rates.json` and the downloaded price cache | in the data folder; a refresh fetches from `raw.githubusercontent.com`, declared in `uses` |
@@ -650,9 +675,12 @@ repository exists, step 4 develops it with `kollab plugin dev`.
 | a relay process to reach the board from other devices | not needed: the web UI already serves remote devices with auth |
 | `routes/pr_chain.py`, `pr_chain.py` and `components/pr-chain/` in kollab (#1008) | removed from core once the plugin page has parity |
 
-The port adds what today's script lacks: each command stage runs with a scratch HOME (no gh or ssh
-config), no `GH_TOKEN`, `GITHUB_TOKEN` or `SSH_AUTH_SOCK`, and an empty `GH_CONFIG_DIR`. Only the plugin's
-own code pushes, labels, comments and merges. Kollab does not sandbox these stages.
+The port adds what today's script lacks: each command stage gets the agent-run environment allowlist
+with a scratch HOME (no gh or ssh config), `GIT_CONFIG_NOSYSTEM=1` and `GIT_TERMINAL_PROMPT=0` (no
+system credential helpers), an empty `GH_CONFIG_DIR`, and no `GH_TOKEN`, `GITHUB_TOKEN`,
+`SSH_AUTH_SOCK`, `KOLLAB_PLUGIN_TOKEN` or provider keys. Stage shells still run as the user and can reach
+whatever the user's keychain and files allow; kollab does not sandbox them (#1037). The plugin's own code
+is what pushes, labels, comments and merges.
 
 Parity means that for the same data every route above answers what the current board answers, and
 screenshots of the five tabs match at 1440, 820 and 390 px wide in dark and light.
@@ -664,13 +692,18 @@ Two loops never run on the same PRs. With the owner's yes:
 1. `pr-chain stop` writes the `STOP` file; the running chains finish their stage and the loop exits.
 2. Kollab imports once into `~/.kollab/plugin-data/pr-chain/`: from the state folder `prs/`, `issues/`,
    `ledger.jsonl` (absolute paths rewritten) and `logs/`; from the config folder `models.json`,
-   `profiles.json`, `commands.json`, `prompts/`, `rates.json` and the price cache; the thread cap from
-   `board-config.json` and the issue switch from `NO-BUILD` into the plugin's settings. Worktrees, `STOP`,
-   `locks/`, `claims/` and scratch homes are skipped; worktrees come back on demand. A marker file in the
+   `profiles.json`, `commands.json`, `prompts/`, `rates.json`, the price cache, the GitHub read cache and the skip lists `exclude.txt` and
+   `exclude-issues.txt`, which the plugin's pick reads; the thread cap from
+   `board-config.json` and the issue switch from `NO-BUILD` into the plugin's settings. Worktrees
+   (`prs/**/wt/`), `STOP`, `locks/`, `claims/` and scratch homes are skipped, worktrees come back on
+   demand, and the `ui_seed` paths in `STATE.json` are rewritten with the ledger's. A marker file in the
    data folder records the import, so it never runs twice.
-3. The old board runs on a second copy of the data, so nothing it writes reaches either original, while
-   the plugin page is compared with it.
-4. With parity shown, the plugin's loop is turned on and the old loop, board and relay are retired.
+3. The old board runs on a second copy of the data, through new `PR_CHAIN_WORK`, `PR_CHAIN_CONFIG` and
+   `PR_CHAIN_SCRIPT` overrides (today it reads fixed home-folder paths), so nothing it writes reaches
+   either original, while the plugin page is compared with it.
+4. With parity shown, the plugin's loop is turned on. The old loop, board and relay are retired: stopped
+   for 7 days with nothing deleted, so starting the old loop again is the way back if the plugin has to
+   be turned off.
 
 ### Owning files
 
@@ -689,6 +722,7 @@ Two loops never run on the same PRs. With the owner's yes:
 | `packages/kollabor-webui/frontend/src/components/ui/dialog.tsx` | a full-screen phone variant with a scrolling body |
 | `kollabor/goals/` | honor `KOLLAB_RUN_DEADLINE` and `KOLLAB_RUN_MAX_TOKENS` at the dispatch gate |
 | `packages/kollabor-engine/src/kollabor_engine/routes/plugins.py`, `plugin_agents.py`, `server.py` | routes, agent runs, usage counter, supervisor tick |
+| `packages/kollabor-engine/src/kollabor_engine/daemon_pool.py` | take a run's own environment instead of copying the engine's; leave plugin run daemons running when the engine stops |
 | `packages/kollabor-webui/src/kollabor_webui/server.py` | serve `/plugins/{id}/web/*` from `web/dist/` only |
 | `packages/kollabor-webui/frontend/src/plugins/` | new: loader, registry, `sdk.ts`, error boundary |
 | `packages/kollabor-webui/frontend/vite.config.ts`, `index.html` | `plugin-runtime` entry and import map |
@@ -700,13 +734,16 @@ Two loops never run on the same PRs. With the owner's yes:
 1. Packages, the wrapper and supervisor, the one plugin list with `/config` reading it, the settings
    writer and the CLI, with the hello plugin's Python, settings and one background process. Terminal only.
    The hello plugin's web parts land in step 3; until then its tests use a committed `web/dist/` fixture.
-2. Engine routes except agent runs: `/plugins`, events, settings, background processes, install and
-   management.
-3. Web loader, registry and the eight contribution points; Settings → Plugins; the add sheet.
-4. Agent runs, once #889 to #897 are closed. The pr-chain plugin, developed with `kollab plugin dev`.
+2. Engine routes except agent runs (`/plugins`, events, settings, background processes, install and
+   management), the agent file tools' read deny list and the `web/dist/` file route, each with its tests.
+3. The state mockups, then the web loader, registry and the eight contribution points, Settings →
+   Plugins and the add sheet; the pr-chain plugin with its command-line stages, developed with
+   `kollab plugin dev`.
+4. Agent runs, once #889 to #897 are closed, and pr-chain's option to run a stage on a kollab loadout.
 5. Cutover, then removal of the #1008 reader and dialog.
 
-Steps 2 and 3 share no files and can run at the same time once step 1 lands.
+Steps 2 and 3 share no files and can run at the same time once step 1 lands. Every step lands as its own
+PR, goes through the design review swarm when it changes a surface, and gets an independent code review.
 
 ## Scenarios
 
@@ -855,7 +892,12 @@ Red first; each test lands failing before its code:
 - `tests/unit/engine/test_plugin_agents.py`: POST answers at once and GET returns the result; defaults
   applied; refused `env` names; `runs.json` written atomically and re-read after a simulated restart;
   the daemon gate stops a run past its deadline or cap with no engine; the fifth concurrent run gets 429;
-  the daily counter from runs and `usage.jsonl`, its 429 and its midnight reset.
+  the daily counter from runs and `usage.jsonl`, its 429 and its midnight reset; a usage line written
+  after midnight counts toward the new day.
+- `tests/unit/engine/test_plugin_policy.py`: absent `approval` means ask; secrets refused for a run with a
+  shell or network tool; `PUT settings` and `@ctx.local_only` routes refused for remote callers through
+  the proxy and the PhoneLink bridge; a token in a log line comes back redacted; a second wrapper exits
+  while the first holds the lock.
 - `packages/kollabor-webui/frontend/src/plugins/*.test.ts`: error boundary, Failed to Render, the 5 s
   limit, Retry with a new URL, a late import ignored, `plugins-changed` adds and removes rows, a chat on
   a removed tab goes to Chat, one React instance, text from GitHub rendered as text.
