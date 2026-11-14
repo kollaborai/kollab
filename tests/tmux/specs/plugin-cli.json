@@ -80,6 +80,7 @@
     {"action": "capture", "show": true},
     {"action": "wait_for", "pattern": "Greeting", "timeout": 10},
     {"action": "send_keys", "keys": "Space"},
+    {"action": "capture", "show": true},
     {"action": "send_keys", "keys": "C-s"},
     {"action": "wait_for", "pattern": "Save to:", "timeout": 10},
     {"action": "type", "text": "g"},
@@ -92,6 +93,7 @@
       "assert_contains": "service-stopped"
     },
     {"action": "send_keys", "keys": "Space"},
+    {"action": "capture", "show": true},
     {"action": "send_keys", "keys": "C-s"},
     {"action": "wait_for", "pattern": "Save to:", "timeout": 10},
     {"action": "type", "text": "g"},
