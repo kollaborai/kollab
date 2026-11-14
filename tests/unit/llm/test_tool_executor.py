@@ -7,8 +7,10 @@ and result formatting functionality.
 import asyncio
 import os
 import sys
+import tempfile
 import unittest
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -154,6 +156,48 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.output.strip(), "Hello World")
         self.assertEqual(result.error, "")
         self.assertGreaterEqual(result.execution_time, 0)
+
+    async def test_terminal_read_only_tool_allows_reads_and_refuses_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            self.executor.workspace = workspace
+            self.executor.set_bundle_scope(
+                ["file-read", "file-grep", "terminal-read"]
+            )
+            self.executor.shell_executor.run_argv = AsyncMock(
+                return_value=ShellResult(
+                    success=True, stdout="commit\n", stderr="", exit_code=0
+                )
+            )
+
+            read_result = await self.executor.execute_tool(
+                {
+                    "type": "terminal_read",
+                    "id": "terminal-read-1",
+                    "command": "git log --oneline -1",
+                    "cwd": str(workspace),
+                }
+            )
+            write_result = await self.executor.execute_tool(
+                {
+                    "type": "terminal_read",
+                    "id": "terminal-read-2",
+                    "command": "touch x.txt",
+                    "cwd": str(workspace),
+                }
+            )
+
+            self.assertTrue(read_result.success)
+            self.assertEqual(read_result.output, "commit\n")
+            self.assertFalse(write_result.success)
+            self.assertIn("read-only", write_result.error.lower())
+            self.assertFalse((workspace / "x.txt").exists())
+            self.executor.shell_executor.run_argv.assert_awaited_once_with(
+                ("git", "log", "--oneline", "-1"),
+                timeout=10,
+                cwd=workspace,
+                max_output_bytes=8 * 1024,
+            )
 
     async def test_terminal_output_uses_the_only_active_session_when_name_is_missing(self):
         plugin = MagicMock()
