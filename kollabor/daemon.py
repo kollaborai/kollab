@@ -36,6 +36,13 @@ SERVICE_PID_ENV = "KOLLAB_SERVICE_PID"
 # exec_detached_child or by a supervisor that owns its Popen handle. The CLI
 # must not fork again or the supervisor would retain only the exiting parent.
 DETACHED_CHILD_ENV = "KOLLAB_DETACHED_CHILD"
+# A restart in place (#968) names the conversation the new image resumes; the new
+# image reads it once at boot and drops it, so a later restart names its own.
+RESUME_SESSION_ENV = "KOLLAB_RESUME_SESSION"
+# Seconds an attached terminal window keeps trying to attach again once its daemon's
+# connection ended and the daemon is still alive (a restart in place, #968) before it
+# tells the user to run kollab again.
+REATTACH_WAIT = 30.0
 
 
 class DaemonExited(RuntimeError):
@@ -54,6 +61,50 @@ def detached_command(argv: list[str]) -> list[str]:
     if "--detached" not in args and "-d" not in args:
         args.insert(0, "--detached")
     return [*kollab_argv(), *args]
+
+
+def restart_command(argv: list[str]) -> list[str]:
+    """The command that starts this detached agent again in place: same flags, still detached.
+
+    Goes through ``kollab_argv()``, so a binary install starts the file on disk,
+    which holds the upgrade, and a source run starts the same interpreter.
+    """
+    return detached_command(argv)
+
+
+def restart_env(session_id: str, environ: dict[str, str] | None = None) -> dict[str, str]:
+    """The restarted image's environment: the detached marker (cli_main must not fork again) and the conversation."""
+    env = dict(os.environ if environ is None else environ)
+    env[DETACHED_CHILD_ENV] = "1"
+    if session_id:
+        env[RESUME_SESSION_ENV] = session_id
+    return env
+
+
+async def resume_after_restart(state_service, environ: dict[str, str] | None = None) -> bool:
+    """Pick the conversation a restart named back up; False when none was named or it could not load."""
+    env = os.environ if environ is None else environ
+    session_id = env.pop(RESUME_SESSION_ENV, "")
+    if not session_id:
+        return False
+    try:
+        await state_service.resume_conversation(session_id)
+    except Exception as e:
+        logger.warning(f"restart: could not resume conversation {session_id!r}: {e}")
+        return False
+    return True
+
+
+async def wait_until_idle(is_busy, poll: float = 0.5, limit: float = 3600.0) -> bool:
+    """Wait for the turn in progress to end (never cut it); False if it is still running after ``limit`` seconds."""
+    import asyncio
+
+    deadline = time.monotonic() + limit
+    while is_busy():
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(poll)
+    return True
 
 
 def spawn_detached_child(argv: list[str]) -> int:

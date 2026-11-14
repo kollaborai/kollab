@@ -89,6 +89,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         state.attach_to_context       (phase 4.5 step 6 write)
         state.archive_context         (phase 4.5 step 6 write)
         state.restart_session         (phase 4.5 step 7 write)
+        state.restart_agent           (#968 write)
         state.enable_mcp_server       (phase 4.5 step 7 write)
         state.disable_mcp_server      (phase 4.5 step 7 write)
         state.test_mcp_server         (phase 4.5 step 7 read)
@@ -377,6 +378,12 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         except ValueError as e:
             return {"error": str(e)}
         return snapshot.to_dict()
+
+    async def _restart_agent(params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await state_service.restart_agent()
+        except ValueError as e:
+            return {"error": str(e)}
 
     async def _enable_mcp_server(params: dict[str, Any]) -> dict[str, Any]:
         name = params.get("name", "")
@@ -803,6 +810,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.archive_context": _archive_context,
         # Phase 4.5 step 7: session management
         "state.restart_session": _restart_session,
+        "state.restart_agent": _restart_agent,
         # Phase 4.5 step 7: MCP writes (file-only, no hot-reload)
         "state.enable_mcp_server": _enable_mcp_server,
         "state.disable_mcp_server": _disable_mcp_server,

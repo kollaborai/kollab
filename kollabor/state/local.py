@@ -2811,6 +2811,13 @@ class LocalStateService(StateService):
                 if callable(transition):
                     acp._conversation_transition = False
 
+    async def restart_agent(self) -> dict[str, Any]:
+        """Restart this detached agent on the installed code, same conversation (#968)."""
+        hub = self._event_bus.get_service("hub_plugin") if self._event_bus is not None else None
+        if hub is None or not hasattr(hub, "restart_in_place"):
+            raise ValueError("this agent is not on a hub, so it cannot restart itself")
+        return await hub.restart_in_place()
+
     async def restart_session(self) -> ConversationSnapshot:
         async with self._conversation_ownership("restart") as (acp, uses_acp, mark_changed):
             return await self._restart_session_owned(acp, uses_acp, mark_changed)
@@ -2821,10 +2828,10 @@ class LocalStateService(StateService):
         """Clear the live conversation and rebuild the system prompt.
 
         Mirrors kollabor/commands/system_commands/handlers/system.py
-        handle_restart: clears conversation_manager, re-initializes
+        handle_new: clears conversation_manager, re-initializes
         llm_service conversation, and returns the post-restart snapshot.
 
-        Used by /restart in both local and attach mode.
+        Used by /new (and /clear) in both local and attach mode.
 
         Raises:
             ValueError: if llm_service is not available.
