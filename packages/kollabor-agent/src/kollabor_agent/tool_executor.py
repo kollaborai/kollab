@@ -7,6 +7,7 @@ file operations with proper error handling, logging, and result processing.
 import asyncio
 import logging
 import re
+import shlex
 import time
 import uuid
 from pathlib import Path
@@ -831,13 +832,17 @@ class ToolExecutor:
         return tool_type.replace("_", "-")
 
     def _check_bundle_scope(
-        self, tool_type: str, tool_name: Optional[str] = None
+        self,
+        tool_type: str,
+        tool_name: Optional[str] = None,
+        command: Optional[str] = None,
     ) -> Optional[str]:
         """Check if a tool_type is allowed by the bundle scope.
 
         Args:
             tool_type: The dispatch tool type to check.
-            tool_name: Optional MCP tool name for per-tool scope checks.
+            tool_name: Optional native tool name for alias and MCP checks.
+            command: Optional terminal command for the git tool alias.
 
         Returns:
             None if allowed, error message string if denied.
@@ -847,6 +852,22 @@ class ToolExecutor:
 
         if self._bundle_tools is None:
             return None  # Legacy: all tools allowed
+
+        # The native git tool dispatches through terminal. A git-only grant
+        # must preserve that distinction and must not grant arbitrary shell
+        # commands through the shared terminal handler.
+        if (
+            tool_type == "terminal"
+            and tool_name == "git"
+            and "terminal" not in self._bundle_tools
+            and "git" in self._bundle_tools
+        ):
+            if not self._is_single_git_command(command):
+                return (
+                    "[terminal] the git tool only allows a single git command; "
+                    "shell commands are not allowed"
+                )
+            return None
 
         # Internal dispatch types bypass scope
         if tool_type in self._INTERNAL_TYPES:
@@ -888,6 +909,19 @@ class ToolExecutor:
             f"{registry_name} tool. available tools: "
             f"{', '.join(sorted_tools)}"
         )
+
+    @staticmethod
+    def _is_single_git_command(command: Optional[str]) -> bool:
+        """Return whether command contains one shell-free git invocation."""
+        if not isinstance(command, str) or not command.strip():
+            return False
+        if re.search(r"[;&|<>`\r\n]|\$[({]", command):
+            return False
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            return False
+        return len(argv) >= 2 and argv[0] == "git"
 
     def register_plugin_handler(
         self,
@@ -1163,7 +1197,9 @@ class ToolExecutor:
             )
 
         # Check bundle scope — reject tools not in the agent's allowed set
-        scope_error = self._check_bundle_scope(tool_type, tool_data.get("name"))
+        scope_error = self._check_bundle_scope(
+            tool_type, tool_data.get("name"), tool_data.get("command")
+        )
         if scope_error:
             logger.warning(f"Tool {tool_id} rejected by bundle scope: {tool_type}")
             return ToolExecutionResult(
