@@ -327,6 +327,24 @@ def get_plugin_settings(plugin_id: str):
     raise HTTPException(status_code=404, detail="Plugin not found")
 
 
+@router.put("/{plugin_id}/settings")
+def put_plugin_settings(request: Request, plugin_id: str, values: dict[str, Any]):
+    context = _package_context(plugin_id)
+    if context is None:
+        raise HTTPException(status_code=404, detail="Plugin not found")
+    try:
+        context.settings.save(values)
+        saved = context.settings.get()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except OSError as exc:
+        logger.warning("Cannot save plugin settings for %s: %s", plugin_id, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Cannot save plugin settings") from exc
+    request.app.state.plugin_events.publish_change()
+    return saved
+
+
+
 def _read_usage_json(path: Path, default: dict) -> dict:
     if path.is_symlink():
         raise ValueError("Usage state cannot be a symlink")
