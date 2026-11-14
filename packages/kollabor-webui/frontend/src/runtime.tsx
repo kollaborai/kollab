@@ -1027,12 +1027,13 @@ export function EngineRuntimeProvider({
     if (ownsPendingInput(thread)) {
       if (initialState.messages === reloaded.current) return;
       if (initialState.synced?.olderWindow) deferredOlderWindow.current = initialState;
-      // As before, an event refresh received during our own run is consumed;
-      // replaying it later as authoritative can remove that run's messages
-      // when the engine mirror has not caught up. Only retry the older-page
-      // work, against the newest available snapshot, after the run ends.
-      reloaded.current = initialState.messages;
-      deferredHistorySync.current = deferredOlderWindow.current !== null;
+      // Defer every changed snapshot until our input settles. External turns
+      // can land while this page is running (an ACP peer message, for
+      // example); consuming that snapshot here would leave those rows out of
+      // the thread because no later event is guaranteed to refresh history.
+      // Reconcile the newest snapshot after the local turn, when its own rows
+      // are already in the thread and can be preserved by the incremental merge.
+      deferredHistorySync.current = true;
       return;
     }
     const pendingOlder = deferredOlderWindow.current;
