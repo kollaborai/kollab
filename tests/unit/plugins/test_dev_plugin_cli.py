@@ -43,5 +43,7 @@ def test_dev_registration_copies_settings_once_and_detaches(tmp_path, monkeypatc
     assert json.loads(dev_values.read_text()) == {"count": 3}
     assert main(["dev", "off", "hello"]) == 0
     assert json.loads(registry_path.read_text())["dev"] == {}
-    assert json.loads(dev_values.read_text()) == {"count": 3}
+    assert not dev_values.exists()
     assert json.loads((installed_data / "values.json").read_text()) == {"count": 2}
+    assert main(["dev", str(source)]) == 0
+    assert json.loads(dev_values.read_text()) == {"count": 2}
