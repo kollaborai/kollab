@@ -366,9 +366,9 @@ class TestToolLoadExecution(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIsNotNone(result.error)
 
-    def test_load_adds_to_bundle_scope(self):
-        """Loading a tool should add it to bundle scope when active."""
-        self.executor.set_bundle_scope(["terminal"])  # narrow scope
+    def test_load_does_not_expand_bundle_scope(self):
+        """Loading an undeclared tool should not expand bundle scope."""
+        self.executor.set_bundle_scope(["terminal", "tool-load"])
 
         tool_data = {
             "type": "tool_load",
@@ -378,9 +378,9 @@ class TestToolLoadExecution(unittest.TestCase):
 
         result = _run(self.executor._execute_tool_load(tool_data))
 
-        self.assertTrue(result.success)
-        # git should now be in the bundle scope
-        self.assertIn("git", self.executor._bundle_tools)
+        self.assertFalse(result.success)
+        self.assertIn("terminal", result.error)
+        self.assertNotIn("git", self.executor._bundle_tools)
 
     def test_load_already_in_scope(self):
         """Loading a tool already in scope should succeed (no-op add)."""
@@ -592,10 +592,10 @@ class TestOnDemandIntegration(unittest.TestCase):
         self.assertTrue(load_result.success)
         self.assertEqual(load_result.metadata["loaded_tool"], "git")
 
-    def test_bundle_scope_blocks_unloaded_then_allows_loaded(self):
-        """Tool not in bundle scope is blocked; after loading, it's allowed."""
+    def test_bundle_scope_still_blocks_after_rejected_load(self):
+        """A rejected tool-load leaves the tool outside bundle scope."""
 
-        self.executor.set_bundle_scope(["terminal"])
+        self.executor.set_bundle_scope(["terminal", "tool-load"])
 
         # git is NOT in scope — should be denied
         scope_error = self.executor._check_bundle_scope("git")
@@ -607,11 +607,12 @@ class TestOnDemandIntegration(unittest.TestCase):
             "id": "tl_0",
             "name": "git",
         }
-        _run(self.executor._execute_tool_load(load_data))
+        load_result = _run(self.executor._execute_tool_load(load_data))
+        self.assertFalse(load_result.success)
 
-        # Now git should be allowed
+        # git remains blocked.
         scope_error = self.executor._check_bundle_scope("git")
-        self.assertIsNone(scope_error, "git should be allowed after loading")
+        self.assertIsNotNone(scope_error, "git should remain blocked after loading")
 
     def test_stats_tracking(self):
         """tool-search and tool-load should be tracked in stats."""
