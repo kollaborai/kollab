@@ -63,6 +63,7 @@ async def test_detached_parent_reports_deferred_startup_failure(monkeypatch):
     class App:
         _startup_ready = ready_event
         _startup_complete = False
+        _startup_error = "deferred startup failed"
         pipe_mode = False
 
         async def start(self, initial_message=None):
