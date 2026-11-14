@@ -146,6 +146,8 @@ class MCPServerConnection:
         self._read_buffer = ""
         self._pending_requests: Dict[str, asyncio.Future] = {}
         self._reader_task: Optional[asyncio.Task] = None
+        self._stderr_task: Optional[asyncio.Task] = None
+        self._stderr_bytes = 0
         self._write_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
 
@@ -163,6 +165,12 @@ class MCPServerConnection:
                 env=env,
             )
             logger.info(f"Started MCP server process: {self.server_name}")
+            self._stderr_bytes = 0
+            if self.process.stderr:
+                self._stderr_task = asyncio.create_task(
+                    self._drain_stderr(self.process.stderr),
+                    name=f"mcp_stderr:{self.server_name}",
+                )
             self._ensure_reader_task()
             return True
         except Exception as e:
@@ -203,22 +211,16 @@ class MCPServerConnection:
                     f"MCP server {self.server_name} process exited with code {self.process.returncode}. "
                     f"Check if the server command is correct and the MCP server binary exists."
                 )
-                # Try to read stderr for more details
-                if self.process.stderr:
+                if self._stderr_task:
                     try:
-                        stderr_output = await asyncio.wait_for(
-                            self.process.stderr.read(), timeout=1
-                        )
-                        if stderr_output:
-                            logger.error(
-                                f"MCP server {self.server_name} stderr: {stderr_output.decode()}"
-                            )
-                    except Exception as exc:
-                        logger.debug(
-                            "Could not read shutdown stderr from MCP server %s: %s",
-                            self.server_name,
-                            exc,
-                        )
+                        await asyncio.wait_for(asyncio.shield(self._stderr_task), timeout=1)
+                    except asyncio.TimeoutError:
+                        pass
+                logger.error(
+                    "MCP server %s emitted %d diagnostic bytes (content omitted)",
+                    self.server_name,
+                    self._stderr_bytes,
+                )
             return False
 
         # Check for error response
@@ -385,6 +387,16 @@ class MCPServerConnection:
             self._reader_loop(), name=f"mcp_reader:{self.server_name}"
         )
 
+    async def _drain_stderr(self, stream: asyncio.StreamReader) -> None:
+        """Prevent pipe backpressure without retaining untrusted diagnostics."""
+        try:
+            while chunk := await stream.read(4096):
+                self._stderr_bytes = min(self._stderr_bytes + len(chunk), 2**63 - 1)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Could not read MCP server %s diagnostics", self.server_name)
+
     async def _reader_loop(self) -> None:
         """Read JSON-RPC messages and resolve pending request futures by id."""
         if not self.process or not self.process.stdout:
@@ -507,6 +519,14 @@ class MCPServerConnection:
             except Exception as e:
                 logger.warning(f"Error closing MCP server {self.server_name}: {e}")
             finally:
+                if self._stderr_task:
+                    if not self._stderr_task.done():
+                        self._stderr_task.cancel()
+                    try:
+                        await self._stderr_task
+                    except asyncio.CancelledError:
+                        pass
+                    self._stderr_task = None
                 # Explicitly close transports to prevent __del__ gc warnings
                 for transport in (
                     self.process.stdin,
