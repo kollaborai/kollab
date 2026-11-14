@@ -926,8 +926,6 @@ class ToolExecutor:
 
         takes_value = {
             "-C",
-            "-c",
-            "--config-env",
             "--git-dir",
             "--namespace",
             "--super-prefix",
@@ -965,6 +963,11 @@ class ToolExecutor:
             subcommand = arg
             break
         else:
+            return False
+
+        # Config can install shell-backed pagers, aliases, helpers, and hooks.
+        # A Git-only grant must not let a command configure those for later use.
+        if subcommand == "config":
             return False
 
         try:
