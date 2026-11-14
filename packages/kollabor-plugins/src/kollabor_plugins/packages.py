@@ -370,6 +370,9 @@ def install_stage(stage: Path, staged: dict, commit: str, digest: str) -> None:
                 "commit": commit,
                 "files_sha256": digest,
                 "enabled": prior.get("enabled", True) if prior else True,
+                "enabled_path": prior.get("enabled_path", os.environ.get("PATH", os.defpath))
+                if prior
+                else os.environ.get("PATH", os.defpath),
                 "granted": staged["manifest"].get("uses", []),
                 "added": prior.get("added", now) if prior else now,
                 "updated": now,
