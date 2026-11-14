@@ -135,6 +135,28 @@ class TestBundleScopeEnforcement:
         )
         assert terminal_result.metadata.get("scope_denied") is True
 
+    def test_git_terminal_tag_is_allowed_without_granting_terminal(self):
+        """A Git grant should cover the advertised XML terminal form only for Git."""
+        from kollabor_ai.response_parser import ResponseParser
+
+        executor = _make_executor()
+        executor.set_bundle_scope(["file-read", "file-grep", "git"])
+        parser = ResponseParser()
+
+        git_call = parser.get_all_tools(
+            parser.parse_response("<terminal>git status --short</terminal>")
+        )[0]
+        assert git_call["type"] == "terminal"
+        assert git_call["name"] is None
+        git_result = _run_async(executor.execute_tool(git_call))
+        assert git_result.metadata.get("scope_denied") is None
+
+        composed_call = parser.get_all_tools(
+            parser.parse_response("<terminal>git status && pwd</terminal>")
+        )[0]
+        composed_result = _run_async(executor.execute_tool(composed_call))
+        assert composed_result.metadata.get("scope_denied") is True
+
     def test_execute_tool_rejects_out_of_scope(self):
         """execute_tool returns error for out-of-scope tools."""
         executor = _make_executor()
