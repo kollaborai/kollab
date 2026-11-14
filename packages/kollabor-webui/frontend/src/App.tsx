@@ -25,6 +25,7 @@ function ViewLoading() {
   );
 }
 import { AppsDialog } from "@/components/apps/AppsDialog";
+import { PrChainDialog } from "@/components/pr-chain/PrChainDialog";
 import { SupervisorAlertBanner } from "@/components/SupervisorAlertBanner";
 import type { StreamEvent } from "@/supervisor-alerts";
 import { liveActivity, nextLiveActivity, NO_LIVE_ACTIVITY, useThreadActivity } from "@/components/gems/activity";
@@ -469,6 +470,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [studioFocus, setStudioFocus] = useState<StudioFocus | null>(null);
   const [profilesOpen, setProfilesOpen] = useState(false);
   const [appsOpen, setAppsOpen] = useState(false);
+  const [prChainOpen, setPrChainOpen] = useState(false);
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [agentLibraryInitialTab, setAgentLibraryInitialTab] = useState<"rosters" | "teams">("rosters");
   const [setupGuideOpen, setSetupGuideOpen] = useState(false);
@@ -1793,6 +1795,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           onSettings={() => openSettings()}
           onHalt={() => openSettings({ tab: "network", intent: "halt" })}
           onLearn={() => navigateToLearn()}
+          onPrChain={() => setPrChainOpen(true)}
           onWhatsNew={navigateToWhatsNew}
           onStudio={() => {
             setStudioFocus(null);
@@ -1839,6 +1842,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           onOpenSettings={(tab) => openSettings({ tab })}
           onStartSession={() => void createSession()}
         />
+        <PrChainDialog api={api} open={prChainOpen} onOpenChange={setPrChainOpen} />
         {activeSession ? (
           <AppsDialog
             api={api}
