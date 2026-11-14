@@ -297,7 +297,7 @@ def create_app(
                 (k, v)
                 for k, v in request.headers.items()
                 if k.lower() not in _HOP_BY_HOP
-                and k.lower() != "x-kollab-client-ip"
+                and k.lower() not in {"x-kollab-client-ip", "x-kollab-plugin-remote"}
                 and not is_forwarded_client_header(k)
             ],
             content=await request.body(),
@@ -310,6 +310,16 @@ def create_app(
         if base != "/" and (routed == base or routed.startswith(base + "/")):
             routed = routed[len(base) :] or "/"
         first = routed.lstrip("/").split("/", 1)[0]
+        if first == "plugins" and not _is_local(request):
+            from kollabor_engine.routes.plugins import remote_plugin_route_allowed
+
+            if not remote_plugin_route_allowed(request.method, routed):
+                return JSONResponse(
+                    {"detail": "Plugin management is available only on this computer."},
+                    status_code=403,
+                    headers=NO_STORE_HEADERS,
+                )
+            upstream.headers["x-kollab-plugin-remote"] = "1"
         if first.lower() == "phonelink" and not _is_local(request):
             return JSONResponse(
                 {
