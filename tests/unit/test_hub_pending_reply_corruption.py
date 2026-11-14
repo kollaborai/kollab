@@ -13,6 +13,7 @@ from plugins.hub.task_ledger import TaskLedger
         '{"expected_replies":{"unknown":"shape"}}',
         '{"expected_replies":[]} trailing writer data',
         '{"expected_replies":[{"task_id":"valid"},"unknown entry"]}',
+        '{"expected_replies":[{"status":"pending","created_at":"bad"}]}',
     ],
 )
 @pytest.mark.parametrize(
