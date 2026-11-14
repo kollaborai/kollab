@@ -106,6 +106,12 @@ def _scratch_home(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_picker_warm(monkeypatch):
+    """The model picker's background warm launches real harnesses (#953): a test that wants it sets 1."""
+    monkeypatch.setenv("KOLLAB_PICKER_WARM", "0")
+
+
+@pytest.fixture(autouse=True)
 def _scratch_presence_roots(tmp_path, monkeypatch, request):
     """Keep presence scans away from the account home and shared Hub root."""
     from plugins.hub import presence
