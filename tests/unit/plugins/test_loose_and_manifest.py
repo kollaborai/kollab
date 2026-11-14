@@ -15,7 +15,9 @@ def test_loose_plugin_does_not_scan_manifest_package(tmp_path, monkeypatch):
     package = root / "hello"
     package.mkdir(parents=True)
     marker = tmp_path / "package-executed"
-    (root / "loose_plugin.py").write_text("class LoosePlugin: pass\n")
+    (root / "loose_plugin.py").write_text(
+        "class LoosePlugin:\n    @staticmethod\n    def get_default_config(): return {}\n"
+    )
     (package / "__init__.py").write_text(f"open({str(marker)!r}, 'w').close()\n")
     (package / "bad_plugin.py").write_text(f"open({str(marker)!r}, 'w').close()\nclass BadPlugin: pass\n")
     (package / "kollab-plugin.json").write_text(json.dumps({"id": "hello"}))
