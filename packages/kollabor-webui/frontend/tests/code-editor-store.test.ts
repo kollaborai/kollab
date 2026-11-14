@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 import { EmptyEditorState } from "../src/components/code/empty-editor-state";
+import { editorThemeColors } from "../src/components/code/editor-theme";
 import {
   CODE_EDITOR_LAYOUT_KEY,
   isDiffTab,
@@ -73,6 +74,17 @@ test("commit views cannot collide with or edit a real file and are not restored 
   const layout = JSON.parse(must(storage.get(CODE_EDITOR_LAYOUT_KEY), "layout"));
   expect(layout.panes[0].openPaths).toEqual([real]);
   expect(layout.panes[0].activePath).toBeNull();
+});
+
+test("the editor uses the active light palette for its canvas and text", () => {
+  const palette = editorThemeColors(false, {
+    background: "#ffffff",
+    foreground: "#252525",
+  });
+
+  expect(palette.base).toBe("vs");
+  expect(palette.colors["editor.background"]).toBe("#ffffff");
+  expect(palette.colors["editor.foreground"]).toBe("#252525");
 });
 
 // a pinned tab is never replaced by a later preview open
