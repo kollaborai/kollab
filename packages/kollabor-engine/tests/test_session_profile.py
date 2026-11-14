@@ -161,10 +161,13 @@ async def test_acp_capability_event_updates_after_profile_mirroring(
     response = await client.post("/sessions/sess_profile/profile", json={"name": "acp"})
     assert response.status_code == 200
 
+    events = asyncio.Queue()
+    monkeypatch.setattr(live_session, "subscribe", lambda: events)
+    monkeypatch.setattr(live_session, "unsubscribe", lambda queue: None)
     tracker = asyncio.create_task(live_session._track_events())
     try:
         await asyncio.sleep(0)
-        live_session._emit_event({"type": "acp_session", "supports_vision": False})
+        events.put_nowait({"type": "acp_session", "supports_vision": False})
         await asyncio.sleep(0)
         assert live_session.to_dict()["supports_vision"] is False
     finally:
