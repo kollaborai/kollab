@@ -6,6 +6,7 @@ file operations with proper error handling, logging, and result processing.
 
 import asyncio
 import logging
+import os
 import re
 import shlex
 import time
@@ -1728,6 +1729,13 @@ class ToolExecutor:
         if executable is None:
             return refuse("executable is not on the trusted system path")
         argv = (str(executable), *argv[1:])
+        command_env = self.shell_executor._filter_env(os.environ.copy())
+        if Path(argv[0]).name.lower() == "git":
+            command_env = {
+                name: value
+                for name, value in command_env.items()
+                if not name.upper().startswith("GIT_")
+            }
 
         self._active_shell_executor = self.shell_executor
         try:
@@ -1735,6 +1743,7 @@ class ToolExecutor:
                 argv,
                 timeout=min(self.terminal_timeout, MAX_VOICE_COMMAND_SECONDS),
                 cwd=cwd,
+                env=command_env,
                 max_output_bytes=MAX_VOICE_OUTPUT_BYTES,
             )
         finally:
