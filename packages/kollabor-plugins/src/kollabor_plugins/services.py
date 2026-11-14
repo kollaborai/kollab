@@ -163,6 +163,20 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
                             _write_log(log_path, output)
                         else:
                             selector.unregister(key.fileobj)
+            if term_sent and deadline is not None:
+                # The leader may exit before descendants that ignored SIGTERM.
+                # Keep the wrapper alive until the group is gone or its grace expires.
+                while time.monotonic() < deadline:
+                    try:
+                        os.killpg(child.pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+                else:
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
             code = child.wait()
             child.stdout.close()
             now = time.monotonic()
