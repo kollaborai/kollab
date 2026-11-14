@@ -17,7 +17,7 @@ class HelloPlugin(BasePlugin):
                     name="hello",
                     description="Say hello from the example plugin",
                     handler=self._hello,
-                    plugin_name=self.name,
+                    plugin_name="hello",
                     mode=CommandMode.INSTANT,
                     category=CommandCategory.SYSTEM,
                 )
