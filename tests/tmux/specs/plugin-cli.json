@@ -81,16 +81,32 @@
     {"action": "wait_for", "pattern": "Greeting", "timeout": 10},
     {"action": "send_keys", "keys": "Space"},
     {"action": "send_keys", "keys": "C-s"},
+    {"action": "wait_for", "pattern": "Save to:", "timeout": 10},
+    {"action": "type", "text": "g"},
     {"action": "sleep", "seconds": 3},
+    {"action": "capture", "show": true},
     {
       "action": "shell",
       "description": "verify the terminal stopped the service",
       "command": "python3 -c 'import json,os,pathlib; p=pathlib.Path(os.environ[\"HOME\"])/\".kollab/plugin-data/hello/run/hello.state\"; assert json.loads(p.read_text())[\"desired\"] == \"stopped\"; print(\"service-stopped\")'",
       "assert_contains": "service-stopped"
     },
+    {"action": "send_keys", "keys": "Space"},
+    {"action": "send_keys", "keys": "C-s"},
+    {"action": "wait_for", "pattern": "Save to:", "timeout": 10},
+    {"action": "type", "text": "g"},
+    {"action": "sleep", "seconds": 3},
+    {
+      "action": "shell",
+      "description": "verify the terminal started the service",
+      "command": "python3 -c 'import json,os,pathlib; p=pathlib.Path(os.environ[\"HOME\"])/\".kollab/plugin-data/hello/run/hello.state\"; state=json.loads(p.read_text()); print(state); assert state[\"desired\"] == \"running\" and state[\"status\"] == \"running\"; print(\"service-started\")'",
+      "assert_contains": "service-started"
+    },
     {"action": "send_keys", "keys": "Down"},
     {"action": "type", "text": "test-greeting"},
     {"action": "send_keys", "keys": "C-s"},
+    {"action": "wait_for", "pattern": "Save to:", "timeout": 10},
+    {"action": "type", "text": "g"},
     {"action": "sleep", "seconds": 2},
     {
       "action": "shell",
