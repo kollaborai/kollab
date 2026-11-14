@@ -70,6 +70,26 @@ async def test_process_group_guard_keeps_group_identity_after_adapter_exits(tmp_
 
 
 @pytest.mark.asyncio
+async def test_process_tracker_leaves_cleanup_to_close_after_close_started(tmp_path, monkeypatch):
+    runner = ACPRunner(
+        ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)),
+        persist_profile_resolution=False,
+    )
+    runner._owned_processes[12345] = object()
+    runner._process = SimpleNamespace(returncode=0)
+    runner._closing = True
+    signals = []
+    monkeypatch.setattr(runner, "_refresh_process_tree", lambda: None)
+    monkeypatch.setattr(
+        runner, "_signal_owned_process_group", lambda signum: signals.append(signum)
+    )
+
+    await runner._track_process_tree()
+
+    assert signals == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("message, login_guidance", [
     ("Authentication required", True),
     ("This client is no longer supported for Gemini Code Assist for individuals", False),
@@ -706,7 +726,7 @@ async def test_private_process_group_cleans_orphan_without_session_lookup(tmp_pa
         identity = json.loads(child_file.read_text())
         child = psutil.Process(identity["pid"])
         assert child.create_time() == identity["birth"]
-        assert os.getsid(child.pid) == runner._adapter_pid
+        assert os.getpgid(child.pid) == runner._process_group_id
         await runner.close()
         assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
         assert not runner._owned_processes and runner._adapter_pid is None
@@ -793,6 +813,7 @@ async def test_orphan_fixture_defers_cleanup_when_runner_close_raises(
         instances.append(self)
 
     async def broken_close(self):
+        self._closing = True
         raise RuntimeError("injected close failure")
 
     async def observe_cleanup(runner, captured, child_file):
