@@ -345,7 +345,17 @@ class TaskLedger:
         if (
             not isinstance(data, dict)
             or not isinstance(data.get("expected_replies"), list)
-            or any(not isinstance(reply, dict) for reply in data["expected_replies"])
+            or any(
+                not isinstance(reply, dict)
+                or (
+                    reply.get("status") == "pending"
+                    and (
+                        not isinstance(reply.get("created_at", 0), (int, float))
+                        or isinstance(reply.get("created_at", 0), bool)
+                    )
+                )
+                for reply in data["expected_replies"]
+            )
         ):
             raise PendingReplyLedgerError(
                 "Pending reply ledger is unreadable; preserve a copy, repair "
