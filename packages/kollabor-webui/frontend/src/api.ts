@@ -215,6 +215,8 @@ export type Effort = (typeof EFFORT_LEVELS)[number];
 export type Profile = {
   name: string;
   provider?: string;
+  /** Opaque hash of the ACP launch inputs that decide model discovery. */
+  choices_fingerprint?: string;
   model?: string;
   description?: string;
   base_url?: string;
@@ -432,6 +434,8 @@ export type NetworkAgent = {
   handle?: string;
   state?: string;
   is_coordinator?: boolean;
+  /** The agent bundle it runs, as its device reports it; absent from a device that does not say. */
+  agent_type?: string;
   harness?: string;
   acp_waiting?: boolean;
   /** The tool it runs now (bare name and type, no arguments), from its device's directory; null between tools. */
@@ -1454,12 +1458,18 @@ export class EngineApi {
     );
   }
 
-  /** Choices for `workspace`'s own profiles and loadouts (empty: the engine's folder). */
-  listModelChoices(workspace = "") {
+  /**
+   * Choices for `workspace`'s own profiles and loadouts (empty: the engine's folder). `refresh` is the picker's
+   * Retry: the engine probes the harnesses whose list is incomplete again.
+   */
+  listModelChoices(workspace = "", refresh = false) {
+    const query = [workspace ? `workspace=${encodeURIComponent(workspace)}` : "", refresh ? "refresh=true" : ""]
+      .filter(Boolean)
+      .join("&");
     return this.json<{
       choices: ModelChoice[];
       discovery?: Record<string, { status: "ready" | "partial" | "unavailable"; message?: string; more?: boolean }>;
-    }>(workspace ? `/profiles/choices?workspace=${encodeURIComponent(workspace)}` : "/profiles/choices");
+    }>(query ? `/profiles/choices?${query}` : "/profiles/choices");
   }
 
   /** The profiles, and the default loadout of `workspace` (empty: the engine's own folder). */
