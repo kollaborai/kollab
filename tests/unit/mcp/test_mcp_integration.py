@@ -328,8 +328,8 @@ class TestMCPServerConnection(unittest.TestCase):
             child = (
                 "import os, sys, time; "
                 "frame = b'{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":\\\"pipe\\\","
-                "\\\"result\\\":{\\\"text\\\":\\\"caf\\\\xc3\\\\xa9\\\"}}\\n'; "
-                "cut = frame.index(b'\\\\xc3') + 1; "
+                "\\\"result\\\":{\\\"text\\\":\\\"caf' + bytes([195, 169]) + b'\\\"}}\\n'; "
+                "cut = frame.index(bytes([195])) + 1; "
                 "os.write(1, frame[:cut]); time.sleep(0.02); "
                 "os.write(1, frame[cut:]); sys.stdin.buffer.readline()"
             )
