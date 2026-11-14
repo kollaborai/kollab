@@ -10,6 +10,7 @@ imported instead of the canonical dev install's.
 from __future__ import annotations
 
 import getpass
+import logging
 import os
 import platform
 import socket
@@ -65,8 +66,12 @@ def test_git_bash_line_carries_label_and_rule():
 def test_full_posix_block_equals_todays_output(monkeypatch):
     """The new session block renders exactly what the bash trenders printed."""
     monkeypatch.setattr(
-        prompt_renderer_module.time, "strftime", lambda fmt: "2026-10-30 MST"
+        prompt_renderer_module.time, "strftime", lambda fmt, *_: "2026-10-30 MST"
     )
+    record = logging.LogRecord("test", logging.WARNING, __file__, 1, "probe", (), None)
+    assert logging.Formatter(
+        "%(asctime)s %(message)s", datefmt="%Y"
+    ).format(record) == "2026-10-30 MST probe"
     monkeypatch.setenv("PWD", os.getcwd())
     renderer = _renderer(shell_resolver=lambda: _posix_shell())
 
