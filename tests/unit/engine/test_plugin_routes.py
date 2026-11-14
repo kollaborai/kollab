@@ -142,3 +142,57 @@ def test_plugin_events_are_available_to_remote_pages():
     assert remote_plugin_route_allowed("POST", "/plugins/hello/events")
     assert not remote_plugin_route_allowed("DELETE", "/plugins/hello/events")
     assert not remote_plugin_route_allowed("PUT", "/plugins/hello/settings")
+
+
+def test_plugin_usage_incremental_replay_and_local_day(tmp_path, monkeypatch):
+    import json
+    import shutil
+    from datetime import datetime, timedelta
+    from pathlib import Path
+
+    from kollabor_engine.routes import plugins as plugin_routes
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    source = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    home = tmp_path / ".kollab"
+    shutil.copytree(source, home / "plugins" / "hello")
+    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {}}, "dev": {}}))
+    run = home / "plugin-data" / "hello" / "run"
+    run.mkdir(parents=True)
+    now = datetime.now().astimezone()
+    yesterday = now - timedelta(days=1)
+    today_row = {"ts": now.timestamp(), "model": "example", "input": 10, "output": 10, "labels": {}}
+    old_row = {"ts": yesterday.timestamp(), "model": "example", "input": 1, "output": 2, "labels": {}}
+    next_row = {"ts": now.timestamp(), "model": "example", "input": 2, "output": 3, "labels": {}}
+    next_line = json.dumps(next_row)
+    usage = run / "usage.jsonl"
+    usage.write_text(json.dumps(today_row) + "\n" + json.dumps(old_row) + "\n" + next_line[:10])
+    with TestClient(create_app()) as client:
+        first = client.get("/plugins/hello/usage")
+        assert first.status_code == 200
+        assert first.json() == {"date": now.date().isoformat(), "total": 20, "cap": 2000000, "remaining": 1999980}
+        assert client.get("/plugins/hello/usage").json() == first.json()
+        previous = json.loads((run / f"usage-{yesterday.date().isoformat()}.json").read_text())
+        assert previous["total"] == 3
+        with usage.open("a") as stream:
+            stream.write(next_line[10:] + "\n")
+        real_write = plugin_routes.write_text_atomic
+
+        def fail_offset(path, content):
+            if Path(path).name == "usage.offset":
+                raise OSError("simulated crash before offset commit")
+            return real_write(path, content)
+
+        monkeypatch.setattr(plugin_routes, "write_text_atomic", fail_offset)
+        assert client.get("/plugins/hello/usage").status_code == 503
+        monkeypatch.setattr(plugin_routes, "write_text_atomic", real_write)
+        assert client.get("/plugins/hello/usage").json()["total"] == 25
+    with TestClient(create_app()) as restarted:
+        assert restarted.get("/plugins/hello/usage").json()["total"] == 25
+        usage.write_text(json.dumps({**today_row, "input": 1, "output": 1}) + "\n")
+        assert restarted.get("/plugins/hello/usage").json()["total"] == 27
+        with usage.open("a") as stream:
+            stream.write("{bad json}\n")
+        assert restarted.get("/plugins/hello/usage").status_code == 409
