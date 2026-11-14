@@ -196,3 +196,37 @@ def test_plugin_usage_incremental_replay_and_local_day(tmp_path, monkeypatch):
         with usage.open("a") as stream:
             stream.write("{bad json}\n")
         assert restarted.get("/plugins/hello/usage").status_code == 409
+
+
+def test_plugin_usage_is_checkpointed_in_bounded_batches(tmp_path, monkeypatch):
+    import json
+    import shutil
+    from datetime import datetime
+    from pathlib import Path
+
+    from kollabor_engine.routes import plugins as plugin_routes
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    source = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    home = tmp_path / ".kollab"
+    shutil.copytree(source, home / "plugins" / "hello")
+    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {}}, "dev": {}}))
+    run = home / "plugin-data" / "hello" / "run"
+    run.mkdir(parents=True)
+    row = {"ts": datetime.now().timestamp(), "model": "example", "input": 1, "output": 0, "labels": {}}
+    (run / "usage.jsonl").write_text((json.dumps(row) + "\n") * 1500)
+    offsets = []
+    real_write = plugin_routes._write_usage_json
+
+    def record_offset(path, value):
+        if path.name == "usage.offset":
+            offsets.append(value["offset"])
+        return real_write(path, value)
+
+    monkeypatch.setattr(plugin_routes, "_write_usage_json", record_offset)
+    with TestClient(create_app()) as client:
+        assert client.get("/plugins/hello/usage").json()["total"] == 1500
+    assert len(offsets) >= 2
+    assert offsets == sorted(set(offsets))
