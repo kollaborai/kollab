@@ -9,6 +9,9 @@ logger = logging.getLogger(__name__)
 
 
 class HelloPlugin(BasePlugin):
+    def __init__(self, **kwargs):
+        self.name = kwargs.get("name", "hello")
+
     async def initialize(self, event_bus=None, config=None, **kwargs):
         registry = kwargs.get("command_registry")
         if registry is not None:
