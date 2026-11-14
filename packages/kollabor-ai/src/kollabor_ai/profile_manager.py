@@ -852,7 +852,7 @@ class LLMProfile:
         endpoint, _hidden = redact_profile_endpoint(self.get_endpoint())
         return str(endpoint or "")
 
-    def get_api_key(self) -> str:
+    def get_api_key(self, *, migrate_plaintext: bool = True) -> str:
         """Get API key with tiered resolution.
 
         Resolution order:
@@ -894,7 +894,11 @@ class LLMProfile:
         # the mark lives at module level, not on the object. An OAuth access
         # token is not an API key: it refreshes and never goes to the keyring.
         if raw:
-            if self.api_key_from_env or self.auth_type == "oauth":
+            if (
+                self.api_key_from_env
+                or self.auth_type == "oauth"
+                or not migrate_plaintext
+            ):
                 return raw
             if (self.name, raw) not in _KEYRING_MIGRATION_TRIED:
                 _KEYRING_MIGRATION_TRIED.add((self.name, raw))
@@ -1037,12 +1041,16 @@ class LLMProfile:
             return global_val.lower()
         return self.provider or "openai"
 
-    def get_effort_provider(self) -> str:
+    def get_effort_provider(self, *, migrate_plaintext: bool = True) -> str:
         """``get_provider()`` with ``auto`` resolved to the provider requests use."""
         provider = self.get_provider()
         if provider != "auto":
             return provider
-        return resolve_effort_provider(provider, self.get_api_key(), self.get_endpoint())
+        return resolve_effort_provider(
+            provider,
+            self.get_api_key(migrate_plaintext=migrate_plaintext),
+            self.get_endpoint(),
+        )
 
     def get_provider_type(self) -> str:
         """
