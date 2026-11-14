@@ -11,6 +11,7 @@ import { saveWorkspaceFile } from "@/components/code/file-save";
 import { isDiffTab, isDirty, setBufferSaveNotice, usePane, useEditorStore } from "@/components/code/editor-store";
 import { getFileAccentColor } from "./file-tree";
 import { StatusBar } from "./status-bar";
+import { editorThemeColors } from "./editor-theme";
 
 type MonacoReactModule = typeof import("@monaco-editor/react");
 
@@ -40,6 +41,20 @@ function PaneSpinner() {
 }
 
 function defineVoidTheme(monaco: typeof import("monaco-editor"), accent: string) {
+  const style = getComputedStyle(document.documentElement);
+  const toHex = (color: string): string => {
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    if (!context) return color;
+    context.fillStyle = color;
+    context.fillRect(0, 0, 1, 1);
+    const [r = 0, g = 0, b = 0] = context.getImageData(0, 0, 1, 1).data;
+    return `#${[r, g, b].map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
+  };
+  const activePalette = editorThemeColors(document.documentElement.classList.contains("dark"), {
+    background: toHex(style.getPropertyValue("--background").trim()),
+    foreground: toHex(style.getPropertyValue("--foreground").trim()),
+  });
   const hexToRgb = (hex: string) => {
     const h = hex.replace('#', '');
     return {
@@ -58,7 +73,7 @@ function defineVoidTheme(monaco: typeof import("monaco-editor"), accent: string)
 
   // Monaco takes literal colors, not CSS variables, so the palette stays hex.
   monaco.editor.defineTheme("kollab-void", {
-    base: "vs-dark",
+    base: activePalette.base,
     inherit: true,
     rules: [
       { token: "comment", foreground: "4a4a55", fontStyle: "italic" },
@@ -72,8 +87,7 @@ function defineVoidTheme(monaco: typeof import("monaco-editor"), accent: string)
       { token: "delimiter", foreground: "ffffff40" },
     ],
     colors: {
-      "editor.background": "#0a0a0a",
-      "editor.foreground": "#d4d4d4",
+      ...activePalette.colors,
       "editor.lineHighlightBackground": a(0.06),
       "editor.selectionBackground": a(0.22),
       "editor.selectionHighlightBackground": a(0.10),
@@ -81,8 +95,6 @@ function defineVoidTheme(monaco: typeof import("monaco-editor"), accent: string)
       "editorCursor.foreground": accent + "e0",
       "editorLineNumber.foreground": "#ffffff12",
       "editorLineNumber.activeForeground": accent + "80",
-      "editorGutter.background": "#0a0a0a",
-      "minimap.background": "#080808",
       "minimapSlider.background": accent + "18",
       "minimapSlider.hoverBackground": accent + "30",
       "minimapSlider.activeBackground": accent + "40",
