@@ -382,6 +382,19 @@ class TestToolLoadExecution(unittest.TestCase):
         self.assertIn("terminal", result.error)
         self.assertNotIn("git", self.executor._bundle_tools)
 
+    def test_load_declared_native_alias_in_bundle_scope(self):
+        """A declared native alias remains loadable under bundle enforcement."""
+        self.executor.set_bundle_scope(["hub_msg", "tool-load"])
+
+        result = _run(self.executor._execute_tool_load({
+            "type": "tool_load",
+            "id": "tl_alias",
+            "name": "hub_msg",
+        }))
+
+        self.assertTrue(result.success, result.error)
+        self.assertEqual(result.metadata["loaded_tool"], "hub-msg")
+
     def test_load_already_in_scope(self):
         """Loading a tool already in scope should succeed (no-op add)."""
         self.executor.set_bundle_scope(["terminal", "git"])
