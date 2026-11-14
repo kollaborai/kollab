@@ -22,7 +22,10 @@ class _Settings:
         }
         path = self.context.data / "values.json"
         if path.exists():
-            saved = json.loads(path.read_text(encoding="utf-8"))
+            try:
+                saved = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise ValueError("Invalid plugin settings") from exc
             if not isinstance(saved, dict):
                 raise ValueError("Invalid plugin settings")
             values.update(saved)
