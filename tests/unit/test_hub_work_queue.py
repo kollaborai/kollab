@@ -285,6 +285,32 @@ def test_github_terminal_state_caches_terminal_only(tmp_path, monkeypatch):
     assert len([c for c in calls if c[3] == "221"]) == 2  # open re-checked
 
 
+def test_github_terminal_state_uses_repository_remote_for_project_path(
+    tmp_path, monkeypatch
+):
+    project = tmp_path / "repo-a"
+    project.mkdir()
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        if argv[:2] == ["git", "-C"]:
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout="git@github.com:owner/repo-a.git\n",
+            )
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"state": "MERGED", "mergedAt": "now"}),
+        )
+
+    monkeypatch.setattr(coordinator, "subprocess", types.SimpleNamespace(run=fake_run))
+
+    assert coordinator.github_terminal_state("#12", str(project)) == "#12 merged"
+    gh_call = next(argv for argv, _ in calls if argv[0] == "gh")
+    assert gh_call[gh_call.index("-R") + 1] == "github.com/owner/repo-a"
+
+
 import threading
 
 
