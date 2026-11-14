@@ -114,6 +114,100 @@ class TestBundleScopeEnforcement:
         assert executor._tool_type_to_registry_name("terminal") == "terminal"
         assert executor._tool_type_to_registry_name("scratchpad") == "scratchpad"
 
+    def test_git_native_tool_is_allowed_without_granting_terminal(self):
+        """A git grant should allow native git calls, not arbitrary terminal calls."""
+        from kollabor_agent.tool_call_contract import normalize_native_tool_call
+
+        executor = _make_executor()
+        executor.set_bundle_scope(["file-read", "file-grep", "git"])
+
+        git_call = normalize_native_tool_call(
+            {"id": "git-call", "name": "git", "input": {"command": "git status"}}
+        )
+        git_result = _run_async(executor.execute_tool(git_call))
+
+        assert git_result.metadata.get("scope_denied") is None
+
+        terminal_result = _run_async(
+            executor.execute_tool(
+                {"id": "shell-call", "type": "terminal", "command": "pwd"}
+            )
+        )
+        assert terminal_result.metadata.get("scope_denied") is True
+
+    def test_git_terminal_tag_is_allowed_without_granting_terminal(self):
+        """A Git grant should cover the advertised XML terminal form only for Git."""
+        from kollabor_ai.response_parser import ResponseParser
+
+        executor = _make_executor()
+        executor.set_bundle_scope(["file-read", "file-grep", "git"])
+        parser = ResponseParser()
+
+        git_call = parser.get_all_tools(
+            parser.parse_response("<terminal>git status --short</terminal>")
+        )[0]
+        assert git_call["type"] == "terminal"
+        assert git_call["name"] is None
+        git_result = _run_async(executor.execute_tool(git_call))
+        assert git_result.metadata.get("scope_denied") is None
+
+        composed_call = parser.get_all_tools(
+            parser.parse_response("<terminal>git status && pwd</terminal>")
+        )[0]
+        composed_result = _run_async(executor.execute_tool(composed_call))
+        assert composed_result.metadata.get("scope_denied") is True
+
+    def test_git_shell_alias_is_denied_without_terminal_grant(self):
+        """Git aliases prefixed with ! can execute shell commands."""
+        executor = _make_executor()
+        executor.set_bundle_scope(["git"])
+
+        result = _run_async(
+            executor.execute_tool(
+                {
+                    "id": "git-alias-call",
+                    "type": "terminal",
+                    "command": "git -c alias.pwn='!touch /tmp/pwned' pwn",
+                }
+            )
+        )
+
+        assert result.metadata.get("scope_denied") is True
+
+    def test_git_pager_config_is_denied_without_terminal_grant(self):
+        """Git config options can execute a shell command through the pager."""
+        executor = _make_executor()
+        executor.set_bundle_scope(["git"])
+
+        result = _run_async(
+            executor.execute_tool(
+                {
+                    "id": "git-pager-call",
+                    "type": "terminal",
+                    "command": "git -c core.pager='printf PAGER_EXECUTED' --paginate log -1",
+                }
+            )
+        )
+
+        assert result.metadata.get("scope_denied") is True
+
+    def test_git_config_mutation_is_denied_without_terminal_grant(self):
+        """A Git grant cannot persist command execution through local config."""
+        executor = _make_executor()
+        executor.set_bundle_scope(["git"])
+
+        result = _run_async(
+            executor.execute_tool(
+                {
+                    "id": "git-config-call",
+                    "type": "terminal",
+                    "command": "git config core.pager 'printf PAGER_EXECUTED'",
+                }
+            )
+        )
+
+        assert result.metadata.get("scope_denied") is True
+
     def test_execute_tool_rejects_out_of_scope(self):
         """execute_tool returns error for out-of-scope tools."""
         executor = _make_executor()

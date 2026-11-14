@@ -7,6 +7,8 @@ file operations with proper error handling, logging, and result processing.
 import asyncio
 import logging
 import re
+import shlex
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -831,13 +833,17 @@ class ToolExecutor:
         return tool_type.replace("_", "-")
 
     def _check_bundle_scope(
-        self, tool_type: str, tool_name: Optional[str] = None
+        self,
+        tool_type: str,
+        tool_name: Optional[str] = None,
+        command: Optional[str] = None,
     ) -> Optional[str]:
         """Check if a tool_type is allowed by the bundle scope.
 
         Args:
             tool_type: The dispatch tool type to check.
-            tool_name: Optional MCP tool name for per-tool scope checks.
+            tool_name: Optional native tool name for alias and MCP checks.
+            command: Optional terminal command for the git tool alias.
 
         Returns:
             None if allowed, error message string if denied.
@@ -847,6 +853,21 @@ class ToolExecutor:
 
         if self._bundle_tools is None:
             return None  # Legacy: all tools allowed
+
+        # The git tool is advertised through the shared terminal tag, so XML
+        # calls may not carry a native tool name. A git-only grant must still
+        # reject shell commands through that handler.
+        if (
+            tool_type == "terminal"
+            and "terminal" not in self._bundle_tools
+            and "git" in self._bundle_tools
+        ):
+            if not self._is_single_git_command(command):
+                return (
+                    "[terminal] the git tool only allows a single git command; "
+                    "shell commands are not allowed"
+                )
+            return None
 
         # Internal dispatch types bypass scope
         if tool_type in self._INTERNAL_TYPES:
@@ -888,6 +909,78 @@ class ToolExecutor:
             f"{registry_name} tool. available tools: "
             f"{', '.join(sorted_tools)}"
         )
+
+    @staticmethod
+    def _is_single_git_command(command: Optional[str]) -> bool:
+        """Return whether command invokes one Git built-in without shell syntax."""
+        if not isinstance(command, str) or not command.strip():
+            return False
+        if re.search(r"[;&|<>`\r\n]|\$[({]", command):
+            return False
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            return False
+        if len(argv) < 2 or argv[0] != "git":
+            return False
+
+        takes_value = {
+            "-C",
+            "--git-dir",
+            "--namespace",
+            "--super-prefix",
+            "--work-tree",
+        }
+        flags = {
+            "-p",
+            "-P",
+            "--bare",
+            "--glob-pathspecs",
+            "--icase-pathspecs",
+            "--literal-pathspecs",
+            "--no-lazy-fetch",
+            "--no-optional-locks",
+            "--no-pager",
+            "--no-replace-objects",
+            "--noglob-pathspecs",
+            "--paginate",
+        }
+        index = 1
+        while index < len(argv):
+            arg = argv[index]
+            if arg in takes_value:
+                index += 2
+                continue
+            if arg in flags or any(
+                arg.startswith(f"{option}=")
+                for option in takes_value
+                if option.startswith("--")
+            ):
+                index += 1
+                continue
+            if arg.startswith("-"):
+                return False
+            subcommand = arg
+            break
+        else:
+            return False
+
+        # Config can install shell-backed pagers, aliases, helpers, and hooks.
+        # A Git-only grant must not let a command configure those for later use.
+        if subcommand == "config":
+            return False
+
+        try:
+            builtins = subprocess.run(
+                ["git", "--list-cmds=main"],
+                capture_output=True,
+                check=True,
+                text=True,
+                timeout=2,
+            ).stdout.split()
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return subcommand in builtins
 
     def register_plugin_handler(
         self,
@@ -1163,7 +1256,9 @@ class ToolExecutor:
             )
 
         # Check bundle scope — reject tools not in the agent's allowed set
-        scope_error = self._check_bundle_scope(tool_type, tool_data.get("name"))
+        scope_error = self._check_bundle_scope(
+            tool_type, tool_data.get("name"), tool_data.get("command")
+        )
         if scope_error:
             logger.warning(f"Tool {tool_id} rejected by bundle scope: {tool_type}")
             return ToolExecutionResult(
