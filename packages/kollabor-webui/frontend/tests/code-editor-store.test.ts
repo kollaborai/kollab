@@ -100,6 +100,26 @@ test("the editor uses the active light palette for its canvas and text", () => {
   expect(palette.colors["editor.foreground"]).toBe("#252525");
 });
 
+test("light editor syntax colors stay readable against the active canvas", () => {
+  const theme = editorThemeColors(false, { background: "#ffffff", foreground: "#252525" });
+  const rules = (theme as unknown as { rules?: Array<{ token: string; foreground: string }> }).rules;
+  expect(rules).toBeDefined();
+
+  const luminance = (hex: string) => {
+    const channels = [1, 3, 5].map((start) => Number.parseInt(hex.slice(start, start + 2), 16) / 255);
+    const [red = 0, green = 0, blue = 0] = channels.map((channel) =>
+      channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
+    );
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+  };
+  const background = luminance(theme.colors["editor.background"]);
+  for (const rule of rules ?? []) {
+    const foreground = luminance(rule.foreground);
+    expect((Math.max(background, foreground) + 0.05) / (Math.min(background, foreground) + 0.05), rule.token)
+      .toBeGreaterThanOrEqual(4.5);
+  }
+});
+
 test("the editor replaces an unreadable resolved palette with readable theme colors", () => {
   const light = editorThemeColors(false, {
     background: "#000000",
