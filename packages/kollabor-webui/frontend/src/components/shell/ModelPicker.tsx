@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { optionRowCheckClassName, optionRowClassName } from "@/components/ui/select";
 import { choiceLabel, matchesChoice, sameChoice } from "@/components/shell/model-choice";
+import { loadModelChoices, rowsForProfiles, useModelChoices } from "@/components/shell/model-choices";
 import { cn } from "@/lib/utils";
 
 /**
@@ -56,68 +57,34 @@ export function ModelPicker({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
-  const [loaded, setLoaded] = useState<ModelChoice[] | null>(null);
-  const [failed, setFailed] = useState(false);
-  const [incomplete, setIncomplete] = useState<string[]>([]);
-  const [discovering, setDiscovering] = useState<string[]>([]);
-  const [attempt, setAttempt] = useState(0); // Retry asks again
+  // The page keeps one list per workspace (model-choices.ts): the engine folder's was asked for when the shell
+  // loaded, so it is usually complete before this opens. Each opening asks again, quietly; the list held stays
+  // up until the answer lands, and another folder's answer never lands in this one.
+  const workspace = folder?.trim() || "";
+  const { choices: loaded, discovering, incomplete, failed } = useModelChoices(api, workspace);
   const list = useRef<HTMLDivElement>(null);
   const search = useRef<HTMLInputElement>(null);
   const listId = useId();
 
   useEffect(() => {
-    if (!open) return;
-    let live = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let batches = 0;
-    let pending: string[] = [];
-    const load = async () => {
-      try {
-        const result = await api.listModelChoices(folder?.trim() || "");
-        if (!live) return;
-        setLoaded(result.choices);
-        setFailed(false);
-        const statuses = Object.entries(result.discovery ?? {});
-        const advancing = statuses.filter(([, info]) => info.more).map(([name]) => name);
-        const stalled = statuses.filter(([, info]) => info.status !== "ready" && !info.more).map(([name]) => name);
-        batches += 1;
-        pending = advancing;
-        if (advancing.length && batches < 16) {
-          setDiscovering(advancing);
-          setIncomplete(stalled);
-          timer = setTimeout(load, 250);
-        } else {
-          setDiscovering([]);
-          setIncomplete([...stalled, ...advancing]);
-        }
-      } catch {
-        if (live) {
-          setDiscovering([]);
-          setIncomplete((current) => [...new Set([...current, ...pending])]);
-          setFailed(true);
-        }
-      }
-    };
-    void load();
-    return () => {
-      live = false;
-      if (timer) clearTimeout(timer);
-      setLoaded(null); // each opening asks again: a list fetched as an earlier login never shows
-      setFailed(false);
-      setIncomplete([]);
-      setDiscovering([]);
-    };
-  }, [open, api, attempt, folder]);
+    if (open) void loadModelChoices(api, { workspace });
+  }, [open, api, workspace]);
+
+  const retry = () => {
+    void loadModelChoices(api, { retry: true, workspace });
+    search.current?.focus();
+  };
 
   const choices = useMemo<ModelChoice[]>(
     () =>
-      loaded ??
-      profiles.map((profile) => ({
-        profile: profile.name,
-        provider: profile.provider || "",
-        model: profile.provider === "acp" ? "" : profile.model || "",
-        effort: "",
-      })),
+      loaded
+        ? rowsForProfiles(loaded, profiles)
+        : profiles.map((profile) => ({
+            profile: profile.name,
+            provider: profile.provider || "",
+            model: profile.provider === "acp" ? "" : profile.model || "",
+            effort: "",
+          })),
     [loaded, profiles],
   );
   const shown = useMemo(() => choices.filter((choice) => matchesChoice(choice, query.trim())), [choices, query]);
@@ -205,10 +172,7 @@ export function ModelPicker({
                 type="button"
                 variant="ghost"
                 size="xs"
-                onClick={() => {
-                  setAttempt((count) => count + 1);
-                  search.current?.focus();
-                }}
+                onClick={retry}
               >
                 Retry
               </Button>
@@ -223,10 +187,7 @@ export function ModelPicker({
         {loaded !== null && incomplete.length > 0 ? (
           <p role="status" className="text-muted-foreground flex min-h-8 items-center gap-2 px-3 text-xs">
             Some model options did not load: {incomplete.join(", ")}.
-            <Button type="button" variant="ghost" size="xs" onClick={() => {
-              setAttempt((count) => count + 1);
-              search.current?.focus();
-            }}>
+            <Button type="button" variant="ghost" size="xs" onClick={retry}>
               Retry
             </Button>
           </p>

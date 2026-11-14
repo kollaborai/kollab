@@ -20,9 +20,12 @@ export function makeFixtures(options = {}) {
     resolveCreate = resolve;
   });
   const requests = [];
+  // The engine learns each harness in the background (#953): a harness stays "loading" (more) until it is learned,
+  // and one that failed stays incomplete until its own retry or the picker's Retry (`?refresh=true`).
   let discoveryFailurePending = options.discoveryFailureOnce ?? false;
-  let discoveryProgressPending = options.discoveryProgressOnce ?? false;
+  let discoveryProgressHeld = options.discoveryProgressOnce ?? false;
   let discoveryRequests = 0;
+  let refreshRequests = 0;
 
   const remoteAgent = {
     name: "remote-coder",
@@ -179,10 +182,12 @@ export function makeFixtures(options = {}) {
     }
     if (endpoint === "/profiles/choices") {
       discoveryRequests += 1;
-      const more = discoveryProgressPending;
-      discoveryProgressPending = false;
+      if (url.searchParams.get("refresh") === "true") {
+        refreshRequests += 1;
+        discoveryFailurePending = false;
+      }
+      const more = discoveryProgressHeld;
       const status = more || discoveryFailurePending ? "partial" : "ready";
-      if (!more) discoveryFailurePending = false;
       return json(route, {
         choices: profiles.profiles.map(({ name, provider, model }) => ({
           profile: name, provider, model, effort: "",
@@ -263,6 +268,10 @@ export function makeFixtures(options = {}) {
     agents,
     createPayload: () => createPayload,
     discoveryRequests: () => discoveryRequests,
+    finishDiscoveryProgress: () => {
+      discoveryProgressHeld = false;
+    },
+    refreshRequests: () => refreshRequests,
     createRequest,
     network,
     // The bodies of the profile switches a page asked for, in order.
@@ -522,13 +531,20 @@ async function main() {
 
     await shell.page.getByTestId("new-session-options").click();
     await shell.page.locator("#new-session-model").click();
+    // The shell asked for the list when it loaded (#953), so the picker opens on what the page already knows:
+    // the engine is still learning one harness, which the picker says, and the list is not blank meanwhile.
     const loadingMore = shell.page.getByRole("status").filter({ hasText: "Loading more model options: review" });
     await loadingMore.waitFor({ state: "visible" });
+    assert.equal(await shell.page.getByRole("status").filter({ hasText: "Loading models" }).count(), 0);
+    // The harness finishes, but one of its models failed: the page keeps polling until the engine says it is done.
+    fixtures.finishDiscoveryProgress();
     const discoveryWarning = shell.page.getByRole("status").filter({ hasText: "Some model options did not load: review" });
     await discoveryWarning.waitFor({ state: "visible" });
+    // Opening the picker again asks quietly and never clears a failure on its own; only Retry (?refresh=true) does.
+    assert.equal(fixtures.refreshRequests(), 0);
     await discoveryWarning.getByRole("button", { name: "Retry" }).click();
     await discoveryWarning.waitFor({ state: "hidden" });
-    assert.equal(fixtures.discoveryRequests(), 3);
+    assert.equal(fixtures.refreshRequests(), 1);
     await shell.page.getByRole("group", { name: "review", exact: true })
       .getByRole("option", { name: /claude-haiku/ }).click();
     await shell.page.locator("#new-session-gem").click();

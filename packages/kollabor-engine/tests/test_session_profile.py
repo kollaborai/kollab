@@ -1,5 +1,6 @@
 """POST /sessions/{id}/profile: the session reports the daemon's live effort and vision support."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -124,3 +125,51 @@ async def test_switching_back_keeps_the_override_the_daemon_still_holds(
 
     assert response.json()["effort"] == "max"
     assert response.json()["supports_vision"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("supports_vision", [True, False])
+async def test_acp_profile_switch_preserves_daemon_vision_capability(
+    client, live_session, monkeypatch, supports_vision
+):
+    _mirror_profile(
+        monkeypatch, name="acp", model="saved-model", provider="acp", effort=""
+    )
+    live_session.state.set_active_profile.return_value = ProfileSnapshot(
+        name="acp",
+        model="live-model",
+        provider="acp",
+        supports_vision=supports_vision,
+    )
+
+    response = await client.post("/sessions/sess_profile/profile", json={"name": "acp"})
+
+    assert response.status_code == 200
+    assert response.json()["supports_vision"] is supports_vision
+
+
+@pytest.mark.asyncio
+async def test_acp_capability_event_updates_after_profile_mirroring(
+    client, live_session, monkeypatch
+):
+    _mirror_profile(
+        monkeypatch, name="acp", model="saved-model", provider="acp", effort=""
+    )
+    live_session.state.set_active_profile.return_value = ProfileSnapshot(
+        name="acp", model="live-model", provider="acp", supports_vision=False
+    )
+    response = await client.post("/sessions/sess_profile/profile", json={"name": "acp"})
+    assert response.status_code == 200
+
+    events = asyncio.Queue()
+    monkeypatch.setattr(live_session, "subscribe", lambda: events)
+    monkeypatch.setattr(live_session, "unsubscribe", lambda queue: None)
+    tracker = asyncio.create_task(live_session._track_events())
+    try:
+        await asyncio.sleep(0)
+        events.put_nowait({"type": "acp_session", "supports_vision": True})
+        await asyncio.sleep(0)
+        assert live_session.to_dict()["supports_vision"] is True
+    finally:
+        tracker.cancel()
+        await asyncio.gather(tracker, return_exceptions=True)

@@ -6051,6 +6051,11 @@ class HubPlugin(BasePlugin):
                             preferred,
                             holder.pid,
                         )
+                        from kollabor.daemon import report_detached_startup
+
+                        report_detached_startup(
+                            ready=False, reason=f"{preferred} is already running"
+                        )
                         _os._exit(1)
 
             self._identity.identity = self._designator.assign(taken, preferred)
@@ -8387,6 +8392,7 @@ class HubPlugin(BasePlugin):
                     e,
                 )
                 continue
+            self._work_queue.mark_task_card_terminalized(slot.id)
             if card is None:
                 logger.warning(
                     "Task card %s for retired work slot %s is missing",

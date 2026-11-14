@@ -38,6 +38,7 @@ from kollabor_ai.providers.security import (
     LoggingRedactor,
     PlaintextKeyStorage,
     RedactingLogFilter,
+    SecretRedactionFilter,
     URLValidator,
     get_key_manager,
     setup_secure_logging,
@@ -1065,6 +1066,24 @@ class TestRedactingLogFilter(unittest.TestCase):
 # =============================================================================
 # Setup Secure Logging Tests
 # =============================================================================
+
+
+class TestSecretRedactionFilter(unittest.TestCase):
+    """Test handler-level secret redaction."""
+
+    def test_filter_handles_malformed_exception_info(self):
+        log_filter = SecretRedactionFilter()
+        record = logging.LogRecord(
+            name="test",
+            level=logging.ERROR,
+            pathname="test.py",
+            lineno=1,
+            msg="x",
+            args=(),
+            exc_info=(1, 2, 3),
+        )
+
+        self.assertTrue(log_filter.filter(record))
 
 
 class TestSetupSecureLogging(unittest.TestCase):
@@ -2317,6 +2336,15 @@ class TestLoggingRedactorAllPatterns(unittest.TestCase):
 
         self.assertNotIn("sk-example-openai-redaction-0000", redacted)
         self.assertIn("[REDACTED", redacted)
+
+    def test_openai_key_pattern_preserves_embedded_task_id_and_redacts_key(self):
+        task_id = "task-3f2a9c1e5b7d4e8f9a0b1c2d3e4f5a6b"
+        openai_key = "sk-" + "o" * 24
+
+        self.assertEqual(LoggingRedactor.redact(task_id), task_id)
+        self.assertEqual(
+            LoggingRedactor.redact(openai_key), "[REDACTED-OPENAI-KEY]"
+        )
 
     def test_redact_openai_project_key_pattern(self):
         """Test OpenAI project key pattern matches."""
