@@ -10648,7 +10648,9 @@ class HubPlugin(BasePlugin):
                 ]
                 read_error = str(e)
             if read_error:
-                lines.extend(["", "--- active task view incomplete ---", read_error])
+                roster_block += (
+                    "\n\n--- active task view incomplete ---\n" + read_error
+                )
             if my_tasks:
                 task_lines = ["", "--- active tasks (DO NOT FORGET) ---"]
                 for task in my_tasks:
