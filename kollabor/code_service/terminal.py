@@ -653,7 +653,8 @@ def _spawn(cwd: str, cols: int, rows: int, settings: CodeSettings = DEFAULTS) ->
         _set_winsize(slave, cols, rows)
         if sys.platform.startswith("linux"):
             ready_read, ready_write = os.pipe()
-            argv = [sys.executable, "-I", "-c", "from kollabor.code_service._terminal_supervisor import main; main()",
+            supervisor = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_terminal_supervisor.py")
+            argv = [sys.executable, "-I", supervisor,
                     str(ready_write), shell, *(["-l"] if settings.login else [])]
             proc = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave, cwd=cwd, env=env,
                                     close_fds=True, pass_fds=(ready_write,))
