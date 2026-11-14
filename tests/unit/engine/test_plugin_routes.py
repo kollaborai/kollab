@@ -478,3 +478,36 @@ def make_router(ctx):
         assert client.get("/plugins/hello/api/value").status_code == 404
         assert client.get("/plugins/other/api/value").json() == {"value": 2}
     assert "plugin_vendor_collision_1028" not in sys.modules
+
+
+def test_engine_router_load_failure_is_visible_on_startup(tmp_path, monkeypatch):
+    import json
+    import shutil
+    from pathlib import Path
+
+    from kollabor_plugins import registry
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    source = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    home = tmp_path / ".kollab"
+    root = home / "plugins" / "hello"
+    shutil.copytree(source, root)
+    manifest_path = root / "kollab-plugin.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["engine"] = "python/engine.py:make_router"
+    manifest_path.write_text(json.dumps(manifest))
+    (root / "python" / "engine.py").write_text('def make_router(ctx):\n    raise ValueError("bad router")\n')
+    (home / "plugins.json").write_text(json.dumps({
+        "plugins": {"hello": {"enabled": True, "files_sha256": files_sha256(root), "granted": []}}, "dev": {},
+    }))
+    monkeypatch.setattr(registry, "plugin_entries", lambda: [
+        {"id": "hello", "state": "ok", "error": None, "services": []},
+    ])
+    with TestClient(create_app()) as client:
+        entry = client.get("/plugins").json()["plugins"][0]
+        assert entry["state"] == "error"
+        assert "bad router" in entry["error"]
+        assert client.get("/plugins/hello/api/anything").status_code == 503
