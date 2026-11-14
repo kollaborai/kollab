@@ -1,3 +1,4 @@
+import { sameVersionBase } from "./engine-version";
 import { refreshesOnEvent, tracksStreamedRequest } from "./live-follow";
 import type { SessionEvent } from "./api";
 import { createHistoryReconciliation } from "./history-reconciliation";
@@ -1351,7 +1352,10 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         const bundle = __APP_VERSION__;
         const engine = (config?.engine_version || "").trim();
         setEngineVersion(engine);
-        if (!engine || !bundle || engine === bundle) return;
+        // Source checkouts report a PEP 440 local version segment (+<sha8>, or
+        // +unknown without git metadata); compare base versions so a matching
+        // build does not flag a mismatch (#684).
+        if (!engine || !bundle || sameVersionBase(engine, bundle)) return;
         setVersionMismatch({ page: bundle, engine });
       } catch {
         // The session bootstrap effect surfaces WebUI host/origin denials.
