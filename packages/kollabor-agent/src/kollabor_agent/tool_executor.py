@@ -2465,9 +2465,9 @@ class ToolExecutor:
     ) -> ToolExecutionResult:
         """Load a tool's full definition into the active session.
 
-        For built-in tools: adds the tool name to _bundle_tools so it
-        passes the bundle scope check. Returns the full markdown docs.
-        For MCP tools: marks the tool as enabled and returns its schema.
+        For built-in tools: returns full markdown docs when the tool is in
+        the bundle's declared scope. For MCP tools: marks a declared tool as
+        enabled and returns its schema. Loading never expands bundle scope.
 
         Args:
             tool_data: Tool information containing 'name' (required).
@@ -2555,10 +2555,11 @@ class ToolExecutor:
                 metadata={"available_tools": available},
             )
 
+        declared_names = {tool_def.name, tool_name}
         if (
             self._enforce_bundle_scope
             and self._bundle_tools is not None
-            and tool_def.name not in self._bundle_tools
+            and not declared_names.intersection(self._bundle_tools)
         ):
             allowed_tools = ", ".join(sorted(set(self._bundle_tools)))
             return ToolExecutionResult(
