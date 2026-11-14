@@ -138,6 +138,11 @@ def test_process_table_detector_blocks_global_ps_but_allows_pid_targeting():
     assert not is_process_table_enumeration_command(["/usr/bin/python3", "-c", "print('not a process scan')"])
 
 
+@pytest.mark.parametrize("command", [["echo", "ps"], ["git", "log", "lsof"]])
+def test_process_table_detector_ignores_process_tool_names_in_arguments(command):
+    assert not is_process_table_enumeration_command(command)
+
+
 @pytest.mark.parametrize(
     "command",
     [
