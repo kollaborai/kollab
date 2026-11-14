@@ -174,6 +174,23 @@ class TestBundleScopeEnforcement:
 
         assert result.metadata.get("scope_denied") is True
 
+    def test_git_pager_config_is_denied_without_terminal_grant(self):
+        """Git config options can execute a shell command through the pager."""
+        executor = _make_executor()
+        executor.set_bundle_scope(["git"])
+
+        result = _run_async(
+            executor.execute_tool(
+                {
+                    "id": "git-pager-call",
+                    "type": "terminal",
+                    "command": "git -c core.pager='printf PAGER_EXECUTED' --paginate log -1",
+                }
+            )
+        )
+
+        assert result.metadata.get("scope_denied") is True
+
     def test_execute_tool_rejects_out_of_scope(self):
         """execute_tool returns error for out-of-scope tools."""
         executor = _make_executor()
