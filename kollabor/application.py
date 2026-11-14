@@ -236,11 +236,7 @@ class TerminalLLMChat:
                 __file__
             ).parent.parent  # Go up from core/ to package root
             plugins_dir = package_dir / "plugins"
-            if not plugins_dir.exists():
-                plugins_dir = Path.cwd() / "plugins"  # Fallback for development mode
-                logger.info(f"Using development plugins directory: {plugins_dir}")
-            else:
-                logger.info(f"Using installed package plugins directory: {plugins_dir}")
+            logger.info(f"Using installed package plugins directory: {plugins_dir}")
 
             self.plugin_registry = PluginRegistry(plugins_dir, no_plugins=getattr(args, "no_plugins", False))
             self.plugin_registry.load_all_plugins()
@@ -3673,8 +3669,6 @@ class TerminalLLMChat:
             # Use same plugin directory resolution as main plugin registry
             package_dir = Path(__file__).parent.parent
             plugins_dir = package_dir / "plugins"
-            if not plugins_dir.exists():
-                plugins_dir = Path.cwd() / "plugins"
             registered_count = self.fullscreen_integrator.discover_and_register_plugins(
                 plugins_dir
             )
@@ -3717,8 +3711,6 @@ class TerminalLLMChat:
             # Same plugin directory resolution as fullscreen integrator
             package_dir = Path(__file__).parent.parent
             plugins_dir = package_dir / "plugins"
-            if not plugins_dir.exists():
-                plugins_dir = Path.cwd() / "plugins"
             registered_count = self.altview_integrator.discover_and_register_plugins(
                 plugins_dir
             )

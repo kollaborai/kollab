@@ -148,7 +148,6 @@ class PluginRegistry:
             plugins_dir,
             *(extra_plugin_dirs or []),
             Path.home() / ".kollab" / "plugins",
-            Path.cwd() / ".kollab" / "plugins",
         ]
 
         resolved_dirs: list[Path] = []

@@ -220,9 +220,6 @@ def discover_plugin_args() -> tuple:
     # Determine plugins directory (same logic as application.py)
     package_dir = Path(__file__).parent.parent
     plugins_dir = package_dir / "plugins"
-    if not plugins_dir.exists():
-        plugins_dir = Path.cwd() / "plugins"
-
     plugin_registry = PluginRegistry(plugins_dir, no_plugins="--no-plugins" in sys.argv[1:])
     plugin_classes = plugin_registry.discover_classes_only()
 
