@@ -87,12 +87,33 @@ notice rendering are not yet wired. Eighteen focused tests passed
 (`engine-run-usage-green.log`); Ruff and compilation passed. Logs are under
 `<home>/backups/plugins-step2-work/`.
 
-## Remaining and exact next step
+Dispatcher: `818e1efa`, `47ad19cb`, `325183e5`, and `ddc3a8d7` were red
+before `57d4a6c5` added an approved per-plugin ASGI mount, development reload,
+vendor-name conflict handling and cleanup, startup error reporting, and the
+local-only guard. Twenty-three focused tests passed (`engine-dispatch-green.log`);
+Ruff and compilation passed. Route tests now mock the supervisor so they never
+start services. Earlier isolated-HOME route tests did not mock it; a later process
+check found no matching test service, but cannot prove none was briefly started.
+Earlier pytest invocations also used pytest's default temporary-directory policy;
+from the dispatcher checkpoint onward tests use fresh, explicit backup-tree
+basetemp paths to avoid pytest housekeeping against pre-existing temp data.
 
-Step 2 is not complete. Next: item 3, implement the approved per-plugin ASGI
-dispatcher and connect it to `_engine_context`. Then enforce plugin tokens and
-the proxy/PhoneLink remote restrictions, implement management routes, and run
-all tests specified in the brief. The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
+## Blocker and exact next step
+
+Step 2 is not complete. Item 4 requires each background process to receive
+`KOLLAB_ENGINE_URL` and its plugin-only `KOLLAB_PLUGIN_TOKEN`. The service wrapper
+at `packages/kollabor-plugins/src/kollabor_plugins/services.py:251-264` constructs
+a strict child environment that omits both, and the supervisor at lines 473-480
+starts that wrapper independently. `services.py` is outside the brief's listed
+file ownership. The brief says to stop and tell the lead before touching files
+owned by another lane; no lead or peer is currently online. Request a lead-owned
+change or explicit expanded ownership for the minimal token/URL provisioning and
+redaction plus its tests. No change was made to `services.py`.
+
+Once resolved: implement item 4 token validation and provisioning, spoof-proof
+remote headers plus PhoneLink filtering; item 5 management routes; then run every
+specified test and isolated live smoke. Current branch is not ready to deploy:
+plugin-only token authorization and PhoneLink management blocking are absent. The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
 `packages/kollabor-engine/src/kollabor_engine/phone_link.py` is in scope only
 for refusing the spec's remote-disallowed plugin routes and its tests;
 `routes/phonelink.py` stays unchanged unless that refusal requires it. Audit the file deny list
