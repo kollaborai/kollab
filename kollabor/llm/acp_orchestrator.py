@@ -114,6 +114,15 @@ class ACPOrchestrator:
         self._loadout_override: tuple[str, str, str] | None = None
         self._session_options: dict[str, dict[str, str | bool]] = {}
         self.startup_error: str | None = None
+        # Set while the model fallback switches away from this runner: new
+        # prompts are refused with it, since the switch closes the runner.
+        self.closing_reason = ""
+        # Set while a fallback switch for this runner's failure waits: peer
+        # messages are kept for the harness the switch starts (#548).
+        self.observations_held = False
+        # Each observation turn's messages and their count, by request id, until
+        # it ends: one that fails while they are held gets them back.
+        self._sent_observations: dict[str, tuple[list[AgentHudEntry], int]] = {}
         self._parents: dict[str, str] = {}
         self._history_tasks: set[asyncio.Task] = set()
         self._user_history_tasks: dict[str, asyncio.Task] = {}
@@ -501,14 +510,18 @@ class ACPOrchestrator:
         self._forget_session_picks()
         self.startup_error = None
         self._terminal_session_id = None
-        self._observations.clear()
-        self._observation_count = 0
         self._usage_settled_through = 0
         self._usage_settled_ranges.clear()
         self._display_usage_payload = None
         self._usage_display_turn = None
-        self._observation_rows.clear()
-        self._unwritten_observations.clear()
+        if resume_conversation:
+            # Another conversation: the messages this one heard are not its.
+            self._observations.clear()
+            self._observation_count = 0
+            self._observation_rows.clear()
+            self._unwritten_observations.clear()
+        # Otherwise a peer message the old harness never heard stays for the
+        # new one: a fallback switch restarts it while the failed turn ends (#548).
         self._selected_profile = profile
         self.hub_plugin = self.event_bus.get_service("hub_plugin") or self.hub_plugin
         if not getattr(self.hub_plugin, "enabled", True):
@@ -583,6 +596,8 @@ class ACPOrchestrator:
                 await self._runner_lifecycle("ready", pending)
             else:
                 self._save_binding()
+            if not self.is_processing:
+                self._flush_observations()  # what the harness it replaced never heard
         except BaseException as exc:
             if self._runner is not owned_runner:
                 # A stale attempt may retire only its own child, never a
@@ -689,6 +704,8 @@ class ACPOrchestrator:
         images: tuple[dict[str, str], ...] = (),
         operator_inputs: tuple[dict[str, str], ...] = (),
     ) -> ACPAdmission:
+        if self.closing_reason:
+            raise ACPError(self.closing_reason)
         if (self._runner is None or self._closed or getattr(self, "_starting", False)
                 or (self.transitioning and not self.transition_owned_by_current_task)):
             raise ACPError(self.startup_error or "ACP runner is not active")
@@ -733,6 +750,29 @@ class ACPOrchestrator:
         task = self._user_history_tasks.pop(request_id, None)
         if task is not None:
             self._turn_user_tasks[turn_key] = task
+
+    def hold_observations(self) -> None:
+        """Keep peer messages for the harness a pending fallback switch starts:
+        the failing one would take them and fail them too (#548)."""
+        self.observations_held = True
+
+    def release_observations(self, flush: bool = True) -> None:
+        """The switch is over: the harness that runs now gets what was kept, or,
+        without ``flush``, the next prompt it runs does."""
+        self.observations_held = False
+        if flush and not self.is_processing:
+            self._flush_observations()
+
+    def _requeue_observations(self, request_id: str) -> None:
+        """An observation turn failed while a switch waits on that failure: the
+        harness the switch starts gets its messages, under their written row."""
+        sent = self._sent_observations.pop(request_id, None)
+        if sent is None or not self.observations_held:
+            return
+        entries, count = sent
+        self._observations = deque([*entries, *self._observations], maxlen=self._observations.maxlen)
+        self._observation_count += count
+        self._observation_rows.insert(0, request_id)
 
     def observe_notification(self, message: Any) -> bool:
         """Admit a peer observation. False means refused: nothing was admitted.
@@ -787,7 +827,7 @@ class ACPOrchestrator:
         return True
 
     def _flush_observations(self) -> None:
-        if self._closed or self._runner is None:
+        if self._closed or self._runner is None or self.observations_held:
             return
         if not self._observations and not self._unwritten_observations:
             return
@@ -850,22 +890,23 @@ class ACPOrchestrator:
         for stale in rows[:-1]:
             self._parents.pop(stale, None)
             self._user_history_tasks.pop(stale, None)
+        self._sent_observations[request_id] = (list(self._observations), self._observation_count)
         self._observations.clear()
         self._observation_count = 0
 
-    async def hand_over_to_native(self) -> None:
+    async def hand_over_to_native(self) -> bool:
         """Give the peer messages still buffered for the harness to the native profile.
 
         Call it once a native profile is active after this harness closed. Each
         message is already in the conversation; this drops the buffer so no
-        harness is offered them again, and starts the one native turn that
-        answers them. A message that still has no history row is kept, and no
-        turn starts. Each history write is awaited first; one that fails is shown
-        to the user, and the turn starts anyway, since the message is in the
-        conversation.
+        harness is offered them again. A message that still has no history row
+        is kept, and no turn starts. Each history write is awaited first. True
+        means the native continuation can safely read every kept message, and
+        the one turn that answers them has been started here.
         """
+        self.observations_held = False
         if not self._observation_count and not self._unwritten_observations:
-            return
+            return False
         # A message whose arrival row failed has no history row yet; the native
         # model reads history, so it gets one more try here.
         still_unwritten: list[tuple[str, AgentHudEntry]] = []
@@ -889,7 +930,7 @@ class ACPOrchestrator:
             batch_text = format_agent_hud([entry for _, entry in still_unwritten])
             if not self._write_history_row(batch_id, batch_text):
                 self._unwritten_observations.extend(still_unwritten)
-                return
+                return False
             self._parents.pop(batch_id, None)
             writes.append(self._user_history_tasks.pop(batch_id, None))
         # The native turn reads history, so it starts once these writes have settled.
@@ -897,11 +938,15 @@ class ACPOrchestrator:
         settled = [task for task in writes if task is not None]
         if settled:
             await asyncio.gather(*settled, return_exceptions=True)
+        # Every switch into a native profile ends here (coordinator, state RPC,
+        # loadout activation, the fallback plugin); the turn that answers the
+        # buffered messages starts with this event (#560).
         await self.event_bus.emit_with_hooks(
             EventType.TRIGGER_LLM_CONTINUE,
             {"source": "acp_handover", "content": ""},
             "acp_orchestrator",
         )
+        return True
 
     def _write_history_row(self, row_id: str, text: str) -> bool:
         """Write one observation row. True when it is in history, even if the write raised.
@@ -1329,6 +1374,7 @@ class ACPOrchestrator:
                 thread_id=admission.thread_id, source=admission.source,
                 text="", end_frame=end_frame, failed=True,
             )
+            self._requeue_observations(admission.request_id)
             self._flush_observations()
             return {"text": "", "session_id": session_id,
                     "generation": generation, "turn_id": admission.turn_id,
@@ -1339,6 +1385,7 @@ class ACPOrchestrator:
             self._turn_user_tasks.pop(turn_key, None)
             self._turn_conversations.pop(turn_key, None)
             self._observed_turns.pop((admission.request_id, admission.turn_id), None)
+            self._sent_observations.pop(admission.request_id, None)
         event_usage = (settled_usage or {}).get("usage")
         if (event_usage is None and self._display_usage_payload is not None
                 and self._display_usage_payload[0] == (result.request_id, result.turn_id)):

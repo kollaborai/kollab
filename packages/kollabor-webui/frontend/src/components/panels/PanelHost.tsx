@@ -15,11 +15,9 @@ import type {
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
-  DialogContent,
   DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { LiquidMetalBorder } from "@/components/ui/liquid-metal-border";
 import { SheetContent } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -34,6 +32,7 @@ import { PickerList } from "./PickerList";
 import { PromptsPage } from "@/components/prompts/PromptsPage";
 import { PromptsApi } from "@/prompts-api";
 import { SessionSettings } from "./SessionSettings";
+import { PanelDialogSurface } from "./PanelDialogSurface";
 import { PhoneLinkPanel } from "./PhoneLinkPanel";
 import { WizardSteps, wizardValues } from "./WizardSteps";
 import {
@@ -828,14 +827,11 @@ export function PanelHost({
           {body}
         </SheetContent>
       ) : (
-        <DialogContent className="flex h-[min(52rem,92dvh)] w-full flex-col gap-0 overflow-hidden border-0 bg-transparent p-0 sm:max-w-[min(72rem,94vw)]">
-          <LiquidMetalBorder
-            frameClassName="flex min-h-0 flex-1 flex-col"
-            className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background"
-          >
+        <PanelDialogSurface>
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             {body}
-          </LiquidMetalBorder>
-        </DialogContent>
+          </div>
+        </PanelDialogSurface>
       )}
     </Dialog>
   );
