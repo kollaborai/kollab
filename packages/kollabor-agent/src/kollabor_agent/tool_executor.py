@@ -1730,7 +1730,7 @@ class ToolExecutor:
             return refuse("executable is not on the trusted system path")
         argv = (str(executable), *argv[1:])
         command_env = self.shell_executor._filter_env(os.environ.copy())
-        if Path(argv[0]).name.lower() == "git":
+        if Path(argv[0]).stem.lower() == "git":
             command_env = {
                 name: value
                 for name, value in command_env.items()
