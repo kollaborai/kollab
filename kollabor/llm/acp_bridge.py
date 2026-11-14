@@ -1023,6 +1023,8 @@ class ACPRunner:
 
     async def _track_process_tree(self) -> None:
         while self._owned_processes:
+            if self._closing:
+                return
             self._refresh_process_tree()
             if self._process is not None and self._process.returncode is not None:
                 # The adapter exited without a close request. Its descendants
