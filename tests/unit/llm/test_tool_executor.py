@@ -204,6 +204,44 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(call.kwargs["cwd"], workspace.resolve())
             self.assertEqual(call.kwargs["max_output_bytes"], 8 * 1024)
 
+    async def test_terminal_read_ignores_inherited_git_repository_overrides(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            workspace = temp_root / "workspace"
+            outside = temp_root / "outside"
+            for repository, message in (
+                (workspace, "workspace-marker"),
+                (outside, "outside-marker"),
+            ):
+                repository.mkdir()
+                subprocess.run(["git", "init", "-q", str(repository)], check=True)
+                (repository / "README.md").write_text(message)
+                subprocess.run(
+                    ["git", "-C", str(repository), "add", "README.md"], check=True
+                )
+                subprocess.run(
+                    [
+                        "git", "-C", str(repository), "-c", "user.name=Review",
+                        "-c", "user.email=review@example.invalid", "commit", "-qm", message,
+                    ],
+                    check=True,
+                )
+
+            self.executor.workspace = workspace
+            with patch.dict(os.environ, {"GIT_DIR": str(outside / ".git")}):
+                result = await self.executor.execute_tool(
+                    {
+                        "type": "terminal_read",
+                        "id": "terminal-read-inherited-git-dir",
+                        "command": "git log --format=%s -1",
+                    }
+                )
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.output.strip(), "workspace-marker")
+
     async def test_terminal_read_resolves_executable_outside_writable_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir) / "workspace"
