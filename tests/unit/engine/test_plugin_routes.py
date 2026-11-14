@@ -55,3 +55,7 @@ def test_plugin_settings_read_installed_development_and_builtin(tmp_path, monkey
         }
         assert client.get("/plugins/missing/settings").status_code == 404
         assert client.get("/plugins/hello%40other/settings").status_code == 404
+        (data / "values.json").write_text("{broken", encoding="utf-8")
+        assert client.get("/plugins/hello/settings").status_code == 409
+        (installed / "kollab-plugin.json").write_text("{broken", encoding="utf-8")
+        assert client.get("/plugins/hello/settings").status_code == 409
