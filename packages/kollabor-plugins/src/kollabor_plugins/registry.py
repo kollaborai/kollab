@@ -48,6 +48,17 @@ class PluginRegistry:
             PluginDiscovery(plugin_dir) for plugin_dir in self.plugin_dirs
         ]
         self.discovery = self.discoveries[0]
+        if not no_plugins:
+            global_root = (Path.home() / ".kollab" / "plugins").resolve()
+            for discovery in self.discoveries:
+                if discovery.plugins_dir.resolve() == global_root:
+                    try:
+                        records = _read_registry(global_root.parent / "plugins.json")
+                        discovery.blocked_plugin_dirs = set(records["plugins"])
+                    except (OSError, ValueError):
+                        # Corrupt authority must not make installed directories
+                        # eligible for unchecked legacy imports.
+                        discovery.block_all_subdirs = True
         self.factory = PluginFactory()
         self.collector = PluginStatusCollector()
         self.package_errors: dict[str, str] = {}
@@ -65,6 +76,8 @@ class PluginRegistry:
         candidates = [
             plugins_dir,
             *(extra_plugin_dirs or []),
+            Path.home() / ".kollab" / "plugins",
+            Path.cwd() / ".kollab" / "plugins",
         ]
 
         resolved_dirs: list[Path] = []

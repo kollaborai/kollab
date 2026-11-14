@@ -16,6 +16,8 @@ def test_registered_directory_with_missing_manifest_is_not_imported(tmp_path, mo
     marker = tmp_path / "executed"
     (package / "__init__.py").write_text(f"open({str(marker)!r},'w').close()\n")
     (package / "bad_plugin.py").write_text("class BadPlugin:\n @staticmethod\n def get_default_config(): return {}\n")
-    (tmp_path / ".kollab" / "plugins.json").write_text(json.dumps({"plugins": {"hello": {"enabled": False}}, "dev": {}}))
+    (tmp_path / ".kollab" / "plugins.json").write_text(
+        json.dumps({"plugins": {"hello": {"enabled": False}}, "dev": {}})
+    )
     PluginRegistry(builtin).load_all_plugins()
     assert not marker.exists()

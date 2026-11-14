@@ -308,9 +308,27 @@ class PluginDiscovery:
             logger.error(f"Error resolving plugins directory: {e}")
             return discovered
 
+        def inside_manifest_package(path: Path) -> bool:
+            relative = path.relative_to(plugins_dir)
+            if len(relative.parts) > 1 and (
+                getattr(self, "block_all_subdirs", False)
+                or relative.parts[0] in getattr(self, "blocked_plugin_dirs", set())
+            ):
+                return True
+            parent = path.parent
+            while parent != plugins_dir and parent.is_relative_to(plugins_dir):
+                if (parent / "kollab-plugin.json").exists():
+                    return True
+                parent = parent.parent
+            return False
+
+        # Manifest packages are loaded only by the package registry, never via
+        # legacy recursive discovery (even when disabled or unapproved).
         # Recursively scan for *_plugin.py files
         for plugin_file in plugins_dir.rglob("*_plugin.py"):
             try:
+                if inside_manifest_package(plugin_file):
+                    continue
                 # Calculate relative path from plugins directory
                 rel_path = plugin_file.relative_to(plugins_dir)
 
@@ -354,6 +372,8 @@ class PluginDiscovery:
         # Recursively scan for directory-based plugins (packages with __init__.py)
         for plugin_dir in plugins_dir.rglob("*/__init__.py"):
             try:
+                if inside_manifest_package(plugin_dir):
+                    continue
                 # Get the directory containing __init__.py
                 dir_path = plugin_dir.parent
 
