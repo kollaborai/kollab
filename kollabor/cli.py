@@ -1351,7 +1351,10 @@ async def async_main() -> None:
         # Reuse the discovery object from CLI arg parsing
         from kollabor_plugins import PluginRegistry
 
-        plugin_registry = PluginRegistry(discovery.plugins_dir, no_plugins=args.no_plugins)
+        if getattr(args, "no_plugins", False):
+            plugin_registry = PluginRegistry(discovery.plugins_dir, no_plugins=True)
+        else:
+            plugin_registry = PluginRegistry(discovery.plugins_dir)
         plugin_registry.discovery = discovery  # Reuse discovery from CLI args
 
         # Resolve attach identity (set earlier if --attach was used)
