@@ -106,6 +106,64 @@ async def test_create_rejects_unknown_effort_with_422(client):
 
 
 @pytest.mark.asyncio
+async def test_create_auto_profile_validates_effort_against_environment_key(
+    client, manager, monkeypatch
+):
+    monkeypatch.setenv("KOLLAB_API_KEY", "sk-ant-test")
+
+    response = await client.post(
+        "/profiles",
+        json={
+            "name": "anthropic-auto",
+            "provider": "auto",
+            "model": "claude-opus-5-5",
+            "effort": "minimal",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "Anthropic has no reasoning effort" in response.text
+    assert manager.get_profile("anthropic-auto") is None
+
+
+@pytest.mark.asyncio
+async def test_rejected_create_does_not_store_submitted_api_key(
+    client, monkeypatch
+):
+    import kollabor_ai.profile_manager as profile_manager_module
+
+    monkeypatch.delenv("KOLLAB_API_KEY", raising=False)
+    monkeypatch.delenv("KOLLAB_REJECTED_API_KEY", raising=False)
+    attempted_stores = []
+    monkeypatch.setattr(
+        profile_manager_module,
+        "_vault_call",
+        lambda *args, **kwargs: attempted_stores.append(("vault", args, kwargs))
+        or None,
+    )
+    monkeypatch.setattr(
+        profile_manager_module,
+        "_keyring_set",
+        lambda *args, **kwargs: attempted_stores.append(("keyring", args, kwargs))
+        or True,
+    )
+
+    response = await client.post(
+        "/profiles",
+        json={
+            "name": "rejected",
+            "provider": "auto",
+            "model": "claude-opus-5-5",
+            "api_key": "sk-ant-submitted",
+            "effort": "minimal",
+        },
+    )
+
+    assert response.status_code == 422
+    assert attempted_stores == []
+
+
+@pytest.mark.asyncio
 async def test_create_without_effort_omits_it(client, manager):
     response = await client.post(
         "/profiles",

@@ -90,6 +90,7 @@ class AutoModelPanelTests(unittest.TestCase):
         field = asyncio.run(_effort_control(_handler(_FakePM(profile)), profile))
         self.assertTrue(field.get("editable", True), field)
         self.assertIn("minimal", field["options"])
+        self.assertEqual(field["option_labels"]["none"], "none (no reasoning)")
 
 
 class ProfileRowEffortProviderTests(unittest.TestCase):
