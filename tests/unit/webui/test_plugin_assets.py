@@ -4,7 +4,6 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
-
 from kollabor_webui.server import create_app
 
 

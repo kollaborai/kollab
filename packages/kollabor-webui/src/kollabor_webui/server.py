@@ -186,6 +186,7 @@ def create_app(
         if sensitive:
             response.headers.update(NO_STORE_HEADERS)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Content-Security-Policy", "script-src 'self'")
         response.headers.setdefault("X-Frame-Options", "DENY")
         return response
 
@@ -359,6 +360,41 @@ def create_app(
     @app.get("/")
     async def index():
         return page(_assistant_static_dir() or LEGACY_STATIC_DIR)
+
+    @app.get("/plugins/{plugin_id}/web/{asset_path:path}")
+    async def plugin_asset(plugin_id: str, asset_path: str):
+        from kollabor_plugins.packages import _ID, _read_registry
+
+        missing = JSONResponse({"detail": "Not found"}, status_code=404)
+        is_dev = plugin_id.endswith("@dev")
+        base_id = plugin_id[:-4] if is_dev else plugin_id
+        if not _ID.fullmatch(base_id):
+            return missing
+        parts = asset_path.split("/")
+        if any(not part or part.startswith(".") for part in parts):
+            return missing
+        if Path(asset_path).suffix not in {".js", ".mjs", ".css", ".png", ".woff2", ".json"}:
+            return missing
+        home = Path.home() / ".kollab"
+        try:
+            registry = _read_registry(home / "plugins.json")
+            if is_dev:
+                folder = registry["dev"].get(base_id)
+                if not isinstance(folder, str):
+                    return missing
+                root = Path(folder).resolve()
+            else:
+                record = registry["plugins"].get(base_id)
+                if not isinstance(record, dict) or not record.get("enabled") or base_id in registry["dev"]:
+                    return missing
+                root = (home / "plugins" / base_id).resolve()
+            dist = root / "web" / "dist"
+            if not dist.resolve().is_relative_to(root):
+                return missing
+            asset = _safe_asset(dist, asset_path)
+        except (OSError, ValueError, RuntimeError):
+            return missing
+        return FileResponse(asset) if asset is not None else missing
 
     @app.get("/{asset_path:path}")
     async def static_or_spa(asset_path: str):
