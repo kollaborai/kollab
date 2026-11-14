@@ -263,6 +263,57 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
             self.assertIn("project", result.error.lower())
             self.executor.shell_executor.run_argv.assert_not_awaited()
 
+    async def test_terminal_read_git_diff_disables_configured_external_helper(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            helper = workspace / "external-diff"
+            marker = workspace / "helper-ran"
+            helper.write_text(f"#!/bin/sh\nprintf ran > '{marker}'\n")
+            helper.chmod(0o755)
+            subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+            subprocess.run(
+                ["git", "-C", str(workspace), "config", "user.name", "Review"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-C", str(workspace), "config", "user.email",
+                    "review@example.invalid",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-C", str(workspace), "config", "diff.external",
+                    str(helper),
+                ],
+                check=True,
+            )
+            tracked = workspace / "file.txt"
+            tracked.write_text("before\n")
+            subprocess.run(
+                ["git", "-C", str(workspace), "add", "file.txt"], check=True
+            )
+            subprocess.run(
+                ["git", "-C", str(workspace), "commit", "-qm", "initial"],
+                check=True,
+            )
+            tracked.write_text("after\n")
+            self.executor.workspace = workspace
+
+            result = await self.executor.execute_tool(
+                {
+                    "type": "terminal_read",
+                    "id": "terminal-read-external-diff",
+                    "command": "git diff -- file.txt",
+                }
+            )
+
+            self.assertTrue(result.success)
+            self.assertFalse(marker.exists())
+
     async def test_terminal_read_filters_git_overrides_for_windows_executable_name(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             self.executor.workspace = Path(temp_dir)
