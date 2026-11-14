@@ -90,6 +90,13 @@ device's roster as `agent@device`. A hub message to `agent@device` is
 delivered to that device, wakes that agent, and is observed by the rest of the
 network exactly as a local message is observed by the rest of the hub.
 
+Directory requests keep the original empty payload for older peers. A current
+device may opt in to the `agent_type` roster field with
+`{"agent_type": true}`; a current device includes that field only for an opted-in
+request. If an older peer rejects the opt-in request, the requester retries with
+the empty payload and uses the legacy roster. This keeps mixed-version devices
+visible while newer peers can show the remote agent's bundle glyph.
+
 **Agents from other harnesses.** Claude Code, Codex and any other ACP agent
 can run as a kollab agent (`docs/specs/acp-bridge.md`): a name in the roster,
 addressed as `agent@device`, under the same trust and hub rules.
