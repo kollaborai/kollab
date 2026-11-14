@@ -10,7 +10,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.22.0] - 2026-11-14
 
 ### Added
-- The web UI sidebar has a PR Chain dialog that lists the pull requests and issues an external review runner is working on, with status, round and recent activity (#1008).
 - The web UI's session panel has Code Editor, Git and Terminal views beside Chat and Trajectory, shown for a chat that
   has a folder. Code Editor is a Monaco editor with file tree, search, quick open and split panes; Git is its own view
   (status, stage, commit, branches, stash, log, diff) with the git panel beside the same editor panes; Terminal is a
@@ -19,21 +18,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and shell (#987). The on and off switches, the terminal's environment filters and shell limits, the editor's file size
   and folder rules, and the Git rules all have settings (#987). The Terminal view shows a plain notice to restart the
   agent when the session's daemon is older than this change (#987).
-- Code and Git share a folder selector that discovers linked worktrees and browses the agent computer. Guarded subfolder commits and stash deletion are unavailable because concurrent Git activity can change the checked index or stash position.
-- Feature work now has a shared spec template, bug fixes have a concise fix brief, and the PR gate reports missing documentation before blocking is enabled (#984).
+- Code and Git share a folder selector that discovers linked worktrees and browses the agent computer. Guarded subfolder commits and stash deletion are unavailable because concurrent Git activity can change the checked index or stash position (#987).
 - The web UI shows the agent's latest todo list as a Todo card under the Session Controls panel: a count, the items with finished ones struck through, and a header that opens and closes it (#973).
 - `/restart` restarts a detached agent in place on the installed Kollab version and keeps its conversation; `/new` and `/clear` clear it. A web chat whose agent runs an older version than the engine says so, with a Restart Agent button when `kollabor.updates.restart_agents` is on (default off) and the `/restart` line when it is off. Agents publish the version and build they run in presence, `GET /agents` and the network rows. An agent that cannot restart itself (it started before Restart Agent existed) gets a stop command and instructions to select its Offline row in the sidebar to start it again, without a button (#968).
 - Agent bundles can grant read-only terminal access with `terminal-read` (#889).
 - `/llm fallback` lets an agent switch once to a configured loadout after usage, quota, rate-limit or login errors (#548).
 
 ### Changed
-- Migration: engine folder routes now refuse a folder unless it sits inside your home folder, the engine's own folder, a folder a kollab agent runs in, or a recent web session folder (see Security). To use a project elsewhere, start its agent from that folder or move the project under your home folder.
+- Migration: engine folder routes now refuse a folder unless it sits inside your home folder, the engine's own folder, a folder a kollab agent runs in, or a recent web session folder (see Security). To use a project elsewhere, start its agent from that folder or move the project under your home folder (#980).
 - Learn pages use feature-specific workflows with real product visuals, exact entry points, command examples, expected results, and recovery guidance across all eleven topics, including Connect and Knocks (#1006).
-- Run isolated web UI browser acceptance suites in parallel and record a control inventory with explicit coverage gaps.
+- Behaviour changes:
+  - A busy role no longer borrows another role's persona.
+  - `name=<persona> identity=<x>` now honours the explicit identity.
+  - Harness mode is detected from the bundle or inherited profile (#928).
 
 ### Fixed
-- The CI binary build retries its pex download steps up to four attempts with growing pauses, so a gateway timeout from the package host no longer fails it.
-- The web UI browser acceptance runner gives each suite 900 seconds instead of 360, so the slowest suite no longer fails with a bare timeout on a slow CI runner (#1018).
+- The Code Editor markdown preview wraps long inline code, links and table cells on phones instead of widening the page (#1063).
 - Prevent concurrent editor opens from advancing a dirty file's revision and refuse unsafe subfolder stash creation (#1011).
 - Stop terminal jobs on close, idle reap, and daemon shutdown; detect macOS jobs that detach and close PTY descriptors
   between scans, and keep Linux source-mode terminal startup working with the isolated supervisor (#1011).
@@ -44,8 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Narrow editor users can switch between every open split pane from visible phone controls (#1011).
 - Keep split Code Editor documents readable on narrow screens by showing the active pane full width (#1011).
 - Fall back to readable Monaco canvas and source colors when the active theme palette lacks contrast (#1011).
-- The binary build retries its pex step up to four times, waiting longer each time, so a network timeout while fetching the portable CPython no longer fails `ci/binary-smoke` (#996).
-- New Session in a folder typed in other letters than it has on disk (`~/dev/cASEpROJECT` for `~/dev/CaseProject`)
+- New Session in a folder typed in other letters than it has on disk (`~/projects/cASEpROJECT` for `~/projects/CaseProject`)
   no longer waits 45 seconds and fails with "daemon did not publish a socket" on a computer whose disk ignores case
   (macOS, Windows). The engine now answers a folder the way the disk spells it, so the agent it starts is found at once
   (#980).
@@ -71,20 +70,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The web UI's Model picker is ready before you click it: the engine learns each harness's models and efforts
   in the background when it starts and keeps the list, and the page asks for it as it loads, instead of waiting
   about 30 s on every opening. Retry keeps loading until fresh options arrive, and editing an ACP profile's
-  launch settings removes its old model rows while the matching list is warmed (#953). Each workspace keeps
-  its own ACP discovery cache, so requests for another folder do not cancel or discard its warm results.
+  launch settings removes its old model rows while the matching list is warmed. Each workspace keeps
+  its own ACP discovery cache, so requests for another folder do not cancel or discard its warm results (#953).
 - Configured hook subprocesses are reaped when the hook task is cancelled or the hook loader shuts down: SIGTERM, a short grace, then SIGKILL, always awaited, with cleanup failures reported instead of silently claimed (#930).
 - ACP `hub_spawn` now resolves bundle roles to roster identities, while preserving exact and explicitly selected names in chat (#928).
-- Behaviour changes:
-  - A busy role no longer borrows another role's persona.
-  - `name=<persona> identity=<x>` now honours the explicit identity.
-  - Harness mode is detected from the bundle or inherited profile.
 - Saved conversation durations now account for timestamp timezone offsets (#906).
 - ACP profile mirroring preserves the daemon's image capability across profile and panel refreshes (#900).
 - Native-tool providers no longer receive the XML tool reference (#896).
 - Agent tool lists treat `*` as allow all and warn when listed tool names are redundant (#892).
 - Read-only terminal access rejects recursive or symlink-following `ls` commands that could inspect paths outside the project (#889).
-- Read-only Git commands ignore inherited `GIT_*` overrides and disable repository fsmonitor helpers so they stay rooted at the project without executing local helpers.
+- Read-only Git commands ignore inherited `GIT_*` overrides and disable repository fsmonitor helpers so they stay rooted at the project without executing local helpers (#889).
 - Agent terminal commands can send Hub messages beginning with `-a` or `-d` without tripping the spawn guard (#878).
 - `--detached` waits for startup and reports a child refusal with a failing exit status (#872).
 - Usage ledger labels session-stat token fallbacks and documents per-request timing and ACP coverage (#871).
