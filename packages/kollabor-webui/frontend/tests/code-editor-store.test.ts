@@ -88,6 +88,16 @@ test("the editor uses the active light palette for its canvas and text", () => {
   expect(palette.colors["editor.foreground"]).toBe("#252525");
 });
 
+test("the editor replaces an unreadable resolved palette with readable theme colors", () => {
+  const light = editorThemeColors(false, {
+    background: "#000000",
+    foreground: "#000000",
+  });
+
+  expect(light.colors["editor.background"]).toBe("#ffffff");
+  expect(light.colors["editor.foreground"]).toBe("#252525");
+});
+
 test("Monaco active line and gutter colors follow the current theme palette", () => {
   const light = editorThemeColors(false, { background: "#ffffff", foreground: "#202020" }).colors;
   const dark = editorThemeColors(true, { background: "#0e0e14", foreground: "#f0f0f5" }).colors;
