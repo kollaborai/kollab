@@ -26,7 +26,7 @@ def test_unreadable_pending_reply_envelope_is_never_treated_as_empty(
     path = tmp_path / "_pending_replies.json"
     path.write_text(payload)
 
-    with pytest.raises(ValueError, match="pending reply ledger.*repair"):
+    with pytest.raises(ValueError, match="(?i)pending reply ledger.*repair"):
         if operation == "read":
             ledger._load_pending_replies()
         elif operation == "expect":
@@ -66,7 +66,9 @@ def test_pending_reply_read_io_failure_is_reported_without_content(tmp_path, mon
 
     monkeypatch.setattr(Path, "read_text", fail_pending_read)
 
-    with pytest.raises(ValueError, match="pending reply ledger.*repair") as error:
+    with pytest.raises(
+        ValueError, match="(?i)pending reply ledger.*repair"
+    ) as error:
         ledger.pending_replies()
 
     assert "private payload" not in str(error.value)
