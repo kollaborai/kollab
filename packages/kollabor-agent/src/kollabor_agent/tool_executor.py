@@ -8,6 +8,7 @@ import asyncio
 import logging
 import re
 import shlex
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -911,7 +912,7 @@ class ToolExecutor:
 
     @staticmethod
     def _is_single_git_command(command: Optional[str]) -> bool:
-        """Return whether command contains one shell-free git invocation."""
+        """Return whether command invokes one Git built-in without shell syntax."""
         if not isinstance(command, str) or not command.strip():
             return False
         if re.search(r"[;&|<>`\r\n]|\$[({]", command):
@@ -920,7 +921,63 @@ class ToolExecutor:
             argv = shlex.split(command)
         except ValueError:
             return False
-        return len(argv) >= 2 and argv[0] == "git"
+        if len(argv) < 2 or argv[0] != "git":
+            return False
+
+        takes_value = {
+            "-C",
+            "-c",
+            "--config-env",
+            "--git-dir",
+            "--namespace",
+            "--super-prefix",
+            "--work-tree",
+        }
+        flags = {
+            "-p",
+            "-P",
+            "--bare",
+            "--glob-pathspecs",
+            "--icase-pathspecs",
+            "--literal-pathspecs",
+            "--no-lazy-fetch",
+            "--no-optional-locks",
+            "--no-pager",
+            "--no-replace-objects",
+            "--noglob-pathspecs",
+            "--paginate",
+        }
+        index = 1
+        while index < len(argv):
+            arg = argv[index]
+            if arg in takes_value:
+                index += 2
+                continue
+            if arg in flags or any(
+                arg.startswith(f"{option}=")
+                for option in takes_value
+                if option.startswith("--")
+            ):
+                index += 1
+                continue
+            if arg.startswith("-"):
+                return False
+            subcommand = arg
+            break
+        else:
+            return False
+
+        try:
+            builtins = subprocess.run(
+                ["git", "--list-cmds=main"],
+                capture_output=True,
+                check=True,
+                text=True,
+                timeout=2,
+            ).stdout.split()
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return subcommand in builtins
 
     def register_plugin_handler(
         self,
