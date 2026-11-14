@@ -3366,6 +3366,13 @@ def _is_tool_shell_agent_launch(argv: list[str]) -> bool:
 
 def cli_main() -> None:
     """Synchronous entry point for pip-installed CLI command."""
+    if sys.argv[1:2] == ["plugin"]:
+        from kollabor_plugins.cli import main as plugin_main
+
+        result = plugin_main(sys.argv[2:])
+        if result:
+            raise SystemExit(result)
+        return
     if _is_tool_shell_agent_launch(sys.argv):
         sys.stderr.write(
             "error: nested --agent launches are blocked in tool/agent contexts; "
