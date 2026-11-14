@@ -66,6 +66,7 @@ describe("guided setup footer", () => {
     expect(markup).toContain(">Finish<");
     expect(markup).not.toContain(">Skip</button>");
     expect(markup).not.toContain(">Open<");
+    expect(markup).not.toContain(">Get Started<");
   });
 
   it("actionable step keeps Skip next to Open", () => {
@@ -73,11 +74,23 @@ describe("guided setup footer", () => {
     expect(markup).toContain(">Skip</button>");
     expect(markup).toContain(">Open<");
     expect(markup).not.toContain(">Finish<");
+    expect(markup).not.toContain(">Get Started<");
   });
 
-  it("welcome has no target, so no footer Skip", () => {
+  it("primary button label matches the step's action", () => {
+    // Welcome has no target and is the greeting: its button starts the tour.
+    expect(guideMarkup("welcome")).toContain(">Get Started<");
+    // Actionable steps open their surface.
+    expect(guideMarkup("provider")).toContain(">Open<");
+    expect(guideMarkup("agent")).toContain(">Open<");
+    // Only the final step finishes.
+    expect(guideMarkup("done")).toContain(">Finish<");
+  });
+
+  it("welcome renders Get Started, never Finish, and no footer Skip", () => {
     const markup = guideMarkup("welcome");
     expect(markup).not.toContain(">Skip</button>");
-    expect(markup).toContain(">Finish<");
+    expect(markup).not.toContain(">Finish<");
+    expect(markup).toContain(">Get Started<");
   });
 });

@@ -183,7 +183,7 @@ export function SetupGuide({
           })}
           </ol>
         </div>
-        <footer className="flex shrink-0 items-center justify-between gap-2 pt-3">
+        <footer className="flex shrink-0 items-center justify-between gap-2 px-6 pt-3">
           {target ? (
             <Button type="button" variant="ghost" onClick={dismiss}>
               Skip
@@ -192,9 +192,10 @@ export function SetupGuide({
           <Button
             type="button"
             data-testid="setup-guide-next"
-            onClick={target ? runTarget : advance}
+            className="ml-auto"
+            onClick={target ? runTarget : step === "done" ? dismiss : advance}
           >
-            {target ? "Open" : "Finish"}
+            {target ? "Open" : step === "done" ? "Finish" : "Get Started"}
             <ChevronRight />
           </Button>
         </footer>
