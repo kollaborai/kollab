@@ -208,6 +208,26 @@ class TestBundleScopeEnforcement:
 
         assert result.metadata.get("scope_denied") is True
 
+    def test_git_subcommands_that_run_external_commands_are_denied(self):
+        """Git built-ins that intentionally run arbitrary commands need shell scope."""
+        executor = _make_executor()
+        executor.set_bundle_scope(["git"])
+
+        commands = [
+            "git bisect run sh -c 'touch marker'",
+            "git submodule foreach touch marker",
+            "git difftool",
+            "git mergetool",
+            "git filter-branch --msg-filter cat",
+        ]
+        for command in commands:
+            result = _run_async(
+                executor.execute_tool(
+                    {"id": "git-external-helper", "type": "terminal", "command": command}
+                )
+            )
+            assert result.metadata.get("scope_denied") is True, command
+
     def test_execute_tool_rejects_out_of_scope(self):
         """execute_tool returns error for out-of-scope tools."""
         executor = _make_executor()
