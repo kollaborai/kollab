@@ -443,6 +443,10 @@ Background processes get `KOLLAB_PLUGIN_ID`, `KOLLAB_PLUGIN_ROOT`, `KOLLAB_PLUGI
   under a sibling `runs.json.lock`. The daemon writes its own end state and result when it finishes, is
   refused at the gate or exits, so a run that ends while no engine runs still records how it ended; a
   starting engine marks rows whose daemon is gone as `failed`. Finished rows stay for the daily count.
+  The file is `{ "runs": [<row>, ...] }`; each row has a unique `run_id` and the status above.
+  A terminal row also has `finished_at` (an ISO-8601 timestamp or Unix seconds) and `result.usage`
+  with non-negative integer `input` and `output` counts, including zero when no tokens were used.
+  These fields let the daily counter assign and deduplicate a completed run even after a crash.
 - A plugin runs at most 4 agents at once (`max_concurrent_runs`); the next start gets 429. A run is
   admitted against the day's counted tokens plus the tokens of runs still going.
 - `tools` goes through the agent bundle's tools allowlist. That allowlist has open gaps (#889 to #897),
