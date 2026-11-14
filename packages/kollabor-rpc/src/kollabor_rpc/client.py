@@ -172,6 +172,18 @@ class RpcClient:
         else:
             fut.set_result(msg_data.get("result"))
 
+    def reconnect(self, writer: asyncio.StreamWriter) -> None:
+        """Send over a new connection from now on; the same client works again.
+
+        For a caller whose connection ended and attached again (a daemon restarted
+        in place): whatever holds this client keeps it. Calls still waiting on the
+        old connection fail now, since their replies can never arrive. The caller
+        keeps routing the new reader's replies to :meth:`on_reply`.
+        """
+        self.close()
+        self._writer = writer
+        self._closed = False
+
     def close(self) -> None:
         """Cancel all pending calls with ``RpcError('rpc client closed')``.
 

@@ -4555,6 +4555,75 @@ class HubPlugin(BasePlugin):
             output=f"{self._identity.identity} restarting...",
         )
 
+    async def restart_in_place(self) -> dict:
+        """Restart this detached agent on the installed code, same conversation (#968).
+
+        Replies at once. A task lets the turn in progress end (a running tool is
+        never cut), saves the conversation, runs the graceful shutdown and replaces
+        the process image: same pid, same flags, still detached, started through
+        ``kollab_argv()``. The hub socket is named by identity, so the engine's open
+        chat reattaches to the same path with no page reload.
+        """
+        import sys
+
+        from kollabor.daemon import DETACHED_CHILD_ENV
+
+        if not self._identity:
+            raise ValueError("hub not initialized")
+        if not {"--detached", "-d"} & set(sys.argv) and os.environ.get(DETACHED_CHILD_ENV) != "1":
+            raise ValueError("this window runs without a daemon: quit and start Kollab again to update it")
+        if getattr(self, "_self_restart_requested", False):
+            return {"restarting": True, "waiting_for_turn": False}
+        llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+        busy = bool(getattr(llm, "is_processing", False))
+        self._self_restart_requested = True
+        self._restart_task = asyncio.create_task(self._restart_when_idle(llm))
+        return {"restarting": True, "waiting_for_turn": busy}
+
+    async def _restart_when_idle(self, llm: Any) -> None:
+        import sys
+
+        from kollabor.daemon import restart_command, restart_env, wait_until_idle
+
+        def busy() -> bool:
+            return bool(getattr(llm, "is_processing", False)) or self.network_turn_open()
+
+        if not await wait_until_idle(busy):
+            logger.warning("restart in place: the turn never ended, so the agent keeps running")
+            self._self_restart_requested = False
+            return
+        conv = getattr(llm, "conversation_manager", None)
+        session_id = str(getattr(conv, "current_session_id", "") or "")
+        try:
+            if conv is not None and getattr(conv, "messages", None):
+                conv.save_conversation()
+        except Exception as e:
+            logger.warning(f"restart in place: could not save the conversation: {e}")
+            self._self_restart_requested = False
+            from kollabor_tui.display_tap import publish_semantic
+
+            publish_semantic(
+                self.event_bus,
+                "agent_restart_failed",
+                identity=self._identity.identity,
+            )
+            return
+        # Past this point the process image is replaced or the process ends: tell every
+        # attached window now, so a terminal waits and attaches again instead of
+        # reporting an exit, and give the attach streams time to write it out first.
+        from kollabor_tui.display_tap import publish_semantic
+
+        publish_semantic(self.event_bus, "daemon_restarting", identity=self._identity.identity)
+        await asyncio.sleep(0.25)
+        exec_argv = restart_command(sys.argv)
+        os.environ.update(restart_env(session_id))  # execvp hands the environment on
+        self._self_restart_cmd = exec_argv
+        self._self_stop_requested = True
+        self._self_restart_watchdog_task = asyncio.create_task(
+            self._self_restart_watchdog(exec_argv, self._identity.identity)
+        )
+        await self._perform_self_restart()
+
     async def _self_restart_watchdog(self, exec_argv, identity: str) -> None:
         try:
             await asyncio.sleep(8.0)
@@ -6406,6 +6475,17 @@ class HubPlugin(BasePlugin):
                     f"({'coordinator' if is_coordinator else 'peer'})",
                     from_agent=self._identity.identity,
                 )
+
+            # A restart in place (#968) names the conversation to pick back up. It runs before
+            # the session log path below is published, so peers read the resumed file.
+            try:
+                from kollabor.daemon import resume_after_restart
+
+                state_svc = self.event_bus.get_service("state_service") if self.event_bus else None
+                if state_svc is not None:
+                    await resume_after_restart(state_svc)
+            except Exception as e:
+                logger.warning(f"restart: could not resume the conversation: {e}")
 
             # Set session log path so other agents can find our conversation file
             llm_svc = (

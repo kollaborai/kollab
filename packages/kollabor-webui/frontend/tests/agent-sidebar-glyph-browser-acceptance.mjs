@@ -9,7 +9,9 @@ import { makeFixtures, openPage, openVite } from "./learn-browser-acceptance.mjs
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = path.resolve(scriptDir, "..");
 const repoRoot = path.resolve(frontendRoot, "../../..");
-const screenshotDir = path.join(repoRoot, "docs/screenshots");
+const screenshotDir = process.env.KOLLAB_BROWSER_ARTIFACT_DIR
+  ? path.resolve(process.env.KOLLAB_BROWSER_ARTIFACT_DIR)
+  : path.join(repoRoot, "docs/screenshots");
 const agentTypes = [
   "coder",
   "community",
