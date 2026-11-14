@@ -49,14 +49,20 @@ plugin API dispatch must not be considered safe until that is implemented.
 PhoneLink enforcement is also outstanding. Add tests for allowed routes,
 forwarded markers, normalization and spoofing.
 
+Lock-directory symlink regression test `e36d325b` failed before fix `954044b5`;
+all three context tests passed afterward. Logs: `<home>/backups/plugins-step2-work/
+context-lock-symlink-{red,green}.log`. Ruff and compilation passed for the context
+and test files. This rejects a pre-existing symlink; it is not an OS sandbox or
+proof against concurrent directory replacement. Context remains incomplete.
+
 ## Remaining and exact next step
 
 Step 2 is not complete. Next: wire and test PluginContext, then implement the
 remaining engine routes, tokens, proxy and PhoneLink remote restrictions, and
-all tests specified in the brief. The actual PhoneLink ASGI bridge is in
-`packages/kollabor-engine/src/kollabor_engine/phone_link.py`, outside the
-brief's stated ownership; its routes/phonelink.py is the management router.
-Resolve that scope mismatch before modifying the bridge. Audit the file deny list
+all tests specified in the brief. The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
+`packages/kollabor-engine/src/kollabor_engine/phone_link.py` is in scope only
+for refusing the spec's remote-disallowed plugin routes and its tests;
+`routes/phonelink.py` stays unchanged unless that refusal requires it. Audit the file deny list
 against all actual token paths and tool entrypoints. Run the full unit suite on a
 fixed HEAD, Ruff, compilation, and the specified isolated live smoke; record
 results. Append the changelog line. Check PR #1065 only once step 2 is green;
