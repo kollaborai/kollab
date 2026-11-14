@@ -44,6 +44,7 @@ function harness(
   state: { text: string; attachments: unknown[] },
   attachmentAdapter = new SimpleImageAttachmentAdapter(),
 ) {
+  let currentState = state;
   const sendTransportCommand = vi.fn();
   const reset = vi.fn();
   const setBusySubmitError = vi.fn();
@@ -51,7 +52,7 @@ function harness(
   const skipEmptyDraftPersist = { current: false };
   const sendBusyMessage = loadSendBusyMessage({
     isRunning: true,
-    aui: { composer: { getState: () => state, reset } },
+    aui: { composer: { getState: () => currentState, reset } },
     lastBusySubmit,
     draftKey: "test-draft",
     queueComposerDraftSubmission: vi.fn(),
@@ -60,7 +61,15 @@ function harness(
     imageAttachmentAdapter: attachmentAdapter,
     setBusySubmitError,
   });
-  return { sendBusyMessage, sendTransportCommand, reset, setBusySubmitError };
+  return {
+    sendBusyMessage,
+    sendTransportCommand,
+    reset,
+    setBusySubmitError,
+    setState: (nextState: { text: string; attachments: unknown[] }) => {
+      currentState = nextState;
+    },
+  };
 }
 
 describe("sendBusyMessage pending image attachments", () => {
@@ -131,6 +140,37 @@ describe("sendBusyMessage pending image attachments", () => {
     expect(attachmentAdapter.send).toHaveBeenCalledOnce();
     expect(sendTransportCommand).toHaveBeenCalledOnce();
     vi.restoreAllMocks();
+  });
+
+  it("preserves composer edits made while a pending image is converting", async () => {
+    const image = await pendingImage();
+    const attachmentAdapter = new SimpleImageAttachmentAdapter();
+    let resolveConversion!: (
+      value: Awaited<ReturnType<typeof attachmentAdapter.send>>,
+    ) => void;
+    vi.spyOn(attachmentAdapter, "send").mockReturnValue(
+      new Promise((resolve) => {
+        resolveConversion = resolve;
+      }),
+    );
+    const { sendBusyMessage, sendTransportCommand, reset, setState } = harness(
+      { text: "inspect", attachments: [image] },
+      attachmentAdapter,
+    );
+
+    const submission = sendBusyMessage({ preventDefault: vi.fn() });
+    setState({ text: "new message", attachments: [image] });
+    resolveConversion({
+      ...image,
+      content: [{ type: "image", image: "data:image/png;base64,cG5n" }],
+    });
+    await submission;
+
+    expect(sendTransportCommand.mock.calls[0][0].message.parts).toEqual([
+      { type: "text", text: "inspect" },
+      expect.objectContaining({ type: "image", image: expect.any(String) }),
+    ]);
+    expect(reset).not.toHaveBeenCalled();
   });
 
   it("keeps text-only submission and duplicate suppression working", async () => {
