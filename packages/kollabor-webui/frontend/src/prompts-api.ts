@@ -249,6 +249,6 @@ export class PromptsApi {
     } catch {
       // Keep the status text for non-JSON errors.
     }
-    throw new PromptsApiError(`${response.status}: ${detail}`, response.status);
+    throw new PromptsApiError(detail, response.status);
   }
 }

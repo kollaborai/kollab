@@ -955,7 +955,7 @@ export class EngineApi {
         } catch {
           // Keep status text for non-JSON errors.
         }
-        throw new ApiError(`${response.status}: ${detail}`, response.status, body);
+        throw new ApiError(detail, response.status, body);
       }
       const config = (await response.json()) as EngineConfig;
       if (config.token && config.token !== this.token) {
@@ -998,7 +998,7 @@ export class EngineApi {
       } catch {
         // Keep status text for non-JSON errors.
       }
-      throw new ApiError(`${response.status}: ${detail}`, response.status, body);
+      throw new ApiError(detail, response.status, body);
     }
     return response;
   }
@@ -1024,7 +1024,7 @@ export class EngineApi {
           } catch {
             // Keep status text for non-JSON errors.
           }
-          throw new ApiError(`${response.status}: ${detail}`, response.status, body);
+          throw new ApiError(detail, response.status, body);
         }
         const config = (await response.json()) as EngineConfig;
         if (config.engine_url) this.setBaseUrl(config.engine_url);
