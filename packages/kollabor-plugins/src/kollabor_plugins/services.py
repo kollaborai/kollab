@@ -102,18 +102,14 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
             raise ValueError("Invalid or ungranted service secret")
     secret_values = {}
     if requested_secrets:
-        from kollabor_ai.providers.security import APIKeyManager
+        from kollabor_ai.profile_manager import _keyring_get
 
-        async def load_secrets():
-            store = APIKeyManager()
+        try:
             for name in requested_secrets:
-                value = await store.get_key(name)
+                value = _keyring_get(name)
                 if not isinstance(value, str) or not value:
                     raise ValueError(f"Service secret {name} is not available")
                 secret_values[name] = value
-
-        try:
-            asyncio.run(load_secrets())
         except Exception:
             raise ValueError("Cannot read service secrets from the secure store") from None
     path = record.get("enabled_path")

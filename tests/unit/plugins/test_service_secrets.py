@@ -26,18 +26,17 @@ def setup_service(tmp_path, monkeypatch, granted):
 
 
 def test_granted_secret_is_given_only_to_child(tmp_path, monkeypatch):
-    import kollabor_ai.providers.security as security
+    import kollabor_ai.profile_manager as profile_manager
     from kollabor_plugins.services import run_service
 
     home = setup_service(tmp_path, monkeypatch, ["secret:TEST_TOKEN"])
     monkeypatch.setenv("UNRELATED", "not-for-plugin")
 
-    class Store:
-        async def get_key(self, name):
-            assert name == "TEST_TOKEN"
-            return "secret-test-value"
+    def get_key(name):
+        assert name == "TEST_TOKEN"
+        return "secret-test-value"
 
-    monkeypatch.setattr(security, "APIKeyManager", Store)
+    monkeypatch.setattr(profile_manager, "_keyring_get", get_key)
     assert run_service("hello", "worker", "abcdef") == 0
     text = (home / "plugin-data" / "hello" / "run" / "worker.log").read_text()
     assert "secret-test-value" in text and "False" in text

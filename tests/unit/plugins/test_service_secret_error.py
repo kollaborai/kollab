@@ -7,7 +7,7 @@ import pytest
 
 
 def test_backend_exception_does_not_expose_secret(tmp_path, monkeypatch):
-    import kollabor_ai.providers.security as security
+    import kollabor_ai.profile_manager as profile_manager
     from kollabor_plugins.packages import files_sha256
     from kollabor_plugins.services import run_service
 
@@ -34,11 +34,10 @@ def test_backend_exception_does_not_expose_secret(tmp_path, monkeypatch):
         )
     )
 
-    class Store:
-        async def get_key(self, name):
-            raise ValueError("credential-value-must-not-leak")
+    def get_key(name):
+        raise ValueError("credential-value-must-not-leak")
 
-    monkeypatch.setattr(security, "APIKeyManager", Store)
+    monkeypatch.setattr(profile_manager, "_keyring_get", get_key)
     with pytest.raises(ValueError) as exc:
         run_service("hello", "worker", "abcdef")
     assert "credential-value-must-not-leak" not in str(exc.value)
