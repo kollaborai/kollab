@@ -346,6 +346,7 @@ async def test_remote_agents_row_shape_and_device_fallback_for_older_peers(bridg
         "workspace_id": right.commands.client.state.workspace_id,
         "harness": "",
         "acp_waiting": False,
+        "agent_type": "",
         "current_tool": None,
     }
 

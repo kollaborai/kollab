@@ -321,6 +321,16 @@ class SecureConversationTransport:
                 # still discarded the session above, so no partial frame ever
                 # executes remotely.
                 raise RelayError("relay pending capacity reached", "capacity") from None
+            if (
+                isinstance(exc, RelayError)
+                and str(exc) == "peer application request failed"
+            ):
+                # Keep peer handler rejection distinct from carrier errors.
+                # Directory callers use this fixed signal to retry an older
+                # request shape; deadlines and offline peers stay non-retryable.
+                raise RelayError(
+                    "peer application request failed", "peer_application"
+                ) from None
             logger.warning(
                 "secure %s request to %s failed: %s: %s",
                 method,
