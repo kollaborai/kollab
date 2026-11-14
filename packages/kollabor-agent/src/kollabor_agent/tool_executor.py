@@ -33,6 +33,7 @@ from .voice_tool_policy import (
     _is_hard_blocked,
     _is_path_qualified_executable,
     _is_read_only_action,
+    _resolve_trusted_executable,
 )
 from .yes_approval import NEEDS_YES, NOT_IN_HIDDEN_TURN, YesApprovals, call_approval
 
@@ -1719,6 +1720,11 @@ class ToolExecutor:
             return refuse("Git command must stay inside the project")
         if not _is_read_only_action(argv, cwd, root):
             return refuse("command is not classified as read-only")
+
+        executable = _resolve_trusted_executable(argv[0], root)
+        if executable is None:
+            return refuse("executable is not on the trusted system path")
+        argv = (str(executable), *argv[1:])
 
         self._active_shell_executor = self.shell_executor
         try:
