@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useState, type ComponentProps, type React
 import { BookOpen, ChevronDown, Eye, EyeOff, GitPullRequest, LayoutGrid, Loader2, Newspaper, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
 import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, LiveAgent, ModelChoice, OfflineAgent, Profile, Session } from "@/api";
 import { ModelPicker } from "@/components/shell/ModelPicker";
+import { loadModelChoices, profileChoicesKey } from "@/components/shell/model-choices";
 import { AgentPicker, choiceLabel } from "@/components/agents/AgentPicker";
 import { Avatar } from "@/components/agents/Avatar";
 import type { LaunchChoice } from "@/components/agents/launch-choices";
@@ -266,6 +267,12 @@ export function AppSidebar({
   }, [learnActive, whatsNewActive]);
   // A lifted row's clone replaces the element a touch started on; keep that touch reaching the drag.
   useEffect(() => relayDetachedTouches(window), []);
+  // The model picker's list is asked for as the shell loads, and again when the profiles change, so the Model
+  // button opens on a list that is already complete (#953). The engine has been learning it since it started.
+  const profilesKey = profileChoicesKey(profiles);
+  useEffect(() => {
+    void loadModelChoices(api, { profiles });
+  }, [api, profilesKey]);
   // Every live agent on this computer is a session row (the engine lists them); these are the other computers'.
   // The #158 tree: NETWORKS > DEVICES > WORKSPACES > AGENTS across every network
   // this device belongs to; an engine without the aggregate synthesizes one

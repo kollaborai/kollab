@@ -28,6 +28,7 @@ this page holds the reference for one area. Read it before you change that area.
 - `streaming_handler.py` - Streaming response handling
 - `session_manager.py` - Session lifecycle
 - `status_service.py` - LLM status reporting
+- `acp_discovery.py` - Model and effort discovery for the ACP harnesses behind the web UI's model picker: a bounded, isolated probe per profile, learned once in the background when the engine starts (`warm_in_background`) and kept in memory (`known_outcomes`), so `GET /profiles/choices` never waits for a harness; `KOLLAB_PICKER_WARM=0` brings back probing on request (#953). Doc `docs/features/loadouts.md`
 - `voice_aside.py` - Words said while a turn runs get a Quick Model answer at once, on its own provider; the turn keeps going, and a spoken stop ends it (#388)
 - `permissions/` - Tool permission system
   - `hook.py` - Event bus integration at SECURITY priority (approval modes, risk assessment, response handling)
