@@ -424,6 +424,19 @@ class PluginRegistry:
         }
 
 
+def _web_entry(root: Path, manifest: dict) -> dict | None:
+    from .packages import _within, files_sha256
+
+    web = manifest.get("web")
+    if not isinstance(web, dict):
+        return None
+    try:
+        dist = _within(root.resolve(), "web/dist", "web assets")
+        return {"entry": web.get("entry"), "style": web.get("style"), "hash": files_sha256(dist)}
+    except (OSError, ValueError):
+        return None
+
+
 def _settings_fields(plugin_id: str, widgets: list[dict]) -> list[dict]:
     """Expose panel fields while retaining widget definitions for the terminal."""
     from kollabor.panels.config import _field
@@ -584,7 +597,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
                 "state": state,
                 "error": error,
                 "settings": _settings_fields(plugin_id, settings),
-                "web": manifest.get("web"),
+                "web": _web_entry(root, manifest),
                 "contributes": manifest.get("contributes", {}),
                 "services": service_entries,
                 "uses": manifest.get("uses", []),
@@ -594,6 +607,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
     for plugin_id, folder in data["dev"].items():
         if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id) or not isinstance(folder, str):
             continue
+        root = Path(folder)
         manifest = {}
         dev_settings = []
         error = registry.package_errors.get(plugin_id)
@@ -619,7 +633,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
                 "state": "error" if error else "ok",
                 "error": error,
                 "settings": _settings_fields(f"{plugin_id}@dev", dev_settings),
-                "web": manifest.get("web"),
+                "web": _web_entry(root, manifest),
                 "contributes": manifest.get("contributes", {}),
                 "services": _service_entries(home, f"{plugin_id}@dev", manifest),
                 "uses": manifest.get("uses", []),
