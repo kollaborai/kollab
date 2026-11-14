@@ -29,6 +29,7 @@ from kollabor_events.data_models import ConversationMessage
 from kollabor_events.models import CommandCategory, CommandDefinition, SubcommandInfo
 from kollabor_plugins import BasePlugin
 from kollabor_tui.display_tap import publish_semantic
+from plugins.hub.task_ledger import TaskLedgerReadError
 
 logger = logging.getLogger(__name__)
 
@@ -3017,6 +3018,10 @@ class ContextCompactionPlugin(BasePlugin):
                 for card in cards
                 if getattr(card, "id", None)
             }
+        except TaskLedgerReadError:
+            # A partial scan cannot prove which task messages are still live.
+            # Let the recovery rollover fail closed rather than dropping them.
+            raise
         except Exception:
             logger.debug("Unable to read live TaskLedger IDs for compaction", exc_info=True)
             return set()

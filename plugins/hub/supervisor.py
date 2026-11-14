@@ -22,6 +22,8 @@ operator nudge.
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from .task_ledger import TaskLedgerReadError
+
 DEFAULT_POLL_INTERVAL = 10.0
 DEFAULT_STALL_THRESHOLD = 900.0
 """Seconds of card inactivity before a worker is nudged (15m default)."""
@@ -251,7 +253,14 @@ def evaluate(
     state = state if state is not None else SupervisorState()
     decisions: List[SupervisorDecision] = []
 
-    for card in unacked_handoffs(ledger):
+    try:
+        handoffs = unacked_handoffs(ledger)
+        open_cards = ledger.get_open()
+        stalled_cards = ledger.get_stalled(stall_threshold, now=now)
+    except TaskLedgerReadError as e:
+        return [SupervisorDecision(kind="ledger_read_failed", text=str(e))], state
+
+    for card in handoffs:
         sent_at, _, retries, alerted = handoff_status(card)
         if now - sent_at < handoff_ack_timeout:
             continue
@@ -288,9 +297,6 @@ def evaluate(
                     ),
                 )
             )
-
-    open_cards = ledger.get_open()
-    stalled_cards = ledger.get_stalled(stall_threshold, now=now)
 
     # Nudge records for cards that recovered (checkpoint arrived) are
     # stale: a fresh stall must earn a fresh nudge.

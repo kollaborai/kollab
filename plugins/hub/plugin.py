@@ -111,7 +111,7 @@ from .supervisor import (
 from .supervisor import (
     evaluate as evaluate_supervisor,
 )
-from .task_ledger import TaskLedger
+from .task_ledger import TaskLedger, TaskLedgerReadError
 from .vault import AgentVault, sanitize_rebirth_text
 from .wake_hooks import WakeAction, WakeEvent, WakeHookEngine, default_hook_config
 from .xml_tags import embedded_attrs, tag_attrs, tag_pattern
@@ -7627,6 +7627,11 @@ class HubPlugin(BasePlugin):
                 self._record_supervisor_alert(decision.text)
                 await self._notify_supervisor_alert(decision.text)
                 outcomes.append("alert: coordinator stalled")
+            elif decision.kind == "ledger_read_failed":
+                logger.error("idle supervisor: %s", decision.text)
+                self._record_supervisor_alert(decision.text)
+                await self._notify_supervisor_alert(decision.text)
+                outcomes.append("alert: TaskLedger read incomplete")
             else:  # requeue_stalled — already applied on the ledger
                 outcomes.append(
                     f"requeue_stalled: task {decision.card_id}"
@@ -10619,7 +10624,19 @@ class HubPlugin(BasePlugin):
         # Active tasks (compaction-proof: they live on disk and are injected
         # every user turn, so they survive any compaction)
         if self._identity and self._task_ledger:
-            my_tasks = self._task_ledger.get_active_for(self._identity.identity)
+            read_error = None
+            try:
+                my_tasks = self._task_ledger.get_active_for(self._identity.identity)
+            except TaskLedgerReadError as e:
+                my_tasks = [
+                    card
+                    for card in e.partial_cards
+                    if card.assignee == self._identity.identity
+                    and card.status in ("active", "standby", "qa_review")
+                ]
+                read_error = str(e)
+            if read_error:
+                lines.extend(["", "--- active task view incomplete ---", read_error])
             if my_tasks:
                 task_lines = ["", "--- active tasks (DO NOT FORGET) ---"]
                 for task in my_tasks:
@@ -11617,14 +11634,18 @@ class HubPlugin(BasePlugin):
         ):
             return []
         state = self._supervisor_state
-        open_cards = self._task_ledger.get_open()
-        stalled = self._task_ledger.get_stalled(
-            self.config.get(
-                "plugins.hub.supervisor_stall_threshold", DEFAULT_STALL_THRESHOLD
+        try:
+            open_cards = self._task_ledger.get_open()
+            stalled = self._task_ledger.get_stalled(
+                self.config.get(
+                    "plugins.hub.supervisor_stall_threshold", DEFAULT_STALL_THRESHOLD
+                )
+                if self.config
+                else DEFAULT_STALL_THRESHOLD
             )
-            if self.config
-            else DEFAULT_STALL_THRESHOLD
-        )
+            handoffs = unacked_handoffs(self._task_ledger)
+        except TaskLedgerReadError as e:
+            return [f"supervisor: {e}"]
         lines = [
             f"supervisor: {len(open_cards)} open, {len(stalled)} stalled,"
             f" {len(self._supervisor_alerts)} alert(s)"
@@ -11636,7 +11657,7 @@ class HubPlugin(BasePlugin):
                 f" turn; last completed turn {idle}m ago"
             )
         now = time.time()
-        for card in unacked_handoffs(self._task_ledger):
+        for card in handoffs:
             lines.append(
                 f"  handoff awaiting ack: {card.id} -> {card.assignee}"
             )
@@ -15751,11 +15772,18 @@ class HubPlugin(BasePlugin):
         """List all tasks."""
         if self._task_ledger is None:
             return "task system not available"
-        all_tasks = self._task_ledger.get_all()
+        read_error = None
+        try:
+            all_tasks = self._task_ledger.get_all()
+        except TaskLedgerReadError as e:
+            all_tasks = e.partial_cards
+            read_error = str(e)
         if not all_tasks:
-            return "no tasks"
+            return read_error or "no tasks"
 
         lines = [f"tasks: {len(all_tasks)} total"]
+        if read_error:
+            lines.append(read_error)
         for card in sorted(all_tasks, key=lambda c: -c.priority):
             status_icon = {
                 "active": ">>",
@@ -15782,11 +15810,23 @@ class HubPlugin(BasePlugin):
             return "not connected to hub"
         if not self._task_ledger:
             return "task ledger not available"
-        my_tasks = self._task_ledger.get_active_for(self._identity.identity)
+        read_error = None
+        try:
+            my_tasks = self._task_ledger.get_active_for(self._identity.identity)
+        except TaskLedgerReadError as e:
+            my_tasks = [
+                card
+                for card in e.partial_cards
+                if card.assignee == self._identity.identity
+                and card.status in ("active", "standby", "qa_review")
+            ]
+            read_error = str(e)
         if not my_tasks:
-            return "no active tasks assigned to you"
+            return read_error or "no active tasks assigned to you"
 
         lines = [f"your tasks: {len(my_tasks)}"]
+        if read_error:
+            lines.append(read_error)
         for card in my_tasks:
             lines.append(
                 f"  [{card.id}] p{card.priority}"
@@ -15853,6 +15893,8 @@ class HubPlugin(BasePlugin):
                 reason=reason,
                 actor=self._identity.identity if self._identity else "",
             )
+        except TaskLedgerReadError as exc:
+            return str(exc)
         except ValueError as exc:
             return str(exc)
         if not card:
@@ -15866,7 +15908,10 @@ class HubPlugin(BasePlugin):
 
         if self._task_ledger is None:
             return "task system not available"
-        card = self._task_ledger.get(task_id)
+        try:
+            card = self._task_ledger.get(task_id)
+        except TaskLedgerReadError as e:
+            return str(e)
         if not card:
             return f"task {task_id} not found"
 
@@ -16844,8 +16889,23 @@ class HubPlugin(BasePlugin):
                     lines.append(f"open ledger cards: {len(open_cards)}")
                     for c in open_cards:
                         lines.append(f"  [{c.id}] open (p{c.priority}): {c.directive[:60]}")
+            except TaskLedgerReadError as e:
+                open_cards = [
+                    card
+                    for card in e.partial_cards
+                    if card.status == "open" and not card.assignee
+                ]
+                if open_cards:
+                    lines.append(f"readable open ledger cards: {len(open_cards)}")
+                    for card in open_cards:
+                        lines.append(
+                            f"  [{card.id}] open (p{card.priority}): "
+                            f"{card.directive[:60]}"
+                        )
+                lines.append(f"open ledger cards: unavailable ({e})")
             except Exception as e:
-                logger.debug(f"open card listing failed: {e}")
+                logger.debug("open card listing failed (%s)", type(e).__name__)
+                lines.append("open ledger cards: unavailable (read failed)")
         if not lines:
             return "work queue: empty"
         return "\n".join(lines)

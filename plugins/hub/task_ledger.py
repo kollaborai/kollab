@@ -40,6 +40,20 @@ TERMINAL_TASK_STATUSES = frozenset(
 )
 
 
+class TaskLedgerReadError(OSError):
+    """A ledger scan was incomplete; valid cards are available for inspection."""
+
+    def __init__(self, partial_cards: List["TaskCard"], failed_count: int):
+        self.partial_cards = list(partial_cards)
+        self.failed_count = failed_count
+        super().__init__(
+            "Task ledger read incomplete: "
+            f"{failed_count} record(s) unavailable. Operator recovery: keep an "
+            "archival copy of the original bytes; inspect and repair a separate "
+            "copy, retaining the archive when restoring a verified card."
+        )
+
+
 @dataclass
 class TaskCard:
     """A task assignment that survives context compaction."""
@@ -260,16 +274,17 @@ class TaskLedger:
         return self._tasks_dir / "_pending_replies.json"
 
     def _task_files(self):
-        """Yield task cards, excluding control and dispatch envelopes."""
+        """Return task card paths, excluding control and dispatch envelopes."""
         control_names = {
             self._pending_replies_path().name,
             self._dispatches_path().name,
         }
-        return (
-            path
-            for path in self._tasks_dir.glob("*.json")
-            if path.name not in control_names
-        )
+        with os.scandir(self._tasks_dir) as entries:
+            return [
+                self._tasks_dir / entry.name
+                for entry in entries
+                if entry.name.endswith(".json") and entry.name not in control_names
+            ]
 
     @contextmanager
     def _file_lock(self, path: Path):
@@ -643,13 +658,26 @@ class TaskLedger:
 
     def _load(self, task_id: str) -> Optional[TaskCard]:
         path = self._task_path(task_id)
-        if not path.exists():
+        try:
+            path.stat()
+        except FileNotFoundError:
             return None
+        except Exception as e:
+            logger.warning(
+                "Failed to inspect task ledger record %s (%s)",
+                task_id,
+                type(e).__name__,
+            )
+            raise TaskLedgerReadError([], 1) from None
         try:
             return TaskCard.from_dict(self._load_json_object(path))
         except Exception as e:
-            logger.warning("Failed to load task %s from %s: %s", task_id, path, e)
-            return None
+            logger.warning(
+                "Failed to load task ledger record %s (%s)",
+                task_id,
+                type(e).__name__,
+            )
+            raise TaskLedgerReadError([], 1) from None
 
     def _load_mutable(self, task_id: str, operation: str) -> Optional[TaskCard]:
         """Load a task only when a late operation may still mutate it.
@@ -843,8 +871,7 @@ class TaskLedger:
     def get_active_for(self, identity: str) -> List[TaskCard]:
         """Get all active tasks assigned to this agent."""
         result = []
-        for f in self._task_files():
-            card = self._load(f.stem)
+        for card in self.get_all():
             if (
                 card
                 and card.assignee == identity
@@ -867,11 +894,23 @@ class TaskLedger:
         return sorted(result, key=lambda c: c.priority)
 
     def get_all(self, status: Optional[str] = None) -> List[TaskCard]:
-        result = []
-        for f in self._task_files():
-            card = self._load(f.stem)
+        result: List[TaskCard] = []
+        failed_count = 0
+        try:
+            files = list(self._task_files())
+        except Exception as e:
+            logger.warning("Failed to enumerate task ledger records (%s)", type(e).__name__)
+            raise TaskLedgerReadError([], 1) from None
+        for path in files:
+            try:
+                card = self._load(path.stem)
+            except TaskLedgerReadError as e:
+                failed_count += e.failed_count
+                continue
             if card and (status is None or card.status == status):
                 result.append(card)
+        if failed_count:
+            raise TaskLedgerReadError(result, failed_count)
         return result
 
     # --- Durable open queue (issue #211) ---------------------------------
@@ -891,14 +930,27 @@ class TaskLedger:
         When requested, the current card is returned for an unchanged result.
         """
         path = self._task_path(task_id)
-        if not path.exists():
+        try:
+            path.stat()
+        except FileNotFoundError:
             return None
+        except Exception as e:
+            logger.warning(
+                "Failed to inspect task ledger record %s for mutation (%s)",
+                task_id,
+                type(e).__name__,
+            )
+            raise TaskLedgerReadError([], 1) from None
         with self._file_lock(path):
             try:
                 card = TaskCard.from_dict(self._load_json_object(path))
             except Exception as e:
-                logger.debug(f"Failed to load task {task_id} for mutation: {e}")
-                return None
+                logger.warning(
+                    "Failed to load task ledger record %s for mutation (%s)",
+                    task_id,
+                    type(e).__name__,
+                )
+                raise TaskLedgerReadError([], 1) from None
             if mutator(card) is True:
                 card.updated_at = time.time()
                 self._write_json_atomic(path, card.to_dict())

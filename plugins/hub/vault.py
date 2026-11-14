@@ -41,6 +41,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .task_ledger import TaskLedgerReadError
+
 logger = logging.getLogger(__name__)
 
 
@@ -748,23 +750,39 @@ class AgentVault:
         "unavailable" -- never a silent gap the agent has to ask peers about.
         """
         lines.append("")
+        read_error = None
         try:
             cards = ledger.get_active_for(self.identity)
+        except TaskLedgerReadError as e:
+            logger.warning("Rebirth TaskLedger read incomplete (%s)", type(e).__name__)
+            cards = [
+                card
+                for card in e.partial_cards
+                if card.assignee == self.identity
+                and card.status in ("active", "standby", "qa_review")
+            ]
+            read_error = str(e)
         except Exception as e:
-            logger.warning(f"Rebirth ledger read failed for {self.identity}: {e}")
+            logger.warning("Rebirth TaskLedger read unavailable (%s)", type(e).__name__)
             lines.append(
-                "active TaskLedger cards: unavailable (read failed; "
-                "do not assume none)"
+                "active TaskLedger cards: unavailable (read incomplete; "
+                "preserve the original record and inspect a separate copy before repair)"
             )
             return
 
+        if read_error:
+            lines.append(f"active TaskLedger cards: unavailable ({read_error})")
         if not cards:
-            lines.append("active TaskLedger cards: none (no card is assigned to you)")
+            if not read_error:
+                lines.append("active TaskLedger cards: none (no card is assigned to you)")
             return
 
-        lines.append(
-            f"active TaskLedger cards ({len(cards)}) - your current assignments:"
-        )
+        if read_error:
+            lines.append(f"readable active TaskLedger cards ({len(cards)}):")
+        else:
+            lines.append(
+                f"active TaskLedger cards ({len(cards)}) - your current assignments:"
+            )
         for card in cards[: self._REBIRTH_MAX_CARDS]:
             lines.append(f"  {card.summary_line()}")
         if len(cards) > self._REBIRTH_MAX_CARDS:
