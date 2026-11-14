@@ -855,3 +855,56 @@ def test_service_actions_restart_and_redacted_log(tmp_path, monkeypatch):
         log.symlink_to(outside)
         assert client.get("/plugins/hello/services/hello/log").status_code == 409
         assert outside.read_text() == "private outside contents"
+
+
+def test_package_enable_disable_remove_are_guarded_and_preserve_data(tmp_path, monkeypatch):
+    import json
+    import shutil
+    from pathlib import Path
+
+    from kollabor_plugins import packages, services, settings
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    source = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    home = tmp_path / ".kollab"
+    root = home / "plugins" / "hello"
+    shutil.copytree(source, root)
+    registry_path = home / "plugins.json"
+    registry_path.write_text(json.dumps({
+        "plugins": {"hello": {"enabled": False, "files_sha256": files_sha256(root), "granted": []}}, "dev": {},
+    }))
+    data = home / "plugin-data" / "hello"
+    run = data / "run"
+    run.mkdir(parents=True)
+    (data / "values.json").write_text('{"greeting":"keep"}')
+    calls = []
+    real_set_enabled = settings.set_enabled
+
+    def enable(plugin_id, value):
+        calls.append(("enabled", plugin_id, value))
+        return real_set_enabled(plugin_id, value)
+
+    monkeypatch.setattr(settings, "set_enabled", enable)
+    monkeypatch.setattr(services, "stop_services", lambda plugin_id: calls.append(("stop", plugin_id)))
+    monkeypatch.setattr(services, "supervisor_tick", lambda: calls.append(("tick",)))
+    monkeypatch.setattr(services, "_recorded_process_alive", lambda path: False)
+    monkeypatch.setattr(packages, "remove_package", lambda plugin_id, **kwargs: calls.append(("remove", plugin_id, kwargs)))
+    app = create_app()
+    with TestClient(app) as client:
+        assert client.post("/plugins/hello/enable").status_code == 200
+        assert json.loads(registry_path.read_text())["plugins"]["hello"]["enabled"] is True
+        (run / "runs.json").write_text(json.dumps({"runs": [{"run_id": "active", "status": "running"}]}))
+        assert client.post("/plugins/hello/disable").status_code == 409
+        assert json.loads(registry_path.read_text())["plugins"]["hello"]["enabled"] is True
+        (run / "runs.json").write_text(json.dumps({"runs": []}))
+        assert client.post("/plugins/hello/disable").status_code == 200
+        assert json.loads(registry_path.read_text())["plugins"]["hello"]["enabled"] is False
+        assert client.post("/plugins/hello/remove", json={"purge": True}).status_code == 422
+        assert client.post("/plugins/hello/remove").status_code == 200
+        assert (data / "values.json").read_text() == '{"greeting":"keep"}'
+        assert any(call[0] == "remove" and call[2]["purge"] is False for call in calls)
+        assert client.post("/plugins/missing/enable").status_code == 404
+        assert client.post("/plugins/hello/enable", headers={"x-kollab-plugin-remote": "1"}).status_code == 403
