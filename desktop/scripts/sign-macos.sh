@@ -184,9 +184,9 @@ verify_signature() {
 check_signature_details() {
   local details
   details=$(codesign --display --verbose=4 "$1" 2>&1)
-  printf '%s\n' "$details" | grep -Fxq "TeamIdentifier=$APPLE_TEAM_ID" || fail "signature team does not match APPLE_TEAM_ID: $1"
-  printf '%s\n' "$details" | grep -Eq 'flags=.*runtime' || fail "signature has no hardened runtime: $1"
-  printf '%s\n' "$details" | grep -Eq '^Timestamp=' || fail "signature has no secure timestamp: $1"
+  grep -Fxq "TeamIdentifier=$APPLE_TEAM_ID" <<< "$details" || fail "signature team does not match APPLE_TEAM_ID: $1"
+  grep -Eq 'flags=.*runtime' <<< "$details" || fail "signature has no hardened runtime: $1"
+  grep -Eq '^Timestamp=' <<< "$details" || fail "signature has no secure timestamp: $1"
 }
 
 # One complete notarization authentication set, selected the same way for the
