@@ -2,12 +2,41 @@
 
 import ctypes
 import os
+import runpy
 import struct
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 from kollabor.code_service import _terminal_darwin, _terminal_supervisor
+
+
+def test_supervisor_script_calls_main_when_executed(monkeypatch):
+    writes = []
+
+    class ExitCalled(Exception):
+        pass
+
+    class Lib:
+        @staticmethod
+        def prctl(*_args):
+            return -1
+
+    monkeypatch.setattr(_terminal_supervisor.ctypes, "CDLL", lambda *_args, **_kwargs: Lib())
+    monkeypatch.setattr(_terminal_supervisor.os, "write", lambda _fd, data: writes.append(data) or len(data))
+    monkeypatch.setattr(
+        _terminal_supervisor.os,
+        "_exit",
+        lambda code: (_ for _ in ()).throw(ExitCalled(code)),
+    )
+    monkeypatch.setattr(sys, "argv", [_terminal_supervisor.__file__, "9", "/bin/sh"])
+
+    with pytest.raises(ExitCalled) as exited:
+        runpy.run_path(_terminal_supervisor.__file__, run_name="__main__")
+
+    assert exited.value.args == (1,)
+    assert writes == [b"error\n"]
 
 
 def test_supervisor_rejects_unrelated_and_reused_pids(monkeypatch):
