@@ -19,6 +19,17 @@ from tests.unit._owned_processes import (
 )
 
 
+def test_live_owned_processes_do_not_scan_host_process_table(tmp_path):
+    runner = ACPRunner(ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)))
+    owner = psutil.Process()
+    runner._adapter_pid = owner.pid
+    runner._process_started_at = owner.create_time()
+    runner._process_username = ""
+    runner._owned_processes[owner.pid] = owner
+
+    assert runner._live_owned_processes() == [owner]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("message, login_guidance", [
     ("Authentication required", True),
