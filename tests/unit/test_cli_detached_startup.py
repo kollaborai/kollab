@@ -136,5 +136,5 @@ def test_detached_parent_reports_nonzero_child_exit(monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc:
         cli.cli_main()
 
-    assert exc.value.code == 1
+    assert exc.value.code == 2
     assert "status 2" in capsys.readouterr().err
