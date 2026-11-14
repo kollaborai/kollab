@@ -6,10 +6,12 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { editor } from "monaco-editor";
 import { Button } from "@/components/ui/button";
+import { EmptyEditorState } from "./empty-editor-state";
 import { saveWorkspaceFile } from "@/components/code/file-save";
 import { isDiffTab, isDirty, setBufferSaveNotice, usePane, useEditorStore } from "@/components/code/editor-store";
 import { getFileAccentColor } from "./file-tree";
 import { StatusBar } from "./status-bar";
+import { editorThemeColors } from "./editor-theme";
 
 type MonacoReactModule = typeof import("@monaco-editor/react");
 
@@ -39,6 +41,20 @@ function PaneSpinner() {
 }
 
 function defineVoidTheme(monaco: typeof import("monaco-editor"), accent: string) {
+  const style = getComputedStyle(document.documentElement);
+  const toHex = (color: string): string => {
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    if (!context) return color;
+    context.fillStyle = color;
+    context.fillRect(0, 0, 1, 1);
+    const [r = 0, g = 0, b = 0] = context.getImageData(0, 0, 1, 1).data;
+    return `#${[r, g, b].map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
+  };
+  const activePalette = editorThemeColors(document.documentElement.classList.contains("dark"), {
+    background: toHex(style.getPropertyValue("--background").trim()),
+    foreground: toHex(style.getPropertyValue("--foreground").trim()),
+  });
   const hexToRgb = (hex: string) => {
     const h = hex.replace('#', '');
     return {
@@ -57,31 +73,15 @@ function defineVoidTheme(monaco: typeof import("monaco-editor"), accent: string)
 
   // Monaco takes literal colors, not CSS variables, so the palette stays hex.
   monaco.editor.defineTheme("kollab-void", {
-    base: "vs-dark",
+    base: activePalette.base,
     inherit: true,
-    rules: [
-      { token: "comment", foreground: "4a4a55", fontStyle: "italic" },
-      { token: "string", foreground: "e8b661" },
-      { token: "keyword", foreground: "7eb8da" },
-      { token: "number", foreground: "6dd4c8" },
-      { token: "type", foreground: "7eb8da" },
-      { token: "function", foreground: "e0e0e8" },
-      { token: "variable", foreground: "c8c8d0" },
-      { token: "operator", foreground: "ffffff66" },
-      { token: "delimiter", foreground: "ffffff40" },
-    ],
+    rules: activePalette.rules.map((rule) => ({ ...rule, foreground: rule.foreground.slice(1) })),
     colors: {
-      "editor.background": "#0a0a0a",
-      "editor.foreground": "#d4d4d4",
-      "editor.lineHighlightBackground": a(0.06),
+      ...activePalette.colors,
       "editor.selectionBackground": a(0.22),
       "editor.selectionHighlightBackground": a(0.10),
       "editor.inactiveSelectionBackground": a(0.08),
       "editorCursor.foreground": accent + "e0",
-      "editorLineNumber.foreground": "#ffffff12",
-      "editorLineNumber.activeForeground": accent + "80",
-      "editorGutter.background": "#0a0a0a",
-      "minimap.background": "#080808",
       "minimapSlider.background": accent + "18",
       "minimapSlider.hoverBackground": accent + "30",
       "minimapSlider.activeBackground": accent + "40",
@@ -150,9 +150,11 @@ function errorMessageOf(payload: unknown, fallback: string): string {
 interface EditorPaneProps {
   paneId: string;
   rootPath: string;
+  showFilePicker: boolean;
+  onOpenFiles: () => void;
 }
 
-export function EditorPane({ paneId, rootPath }: EditorPaneProps) {
+export function EditorPane({ paneId, rootPath, showFilePicker, onOpenFiles }: EditorPaneProps) {
   const { activeFile, pane } = usePane(paneId);
   const updateContent = useEditorStore((s) => s.updateContent);
   const markSaved = useEditorStore((s) => s.markSaved);
@@ -316,26 +318,7 @@ export function EditorPane({ paneId, rootPath }: EditorPaneProps) {
   }, [file, file?.path, pendingReveal, setPendingReveal]);
 
   if (!file) {
-    return (
-      <div className="flex h-full flex-col">
-        <div className="relative flex flex-1 flex-col items-center justify-center gap-4">
-          {/* subtle dot grid behind */}
-          <div className="absolute inset-0 text-muted-foreground opacity-[0.03]" style={{ backgroundImage: "radial-gradient(circle, currentColor 1px, transparent 1px)", backgroundSize: "12px 12px" }} />
-          <div className="relative flex flex-col items-center gap-3">
-            <span className="select-none font-mono text-5xl font-bold tracking-tighter text-muted-foreground/10">{"{ }"}</span>
-            <div className="space-y-1.5 text-center">
-              <p className="font-mono text-[11px] text-muted-foreground">select a file to open</p>
-              <div className="flex items-center gap-3 text-[10px] text-muted-foreground/70">
-                <kbd className="font-mono">cmd+p</kbd>
-                <span>quick open</span>
-                <kbd className="font-mono">cmd+\</kbd>
-                <span>split</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
+    return <EmptyEditorState showFilePicker={showFilePicker} onOpenFiles={onOpenFiles} />;
   }
 
   if (file.loading) {
@@ -351,7 +334,7 @@ export function EditorPane({ paneId, rootPath }: EditorPaneProps) {
       <div className="relative flex-1 overflow-hidden">
         {showMarkdownPreview ? (
           <div className="h-full overflow-y-auto">
-            <div className="mx-auto max-w-3xl px-8 py-8 text-sm leading-relaxed text-foreground [&_a]:text-highlight [&_a]:underline [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground [&_code]:font-mono [&_code]:text-[0.9em] [&_h1]:mb-3 [&_h1]:text-xl [&_h1]:font-semibold [&_h2]:mb-2 [&_h2]:mt-6 [&_h2]:text-lg [&_h2]:font-semibold [&_h3]:mt-4 [&_h3]:font-semibold [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-3 [&_pre]:my-3 [&_pre]:overflow-x-auto [&_pre]:bg-muted [&_pre]:p-3 [&_ul]:list-disc [&_ul]:pl-5">
+            <div className="mx-auto max-w-3xl px-8 py-8 text-sm leading-relaxed text-foreground [&_a]:text-highlight [&_a]:underline [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground [&_code]:font-mono [&_code]:text-[0.9em] [&_h1]:mb-3 [&_h1]:text-xl [&_h1]:font-semibold [&_h2]:mb-2 [&_h2]:mt-6 [&_h2]:text-lg [&_h2]:font-semibold [&_h3]:mt-4 [&_h3]:font-semibold [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-3 [&_pre]:my-3 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:bg-muted [&_pre]:p-3 [&_ul]:list-disc [&_ul]:pl-5">
               <Markdown remarkPlugins={[remarkGfm]}>{file.content}</Markdown>
             </div>
           </div>
