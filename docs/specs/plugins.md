@@ -877,7 +877,7 @@ Red first; each test lands failing before its code:
   `get_config_widgets()` and `settings.json` give the same fields; `/config` lists a plugin installed
   outside `plugins/`; the Configuration panel carries no plugin sections.
 - `tests/unit/plugins/test_settings.py`: every save path goes through the one writer; installed values
-  land in `settings.json` and never touch `config.json`; `set_enabled` writes the right store per kind.
+  land in `values.json` and never touch `config.json`; `set_enabled` writes the right store per kind.
 - `tests/unit/plugins/test_python_entries.py`: every enabled `python` entry loads with stdout and stderr
   captured, and any output fails the test; an entry that raises is skipped and reported.
 - `tests/unit/plugins/test_cli_guard.py`: management commands refuse without a terminal; the agent file
@@ -919,7 +919,7 @@ Live proof:
   real data, GitHub reads through the normal login, and the plugin's write routes refusing while
   `PR_CHAIN_READ_ONLY=1` is set. Compare every route and the five tabs with the running board.
 - The import: the copied `board-config.json` sets a thread count other than the default; after the first
-  enable, `GET /plugins/pr-chain/api/config` and the plugin's `settings.json` both report it.
+  enable, `GET /plugins/pr-chain/api/config` and the plugin's `values.json` both report it.
 - Restart the web UI while a stub background process runs: it keeps running and is found again.
 - One review stage through `POST /plugins/pr-chain/agents` on a local worktree copy shows under PR Chain
   in the sidebar and in Trajectory while it works.
@@ -945,6 +945,7 @@ This spec file is docs only, so it carries no changelog fragment.
 ## Open questions
 
 1. Where the pr-chain plugin repository lives (public or private) and under which account. Until it
-   exists, build step 4 develops the plugin with `kollab plugin dev`, and the acceptance test runs that way.
+   exists, build step 4 develops the plugin with `kollab plugin dev`; acceptance cannot pass until the
+   plugin is installed into a throwaway HOME from its git URL, as required above and by issue #1028.
 2. Which kollab release first ships plugins. The manifest's `kollab` range needs it, and a release tag
    waits for the owner's word.
