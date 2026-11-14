@@ -189,16 +189,19 @@ check_signature_details() {
   printf '%s\n' "$details" | grep -Eq '^Timestamp=' || fail "signature has no secure timestamp: $1"
 }
 
-notarize() {
-  local app="$1" auth=() submission_status=0
+# One complete notarization authentication set, selected the same way for the
+# app and the dmg: the API key trio, else Apple ID. Sets NOTARY_AUTH.
+notary_auth_args() {
   if [ -n "${APPLE_API_KEY:-}" ]; then
     printf '%s\n' "$APPLE_API_PRIVATE_KEY" > "$APPLE_SIGNING_STATE_DIR/notary-key.p8"
-    auth=(--key "$APPLE_SIGNING_STATE_DIR/notary-key.p8" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER")
+    NOTARY_AUTH=(--key "$APPLE_SIGNING_STATE_DIR/notary-key.p8" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER")
   else
-    auth=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
+    NOTARY_AUTH=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
   fi
-  ditto -c -k --sequesterRsrc --keepParent "$app" "$APPLE_SIGNING_STATE_DIR/notary-upload.zip"
-  xcrun notarytool submit "$APPLE_SIGNING_STATE_DIR/notary-upload.zip" "${auth[@]}" --wait --timeout 30m --output-format json > "$APPLE_SIGNING_STATE_DIR/notary-result.json" || submission_status=$?
+}
+
+check_notary_result() {
+  local submission_status=$1
   python3 - "$APPLE_SIGNING_STATE_DIR/notary-result.json" "$submission_status" <<'PY'
 import json, sys
 with open(sys.argv[1]) as stream:
@@ -209,10 +212,43 @@ if sys.argv[2] != "0":
 if result.get("status") != "Accepted":
     raise SystemExit("Apple did not accept the submission; do not archive or publish this app")
 PY
+}
+
+notarize() {
+  local app="$1" auth=() submission_status=0
+  notary_auth_args
+  auth=("${NOTARY_AUTH[@]}")
+  ditto -c -k --sequesterRsrc --keepParent "$app" "$APPLE_SIGNING_STATE_DIR/notary-upload.zip"
+  xcrun notarytool submit "$APPLE_SIGNING_STATE_DIR/notary-upload.zip" "${auth[@]}" --wait --timeout 30m --output-format json > "$APPLE_SIGNING_STATE_DIR/notary-result.json" || submission_status=$?
+  check_notary_result "$submission_status"
   xcrun stapler staple "$app"
   xcrun stapler validate "$app"
   codesign --verify --deep --strict --verbose=2 "$app"
   spctl --assess --type execute --verbose=2 "$app"
+}
+
+# Item 5: notarize and staple a built dmg, not only the app inside it, so
+# Gatekeeper accepts the whole image on a clean Mac. Runs in its own owned
+# state directory (the app build already cleaned its keychain state).
+notarize_dmg() {
+  local dmg=$1 submission_status=0
+  [ "$mode" = developer-id ] || fail 'notarize-dmg applies to developer-id builds'
+  case "$dmg" in /*.dmg) ;; *) fail 'the image must be an absolute .dmg path' ;; esac
+  [ -f "$dmg" ] || fail "no dmg at $dmg"
+  : "${RUNNER_TEMP:?RUNNER_TEMP is required}" "${APPLE_SIGNING_STATE_DIR:?APPLE_SIGNING_STATE_DIR is required}"
+  check_state_path
+  mkdir "$APPLE_SIGNING_STATE_DIR"
+  : > "$APPLE_SIGNING_STATE_DIR/.owned-by-kollab"
+  trap cleanup_on_exit EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  notary_auth_args
+  xcrun notarytool submit "$dmg" "${NOTARY_AUTH[@]}" --wait --timeout 30m --output-format json > "$APPLE_SIGNING_STATE_DIR/notary-result.json" || submission_status=$?
+  check_notary_result "$submission_status"
+  xcrun stapler staple "$dmg"
+  xcrun stapler validate "$dmg"
+  cleanup || fail 'signing cleanup incomplete; do not archive or publish this image'
+  trap - EXIT INT TERM
 }
 
 command=${1:-}
@@ -224,6 +260,13 @@ case "$command" in
     exit 0
     ;;
   cleanup) cleanup; exit $? ;;
+  notarize-dmg)
+    [ "$#" -eq 2 ] || fail 'usage: sign-macos.sh notarize-dmg /path/image.dmg'
+    preflight "$mode"
+    notarize_dmg "$2"
+    printf 'Notarized and stapled %s (%s)\n' "$2" "$mode"
+    exit 0
+    ;;
   seal)
     # The unsigned path: seal an existing Tauri build ad hoc. Developer ID
     # signing needs the keychain the build command prepares.
@@ -242,7 +285,7 @@ case "$command" in
     app=$2
     shift 3
     ;;
-  *) fail 'usage: sign-macos.sh preflight [MODE] | build /path/Kollab.app -- COMMAND [ARGS...] | seal /path/Kollab.app | cleanup' ;;
+  *) fail 'usage: sign-macos.sh preflight [MODE] | build /path/Kollab.app -- COMMAND [ARGS...] | seal /path/Kollab.app | notarize-dmg /path/image.dmg | cleanup' ;;
 esac
 preflight "$mode"
 check_runtime

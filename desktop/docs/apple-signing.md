@@ -129,6 +129,11 @@ bash scripts/sign-macos.sh cleanup
 
 `build` and `seal` both read `KOLLAB_APP_RUNTIME` and fail before any build when
 it does not name a staged runtime. `seal` refuses an app that already holds one.
+`notarize-dmg` notarizes and staples an already-built `.dmg` in its own owned
+`kollab-apple-signing-*` state directory under `RUNNER_TEMP`, selecting the
+same single notarization authentication set as the app submission; it refuses
+any mode other than `developer-id`, non-absolute or non-`.dmg` paths, and
+cleans its state on exit, success or failure.
 
 The caller sets `APP_PATH` to its actual build output, including the target/profile
 layout. Use a fresh output directory: rejecting an existing app prevents a successful
@@ -144,10 +149,11 @@ Python 3.9+, Bash, OpenSSL and the macOS/Xcode command-line tools must be availa
 
 ## Connect the existing macOS packaging job
 
-The macOS packaging job is in `binaries.yml`. To opt in, add an explicit manual
-input to that workflow. Tag runs (publish.yml's reusable-workflow call) have no
-input and continue to resolve to unsigned. No secret
-should enable signing merely by existing in repository settings.
+The macOS packaging job is in `binaries.yml`. The wiring below is in place
+there: the manual input, the mode guard, the split build steps with step-level
+secrets and the `always()` cleanup retry. Tag runs (publish.yml's
+reusable-workflow call) have no input and continue to resolve to unsigned. No
+secret should enable signing merely by existing in repository settings.
 
 ```yaml
 "on":
@@ -279,9 +285,9 @@ need a Developer ID and have not run yet:
 
 1. Apple Developer Program enrollment, a **Developer ID Application**
    certificate and the repository secrets above (see "What Marco must create").
-2. Wire the `developer-id` step from the fragment above into the macOS job of
-   `binaries.yml`, with `KOLLAB_APP_RUNTIME` and the hardened-runtime config.
-   Only the unsigned `seal` path is connected today.
+2. ~~Wire the `developer-id` step from the fragment above into the macOS job of
+   `binaries.yml`, with `KOLLAB_APP_RUNTIME` and the hardened-runtime config.~~
+   Done: the input, mode guard, split build steps and cleanup retry are wired.
 3. A first real submission for each architecture. If Apple rejects a file,
    `xcrun notarytool log <id>` names it; every Mach-O under
    `Contents/Resources/runtime` (about 25 `.so` plus `python3.14`, some of
@@ -290,8 +296,10 @@ need a Developer ID and have not run yet:
    PyNaCl, uvloop and TLS worked under hardened runtime locally; add
    `com.apple.security.cs.allow-unsigned-executable-memory` only if a signed
    run proves it is needed.
-5. Notarize and staple the `.dmg` as well as the app inside it, then run the
-   clean-Mac checks below on both downloads.
+5. ~~Notarize and staple the `.dmg` as well as the app inside it~~ Done in the
+   same developer-id runs (`sign-macos.sh notarize-dmg` after the image is
+   built); the clean-Mac checks below remain the release owner's step on both
+   downloads.
 6. Expect one Keychain prompt per stored secret after the switch: macOS knows
    `python3.14` by its signature, and Developer ID replaces the ad hoc one.
    From then on the requirement (team + identifier) stays the same across
