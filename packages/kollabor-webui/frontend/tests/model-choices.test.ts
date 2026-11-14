@@ -261,6 +261,9 @@ test("an in-flight answer cannot restore rows after a profile's launch fingerpri
   (api.listModelChoices as ReturnType<typeof vi.fn>).mockImplementationOnce(
     () => new Promise<Answer>((resolve) => (answer = resolve)),
   );
+  (api.listModelChoices as ReturnType<typeof vi.fn>).mockImplementationOnce(() =>
+    Promise.resolve({ choices: [row("p", "new"), row("native", "n")], discovery: { p: ready, native: ready } }),
+  );
   const inFlight = loadModelChoices(api, { profiles: oldProfile } as never);
   const joined = loadModelChoices(api, { profiles: editedProfile } as never);
 
@@ -268,7 +271,7 @@ test("an in-flight answer cannot restore rows after a profile's launch fingerpri
   answer({ choices: [row("p", "old"), row("native", "n")], discovery: { p: ready, native: ready } });
   await Promise.all([inFlight, joined]);
 
-  assert.deepEqual(getModelChoices(api).choices, [row("native", "n")]);
+  assert.deepEqual(getModelChoices(api).choices, [row("p", "new"), row("native", "n")]);
 });
 
 test("a first-ever warm shows each batch as it arrives, rows only growing", async () => {
