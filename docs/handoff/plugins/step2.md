@@ -27,6 +27,10 @@ supervisor with its lifespan: test `fb1bf7af` was red and implementation
 `f45f117a` passed. Logs are `<home>/backups/plugins-step2-work/assets-symlink-{red,green}.log`
 and `supervisor-{red,green}.log`. These are targeted checks, not a live smoke.
 
+Engine `GET /plugins` now delegates to `plugin_entries()` and returns schema 1;
+red test `6f438cd2`, implementation `ad5217b7`, two targeted tests passed.
+Logs: `<home>/backups/plugins-step2-work/routes-list-{red,green}.log`.
+
 ## Remaining and exact next step
 
 Step 2 is not complete. Next: implement engine routes, PluginContext, tokens,
