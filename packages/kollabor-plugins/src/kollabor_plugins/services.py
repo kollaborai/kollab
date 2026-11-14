@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import selectors
 import signal
@@ -86,8 +87,37 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
     command = service.get("command")
     if not isinstance(command, list) or not command or any(not isinstance(x, str) or not x for x in command):
         raise ValueError("Invalid service command")
-    if service.get("secrets"):
-        raise ValueError("Service secret injection is not available")
+    requested_secrets = service.get("secrets", [])
+    granted = record.get("granted", [])
+    if not isinstance(requested_secrets, list) or not isinstance(granted, list):
+        raise ValueError("Invalid service secrets or grants")
+    for name in requested_secrets:
+        if (
+            not isinstance(name, str)
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
+            or name in {"PATH", "HOME", "LANG"}
+            or name.startswith("KOLLAB_")
+            or f"secret:{name}" not in granted
+        ):
+            raise ValueError("Invalid or ungranted service secret")
+    secret_values = {}
+    if requested_secrets:
+        from kollabor_ai.providers.security import APIKeyManager
+
+        async def load_secrets():
+            store = APIKeyManager()
+            for name in requested_secrets:
+                value = await store.get_key(name)
+                if not isinstance(value, str) or not value:
+                    raise ValueError(f"Service secret {name} is not available")
+                secret_values[name] = value
+
+        try:
+            asyncio.run(load_secrets())
+        except ValueError:
+            raise
+        except Exception:
+            raise ValueError("Cannot read service secrets from the secure store") from None
     path = record.get("enabled_path")
     if not isinstance(path, str) or not path:
         raise ValueError("Plugin has no captured PATH; enable it again")
@@ -131,6 +161,7 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
             env["KOLLAB_PLUGIN_ID"] = plugin_id
             env["KOLLAB_PLUGIN_ROOT"] = str(root)
             env["KOLLAB_PLUGIN_DATA"] = str(home / "plugin-data" / plugin_id)
+            env.update(secret_values)
             try:
                 child = subprocess.Popen(
                     command, cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True

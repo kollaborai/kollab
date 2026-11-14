@@ -1,4 +1,5 @@
 """Only explicitly granted process secrets enter a service environment."""
+
 import json
 import sys
 
@@ -13,7 +14,11 @@ def setup_service(tmp_path, monkeypatch, granted):
     root = home / "plugins" / "hello"
     root.mkdir(parents=True)
     script = "import os; print(os.environ['TEST_TOKEN']); print('UNRELATED' in os.environ)"
-    manifest = {"services": {"worker": {"command": [sys.executable, "-c", script], "restart": "never", "secrets": ["TEST_TOKEN"]}}}
+    manifest = {
+        "services": {
+            "worker": {"command": [sys.executable, "-c", script], "restart": "never", "secrets": ["TEST_TOKEN"]}
+        }
+    }
     (root / "kollab-plugin.json").write_text(json.dumps(manifest))
     entry = {"enabled": True, "enabled_path": "/usr/bin:/bin", "granted": granted, "files_sha256": files_sha256(root)}
     (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": entry}, "dev": {}}))
