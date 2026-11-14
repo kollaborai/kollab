@@ -242,6 +242,35 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result.success)
             self.assertEqual(result.output.strip(), "workspace-marker")
 
+    async def test_terminal_read_disables_repository_fsmonitor_helper(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            helper = workspace / "fsmonitor-helper"
+            marker = workspace / "fsmonitor-ran"
+            helper.write_text(
+                f"#!/bin/sh\nprintf ran > '{marker}'\nprintf 'token\\n'\n"
+            )
+            helper.chmod(0o755)
+            subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+            subprocess.run(
+                ["git", "-C", str(workspace), "config", "core.fsmonitor", str(helper)],
+                check=True,
+            )
+            self.executor.workspace = workspace
+
+            result = await self.executor.execute_tool(
+                {
+                    "type": "terminal_read",
+                    "id": "terminal-read-fsmonitor",
+                    "command": "git status --short",
+                }
+            )
+
+            self.assertTrue(result.success, result.error)
+            self.assertFalse(marker.exists())
+
     async def test_terminal_read_refuses_git_diff_no_index_outside_project(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             self.executor.workspace = Path(temp_dir)
