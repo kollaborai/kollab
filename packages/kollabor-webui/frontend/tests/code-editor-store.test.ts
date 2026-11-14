@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 import { EmptyEditorState } from "../src/components/code/empty-editor-state";
 import { editorThemeColors } from "../src/components/code/editor-theme";
+import { visibleSplitTree } from "../src/components/code/split-layout";
 import {
   CODE_EDITOR_LAYOUT_KEY,
   isDiffTab,
@@ -85,6 +86,25 @@ test("the editor uses the active light palette for its canvas and text", () => {
   expect(palette.base).toBe("vs");
   expect(palette.colors["editor.background"]).toBe("#ffffff");
   expect(palette.colors["editor.foreground"]).toBe("#252525");
+});
+
+test("a narrow editor keeps only the active pane while desktop keeps the split", () => {
+  const split = {
+    type: "split" as const,
+    direction: "horizontal" as const,
+    first: { type: "leaf" as const, paneId: "left" },
+    second: {
+      type: "split" as const,
+      direction: "vertical" as const,
+      first: { type: "leaf" as const, paneId: "top-right" },
+      second: { type: "leaf" as const, paneId: "bottom-right" },
+      sizePercent: 50,
+    },
+    sizePercent: 50,
+  };
+
+  expect(visibleSplitTree(split, "bottom-right", true)).toEqual({ type: "leaf", paneId: "bottom-right" });
+  expect(visibleSplitTree(split, "bottom-right", false)).toBe(split);
 });
 
 // a pinned tab is never replaced by a later preview open
