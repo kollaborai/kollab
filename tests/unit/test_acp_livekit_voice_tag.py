@@ -12,8 +12,8 @@ the voice runtime issued for exactly this session, generation, and turn.
 
 from types import SimpleNamespace
 
-import acp
 import pytest
+from kollabor_voice.voice_context import VOICE_NUDGE, VOICE_RULES_MARK
 
 from kollabor.llm.acp_bridge import ACPProfile, ACPRunner
 from kollabor.llm.acp_orchestrator import ACPOrchestrator
@@ -22,7 +22,6 @@ from kollabor_agent.voice_admission import (
     issue_voice_admission_context,
     validate_voice_admission_context,
 )
-from kollabor_voice.voice_context import VOICE_NUDGE, VOICE_RULES_MARK
 
 BINDING = {
     "owner_id": "room-owner",
