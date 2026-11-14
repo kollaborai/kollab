@@ -300,26 +300,28 @@ def _write_usage_json(path: Path, value: dict) -> None:
     write_text_atomic(path, json.dumps(value, ensure_ascii=False) + "\n")
 
 
+def _usage_date(stamp: Any) -> str:
+    if isinstance(stamp, bool):
+        raise ValueError("Invalid usage timestamp")
+    if isinstance(stamp, (int, float)):
+        return datetime.fromtimestamp(stamp).astimezone().date().isoformat()
+    if isinstance(stamp, str):
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone().date().isoformat()
+    raise ValueError("Invalid usage timestamp")
+
+
 def _usage_day_and_tokens(line: bytes) -> tuple[str, int]:
     try:
         item = json.loads(line)
         if not isinstance(item, dict):
             raise ValueError("Usage line must be an object")
-        stamp = item["ts"]
-        if isinstance(stamp, bool):
-            raise ValueError("Invalid usage timestamp")
-        if isinstance(stamp, (int, float)):
-            date = datetime.fromtimestamp(stamp).astimezone().date()
-        elif isinstance(stamp, str):
-            date = datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone().date()
-        else:
-            raise ValueError("Invalid usage timestamp")
+        date = _usage_date(item["ts"])
         if not isinstance(item["model"], str) or not isinstance(item["labels"], dict):
             raise ValueError("Invalid usage metadata")
         input_tokens, output_tokens = item["input"], item["output"]
         if any(type(value) is not int or value < 0 for value in (input_tokens, output_tokens)):
             raise ValueError("Invalid usage token count")
-        return date.isoformat(), input_tokens + output_tokens
+        return date, input_tokens + output_tokens
     except (KeyError, TypeError, ValueError, OverflowError, OSError, UnicodeError) as exc:
         raise ValueError("Invalid plugin usage line") from exc
 
@@ -331,10 +333,54 @@ def _daily_usage(run: Path, date: str) -> dict:
         or type(state.get("total")) is not int
         or state["total"] < 0
         or not isinstance(state.get("run_ids"), list)
+        or any(not isinstance(run_id, str) for run_id in state["run_ids"])
+        or len(set(state["run_ids"])) != len(state["run_ids"])
         or not isinstance(state.get("usage_sources", {}), dict)
     ):
         raise ValueError("Invalid daily plugin usage")
     return state
+
+
+def _reconcile_finished_runs(run: Path) -> None:
+    with locked_file(run / "runs.json.lock", private=True):
+        state = _read_usage_json(run / "runs.json", {"runs": []})
+    rows = state.get("runs")
+    if not isinstance(rows, list):
+        raise ValueError("Invalid plugin runs")
+    seen: set[str] = set()
+    by_date: dict[str, list[tuple[str, int]]] = {}
+    try:
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("Invalid plugin run")
+            run_id = row["run_id"]
+            status = row["status"]
+            if not isinstance(run_id, str) or not run_id or run_id in seen:
+                raise ValueError("Invalid or duplicate plugin run id")
+            seen.add(run_id)
+            if status == "running":
+                continue
+            if status not in {"done", "timeout", "capped", "failed", "cancelled"}:
+                raise ValueError("Invalid plugin run status")
+            date = _usage_date(row["finished_at"])
+            usage = row["result"]["usage"]
+            input_tokens, output_tokens = usage["input"], usage["output"]
+            if any(type(value) is not int or value < 0 for value in (input_tokens, output_tokens)):
+                raise ValueError("Invalid plugin run usage")
+            by_date.setdefault(date, []).append((run_id, input_tokens + output_tokens))
+    except (KeyError, TypeError, ValueError, OverflowError, OSError) as exc:
+        raise ValueError("Invalid plugin runs") from exc
+    for date, records in by_date.items():
+        path = run / f"usage-{date}.json"
+        with locked_file(run / f"usage-{date}.json.lock", private=True):
+            counter = _daily_usage(run, date)
+            counted = set(counter["run_ids"])
+            new = [(run_id, amount) for run_id, amount in records if run_id not in counted]
+            if new:
+                counter["total"] += sum(amount for _, amount in new)
+                counter["run_ids"].extend(run_id for run_id, _ in new)
+                _write_usage_json(path, counter)
+
 
 
 def _usage_anchor(stream, offset: int) -> str:
@@ -417,6 +463,7 @@ def _ingest_plugin_usage(run: Path, today: str) -> int:
                         offset_state = next_offset
                     if reached_end:
                         break
+        _reconcile_finished_runs(run)
         with locked_file(run / f"usage-{today}.json.lock", private=True):
             return _daily_usage(run, today)["total"]
 
