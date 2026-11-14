@@ -29,8 +29,8 @@ output when allowed. A refused command returns a reason, such as
   resolve inside the project workspace.
 - The executor rejects compound shell syntax, unsupported escaping, background
   requests, path-qualified executables, hard-blocked commands, Git operations
-  that leave the project, and commands the existing read-only classifier does
-  not accept.
+  that leave the project, recursive or symlink-following `ls`, and commands the
+  existing read-only classifier does not accept.
 - Accepted commands are parsed to argv and executed without a shell, with the
   existing terminal timeout, command-size, and output-size limits.
 - The tool is explicitly granted through the agent bundle tool list. It does
@@ -48,6 +48,8 @@ output when allowed. A refused command returns a reason, such as
   tool refuses the command.
 - If a command uses compound shell operators or background execution, then the
   tool refuses it before execution.
+- If `ls` requests recursive traversal or symlink dereferencing, then the tool
+  refuses it before execution, including when no explicit path is supplied.
 - If a command is not recognized by the read-only classifier, then the tool
   fails closed and returns the refusal reason.
 
@@ -55,6 +57,7 @@ output when allowed. A refused command returns a reason, such as
 - Empty or malformed command: refuse without executing.
 - Command exceeds the read-only policy size limit or is invalid UTF-8: refuse.
 - Unsupported shell syntax, escaping, or executable path: refuse.
+- Recursive or symlink-following `ls`: refuse.
 - Working directory escapes the project or cannot be resolved: refuse.
 - Hard-blocked, out-of-project Git, or unclassified command: refuse.
 - Allowed command times out or exits unsuccessfully: return failure details and

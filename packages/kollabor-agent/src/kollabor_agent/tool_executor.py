@@ -30,6 +30,7 @@ from .voice_tool_policy import (
     VoiceToolDecision,
     VoiceToolExecutionGuard,
     _git_leaves_project,
+    _has_unsafe_ls_flags,
     _is_hard_blocked,
     _is_path_qualified_executable,
     _is_read_only_action,
@@ -1703,6 +1704,8 @@ class ToolExecutor:
             return refuse("command could not be parsed safely")
         if not argv or any(not part or "\\" in part for part in argv):
             return refuse("command contains unsupported escaping")
+        if _has_unsafe_ls_flags(argv):
+            return refuse("recursive or symlink-following ls is not allowed")
         if _is_path_qualified_executable(argv[0]):
             return refuse("executable must use a trusted bare command name")
 
