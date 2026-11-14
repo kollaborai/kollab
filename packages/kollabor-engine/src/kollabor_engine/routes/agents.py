@@ -127,7 +127,28 @@ def _live_row(agent: Dict[str, Any]) -> Dict[str, Any]:
         ),
         "solo": bool(agent.get("solo")),
         "project": str(agent.get("project") or ""),
+        # What it runs, as it published it: empty from an agent older than this field (#968).
+        "version": str(agent.get("version") or ""),
+        "build": str(agent.get("build") or ""),
     }
+
+
+def restart_agents_enabled() -> bool:
+    """``kollabor.updates.restart_agents`` from the global config file, off when unreadable.
+
+    A plain read: building a ConfigService here would write defaults over a
+    missing file, and this runs on every poll of the sidebar.
+    """
+    import json
+    from pathlib import Path
+
+    from kollabor_config.config_utils import get_global_config_path
+
+    try:
+        data = json.loads(Path(get_global_config_path()).read_text())
+        return data["kollabor"]["updates"]["restart_agents"] is True
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 @router.get("")
@@ -260,6 +281,8 @@ async def list_agent_pool(
         "active": [agent["name"] for agent in agents if agent["active"]],
         "count": len(agents),
         "live": running,
+        # Whether a chat whose agent runs an older version offers Restart Agent (else it points at /restart).
+        "restart_agents": restart_agents_enabled(),
     }
 
 

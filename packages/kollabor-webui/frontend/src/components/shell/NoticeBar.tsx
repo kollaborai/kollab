@@ -13,12 +13,14 @@ import { cn } from "@/lib/utils";
 export function NoticeBar({
   children,
   detail,
+  details,
   urgent = false,
   actions,
   onDismiss,
 }: {
   children: ReactNode;
   detail?: string;
+  details?: ReactNode;
   urgent?: boolean;
   actions?: ReactNode;
   onDismiss?: () => void;
@@ -32,6 +34,7 @@ export function NoticeBar({
     >
       <span className={cn("min-w-0 flex-1", urgent && "text-foreground")}>{children}</span>
       {actions}
+      {details}
       {onDismiss ? (
         <Button type="button" variant="ghost" size="icon-xs" aria-label="Dismiss" onClick={onDismiss}>
           <X />
