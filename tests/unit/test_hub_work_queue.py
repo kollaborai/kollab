@@ -1,5 +1,6 @@
 """Hub work queue: orphan requeue and stale-item sweeping."""
 
+import json
 import logging
 import types
 
@@ -60,6 +61,44 @@ def test_sweep_stale_retires_merged_pr_across_restart(tmp_path, monkeypatch, cap
     assert any(
         stale.id in r.getMessage() and "#219 merged" in r.getMessage()
         for r in caplog.records
+    )
+
+
+def test_sweep_scopes_same_upstream_ref_to_each_slot_repository(
+    tmp_path, monkeypatch
+):
+    """A shared legacy queue must resolve identical refs in each slot's repo."""
+    monkeypatch.setattr(coordinator, "get_hub_dir", lambda: tmp_path)
+    queue = WorkQueue()
+    open_slot = queue.add(
+        "work tied to repo-a #12", project="/repos/repo-a", upstream_refs=["#12"]
+    )
+    merged_slot = queue.add(
+        "work tied to repo-b #12", project="/repos/repo-b", upstream_refs=["#12"]
+    )
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        repo = argv[argv.index("-R") + 1] if "-R" in argv else "/repos/repo-b"
+        state = "OPEN" if repo == "/repos/repo-a" else "MERGED"
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"state": state, "mergedAt": "now"}),
+        )
+
+    monkeypatch.setattr(
+        coordinator, "subprocess", types.SimpleNamespace(run=fake_run)
+    )
+
+    retired = queue.sweep_stale()
+
+    assert [slot.id for slot in retired] == [merged_slot.id]
+    assert queue.get_pending() == [open_slot]
+    assert calls
+    assert all(
+        call[call.index("-R") + 1] in {"/repos/repo-a", "/repos/repo-b"}
+        for call in calls
     )
 
 
