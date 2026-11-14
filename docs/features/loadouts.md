@@ -180,6 +180,41 @@ kollab --model gpt-5.6-terra                  # active profile, this model
 
 Precedence is explicit flag → loadout field → provider profile value.
 
+## Fallback when a model can't serve
+
+`/llm fallback <name>` picks the loadout this agent switches to when a turn
+fails because its model can't serve it: a usage limit, a quota, a rate limit
+that outlasted the retries, or an expired login. The agent says so in one line
+in the chat, switches once and runs the turn again, in the same reply. It stays
+on the fallback until you switch back with `/llm`. Three cases are not run
+again, and the notice asks you to send the message again:
+
+- the fallback is an ACP harness, which has its own conversation;
+- the failed turn was an ACP harness's, which has ended before the switch;
+- the failed model had already streamed part of its reply, which the new
+  answer would join as one.
+
+An ACP harness still running or holding other messages is not switched yet:
+switching closes it, which would fail them too. It switches once the last of
+them ends, however that one ends. From then until the switch is done, a new
+message is refused with a line asking you to send it again. A message from
+another agent that the old harness never got, or got and failed, reaches the
+new one; a native fallback answers them in one turn. If you pick another
+profile before the switch, the switch is dropped, and that profile gets those
+messages. If nothing switches (the fallback is out of usage too), they wait
+for the agent's next prompt. If activation fails after closing ACP, those
+messages stay queued; no native turn starts until a successful switch can read
+them from conversation history.
+
+- `/llm fallback` shows the choice; `/llm fallback off` turns it off.
+- In the web UI: Settings → Loadouts → Fallback Model, a dropdown of every
+  connection (with its own model) and every saved loadout; None turns it off.
+- The choice is per agent (`plugins.model_fallback.agents.<agent>`), saved in
+  the folder's `.kollab/config.json`. `plugins.model_fallback.loadout` is the
+  default for every agent.
+- Other errors (a context-window overflow, a bad request) never switch.
+- Code: `plugins/model_fallback_plugin.py`, `kollabor/llm/usage_limits.py`.
+
 ## Relation to `/setup`
 
 `/setup` owns provider connections (keys, endpoints, OAuth); `/llm` owns

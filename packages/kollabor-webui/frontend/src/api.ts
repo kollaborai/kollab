@@ -399,6 +399,10 @@ export type LiveAgent = {
   solo: boolean;
   /** The folder it runs in. */
   project: string;
+  /** The Kollab version it runs; empty from an agent that started before agents published one. */
+  version?: string;
+  /** The commit of that build. */
+  build?: string;
 };
 
 /** GET /agents: the pool, as one folder (or the whole computer) sees it. */
@@ -409,6 +413,8 @@ export type AgentPoolResponse = {
   active?: string[];
   /** Every running agent in that scope, one per process (`agents` has one per name). */
   live?: LiveAgent[];
+  /** kollabor.updates.restart_agents: a chat whose agent is older offers Restart Agent (else it points at /restart). */
+  restart_agents?: boolean;
 };
 
 export type AgentBundleEntry = {
@@ -591,7 +597,8 @@ export const DEFAULT_SLASH_COMMANDS: SlashCommand[] = [
   { name: "cd", description: "Change the working directory" },
   { name: "compact", description: "Compact the current context" },
   { name: "version", description: "Show the Kollab version" },
-  { name: "restart", description: "Clear conversation and start fresh session" },
+  { name: "new", description: "Clear conversation and start fresh session" },
+  { name: "restart", description: "Restart this agent on the installed version" },
   { name: "upgrade", description: "Update Kollab to the latest release" },
 ];
 
@@ -766,6 +773,35 @@ export type AppsPicker = Omit<PanelPicker, "rows"> & {
   sections?: AppsSection[] | null;
 };
 
+export type PrChainItem = {
+  kind: "pr" | "issue";
+  number: number;
+  status?: string;
+  started?: string;
+  updated?: string;
+  round?: number;
+  head?: string;
+  last_verdict?: string;
+  why?: string;
+  branch?: string;
+  pr?: number;
+  claimed: boolean;
+};
+
+export type PrChainEvent = {
+  ts?: string;
+  pr?: number | string;
+  issue?: number;
+  stage?: string;
+  status?: string;
+  verdict?: string;
+  why?: string;
+  round?: number;
+  n?: number;
+};
+
+export type PrChainSnapshot = { root_found: boolean; items: PrChainItem[]; events: PrChainEvent[]; truncated?: boolean };
+
 export type AppsRegistryResult = AppsPicker & {
   query?: string | null;
   note?: string | null;
@@ -843,6 +879,11 @@ export class ApiError extends Error {
     this.status = status;
     this.body = body;
   }
+}
+
+/** The engine's 409 for an agent that cannot restart itself: it started before Restart Agent existed (#968). */
+export function isAgentTooOld(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409 && error.message.includes("too old to restart itself");
 }
 
 /** A failure as a sentence for the page: no HTTP status, capitalized. */
@@ -1058,6 +1099,11 @@ export class EngineApi {
   /** Hide a sidebar row for every client of this engine; resolves to the rows hidden now. */
   hideAgent(entry: HiddenAgent) {
     return this.json<{ hidden: HiddenAgent[] }>("/sidebar/hide", { method: "POST", body: JSON.stringify(entry) });
+  }
+
+  /** Read the pr-chain workflow's state: every PR and issue it tracks, plus its latest ledger events. */
+  getPrChain(signal?: AbortSignal) {
+    return this.json<PrChainSnapshot>("/pr-chain", { cache: "no-store", signal });
   }
 
   /** Read the engine-owned sidebar order and any recovery warning. */
@@ -1278,6 +1324,14 @@ export class EngineApi {
     };
   }
 
+  /** Restart one chat's detached agent on the installed code, keeping its conversation. */
+  restartAgent(sessionId: string) {
+    return this.json<{ ok: boolean; session_id: string; restarting: boolean; waiting_for_turn: boolean }>(
+      `/sessions/${encodeURIComponent(sessionId)}/restart-agent`,
+      { method: "POST" },
+    );
+  }
+
   clearHistory(sessionId: string) {
     return this.json<{ ok: boolean }>(
       `/sessions/${encodeURIComponent(sessionId)}/history`,
@@ -1402,11 +1456,12 @@ export class EngineApi {
     );
   }
 
-  listModelChoices() {
+  /** Choices for `workspace`'s own profiles and loadouts (empty: the engine's folder). */
+  listModelChoices(workspace = "") {
     return this.json<{
       choices: ModelChoice[];
       discovery?: Record<string, { status: "ready" | "partial" | "unavailable"; message?: string; more?: boolean }>;
-    }>("/profiles/choices");
+    }>(workspace ? `/profiles/choices?workspace=${encodeURIComponent(workspace)}` : "/profiles/choices");
   }
 
   /** The profiles, and the default loadout of `workspace` (empty: the engine's own folder). */

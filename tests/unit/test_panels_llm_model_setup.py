@@ -587,3 +587,41 @@ async def test_setup_reads_the_wizard_action_body(monkeypatch):
     with pytest.raises(PanelError) as err:
         await SETUP.act(FakeDaemon(FakeProfiles()), "finish", {"values": {**PAYLOAD, "api_key": ""}, "step": "key"})
     assert "api_key" in err.value.errors and KEY not in str(err.value.errors)
+
+
+class FakeFallback:
+    """Stands in for the model_fallback plugin (plugins/model_fallback_plugin.py)."""
+
+    def __init__(self):
+        self.value, self.saved = "", []
+
+    def choice(self):
+        return self.value
+
+    def resolve(self, name):
+        return SimpleNamespace(name=name) if name in ("openai", "mine") else None
+
+    def set_choice(self, name):
+        self.saved.append(name)
+        self.value = "" if name == "off" else name
+        return True
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_dropdown_offers_connections_and_saved_loadouts(llm_ctx):
+    # #548: Marco asked for the model fallback to be selectable in the web UI.
+    plugin = FakeFallback()
+    llm_ctx._event_bus = SimpleNamespace(get_service=lambda name: plugin if name == "model_fallback" else None)
+    (control,) = (await LLM.describe(llm_ctx, {}))["controls"]
+    assert control["path"] == "fallback" and control["value"] == "off"
+    assert control["options"] == ["off", "anthropic", "openai", "openrouter", "mine"]
+    assert control["label"] == "Fallback Model"
+    assert control["option_labels"]["off"] == "None" and control["option_labels"]["mine"] == "mine · anthropic"
+
+    done = await LLM.act(llm_ctx, "fallback", {"fallback": "openai"})
+    assert done["ok"] and plugin.saved == ["openai"]
+    assert done["panel"]["controls"][0]["value"] == "openai"
+    assert (await LLM.act(llm_ctx, "fallback", {"fallback": "off"}))["ok"] and plugin.value == ""
+    with pytest.raises(PanelError):
+        await LLM.act(llm_ctx, "fallback", {"fallback": "nonesuch"})
+    assert plugin.saved == ["openai", "off"]

@@ -1484,7 +1484,13 @@ class QueueProcessor:
         from kollabor_ai.goal_image_scope import goal_image_request_scope
 
         with goal_image_request_scope(self):
-            return await self._streaming_handler.call_llm(**kwargs)
+            try:
+                return await self._streaming_handler.call_llm(**kwargs)
+            finally:
+                # Each call resets the service's flag, so a timeout retry that
+                # fails before streaming would hide what the first try showed.
+                if getattr(getattr(self, "api_service", None), "last_call_streamed", False) is True:
+                    self._reply_streamed = True
 
     async def continue_conversation(self, current_parent_uuid: str) -> str:
         """Continue an ongoing conversation (no new user message).
@@ -1633,6 +1639,9 @@ class QueueProcessor:
         """Inner implementation of _execute_llm_turn (called under _turn_lock)."""
         # Watchdog heartbeat: a turn is actually executing = forward progress.
         self.mark_progress()
+        # Whether any of this turn's provider calls showed part of its reply:
+        # the model fallback never asks a new model for a reply seen in part (#548).
+        self._reply_streamed = False
 
         # Context service: signal new turn for curator throttling
         context_svc = None
@@ -2641,10 +2650,14 @@ class QueueProcessor:
             # message, which carries provider names and hints (#549, #720).
             error_code = info.error_code
             context_window_exceeded = is_context_overflow_info(info)
+            retry = False
+            # Part of a reply already streamed would read as the start of the
+            # new model's answer, so such a turn is never asked again.
+            streamed = getattr(self, "_reply_streamed", False) is True
             event_bus = getattr(self, "event_bus", None)
             if event_bus is not None:
                 try:
-                    await event_bus.emit_with_hooks(
+                    hooked = await event_bus.emit_with_hooks(
                         EventType.LLM_REQUEST_ERROR,
                         {
                             "error_type": type(e).__name__,
@@ -2653,22 +2666,33 @@ class QueueProcessor:
                             "provider": info.provider,
                             "retryable": info.retryable,
                             "context_window_exceeded": context_window_exceeded,
+                            "message": error_msg,
+                            "streamed": streamed,
                         },
                         "llm_service",
                     )
+                    final = (hooked or {}).get("main", {}).get("final_data") or {}
+                    retry = final.get("retry") is True
                 except Exception:
                     logger.exception("Failed to dispatch LLM request error hooks")
 
-            self.message_display_service.display_error_message(error_msg)
-            # Web clients follow the turn through semantic events, not the
-            # terminal's red line; without this a failed turn ends silently.
-            # The structured fields ride along so no consumer has to parse the
-            # message text to classify the failure (#720).
-            publish_turn_error(self.renderer, error_msg, info)
-            self.last_turn_error = error_msg
-            self.last_turn_error_code = error_code
-            self.last_turn_error_class = info.error_class
-            self.turn_completed = True
+            if retry and not streamed and not self.cancel_processing and not getattr(self, "_error_retried", False):
+                # Asked inside this turn, so its request's stream gets the new
+                # model's answer. Once per turn, whatever a hook asks, and never
+                # after a Stop: no loop runs the retry then, so the turn ends here.
+                self._error_retried = True
+                self.turn_completed = False  # the turn's loop sends the request again
+            else:
+                self.message_display_service.display_error_message(error_msg)
+                # Web clients follow the turn through semantic events, not the
+                # terminal's red line; without this a failed turn ends silently.
+                # Structured fields let consumers classify it without parsing
+                # display text (#720).
+                publish_turn_error(self.renderer, error_msg, info)
+                self.last_turn_error = error_msg
+                self.last_turn_error_code = error_code
+                self.last_turn_error_class = info.error_class
+                self.turn_completed = True
 
         # A turn is only done once no tool results need to go back to the model.
         # Publishing earlier would tell remote clients the turn ended while its
@@ -2677,6 +2701,7 @@ class QueueProcessor:
             self.active_voice = None
             revoke_voice_admission_context(self.active_origin_context)
             self.active_origin_context = None
+            self._error_retried = False
             self.active_request_ids = ()  # stamped already; a later chain answers none
             provider_config = getattr(getattr(self.api_service, "_provider", None), "config", None)
             context_size = _config_int(provider_config, "context_window", 0) if provider_config is not None else 0

@@ -312,10 +312,15 @@ live engine, router, or user configuration. Install a browser once with
 `npx playwright-core install chromium`, or set `CHROME_PATH` to an existing
 Chrome/Chromium executable, then run `npm run test:e2e:learn` from `frontend/`.
 The harness checks startup, Hub/network listing, profile selection and agent
-session launch, Learn navigation/focus, the separate What’s New page, changelog
-failure/retry, and responsive layouts. It writes the three viewport screenshots
-to the repository's `docs/screenshots/`; set `LEARN_CAPTURE_SCREENSHOTS=0` to
-run the checks without rewriting images.
+session launch, Learn navigation/focus, and responsive layouts. It writes the
+three viewport screenshots to `LEARN_SCREENSHOT_DIR` (by default a directory
+under the system temp dir); set `LEARN_CAPTURE_SCREENSHOTS=0` to run the
+checks without writing images.
+Four sibling suites split out of the original monolithic script so CI workers
+run them in parallel (#1022): `npm run test:e2e:learn:topics` (topic tour and
+walkthrough video), `test:e2e:learn:loadouts` (default-loadout scenarios),
+`test:e2e:learn:notices` (release notes and notice lines) and
+`test:e2e:learn:retries` (dismissed retry and hand-made model changes).
 
 
 ## License

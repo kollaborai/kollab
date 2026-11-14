@@ -87,7 +87,7 @@ function FieldShell({
       </div>
       {children}
       {field.help ? (
-        <p className="text-muted-foreground text-xs break-words">
+        <p className="text-muted-foreground max-w-prose text-xs break-words">
           {field.help}
         </p>
       ) : null}
@@ -199,7 +199,7 @@ export function FieldRenderer({
           </p>
         ) : null}
         {field.help ? (
-          <p className="text-muted-foreground text-xs break-words">
+          <p className="text-muted-foreground max-w-prose text-xs break-words">
             {field.help}
           </p>
         ) : null}
