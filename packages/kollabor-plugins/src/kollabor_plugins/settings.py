@@ -83,7 +83,15 @@ def _valid_data_id(plugin_id: object) -> bool:
 
 
 def save(plugin_id: str, values: dict) -> None:
-    """Merge validated values under the installed plugin's sibling lock."""
+    """Serialize validation and saving with install, update, detach and removal."""
+    home = Path.home() / ".kollab"
+    home.mkdir(parents=True, exist_ok=True)
+    with locked_file(home / "plugins.json.lock", private=True):
+        _recover_locked(home)
+        _save_locked(plugin_id, values)
+
+
+def _save_locked(plugin_id: str, values: dict) -> None:
     if not _valid_data_id(plugin_id):
         raise ValueError("Invalid plugin id")
     if not isinstance(values, dict):

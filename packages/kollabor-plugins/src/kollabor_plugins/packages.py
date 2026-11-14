@@ -408,8 +408,8 @@ def install_stage(stage: Path, staged: dict, commit: str, digest: str, *, expect
             raise
 
 
-def remove_package(plugin_id: str, *, expected_record: dict) -> None:
-    """Remove an approved disabled package using the same recoverable journal as install."""
+def remove_package(plugin_id: str, *, expected_record: dict, purge: bool = False) -> None:
+    """Remove an approved package, optionally purging data under the registry lock."""
     if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id):
         raise ValueError("Invalid plugin id")
     home = Path.home() / ".kollab"
@@ -441,3 +441,9 @@ def remove_package(plugin_id: str, *, expected_record: dict) -> None:
         except Exception:
             _recover_locked(home)
             raise
+        if purge:
+            data = home / "plugin-data" / plugin_id
+            if data.is_symlink() or (home / "plugin-data").is_symlink():
+                raise ValueError("Plugin removed, but data path changed; data was not purged")
+            if data.exists():
+                shutil.rmtree(data)

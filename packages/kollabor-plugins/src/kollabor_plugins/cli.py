@@ -360,15 +360,11 @@ def main(argv: list[str]) -> int:
                 locks.append(fd)
                 if _recorded_process_alive(run_dir / f"{service_name}.pid"):
                     raise ValueError("A plugin service is running; stop it and try again")
-            remove_package(plugin_id, expected_record=prior)
+            remove_package(plugin_id, expected_record=prior, purge=args.purge)
         finally:
             for fd in reversed(locks):
                 unlock(fd)
                 os.close(fd)
-        if args.purge:
-            if data.is_symlink() or (home / "plugin-data").is_symlink():
-                raise ValueError("Plugin removed, but data path changed; data was not purged")
-            shutil.rmtree(data)
         print(f"Removed {plugin_id}" + (" and purged its data" if args.purge else ""))
         return 0
 
