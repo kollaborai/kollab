@@ -24,12 +24,12 @@ def _restore_plugins_modules(snapshot: dict[str, object]) -> None:
     sys.modules.update(snapshot)
 
 
-def test_registry_loads_global_user_plugins(
+def test_registry_does_not_load_unregistered_global_scripts(
     tmp_path,
     monkeypatch,
     request,
 ) -> None:
-    """Plugins in ~/.kollab/plugins should load without a source checkout."""
+    """Unregistered scripts are not approved plugin packages."""
     snapshot = _snapshot_plugins_modules()
     request.addfinalizer(lambda: _restore_plugins_modules(snapshot))
 
@@ -70,5 +70,5 @@ class GlobalPlugin:
     registry.load_all_plugins()
 
     assert "BuiltinPlugin" in registry.list_plugins()
-    assert "GlobalPlugin" in registry.list_plugins()
-    assert registry.get_merged_config()["plugins"]["global_plugin"]["enabled"] is True
+    assert "GlobalPlugin" not in registry.list_plugins()
+    assert "global_plugin" not in registry.get_merged_config().get("plugins", {})
