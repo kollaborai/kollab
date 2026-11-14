@@ -18,7 +18,8 @@ def test_echoed_secret_and_token_are_redacted_in_cli(tmp_path, monkeypatch, caps
     command = [
         sys.executable,
         "-c",
-        "import os; print(os.environ['TEST_TOKEN']); print('https://x.test/?token=hidden'); print('Authorization: Bearer abc123')",
+        "import os; print(os.environ['TEST_TOKEN']); "
+        "print('https://x.test/?token=hidden'); print('Authorization: Bearer abc123')",
     ]
     manifest = {"services": {"worker": {"command": command, "secrets": ["TEST_TOKEN"]}}}
     (root / "kollab-plugin.json").write_text(json.dumps(manifest))

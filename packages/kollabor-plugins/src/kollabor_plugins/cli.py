@@ -102,7 +102,27 @@ def main(argv: list[str]) -> int:
         run = home / "plugin-data" / args.plugin_id / "run"
         if any(path.is_symlink() for path in (home / "plugin-data", run.parent, run)):
             raise ValueError("Plugin data path may not be a symlink")
+        from .services import redact_log
+
         for name in names:
+            service = services[name]
+            if not isinstance(service, dict):
+                raise ValueError("Invalid plugin service")
+            declared = service.get("secrets", [])
+            if not isinstance(declared, list) or any(not isinstance(key, str) for key in declared):
+                raise ValueError("Invalid plugin service secrets")
+            secret_values = []
+            if declared:
+                from kollabor_ai.profile_manager import _keyring_get
+
+                try:
+                    for key in declared:
+                        value = _keyring_get(key)
+                        if not isinstance(value, str) or not value:
+                            raise ValueError("Service secret unavailable")
+                        secret_values.append(value)
+                except Exception:
+                    raise ValueError("Cannot safely display logs: service secret unavailable") from None
             log = run / f"{name}.log"
             if not log.exists() and not log.is_symlink():
                 print(f"{name}: no log yet")
@@ -110,7 +130,9 @@ def main(argv: list[str]) -> int:
             fd = os.open(log, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as stream:
                 print(f"--- {name} ---")
-                print(stream.read(10 * 1024 * 1024), end="")
+                text = stream.read(10 * 1024 * 1024)
+                for line in text.splitlines(keepends=True):
+                    print(redact_log(line, secret_values), end="")
         return 0
     if args.action == "new":
         import shutil

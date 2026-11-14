@@ -23,6 +23,16 @@ logger = logging.getLogger(__name__)
 _LOG_LIMIT = 10 * 1024 * 1024
 
 
+def redact_log(text: str, secret_values: list[str] | tuple[str, ...] = ()) -> str:
+    """Redact declared values and common credential forms from log text."""
+    for value in sorted((value for value in secret_values if value), key=len, reverse=True):
+        text = text.replace(value, "[redacted]")
+    text = re.sub(r"(?:https?|ssh)://[^\s'\"<>]+", "[redacted]", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?i)\b(bearer|basic)\s+[^\s,;]+", r"\1 [redacted]", text)
+    text = re.sub(r"(?i)\b(authorization|password|token|secret|credential)\s*[:=]\s*[^\s,;]+", r"\1: [redacted]", text)
+    return re.sub(r"\b(?:sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_-]+", "[redacted]", text)
+
+
 def restart_decision(policy: str, exit_code: int, crashes: list[float], now: float) -> tuple[int | None, bool]:
     """Return the retry delay and whether the five-crash limit was reached.
 
