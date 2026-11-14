@@ -282,6 +282,9 @@ def create_app(port: Optional[int] = None) -> FastAPI:
         version="0.1.0",
         lifespan=_engine_lifespan,
     )
+    from .routes.plugins import PluginEventHub
+
+    app.state.plugin_events = PluginEventHub()
     _wire_voice(app, port)
     from .phone_link import PhoneLink
 

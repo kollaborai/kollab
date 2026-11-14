@@ -72,6 +72,7 @@ async def test_plugin_event_streams_heartbeat_and_disconnect(tmp_path, monkeypat
 
     import httpx
     from kollabor_engine.routes import plugins as plugin_routes
+
     from kollabor_plugins import registry
 
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -88,9 +89,10 @@ async def test_plugin_event_streams_heartbeat_and_disconnect(tmp_path, monkeypat
     hub = app.state.plugin_events
     response = await plugin_routes.plugin_events(SimpleNamespace(app=app), "hello")
     other = hub.subscribe("other")
-    assert hub.subscriber_count("hello") == 1
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         received = asyncio.create_task(anext(response.body_iterator))
+        await asyncio.sleep(0)
+        assert hub.subscriber_count("hello") == 1
         sent = await client.post("/plugins/hello/events", json={
             "topic": "heartbeat", "data": {"service": "hello"}, "ts": -1,
         })
@@ -124,6 +126,7 @@ async def test_global_plugin_change_stream(tmp_path, monkeypatch):
     app = create_app()
     response = await plugin_routes.plugin_changes(SimpleNamespace(app=app))
     received = asyncio.create_task(anext(response.body_iterator))
+    await asyncio.sleep(0)
     app.state.plugin_events.publish_change()
     event = json.loads((await asyncio.wait_for(received, timeout=1))["data"])
     assert event["topic"] == "plugins-changed"
