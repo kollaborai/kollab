@@ -69,6 +69,8 @@ elif tool == "codesign" and "--display" in args:
         print("flags=0x10000(runtime)", file=sys.stderr)
     if not os.environ.get("MOCK_NO_TIMESTAMP"):
         print("Timestamp=fixture", file=sys.stderr)
+    if os.environ.get("MOCK_LARGE_SIGNATURE_DETAILS"):
+        print("Details=" + "x" * 131072, file=sys.stderr)
 elif tool == "ditto":
     pathlib.Path(args[-1]).write_text("stapled" if (app / "stapled").exists() else "unstapled")
 elif tool == "xcrun":
@@ -359,6 +361,7 @@ class SigningContractTests(unittest.TestCase):
             with self.subTest(api=api):
                 self.env = original.copy()
                 self.signed(api=api)
+                self.env["MOCK_LARGE_SIGNATURE_DETAILS"] = "1"
                 self.configure_documented_run()
                 self.assertEqual(self.run_documented_step(self.doc_guard).returncode, 0)
                 result = self.run_documented_step(self.doc_signed)
