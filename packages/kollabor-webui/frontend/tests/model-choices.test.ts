@@ -251,6 +251,26 @@ test("a changed ACP launch fingerprint drops only that profile's cached rows whi
   await refresh;
 });
 
+test("an in-flight answer cannot restore rows after a profile's launch fingerprint changes", async () => {
+  const { api } = fakeApi({ choices: [row("p", "old"), row("native", "n")], discovery: { p: ready, native: ready } });
+  const oldProfile = [{ name: "p", provider: "acp", choices_fingerprint: "before" }];
+  const editedProfile = [{ name: "p", provider: "acp", choices_fingerprint: "after" }];
+  await loadModelChoices(api, { profiles: oldProfile } as never);
+
+  let answer!: (value: Answer) => void;
+  (api.listModelChoices as ReturnType<typeof vi.fn>).mockImplementationOnce(
+    () => new Promise<Answer>((resolve) => (answer = resolve)),
+  );
+  const inFlight = loadModelChoices(api, { profiles: oldProfile } as never);
+  const joined = loadModelChoices(api, { profiles: editedProfile } as never);
+
+  assert.deepEqual(getModelChoices(api).choices, [row("native", "n")]);
+  answer({ choices: [row("p", "old"), row("native", "n")], discovery: { p: ready, native: ready } });
+  await Promise.all([inFlight, joined]);
+
+  assert.deepEqual(getModelChoices(api).choices, [row("native", "n")]);
+});
+
 test("a first-ever warm shows each batch as it arrives, rows only growing", async () => {
   vi.useFakeTimers();
   const { api } = fakeApi(
