@@ -18,7 +18,11 @@ for package_src in (
 ):
     sys.path.insert(0, str(package_src))
 
-from kollabor_agent.mcp_integration import MCPIntegration, MCPServerConnection
+from kollabor_agent.mcp_integration import (
+    MCPIntegration,
+    MCPRequestInterruptedError,
+    MCPServerConnection,
+)
 from kollabor_agent.native_tools_handler import NativeToolsHandler
 from kollabor_events.bus import EventBus
 from kollabor_events.models import EventType, Hook, HookPriority
@@ -411,7 +415,10 @@ class TestMCPServerConnection(unittest.TestCase):
             await asyncio.gather(connection.close(), connection.close())
             if not request.done():
                 request.cancel()
-            await request
+            with self.assertRaisesRegex(
+                MCPRequestInterruptedError, "shared MCP connection was closed"
+            ):
+                await request
             self.assertIsNone(connection.process)
             self.assertEqual(connection._pending_requests, {})
             self.assertIsNone(connection._reader_task)

@@ -129,8 +129,9 @@ class TestMCPConcurrentInterruption(unittest.IsolatedAsyncioTestCase):
         )
         await self._wait_for_writes(1)
 
-        with self.assertRaises(MCPRequestTimeoutError):
+        with self.assertRaises(MCPRequestTimeoutError) as timeout_error:
             await first
+        self.assertIn("outcome may be unknown", str(timeout_error.exception))
         with self.assertRaisesRegex(MCPRequestInterruptedError, "request was not written"):
             await second
 
@@ -153,8 +154,9 @@ class TestMCPConcurrentInterruption(unittest.IsolatedAsyncioTestCase):
         )
         await self._wait_for_writes(2)
 
-        with self.assertRaises(MCPRequestTimeoutError):
+        with self.assertRaises(MCPRequestTimeoutError) as timeout_error:
             await first
+        self.assertIn("outcome may be unknown", str(timeout_error.exception))
         with self.assertRaisesRegex(
             MCPRequestInterruptedError, "outcome may be unknown"
         ):

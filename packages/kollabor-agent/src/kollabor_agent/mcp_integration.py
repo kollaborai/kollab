@@ -270,7 +270,7 @@ class MCPServerConnection:
 
         try:
             response = await self._send_request(request, timeout=self.startup_timeout)
-        except MCPRequestTimeoutError:
+        except (MCPRequestTimeoutError, MCPRequestInterruptedError):
             return []
         if response and "result" in response:
             tools = response["result"].get("tools", [])
@@ -361,9 +361,15 @@ class MCPServerConnection:
             self._closing = True
             if not response_future.done():
                 response_future.cancel()
+            was_written = self._pending_request_written.get(request_id, False)
+            detail = (
+                "the outcome may be unknown because the request was written"
+                if was_written
+                else "the request was not written"
+            )
             await self.close()
             raise MCPRequestTimeoutError(
-                f"MCP request timed out after {timeout_display} seconds"
+                f"MCP request timed out after {timeout_display} seconds; {detail}"
             )
         except asyncio.CancelledError:
             logger.warning(
