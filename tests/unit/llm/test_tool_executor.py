@@ -236,6 +236,37 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(Path(argv[0]).is_absolute())
             self.assertNotEqual(Path(argv[0]).resolve(), fake_git.resolve())
 
+    async def test_terminal_read_refuses_recursive_symlink_following_ls(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            workspace = temp_root / "workspace"
+            private = temp_root / "private"
+            workspace.mkdir()
+            private.mkdir()
+            if os.name != "nt":
+                (private / "secret.txt").write_text("outside project")
+                (workspace / "external").symlink_to(
+                    private, target_is_directory=True
+                )
+            self.executor.workspace = workspace
+            self.executor.shell_executor.run_argv = AsyncMock(
+                return_value=ShellResult(
+                    success=True, stdout="", stderr="", exit_code=0
+                )
+            )
+
+            result = await self.executor.execute_tool(
+                {
+                    "type": "terminal_read",
+                    "id": "terminal-read-ls-1",
+                    "command": "ls -RL",
+                }
+            )
+
+            self.assertFalse(result.success)
+            self.assertIn("recursive", result.error.lower())
+            self.executor.shell_executor.run_argv.assert_not_awaited()
+
     async def test_terminal_output_uses_the_only_active_session_when_name_is_missing(self):
         plugin = MagicMock()
         plugin.get_session_status = AsyncMock(
