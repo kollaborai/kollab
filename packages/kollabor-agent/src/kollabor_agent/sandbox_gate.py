@@ -185,7 +185,23 @@ class SandboxGate:
                     paths.append(root)
         else:
             return []
-        return [r for r in roots if any(_inside(p, r) for p in paths)]
+        return [r for r in roots if any(self._inside_protected_root(p, r) for p in paths)]
+
+    @staticmethod
+    def _inside_protected_root(path: Path, root: Path) -> bool:
+        if _inside(path, root):
+            return True
+        candidate = path
+        while True:
+            try:
+                if candidate.samefile(root):
+                    return True
+            except OSError:
+                pass
+            parent = candidate.parent
+            if parent == candidate:
+                return False
+            candidate = parent
 
     @staticmethod
     def _resolve(value: str, base: Path) -> Path:
