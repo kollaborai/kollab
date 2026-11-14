@@ -21,8 +21,12 @@ def test_detach_stops_dev_service(tmp_path, monkeypatch):
     (source / "kollab-plugin.json").write_text(
         json.dumps(
             {
+                "format": 1,
                 "id": "hello",
                 "name": "Hello",
+                "version": "1.0.0",
+                "description": "Example",
+                "kollab": ">=0.1",
                 "uses": [],
                 "services": {
                     "worker": {"command": [sys.executable, "-c", "import time; time.sleep(60)"], "stop_timeout_s": 1}
