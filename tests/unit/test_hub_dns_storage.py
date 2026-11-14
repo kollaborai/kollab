@@ -17,6 +17,26 @@ def _merge_from_process(dns_dir, designation, start_event):
     )
 
 
+def test_capability_index_saves_keep_updates_from_stale_snapshots(tmp_path):
+    first = DNSStorage(tmp_path)
+    second = DNSStorage(tmp_path)
+    first_snapshot = first.load_capability_index()
+    second_snapshot = second.load_capability_index()
+    assert first_snapshot == second_snapshot == {}
+
+    first.save_capability_index(
+        {"alpha-capability": [{"designation": "alpha", "capability": {}}]}
+    )
+    second.save_capability_index(
+        {"beta-capability": [{"designation": "beta", "capability": {}}]}
+    )
+
+    final_index = DNSStorage(tmp_path).load_capability_index()
+    assert set(final_index) == {"alpha-capability", "beta-capability"}
+    assert final_index["alpha-capability"][0]["designation"] == "alpha"
+    assert final_index["beta-capability"][0]["designation"] == "beta"
+
+
 def test_concurrent_registry_merges_keep_both_updates(tmp_path, monkeypatch):
     stores = [DNSStorage(tmp_path), DNSStorage(tmp_path)]
     barrier = threading.Barrier(2)
