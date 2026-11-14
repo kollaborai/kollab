@@ -36,3 +36,19 @@ def test_plugin_dist_asset_served_with_nosniff(assets):
 def test_plugin_unsafe_assets_never_fall_through_to_spa(assets, path):
     response = assets.get(f"/plugins/hello/web/{path}")
     assert response.status_code == 404
+
+
+def test_installed_plugin_root_cannot_be_symlinked_outside_plugin_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    home = tmp_path / ".kollab"
+    plugins = home / "plugins"
+    plugins.mkdir(parents=True)
+    outside = tmp_path / "external"
+    dist = outside / "web" / "dist"
+    dist.mkdir(parents=True)
+    (dist / "main.js").write_text("external code")
+    (plugins / "hello").symlink_to(outside, target_is_directory=True)
+    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {"enabled": True}}, "dev": {}}))
+    with TestClient(create_app(), base_url="http://localhost", client=("127.0.0.1", 1234)) as client:
+        assert client.get("/plugins/hello/web/main.js").status_code == 404
