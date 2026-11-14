@@ -17,7 +17,7 @@ def test_hello_manifest_and_parts():
     assert manifest["web"]["entry"] == "web/dist/index.js"
     assert manifest["web"]["style"] == "web/dist/index.css"
     section = json.loads((ROOT / manifest["settings"]).read_text())
-    assert section["widgets"]
+    assert section["widgets"][0]["config_path"] == "greeting"
     path, symbol = manifest["python"].split(":")
     spec = importlib.util.spec_from_file_location("hello_fixture", ROOT / path)
     module = importlib.util.module_from_spec(spec)
