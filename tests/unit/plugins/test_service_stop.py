@@ -14,9 +14,11 @@ import psutil
 def test_stop_kills_group_after_leader_exits(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    from kollabor_config import file_lock
     from kollabor_plugins import services
 
-    monkeypatch.setenv("PYTHONPATH", str(Path(services.__file__).resolve().parent.parent))
+    package_paths = [Path(module.__file__).resolve().parent.parent for module in (services, file_lock)]
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(map(str, package_paths)))
     home = tmp_path / ".kollab"
     root = home / "plugins" / "hello"
     root.mkdir(parents=True)
