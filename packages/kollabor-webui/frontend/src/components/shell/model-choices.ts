@@ -133,6 +133,7 @@ async function poll(api: EngineApi, store: Store): Promise<void> {
   for (let polls = 1; ; polls += 1) {
     const retry = store.retryNext;
     store.retryNext = false;
+    const requestSignatures = store.profileSignatures;
     let answer: Awaited<ReturnType<EngineApi["listModelChoices"]>>;
     try {
       answer = await (
@@ -148,13 +149,26 @@ async function poll(api: EngineApi, store: Store): Promise<void> {
       });
       return;
     }
-    const statuses = Object.entries(answer.discovery ?? {});
-    const advancing = statuses.filter(([, info]) => info.more).map(([name]) => name);
+    const changedDuringRequest = new Set<string>();
+    const requestedSignatures = requestSignatures ?? new Map<string, string>();
+    const currentSignatures = store.profileSignatures ?? new Map<string, string>();
+    const comparedProfiles = new Set([...requestedSignatures.keys(), ...currentSignatures.keys()]);
+    for (const name of comparedProfiles) {
+      if (requestedSignatures.get(name) !== currentSignatures.get(name)) changedDuringRequest.add(name);
+    }
+    const choices = answer.choices.filter((choice) => !changedDuringRequest.has(choice.profile));
+    const discovery = answer.discovery
+      ? Object.fromEntries(Object.entries(answer.discovery).filter(([name]) => !changedDuringRequest.has(name)))
+      : answer.discovery;
+    const statuses = Object.entries(discovery ?? {});
+    const advancing = [
+      ...new Set([...statuses.filter(([, info]) => info.more).map(([name]) => name), ...changedDuringRequest]),
+    ];
     const stalled = statuses.filter(([, info]) => info.status !== "ready" && !info.more).map(([name]) => name);
     const retryQueued = store.retryNext;
     const again = retryQueued || (advancing.length > 0 && polls < MAX_POLLS);
     publish(store, {
-      choices: mergeChoices(store.view.choices, answer.choices, answer.discovery),
+      choices: mergeChoices(store.view.choices, choices, discovery),
       discovering: again ? [...new Set([...advancing, ...(retryQueued ? stalled : [])])] : [],
       incomplete: again ? stalled : [...stalled, ...advancing],
       failed: false,
