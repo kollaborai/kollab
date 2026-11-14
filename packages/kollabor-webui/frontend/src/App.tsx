@@ -365,6 +365,7 @@ function RuntimeShell({
                   session.supports_vision ?? profile?.supports_vision ?? true
                 }
                 identity={session.identity}
+                sessionId={session.session_id}
                 activity={activity}
                 onOpenGem={onOpenProperties}
                 remoteAgents={targets.remote}
@@ -1974,6 +1975,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                 key={`${activeId}:${runtimeEpoch}`}
                 api={api}
                 sessionId={activeSession.session_id}
+                agentIdentity={activeSession.identity}
                 initialState={initialState}
                 onStale={(stillCurrent) => resetThread(activeSession.session_id, stillCurrent)}
                 liveEvents={liveEventsRef}
