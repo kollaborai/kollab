@@ -75,17 +75,30 @@ def setting_widgets(root: Path, manifest: dict) -> list[dict]:
     return widgets
 
 
+def _valid_data_id(plugin_id: object) -> bool:
+    if not isinstance(plugin_id, str):
+        return False
+    base = plugin_id.removesuffix("@dev")
+    return bool(_ID.fullmatch(base))
+
+
 def save(plugin_id: str, values: dict) -> None:
     """Merge validated values under the installed plugin's sibling lock."""
-    if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id):
+    if not _valid_data_id(plugin_id):
         raise ValueError("Invalid plugin id")
     if not isinstance(values, dict):
         raise ValueError("Plugin values must be an object")
     home = Path.home() / ".kollab"
     registry = _read_registry(home / "plugins.json")
-    if plugin_id not in registry["plugins"]:
-        raise ValueError("Plugin is not installed")
-    root = home / "plugins" / plugin_id
+    if plugin_id.endswith("@dev"):
+        folder = registry["dev"].get(plugin_id.removesuffix("@dev"))
+        if not isinstance(folder, str):
+            raise ValueError("Development plugin is not attached")
+        root = Path(folder)
+    else:
+        if plugin_id not in registry["plugins"]:
+            raise ValueError("Plugin is not installed")
+        root = home / "plugins" / plugin_id
     manifest = _read_json(root / "kollab-plugin.json")
     widgets = setting_widgets(root, manifest)
     definitions = {}
@@ -187,7 +200,7 @@ def apply_config_changes(changes: dict) -> dict:
 def config_value(path: str, default: object = None) -> object:
     """Read a namespaced installed-plugin field from its authoritative store."""
     parts = path.split(".", 2)
-    if len(parts) != 3 or not _ID.fullmatch(parts[1]):
+    if len(parts) != 3 or not _valid_data_id(parts[1]):
         raise ValueError("Invalid plugin configuration path")
     home = Path.home() / ".kollab"
     if parts[0] == "plugin-registry" and parts[2] == "enabled":

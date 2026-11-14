@@ -554,11 +554,15 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
         if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id) or not isinstance(folder, str):
             continue
         manifest = {}
+        dev_settings = []
         error = registry.package_errors.get(plugin_id)
         try:
             manifest = json.loads((Path(folder) / "kollab-plugin.json").read_text(encoding="utf-8"))
             if not isinstance(manifest, dict):
                 raise ValueError("Invalid development manifest")
+            from .settings import setting_widgets
+
+            dev_settings = setting_widgets(Path(folder), manifest)
         except (OSError, ValueError) as exc:
             manifest, error = {}, str(exc)
         entries.append(
@@ -573,7 +577,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
                 "shadowed": False,
                 "state": "error" if error else "ok",
                 "error": error,
-                "settings": [],
+                "settings": dev_settings,
                 "web": manifest.get("web"),
                 "contributes": manifest.get("contributes", {}),
                 "services": [],
