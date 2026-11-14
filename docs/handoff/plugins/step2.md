@@ -65,11 +65,22 @@ settings tests pass (`context-contract-green.log`); Ruff and compilation pass.
 Logs are in `<home>/backups/plugins-step2-work/`. Context callbacks still need
 to be wired to the engine event streams and actual NoticeBar delivery.
 
+Engine reads so far: `810c5c79` was red before `382b1eab` added settings reads
+for installed, development and built-in plugins; malformed values/manifests
+return 409 and built-in secret/enable fields are omitted. `ed4c63d0`, `f9ae2040`
+and `01884ef5` were red before `0d55d16a` added per-engine, bounded SSE queues,
+global change streams, plugin event POST/GET, engine timestamps, heartbeat
+validation and inventory heartbeat overlays, plus remote event allowance.
+Fifteen focused tests passed (`engine-events-green.log`); Ruff and compilation
+passed. These streams are not yet wired to management changes or PluginContext,
+and the heartbeat overlay currently applies to engine inventory only.
+
 ## Remaining and exact next step
 
-Step 2 is not complete. Next: implement the engine read routes in item 2,
-including wiring PluginContext events and notices, then the dispatcher, tokens,
-proxy and PhoneLink remote restrictions, and all tests specified in the brief. The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
+Step 2 is not complete. Next: finish item 2: restart-safe usage accounting and
+GET usage; wire PluginContext events/notices and service heartbeat status; then
+the dispatcher, tokens, proxy and PhoneLink remote restrictions, and all tests
+specified in the brief. The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
 `packages/kollabor-engine/src/kollabor_engine/phone_link.py` is in scope only
 for refusing the spec's remote-disallowed plugin routes and its tests;
 `routes/phonelink.py` stays unchanged unless that refusal requires it. Audit the file deny list
