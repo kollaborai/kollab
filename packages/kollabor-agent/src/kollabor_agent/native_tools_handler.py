@@ -57,6 +57,12 @@ class NativeToolsHandler:
         Sets discovery_complete event when finished (success or failure).
         """
         try:
+            # Make built-ins available even when discovery exceeds the request timeout.
+            try:
+                await self.load_tools()
+            except Exception as e:
+                self.tools = None
+                logger.warning("Background native tool loading failed: %s", e)
             try:
                 if not self._mcp_enabled():
                     logger.info("MCP disabled in global config; skipping discovery")
@@ -76,8 +82,7 @@ class NativeToolsHandler:
             try:
                 await self.load_tools()
             except Exception as e:
-                self.tools = None
-                logger.warning("Background native tool loading failed: %s", e)
+                logger.warning("Background native tool refresh failed: %s", e)
         finally:
             # Cancellation must also release API calls waiting for discovery.
             self.discovery_complete.set()
