@@ -1,4 +1,9 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { renderToStaticMarkup } from "react-dom/server";
+import { createElement } from "react";
+import { EmptyEditorState } from "../src/components/code/empty-editor-state";
+import { editorThemeColors } from "../src/components/code/editor-theme";
+import { visibleSplitTree } from "../src/components/code/split-layout";
 import {
   CODE_EDITOR_LAYOUT_KEY,
   isDiffTab,
@@ -70,6 +75,36 @@ test("commit views cannot collide with or edit a real file and are not restored 
   const layout = JSON.parse(must(storage.get(CODE_EDITOR_LAYOUT_KEY), "layout"));
   expect(layout.panes[0].openPaths).toEqual([real]);
   expect(layout.panes[0].activePath).toBeNull();
+});
+
+test("the editor uses the active light palette for its canvas and text", () => {
+  const palette = editorThemeColors(false, {
+    background: "#ffffff",
+    foreground: "#252525",
+  });
+
+  expect(palette.base).toBe("vs");
+  expect(palette.colors["editor.background"]).toBe("#ffffff");
+  expect(palette.colors["editor.foreground"]).toBe("#252525");
+});
+
+test("a narrow editor keeps only the active pane while desktop keeps the split", () => {
+  const split = {
+    type: "split" as const,
+    direction: "horizontal" as const,
+    first: { type: "leaf" as const, paneId: "left" },
+    second: {
+      type: "split" as const,
+      direction: "vertical" as const,
+      first: { type: "leaf" as const, paneId: "top-right" },
+      second: { type: "leaf" as const, paneId: "bottom-right" },
+      sizePercent: 50,
+    },
+    sizePercent: 50,
+  };
+
+  expect(visibleSplitTree(split, "bottom-right", true)).toEqual({ type: "leaf", paneId: "bottom-right" });
+  expect(visibleSplitTree(split, "bottom-right", false)).toBe(split);
 });
 
 // a pinned tab is never replaced by a later preview open
@@ -216,6 +251,20 @@ test("a malformed or inconsistent saved layout is ignored", () => {
       })
     )
   ).toBeNull();
+});
+
+test("the narrow empty editor exposes a touch-sized file picker", () => {
+  const html = renderToStaticMarkup(createElement(EmptyEditorState, { showFilePicker: true, onOpenFiles: () => {} }));
+
+  expect(html).toContain('type="button"');
+  expect(html).toContain("Browse files");
+  expect(html).toContain("min-h-10");
+});
+
+test("the empty editor does not add a file picker when its sidebar is visible", () => {
+  const html = renderToStaticMarkup(createElement(EmptyEditorState, { showFilePicker: false, onOpenFiles: () => {} }));
+
+  expect(html).not.toContain("Browse files");
 });
 
 test("opening a diff tab over a file with unsaved edits keeps the file dirty", () => {

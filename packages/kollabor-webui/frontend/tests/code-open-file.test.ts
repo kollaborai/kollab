@@ -111,3 +111,22 @@ test("a read cannot cross sessions sharing the same device and folder", async ()
   finish(reply(true, "old session"));
   expect(await reading).toBeNull();
 });
+
+test("concurrent panes share one read and preserve its revision after an edit", async () => {
+  setEditorOwner("race:/work");
+  let finish!: (value: unknown) => void;
+  codeFetch.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  const first = openWorkspaceFile(WS, "/work/race-1011.ts");
+  useEditorStore.setState((state) => ({ panes: [...state.panes, { id: "second-1011", openPaths: [], activePath: null }] }));
+  const second = openWorkspaceFile(WS, "/work/race-1011.ts", { paneId: "second-1011" });
+  expect(codeFetch).toHaveBeenCalledTimes(1);
+  finish({ ok: true, json: async () => ({ data: { content: "base", version: "v1" } }) });
+  expect(await first).toBe(true);
+  expect(await second).toBe(true);
+  useEditorStore.getState().updateContent("/work/race-1011.ts", "edited");
+  codeFetch.mockResolvedValue({ ok: false, status: 409, json: async () => ({ error: { code: "stale_write" } }) });
+  const { saveWorkspaceFile } = await import("../src/components/code/file-save");
+  expect((await saveWorkspaceFile(WS, "/work/race-1011.ts", "edited")).ok).toBe(false);
+  const request = codeFetch.mock.calls.at(-1)?.[1] as { body: string };
+  expect(JSON.parse(request.body).expectedVersion).toBe("v1");
+});

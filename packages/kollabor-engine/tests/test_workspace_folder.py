@@ -430,4 +430,3 @@ def test_up_is_the_parent_while_the_rule_allows_it(machine):
     assert parent_folder(str(machine.home)) is None
     assert parent_folder(str(machine.engine / "pkg")) == str(machine.engine)
     assert parent_folder(str(machine.engine)) is None
-

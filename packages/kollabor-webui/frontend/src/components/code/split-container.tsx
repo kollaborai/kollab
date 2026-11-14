@@ -3,17 +3,29 @@ import { useRef, useCallback, useState, useEffect } from "react";
 import { useEditorStore, type SplitNode } from "@/components/code/editor-store";
 import { TabBar } from "./tab-bar";
 import { EditorPane } from "./editor-pane";
+import { visibleSplitTree } from "./split-layout";
 
 interface SplitContainerProps {
   workspace: string;
+  showFilePicker?: boolean;
+  onOpenFiles?: () => void;
 }
 
-export function SplitContainer({ workspace }: SplitContainerProps) {
+export function SplitContainer({ workspace, showFilePicker = false, onOpenFiles = () => {} }: SplitContainerProps) {
   const splitTree = useEditorStore((s) => s.splitTree);
   const activePaneId = useEditorStore((s) => s.activePaneId);
   const setActivePane = useEditorStore((s) => s.setActivePane);
   const splitRight = useEditorStore((s) => s.splitRight);
   const splitDown = useEditorStore((s) => s.splitDown);
+  const [isNarrow, setIsNarrow] = useState(false);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 640px)");
+    const update = () => setIsNarrow(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
 
   // keyboard shortcuts: cmd+\ split right, cmd+shift+\ split down
   useEffect(() => {
@@ -52,7 +64,7 @@ export function SplitContainer({ workspace }: SplitContainerProps) {
       onClick={handleContainerClick}
       onFocus={handleContainerClick}
     >
-      <SplitRender node={splitTree} workspace={workspace} isActivePaneId={activePaneId} />
+      <SplitRender node={visibleSplitTree(splitTree, activePaneId, isNarrow)} workspace={workspace} isActivePaneId={activePaneId} showFilePicker={showFilePicker} onOpenFiles={onOpenFiles} />
     </div>
   );
 }
@@ -61,13 +73,15 @@ interface SplitRenderProps {
   node: SplitNode;
   workspace: string;
   isActivePaneId: string;
+  showFilePicker: boolean;
+  onOpenFiles: () => void;
 }
 
-function SplitRender({ node, workspace, isActivePaneId }: SplitRenderProps) {
+function SplitRender({ node, workspace, isActivePaneId, showFilePicker, onOpenFiles }: SplitRenderProps) {
   if (node.type === "leaf") {
     const isActive = node.paneId === isActivePaneId;
     return (
-      <PaneLeaf paneId={node.paneId} workspace={workspace} isActive={isActive} />
+      <PaneLeaf paneId={node.paneId} workspace={workspace} isActive={isActive} showFilePicker={showFilePicker} onOpenFiles={onOpenFiles} />
     );
   }
 
@@ -79,6 +93,8 @@ function SplitRender({ node, workspace, isActivePaneId }: SplitRenderProps) {
       sizePercent={node.sizePercent}
       workspace={workspace}
       isActivePaneId={isActivePaneId}
+      showFilePicker={showFilePicker}
+      onOpenFiles={onOpenFiles}
     />
   );
 }
@@ -90,6 +106,8 @@ interface SplitBranchProps {
   sizePercent: number;
   workspace: string;
   isActivePaneId: string;
+  showFilePicker: boolean;
+  onOpenFiles: () => void;
 }
 
 function SplitBranch({
@@ -99,6 +117,8 @@ function SplitBranch({
   sizePercent,
   workspace,
   isActivePaneId,
+  showFilePicker,
+  onOpenFiles,
 }: SplitBranchProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [localSize, setLocalSize] = useState(sizePercent);
@@ -142,7 +162,7 @@ function SplitBranch({
       className={`flex ${isHorizontal ? "flex-row" : "flex-col"} flex-1 h-full overflow-hidden`}
     >
       <div style={{ flex: `0 0 calc(${localSize}% - 2px)` }} className="overflow-hidden h-full">
-        <SplitRender node={first} workspace={workspace} isActivePaneId={isActivePaneId} />
+        <SplitRender node={first} workspace={workspace} isActivePaneId={isActivePaneId} showFilePicker={showFilePicker} onOpenFiles={onOpenFiles} />
       </div>
 
       <div
@@ -155,7 +175,7 @@ function SplitBranch({
       />
 
       <div style={{ flex: `0 0 calc(${100 - localSize}% - 2px)` }} className="overflow-hidden h-full">
-        <SplitRender node={second} workspace={workspace} isActivePaneId={isActivePaneId} />
+        <SplitRender node={second} workspace={workspace} isActivePaneId={isActivePaneId} showFilePicker={showFilePicker} onOpenFiles={onOpenFiles} />
       </div>
     </div>
   );
@@ -165,9 +185,11 @@ interface PaneLeafProps {
   paneId: string;
   workspace: string;
   isActive: boolean;
+  showFilePicker: boolean;
+  onOpenFiles: () => void;
 }
 
-function PaneLeaf({ paneId, workspace, isActive }: PaneLeafProps) {
+function PaneLeaf({ paneId, workspace, isActive, showFilePicker, onOpenFiles }: PaneLeafProps) {
   return (
     <div
       data-pane-id={paneId}
@@ -176,7 +198,7 @@ function PaneLeaf({ paneId, workspace, isActive }: PaneLeafProps) {
       <div className="shrink-0">
         <TabBar paneId={paneId} rootPath={workspace} />
       </div>
-      <EditorPane paneId={paneId} rootPath={workspace} />
+      <EditorPane paneId={paneId} rootPath={workspace} showFilePicker={showFilePicker} onOpenFiles={onOpenFiles} />
     </div>
   );
 }
