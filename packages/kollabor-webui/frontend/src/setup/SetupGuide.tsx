@@ -13,6 +13,7 @@ import {
   SETUP_STEPS,
   STORAGE_KEY,
   emptyFacts,
+  isInitialGuideState,
   loadGuideState,
   nextStep,
   resolveStep,
@@ -55,6 +56,10 @@ export function SetupGuide({
   // Persist every transition; a reload resumes where the user left off.
   useEffect(() => {
     if (typeof window === "undefined") return;
+    // The untouched first-run state is not a user decision: writing it here
+    // used to defeat App's first-run check before startup even read it
+    // (#1098). Only engage/dismiss/advance transitions create a record.
+    if (isInitialGuideState(state)) return;
     window.localStorage.setItem(STORAGE_KEY, saveGuideState(state));
   }, [state]);
 

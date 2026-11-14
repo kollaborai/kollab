@@ -58,6 +58,7 @@ import type {
 } from "@/components/panels/panel-model";
 import { ProfilesDialog } from "@/components/shell/ProfilesDialog";
 import { SetupGuide } from "@/setup/SetupGuide";
+import { STORAGE_KEY, shouldAutoOpenGuide } from "@/setup/guide-model";
 import { SessionPanel, type SessionView } from "@/components/shell/SessionPanel";
 import { latestTodoBlock } from "@/utils/todo-list";
 import { ShellHeader } from "@/components/shell/ShellHeader";
@@ -137,10 +138,12 @@ function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current:
 
 const api = new EngineApi();
 
-/** True until this browser recorded a guided-setup dismissal. */
+/** True while this browser has no engaged guided-setup record: a first run,
+ * or a record stuck at an undismissed welcome (older builds wrote that on
+ * mount, so their owners never saw the auto-open either). */
 const noGuideYet = () => {
   try {
-    return window.localStorage.getItem("kollab.setup-guide.v1") === null;
+    return shouldAutoOpenGuide(window.localStorage.getItem(STORAGE_KEY));
   } catch {
     return false;
   }

@@ -171,3 +171,25 @@ export function stepTarget(
 
 export const isSetupStepId = (value: string): value is SetupStepId =>
   value in STEP_INDEX;
+
+/** The untouched first-run state: the tour has not engaged yet. */
+export function isInitialGuideState(state: GuideState): boolean {
+  return state.step === "welcome" && !state.dismissed;
+}
+
+/**
+ * Whether startup should open the guide on its own. No record at all is a
+ * first run. A record stuck at an undismissed welcome also counts: it carries
+ * no user decision (older builds wrote exactly that on mount, which is why
+ * the first-run branch never fired for anyone). Anything else means the
+ * person engaged the tour or dismissed it, and neither reopens on its own.
+ */
+export function shouldAutoOpenGuide(raw: string | null): boolean {
+  if (raw === null) return true;
+  try {
+    const parsed = JSON.parse(raw) as { step?: unknown; dismissed?: unknown };
+    return parsed.step === "welcome" && parsed.dismissed !== true;
+  } catch {
+    return true;
+  }
+}
