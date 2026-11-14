@@ -205,7 +205,7 @@ class IdentityAssigner:
 
 MAX_UPSTREAM_CHECKS = 20
 _GH_TIMEOUT_SECS = 5
-_TERMINAL_CACHE: Dict[str, str] = {}
+_TERMINAL_CACHE: Dict[Tuple[str, str], str] = {}
 
 # The stale sweep never runs more often than this. Review F1 fix: it
 # used to run on every heartbeat tick, re-checking every open ref.
@@ -229,22 +229,33 @@ class SweepScheduler:
         return False
 
 
-def github_terminal_state(ref: str) -> Optional[str]:
+def github_terminal_state(ref: str, project: Optional[str] = None) -> Optional[str]:
     """Return a terminal reason for ``ref`` if its issue/PR is done.
 
-    Queries ``gh`` (repo inferred from the working directory). Returns
+    Queries ``gh`` in ``project`` (or the current directory when omitted). Returns
     ``None`` for open items, unmerged closed PRs, unknown numbers, and any
     ``gh`` failure -- unknown means keep the work item, never retire on a bad
-    answer. Merged PRs are cached for the process lifetime. Closed issues and
-    unmerged closed PRs are re-checked each sweep because they can reopen.
+    answer. A missing explicit project is unresolved and fails open. Merged PRs
+    are cached per project for the process lifetime. Closed issues and unmerged
+    closed PRs are re-checked each sweep because they can reopen.
     """
-    cached = _TERMINAL_CACHE.get(ref)
+    repository = os.getcwd() if project is None else project
+    if not repository:
+        return None
+    cache_key = (repository, ref)
+    cached = _TERMINAL_CACHE.get(cache_key)
     if cached is not None:
         return cached
     num = ref.lstrip("#")
     attempts = (
-        (["gh", "pr", "view", num, "--json", "state,mergedAt"], "pr"),
-        (["gh", "issue", "view", num, "--json", "state,stateReason"], "issue"),
+        (
+            ["gh", "pr", "view", num, "--json", "state,mergedAt", "-R", repository],
+            "pr",
+        ),
+        (
+            ["gh", "issue", "view", num, "--json", "state,stateReason", "-R", repository],
+            "issue",
+        ),
     )
     for argv, kind in attempts:
         try:
@@ -266,7 +277,7 @@ def github_terminal_state(ref: str) -> Optional[str]:
             )
             if merged:
                 reason = f"{ref} merged"
-                _TERMINAL_CACHE[ref] = reason
+                _TERMINAL_CACHE[cache_key] = reason
                 return reason
             # A CLOSED PR may later reopen, and PRs are also GitHub issues.
             # Do not fall through to issue-state handling without merge proof.
@@ -528,12 +539,13 @@ class WorkQueue:
         Returns retired WorkSlot snapshots. Paired retired slots are returned
         again on later sweeps so TaskLedger cleanup can retry transient failures.
         """
+        repository_checker = checker is None
         if checker is None:
             checker = github_terminal_state
         snapshot = self._load()
         decisions: Dict[str, str] = {}
         notes: Dict[str, List[str]] = {}
-        states: Dict[str, Optional[str]] = {}
+        states: Dict[Tuple[str, str], Optional[str]] = {}
         task_card_statuses: Dict[str, Optional[str]] = {}
         budget = MAX_UPSTREAM_CHECKS
 
@@ -598,20 +610,26 @@ class WorkQueue:
 
             reasons: List[str] = []
             for ref in refs:
-                if ref not in states:
+                state_key = (slot.project, ref)
+                if state_key not in states:
                     if budget > 0:
                         budget -= 1
                         try:
-                            states[ref] = checker(ref)
+                            if repository_checker:
+                                states[state_key] = github_terminal_state(
+                                    ref, slot.project
+                                )
+                            else:
+                                states[state_key] = checker(ref)
                         except Exception as e:
                             logger.debug(
                                 "stale sweep checker failed for %s: %s", ref, e
                             )
-                            states[ref] = None
+                            states[state_key] = None
                     else:
                         # Budget exhausted: unknown, fail open, keep.
-                        states[ref] = None
-                reason = states[ref]
+                        states[state_key] = None
+                reason = states[state_key]
                 if not reason:
                     reasons = []
                     break
