@@ -4,7 +4,6 @@ import json
 import os
 import sys
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import acp
 import psutil
@@ -598,6 +597,9 @@ async def test_close_recovers_fast_detached_orphan_and_preserves_other_session_p
                     break
                 await asyncio.sleep(0.005)
             assert child_file.exists()
+            child = child_identity()
+            assert child is not None
+            assert os.getpgid(child.pid) == runner._process_group_id
         await runner.close()
         assert child_file.exists()
         child = child_identity()
@@ -647,12 +649,8 @@ async def test_setsid_orphan_lost_before_a_tree_sample_is_the_documented_limit(t
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
 @pytest.mark.asyncio
-async def test_orphan_is_not_recovered_where_os_getsid_is_missing(tmp_path, monkeypatch):
-    """#608 Windows trade-off: os.getsid does not exist there, so the session
-    scan is skipped and a descendant that lost its parent between two 100 ms
-    tree samples survives teardown, which reports clean. A Job Object would
-    close it (#819); this test should then flip to asserting recovery.
-    """
+async def test_private_process_group_cleans_orphan_without_session_lookup(tmp_path):
+    """A same-group orphan is cleaned without inspecting the host process table."""
     child_file = tmp_path / "child.json"
     runner = ACPRunner(ACPProfile("owned-orphan", (sys.executable, "-c", FAST_ORPHAN_ADAPTER), cwd=str(tmp_path), env={
         "ACP_OWNED_CHILD_FILE": str(child_file), "ACP_OWNED_CHILD_MODE": "prompt",
@@ -669,13 +667,10 @@ async def test_orphan_is_not_recovered_where_os_getsid_is_missing(tmp_path, monk
         child = psutil.Process(identity["pid"])
         assert child.create_time() == identity["birth"]
         assert os.getsid(child.pid) == runner._adapter_pid
-        monkeypatch.delattr(os, "getsid")
         await runner.close()
-        monkeypatch.undo()
-        assert child.is_running() and child.status() != psutil.STATUS_ZOMBIE
+        assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
         assert not runner._owned_processes and runner._adapter_pid is None
     finally:
-        monkeypatch.undo()
         with contextlib.suppress(Exception):
             await runner.close()
         if child is not None:
@@ -684,76 +679,7 @@ async def test_orphan_is_not_recovered_where_os_getsid_is_missing(tmp_path, monk
                 child.wait(timeout=2)
 
 
-def _session_lookup_runner(tmp_path, monkeypatch, candidate):
-    runner = ACPRunner(ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)))
-    runner._adapter_pid = 4242
-    runner._process_started_at = 10
-    runner._process_username = "owned-test-user"
-
-    def no_process(pid):
-        raise psutil.NoSuchProcess(pid)
-
-    # The adapter (session leader) has exited and its pid names nothing.
-    monkeypatch.setattr(bridge_mod.psutil, "Process", no_process)
-    monkeypatch.setattr(bridge_mod.psutil, "process_iter", lambda attrs: iter([candidate]))
-    return runner
-
-
-@pytest.mark.parametrize("older", [False, True])
-def test_session_lookup_rejects_old_birth_or_identity_reused_during_session_read(tmp_path, monkeypatch, older):
-    candidate = Mock()
-    candidate.pid = 9999
-    candidate.info = {"pid": 9999, "create_time": 9 if older else 11, "username": "owned-test-user"}
-    candidate.is_running.side_effect = [True, False]
-    sessions = []
-    monkeypatch.setattr(bridge_mod.os, "getsid", lambda pid: sessions.append(pid) or 4242)
-    runner = _session_lookup_runner(tmp_path, monkeypatch, candidate)
-    runner._recover_session_processes()
-    assert not runner._owned_processes
-    candidate.create_time.assert_not_called()
-    candidate.environ.assert_not_called()
-    assert sessions == ([] if older else [9999])
-
-
-def test_session_lookup_adopts_same_session_orphan_and_skips_unreadable_session(tmp_path, monkeypatch):
-    candidate = Mock()
-    candidate.pid = 9999
-    candidate.info = {"pid": 9999, "create_time": 11, "username": "owned-test-user"}
-    candidate.is_running.return_value = True
-    monkeypatch.setattr(bridge_mod.os, "getsid", Mock(side_effect=PermissionError(1, "denied")))
-    runner = _session_lookup_runner(tmp_path, monkeypatch, candidate)
-    runner._recover_session_processes()
-    assert not runner._owned_processes
-    monkeypatch.setattr(bridge_mod.os, "getsid", lambda pid: 4242)
-    runner._recover_session_processes()
-    assert runner._owned_processes == {9999: candidate}
-    candidate.environ.assert_not_called()
-
-
 @pytest.mark.skipif(not hasattr(os, "getsid"), reason="requires POSIX sessions")
-@pytest.mark.asyncio
-async def test_session_lookup_ignores_session_whose_leader_pid_was_reused(tmp_path):
-    """A reused adapter pid that leads another session must not be adopted."""
-    stranger = await asyncio.create_subprocess_exec(
-        sys.executable, "-c", "import time; time.sleep(60)", cwd=str(tmp_path),
-        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
-    )
-    try:
-        assert os.getsid(stranger.pid) == stranger.pid
-        runner = ACPRunner(ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)))
-        # The recorded adapter had this pid; the number now names the stranger.
-        runner._adapter_pid = stranger.pid
-        runner._process_started_at = 0
-        runner._process_username = psutil.Process().username()
-        runner._recover_session_processes()
-        assert stranger.pid not in runner._owned_processes
-        assert stranger.returncode is None
-    finally:
-        stranger.kill()
-        await asyncio.wait_for(stranger.wait(), timeout=2)
-
-
 @pytest.mark.asyncio
 async def test_start_and_close_never_read_any_process_environment(tmp_path, monkeypatch):
     """#608: finding owned processes must not read other processes' environments."""
@@ -790,7 +716,7 @@ async def test_start_and_close_never_read_any_process_environment(tmp_path, monk
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork and setsid")
 @pytest.mark.asyncio
-async def test_startup_failure_recovers_orphan_after_root_exited_before_ownership_read(tmp_path, monkeypatch):
+async def test_startup_failure_cleans_same_group_orphan_after_root_exits(tmp_path, monkeypatch):
     child_file = tmp_path / "early-child.json"
     runner = ACPRunner(ACPProfile("owned-early-exit", (sys.executable, "-c", FAST_ORPHAN_ADAPTER),
                                   cwd=str(tmp_path), env=_orphan_env(child_file, "startup")))
@@ -872,7 +798,7 @@ async def test_startup_orphan_fixture_defers_when_product_cleanup_is_broken(
     monkeypatch.setattr(ACPRunner, "_terminate_process", broken_terminate)
     monkeypatch.setattr(sys.modules[__name__], "_cleanup_orphan_test", observe_cleanup)
     with pytest.raises(AssertionError):
-        await test_startup_failure_recovers_orphan_after_root_exited_before_ownership_read(
+        await test_startup_failure_cleans_same_group_orphan_after_root_exits(
             tmp_path, monkeypatch
         )
     assert cleanup_outcomes == [("early-child.json", "deferred")]

@@ -27,22 +27,12 @@ HOST_PROCESS_SCAN_SKIP_REASON = "host-wide process scans run only in a sanctione
 HOST_PROCESS_SCAN_TESTS = {
     "unit/test_acp_bridge.py": frozenset(
         {
-            "test_startup_refusal_preserves_public_message_code_and_cleans_process",
-            "test_close_after_started_worker_releases_queue_and_is_repeatable",
             "test_close_recovers_fast_detached_orphan_and_preserves_other_session_process",
             "test_setsid_orphan_lost_before_a_tree_sample_is_the_documented_limit",
-            "test_orphan_is_not_recovered_where_os_getsid_is_missing",
-            "test_start_and_close_never_read_any_process_environment",
-            "test_startup_failure_recovers_orphan_after_root_exited_before_ownership_read",
+            "test_private_process_group_cleans_orphan_without_session_lookup",
             "test_orphan_fixture_defers_cleanup_when_runner_close_raises",
             "test_startup_orphan_fixture_defers_when_product_cleanup_is_broken",
-            "test_queued_turn_after_cancel_rebases_generation",
-            "test_queued_turn_keeps_first_generation_updates",
-            "test_compliant_cancel_preserves_process_session_and_single_consumer",
-            "test_ignored_cancel_kills_old_process_and_restarts_before_queue",
-            "test_runner_uses_sdk_agent_for_streams_answer_and_closes_process",
-            "test_admission_accepts_exactly_ten_waiting_turns",
-            "test_prepare_cancel_holds_queue_for_delayed_owner",
+            "test_startup_failure_cleans_same_group_orphan_after_root_exits",
         }
     ),
     "unit/test_acp_orchestrator.py": frozenset(
