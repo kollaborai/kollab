@@ -677,3 +677,35 @@ def test_plugin_token_mint_refuses_symlinks(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="symlink"):
         plugin_routes.PluginTokenStore().mint(context)
     assert outside.read_text() == "do not alter"
+
+
+def test_forwarded_engine_requests_cannot_use_plugin_management(tmp_path, monkeypatch):
+    import json
+    import shutil
+    from pathlib import Path
+
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    source = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    home = tmp_path / ".kollab"
+    root = home / "plugins" / "hello"
+    shutil.copytree(source, root)
+    (home / "plugins.json").write_text(json.dumps({
+        "plugins": {"hello": {"enabled": True, "files_sha256": files_sha256(root), "granted": []}}, "dev": {},
+    }))
+    remote = {"x-kollab-plugin-remote": "1"}
+    with TestClient(create_app()) as client:
+        for method, path in [
+            ("PUT", "/plugins/hello/settings"),
+            ("POST", "/plugins/install"),
+            ("POST", "/plugins/hello/services/hello/start"),
+            ("POST", "/plugins/hello/disable"),
+        ]:
+            assert client.request(method, path, headers=remote).status_code == 403
+        assert client.get("/plugins/hello/settings", headers=remote).status_code == 200
+        assert client.post("/plugins/hello/events", headers=remote, json={"topic": "x", "data": {}}).status_code == 200
+        assert client.post("/plugins/hello/agents", headers=remote).status_code != 403
+        assert client.delete("/plugins/hello/agents/run-1", headers=remote).status_code != 403
