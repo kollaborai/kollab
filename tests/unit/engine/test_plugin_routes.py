@@ -280,3 +280,44 @@ async def test_engine_context_routes_events_notices_and_heartbeats(tmp_path, mon
     hub.unsubscribe("hello", own)
     hub.unsubscribe(None, global_events)
     hub.unsubscribe("other", other)
+
+
+def test_finished_agent_run_usage_is_reconciled_once_per_day(tmp_path, monkeypatch):
+    import json
+    import shutil
+    from datetime import datetime, timedelta
+    from pathlib import Path
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    source = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    home = tmp_path / ".kollab"
+    shutil.copytree(source, home / "plugins" / "hello")
+    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {}}, "dev": {}}))
+    run = home / "plugin-data" / "hello" / "run"
+    run.mkdir(parents=True)
+    now = datetime.now().astimezone()
+    yesterday = now - timedelta(days=1)
+    rows = [
+        {"run_id": "one", "status": "done", "finished_at": now.isoformat(),
+         "result": {"usage": {"input": 10, "output": 4}}},
+        {"run_id": "two", "status": "running", "tokens_so_far": 7},
+    ]
+    runs = run / "runs.json"
+    runs.write_text(json.dumps({"runs": rows}))
+    with TestClient(create_app()) as client:
+        assert client.get("/plugins/hello/usage").json()["total"] == 14
+        assert client.get("/plugins/hello/usage").json()["total"] == 14
+        rows[1] = {"run_id": "two", "status": "timeout", "finished_at": yesterday.timestamp(),
+                   "result": {"usage": {"input": 2, "output": 1}}}
+        runs.write_text(json.dumps({"runs": rows}))
+        assert client.get("/plugins/hello/usage").json()["total"] == 14
+        previous = json.loads((run / f"usage-{yesterday.date().isoformat()}.json").read_text())
+        assert previous["total"] == 3
+    with TestClient(create_app()) as restarted:
+        assert restarted.get("/plugins/hello/usage").json()["total"] == 14
+        rows.append({"run_id": "one", "status": "done", "finished_at": now.isoformat(),
+                     "result": {"usage": {"input": 3, "output": 3}}})
+        runs.write_text(json.dumps({"runs": rows}))
+        assert restarted.get("/plugins/hello/usage").status_code == 409
