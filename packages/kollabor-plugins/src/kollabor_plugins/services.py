@@ -33,6 +33,42 @@ def redact_log(text: str, secret_values: list[str] | tuple[str, ...] = ()) -> st
     return re.sub(r"\b(?:sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_-]+", "[redacted]", text)
 
 
+class _LogFilter:
+    """Buffer lines across reads, suppressing output that cannot be safely bounded."""
+
+    def __init__(self, secrets: list[str]):
+        self.secrets = secrets
+        self.pending = bytearray()
+        self.discarding = False
+        self.suppress = any("\n" in value or "\r" in value for value in secrets)
+        self.notified = False
+
+    def feed(self, data: bytes, *, final: bool = False) -> bytes:
+        if self.suppress:
+            if data and not self.notified:
+                self.notified = True
+                return b"[redacted multiline secret output]\n"
+            return b""
+        output = bytearray()
+        for part in data.splitlines(keepends=True):
+            ended = part.endswith((b"\n", b"\r"))
+            if not self.discarding:
+                self.pending.extend(part)
+                if len(self.pending) > 1024 * 1024:
+                    self.pending.clear()
+                    self.discarding = True
+                    output.extend(b"[redacted oversized log line]\n")
+            if ended:
+                if not self.discarding:
+                    output.extend(redact_log(self.pending.decode("utf-8", "replace"), self.secrets).encode())
+                self.pending.clear()
+                self.discarding = False
+        if final and self.pending and not self.discarding:
+            output.extend(redact_log(self.pending.decode("utf-8", "replace"), self.secrets).encode())
+            self.pending.clear()
+        return bytes(output)
+
+
 def restart_decision(policy: str, exit_code: int, crashes: list[float], now: float) -> tuple[int | None, bool]:
     """Return the retry delay and whether the five-crash limit was reached.
 
@@ -213,6 +249,7 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
             _write_state(state_path, state)
             deadline = None
             term_sent = False
+            log_filter = _LogFilter(list(secret_values.values()))
             with selectors.DefaultSelector() as selector:
                 selector.register(child.stdout, selectors.EVENT_READ)
                 while selector.get_map() or child.poll() is None:
@@ -232,8 +269,13 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
                     for key, _ in selector.select(0.1):
                         output = os.read(key.fd, 65536)
                         if output:
-                            _write_log(log_path, output)
+                            filtered = log_filter.feed(output)
+                            if filtered:
+                                _write_log(log_path, filtered)
                         else:
+                            filtered = log_filter.feed(b"", final=True)
+                            if filtered:
+                                _write_log(log_path, filtered)
                             selector.unregister(key.fileobj)
             if term_sent and deadline is not None:
                 # The leader may exit before descendants that ignored SIGTERM.

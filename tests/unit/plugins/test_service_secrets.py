@@ -13,7 +13,7 @@ def setup_service(tmp_path, monkeypatch, granted):
     home = tmp_path / ".kollab"
     root = home / "plugins" / "hello"
     root.mkdir(parents=True)
-    script = "import os; print(os.environ['TEST_TOKEN']); print('UNRELATED' in os.environ)"
+    script = "import os; print(os.environ['TEST_TOKEN'] == 'secret-test-value'); print('UNRELATED' in os.environ)"
     manifest = {
         "services": {
             "worker": {"command": [sys.executable, "-c", script], "restart": "never", "secrets": ["TEST_TOKEN"]}
@@ -39,7 +39,7 @@ def test_granted_secret_is_given_only_to_child(tmp_path, monkeypatch):
     monkeypatch.setattr(profile_manager, "_keyring_get", get_key)
     assert run_service("hello", "worker", "abcdef") == 0
     text = (home / "plugin-data" / "hello" / "run" / "worker.log").read_text()
-    assert "secret-test-value" in text and "False" in text
+    assert text.splitlines() == ["True", "False"]
 
 
 def test_undeclared_grant_refused_before_spawn(tmp_path, monkeypatch):

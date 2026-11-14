@@ -9,6 +9,18 @@ from kollabor_plugins.packages import files_sha256
 from kollabor_plugins.services import run_service
 
 
+def test_log_filter_redacts_across_chunks_and_suppresses_oversized_lines():
+    from kollabor_plugins.services import _LogFilter
+
+    filt = _LogFilter(["arbitrary-secret"])
+    output = filt.feed(b"prefix arbitrary-") + filt.feed(b"secret suffix\n")
+    assert b"arbitrary-secret" not in output
+    assert b"[redacted]" in output
+    oversized = filt.feed(b"a" * (1024 * 1024 + 1)) + filt.feed(b"arbitrary-secret\n")
+    assert b"arbitrary-secret" not in oversized
+    assert b"oversized" in oversized
+
+
 def test_echoed_secret_and_token_are_redacted_in_cli(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
