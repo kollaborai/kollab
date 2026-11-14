@@ -126,7 +126,7 @@ class UsageLedgerPlugin(BasePlugin):
     # ------------------------------------------------------------------
 
     async def _on_request_pre(self, data: Dict[str, Any], event) -> Dict[str, Any]:
-        """Start the wall clock at the first request of a turn."""
+        """Start the wall clock for this API request."""
         if self._turn_started is None:
             self._turn_started = time.monotonic()
         return data
@@ -137,7 +137,7 @@ class UsageLedgerPlugin(BasePlugin):
         return data
 
     async def _on_request_post(self, data: Dict[str, Any], event) -> Dict[str, Any]:
-        """Append the finished turn and evaluate budget alerts."""
+        """Append the request record and evaluate budget alerts."""
         try:
             self._record_turn(data if isinstance(data, dict) else {})
         except Exception:

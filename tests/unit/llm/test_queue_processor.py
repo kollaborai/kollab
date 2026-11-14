@@ -2001,6 +2001,20 @@ class TestQueueProcessor(unittest.TestCase):
         self.assertEqual(self.session_stats["total_output_tokens"], 500)
         self.assertEqual(self.session_stats["total_cost_usd"], expected)
 
+    def test_usage_source_marks_session_stats_token_fallback(self):
+        self.session_stats.update(input_tokens=77, output_tokens=9)
+        self._truncated_turn("venteen", "stop")
+
+        (post_call,) = [
+            call
+            for call in self.event_bus.emit_with_hooks.call_args_list
+            if call.args[0] == EventType.LLM_REQUEST_POST
+        ]
+        payload = post_call.args[1]
+        self.assertEqual(payload["input_tokens"], 77)
+        self.assertEqual(payload["output_tokens"], 9)
+        self.assertEqual(payload["usage_source"], "session_stats")
+
     def test_a_cut_reply_is_priced_from_both_calls_when_both_report_usage(self):
         """Unchanged path: both calls report usage and both are billed."""
         from kollabor_ai.cost_calculator import calculate_cost

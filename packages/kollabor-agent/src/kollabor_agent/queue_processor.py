@@ -2030,17 +2030,27 @@ class QueueProcessor:
                     f"cache_write={cache_creation_tokens}, cache_read={cache_read_tokens}"
                 )
 
-            # "none" means the provider reported no counts at all, so readers
-            # must not treat the zeros as measured usage (usage ledger, #723).
-            if prompt_tokens or completion_tokens or cache_read_tokens or cache_creation_tokens:
-                usage_source = "estimated" if usage_is_estimated else "provider"
-            else:
-                usage_source = "none"
-
             # Emit LLM_REQUEST_POST with actual token data
             # Also read from session_stats which may have been set by streaming
             final_in = prompt_tokens or self.session_stats.get("input_tokens", 0)
             final_out = completion_tokens or self.session_stats.get("output_tokens", 0)
+            used_session_stats = bool(
+                (not prompt_tokens and final_in)
+                or (not completion_tokens and final_out)
+            )
+            # "none" means no counts were reported and no session-stat fallback
+            # supplied the emitted input/output values (usage ledger, #723).
+            if used_session_stats:
+                usage_source = (
+                    "estimated"
+                    if usage_is_estimated
+                    or self.session_stats.get("input_tokens_estimated", False)
+                    else "session_stats"
+                )
+            elif prompt_tokens or completion_tokens or cache_read_tokens or cache_creation_tokens:
+                usage_source = "estimated" if usage_is_estimated else "provider"
+            else:
+                usage_source = "none"
             await self.event_bus.emit_with_hooks(
                 EventType.LLM_REQUEST_POST,
                 {
