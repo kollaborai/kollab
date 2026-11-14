@@ -128,9 +128,15 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
                 if key in {"HOME", "USER", "LANG", "TERM", "TMPDIR", "SHELL"} or key.startswith("LC_")
             }
             env["PATH"] = path
-            child = subprocess.Popen(
-                command, cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True
-            )
+            try:
+                child = subprocess.Popen(
+                    command, cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True
+                )
+            except OSError as exc:
+                state["status"] = "error"
+                state["error"] = f"Could not start {command[0]}: {exc.strerror or type(exc).__name__}"
+                _write_state(state_path, state)
+                return 1
             assert child.stdout is not None
             try:
                 identity["child"] = {
@@ -296,7 +302,7 @@ def supervisor_tick() -> None:
                         if (
                             not isinstance(state, dict)
                             or state.get("desired") != "running"
-                            or state.get("status") in {"exited", "crash-stopped"}
+                            or state.get("status") in {"exited", "crash-stopped", "error"}
                         ):
                             continue
                     elif service.get("autostart", False) is not True:
