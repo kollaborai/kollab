@@ -13,6 +13,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "desktop/scripts/sign-macos.sh"
 WORKFLOW = ROOT / ".github/workflows/desktop-macos-signing.yml"
+PACKAGING_WORKFLOW = ROOT / ".github/workflows/binaries.yml"
 TARGET = "aarch64-apple-darwin"
 
 
@@ -424,6 +425,19 @@ class SigningContractTests(unittest.TestCase):
         self.assertEqual([args[-1] for args in stapled], [str(dmg)])
         self.assertFalse(self.state.exists(), "the dmg state directory must be cleaned after success")
         self.assertNotIn("fixture-app-specific-password", result.stdout + result.stderr)
+
+    def test_packaging_workflow_passes_absolute_dmg_path(self):
+        workflow = PACKAGING_WORKFLOW.read_text()
+        command = re.search(
+            r'^\s*bash desktop/scripts/sign-macos\.sh notarize-dmg "([^"]+)"$',
+            workflow,
+            re.M,
+        )
+        self.assertIsNotNone(command, "the packaging workflow must invoke dmg notarization")
+        self.assertTrue(
+            command.group(1).startswith("$GITHUB_WORKSPACE/"),
+            "the signing helper requires an absolute dmg path",
+        )
 
     def test_notarize_dmg_api_auth_uses_an_ephemeral_key_file(self):
         self.signed(api=True)
