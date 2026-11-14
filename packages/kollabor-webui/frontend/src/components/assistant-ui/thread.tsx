@@ -40,7 +40,10 @@ import {
   type VoiceMode,
 } from "@/voice-mode";
 import { useRoomVoiceMode, useVoiceRoomLive, VoiceRoomBar } from "@/voice/voice-room";
-import { usePendingPermissionCancellation } from "@/runtime";
+import {
+  imageAttachmentAdapter,
+  usePendingPermissionCancellation,
+} from "@/runtime";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
   panelCommandRequest,
@@ -58,6 +61,7 @@ import {
   MessagePrimitive,
   SuggestionPrimitive,
   ThreadPrimitive,
+  type PendingAttachment,
   type ToolCallMessagePartComponent,
   useAui,
   useAssistantTransportSendCommand,
@@ -84,6 +88,7 @@ import {
   useMemo,
   useLayoutEffect,
   useRef,
+  useState,
   type ComponentType,
   type FC,
   type KeyboardEvent,
@@ -526,6 +531,7 @@ const Composer: FC<{
   const composerText = useAuiState((s) => s.composer.text);
   const restoredDraft = useRef<{ key: string | null; text: string } | null>(null);
   const skipEmptyDraftPersist = useRef(false);
+  const [busySubmitError, setBusySubmitError] = useState<string | null>(null);
 
   useLayoutEffect(() => {
     const key = draftKey ?? null;
@@ -575,7 +581,7 @@ const Composer: FC<{
 
   // Picking a panel command in the slash menu (Enter or click) opens its tab
   // instead of leaving "/config" in the box for a second Enter.
-  const sendBusyMessage = (event: {
+  const sendBusyMessage = async (event: {
     preventDefault: () => void;
     defaultPrevented?: boolean;
   }) => {
@@ -598,27 +604,45 @@ const Composer: FC<{
     }
     lastBusySubmit.current = { fingerprint, at: now };
     event.preventDefault();
-    const parts: Array<
-      | { type: "text"; text: string }
-      | { type: "image"; image: string }
-    > = [];
-    if (state.text.trim()) parts.push({ type: "text", text: state.text });
-    for (const attachment of state.attachments) {
-      for (const part of attachment.content ?? []) {
-        if (part.type === "text") parts.push({ type: "text", text: part.text });
-        if (part.type === "image") parts.push({ type: "image", image: part.image });
+    setBusySubmitError(null);
+    try {
+      const attachments = await Promise.all(
+        state.attachments.map(async (attachment) => {
+          if (attachment.content) return attachment;
+          if (
+            attachment.type === "image" &&
+            attachment.status.type === "requires-action"
+          ) {
+            return imageAttachmentAdapter.send(attachment as PendingAttachment);
+          }
+          throw new Error("Attachment is not ready to send");
+        }),
+      );
+      const parts: Array<
+        | { type: "text"; text: string }
+        | { type: "image"; image: string }
+      > = [];
+      if (state.text.trim()) parts.push({ type: "text", text: state.text });
+      for (const attachment of attachments) {
+        for (const part of attachment.content ?? []) {
+          if (part.type === "text") parts.push({ type: "text", text: part.text });
+          if (part.type === "image") parts.push({ type: "image", image: part.image });
+        }
       }
+      if (parts.length === 0) throw new Error("Message has no sendable content");
+      queueComposerDraftSubmission(draftKey, state.text);
+      if (state.text.length > 0) skipEmptyDraftPersist.current = true;
+      sendTransportCommand({
+        type: "add-message",
+        message: { role: "user", parts },
+        parentId: null,
+        sourceId: null,
+      });
+      void aui.composer.reset();
+    } catch {
+      lastBusySubmit.current = null;
+      setBusySubmitError("Could not send the message. Retry or remove the attachment.");
     }
-    if (parts.length === 0) return;
-    queueComposerDraftSubmission(draftKey, state.text);
-    if (state.text.length > 0) skipEmptyDraftPersist.current = true;
-    sendTransportCommand({
-      type: "add-message",
-      message: { role: "user", parts },
-      parentId: null,
-      sourceId: null,
-    });
-    void aui.composer.reset();
   };
 
   const submitBusyMessage = (event: {
@@ -910,6 +934,11 @@ const Composer: FC<{
           emptyMessage="No online agents"
           emptyHint="Try @broadcast to reach every agent in this project."
         />
+        {busySubmitError ? (
+          <p role="alert" className="text-destructive px-2 text-xs">
+            {busySubmitError}
+          </p>
+        ) : null}
         <ComposerPrimitive.AttachmentDropzone
           asChild
           disabled={!attachmentsEnabled}
