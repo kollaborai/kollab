@@ -199,7 +199,10 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
             call = self.executor.shell_executor.run_argv.await_args
             self.assertEqual(Path(call.args[0][0]).name, "git")
             self.assertTrue(Path(call.args[0][0]).is_absolute())
-            self.assertEqual(call.args[0][1:], ("log", "--oneline", "-1"))
+            self.assertEqual(
+                call.args[0][1:4], ("-c", "core.fsmonitor=false", "log")
+            )
+            self.assertEqual(call.args[0][4:], ("--oneline", "-1"))
             self.assertEqual(call.kwargs["timeout"], 10)
             self.assertEqual(call.kwargs["cwd"], workspace.resolve())
             self.assertEqual(call.kwargs["max_output_bytes"], 8 * 1024)

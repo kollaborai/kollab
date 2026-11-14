@@ -1757,6 +1757,8 @@ class ToolExecutor:
         if executable is None:
             return refuse("executable is not on the trusted system path")
         argv = (str(executable), *argv[1:])
+        if Path(executable).stem.lower() == "git":
+            argv = (argv[0], "-c", "core.fsmonitor=false", *argv[1:])
         command_env = self.shell_executor._filter_env(os.environ.copy())
         if Path(argv[0]).stem.lower() == "git":
             command_env = {
