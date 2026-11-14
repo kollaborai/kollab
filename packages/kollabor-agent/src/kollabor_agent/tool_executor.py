@@ -1720,6 +1720,10 @@ class ToolExecutor:
 
         if _is_hard_blocked(argv):
             return refuse("command is permanently blocked by the read-only policy")
+        if Path(argv[0]).name.lower() == "git" and any(
+            token.split("=", 1)[0].lower() == "--no-index" for token in argv[1:]
+        ):
+            return refuse("Git diff --no-index may read files outside the project")
         if _git_leaves_project(argv, cwd, root):
             return refuse("Git command must stay inside the project")
         if not _is_read_only_action(argv, cwd, root):
