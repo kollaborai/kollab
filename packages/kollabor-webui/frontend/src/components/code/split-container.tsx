@@ -1,6 +1,7 @@
 import { editorShortcutEnabled } from "@/components/code/editor-shortcuts";
 import { useRef, useCallback, useState, useEffect } from "react";
-import { useEditorStore, type SplitNode } from "@/components/code/editor-store";
+import { Button } from "@/components/ui/button";
+import { leafPaneIds, useEditorStore, type SplitNode } from "@/components/code/editor-store";
 import { TabBar } from "./tab-bar";
 import { EditorPane } from "./editor-pane";
 import { visibleSplitTree } from "./split-layout";
@@ -9,6 +10,37 @@ interface SplitContainerProps {
   workspace: string;
   showFilePicker?: boolean;
   onOpenFiles?: () => void;
+}
+
+interface NarrowPaneSwitcherProps {
+  paneIds: string[];
+  activePaneId: string;
+  onSelect: (paneId: string) => void;
+}
+
+export function NarrowPaneSwitcher({ paneIds, activePaneId, onSelect }: NarrowPaneSwitcherProps) {
+  return (
+    <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1 sm:hidden" role="group" aria-label="Editor panes">
+      {paneIds.map((paneId, index) => {
+        const paneNumber = index + 1;
+        const isActive = paneId === activePaneId;
+
+        return (
+          <Button
+            key={paneId}
+            type="button"
+            size="sm"
+            variant={isActive ? "secondary" : "ghost"}
+            aria-label={`Show pane ${paneNumber}`}
+            aria-pressed={isActive}
+            onClick={() => onSelect(paneId)}
+          >
+            Pane {paneNumber}
+          </Button>
+        );
+      })}
+    </div>
+  );
 }
 
 export function SplitContainer({ workspace, showFilePicker = false, onOpenFiles = () => {} }: SplitContainerProps) {
@@ -64,6 +96,9 @@ export function SplitContainer({ workspace, showFilePicker = false, onOpenFiles 
       onClick={handleContainerClick}
       onFocus={handleContainerClick}
     >
+      {splitTree.type === "split" && (
+        <NarrowPaneSwitcher paneIds={leafPaneIds(splitTree)} activePaneId={activePaneId} onSelect={setActivePane} />
+      )}
       <SplitRender node={visibleSplitTree(splitTree, activePaneId, isNarrow)} workspace={workspace} isActivePaneId={activePaneId} showFilePicker={showFilePicker} onOpenFiles={onOpenFiles} />
     </div>
   );
