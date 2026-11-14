@@ -156,7 +156,7 @@ async function poll(api: EngineApi, store: Store): Promise<void> {
     for (const name of comparedProfiles) {
       if (requestedSignatures.get(name) !== currentSignatures.get(name)) changedDuringRequest.add(name);
     }
-    const choices = answer.choices.filter((choice) => !changedDuringRequest.has(choice.profile));
+    const choices = (answer.choices ?? []).filter((choice) => !changedDuringRequest.has(choice.profile));
     const discovery = answer.discovery
       ? Object.fromEntries(Object.entries(answer.discovery).filter(([name]) => !changedDuringRequest.has(name)))
       : answer.discovery;
