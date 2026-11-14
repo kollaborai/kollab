@@ -106,6 +106,27 @@ async def test_create_rejects_unknown_effort_with_422(client):
 
 
 @pytest.mark.asyncio
+async def test_create_auto_profile_validates_effort_against_environment_key(
+    client, manager, monkeypatch
+):
+    monkeypatch.setenv("KOLLAB_API_KEY", "sk-ant-test")
+
+    response = await client.post(
+        "/profiles",
+        json={
+            "name": "anthropic-auto",
+            "provider": "auto",
+            "model": "claude-opus-5-5",
+            "effort": "minimal",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "unsupported reasoning effort" in response.text
+    assert manager.get_profile("anthropic-auto") is None
+
+
+@pytest.mark.asyncio
 async def test_create_without_effort_omits_it(client, manager):
     response = await client.post(
         "/profiles",
