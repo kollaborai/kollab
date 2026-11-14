@@ -125,6 +125,8 @@ class WorkSlot:
     task_card_id: Optional[str] = None
     retired_reason: Optional[str] = None
     stale_upstream_note: Optional[str] = None
+    retired_at: Optional[float] = None
+    task_card_terminalized: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -142,6 +144,8 @@ class WorkSlot:
             "task_card_id": self.task_card_id,
             "retired_reason": self.retired_reason,
             "stale_upstream_note": self.stale_upstream_note,
+            "retired_at": self.retired_at,
+            "task_card_terminalized": self.task_card_terminalized,
         }
 
     @classmethod

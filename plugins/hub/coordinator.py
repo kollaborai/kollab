@@ -18,6 +18,7 @@ from .rosters import roster_names
 from .task_ledger import TERMINAL_TASK_STATUSES
 
 logger = logging.getLogger(__name__)
+RETIRED_SLOT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
 
 def _append_stale_upstream_note(slot: WorkSlot, note: str) -> bool:
@@ -575,7 +576,8 @@ class WorkQueue:
         exhaustion. At most ``MAX_UPSTREAM_CHECKS`` unique refs are checked.
 
         Returns retired WorkSlot snapshots. Paired retired slots are returned
-        again on later sweeps so TaskLedger cleanup can retry transient failures.
+        until their linked TaskLedger cleanup succeeds. Retired slots are kept
+        in ``work-queue.json`` for 30 days after retirement.
         """
         repository_checker = checker is None
         if checker is None:
@@ -681,23 +683,27 @@ class WorkQueue:
             else:
                 decisions[slot.id] = verdict
 
-        if not decisions and not notes:
-            return [
-                slot
-                for slot in snapshot
-                if slot.status == "retired" and slot.task_card_id
-            ]
+        retired_at = time.time()
 
         def _retire(
             slots: List[WorkSlot],
         ) -> Tuple[List[WorkSlot], bool]:
-            retired = [
-                slot for slot in slots if slot.status == "retired" and slot.task_card_id
-            ]
+            retired = []
             changed = False
+            retained = []
             for slot in slots:
                 if slot.status == "retired":
+                    if slot.retired_at is None:
+                        slot.retired_at = retired_at
+                        changed = True
+                    if retired_at - slot.retired_at >= RETIRED_SLOT_RETENTION_SECONDS:
+                        changed = True
+                        continue
+                    retained.append(slot)
+                    if slot.task_card_id and not slot.task_card_terminalized:
+                        retired.append(slot)
                     continue
+                retained.append(slot)
                 verdict = decisions.get(slot.id)
                 requested_notes = list(notes.get(slot.id, []))
                 if slot.status == "completed":
@@ -705,6 +711,7 @@ class WorkQueue:
                     # terminal, and nothing un-completes a slot.
                     slot.status = "retired"
                     slot.retired_reason = "terminal slot (completed)"
+                    slot.retired_at = retired_at
                     retired.append(slot)
                     changed = True
                     logger.info("Retired stale work %s: completed", slot.id)
@@ -712,6 +719,7 @@ class WorkQueue:
                 if verdict and slot.status == "pending":
                     slot.status = "retired"
                     slot.retired_reason = verdict
+                    slot.retired_at = retired_at
                     retired.append(slot)
                     changed = True
                     logger.info("Retired stale work %s: %s", slot.id, verdict)
@@ -745,9 +753,22 @@ class WorkQueue:
                             slot.id,
                             note,
                         )
+            slots[:] = retained
             return retired, changed
 
         return self._mutate(_retire)
+
+    def mark_task_card_terminalized(self, slot_id: str) -> bool:
+        """Persist that a retired slot's linked TaskLedger card was handled."""
+
+        def _mark(slots: List[WorkSlot]) -> Tuple[bool, bool]:
+            for slot in slots:
+                if slot.id == slot_id and not slot.task_card_terminalized:
+                    slot.task_card_terminalized = True
+                    return True, True
+            return False, False
+
+        return self._mutate(_mark)
 
     def get_pending(self) -> List[WorkSlot]:
         """Get all pending work slots."""

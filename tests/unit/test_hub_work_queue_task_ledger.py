@@ -89,6 +89,14 @@ def test_stale_sweep_terminalizes_paired_card_and_keeps_retry_state(
         "github_terminal_state",
         lambda ref, project=None: f"{ref} merged",
     )
+    terminalize_calls = []
+    original_terminalize = plugin._task_ledger.terminalize
+
+    def count_terminalize(*args, **kwargs):
+        terminalize_calls.append(args[0])
+        return original_terminalize(*args, **kwargs)
+
+    monkeypatch.setattr(plugin._task_ledger, "terminalize", count_terminalize)
 
     retired = plugin._sweep_stale_work_queue()
 
@@ -98,6 +106,10 @@ def test_stale_sweep_terminalizes_paired_card_and_keeps_retry_state(
     assert saved.terminal_actor == "work-queue-sweep"
     assert "#640 merged" in saved.terminal_reason
     assert plugin._task_ledger.get_open(project="test-project") == []
+
+    plugin._sweep_stale_work_queue()
+
+    assert terminalize_calls == [card.id]
 
 
 def test_queue_command_cancels_card_if_slot_retires_before_link(tmp_path, monkeypatch):
