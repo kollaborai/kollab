@@ -29,7 +29,7 @@ const initialState: EngineState = {
 const liveEvents: { current: ((event: SessionEvent) => void) | null } = { current: null };
 window.liveEvent = (event) => liveEvents.current?.(event);
 
-function Probe({ onRefresh }: { onRefresh: () => void }) {
+function Probe({ onRefresh, historyCount }: { onRefresh: () => void; historyCount: number }) {
   const aui = useAui();
   const running = useAuiState((s) => s.thread.isRunning);
   const text = useAuiState((s) => s.thread.messages
@@ -43,6 +43,7 @@ function Probe({ onRefresh }: { onRefresh: () => void }) {
       <button id="send" onClick={() => aui.thread().append("hello")}>send</button>
       <button id="refresh-history" onClick={onRefresh}>refresh history</button>
       <div id="running">{running ? "running" : "idle"}</div>
+      <div id="history-count">{historyCount}</div>
       <div id="assistant">{text}</div>
     </div>
   );
@@ -63,7 +64,7 @@ function Fixture() {
   window.refreshHistory = refreshHistory;
   return (
     <EngineRuntimeProvider api={api} sessionId="s1" initialState={state} liveEvents={liveEvents}>
-      <Probe onRefresh={refreshHistory} />
+      <Probe onRefresh={refreshHistory} historyCount={state.messages.length} />
     </EngineRuntimeProvider>
   );
 }

@@ -173,6 +173,8 @@ try {
       await t.waitShown("Alpha");
       await t.submit();
       await t.page.evaluate(() => window.refreshHistory());
+      await t.page.waitForFunction(() => document.getElementById("history-count")?.textContent === "1");
+      assert.equal(await t.page.locator("#running").innerText(), "running");
       await t.finishSubmission();
       await t.waitShown("AlphaBeta");
       await t.page.close();
