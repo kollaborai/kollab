@@ -402,7 +402,9 @@ def main(argv: list[str]) -> int:
             print("Plugin code runs as your user and can use your computer outside Kollab.")
             if input("Install this exact version? [yes/no] ").strip().lower() != "yes":
                 return 1
-            install_stage(stage, staged, staged["commit"], staged["files_sha256"])
+            from .packages import EXPECT_ABSENT
+
+            install_stage(stage, staged, staged["commit"], staged["files_sha256"], expected_record=EXPECT_ABSENT)
             print(f"Installed {manifest['id']}")
             return 0
     for plugin_id, record in sorted(registry["plugins"].items()):
