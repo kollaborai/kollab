@@ -536,6 +536,7 @@ def test_plugin_tokens_are_private_stable_and_scoped(tmp_path, monkeypatch):
     from pathlib import Path
 
     from kollabor_engine import server
+
     from kollabor_plugins.packages import files_sha256
 
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -590,6 +591,13 @@ def make_router(ctx):
         assert client.get("/plugins", headers=own).status_code == 401
         assert client.post("/plugins/hello/enable", headers=own).status_code == 401
         assert client.post("/plugins/install", headers=own).status_code == 401
+        assert client.put("/plugins/hello/settings", headers=own, json={"greeting": "Hi"}).status_code != 401
+        from kollabor_engine.routes.plugins import _plugin_token_target
+        assert _plugin_token_target("GET", "/plugins/hello/api/../other") is None
+        assert _plugin_token_target("GET", "/plugins/hello/api/%2e%2e/other") is None
+        assert _plugin_token_target("GET", "/plugins/hello//settings") is None
+        assert _plugin_token_target("POST", "/plugins/hello/update") is None
+        assert _plugin_token_target("POST", "/plugins/hello/services/hello/start") == "hello"
         assert client.get("/plugins", headers={"Authorization": "Bearer full-user-token"}).status_code == 200
     with TestClient(create_app()):
         assert hello_path.read_text().strip() == hello_token
@@ -648,6 +656,7 @@ def test_plugin_token_mint_refuses_symlinks(tmp_path, monkeypatch):
     from pathlib import Path
 
     from kollabor_engine.routes import plugins as plugin_routes
+
     from kollabor_plugins.packages import files_sha256
 
     monkeypatch.setenv("HOME", str(tmp_path))

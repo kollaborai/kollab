@@ -206,10 +206,10 @@ async def _engine_lifespan(app: FastAPI):
         logger.info("Engine started")
         from kollabor_plugins.services import supervise_services
 
-        supervisor_task = asyncio.create_task(supervise_services(), name="plugin-supervisor")
         dispatcher = getattr(app.state, "plugin_dispatcher", None)
         if dispatcher is not None:
             await dispatcher.warm()
+        supervisor_task = asyncio.create_task(supervise_services(), name="plugin-supervisor")
         if getattr(app.state, "warm_model_choices", False):  # set by `serve`, never by a test's app
             warm_task = asyncio.create_task(_warm_model_choices(), name="model-picker-warm")
         phone_link = getattr(app.state, "phone_link", None)
@@ -291,10 +291,11 @@ def create_app(port: Optional[int] = None) -> FastAPI:
         version="0.1.0",
         lifespan=_engine_lifespan,
     )
-    from .routes.plugins import PluginDispatcher, PluginEventHub
+    from .routes.plugins import PluginDispatcher, PluginEventHub, PluginTokenStore
 
     app.state.plugin_events = PluginEventHub()
-    app.state.plugin_dispatcher = PluginDispatcher(app.state.plugin_events)
+    app.state.plugin_tokens = PluginTokenStore()
+    app.state.plugin_dispatcher = PluginDispatcher(app.state.plugin_events, app.state.plugin_tokens)
     _wire_voice(app, port)
     from .phone_link import PhoneLink
 
@@ -335,7 +336,9 @@ def create_app(port: Optional[int] = None) -> FastAPI:
             )
 
         token = auth_header[7:]
-        if not validate_token(token):
+        if not validate_token(token) and not app.state.plugin_tokens.authorize(
+            token, request.method, request.scope["path"], app.state.plugin_events
+        ):
             return JSONResponse(status_code=401, content={"detail": "Invalid token"})
 
         return await call_next(request)

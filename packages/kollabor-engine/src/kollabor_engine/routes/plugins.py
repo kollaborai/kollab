@@ -8,6 +8,8 @@ import inspect
 import json
 import logging
 import os
+import secrets
+import stat
 import sys
 import threading
 import time
@@ -527,6 +529,100 @@ def get_plugin_usage(plugin_id: str):
     return {"date": today, "total": total, "cap": cap, "remaining": max(0, cap - total)}
 
 
+def _plugin_token_target(method: str, path: str) -> str | None:
+    """Return the own-plugin id only for routes that accept a plugin token."""
+    from kollabor_plugins.settings import _valid_data_id
+
+    if not path.startswith("/") or "\\" in path or "\x00" in path or "%" in path:
+        return None
+    parts = path.split("/")[1:]
+    if any(part in {"", ".", ".."} for part in parts):
+        return None
+    if len(parts) < 3 or parts[0] != "plugins" or not _valid_data_id(parts[1]):
+        return None
+    tail = parts[2:]
+    method = method.upper()
+    allowed = (
+        (len(tail) >= 2 and tail[0] == "api")
+        or (tail == ["events"] and method in {"GET", "POST"})
+        or (tail == ["usage"] and method == "GET")
+        or (tail == ["settings"] and method in {"GET", "PUT"})
+        or (tail == ["agents"] and method == "POST")
+        or (len(tail) == 2 and tail[0] == "agents" and method in {"GET", "DELETE"})
+        or (len(tail) == 3 and tail[0] == "services" and tail[2] in {"start", "stop", "restart"} and method == "POST")
+        or (len(tail) == 3 and tail[0] == "services" and tail[2] == "log" and method == "GET")
+    )
+    return parts[1] if allowed else None
+
+
+class PluginTokenStore:
+    """Stable, private plugin tokens; reading never creates credentials."""
+
+    @staticmethod
+    def _run(context, create: bool) -> Path:
+        data_root = Path.home() / ".kollab" / "plugin-data"
+        data = data_root / context.id
+        if context.data != data:
+            raise ValueError("Invalid plugin data directory")
+        run = data / "run"
+        for path in (data_root, data, run):
+            if path.is_symlink():
+                raise ValueError("Plugin token directory cannot be a symlink")
+        if create:
+            run.mkdir(parents=True, exist_ok=True, mode=0o700)
+            for path in (data_root, data, run):
+                if path.is_symlink():
+                    raise ValueError("Plugin token directory cannot be a symlink")
+        return run
+
+    @staticmethod
+    def _read(path: Path) -> str:
+        if path.is_symlink():
+            raise ValueError("Plugin token cannot be a symlink")
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.getuid():
+                raise ValueError("Plugin token file must be private")
+            raw = os.read(descriptor, 128)
+        finally:
+            os.close(descriptor)
+        try:
+            token = raw.decode("ascii")
+        except UnicodeError as exc:
+            raise ValueError("Invalid plugin token") from exc
+        if len(token) != 43 or not all(ch.isascii() and (ch.isalnum() or ch in "-_") for ch in token):
+            raise ValueError("Invalid plugin token")
+        return token
+
+    def mint(self, context) -> str:
+        run = self._run(context, create=True)
+        path = run / "token"
+        with locked_file(run / "token.lock", private=True):
+            if path.is_symlink():
+                raise ValueError("Plugin token cannot be a symlink")
+            if not path.exists():
+                write_text_atomic(path, secrets.token_urlsafe(32))
+            return self._read(path)
+
+    def authorize(self, token: str, method: str, path: str, hub: PluginEventHub) -> bool:
+        from kollabor_plugins.packages import _read_registry
+
+        plugin_id = _plugin_token_target(method, path)
+        if plugin_id is None:
+            return False
+        try:
+            context = _engine_context(plugin_id, hub)
+            registry = _read_registry(Path.home() / ".kollab" / "plugins.json")
+            if not plugin_id.endswith("@dev") and plugin_id in registry["dev"]:
+                return False
+            expected = self._read(self._run(context, create=False) / "token")
+            return secrets.compare_digest(token, expected)
+        except (HTTPException, OSError, TypeError, ValueError):
+            return False
+
+
+
 class _NoBytecodeLoader(importlib.machinery.SourceFileLoader):
     """Do not mutate approved plugin files when importing vendored Python."""
 
@@ -627,8 +723,9 @@ class _LoadedPlugin:
 class PluginDispatcher:
     """A single ASGI mount that resolves approved routers on each request."""
 
-    def __init__(self, hub: PluginEventHub):
+    def __init__(self, hub: PluginEventHub, tokens: PluginTokenStore):
         self.hub = hub
+        self.tokens = tokens
         self.errors: dict[str, str] = {}
         self._condition = asyncio.Condition()
         self._loaded: dict[str, _LoadedPlugin] = {}
@@ -702,6 +799,7 @@ class PluginDispatcher:
                 raise HTTPException(status_code=404, detail="Plugins are disabled")
             try:
                 context = _engine_context(plugin_id, self.hub)
+                context.token = self.tokens.mint(context)
                 registry = _read_registry(Path.home() / ".kollab" / "plugins.json")
                 if not plugin_id.endswith("@dev") and plugin_id in registry["dev"]:
                     raise HTTPException(status_code=404, detail="Plugin is shadowed")
@@ -788,6 +886,22 @@ class PluginDispatcher:
     async def __call__(self, scope, receive, send):
         if scope["type"] not in {"http", "websocket"}:
             return
+        if scope["type"] == "websocket":
+            from ..server import validate_token
+
+            bypass = os.environ.get("KOLLAB_ENGINE_BYPASS_AUTH") == "1" and "pytest" in sys.modules
+            header = next((value.decode("latin-1") for key, value in scope.get("headers", [])
+                           if key.lower() == b"authorization"), "")
+            token = header[7:] if header.startswith("Bearer ") else ""
+            try:
+                authenticated = bool(token) and (
+                    validate_token(token) or self.tokens.authorize(token, "GET", scope["path"], self.hub)
+                )
+            except (OSError, TypeError, ValueError):
+                authenticated = False
+            if not bypass and not authenticated:
+                await send({"type": "websocket.close", "code": 1008})
+                return
         plugin_id = scope.get("path_params", {}).get("plugin_id", "")
         try:
             loaded = await self._acquire(plugin_id)

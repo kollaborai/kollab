@@ -91,6 +91,7 @@ class PluginContext:
         notify: Callable | None = None,
         heartbeat: Callable | None = None,
         local_guard: Callable | None = None,
+        token: str | None = None,
     ):
         if not _valid_data_id(plugin_id):
             raise ValueError("Invalid plugin id")
@@ -98,6 +99,7 @@ class PluginContext:
         self.root = Path(root)
         self.data = Path(data)
         self.manifest = manifest
+        self.token = token
         self.settings = _Settings(self)
         self.secrets = _Secrets(grants)
         self.events = _Events(plugin_id, publish)
