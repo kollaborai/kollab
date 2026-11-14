@@ -1,0 +1,46 @@
+{
+  "name": "plugin-cli",
+  "description": "Install, update and remove a local Git-backed hello plugin with explicit interactive approval in an isolated HOME.",
+  "config": {
+    "command": "bash --noprofile --norc",
+    "app_init_sleep": 1,
+    "term_width": 140,
+    "term_height": 40,
+    "key_delay": 0.2
+  },
+  "steps": [
+    {
+      "action": "shell",
+      "description": "create a local repository and route a fake HTTPS URL to it without network access",
+      "command": "set -e; cp -R bundles/plugins/hello \"$HOME/source\"; git -C \"$HOME/source\" init -q; git -C \"$HOME/source\" config user.name 'Plugin Test'; git -C \"$HOME/source\" config user.email 'plugin-test@example.invalid'; git -C \"$HOME/source\" add .; git -C \"$HOME/source\" commit -qm initial; git config --global protocol.file.allow always; git config --global url.\"file://$HOME/source\".insteadOf https://example.invalid/hello.git; echo fixture-ready",
+      "assert_contains": "fixture-ready"
+    },
+    {"action": "start_app"},
+    {"action": "type", "text": "python3 main.py plugin add https://example.invalid/hello.git", "delay": 0.01},
+    {"action": "enter"},
+    {"action": "wait_for", "pattern": "Install this plugin", "timeout": 25},
+    {"action": "type", "text": "yes"},
+    {"action": "enter"},
+    {"action": "wait_for", "pattern": "Installed hello", "timeout": 25},
+    {
+      "action": "shell",
+      "description": "advance the source repository",
+      "command": "printf '\\n# changed\\n' >> \"$HOME/source/python/hello.py\"; git -C \"$HOME/source\" add python/hello.py; git -C \"$HOME/source\" commit -qm update; echo update-ready",
+      "assert_contains": "update-ready"
+    },
+    {"action": "type", "text": "python3 main.py plugin update hello", "delay": 0.01},
+    {"action": "enter"},
+    {"action": "wait_for", "pattern": "Update this plugin", "timeout": 25},
+    {"action": "type", "text": "yes"},
+    {"action": "enter"},
+    {"action": "wait_for", "pattern": "Updated hello", "timeout": 25},
+    {"action": "type", "text": "python3 main.py plugin remove hello", "delay": 0.01},
+    {"action": "enter"},
+    {"action": "wait_for", "pattern": "Remove this plugin", "timeout": 25},
+    {"action": "type", "text": "yes"},
+    {"action": "enter"},
+    {"action": "wait_for", "pattern": "Removed hello", "timeout": 25},
+    {"action": "type", "text": "exit"},
+    {"action": "enter"}
+  ]
+}
