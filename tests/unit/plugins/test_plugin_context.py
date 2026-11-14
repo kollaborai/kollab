@@ -98,6 +98,13 @@ async def test_plugin_context_full_contract(tmp_path, monkeypatch):
     context.notify("Ready", {"label": "Open"})
     assert events == [("hello", "changed", {"count": 1})]
     assert notices == [("hello", "Ready", {"label": "Open"})]
+    offline = PluginContext("hello", root, data, manifest)
+    with pytest.raises(RuntimeError, match="event publisher"):
+        offline.events.publish("changed", {})
+    with pytest.raises(RuntimeError, match="notification publisher"):
+        offline.notify("No receiver")
+    with pytest.raises(ValueError):
+        context.settings.save({"greeting": 4})
     assert [service["name"] for service in context.services.status()] == ["hello"]
     with context.lock("chain"):
         assert (data / "locks" / "chain.lock").is_file()
