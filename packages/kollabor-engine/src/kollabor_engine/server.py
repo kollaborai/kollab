@@ -383,6 +383,7 @@ def create_app(port: Optional[int] = None) -> FastAPI:
     from .routes.agents import router as agents_router
     from .routes.hub import router as hub_router
     from .routes.phonelink import router as phonelink_router
+    from .routes.plugins import router as plugins_router
     from .routes.prompts import router as prompts_router
     from .routes.rosters import router as rosters_router
     from .routes.teams import router as teams_router
@@ -390,6 +391,7 @@ def create_app(port: Optional[int] = None) -> FastAPI:
     app.include_router(agents_router)
     app.include_router(hub_router)
     app.include_router(phonelink_router)
+    app.include_router(plugins_router)
     from .routes.voice import router as voice_router
 
     app.include_router(voice_router)
