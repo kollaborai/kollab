@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import psutil
 
@@ -13,6 +14,9 @@ import psutil
 def test_stop_kills_group_after_leader_exits(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    from kollabor_plugins import services
+
+    monkeypatch.setenv("PYTHONPATH", str(Path(services.__file__).resolve().parent.parent))
     home = tmp_path / ".kollab"
     root = home / "plugins" / "hello"
     root.mkdir(parents=True)
@@ -20,7 +24,8 @@ def test_stop_kills_group_after_leader_exits(tmp_path, monkeypatch):
     grandchild_code = "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
     code = (
         "import subprocess,sys,time; "
-        f"p=subprocess.Popen([sys.executable,'-c',{grandchild_code!r}], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        f"p=subprocess.Popen([sys.executable,'-c',{grandchild_code!r}], "
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
         f"open({str(child_pid_file)!r},'w').write(str(p.pid)); "
         "time.sleep(60)"
     )
