@@ -326,12 +326,12 @@ class TestDiscoverPluginArgs(unittest.TestCase):
         self.assertIn("HookMonitoringPlugin", plugin_names)
 
 
-def test_discover_plugin_args_includes_global_user_plugins(
+def test_discover_plugin_args_excludes_unregistered_global_scripts(
     tmp_path,
     monkeypatch,
     request,
 ) -> None:
-    """Global user plugins should be able to register CLI args."""
+    """Unregistered global scripts must not register CLI arguments."""
     snapshot = _snapshot_plugins_modules()
     request.addfinalizer(lambda: _restore_plugins_modules(snapshot))
 
@@ -365,12 +365,7 @@ class CliGlobalPlugin:
     plugin_classes, _discovery = discover_plugin_args()
     plugin_names = [plugin_class.__name__ for plugin_class in plugin_classes]
 
-    assert "CliGlobalPlugin" in plugin_names
-    args = parse_arguments(
-        plugin_classes=plugin_classes,
-        argv=["--global-plugin-flag"],
-    )
-    assert args.global_plugin_flag is True
+    assert "CliGlobalPlugin" not in plugin_names
 
 
 if __name__ == "__main__":
