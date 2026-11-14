@@ -776,8 +776,8 @@ class ACPRunner:
         return self.advertised_config_options()
 
     async def _start_process(self) -> str:
-        if self._live_owned_processes():
-            raise ACPError("previous ACP processes still require cleanup")
+        if self._live_owned_processes() or self._owned_process_group_exists():
+            raise ACPError("previous ACP process group still requires cleanup")
         self._owned_processes.clear()
         self.state = "starting"
         if self.lifecycle_callback is not None:
