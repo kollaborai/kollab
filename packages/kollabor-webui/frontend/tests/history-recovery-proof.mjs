@@ -1221,7 +1221,17 @@ try {
         k.events.splice(0).forEach((release) => release('data: {"type":"hub_message"}\n\n'));
         for (let n = 0; n < 100 && !k.refreshes; n++) await page.waitForTimeout(100);
         if (!k.refreshes) throw new Error("external message did not refresh history");
-        await page.waitForTimeout(300);
+        for (let n = 0; n < 20; n++) {
+          const arrival = await page.getByText("PEER-ARRIVAL", { exact: true }).count();
+          const reply = await page.getByText("PEER-REPLY", { exact: true }).count();
+          if (arrival && reply) break;
+          await page.waitForTimeout(100);
+        }
+        const liveArrival = await page.getByText("PEER-ARRIVAL", { exact: true }).count();
+        const liveReply = await page.getByText("PEER-REPLY", { exact: true }).count();
+        if (liveArrival !== 1 || liveReply !== 1) {
+          fail("K-external-history-during-send", `during-send arrival=${liveArrival} reply=${liveReply}`);
+        }
         k.assistant.splice(0).forEach((release) => release());
         await page.getByText("CLIENT-REPLY", { exact: true }).waitFor({ timeout: 10000 });
         const peerArrival = await page.getByText("PEER-ARRIVAL", { exact: true }).count();
