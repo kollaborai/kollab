@@ -48,11 +48,11 @@ phase 4: effective config analysis
 tools and commands:
 
 core files to read:
-  <read><file>kollabor/config/loader.py</file></read>
-  <read><file>kollabor/config/manager.py</file></read>
-  <read><file>kollabor/config/plugin_config_manager.py</file></read>
-  <read><file>kollabor/config/plugin_schema.py</file></read>
-  <read><file>kollabor/utils/config_utils.py</file></read>
+  <read><file>packages/kollabor-config/src/kollabor_config/loader.py</file></read>
+  <read><file>packages/kollabor-config/src/kollabor_config/manager.py</file></read>
+  <read><file>packages/kollabor-config/src/kollabor_config/plugin_schema.py</file></read>
+  <read><file>packages/kollabor-config/src/kollabor_config/config_utils.py</file></read>
+  <read><file>packages/kollabor-plugins/src/kollabor_plugins/settings.py</file></read>
 
 check config file existence:
   <terminal>ls -la .kollab/config.json 2>/dev/null || echo "no local config"</terminal>
