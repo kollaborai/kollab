@@ -75,20 +75,24 @@ Fifteen focused tests passed (`engine-events-green.log`); Ruff and compilation
 passed. These streams are not yet wired to management changes or PluginContext,
 and the heartbeat overlay currently applies to engine inventory only.
 
-Usage-log reads: `f865f00f` was red before `50ec8736` added GET usage, local-day
+Usage reads: `f865f00f` was red before `50ec8736` added GET usage, local-day
 line attribution, partial-line handling, atomic counter/offset replay and
-truncation detection. Six engine route tests passed (`engine-usage-green.log`);
-Ruff and compilation passed. Counter metadata records per-source high-water
-marks so a crash before the offset write does not duplicate a line. This does
-not yet reconcile finished agent runs from runs.json; the step-4 run record's
-container and finish-time field are not specified or implemented in this tree.
+truncation detection. `765efc73` was red before `edd606bd` bounded ingestion
+and offset checkpoints to 512 records. `ad66db21` clarifies the previously
+unspecified runs.json container and terminal usage fields for step 4;
+`a7529ca3` was red before `f2b40c78` reconciled completed run IDs exactly once.
+`35a68612` was red before `6e022209` wired approved engine contexts to per-id
+SSE, global notice events and heartbeat status. Actual dispatch and frontend
+notice rendering are not yet wired. Eighteen focused tests passed
+(`engine-run-usage-green.log`); Ruff and compilation passed. Logs are under
+`<home>/backups/plugins-step2-work/`.
 
 ## Remaining and exact next step
 
-Step 2 is not complete. Next: finish item 2: reconcile finished agent-run usage
-without inventing a conflicting step-4 run schema; wire PluginContext events,
-notices and service heartbeat status. Then implement the dispatcher, tokens,
-proxy and PhoneLink remote restrictions, and all tests specified in the brief. The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
+Step 2 is not complete. Next: item 3, implement the approved per-plugin ASGI
+dispatcher and connect it to `_engine_context`. Then enforce plugin tokens and
+the proxy/PhoneLink remote restrictions, implement management routes, and run
+all tests specified in the brief. The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
 `packages/kollabor-engine/src/kollabor_engine/phone_link.py` is in scope only
 for refusing the spec's remote-disallowed plugin routes and its tests;
 `routes/phonelink.py` stays unchanged unless that refusal requires it. Audit the file deny list
