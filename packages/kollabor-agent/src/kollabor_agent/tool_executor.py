@@ -965,9 +965,18 @@ class ToolExecutor:
         else:
             return False
 
-        # Config can install shell-backed pagers, aliases, helpers, and hooks.
-        # A Git-only grant must not let a command configure those for later use.
-        if subcommand == "config":
+        # These built-ins can invoke arbitrary commands directly or through
+        # repository/user configuration. A Git-only grant does not include
+        # commands that turn Git into a shell or external-tool launcher.
+        if subcommand in {
+            "bisect",  # `bisect run <cmd>` executes the supplied command
+            "config",  # can persist shell-backed aliases, pagers, helpers, hooks
+            "credential",  # delegates to the configured credential helper
+            "difftool",  # launches the configured diff tool
+            "filter-branch",  # evaluates the supplied filter commands
+            "mergetool",  # launches the configured merge tool
+            "submodule",  # `foreach` runs shell commands; update can use custom commands
+        }:
             return False
 
         try:
