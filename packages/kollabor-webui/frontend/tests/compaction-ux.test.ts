@@ -158,6 +158,21 @@ describe("composer draft persistence", () => {
     expect(loadComposerDraft(key, storage)).toBeNull();
   });
 
+  it("keeps a queued draft when the composer resets before a failed response", () => {
+    const storage = new MemoryStorage();
+    const key = composerDraftStorageKey("agent", "conversation-reset")!;
+    saveComposerDraft(key, "retry after error", storage);
+    queueComposerDraftSubmission(key, "retry after error", storage);
+
+    // assistant-ui clears its in-memory composer as soon as submit starts.
+    saveComposerDraft(key, "", storage);
+    const submission = takeComposerDraftSubmission(key);
+    expect(submission?.text).toBe("retry after error");
+
+    // A failed transport response cannot clear the unsent persisted message.
+    expect(loadComposerDraft(key, storage)).toBe("retry after error");
+  });
+
 
   it("drops an unprepared stale ticket when a newer draft is submitted", () => {
     const storage = new MemoryStorage();
