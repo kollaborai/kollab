@@ -1,6 +1,7 @@
 """Background plugin process supervision primitives."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -110,21 +111,48 @@ def _write_log(path: Path, data: bytes) -> None:
         data = data[len(chunk) :]
 
 
+def _valid_plugin_id(plugin_id: str) -> bool:
+    return isinstance(plugin_id, str) and bool(_ID.fullmatch(plugin_id.removesuffix("@dev")))
+
+
+def _approved_service_root(home: Path, registry: dict, plugin_id: str) -> tuple[Path, dict]:
+    if plugin_id.endswith("@dev"):
+        folder = registry["dev"].get(plugin_id.removesuffix("@dev"))
+        if not isinstance(folder, str):
+            raise ValueError("Development plugin is not attached")
+        root = Path(folder).resolve(strict=True)
+        approval = home / "plugin-data" / plugin_id / "approval.json"
+        if approval.is_symlink():
+            raise ValueError("Invalid development approval")
+        try:
+            record = json.loads(approval.read_text(encoding="utf-8"))
+            digest = hashlib.sha256((root / "kollab-plugin.json").read_bytes()).hexdigest()
+        except (OSError, ValueError) as exc:
+            raise ValueError("Cannot read development approval") from exc
+        if not isinstance(record, dict) or record.get("folder") != str(root) or record.get("manifest_sha256") != digest:
+            raise ValueError("Development manifest changed since approval; attach again")
+        return root, record
+    record = registry["plugins"].get(plugin_id)
+    if not isinstance(record, dict):
+        raise ValueError("Plugin is not installed")
+    root = home / "plugins" / plugin_id
+    expected_hash = record.get("files_sha256")
+    if root.is_symlink() or not isinstance(expected_hash, str) or files_sha256(root) != expected_hash:
+        raise ValueError("Plugin files changed since approval")
+    return root, record
+
+
 def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
     """Run and supervise one service while holding its lifetime lock."""
-    if not _ID.fullmatch(plugin_id) or not _SERVICE.fullmatch(service_name):
+    if not _valid_plugin_id(plugin_id) or not _SERVICE.fullmatch(service_name):
         raise ValueError("Invalid plugin or service name")
     if not nonce or any(c not in "0123456789abcdef" for c in nonce):
         raise ValueError("Invalid service nonce")
     home = Path.home() / ".kollab"
     registry = _read_registry(home / "plugins.json")
-    record = registry["plugins"].get(plugin_id)
-    if not isinstance(record, dict) or record.get("enabled") is not True:
+    root, record = _approved_service_root(home, registry, plugin_id)
+    if not plugin_id.endswith("@dev") and record.get("enabled") is not True:
         raise ValueError("Plugin is not enabled")
-    root = home / "plugins" / plugin_id
-    expected_hash = record.get("files_sha256")
-    if not isinstance(expected_hash, str) or files_sha256(root) != expected_hash:
-        raise ValueError("Plugin files changed since approval")
     try:
         manifest = json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
         service = manifest["services"][service_name]
@@ -169,8 +197,8 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
         os.close(fd)
         return 0
     try:
-        current = _read_registry(home / "plugins.json")["plugins"].get(plugin_id)
-        if current != record or files_sha256(root) != expected_hash:
+        current_root, current = _approved_service_root(home, _read_registry(home / "plugins.json"), plugin_id)
+        if current_root != root or current != record:
             raise ValueError("Plugin approval or files changed while starting service")
     except Exception:
         unlock(fd)
@@ -457,20 +485,15 @@ def supervisor_tick() -> None:
 
 def control_service(plugin_id: str, service_name: str, action: str) -> None:
     """Set one installed service's desired state and signal only its verified wrapper."""
-    if not _ID.fullmatch(plugin_id) or not _SERVICE.fullmatch(service_name):
+    if not _valid_plugin_id(plugin_id) or not _SERVICE.fullmatch(service_name):
         raise ValueError("Invalid plugin or service name")
     if action not in {"start", "stop"}:
         raise ValueError("Invalid service action")
     home = Path.home() / ".kollab"
     registry = _read_registry(home / "plugins.json")
-    record = registry["plugins"].get(plugin_id)
-    if not isinstance(record, dict):
-        raise ValueError("Plugin is not installed")
-    if action == "start" and record.get("enabled") is not True:
+    root, record = _approved_service_root(home, registry, plugin_id)
+    if action == "start" and not plugin_id.endswith("@dev") and record.get("enabled") is not True:
         raise ValueError("Enable the plugin before starting its service")
-    root = home / "plugins" / plugin_id
-    if root.is_symlink() or files_sha256(root) != record.get("files_sha256"):
-        raise ValueError("Plugin files changed since approval")
     try:
         manifest = json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
         if service_name not in manifest["services"]:

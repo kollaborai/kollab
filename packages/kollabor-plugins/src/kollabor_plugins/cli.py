@@ -1,10 +1,12 @@
 """Headless plugin management commands."""
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from kollabor_config.atomic_write import write_text_atomic
@@ -49,6 +51,37 @@ def _stop_for_change(home: Path, plugin_id: str, services: dict) -> None:
         if time.monotonic() >= deadline:
             raise ValueError("Plugin services did not stop in time")
         time.sleep(0.05)
+
+
+@contextmanager
+def _locked_service_files(home: Path, plugin_id: str, services: dict):
+    from kollabor_config.file_lock import try_lock, unlock
+
+    from .services import _recorded_process_alive
+
+    data = home / "plugin-data" / plugin_id
+    run = data / "run"
+    if any(path.is_symlink() for path in (home / "plugin-data", data, run)):
+        raise ValueError("Plugin data path may not be a symlink")
+    run.mkdir(parents=True, exist_ok=True)
+    names = set(services) | {path.stem for path in run.glob("*.pid")}
+    if any(not isinstance(name, str) or not _SERVICE.fullmatch(name) for name in names):
+        raise ValueError("Invalid service name")
+    fds = []
+    try:
+        for name in sorted(names):
+            fd = os.open(run / f"{name}.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            if not try_lock(fd):
+                os.close(fd)
+                raise ValueError("A plugin service is running; stop it and try again")
+            fds.append(fd)
+            if _recorded_process_alive(run / f"{name}.pid"):
+                raise ValueError("A plugin service is running; stop it and try again")
+        yield
+    finally:
+        for fd in reversed(fds):
+            unlock(fd)
+            os.close(fd)
 
 
 def main(argv: list[str]) -> int:
@@ -177,6 +210,7 @@ def main(argv: list[str]) -> int:
                 raise ValueError("Unexpected extra argument")
             folder = Path(args.folder_or_off).expanduser().resolve(strict=True)
             manifest = validate_manifest(folder, get_runtime_version())
+            manifest_digest = hashlib.sha256((folder / "kollab-plugin.json").read_bytes()).hexdigest()
             print(f"Plugin: {manifest['name']} ({manifest['id']}@dev)")
             print(f"Local folder: {folder}")
             print("Uses: " + (", ".join(manifest.get("uses", [])) or "none"))
@@ -190,19 +224,36 @@ def main(argv: list[str]) -> int:
     home = Path.home() / ".kollab"
     registry = _read_registry(home / "plugins.json")
     if args.action == "dev":
+        dev_folder = None
+        dev_services = []
+        if args.folder_or_off == "off":
+            if not args.plugin_id or not _ID.fullmatch(args.plugin_id):
+                raise ValueError("A valid plugin id is required")
+            dev_folder = registry["dev"].get(args.plugin_id)
+            if not isinstance(dev_folder, str):
+                raise ValueError("Development plugin is not attached")
+            dev_id = f"{args.plugin_id}@dev"
+            from .services import _approved_service_root
+
+            dev_root, _ = _approved_service_root(home, registry, dev_id)
+            dev_manifest = json.loads((dev_root / "kollab-plugin.json").read_text(encoding="utf-8"))
+            dev_services = dev_manifest.get("services", {})
+            _stop_for_change(home, dev_id, dev_services)
         with locked_file(home / "plugins.json.lock", private=True):
             _recover_locked(home)
             registry = _read_registry(home / "plugins.json")
             if args.folder_or_off == "off":
                 if not args.plugin_id or not _ID.fullmatch(args.plugin_id):
                     raise ValueError("A valid plugin id is required")
-                if args.plugin_id not in registry["dev"]:
-                    raise ValueError("Development plugin is not attached")
+                if registry["dev"].get(args.plugin_id) != dev_folder:
+                    raise ValueError("Development plugin changed during detach; try again")
                 dev_data = home / "plugin-data" / f"{args.plugin_id}@dev"
-                with locked_file(dev_data / "values.json.lock", private=True):
-                    del registry["dev"][args.plugin_id]
-                    _write_json(home / "plugins.json", registry)
-                    (dev_data / "values.json").unlink(missing_ok=True)
+                with _locked_service_files(home, f"{args.plugin_id}@dev", dev_services):
+                    with locked_file(dev_data / "values.json.lock", private=True):
+                        del registry["dev"][args.plugin_id]
+                        _write_json(home / "plugins.json", registry)
+                        (dev_data / "values.json").unlink(missing_ok=True)
+                        (dev_data / "approval.json").unlink(missing_ok=True)
                 print(f"Detached {args.plugin_id}@dev; staged settings discarded")
                 return 0
             if args.plugin_id is not None:
@@ -211,6 +262,8 @@ def main(argv: list[str]) -> int:
 
             folder = Path(args.folder_or_off).expanduser().resolve(strict=True)
             manifest = validate_manifest(folder, get_runtime_version())
+            if hashlib.sha256((folder / "kollab-plugin.json").read_bytes()).hexdigest() != manifest_digest:
+                raise ValueError("Development manifest changed during approval; try again")
             plugin_id = manifest["id"]
             target = home / "plugin-data" / f"{plugin_id}@dev"
             target.mkdir(parents=True, exist_ok=True)
@@ -223,6 +276,15 @@ def main(argv: list[str]) -> int:
 
                             source_values = _read_json(old_values)
                             write_text_atomic(target / "values.json", json.dumps(source_values, indent=2) + "\n")
+            _write_json(
+                target / "approval.json",
+                {
+                    "folder": str(folder),
+                    "manifest_sha256": manifest_digest,
+                    "enabled_path": os.environ.get("PATH", os.defpath),
+                    "granted": manifest.get("uses", []),
+                },
+            )
             registry["dev"][plugin_id] = str(folder)
             _write_json(home / "plugins.json", registry)
             print(f"Attached {plugin_id}@dev from {folder}; local code runs as your user")
@@ -288,7 +350,6 @@ def main(argv: list[str]) -> int:
         return 0
 
     if args.action == "update":
-        import hashlib
         import shlex
 
         from kollabor.version import get_runtime_version
