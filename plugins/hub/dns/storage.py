@@ -274,31 +274,71 @@ class DNSStorage:
     def load_capability_index(self) -> Dict[str, list]:
         """Load the capability reverse index."""
         with _file_lock(self._capability_index_path):
-            if not self._capability_index_path.exists():
-                return {}
-            try:
-                with open(self._capability_index_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except json.JSONDecodeError as exc:
-                raise DNSStorageReadError(
-                    "capability index", self._capability_index_path, "malformed JSON"
-                ) from exc
-            except OSError as exc:
-                raise DNSStorageReadError(
-                    "capability index", self._capability_index_path, "an I/O error"
-                ) from exc
-            if not isinstance(data, dict) or any(
-                not isinstance(name, str) or not isinstance(entries, list)
-                for name, entries in data.items()
-            ):
-                raise DNSStorageReadError(
-                    "capability index", self._capability_index_path, "an invalid schema"
-                )
-            return data
+            return self._read_capability_index_unlocked()
 
-    def save_capability_index(self, index: Dict[str, list]) -> None:
-        """Save the capability reverse index with flock."""
-        _locked_atomic_write(self._capability_index_path, index)
+    def save_capability_index(
+        self,
+        index: Dict[str, list],
+        *,
+        deleted_entries=(),
+        deleted_designations=(),
+        replace: bool = False,
+    ) -> None:
+        """Merge capability updates with the latest index under its file lock."""
+        with _file_lock(self._capability_index_path):
+            if replace:
+                merged = index
+            else:
+                merged = self._read_capability_index_unlocked()
+                entries_by_capability = {
+                    name: {entry["designation"]: entry for entry in entries}
+                    for name, entries in merged.items()
+                }
+
+                for designation in deleted_designations:
+                    for entries in entries_by_capability.values():
+                        entries.pop(designation, None)
+                for capability_name, designation in deleted_entries:
+                    entries_by_capability.get(capability_name, {}).pop(
+                        designation, None
+                    )
+                for capability_name, entries in index.items():
+                    capability_entries = entries_by_capability.setdefault(
+                        capability_name, {}
+                    )
+                    for entry in entries:
+                        capability_entries[entry["designation"]] = entry
+
+                merged = {
+                    name: list(entries.values())
+                    for name, entries in entries_by_capability.items()
+                    if entries
+                }
+            _atomic_write_unlocked(self._capability_index_path, merged)
+
+    def _read_capability_index_unlocked(self) -> Dict[str, list]:
+        """Read and validate the capability index while its lock is held."""
+        if not self._capability_index_path.exists():
+            return {}
+        try:
+            with open(self._capability_index_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except json.JSONDecodeError as exc:
+            raise DNSStorageReadError(
+                "capability index", self._capability_index_path, "malformed JSON"
+            ) from exc
+        except OSError as exc:
+            raise DNSStorageReadError(
+                "capability index", self._capability_index_path, "an I/O error"
+            ) from exc
+        if not isinstance(data, dict) or any(
+            not isinstance(name, str) or not isinstance(entries, list)
+            for name, entries in data.items()
+        ):
+            raise DNSStorageReadError(
+                "capability index", self._capability_index_path, "an invalid schema"
+            )
+        return data
 
     # --- Key Files ---
 
