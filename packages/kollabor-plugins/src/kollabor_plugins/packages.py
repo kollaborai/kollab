@@ -409,8 +409,8 @@ def remove_package(plugin_id: str, *, expected_record: dict) -> None:
         prior = registry["plugins"].get(plugin_id)
         if prior != expected_record:
             raise ValueError("Plugin registry changed during approval; try again")
-        if not isinstance(prior, dict) or prior.get("enabled") is not False:
-            raise ValueError("Disable the plugin before removing it")
+        if not isinstance(prior, dict):
+            raise ValueError("Plugin is not installed")
         if live.is_symlink() or not live.is_dir() or old.exists() or old.is_symlink():
             raise ValueError("Plugin folder and registry disagree")
         transaction = {"id": plugin_id, "registry": registry, "committed": False}

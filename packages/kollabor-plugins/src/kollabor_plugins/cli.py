@@ -23,6 +23,34 @@ from .packages import (
 )
 
 
+def _stop_for_change(home: Path, plugin_id: str, services: dict) -> None:
+    """Stop verified wrappers after approval and wait for their process groups."""
+    import time
+
+    from .services import _recorded_process_alive, control_service
+
+    data = home / "plugin-data" / plugin_id
+    run_dir = data / "run"
+    if any(path.is_symlink() for path in (home / "plugin-data", data, run_dir)):
+        raise ValueError("Plugin data path may not be a symlink")
+    if not isinstance(services, dict) or any(
+        not isinstance(name, str) or not _SERVICE.fullmatch(name) for name in services
+    ):
+        raise ValueError("Invalid installed service declarations")
+    unknown = [pid for pid in run_dir.glob("*.pid") if pid.stem not in services and _recorded_process_alive(pid)]
+    if unknown:
+        raise ValueError("An unrecognized plugin service is still running")
+    active = [name for name in services if _recorded_process_alive(run_dir / f"{name}.pid")]
+    for name in active:
+        control_service(plugin_id, name, "stop")
+    timeout = max((float(services[name].get("stop_timeout_s", 30)) for name in active), default=0) + 5
+    deadline = time.monotonic() + timeout
+    while any(_recorded_process_alive(run_dir / f"{name}.pid") for name in active):
+        if time.monotonic() >= deadline:
+            raise ValueError("Plugin services did not stop in time")
+        time.sleep(0.05)
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="kollab plugin")
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -163,8 +191,6 @@ def main(argv: list[str]) -> int:
         prior = registry["plugins"].get(plugin_id)
         if not isinstance(prior, dict):
             raise ValueError("Plugin is not installed")
-        if prior.get("enabled") is not False:
-            raise ValueError("Disable the plugin before removing it")
         root = home / "plugins" / plugin_id
         if root.is_symlink() or not root.is_dir():
             raise ValueError("Invalid installed plugin folder")
@@ -178,6 +204,7 @@ def main(argv: list[str]) -> int:
             return 1
         if args.purge and input(f"Delete {name}'s data folder permanently? [yes/no] ").strip().lower() != "yes":
             return 1
+        _stop_for_change(home, plugin_id, services)
         data = home / "plugin-data" / plugin_id
         run_dir = data / "run"
         if any(path.is_symlink() for path in (home / "plugin-data", data, run_dir)):
@@ -227,11 +254,7 @@ def main(argv: list[str]) -> int:
         root = home / "plugins" / plugin_id
         if root.is_symlink() or not root.is_dir():
             raise ValueError("Invalid installed plugin folder")
-        if prior.get("enabled") is not False:
-            raise ValueError("Disable the plugin before updating so services cannot restart")
         run_dir = home / "plugin-data" / plugin_id / "run"
-        if any(_recorded_process_alive(pid) for pid in run_dir.glob("*.pid")):
-            raise ValueError("Stop the plugin's running services before updating")
         source = prior["source"]
         if prior.get("ref"):
             source += "#" + prior["ref"]
@@ -279,6 +302,7 @@ def main(argv: list[str]) -> int:
             old_services = old_manifest.get("services", {})
             if not isinstance(old_services, dict):
                 raise ValueError("Invalid installed service declarations")
+            _stop_for_change(home, plugin_id, old_services)
             names = set(old_services) | set(manifest.get("services", {})) | {p.stem for p in run_dir.glob("*.pid")}
             if any(not isinstance(name, str) or not _SERVICE.fullmatch(name) for name in names):
                 raise ValueError("Invalid installed service name")

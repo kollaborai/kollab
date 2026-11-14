@@ -1,4 +1,5 @@
 """Confirmed update and removal operate on enabled idle plugins."""
+
 import json
 
 from kollabor_plugins import cli

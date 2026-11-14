@@ -18,7 +18,7 @@
     {"action": "start_app"},
     {"action": "type", "text": "python3 main.py plugin add https://example.invalid/hello.git", "delay": 0.01},
     {"action": "enter"},
-    {"action": "wait_for", "pattern": "Install this plugin", "timeout": 25},
+    {"action": "wait_for", "pattern": "Install this exact version", "timeout": 25},
     {"action": "type", "text": "yes"},
     {"action": "enter"},
     {"action": "wait_for", "pattern": "Installed hello", "timeout": 25},
