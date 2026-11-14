@@ -160,6 +160,9 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
     async def test_terminal_read_only_tool_allows_reads_and_refuses_writes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
+            from kollabor_agent.tool_registry import get_registry
+
+            self.assertIsNotNone(get_registry().get("terminal-read"))
             self.executor.workspace = workspace
             self.executor.set_bundle_scope(
                 ["file-read", "file-grep", "terminal-read"]
@@ -192,12 +195,12 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(write_result.success)
             self.assertIn("read-only", write_result.error.lower())
             self.assertFalse((workspace / "x.txt").exists())
-            self.executor.shell_executor.run_argv.assert_awaited_once_with(
-                ("git", "log", "--oneline", "-1"),
-                timeout=10,
-                cwd=workspace,
-                max_output_bytes=8 * 1024,
-            )
+            self.executor.shell_executor.run_argv.assert_awaited_once()
+            call = self.executor.shell_executor.run_argv.await_args
+            self.assertEqual(call.args[0], ("git", "log", "--oneline", "-1"))
+            self.assertEqual(call.kwargs["timeout"], 10)
+            self.assertEqual(call.kwargs["cwd"], workspace.resolve())
+            self.assertEqual(call.kwargs["max_output_bytes"], 8 * 1024)
 
     async def test_terminal_output_uses_the_only_active_session_when_name_is_missing(self):
         plugin = MagicMock()
