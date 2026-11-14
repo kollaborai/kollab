@@ -527,3 +527,59 @@ def test_engine_router_load_failure_is_visible_on_startup(tmp_path, monkeypatch)
         assert "ValueError" in entry["error"]
         assert "secret-value" not in entry["error"]
         assert client.get("/plugins/hello/api/anything").status_code == 503
+
+
+def test_plugin_tokens_are_private_stable_and_scoped(tmp_path, monkeypatch):
+    import json
+    import shutil
+    import stat
+    from pathlib import Path
+
+    from kollabor_engine import server
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.delenv("KOLLAB_ENGINE_BYPASS_AUTH", raising=False)
+    monkeypatch.setattr(server, "validate_token", lambda token: token == "full-user-token")
+    source = Path(__file__).resolve().parents[3] / "bundles" / "plugins" / "hello"
+    home = tmp_path / ".kollab"
+    records = {}
+    for plugin_id in ("hello", "other"):
+        root = home / "plugins" / plugin_id
+        shutil.copytree(source, root)
+        manifest_path = root / "kollab-plugin.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest.update({"id": plugin_id, "engine": "python/engine.py:make_router"})
+        manifest_path.write_text(json.dumps(manifest))
+        (root / "python" / "engine.py").write_text('''from fastapi import APIRouter
+
+def make_router(ctx):
+    router = APIRouter()
+    @router.get("/who")
+    def who():
+        return {"id": ctx.id, "has_token": bool(ctx.token)}
+    return router
+''')
+        records[plugin_id] = {"enabled": True, "files_sha256": files_sha256(root), "granted": []}
+    (home / "plugins.json").write_text(json.dumps({"plugins": records, "dev": {}}))
+    with TestClient(create_app()) as client:
+        hello_path = home / "plugin-data" / "hello" / "run" / "token"
+        other_path = home / "plugin-data" / "other" / "run" / "token"
+        hello_token = hello_path.read_text().strip()
+        other_token = other_path.read_text().strip()
+        assert hello_token and other_token and hello_token != other_token
+        assert stat.S_IMODE(hello_path.stat().st_mode) == 0o600
+        own = {"Authorization": f"Bearer {hello_token}"}
+        assert client.get("/plugins/hello/api/who", headers=own).json() == {"id": "hello", "has_token": True}
+        assert client.get("/plugins/hello/settings", headers=own).status_code == 200
+        assert client.get("/plugins/hello/usage", headers=own).status_code == 200
+        assert client.post("/plugins/hello/events", headers=own, json={"topic": "ready", "data": {}}).status_code == 200
+        assert client.get("/plugins/other/api/who", headers=own).status_code == 401
+        assert client.get("/plugins", headers=own).status_code == 401
+        assert client.post("/plugins/hello/enable", headers=own).status_code == 401
+        assert client.post("/plugins/install", headers=own).status_code == 401
+        assert client.get("/plugins", headers={"Authorization": "Bearer full-user-token"}).status_code == 200
+    with TestClient(create_app()):
+        assert hello_path.read_text().strip() == hello_token
+        assert other_path.read_text().strip() == other_token
