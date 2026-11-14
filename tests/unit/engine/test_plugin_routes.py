@@ -5,6 +5,19 @@ from fastapi.testclient import TestClient
 from kollabor_engine.server import create_app
 
 
+@pytest.fixture(autouse=True)
+def no_live_plugin_services(monkeypatch):
+    """Route tests never start real plugin service processes."""
+    import asyncio
+
+    from kollabor_plugins import services
+
+    async def idle_supervisor():
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(services, "supervise_services", idle_supervisor)
+
+
 def test_plugin_list_uses_shared_inventory(tmp_path, monkeypatch):
     from kollabor_plugins import registry
 
@@ -499,7 +512,9 @@ def test_engine_router_load_failure_is_visible_on_startup(tmp_path, monkeypatch)
     manifest = json.loads(manifest_path.read_text())
     manifest["engine"] = "python/engine.py:make_router"
     manifest_path.write_text(json.dumps(manifest))
-    (root / "python" / "engine.py").write_text('def make_router(ctx):\n    raise ValueError("bad router")\n')
+    (root / "python" / "engine.py").write_text(
+        'def make_router(ctx):\n    raise ValueError("bad router secret-value")\n'
+    )
     (home / "plugins.json").write_text(json.dumps({
         "plugins": {"hello": {"enabled": True, "files_sha256": files_sha256(root), "granted": []}}, "dev": {},
     }))
@@ -509,5 +524,6 @@ def test_engine_router_load_failure_is_visible_on_startup(tmp_path, monkeypatch)
     with TestClient(create_app()) as client:
         entry = client.get("/plugins").json()["plugins"][0]
         assert entry["state"] == "error"
-        assert "bad router" in entry["error"]
+        assert "ValueError" in entry["error"]
+        assert "secret-value" not in entry["error"]
         assert client.get("/plugins/hello/api/anything").status_code == 503

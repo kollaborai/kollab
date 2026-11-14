@@ -2,16 +2,25 @@
 
 import asyncio
 import hashlib
+import importlib.abc
+import importlib.machinery
+import inspect
 import json
 import logging
 import os
+import sys
 import threading
 import time
+import types
+import uuid
+from contextvars import ContextVar
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocketException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -125,6 +134,9 @@ def list_plugins(request: Request):
     entries = plugin_entries()
     for entry in entries:
         plugin_id = entry.get("id")
+        error = request.app.state.plugin_dispatcher.errors.get(plugin_id)
+        if error and entry.get("state") == "ok":
+            entry["state"], entry["error"] = "error", error
         for service in entry.get("services", []):
             if isinstance(service, dict) and isinstance(service.get("name"), str):
                 service["heartbeat"] = request.app.state.plugin_events.heartbeat(plugin_id, service["name"])
@@ -210,6 +222,34 @@ def _validate_plugin_event(manifest: dict, topic: str, data: Any) -> None:
         raise OverflowError("Plugin event data is too large")
 
 
+_remote_plugin_request: ContextVar[str | None] = ContextVar("remote_plugin_request", default=None)
+
+
+def _local_guard(endpoint):
+    def check():
+        remote = _remote_plugin_request.get()
+        if remote == "websocket":
+            raise WebSocketException(code=1008, reason="Plugin route is local only")
+        if remote:
+            raise HTTPException(status_code=403, detail="Plugin route is local only")
+
+    if inspect.iscoroutinefunction(endpoint):
+        @wraps(endpoint)
+        async def async_guarded(*args, **kwargs):
+            check()
+            return await endpoint(*args, **kwargs)
+
+        return async_guarded
+
+    @wraps(endpoint)
+    def guarded(*args, **kwargs):
+        check()
+        return endpoint(*args, **kwargs)
+
+    return guarded
+
+
+
 def _engine_context(plugin_id: str, hub: PluginEventHub):
     """Create capabilities only for an enabled, still-approved package."""
     from kollabor_plugins.context import PluginContext
@@ -246,7 +286,7 @@ def _engine_context(plugin_id: str, hub: PluginEventHub):
 
     return PluginContext(
         plugin_id, root, context.data, context.manifest, grants=granted,
-        publish=publish, notify=notify, heartbeat=hub.heartbeat,
+        publish=publish, notify=notify, heartbeat=hub.heartbeat, local_guard=_local_guard,
     )
 
 
@@ -485,3 +525,282 @@ def get_plugin_usage(plugin_id: str):
         logger.warning("Cannot update plugin usage for %s: %s", plugin_id, exc)
         raise HTTPException(status_code=503, detail="Cannot update plugin usage") from exc
     return {"date": today, "total": total, "cap": cap, "remaining": max(0, cap - total)}
+
+
+class _NoBytecodeLoader(importlib.machinery.SourceFileLoader):
+    """Do not mutate approved plugin files when importing vendored Python."""
+
+    def get_code(self, fullname):
+        return self.source_to_code(self.get_data(self.path), self.path)
+
+
+class _VendorFinder(importlib.abc.MetaPathFinder):
+    def __init__(self, vendor: Path, names: set[str]):
+        self.vendor = vendor
+        self.names = names
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".", 1)[0] not in self.names:
+            return None
+        search = path if path is not None else [str(self.vendor)]
+        spec = importlib.machinery.PathFinder.find_spec(fullname, search, target)
+        if spec is None:
+            return None
+        if spec.origin:
+            try:
+                inside = Path(spec.origin).resolve().is_relative_to(self.vendor)
+            except OSError:
+                inside = False
+            if not inside or not isinstance(spec.loader, importlib.machinery.SourceFileLoader):
+                raise ImportError("Vendored modules must be pure Python inside the plugin")
+            spec.loader = _NoBytecodeLoader(fullname, spec.origin)
+        elif spec.submodule_search_locations and any(
+            not Path(location).resolve().is_relative_to(self.vendor)
+            for location in spec.submodule_search_locations
+        ):
+            raise ImportError("Vendored package escapes the plugin")
+        return spec
+
+
+_vendor_guard = threading.RLock()
+_vendor_refs: dict[Path, int] = {}
+
+
+def _acquire_vendor(root: Path):
+    from kollabor_plugins.registry import _prepare_vendor, _vendor_owners
+
+    with _vendor_guard:
+        vendor, names = _prepare_vendor(root)
+        if vendor is None:
+            return None
+        finder = _VendorFinder(vendor, names)
+        for name in names:
+            _vendor_owners[name] = vendor
+        _vendor_refs[vendor] = _vendor_refs.get(vendor, 0) + 1
+        sys.meta_path.insert(0, finder)
+        return vendor, names, finder
+
+
+def _release_vendor(reservation) -> None:
+    from kollabor_plugins.registry import _vendor_owners
+
+    if reservation is None:
+        return
+    vendor, names, finder = reservation
+    with _vendor_guard:
+        if finder in sys.meta_path:
+            sys.meta_path.remove(finder)
+        count = _vendor_refs.get(vendor, 0) - 1
+        if count > 0:
+            _vendor_refs[vendor] = count
+            return
+        _vendor_refs.pop(vendor, None)
+        for name in names:
+            if _vendor_owners.get(name) == vendor:
+                _vendor_owners.pop(name, None)
+        for name in list(sys.modules):
+            if name.split(".", 1)[0] not in names:
+                continue
+            module = sys.modules.get(name)
+            location = getattr(module, "__file__", None)
+            paths = getattr(module, "__path__", ())
+            try:
+                inside = bool(location and Path(location).resolve().is_relative_to(vendor)) or (
+                    not location and bool(paths) and all(Path(path).resolve().is_relative_to(vendor) for path in paths)
+                )
+            except (OSError, TypeError):
+                inside = False
+            if inside:
+                sys.modules.pop(name, None)
+
+
+class _LoadedPlugin:
+    def __init__(self, app, lifecycle, revision, module_name, vendor):
+        self.app = app
+        self.lifecycle = lifecycle
+        self.revision = revision
+        self.module_name = module_name
+        self.vendor = vendor
+        self.active = 0
+
+
+class PluginDispatcher:
+    """A single ASGI mount that resolves approved routers on each request."""
+
+    def __init__(self, hub: PluginEventHub):
+        self.hub = hub
+        self.errors: dict[str, str] = {}
+        self._condition = asyncio.Condition()
+        self._loaded: dict[str, _LoadedPlugin] = {}
+        self._retired: dict[str, list[_LoadedPlugin]] = {}
+        self._closing = False
+
+    async def _close(self, loaded: _LoadedPlugin) -> None:
+        try:
+            await asyncio.wait_for(loaded.lifecycle.__aexit__(None, None, None), timeout=5)
+        except Exception as exc:
+            logger.warning("Plugin engine shutdown failed: %s", type(exc).__name__)
+        finally:
+            sys.modules.pop(loaded.module_name, None)
+            _release_vendor(loaded.vendor)
+
+    async def _retire(self, plugin_id: str) -> None:
+        loaded = self._loaded.pop(plugin_id, None)
+        if loaded is None:
+            return
+        if loaded.active:
+            self._retired.setdefault(plugin_id, []).append(loaded)
+        else:
+            await self._close(loaded)
+
+    async def _load(self, context, revision: str, entrypoint: str) -> _LoadedPlugin:
+        from kollabor_plugins.packages import _SYMBOL, _within
+
+        if not isinstance(entrypoint, str) or entrypoint.count(":") != 1:
+            raise ValueError("Invalid engine entry")
+        filename, symbol = entrypoint.split(":")
+        if not _SYMBOL.fullmatch(symbol):
+            raise ValueError("Invalid engine symbol")
+        path = _within(context.root.resolve(), filename, "engine")
+        if not path.is_file():
+            raise ValueError("Engine entry is not a file")
+        try:
+            vendor = _acquire_vendor(context.root)
+        except ValueError as exc:
+            raise ValueError("Vendored module name clash or invalid vendor") from exc
+        module_name = f"_kollab_plugin_engine_{uuid.uuid4().hex}"
+        try:
+            module = types.ModuleType(module_name)
+            module.__file__ = str(path)
+            module.__package__ = ""
+            sys.modules[module_name] = module
+            exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+            factory = getattr(module, symbol)
+            router = factory(context)
+            if not isinstance(router, APIRouter):
+                raise ValueError("Engine factory must return an APIRouter")
+            subapp = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
+            subapp.include_router(router)
+            lifecycle = subapp.router.lifespan_context(subapp)
+            await lifecycle.__aenter__()
+            return _LoadedPlugin(subapp, lifecycle, revision, module_name, vendor)
+        except BaseException as exc:
+            sys.modules.pop(module_name, None)
+            _release_vendor(vendor)
+            if isinstance(exc, Exception):
+                raise RuntimeError(f"Plugin engine initialization failed ({type(exc).__name__})") from exc
+            raise
+
+    async def _acquire(self, plugin_id: str) -> _LoadedPlugin:
+        from kollabor_plugins.packages import _read_registry, files_sha256
+        from kollabor_plugins.services import redact_log
+
+        async with self._condition:
+            if self._closing:
+                raise HTTPException(status_code=503, detail="Plugin dispatcher is shutting down")
+            if "--no-plugins" in sys.argv[1:]:
+                raise HTTPException(status_code=404, detail="Plugins are disabled")
+            try:
+                context = _engine_context(plugin_id, self.hub)
+                registry = _read_registry(Path.home() / ".kollab" / "plugins.json")
+                if not plugin_id.endswith("@dev") and plugin_id in registry["dev"]:
+                    raise HTTPException(status_code=404, detail="Plugin is shadowed")
+                entrypoint = context.manifest.get("engine")
+                if entrypoint is None:
+                    raise HTTPException(status_code=404, detail="Plugin has no engine entry")
+                if plugin_id.endswith("@dev"):
+                    revision = files_sha256(context.root)
+                else:
+                    revision = registry["plugins"][plugin_id]["files_sha256"]
+            except HTTPException as exc:
+                await self._retire(plugin_id)
+                if exc.status_code in {403, 404}:
+                    self.errors.pop(plugin_id, None)
+                    raise HTTPException(status_code=404, detail="Plugin is unavailable") from exc
+                raise
+            except (OSError, ValueError, KeyError) as exc:
+                await self._retire(plugin_id)
+                raise HTTPException(status_code=409, detail="Plugin approval or files changed") from exc
+            loaded = self._loaded.get(plugin_id)
+            if loaded is not None and loaded.revision != revision:
+                await self._retire(plugin_id)
+                loaded = None
+            while self._retired.get(plugin_id):
+                await self._condition.wait()
+                if self._closing:
+                    raise HTTPException(status_code=503, detail="Plugin dispatcher is shutting down")
+            if loaded is None:
+                try:
+                    loaded = await self._load(context, revision, entrypoint)
+                except Exception as exc:
+                    message = redact_log(str(exc).strip())[:500] or type(exc).__name__
+                    self.errors[plugin_id] = message
+                    logger.warning("Plugin %s engine failed to load: %s", plugin_id, type(exc).__name__)
+                    raise HTTPException(status_code=503, detail="Plugin engine failed to load") from exc
+                self._loaded[plugin_id] = loaded
+            self.errors.pop(plugin_id, None)
+            loaded.active += 1
+            return loaded
+
+    async def _release(self, plugin_id: str, loaded: _LoadedPlugin) -> None:
+        async with self._condition:
+            loaded.active -= 1
+            retired = self._retired.get(plugin_id, [])
+            if loaded.active == 0 and loaded in retired:
+                retired.remove(loaded)
+                await self._close(loaded)
+                if not retired:
+                    self._retired.pop(plugin_id, None)
+                self._condition.notify_all()
+
+    async def warm(self) -> None:
+        """Load enabled routers so startup failures appear in plugin inventory."""
+        from kollabor_plugins.packages import _read_registry
+
+        if "--no-plugins" in sys.argv[1:]:
+            return
+        try:
+            registry = _read_registry(Path.home() / ".kollab" / "plugins.json")
+        except ValueError:
+            logger.warning("Cannot read plugin registry during engine startup")
+            return
+        ids = [
+            plugin_id for plugin_id, record in registry["plugins"].items()
+            if isinstance(record, dict) and record.get("enabled") is True and plugin_id not in registry["dev"]
+        ]
+        ids.extend(f"{plugin_id}@dev" for plugin_id in registry["dev"] if isinstance(plugin_id, str))
+        for plugin_id in ids:
+            try:
+                loaded = await self._acquire(plugin_id)
+                await self._release(plugin_id, loaded)
+            except HTTPException as exc:
+                if exc.status_code not in {404, 503}:
+                    self.errors[plugin_id] = str(exc.detail)
+                    logger.warning("Cannot load plugin %s engine: %s", plugin_id, exc.detail)
+
+    async def shutdown(self) -> None:
+        async with self._condition:
+            self._closing = True
+            for plugin_id in list(self._loaded):
+                await self._retire(plugin_id)
+            self._condition.notify_all()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in {"http", "websocket"}:
+            return
+        plugin_id = scope.get("path_params", {}).get("plugin_id", "")
+        try:
+            loaded = await self._acquire(plugin_id)
+        except HTTPException as exc:
+            if scope["type"] == "websocket":
+                await send({"type": "websocket.close", "code": 1008})
+            else:
+                await JSONResponse({"detail": exc.detail}, status_code=exc.status_code)(scope, receive, send)
+            return
+        remote = any(k.lower() == b"x-kollab-plugin-remote" and v == b"1" for k, v in scope.get("headers", []))
+        token = _remote_plugin_request.set(scope["type"] if remote else None)
+        try:
+            await loaded.app(scope, receive, send)
+        finally:
+            _remote_plugin_request.reset(token)
+            await self._release(plugin_id, loaded)

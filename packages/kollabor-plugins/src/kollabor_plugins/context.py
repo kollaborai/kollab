@@ -90,6 +90,7 @@ class PluginContext:
         publish: Callable | None = None,
         notify: Callable | None = None,
         heartbeat: Callable | None = None,
+        local_guard: Callable | None = None,
     ):
         if not _valid_data_id(plugin_id):
             raise ValueError("Invalid plugin id")
@@ -104,6 +105,7 @@ class PluginContext:
         self.agents = _Agents()
         self._notify = notify
         self._heartbeat = heartbeat
+        self._local_guard = local_guard
 
     def notify(self, text, button=None):
         if self._notify is None:
@@ -121,7 +123,6 @@ class PluginContext:
             raise ValueError("Plugin lock directory cannot be a symlink")
         return locked_file(directory / f"{name}.lock", private=True)
 
-    @staticmethod
-    def local_only(endpoint):
+    def local_only(self, endpoint):
         endpoint.__kollab_local_only__ = True
-        return endpoint
+        return self._local_guard(endpoint) if self._local_guard is not None else endpoint

@@ -207,6 +207,9 @@ async def _engine_lifespan(app: FastAPI):
         from kollabor_plugins.services import supervise_services
 
         supervisor_task = asyncio.create_task(supervise_services(), name="plugin-supervisor")
+        dispatcher = getattr(app.state, "plugin_dispatcher", None)
+        if dispatcher is not None:
+            await dispatcher.warm()
         if getattr(app.state, "warm_model_choices", False):  # set by `serve`, never by a test's app
             warm_task = asyncio.create_task(_warm_model_choices(), name="model-picker-warm")
         phone_link = getattr(app.state, "phone_link", None)
@@ -229,6 +232,12 @@ async def _engine_lifespan(app: FastAPI):
             await acp_discovery.stop_warming()
         except Exception:
             logger.exception("Model picker warm-up shutdown failed")
+        dispatcher = getattr(app.state, "plugin_dispatcher", None)
+        if dispatcher is not None:
+            try:
+                await dispatcher.shutdown()
+            except Exception:
+                logger.exception("Plugin dispatcher shutdown failed")
         phone_link = getattr(app.state, "phone_link", None)
         if phone_link is not None:
             try:
@@ -282,9 +291,10 @@ def create_app(port: Optional[int] = None) -> FastAPI:
         version="0.1.0",
         lifespan=_engine_lifespan,
     )
-    from .routes.plugins import PluginEventHub
+    from .routes.plugins import PluginDispatcher, PluginEventHub
 
     app.state.plugin_events = PluginEventHub()
+    app.state.plugin_dispatcher = PluginDispatcher(app.state.plugin_events)
     _wire_voice(app, port)
     from .phone_link import PhoneLink
 
@@ -395,6 +405,7 @@ def create_app(port: Optional[int] = None) -> FastAPI:
     app.include_router(hub_router)
     app.include_router(phonelink_router)
     app.include_router(plugins_router)
+    app.mount("/plugins/{plugin_id}/api", app.state.plugin_dispatcher)
     from .routes.voice import router as voice_router
 
     app.include_router(voice_router)
