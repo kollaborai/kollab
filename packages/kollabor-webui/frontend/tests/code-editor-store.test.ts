@@ -88,6 +88,17 @@ test("the editor uses the active light palette for its canvas and text", () => {
   expect(palette.colors["editor.foreground"]).toBe("#252525");
 });
 
+test("Monaco active line and gutter colors follow the current theme palette", () => {
+  const light = editorThemeColors(false, { background: "#ffffff", foreground: "#202020" }).colors;
+  const dark = editorThemeColors(true, { background: "#0e0e14", foreground: "#f0f0f5" }).colors;
+
+  expect(light["editor.lineHighlightBackground"]).toMatch(/^#f[0-9a-f]{5}$/i);
+  expect(light["editorLineNumber.foreground"]).toBeTypeOf("string");
+  expect(light["editorLineNumber.activeForeground"]).toBe("#202020");
+  expect(dark["editorLineNumber.foreground"]).not.toBe(light["editorLineNumber.foreground"]);
+  expect(dark["editorLineNumber.activeForeground"]).toBe("#f0f0f5");
+});
+
 test("a narrow editor keeps only the active pane while desktop keeps the split", () => {
   const split = {
     type: "split" as const,
