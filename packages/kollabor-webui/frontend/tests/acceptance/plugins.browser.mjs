@@ -27,7 +27,7 @@ try {
     plugin_id: "fixture-new", manifest: { name: "Fixture New", version: "1.2.3", uses: { tools: ["file_read"], network: ["example.com"] }, services: { worker: {} } },
     changes: { added: ["web/dist/index.js"], modified: [], removed: [], new_grants: ["network:example.com"], new_dependencies: [] } };
   const entry = { id: "fixture", name: "Fixture", kind: "installed", state: "ok", enabled: true, shadowed: false,
-    web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: {
+    web: { entry: "web/dist/index.js", style: "web/dist/index.css", hash: "1" }, contributes: {
       menu: [{ id: "board", label: "Fixture Board", open: { page: "board" } }],
       views: [{ id: "fixture-view" }], pages: [{ id: "board" }], modals: [{ id: "details" }],
       slash: ["fixture"], renderers: [{ tag: "fixture_tag" }],
@@ -46,10 +46,11 @@ try {
       return route.fulfill({ json: { ...preview, status: "complete" } });
     }
     if (url.pathname === "/plugins/broken/web/index.js") return route.fulfill({ status: 500, contentType: "text/plain", body: "broken" });
+    if (url.pathname === "/plugins/fixture/web/index.css") return route.fulfill({ contentType: "text/css", body: '[data-plugin="fixture"] .scope-probe { color: rgb(12, 34, 56); }' });
     if (url.pathname === "/plugins/fixture/web/index.js") return route.fulfill({ contentType: "text/javascript", body:
       `import React from "react"; import { definePlugin } from "@kollab/plugin";
        export default definePlugin(k => {
-         const body = () => React.createElement("p", null, "Fixture page body");
+         const body = () => React.createElement("p", {className:"scope-probe"}, "Fixture page body");
          const second = () => React.createElement("p", null, "Second tab body");
          const modal = () => React.createElement("p", null, "Fixture modal body");
          k.page({id:"board",title:"Fixture Board",tabs:[{id:"first",label:"First",render:body},{id:"second",label:"Second",render:second}]});
@@ -77,6 +78,7 @@ try {
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   assert.ok(inventoryReads > 0, "host must fetch inventory");
   await page.getByTestId("plugin-tag").waitFor({ timeout: 5000 });
+  assert.equal(await page.getByTestId("plugin-tag").locator('xpath=ancestor::*[@data-plugin="fixture"]').count(), 1, "renderer has plugin-specific CSS scope");
   assert.equal(await page.getByTestId("plugin-tag").textContent(), "<b>untrusted</b>");
   assert.equal(await page.getByTestId("plugin-tag").locator("b").count(), 0, "tag content stays untrusted text");
   const input = page.getByRole("textbox", { name: "Message input" });
@@ -87,7 +89,9 @@ try {
   const panel = page.getByRole("complementary", { name: "Session Controls" });
   await panel.waitFor({ timeout: 15000 });
   await panel.getByRole("button", { name: "Fixture View" }).click();
-  await page.getByText("Fixture view body", { exact: true }).waitFor();
+  const viewBody = page.getByText("Fixture view body", { exact: true });
+  await viewBody.waitFor();
+  assert.equal(await viewBody.locator('xpath=ancestor::*[@data-plugin="fixture"]').count(), 1, "view has plugin-specific CSS scope");
   await panel.getByRole("button", { name: "Chat", exact: true }).click();
   await panel.getByRole("button", { name: /Broken Board/ }).click({ timeout: 5000 });
   await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
@@ -97,12 +101,17 @@ try {
   assert.equal(await boardMenu.getByText("4", { exact: true }).getAttribute("title"), "4 items need attention");
   await boardMenu.click();
   await page.getByRole("heading", { name: "Fixture Board" }).waitFor({ timeout: 5000 });
-  await page.getByText("Fixture page body", { exact: true }).waitFor();
+  const pageBody = page.getByText("Fixture page body", { exact: true });
+  await pageBody.waitFor();
+  assert.equal(await pageBody.locator('xpath=ancestor::*[@data-plugin="fixture"]').count(), 1, "page has plugin-specific CSS scope");
+  assert.equal(await pageBody.evaluate(node => getComputedStyle(node).color), "rgb(12, 34, 56)", "plugin stylesheet applies within its scope");
   await page.getByRole("tab", { name: "Second" }).click();
   await page.getByText("Second tab body", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Back to Chat" }).click();
   await page.getByRole("button", { name: "Open details" }).click();
-  await page.getByRole("dialog", { name: "Fixture Details" }).getByText("Fixture modal body").waitFor();
+  const modalBody = page.getByRole("dialog", { name: "Fixture Details" }).getByText("Fixture modal body");
+  await modalBody.waitFor();
+  assert.equal(await modalBody.locator('xpath=ancestor::*[@data-plugin="fixture"]').count(), 1, "modal has plugin-specific CSS scope");
   await page.keyboard.press("Escape");
   await page.getByRole("dialog", { name: "Fixture Details" }).waitFor({ state: "hidden" });
   await page.getByRole("button", { name: "Settings", exact: true }).first().click();
