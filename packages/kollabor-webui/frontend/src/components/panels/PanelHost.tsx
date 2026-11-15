@@ -33,6 +33,10 @@ import { PromptsPage } from "@/components/prompts/PromptsPage";
 import { PromptsApi } from "@/prompts-api";
 import { SessionSettings } from "./SessionSettings";
 import { PanelDialogSurface } from "./PanelDialogSurface";
+import {
+  sessionlessPanelName,
+  sessionlessTabs,
+} from "./panel-model";
 import { PhoneLinkPanel } from "./PhoneLinkPanel";
 import { WizardSteps, wizardValues } from "./WizardSteps";
 import {
@@ -245,8 +249,9 @@ export function PanelHost({
       const mine = epoch.current;
       patchTab(target, (state) => ({ ...state, status: "loading", error: null }));
       const job: Promise<void> = api
-        // No chat open (the sidebar's halted line): Network opens on Halt and Resume.
-        .getPanel(sessionId, sessionId ? PANEL_NAME[target] : "connect-halt")
+        // No chat open: a halted folder opens on Halt and Resume; the
+        // sessionless setup mount serves the tab's own panel (#1114/#1115).
+        .getPanel(sessionId, sessionId ? PANEL_NAME[target] : sessionlessPanelName(target, session.workspace ?? ""))
         .then(
           (panel) => {
             if (mine !== epoch.current) return;
@@ -759,7 +764,7 @@ export function PanelHost({
           aria-label="Settings sections"
           className="mx-4 h-auto w-auto shrink-0 flex-wrap justify-start [scrollbar-width:none] sm:mx-6 md:h-9 md:flex-nowrap md:overflow-x-auto [&::-webkit-scrollbar]:hidden"
         >
-          {SETTINGS_TABS.filter((item) => sessionId || item.id === "network").map((item) => (
+          {SETTINGS_TABS.filter((item) => sessionId || sessionlessTabs(!!session.workspace).includes(item.id)).map((item) => (
             <TabsTrigger
               key={item.id}
               value={item.id}
