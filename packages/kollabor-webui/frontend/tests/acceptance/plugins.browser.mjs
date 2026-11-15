@@ -66,7 +66,13 @@ try {
   await page.getByRole("dialog", { name: "Fixture Details" }).getByText("Fixture modal body").waitFor();
   await page.keyboard.press("Escape");
   await page.getByRole("dialog", { name: "Fixture Details" }).waitFor({ state: "hidden" });
-  console.log("plugin browser acceptance: opt-out, notice, page, tabs and modal passed");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "Session Controls" }).click();
+  const sheet = page.getByRole("dialog", { name: "Session Controls" });
+  await sheet.getByRole("button", { name: /Fixture Board/ }).click();
+  await page.getByRole("heading", { name: "Fixture Board" }).waitFor();
+  await sheet.waitFor({ state: "hidden", timeout: 3000 });
+  console.log("plugin browser acceptance: opt-out, view, menu, page, modal and mobile sheet passed");
 } finally {
   await browser?.close();
   await vite.close();

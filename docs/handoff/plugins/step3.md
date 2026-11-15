@@ -56,6 +56,9 @@
 - Session views/menu: red browser check (test commit `ac9d778d`) timed out waiting for Fixture View. Session Controls now shows plugin views and menu entries; views render in the center with scoped `k` and session, selected views are kept per session, folder-required entries are disabled, and menu badge counts use the SDK hook. Fake-engine browser acceptance passes view and menu navigation; typecheck and 24 focused tests pass under isolated HOME. Badge values, independent session persistence, mobile sheet closing, live count changes, and multi-width behavior still need explicit browser checks.
 
 
+- Mobile sheet red check: the isolated browser acceptance at 390px shows Session Controls remains open after opening a plugin page. Close the sheet when any plugin menu navigates, then rerun.
+
+
 ## Remaining
 
 1. Add explicit late-import removal/replacement and stale awaited-activation tests; then finish item 1: registry, SDK, error boundary, shared React runtime/import map, CSS and integration. The current lifecycle core is not production-wired and cannot load a plugin by itself.
