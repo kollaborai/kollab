@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import ipaddress
 import json
+import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -38,6 +42,26 @@ async def call(app, client_ip, method, url, **kwargs):
         transport=transport, base_url=TEST_ORIGIN
     ) as client:
         return await client.request(method, url, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_frontend_import_map_is_allowed_without_unsafe_inline(monkeypatch, tmp_path):
+    source = Path(__file__).resolve().parents[2] / "packages/kollabor-webui/frontend/index.html"
+    html = source.read_text(encoding="utf-8")
+    match = re.search(r'<script type="importmap">([\s\S]*?)</script>', html)
+    assert match is not None
+    digest = base64.b64encode(hashlib.sha256(match.group(1).encode()).digest()).decode()
+    (tmp_path / "index.html").write_text(html, encoding="utf-8")
+    monkeypatch.setenv("KOLLAB_FRONTEND_DIST", str(tmp_path))
+    app = make_app(monkeypatch)
+    response = await call(app, "127.0.0.1", "GET", "/")
+    policy = response.headers["content-security-policy"]
+    assert "'self'" in policy
+    assert f"'sha256-{digest}'" in policy
+    assert "'unsafe-inline'" not in policy
+    assert "'unsafe-eval'" not in policy
+    assert "*" not in policy
+
 
 
 def test_uvicorn_client_address_is_not_rewritten_by_proxy_headers():

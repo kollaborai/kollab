@@ -76,6 +76,9 @@
 - Tagged renderers: red browser test commit `fdc8ddd4` timed out on a matching tag. Registered tags now render through a plugin error boundary, and the browser fixture verifies `<b>untrusted</b>` stays text. Isolated plugin tests pass 30/30, typecheck and fake-engine browser acceptance pass. Unknown tags retain the native Markdown path; surrounding text in messages containing a claimed tag currently uses the same Markdown primitive but not the host's custom component overrides, so formatting parity and streaming/nesting edge cases still need audit.
 
 
+- CSP red check: `HOME=~/backups/plugins-step3-work/test-home KOLLAB_NO_KEYRING=1 TMPDIR=~/backups/plugins-step3-work python -m pytest --noconftest -q tests/unit/test_webui_remote.py::test_frontend_import_map_is_allowed_without_unsafe_inline -p no:cacheprovider` fails because the actual `script-src 'self'` lacks the exact SHA-256. The first attempt without `--noconftest` could not load shared unit fixtures because the shell's `python` lacks `acp`; the active PEX Python has `acp` but lacks pytest. The scoped test itself needs neither shared fixture nor acp. Resolve the full-suite environment before final gates; do not treat the scoped check as full Python validation.
+
+
 ## Remaining
 
 1. Add explicit late-import removal/replacement and stale awaited-activation tests; then finish item 1: registry, SDK, error boundary, shared React runtime/import map, CSS and integration. The current lifecycle core is not production-wired and cannot load a plugin by itself.
