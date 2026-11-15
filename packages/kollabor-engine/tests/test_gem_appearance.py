@@ -372,6 +372,19 @@ class TestBirths:
         gem_appearance.record_births(["support-lead"], crew=["support-lead"])
         assert gem_appearance.load_appearance()["born"]["support-lead"] == first
 
+    def test_a_hatless_furry_crew_gem_without_contrasting_hair_takes_the_crew_coat(self, appearance_store):
+        appearance_store.parent.mkdir(parents=True)
+        appearance_store.write_text(json.dumps({"born": {"support-lead": {
+            "face": "bean", "hat": "none", "fur": "short", "furColor": [20, 20, 20],
+            "hair": "short", "hairColor": [30, 26, 24],
+        }}}))
+        gem_appearance.record_births(["support-lead"], crew=["support-lead"])
+        first = gem_appearance.load_appearance()["born"]["support-lead"]
+        assert first["face"] == "bean"
+        assert abs(gem_appearance._luma(first["hairColor"]) - gem_appearance._luma(first["furColor"])) >= gem_appearance.CREW_CONTRAST
+        gem_appearance.record_births(["support-lead"], crew=["support-lead"])
+        assert gem_appearance.load_appearance()["born"]["support-lead"] == first
+
     def test_every_bundled_crew_gem_gets_contrasting_hair(self):
         from kollabor_engine.routes.agents import crew_names  # type: ignore[import-not-found]
 
