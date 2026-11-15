@@ -31,6 +31,7 @@ import { SupervisorAlertBanner } from "@/components/SupervisorAlertBanner";
 import type { StreamEvent } from "@/supervisor-alerts";
 import { liveActivity, nextLiveActivity, NO_LIVE_ACTIVITY, useThreadActivity } from "@/components/gems/activity";
 import { Avatar, AvatarImageProvider } from "@/components/agents/Avatar";
+import { GalleryView } from "@/components/media/gallery-view";
 import { MediaImageProvider, MediaViewerProvider } from "@/components/media/media-view";
 import { AgentLibrary } from "@/components/agents/AgentLibrary";
 import { buildLaunchChoices, keepPick } from "@/components/agents/launch-choices";
@@ -381,6 +382,8 @@ function RuntimeShell({
               />
             ) : shown === "trajectory" ? (
               <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
+            ) : shown === "gallery" ? (
+              <GalleryView api={api} sessionId={session.session_id} />
             ) : null}
             {/* Opened once, then kept mounted and hidden, so open files and shells survive a switch to Chat. */}
             {workspace && visited.editor ? (

@@ -1265,6 +1265,20 @@ export class EngineApi {
     return `/media/${encodeURIComponent(ref)}`;
   }
 
+  /** The session's spilled tool outputs (its Gallery artifacts), newest first. */
+  listArtifacts(sessionId: string) {
+    return this.json<{ session_id: string; artifacts: Array<{ ref: string; name: string; bytes: number; modified: string }> }>(
+      `/sessions/${encodeURIComponent(sessionId)}/artifacts`,
+    );
+  }
+
+  /** One spilled tool output's text (capped by the engine). */
+  readArtifact(sessionId: string, ref: string) {
+    return this.json<{ session_id: string; ref: string; truncated: boolean; content: string }>(
+      `/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(ref)}`,
+    );
+  }
+
   getHistoryPage(sessionId: string, options: HistoryPageOptions = {}) {
     const query = new URLSearchParams();
     if (options.limit !== undefined) query.set("limit", String(options.limit));
