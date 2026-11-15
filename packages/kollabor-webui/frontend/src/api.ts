@@ -989,7 +989,7 @@ export class EngineApi {
       return this.request(path, init, false);
     }
     if (!response.ok) {
-      let detail = response.statusText;
+      let detail = response.statusText || `HTTP ${response.status}`;
       let body: unknown;
       try {
         body = await response.json();

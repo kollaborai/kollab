@@ -242,7 +242,7 @@ export class PromptsApi {
   /** Turns a non-2xx response into a PromptsApiError, like EngineApi does. */
   private async check(response: Response): Promise<void> {
     if (response.ok) return;
-    let detail = response.statusText;
+    let detail = response.statusText || `HTTP ${response.status}`;
     try {
       const body = (await response.json()) as { detail?: unknown } | null;
       if (typeof body?.detail === "string" && body.detail) detail = body.detail;
