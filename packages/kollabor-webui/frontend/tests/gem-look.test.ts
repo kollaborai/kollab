@@ -245,3 +245,59 @@ test("the checked birth eyes draw the same faces as the engine", () => {
   const expected = { lapis: "drowsy", ruby: "bean", opal: "drowsy", peridot: "drowsy", sapphire: "smile", garnet: "kawaii", bismuth: "bean" };
   for (const [key, face] of Object.entries(expected)) assert.equal(drawn(key, "face", faces), face);
 });
+
+// The engine's own vocabulary (gem_appearance.py BIRTH_FURS, BIRTH_HAIR_COLORS).
+const CREW_VOCABULARY = {
+  ...BIRTHS,
+  hairs: new Set(["none", "short", "long", "spiky", "mohawk", "buzz", "crop", "fringe", "bob", "page", "mane", "plume", "crest", "quiff", "halo"]),
+  furs: new Set(["none", "short", "shaggy", "velvet", "plush", "long", "flowing"]),
+  birthFurs: ["short", "shaggy", "velvet", "plush", "long", "flowing"],
+  birthHairColors: [
+    [30, 26, 24],
+    [95, 60, 35],
+    [150, 60, 35],
+    [225, 190, 120],
+    [170, 170, 175],
+    [235, 232, 225],
+  ] as [number, number, number][],
+};
+
+test("a crew gem is born with the engine's crew coat and no hat", () => {
+  const look = resolveGemLook({ crew: ["chief-of-staff", "support-lead"] }, "chief-of-staff", CREW_VOCABULARY);
+  // gem_appearance.crew_coat("chief-of-staff"), as the engine draws it.
+  assert.equal(look.bornHat, "none");
+  assert.deepEqual(
+    { fur: look.fur, furColor: look.furColor, hair: look.hair, hairColor: look.hairColor },
+    { fur: "flowing", furColor: [30, 26, 24], hair: "mane", hairColor: [225, 190, 120] },
+  );
+  const other = resolveGemLook({ crew: ["support-lead"] }, "support-lead@/some/folder", CREW_VOCABULARY);
+  assert.equal(other.bornHat, "none");
+  assert.ok(other.fur && other.hair, "a crew gem in another folder is crew too");
+});
+
+test("a crew gem rolled with a hat before the rule wears the crew coat and keeps its eyes", () => {
+  const look = resolveGemLook(
+    { crew: ["support-lead"], born: { "support-lead": { face: "kawaii", hat: "crown" } } },
+    "support-lead",
+    CREW_VOCABULARY,
+  );
+  assert.equal(look.face, "kawaii");
+  assert.equal(look.bornHat, "none");
+  assert.deepEqual(
+    { fur: look.fur, furColor: look.furColor, hair: look.hair, hairColor: look.hairColor },
+    { fur: "long", furColor: [235, 232, 225], hair: "crop", hairColor: [30, 26, 24] },
+  );
+});
+
+test("a pool gem keeps its born hat and coat; the user's picks still win on a crew gem", () => {
+  const pool = resolveGemLook({ crew: ["support-lead"], born: { lapis: { hat: "crown", fur: "short" } } }, "lapis", CREW_VOCABULARY);
+  assert.equal(pool.bornHat, "crown");
+  assert.equal(pool.hair, undefined);
+  const dressed = resolveGemLook(
+    { crew: ["support-lead"], gems: { "support-lead": { hat: "beret", hair: "none" } } },
+    "support-lead",
+    CREW_VOCABULARY,
+  );
+  assert.equal(dressed.hat, "beret");
+  assert.equal(dressed.hair, "none");
+});

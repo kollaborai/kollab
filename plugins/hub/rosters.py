@@ -470,7 +470,7 @@ def persona_context(persona: Persona) -> List[str]:
     if not (persona.prompt or persona.role):
         return []
     head = f"your persona: {persona.display_name or persona.name}"
-    if persona.role:
+    if persona.role and persona.role != persona.display_name:
         head += f" ({persona.role})"
     return [head, *([persona.prompt] if persona.prompt else [])]
 

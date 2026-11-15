@@ -37,13 +37,13 @@ Accuracy, completeness, tone, policy compliance, efficiency.
 
 ## Team
 
-| Hub name | Name | Role | Bundle | Reports to |
-|---|---|---|---|---|
-| `dana` | Dana Whitfield | Support Lead | `default` | human |
-| `kofi` | Kofi Asante | Tier 1 Support Specialist | `default` | dana |
-| `elena` | Elena Rossi | Tier 2 Technical Specialist | `research` | dana |
-| `jun` | Jun Ishikawa | Knowledge Base Writer | `technical-writer` | dana |
-| `farah` | Farah Haddad | Support QA & Insights Analyst | `data-analyst` | dana |
+| Hub name | Role | Bundle | Reports to |
+|---|---|---|---|
+| `support-lead` | Support Lead | `default` | human |
+| `tier-1-support-specialist` | Tier 1 Support Specialist | `default` | support-lead |
+| `tier-2-technical-specialist` | Tier 2 Technical Specialist | `research` | support-lead |
+| `knowledge-base-writer` | Knowledge Base Writer | `technical-writer` | support-lead |
+| `support-qa-insights-analyst` | Support QA & Insights Analyst | `data-analyst` | support-lead |
 
 ## Hand-off outside the team
 

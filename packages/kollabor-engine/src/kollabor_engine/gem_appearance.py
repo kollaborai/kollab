@@ -108,6 +108,25 @@ BIRTH_FUR_COLORS = ("gem",) + BIRTH_HAIR_COLORS
 # gem-look.ts (BORN_FUR_SHARE, BORN_HAIR_SHARE) draws the same shares.
 FUR_SHARE = 0.85
 HAIR_SHARE = 0.1
+# A crew persona (any roster but the gem pool) is always born furry, with hair
+# on top in a shade that stands out from the fur, and never a hat. These hair
+# styles read over fur; gem-look.ts CREW_HAIRS draws from the same list.
+CREW_HAIRS = (
+    "short",
+    "long",
+    "spiky",
+    "mohawk",
+    "crop",
+    "fringe",
+    "bob",
+    "page",
+    "mane",
+    "plume",
+    "crest",
+    "quiff",
+)
+# How far apart (0-255 luma) a crew gem's hair and fur shades must be.
+CREW_CONTRAST = 80
 MAX_AURAS = 8
 # A coat's knob settings: how many, and how far out (the web UI holds each to its knob's range).
 MAX_KNOBS = 16
@@ -339,12 +358,37 @@ def _birth_coat(name: str) -> Dict[str, Any]:
     return {"hair": "none"}
 
 
-def record_births(names: Iterable[str]) -> None:
+def _luma(rgb: Iterable[int]) -> float:
+    red, green, blue = rgb
+    return 0.299 * red + 0.587 * green + 0.114 * blue
+
+
+def crew_coat(name: str) -> Dict[str, Any]:
+    """A crew persona's born coat and hat: fur, contrasting hair, no hat (gem-look.ts ``crewCoat``)."""
+    fur_color = _drawn(name, "crewFurColor", BIRTH_HAIR_COLORS)
+    contrast = [shade for shade in BIRTH_HAIR_COLORS if abs(_luma(shade) - _luma(fur_color)) >= CREW_CONTRAST]
+    return {
+        "hat": "none",
+        "fur": _drawn(name, "fur", BIRTH_FURS),
+        "furColor": list(fur_color),
+        "hair": _drawn(name, "crewHair", CREW_HAIRS),
+        "hairColor": list(_drawn(name, "crewHairColor", contrast)),
+    }
+
+
+def _crew_shaped(look: Dict[str, Any]) -> bool:
+    return look.get("hat") == "none" and look.get("fur", "none") != "none" and look.get("hair", "none") != "none"
+
+
+def record_births(names: Iterable[str], crew: Iterable[str] = ()) -> None:
     """Give each gem in ``names`` without a born look the draw of its name, for good.
 
-    Called with the gems seen alive. A file that exists but cannot be read is
-    left alone for the user to recover.
+    Called with the gems seen alive. A name in ``crew`` (a persona of a roster
+    other than the gem pool) is born with ``crew_coat``; one born before that
+    rule takes it once, keeping its eyes. A file that exists but cannot be read
+    is left alone for the user to recover.
     """
+    crew = set(crew)
     # ponytail: no file lock. The engine does this read-modify-write without
     # yielding, but two engines on one machine writing at once can lose a birth.
     doc = _read()
@@ -359,16 +403,20 @@ def record_births(names: Iterable[str]) -> None:
         born[name] = {
             "face": _drawn(name, "face", BIRTH_FACES),
             "hat": _drawn(name, "hat", BIRTH_HATS),
-            **_birth_coat(name),
+            **(crew_coat(name) if name in crew else _birth_coat(name)),
         }
     # A gem whose coat was never drawn, or drawn bare before fur was made the
     # common birth, draws it once more; a drawn coat sticks for good.
     bare = [
         name
         for name, look in born.items()
-        if look.get("hair", "none") == "none" and "fur" not in look
+        if name not in crew and look.get("hair", "none") == "none" and "fur" not in look
     ]
     wrote = bool(newborn)
+    for name in crew:
+        if name in born and not _crew_shaped(born[name]):
+            born[name].update(crew_coat(name))
+            wrote = True
     for name in bare:
         coat = _birth_coat(name)
         if {**born[name], **coat} != born[name]:

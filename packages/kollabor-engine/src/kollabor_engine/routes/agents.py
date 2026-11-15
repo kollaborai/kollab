@@ -73,6 +73,17 @@ def pool_identities(folder: Optional[str] = None) -> List[Any]:
         return []
 
 
+def crew_names() -> set:
+    """Names of the personas of every roster but the gem pool: they are born as crew gems."""
+    try:
+        from plugins.hub.rosters import DEFAULT_ROSTER, load_library
+
+        rosters = load_library().rosters
+    except Exception:
+        return set()
+    return {persona.name for key, roster in rosters.items() if key != DEFAULT_ROSTER for persona in roster.personas}
+
+
 def persona_in(name: str, folder: str) -> Dict[str, Any]:
     """A name's persona (any roster, a numbered ``lapis-2`` wears ``lapis``) as the UI reads it; {} if none."""
     try:
@@ -232,7 +243,7 @@ async def list_agent_pool(
     # A gem's first time alive is its birth: it gets the random look it keeps.
     alive = [agent["name"] for agent in agents if agent["active"]]
     if alive:
-        record_births(alive)
+        record_births(alive, crew=crew_names())
 
     # Live agents the pool does not name (numbered gems like lapis-2, a persona
     # of another roster) are listed too, so the sidebar shows every agent.
@@ -292,7 +303,7 @@ async def get_gem_appearance() -> Dict[str, Any]:
 
     ``home`` is this engine's folder: a bare gem name is the agent there.
     """
-    return {**load_appearance(), "home": os.path.realpath(os.getcwd())}
+    return {**load_appearance(), "home": os.path.realpath(os.getcwd()), "crew": sorted(crew_names())}
 
 
 @router.put("/appearance")
@@ -302,7 +313,7 @@ async def put_gem_appearance(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]
         stored = save_appearance(body)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Could not save gem appearance: {exc}") from exc
-    return {**stored, "home": os.path.realpath(os.getcwd())}
+    return {**stored, "home": os.path.realpath(os.getcwd()), "crew": sorted(crew_names())}
 
 
 def _headshot_path(key: str) -> Path:

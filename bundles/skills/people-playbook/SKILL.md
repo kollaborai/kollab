@@ -34,13 +34,13 @@ Employment-law questions -> legal team / human.
 
 ## Team
 
-| Hub name | Name | Role | Bundle | Reports to |
-|---|---|---|---|---|
-| `rosa` | Rosa Delgado | Head of People | `default` | human |
-| `ethan` | Ethan Brooks | Recruiter | `default` | rosa |
-| `lila` | Lila Moreno | Talent Sourcer | `research` | ethan |
-| `noah` | Noah Fischer | Onboarding Coordinator | `default` | rosa |
-| `gemma` | Gemma Hughes | People Operations Partner | `technical-writer` | rosa |
+| Hub name | Role | Bundle | Reports to |
+|---|---|---|---|
+| `head-of-people` | Head of People | `default` | human |
+| `recruiter` | Recruiter | `default` | head-of-people |
+| `talent-sourcer` | Talent Sourcer | `research` | recruiter |
+| `onboarding-coordinator` | Onboarding Coordinator | `default` | head-of-people |
+| `people-operations-partner` | People Operations Partner | `technical-writer` | head-of-people |
 
 ## Hand-off outside the team
 
