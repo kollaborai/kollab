@@ -185,4 +185,10 @@ describe("composer restore wiring", () => {
       "orphanImageNotice(restored.tokenCount, restoredImageCount)",
     );
   });
+
+  it("reports retained images when the active session cannot attach them", () => {
+    expect(threadSource).toContain(
+      "orphanImageNotice(restored.tokenCount, attachmentsEnabled ? keptImages.length : 0)",
+    );
+  });
 });
