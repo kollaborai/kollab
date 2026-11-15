@@ -36,6 +36,7 @@ try {
          k.page({id:"board",title:"Fixture Board",tabs:[{id:"first",label:"First",render:body},{id:"second",label:"Second",render:second}]});
          k.menu("board",{count:{path:"/badge",refreshOn:"changed"}});
          k.command({name:"fixture",description:"Run fixture",run:args=>k.toast("Fixture ran: "+args)});
+         k.renderer({tag:"fixture_tag",render:props=>React.createElement("p",{"data-testid":"plugin-tag"},props.tag.content)});
          k.view({id:"fixture-view",label:"Fixture View",needs_folder:true,render:() => React.createElement("p",null,"Fixture view body")});
          k.modal({id:"details",title:"Fixture Details",tabs:[{id:"info",label:"Info",render:modal}]});
          k.notice({text:"Fixture plugin notice",button:{label:"Open board",open:{page:"board"}}});
@@ -44,7 +45,7 @@ try {
     if (url.pathname === "/engine/plugins/events") return route.fulfill({ contentType: "text/event-stream", body: ": open\n\n" });
     if (url.pathname === "/engine/plugins/fixture/api/badge") return route.fulfill({ json: { count: 4, attention: 1 } });
     if (url.pathname === "/engine/sessions") return route.fulfill({ json: { sessions: [{ session_id: "fixture-session", name: "Fixture Session", agent: "coder", identity: "local-coder", profile: "default", workspace: "/fixture", external: false }], network: { device: "test", remote: [] }, offline: [], hidden: [] } });
-    if (url.pathname.endsWith("/history")) return route.fulfill({ json: { history: [], start_index: 0, end_index: 0, has_more_older: false, has_more_newer: false, source: "mirror" } });
+    if (url.pathname.endsWith("/history")) return route.fulfill({ json: { history: [{ role: "assistant", content: "Before <fixture_tag><b>untrusted</b></fixture_tag> after", metadata: {} }], start_index: 0, end_index: 1, has_more_older: false, has_more_newer: false, source: "mirror" } });
     if (url.pathname.startsWith("/api/")) return route.fulfill({ json: { available: false } });
     if (url.pathname.startsWith("/engine/")) return route.fulfill({ json: { sessions: [], profiles: [], agents: [], live: [], bundles: [], identities: [], teams: [], models: [], commands: [], network: {device:"",remote:[]}, offline: [], hidden: [], order: [] } });
     return route.continue();
@@ -55,6 +56,9 @@ try {
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   assert.ok(inventoryReads > 0, "host must fetch inventory");
+  await page.getByTestId("plugin-tag").waitFor({ timeout: 5000 });
+  assert.equal(await page.getByTestId("plugin-tag").textContent(), "<b>untrusted</b>");
+  assert.equal(await page.getByTestId("plugin-tag").locator("b").count(), 0, "tag content stays untrusted text");
   const input = page.getByRole("textbox", { name: "Message input" });
   await input.fill("/fixture test arguments");
   await page.getByRole("button", { name: "Send message", exact: true }).click();

@@ -73,6 +73,9 @@
 - Tagged-text parser: red test commit `7338ff97` failed because the splitter did not exist. `splitPluginTags` now handles tested registered/complete tags, nested blocks, and preserves unknown, incomplete, escaped and code-fenced text; isolated 3/3 parser tests and typecheck pass. Assistant Markdown is not yet wired; browser streaming, more Markdown edge cases and HTML-safety still need verification.
 
 
+- Tagged renderer browser red check: fake-engine history contains `<fixture_tag><b>untrusted</b></fixture_tag>` and a matching plugin renderer. The isolated browser test times out waiting for the renderer; it also asserts that payload stays text, not a live `<b>` element. Wire registered tags into assistant Markdown without weakening the native fallback.
+
+
 ## Remaining
 
 1. Add explicit late-import removal/replacement and stale awaited-activation tests; then finish item 1: registry, SDK, error boundary, shared React runtime/import map, CSS and integration. The current lifecycle core is not production-wired and cannot load a plugin by itself.
