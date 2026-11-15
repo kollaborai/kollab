@@ -92,6 +92,24 @@ describe("plugin host lifecycle", () => {
     host.close();
   });
 
+  it("forgets a render failure when disabled and reports a later load failure correctly", async () => {
+    const importer = vi.fn()
+      .mockResolvedValueOnce({ default: () => {} })
+      .mockRejectedValueOnce(new Error("new load failure"));
+    const { host, setInventory } = setup({ importer });
+    await host.start();
+    host.reportRenderError("hello", new Error("render failure"));
+    expect(host.getSnapshot().renderFailed).toContain("hello");
+    setInventory([{ ...entry("hello"), enabled: false }]);
+    await host.refresh();
+    expect(host.getSnapshot().renderFailed).not.toContain("hello");
+    setInventory([entry("hello")]);
+    await host.refresh();
+    expect(host.getSnapshot().errors.hello).toBe("new load failure");
+    expect(host.getSnapshot().renderFailed).not.toContain("hello");
+    host.close();
+  });
+
   it("retains a load error while the plugin is stopping", async () => {
     const importer = vi.fn(async () => { throw new Error("bad module"); });
     const { host, setInventory } = setup({ importer });
