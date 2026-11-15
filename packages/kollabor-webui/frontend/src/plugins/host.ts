@@ -161,7 +161,7 @@ export class PluginHost {
       this.entries = response.plugins as PluginEntry[];
       this.inventoryError = null;
       const included = this.entries.filter(entry => !this.skipped.has(entry.id));
-      const desired = new Set(included.filter(entry => entry.enabled && !entry.shadowed && entry.state === "ok" && entry.web).map(entry => entry.id));
+      const desired = new Set(included.filter(entry => entry.enabled && !entry.shadowed && (entry.state === "ok" || entry.state === "stopping") && entry.web).map(entry => entry.id));
       this.errors = Object.fromEntries(Object.entries(this.errors).filter(([id]) => desired.has(id)));
       this.loading = false;
       this.publish();
