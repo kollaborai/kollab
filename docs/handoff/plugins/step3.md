@@ -101,6 +101,8 @@
 
 - Failure classification: red test `4619a3f7` and fix `365d0ca4` clear stale render-failure state when a plugin leaves eligible inventory and when a new load fails. Isolated plugin Vitest passed 33/33 (`failure-kind-green.log`); typecheck passed (`failure-kind-typecheck.log`). Next exercise Retry and Turn Off through the browser and audit failure states.
 
+- Skipped-plugin recovery notice now displays the inventory name instead of the internal ID (generic fallback before inventory arrives): red test `ca0a172b`, fix `279f0aaf`. Isolated plugin Vitest passed 33/33 (`recovery-name-green.log`), typecheck passed (`recovery-name-typecheck.log`). Next exercise Retry and Turn Off through the browser.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
