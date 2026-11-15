@@ -32,7 +32,7 @@ import type { StreamEvent } from "@/supervisor-alerts";
 import { liveActivity, nextLiveActivity, NO_LIVE_ACTIVITY, useThreadActivity } from "@/components/gems/activity";
 import { Avatar, AvatarImageProvider } from "@/components/agents/Avatar";
 import { GalleryView } from "@/components/media/gallery-view";
-import { MediaImageProvider, MediaViewerProvider } from "@/components/media/media-view";
+import { MediaImageProvider, MediaSessionProvider, MediaViewerProvider } from "@/components/media/media-view";
 import { AgentLibrary } from "@/components/agents/AgentLibrary";
 import { buildLaunchChoices, keepPick } from "@/components/agents/launch-choices";
 import { GemAppearanceProvider } from "@/components/gems/gem-appearance";
@@ -321,6 +321,7 @@ function RuntimeShell({
   }, [session.session_id]);
 
   return (
+    <MediaSessionProvider api={api} sessionId={session.session_id}>
     <>
       <ComposerKeeper sessionId={session.session_id} />
       {/* Below the shared sidebar breakpoint the sidebar and the session panel are sheets. */}
@@ -432,6 +433,7 @@ function RuntimeShell({
         />
       </div>
     </>
+    </MediaSessionProvider>
   );
 }
 
