@@ -69,6 +69,50 @@ def test_reputation_saves_keep_updates_from_stale_snapshots(tmp_path):
     assert persisted["beta"].tasks_completed == 1
 
 
+def test_reputation_rejects_update_without_snapshot_baseline(tmp_path):
+    storage = DNSStorage(tmp_path)
+    initial = ReputationScore(designation="alpha")
+    storage.save_reputation({"alpha": initial})
+    first_snapshot = storage.load_reputation()
+    stale_snapshot = storage.load_reputation()
+
+    first_snapshot["alpha"].tasks_completed = 1
+    storage.save_reputation(
+        first_snapshot, base_scores={"alpha": initial}
+    )
+    stale_snapshot["alpha"].tasks_failed = 1
+
+    with pytest.raises(ValueError, match="base_scores"):
+        storage.save_reputation(stale_snapshot)
+
+    persisted = storage.load_reputation()["alpha"]
+    assert (persisted.tasks_completed, persisted.tasks_failed) == (1, 0)
+
+
+def test_capability_update_requires_snapshot_baseline(tmp_path):
+    storage = DNSStorage(tmp_path)
+    initial_entry = {
+        "designation": "alpha",
+        "capability": {"name": "review", "confidence": 0.5, "version": "1"},
+    }
+    storage.save_capability_index({"review": [initial_entry]})
+    first_snapshot = storage.load_capability_index()
+    stale_snapshot = storage.load_capability_index()
+
+    first_snapshot["review"][0]["capability"]["confidence"] = 0.9
+    storage.save_capability_index(
+        first_snapshot,
+        base_entries={("review", "alpha"): initial_entry},
+    )
+    stale_snapshot["review"][0]["capability"]["version"] = "2"
+
+    with pytest.raises(ValueError, match="base_entries"):
+        storage.save_capability_index(stale_snapshot)
+
+    persisted = storage.load_capability_index()["review"][0]["capability"]
+    assert (persisted["confidence"], persisted["version"]) == (0.9, "1")
+
+
 def test_concurrent_registry_merges_keep_both_updates(tmp_path, monkeypatch):
     stores = [DNSStorage(tmp_path), DNSStorage(tmp_path)]
     barrier = threading.Barrier(2)
