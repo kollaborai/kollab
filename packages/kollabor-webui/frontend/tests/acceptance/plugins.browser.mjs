@@ -39,7 +39,7 @@ try {
   const helloRoot = resolve("../../../bundles/plugins/hello");
   const helloManifest = JSON.parse(readFileSync(resolve(helloRoot, "kollab-plugin.json"), "utf8"));
   const hello = { ...helloManifest, kind: "installed", state: "ok", enabled: true, shadowed: false,
-    web: { ...helloManifest.web, hash: "hello" } };
+    settings: [], services: [], web: { ...helloManifest.web, hash: "hello" } };
   const crasher = { id: "crasher", name: "Crash Test", kind: "installed", state: "ok", enabled: true, shadowed: false,
     web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: { views: [{ id: "crash-view" }] } };
   const broken = { id: "broken", name: "Broken", kind: "installed", state: "ok", enabled: true, shadowed: false,

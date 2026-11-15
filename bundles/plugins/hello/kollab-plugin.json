@@ -16,5 +16,10 @@
     }
   },
   "web": {"entry": "web/dist/index.js", "style": "web/dist/index.css"},
+  "contributes": {
+    "views": [{"id": "hello-view"}],
+    "menu": [{"id": "hello-page", "label": "Hello Page", "icon": "box", "open": {"page": "hello-page"}}],
+    "pages": [{"id": "hello-page"}]
+  },
   "uses": ["run:python3"]
 }

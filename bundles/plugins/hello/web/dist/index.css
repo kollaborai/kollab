@@ -1,1 +1,6 @@
-/* Step-one static fixture; web UI support is delivered in step three. */
+/* Scope plugin styles so they do not change the rest of kollab. */
+[data-plugin="hello"] .hello-example {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem;
+}
