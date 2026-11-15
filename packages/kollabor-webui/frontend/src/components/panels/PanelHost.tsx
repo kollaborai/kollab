@@ -33,6 +33,8 @@ import { PromptsPage } from "@/components/prompts/PromptsPage";
 import { PromptsApi } from "@/prompts-api";
 import { SessionSettings } from "./SessionSettings";
 import { PanelDialogSurface } from "./PanelDialogSurface";
+import { usePluginHost } from "@/plugins/components";
+import { PluginsSettings } from "@/plugins/settings";
 import { PhoneLinkPanel } from "./PhoneLinkPanel";
 import { WizardSteps, wizardValues } from "./WizardSteps";
 import {
@@ -179,6 +181,7 @@ export function PanelHost({
   onChanged,
   onSessionUpdated,
   onManageProfiles,
+  canManagePlugins = true,
 }: {
   api: EngineApi;
   session: Session;
@@ -195,7 +198,9 @@ export function PanelHost({
   onSessionUpdated: (session: Session) => void;
   /** Opens the profile editor, offered on the Loadouts tab. */
   onManageProfiles?: () => void;
+  canManagePlugins?: boolean;
 }) {
+  const pluginHost = usePluginHost();
   const isMobile = useIsMobile();
   const sessionId = session.session_id;
   // the session-less halt panels (SESSIONLESS_PANELS) ask about this chat's folder
@@ -281,6 +286,7 @@ export function PanelHost({
       tab !== "session" &&
       tab !== "prompts" &&
       tab !== "phonelink" &&
+      tab !== "plugins" &&
       tabs[tab].status === "idle"
     ) {
       void loadRoot(tab);
@@ -488,14 +494,14 @@ export function PanelHost({
     onTabChange(next as SettingsTab);
   };
 
-  const state = tab === "session" || tab === "prompts" || tab === "phonelink" ? null : tabs[tab];
+  const state = tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "plugins" ? null : tabs[tab];
   const top = state?.views[state.views.length - 1];
   const activeTab =
     SETTINGS_TABS.find((item) => item.id === tab) ?? SETTINGS_TABS[0];
   const message = top?.message ?? null;
 
   const refresh = async () => {
-    if (tab === "session" || tab === "prompts" || tab === "phonelink") return;
+    if (tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "plugins") return;
     if (tab === "network" && top?.panel.panel === "connect-knocks") {
       const mine = epoch.current;
       setBusy(true);
@@ -522,7 +528,7 @@ export function PanelHost({
     patchTab(tab, () => IDLE);
   };
   const back = () => {
-    if (tab === "session" || tab === "prompts" || tab === "phonelink") return;
+    if (tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "plugins") return;
     setReveal(null);
     patchTab(tab, (current) => ({
       ...current,
@@ -551,7 +557,7 @@ export function PanelHost({
   };
 
   const panelBody = () => {
-    if (!state || tab === "session" || tab === "prompts" || tab === "phonelink") return null;
+    if (!state || tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "plugins") return null;
     if (state.status === "error") {
       return (
         <div className="flex flex-col items-start gap-3 px-4 py-4 sm:px-6">
@@ -759,7 +765,7 @@ export function PanelHost({
           aria-label="Settings sections"
           className="mx-4 h-auto w-auto shrink-0 flex-wrap justify-start [scrollbar-width:none] sm:mx-6 md:h-9 md:flex-nowrap md:overflow-x-auto [&::-webkit-scrollbar]:hidden"
         >
-          {SETTINGS_TABS.filter((item) => sessionId || item.id === "network").map((item) => (
+          {SETTINGS_TABS.filter((item) => sessionId || item.id === "network" || item.id === "plugins").map((item) => (
             <TabsTrigger
               key={item.id}
               value={item.id}
@@ -803,7 +809,12 @@ export function PanelHost({
               <PhoneLinkPanel api={api} onOpenNetwork={() => changeTab("network")} />
             </div>
           ) : null}
-          {tab !== "session" && tab !== "prompts" && tab !== "phonelink" ? (
+          {tab === "plugins" && open && pluginHost ? (
+            <div role="tabpanel" aria-label="Plugins" className="flex min-h-0 w-full flex-1 flex-col">
+              <PluginsSettings host={pluginHost} api={api} session={sessionId ? session : undefined} canManage={canManagePlugins} />
+            </div>
+          ) : null}
+          {tab !== "session" && tab !== "prompts" && tab !== "phonelink" && tab !== "plugins" ? (
             <div
               role="tabpanel"
               aria-label={activeTab.label}

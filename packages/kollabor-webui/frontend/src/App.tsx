@@ -1946,7 +1946,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             await loadSessions();
           }}
         />
-        {(activeSession && !activeSession.halted) || (settingsOpen && api.haltFolder) ? (
+        {(activeSession && !activeSession.halted) || settingsOpen ? (
           <PanelHost
             key={activeSession && !activeSession.halted ? activeSession.session_id : "halt"}
             api={api}
@@ -1962,6 +1962,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             onChanged={() => void loadSessions()}
             onSessionUpdated={handleSessionUpdated}
             onManageProfiles={() => setProfilesOpen(true)}
+            canManagePlugins={!contained && ["localhost", "127.0.0.1", "::1", "[::1]"].includes(window.location.hostname)}
           />
         ) : null}
         {learnRoute ? <LearnDialog route={learnRoute} onNavigate={navigateToLearn} onExit={returnToChat} /> : null}

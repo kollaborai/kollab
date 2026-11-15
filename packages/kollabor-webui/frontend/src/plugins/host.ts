@@ -7,6 +7,8 @@ export interface PluginEntry extends WebPluginEntry {
   name: string;
   kind: "built-in" | "installed" | "dev";
   source?: string | null;
+  read_only?: boolean;
+  required?: boolean;
   version?: string | null;
   commit?: string | null;
   error?: string | null;
