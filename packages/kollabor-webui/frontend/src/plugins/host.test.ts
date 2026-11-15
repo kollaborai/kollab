@@ -77,6 +77,21 @@ describe("plugin host lifecycle", () => {
     host.close();
   });
 
+  it("isolates a render failure and retries that plugin", async () => {
+    const { host, importer } = setup();
+    await host.start();
+    expect(host.getContext("hello")).toBeDefined();
+    host.reportRenderError("hello", new Error("render broke"));
+    expect(host.getSnapshot().errors.hello).toContain("render broke");
+    expect(host.getSnapshot().registry.plugins).toEqual([]);
+    expect(host.getContext("hello")).toBeUndefined();
+    await host.retry("hello");
+    expect(importer).toHaveBeenCalledTimes(2);
+    expect(host.getSnapshot().errors.hello).toBeUndefined();
+    expect(host.getSnapshot().registry.plugins[0].id).toBe("hello");
+    host.close();
+  });
+
   it("keeps an error visible when a plugin cannot load", async () => {
     const { host } = setup({ importer: async () => { throw new Error("bad module"); } });
     await host.start();

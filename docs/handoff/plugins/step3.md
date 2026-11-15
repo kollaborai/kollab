@@ -44,6 +44,9 @@
 - Design-system API: red check (test commit `7ea7595b`) failed because the `k.ui` map did not exist. It now exposes typed host primitives, using NoticeBar for Alert and a semantic overflow-contained Table. Isolated `vitest run src/plugins` passes 23/23 and typecheck passes. The host still needs to pass `pluginUI`, and a published plugin declaration/template must carry usable UI types.
 
 
+- Render isolation red check: host test fails because `getContext` and `reportRenderError` are missing. The host must remove only the failing plugin's resources/contributions and permit retry; verify before mounting the error boundary.
+
+
 ## Remaining
 
 1. Add explicit late-import removal/replacement and stale awaited-activation tests; then finish item 1: registry, SDK, error boundary, shared React runtime/import map, CSS and integration. The current lifecycle core is not production-wired and cannot load a plugin by itself.
