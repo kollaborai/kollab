@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from kollabor_ai.model_registry import (
+    get_model_registry,
     list_models_for_provider,
     resolve_context_window,
     resolve_default_model,
@@ -99,3 +100,41 @@ def test_surfaces_without_own_entries_resolve_through_openai():
         assert {
             name for name, _ in list_models_for_provider(surface)
         } == openai_models, surface
+
+
+def test_vendor_prefixed_model_strings_resolve_the_underlying_entry():
+    # OpenRouter (and similar aggregators) hand out "vendor/model" strings and
+    # free-tier suffixes. The catalog stores the underlying model names, so a
+    # prefixed string that matches nothing must fall back to the stripped
+    # name instead of silently degrading to provider defaults.
+    assert resolve_context_window("openai/gpt-5.6-terra") == 1050000
+    assert supports_vision("openai/gpt-5.6-luna", "openrouter") is True
+    assert supports_vision("anthropic/claude-opus-5", "openrouter") is True
+    assert resolve_context_window("zai/glm-5.2") is not None
+
+    # Free/nitro style suffixes strip too.
+    assert supports_vision("openai/gpt-5.6-luna:free", "openrouter") is True
+
+    # Native-provider scoping is untouched: no prefix, same answer as before.
+    assert supports_vision("gpt-5.6-luna", "custom") is False
+    assert supports_vision("gpt-5.6-luna", "openai") is True
+
+    # A prefixed string whose vendor-stripped name is unknown stays unsupported.
+    assert supports_vision("openrouter/no-such-model", "openrouter") is False
+
+
+def test_exact_entry_silence_blocks_prefix_inheritance():
+    """A catalog entry whose name matches exactly owns its field's silence.
+
+    The refreshed catalog adds short-generation entries (models.dev ships
+    ``gpt-5`` with supports_sampling=false). Longest-prefix inheritance must
+    not leak that into a newer generation whose own entry omits the field:
+    ``gpt-5.6`` accepts sampling per its curated entry's silence.
+    """
+    registry = get_model_registry().get("models", {})
+    assert "gpt-5" in registry and registry["gpt-5"].get("supports_sampling") is False
+    assert registry["gpt-5.6"].get("supports_sampling") is None
+    assert supports_sampling("gpt-5.6") is True
+    assert supports_sampling("gpt-5") is False
+    # Prefix inheritance still applies when no exact entry exists.
+    assert resolve_context_window("gpt-5.6-terra-2026-07-09") == 1050000

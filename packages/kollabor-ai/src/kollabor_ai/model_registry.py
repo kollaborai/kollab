@@ -82,21 +82,81 @@ def get_model_registry() -> Dict[str, Any]:
     return _REGISTRY
 
 
+# Aggregator surfaces hand out "vendor/model" (and "vendor/model:tag")
+# strings. The vendor segment tells us the underlying model's family, and
+# tags like ":free" are billing variants, so both strip before lookup.
+_KNOWN_VENDORS = frozenset(
+    {
+        "openai",
+        "anthropic",
+        "google",
+        "gemini",
+        "zai",
+        "zhipuai",
+        "xai",
+        "deepseek",
+        "qwen",
+        "mistralai",
+        "meta-llama",
+        "moonshotai",
+        "amazon",
+        "microsoft",
+        "inclusionai",
+        "minimax",
+    }
+)
+
+
+def _lookup_candidates(model: str, provider: Optional[str] = None) -> List[str]:
+    """Candidate forms of a model string, most specific first.
+
+    The full string always tries first. Aggregator-prefixed strings
+    (``vendor/model`` where vendor is known, or the provider surface is
+    openrouter) also try the stripped name and the suffix-stripped name, so
+    ``openai/gpt-5.6-luna:free`` resolves ``gpt-5.6-luna``.
+    """
+    model_l = (model or "").lower().strip()
+    if not model_l:
+        return []
+    candidates = [model_l]
+    if "/" in model_l:
+        vendor, _, rest = model_l.partition("/")
+        vendor = vendor.strip()
+        rest = rest.strip()
+        if rest and (provider == "openrouter" or vendor in _KNOWN_VENDORS):
+            if ":" in rest:
+                candidates.append(rest.rsplit(":", 1)[0])
+            candidates.append(rest)
+    if ":" in candidates[0] and "/" not in model_l:
+        # Bare ":free"-style suffix without a vendor segment.
+        stripped = model_l.rsplit(":", 1)[0]
+        if stripped:
+            candidates.append(stripped)
+    return candidates
+
+
 def _best_match(model: str, field: str) -> Optional[Any]:
     """Longest-prefix registry lookup for a single field.
 
     ``gpt-5.6-terra-2026-07-09`` matches the ``gpt-5.6-terra`` entry rather
-    than ``gpt-5.6``, because the longest matching entry name wins. Entries
-    missing the field are skipped, so a specific entry never shadows a more
-    general one that actually carries the value.
+    than ``gpt-5.6``, because the longest matching entry name wins. An exact
+    catalog entry stops the search: when the model string names a real entry
+    that omits the field, its silence is authoritative (the default applies)
+    and shorter-generation prefixes never leak their values in (a new
+    ``gpt-5`` entry must not turn ``gpt-5.6`` into a no-sampling model).
     """
     model_l = (model or "").lower()
     if not model_l:
         return None
 
+    registry_models = get_model_registry().get("models", {})
+    exact = registry_models.get(model_l)
+    if isinstance(exact, dict):
+        return exact.get(field)
+
     best: Optional[Any] = None
     best_len = 0
-    for name, info in get_model_registry().get("models", {}).items():
+    for name, info in registry_models.items():
         if not model_l.startswith(name.lower()) or len(name) <= best_len:
             continue
         value = info.get(field)
@@ -106,6 +166,19 @@ def _best_match(model: str, field: str) -> Optional[Any]:
     return best
 
 
+def _lookup_field(model: str, field: str) -> Optional[Any]:
+    """Resolve a field for a model string, aggregator prefixes included.
+
+    Tries :func:`_lookup_candidates` in order and returns the first hit, so
+    an exact catalog id always wins over its stripped fallback form.
+    """
+    for candidate in _lookup_candidates(model):
+        best = _best_match(candidate, field)
+        if best is not None:
+            return best
+    return None
+
+
 def resolve_context_window(model: str, provider: Optional[str] = None) -> Optional[int]:
     """Resolve a model's context window.
 
@@ -113,7 +186,7 @@ def resolve_context_window(model: str, provider: Optional[str] = None) -> Option
     named ``glm-4.7``), then the provider default. ``None`` if neither resolves
     — callers fall back to the config default.
     """
-    window = _best_match(model, "context_window")
+    window = _lookup_field(model, "context_window")
     if window:
         return int(window)
 
@@ -144,12 +217,12 @@ def supports_sampling(model: str) -> bool:
     ``supports_sampling: false``; anything unmarked is assumed to accept them,
     so an unknown model keeps the old behavior.
     """
-    return _best_match(model, "supports_sampling") is not False
+    return _lookup_field(model, "supports_sampling") is not False
 
 
 def supports_thinking(model: str) -> bool:
     """Whether a model reasons, so it takes an effort level. Unmarked models are assumed to."""
-    return _best_match(model, "supports_thinking") is not False
+    return _lookup_field(model, "supports_thinking") is not False
 
 
 # What every effort API takes, for a model the registry gives no levels for.
@@ -165,7 +238,7 @@ def effort_levels(model: str) -> Optional[List[str]]:
     """
     if not supports_thinking(model):
         return []
-    levels = _best_match(model, "effort_levels")
+    levels = _lookup_field(model, "effort_levels")
     return [str(level) for level in levels] if isinstance(levels, list) else None
 
 
@@ -176,23 +249,24 @@ def thinking_default(model: str) -> Optional[str]:
     text (``display: "omitted"``) unless a request asks for the summary.
     Unmarked models (thinking off by default, or not Claude) get nothing.
     """
-    value = _best_match(model, "thinking_default")
+    value = _lookup_field(model, "thinking_default")
     return value if isinstance(value, str) else None
 
 
-def supports_vision(model: str, provider: Optional[str] = None) -> bool:
-    """Whether the catalog explicitly allows image input for a model.
-
-    Unknown models are treated as unsupported so a pasted image is never sent
-    to an endpoint that has not declared a vision contract. Provider surfaces
-    that serve OpenAI models (Azure and the Responses API) use the OpenAI
-    catalog through :func:`registry_provider_for`.
-    """
+def _vision_match(model: str, provider_l: Optional[str]) -> Optional[bool]:
+    """Longest-prefix supports_vision lookup, optionally provider-scoped."""
     model_l = (model or "").lower()
-    provider_l = registry_provider_for(provider or "") if provider else None
+    registry_models = get_model_registry().get("models", {})
+    exact = registry_models.get(model_l)
+    if isinstance(exact, dict) and not (
+        provider_l and str(exact.get("provider") or "").lower() != provider_l
+    ):
+        # Exact entry: its answer (bool or silent default) is final.
+        value = exact.get("supports_vision")
+        return value if isinstance(value, bool) else None
     best_len = 0
     result: Optional[bool] = None
-    for name, info in get_model_registry().get("models", {}).items():
+    for name, info in registry_models.items():
         if not isinstance(info, dict):
             continue
         if provider_l and str(info.get("provider") or "").lower() != provider_l:
@@ -202,7 +276,36 @@ def supports_vision(model: str, provider: Optional[str] = None) -> bool:
             if isinstance(value, bool):
                 best_len = len(name)
                 result = value
-    return result is True
+    return result
+
+
+def supports_vision(model: str, provider: Optional[str] = None) -> bool:
+    """Whether the catalog explicitly allows image input for a model.
+
+    Unknown models are treated as unsupported so a pasted image is never sent
+    to an endpoint that has not declared a vision contract. Provider surfaces
+    that serve OpenAI models (Azure and the Responses API) use the OpenAI
+    catalog through :func:`registry_provider_for`. Aggregator model strings
+    (``openrouter`` and known ``vendor/model`` prefixes) fall back to the
+    stripped underlying entry, whose vendor names the real provider.
+    """
+    provider_l = registry_provider_for(provider or "") if provider else None
+    candidates = _lookup_candidates(model, provider.lower() if provider else None)
+    if not candidates:
+        return False
+    result = _vision_match(candidates[0], provider_l)
+    if result is not None or len(candidates) == 1:
+        return result is True
+    # Stripped forms first stay provider-scoped, then the vendor segment
+    # itself picks the underlying provider's entry.
+    for candidate in candidates[1:]:
+        scoped = _vision_match(candidate, provider_l)
+        if scoped is not None:
+            return scoped is True
+        unscoped = _vision_match(candidate, None)
+        if unscoped is not None:
+            return unscoped is True
+    return False
 
 
 def resolve_default_model(provider: str) -> Optional[str]:
