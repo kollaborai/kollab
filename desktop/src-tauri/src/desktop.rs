@@ -259,7 +259,7 @@ fn watch_runtime(app: AppHandle) {
             if let Some(win) = app.get_webview_window("main") {
                 show_status(&win, "error", "Kollab stopped answering. Choose Retry to start it again.", "");
                 error_shown = true;
-                }
+            }
         }
     }
 }
