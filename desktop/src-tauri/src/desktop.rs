@@ -177,11 +177,15 @@ const DOWN_LOOKS: u32 = 3;
 const RESTART_LIMIT: usize = 3;
 const RESTART_WINDOW: Duration = Duration::from_secs(600);
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 enum Watched {
     Nothing,
     Restart,
     GiveUp,
+}
+
+fn should_start_boot(watched: Watched) -> bool {
+    matches!(watched, Watched::Restart)
 }
 
 /// When a web UI that was answering has gone away. Only a web UI seen up counts:
@@ -228,13 +232,13 @@ fn watch_runtime(app: AppHandle) {
     let mut error_shown = false;
     loop {
         std::thread::sleep(WATCH_EVERY);
-        let (owned, came_up) = {
+        let came_up = {
             let state = app.state::<Spawned>();
             let mut runtime = state.0.lock().unwrap();
             if runtime.closing || runtime.quit_prompt.is_some() || runtime.operation.is_some() {
                 continue; // booting, retrying or quitting: those own the window
             }
-            (runtime.owned.is_some(), runtime.take_up())
+            runtime.take_up()
         };
         if came_up {
             watch.observe(true, Instant::now());
@@ -246,19 +250,16 @@ fn watch_runtime(app: AppHandle) {
                 let _ = win.navigate(url.clone());
             }
         }
-        match watch.observe(up, Instant::now()) {
-            Watched::Nothing => {}
-            Watched::Restart if owned => {
-                eprintln!("kollab-desktop: the web UI stopped answering; restarting the runtime");
-                start_boot(&app, true);
-            }
-            _ => {
-                eprintln!("kollab-desktop: the web UI stopped answering; showing the error page");
-                if let Some(win) = app.get_webview_window("main") {
-                    show_status(&win, "error", "Kollab stopped answering. Choose Retry to start it again.", "");
-                    error_shown = true;
+        let watched = watch.observe(up, Instant::now());
+        if should_start_boot(watched) {
+            eprintln!("kollab-desktop: the web UI stopped answering; restarting the runtime");
+            start_boot(&app, true);
+        } else if watched == Watched::GiveUp {
+            eprintln!("kollab-desktop: the web UI stopped answering; showing the error page");
+            if let Some(win) = app.get_webview_window("main") {
+                show_status(&win, "error", "Kollab stopped answering. Choose Retry to start it again.", "");
+                error_shown = true;
                 }
-            }
         }
     }
 }
