@@ -17,6 +17,12 @@
 - Registry: `PluginRegistry.stage(id)` accumulates contribution drafts; `commit` publishes a cached snapshot and `remove` withdraws a plugin atomically. Built-in/first-plugin command collisions preserve the winner and expose the loser. SDK and UI consumers must use these staged records; async loader activation must not publish a draft until it succeeds. Isolated red check (test commit `39bee293`) failed because `./registry` did not exist; with `registry.ts` and initial `sdk.ts` types, the registry plus loader tests pass 7/7 and `npm run typecheck` passes. SDK runtime, hooks, and UI integration still need implementation.
 
 
+- Blocker: `packages/kollabor-webui/src/kollabor_webui/server.py:189` sets HTTP CSP to `script-src 'self'`; the inline import map required by `docs/specs/plugins.md` needs its SHA-256 authorized in that header. This server file is outside the brief's explicit step 3 ownership. A frontend-only meta CSP cannot relax the HTTP header. Do not weaken CSP; obtain authorization to update the server and its tests or land the required hash through the owning lane before claiming the shared runtime works in browsers.
+
+
+- SDK runtime red check: isolated `vitest run src/plugins/sdk.test.ts` fails 4/4 because `createPluginContext` is not implemented. The tests cover staged calls, scoped engine API/settings requests, path traversal rejection, events and navigation; hook behavior and the full host are separate work.
+
+
 ## Remaining
 
 1. Add explicit late-import removal/replacement and stale awaited-activation tests; then finish item 1: registry, SDK, error boundary, shared React runtime/import map, CSS and integration. The current lifecycle core is not production-wired and cannot load a plugin by itself.
