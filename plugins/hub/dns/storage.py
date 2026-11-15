@@ -224,50 +224,57 @@ class DNSStorage:
 
     # --- Reputation ---
 
+    def _read_reputation_unlocked(self) -> Dict[str, ReputationScore]:
+        """Read and validate reputation data while the caller holds its lock."""
+        if not self._reputation_path.exists():
+            return {}
+        try:
+            with open(self._reputation_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except json.JSONDecodeError as exc:
+            raise DNSStorageReadError(
+                "reputation", self._reputation_path, "malformed JSON"
+            ) from exc
+        except OSError as exc:
+            raise DNSStorageReadError(
+                "reputation", self._reputation_path, "an I/O error"
+            ) from exc
+        if not isinstance(data, dict) or not isinstance(data.get("scores"), dict):
+            raise DNSStorageReadError(
+                "reputation", self._reputation_path, "an invalid schema"
+            )
+        scores: Dict[str, ReputationScore] = {}
+        for designation, score_data in data.get("scores", {}).items():
+            if not isinstance(designation, str) or not isinstance(score_data, dict):
+                raise DNSStorageReadError(
+                    "reputation", self._reputation_path, "an invalid score schema"
+                )
+            try:
+                scores[designation] = ReputationScore.from_dict(score_data)
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                raise DNSStorageReadError(
+                    "reputation", self._reputation_path, "an invalid score schema"
+                ) from exc
+        return scores
+
     def load_reputation(self) -> Dict[str, ReputationScore]:
         """Load all reputation scores from reputation.json."""
         with _file_lock(self._reputation_path):
-            if not self._reputation_path.exists():
-                return {}
-            try:
-                with open(self._reputation_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except json.JSONDecodeError as exc:
-                raise DNSStorageReadError(
-                    "reputation", self._reputation_path, "malformed JSON"
-                ) from exc
-            except OSError as exc:
-                raise DNSStorageReadError(
-                    "reputation", self._reputation_path, "an I/O error"
-                ) from exc
-            if not isinstance(data, dict) or not isinstance(data.get("scores"), dict):
-                raise DNSStorageReadError(
-                    "reputation", self._reputation_path, "an invalid schema"
-                )
-            scores: Dict[str, ReputationScore] = {}
-            for designation, score_data in data.get("scores", {}).items():
-                if not isinstance(designation, str) or not isinstance(score_data, dict):
-                    raise DNSStorageReadError(
-                        "reputation", self._reputation_path, "an invalid score schema"
-                    )
-                try:
-                    scores[designation] = ReputationScore.from_dict(score_data)
-                except (AttributeError, KeyError, TypeError, ValueError) as exc:
-                    raise DNSStorageReadError(
-                        "reputation", self._reputation_path, "an invalid score schema"
-                    ) from exc
-            return scores
+            return self._read_reputation_unlocked()
 
     def save_reputation(self, scores: Dict[str, ReputationScore]) -> None:
-        """Save all reputation scores to reputation.json with flock."""
+        """Merge reputation scores under the cross-process file lock."""
         import time
 
-        data = {
-            "scores": {k: v.to_dict() for k, v in scores.items()},
-            "version": 1,
-            "updated_at": time.time(),
-        }
-        _locked_atomic_write(self._reputation_path, data)
+        with _file_lock(self._reputation_path):
+            existing = self._read_reputation_unlocked()
+            existing.update(scores)
+            data = {
+                "scores": {k: v.to_dict() for k, v in existing.items()},
+                "version": 1,
+                "updated_at": time.time(),
+            }
+            _atomic_write_unlocked(self._reputation_path, data)
 
     # --- Capability Index ---
 
