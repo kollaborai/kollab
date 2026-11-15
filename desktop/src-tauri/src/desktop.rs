@@ -1182,6 +1182,62 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
 
+    // #1123: the runtime died after launch and the window kept a dead page until Kollab was reopened.
+    #[test]
+    fn a_web_ui_that_never_came_up_is_left_to_the_boot_pages() {
+        let (mut watch, t0) = (Watch::default(), Instant::now());
+        for n in 0..10 {
+            assert_eq!(watch.observe(false, t0 + WATCH_EVERY * n), Watched::Nothing);
+        }
+    }
+
+    #[test]
+    fn a_web_ui_that_stops_answering_is_restarted_after_three_failed_looks() {
+        let (mut watch, t0) = (Watch::default(), Instant::now());
+        assert_eq!(watch.observe(true, t0), Watched::Nothing);
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY), Watched::Nothing);
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY * 2), Watched::Nothing);
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY * 3), Watched::Restart);
+        // The restart's own boot owns the window now: nothing more until the web UI is up again.
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY * 4), Watched::Nothing);
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY * 9), Watched::Nothing);
+    }
+
+    #[test]
+    fn one_slow_answer_is_not_a_restart() {
+        let (mut watch, t0) = (Watch::default(), Instant::now());
+        assert_eq!(watch.observe(true, t0), Watched::Nothing);
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY), Watched::Nothing);
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY * 2), Watched::Nothing);
+        assert_eq!(watch.observe(true, t0 + WATCH_EVERY * 3), Watched::Nothing);
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY * 4), Watched::Nothing);
+    }
+
+    #[test]
+    fn restarts_stop_at_the_limit_and_resume_after_the_window() {
+        let (mut watch, t0) = (Watch::default(), Instant::now());
+        let mut at = t0;
+        let mut acts = Vec::new();
+        for _ in 0..RESTART_LIMIT + 1 {
+            assert_eq!(watch.observe(true, at), Watched::Nothing);
+            for _ in 0..DOWN_LOOKS {
+                at += WATCH_EVERY;
+                acts.push(watch.observe(false, at));
+            }
+        }
+        assert_eq!(acts.iter().filter(|a| **a == Watched::Restart).count(), RESTART_LIMIT);
+        assert_eq!(acts.last(), Some(&Watched::GiveUp));
+
+        at += RESTART_WINDOW;
+        assert_eq!(watch.observe(true, at), Watched::Nothing);
+        let mut last = Watched::Nothing;
+        for _ in 0..DOWN_LOOKS {
+            at += WATCH_EVERY;
+            last = watch.observe(false, at);
+        }
+        assert_eq!(last, Watched::Restart);
+    }
+
     #[test]
     fn web_ui_hosts_flag_is_parsed_from_the_desktop_args() {
         let parse = |args: &[&str]| webui_hosts_from_args(args.iter().map(|s| s.to_string()));
