@@ -37,7 +37,7 @@ try {
   const crasher = { id: "crasher", name: "Crash Test", kind: "installed", state: "ok", enabled: true, shadowed: false,
     web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: { views: [{ id: "crash-view" }] } };
   const broken = { id: "broken", name: "Broken", kind: "installed", state: "ok", enabled: true, shadowed: false,
-    web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: { menu: [{ id: "broken-row", label: "Broken Board", open: { page: "board" } }], pages: [{ id: "board" }] } };
+    web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: { views: [{ id: "broken-view" }], menu: [{ id: "broken-row", label: "Broken Board", open: { page: "board" } }], pages: [{ id: "board" }] } };
   await page.route("**/*", async route => {
     const url = new URL(route.request().url());
     if (url.origin !== origin) return route.abort();
@@ -118,6 +118,9 @@ try {
   const viewBody = page.getByText("Fixture view body", { exact: true });
   await viewBody.waitFor();
   assert.equal(await viewBody.locator('xpath=ancestor::*[@data-plugin="fixture"]').count(), 1, "view has plugin-specific CSS scope");
+  await panel.getByRole("button", { name: "Chat", exact: true }).click();
+  await panel.getByRole("button", { name: /^Broken Failed$/ }).click({ timeout: 5000 });
+  await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
   await panel.getByRole("button", { name: "Chat", exact: true }).click();
   await panel.getByRole("button", { name: /Broken Board/ }).click({ timeout: 5000 });
   await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
