@@ -9,6 +9,7 @@
     "preview": "vite preview --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:e2e:gallery": "node tests/gallery-browser-acceptance.mjs",
     "test:e2e:learn": "node tests/learn-browser-acceptance.mjs",
     "test:e2e:learn:topics": "node tests/learn-topics-browser-acceptance.mjs",
     "test:e2e:learn:loadouts": "node tests/learn-loadouts-browser-acceptance.mjs",

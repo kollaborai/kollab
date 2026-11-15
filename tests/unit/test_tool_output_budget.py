@@ -3,10 +3,12 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 from kollabor_agent.tool_executor import ToolExecutionResult
 from kollabor_agent.tool_output_budget import (
     ToolOutputArtifactStore,
+    build_tool_output_store,
     pack_tool_history_and_results,
     pack_tool_history_messages,
     pack_tool_results,
@@ -24,6 +26,22 @@ def _result(tool_id: str, output: str) -> ToolExecutionResult:
 
 
 class TestToolOutputBudget(unittest.TestCase):
+    def test_output_directories_do_not_alias_long_session_ids(self):
+        with TemporaryDirectory() as directory:
+            first_id = "a" * 80 + "x"
+            second_id = "a" * 80 + "y"
+            first_logger = SimpleNamespace(
+                conversations_dir=Path(directory), session_id=first_id
+            )
+            second_logger = SimpleNamespace(
+                conversations_dir=Path(directory), session_id=second_id
+            )
+
+            first = build_tool_output_store(None, first_logger)
+            second = build_tool_output_store(None, second_logger)
+
+            self.assertNotEqual(first.root, second.root)
+
     def test_none_limits_fall_back_without_type_error(self):
         with TemporaryDirectory() as directory:
             store = ToolOutputArtifactStore(Path(directory))
