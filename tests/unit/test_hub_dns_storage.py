@@ -237,3 +237,26 @@ def test_registry_operations_only_persist_their_changed_agent(tmp_path):
     persisted = DNSStorage(tmp_path).load_registry()
     assert persisted["alpha"].state == "busy"
     assert persisted["beta"].state == "busy"
+
+
+def test_reputation_tracker_persists_only_the_changed_agent_score(tmp_path):
+    from plugins.hub.dns.reputation import ReputationTracker
+
+    storage = DNSStorage(tmp_path)
+    storage.save_reputation(
+        {
+            "alpha": ReputationScore(designation="alpha"),
+            "beta": ReputationScore(designation="beta"),
+        }
+    )
+    alpha_tracker = ReputationTracker(DNSStorage(tmp_path))
+    beta_tracker = ReputationTracker(DNSStorage(tmp_path))
+    alpha_tracker.get_trust("alpha")
+    beta_tracker.get_trust("beta")
+
+    alpha_tracker.record_task_completed("alpha")
+    beta_tracker.record_task_completed("beta")
+
+    persisted = DNSStorage(tmp_path).load_reputation()
+    assert persisted["alpha"].tasks_completed == 1
+    assert persisted["beta"].tasks_completed == 1
