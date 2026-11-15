@@ -107,6 +107,8 @@
 
 - Active view disable: isolated Chrome red test `510153da` showed the user stuck on an unavailable view. Fix `b8b3b88d` returns to Chat once inventory confirms disabled or removed, without redirecting on inventory errors. Browser acceptance passed (`active-view-disable-green.log`), plugin Vitest 33/33 (`active-view-vitest.log`), typecheck passed (`active-view-typecheck.log`). Removal itself still needs an explicit browser test.
 
+- Settings rows no longer show version or commit identifiers, per the brief: browser red test `e3d01c02`, fix `5b82b333`; isolated browser acceptance passed (`settings-metadata-green.log`). The install preview must still show its explicitly required pinned commit and hash.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
