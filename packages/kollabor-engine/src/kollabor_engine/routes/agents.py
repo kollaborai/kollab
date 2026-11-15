@@ -74,14 +74,17 @@ def pool_identities(folder: Optional[str] = None) -> List[Any]:
 
 
 def crew_names() -> set:
-    """Names of the personas of every roster but the gem pool: they are born as crew gems."""
+    """Names of the personas of every roster but the gem pool, and of team members written inline: crew gems."""
     try:
         from plugins.hub.rosters import DEFAULT_ROSTER, load_library
 
-        rosters = load_library().rosters
+        lib = load_library()
     except Exception:
         return set()
-    return {persona.name for key, roster in rosters.items() if key != DEFAULT_ROSTER for persona in roster.personas}
+    names = {
+        persona.name for key, roster in lib.rosters.items() if key != DEFAULT_ROSTER for persona in roster.personas
+    }
+    return names | set(lib.inline)  # team members written inline in a team file
 
 
 def persona_in(name: str, folder: str) -> Dict[str, Any]:

@@ -259,7 +259,8 @@ def parse_team(
             raise LibraryError(f"{seat}: expected an object")
         ref = entry.get("persona")
         if isinstance(ref, dict):
-            persona = _persona(ref, "", {"kind": "initials"}, seat)
+            # A team member written inline is a crew gem unless it sets its own avatar.
+            persona = _persona(ref, "", {"kind": "gem"}, seat)
         elif isinstance(ref, str) and ref.strip():
             persona = _lookup(rosters, ref.strip(), [roster or prefer])
             if persona is None:

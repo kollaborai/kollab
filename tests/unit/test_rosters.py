@@ -287,3 +287,21 @@ def test_config_modal_offers_the_rosters_a_folder_can_pick(home, proj, monkeypat
         "crew",
     }
     assert HubPlugin.get_default_config()["plugins"]["hub"]["roster"] == "gems"
+
+
+def test_inline_team_members_are_gems_unless_they_pick_an_avatar(home, proj):
+    write(proj / ".kollab/rosters/crew.json", crew(names=("ana",)))
+    write(
+        proj / ".kollab/teams/inline.json",
+        {
+            "name": "inline",
+            "lead": "boss",
+            "members": [
+                {"persona": {"name": "boss", "display_name": "Boss"}},
+                {"persona": {"name": "pic", "avatar": {"kind": "emoji", "value": "x"}}, "reports_to": "boss"},
+            ],
+        },
+    )
+    members = {m.persona.name: m.persona for m in rosters.load_library(proj).teams["inline"].members}
+    assert members["boss"].avatar == {"kind": "gem"}
+    assert members["pic"].avatar == {"kind": "emoji", "value": "x"}

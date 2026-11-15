@@ -377,6 +377,7 @@ class TestBirths:
 
         names = crew_names()
         assert "chief-of-staff" in names and "lapis" not in names
+        assert {"director", "cto"} <= names  # team members written inline (engineering, startup)
         for name in names:
             coat = gem_appearance.crew_coat(name)
             assert abs(gem_appearance._luma(coat["hairColor"]) - gem_appearance._luma(coat["furColor"])) >= 80, name
