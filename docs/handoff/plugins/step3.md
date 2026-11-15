@@ -66,6 +66,9 @@
 - Composer commands: red browser test (commit `9a1bd151`) timed out after submitting `/fixture test arguments`. Plugin commands now appear in the palette and are intercepted before transport, with local engine commands winning collisions and active-session reservations updated. The isolated fake-engine browser acceptance passes the command invocation and composer clearing; 25 focused tests/typecheck pass. Still verify no transport submission, Enter vs button, busy/attachments, command error handling, and multi-session collision changes in browser tests.
 
 
+- Tool renderer red check: isolated SSR `vitest run src/plugins/renderers.test.tsx` fails because `./renderers` does not exist. It requires a plugin to receive a matching tool result and the native fallback to remain when unmatched. Implement a boundary and session-aware renderer; tagged text remains separate work.
+
+
 ## Remaining
 
 1. Add explicit late-import removal/replacement and stale awaited-activation tests; then finish item 1: registry, SDK, error boundary, shared React runtime/import map, CSS and integration. The current lifecycle core is not production-wired and cannot load a plugin by itself.
