@@ -159,8 +159,10 @@ def test_agent_smoke_fails_when_machine_discovery_cannot_find_the_agent(
 ) -> None:
     stops: list[list[str]] = []
     fake_kollab(monkeypatch, [STATUS_ONLINE], stops, where_ok=False)
+    # A short timeout: the status answers at once, discovery fails every round,
+    # and the deadline path is reached in half a second instead of the real 120.
     with pytest.raises(SystemExit, match="did not find its live endpoint"):
-        build_binary.agent_smoke(tmp_path / "kollab.exe")
+        build_binary.agent_smoke(tmp_path / "kollab.exe", timeout=0.5)
     assert stops == [["--hub", "stop", "lapis"]]
 
 

@@ -145,6 +145,7 @@ class ConfigService:
             "plugins.context_service.hub_broadcast_enabled": True,
             "kollabor.updates.check_enabled": True,
             "kollabor.updates.auto_update_enabled": False,
+            "kollabor.updates.restart_agents": False,
             "kollabor.updates.check_interval_hours": 24,
             "kollabor.updates.github_repo": "kollaborai/kollab",
             "kollabor.updates.timeout_seconds": 5,

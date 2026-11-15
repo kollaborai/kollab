@@ -83,6 +83,7 @@ class LoadoutCommandHandler(BaseCommandHandler):
                 SubcommandInfo("", "", "Open the loadout picker"),
                 SubcommandInfo("new", "", "Create a loadout"),
                 SubcommandInfo("default <name>", "", "Set startup default loadout"),
+                SubcommandInfo("fallback <name|off>", "", "Loadout to switch to when the model can't serve"),
                 SubcommandInfo("<name>", "", "Activate a loadout by name"),
             ],
         )
@@ -97,7 +98,51 @@ class LoadoutCommandHandler(BaseCommandHandler):
             return await self._open_new()
         if args[0].lower() == "default":
             return await self._set_default(" ".join(args[1:]))
+        if args[0].lower() == "fallback":
+            return await self._fallback(" ".join(args[1:]).strip())
         return await self._activate_by_name(" ".join(args))
+
+    async def _fallback(self, query: str) -> CommandResult:
+        """`/llm fallback [<name>|off]`: show or set this agent's fallback loadout."""
+        fallback = self.event_bus.get_service("model_fallback")
+        if fallback is None:
+            return CommandResult(
+                success=False,
+                message="Model fallback unavailable: its plugin is not loaded.",
+                display_type="error",
+            )
+        if not query:
+            return CommandResult(
+                success=True,
+                message=f"Fallback: {fallback.choice() or 'none'}. "
+                "Set it with /llm fallback <name>, or /llm fallback off.",
+                display_type="info",
+            )
+        if query.lower() in {"off", "none"}:
+            if not fallback.set_choice("off"):
+                return CommandResult(
+                    success=False, message="Could not save the fallback setting.", display_type="error"
+                )
+            return CommandResult(success=True, message="Fallback: none.", display_type="success")
+        loadout = fallback.resolve(query)
+        manager = self._get_manager()
+        suggestions = manager.resolve(query)[1] if loadout is None and manager is not None else []
+        if loadout is None:
+            message = f"No loadout matching '{query}'."
+            if suggestions:
+                message += "\n  did you mean:\n    " + "\n    ".join(suggestions)
+            return CommandResult(success=False, message=message, display_type="error")
+        if not fallback.set_choice(loadout.name):
+            return CommandResult(
+                success=False, message="Could not save the fallback setting.", display_type="error"
+            )
+        return CommandResult(
+            success=True,
+            message=f"Fallback: {loadout.name}. When this model can't serve a turn "
+            "(usage limit, quota, rate limit, expired login), the agent switches "
+            "there once and runs the turn again (an ACP fallback asks you to send it again).",
+            display_type="success",
+        )
 
     # -- manager / stack manager construction --------------------------------
 

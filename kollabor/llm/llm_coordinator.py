@@ -78,8 +78,11 @@ logger = logging.getLogger(__name__)
 
 def _acp_unavailable_result(acp: Any) -> Dict[str, Any]:
     result = {"status": "rejected", "reason": "acp_unavailable"}
+    closing = getattr(acp, "closing_reason", None)
     error = getattr(acp, "startup_error", None)
-    if isinstance(error, str) and error:
+    if isinstance(closing, str) and closing:
+        result["message"] = closing  # the model fallback is switching away (#548)
+    elif isinstance(error, str) and error:
         result["message"] = f"ACP could not start: {error}"
     return result
 
@@ -2689,6 +2692,21 @@ class LLMService:
         if not message.strip():
             return {"status": "rejected", "reason": "empty message"}
         voice = data.get("voice")
+        if voice is None and is_voice_origin(origin) and validate_voice_admission_context(origin):
+            # A LiveKit room's mic turn carries no voice dict (#1079): the
+            # validated origin context is the turn's voice identity, the way
+            # voice_turn_settings reads it on the native path. It gets the
+            # voice tag and queues instead of steering a running turn, like a
+            # /voice mic turn. The rules ride the room session's first turn
+            # and then once per generation, keyed off the derived epoch. The
+            # reply is not handed to this process's /voice speech: a room
+            # turn's audio is the voice runtime's, not the device speech the
+            # acp.voice_turns path plays.
+            voice = {
+                "epoch": f"{origin.get('voice_session_id')}:{origin.get('generation')}",
+                # room_turn: never registered into acp.voice_turns; see below.
+                "room_turn": True,
+            }
         if voice:
             # A mic turn carries the voice rules, as on the native path, and
             # its reply is spoken when the turn ends (acp.voice_turns).
@@ -2748,7 +2766,9 @@ class LLMService:
             if "full" in str(exc).lower():
                 return {"status": "rejected", "reason": "acp_queue_full"}
             return {"status": "rejected", "reason": "acp_admission_failed"}
-        if voice:
+        if voice and not voice.get("room_turn"):
+            # A /voice mic turn's reply is spoken by this process's voice
+            # plugin; a LiveKit room turn's audio is the voice runtime's.
             # Key includes the turn id: this admission's metadata must not
             # be overwritten by a later admission that reuses the same
             # caller request ID (#597), and the orchestrator pops by the

@@ -1,0 +1,18 @@
+{
+  "name": "detached-startup-refusal",
+  "description": "CLI contract: a detached child refusal is shown to the caller and returns a failing status (#872).",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); KOLLAB_DEV_HOME=\"$HOME\"; PYTHONPATH=\"$R/packages/kollabor-agent/src:$R/packages/kollabor-ai/src:$R/packages/kollabor-config/src:$R/packages/kollabor-engine/src:$R/packages/kollabor-events/src:$R/packages/kollabor-plugins/src:$R/packages/kollabor-rpc/src:$R/packages/kollabor-tui/src:$R/packages/kollabor-voice/src:$R/packages/kollabor-webui/src:$R\" HOME=/tmp/pr-chain-issue-872-scratch-home KOLLAB_NO_KEYRING=1 \"$KOLLAB_DEV_HOME/dev/kollab/.venv/bin/python\" -c \"import os, sys; from kollabor import cli; cli._update_before_launch = lambda: None; os.fork = lambda: 12345; cli._wait_for_detached_child_startup = lambda *args: \\\"name already held\\\"; sys.argv = [\\\"kollab\\\", \\\"--detached\\\"]; cli.cli_main()\" 2>&1; echo CLI-EXIT:$?'",
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 30
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "wait_for", "pattern": "detached startup failed: name already held", "timeout": 10 },
+    { "action": "wait_for", "pattern": "CLI-EXIT:1", "timeout": 5 },
+    { "action": "capture" },
+    { "action": "assert_contains", "pattern": "CLI-EXIT:1", "description": "refused detached start exits non-zero" },
+    { "action": "assert_contains", "pattern": "detached startup failed: name already held", "description": "caller sees the child's refusal reason" }
+  ]
+}

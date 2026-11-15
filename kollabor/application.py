@@ -2228,6 +2228,146 @@ class TerminalLLMChat:
         except Exception as e:
             logger.warning(f"Failed to collect core ready stats: {e}")
 
+    async def _attach_handshake(self, reader, writer) -> dict:
+        """Ask the daemon on this connection to attach this window; returns its attach_ack.
+
+        Raises when the daemon does not answer in time or answers with anything else.
+        """
+        import json as _json
+
+        req = _json.dumps(
+            {
+                "action": "attach",
+                "mode": "interactive",
+                "client_id": f"attach-{os.getpid()}",
+            }
+        )
+        writer.write((req + "\n").encode())
+        await writer.drain()
+        ack_line = await asyncio.wait_for(reader.readline(), timeout=5.0)
+        ack = _json.loads(ack_line.decode().strip())
+        if ack.get("type") != "attach_ack":
+            raise ConnectionError(ack.get("msg", "unexpected response"))
+        return ack
+
+    def _attach_find_daemon_pid(self) -> int:
+        """The pid of the daemon behind this window's socket; 0 when it is not on this computer."""
+        import json as _json
+
+        from plugins.hub.presence import _presence_files, get_presence_dir
+
+        try:
+            records = list(_presence_files(get_presence_dir()))
+        except OSError:
+            records = []
+        for record in records:
+            try:
+                data = _json.loads(record.read_text())
+                if str(data.get("socket_path", "")) == str(self._attach_socket):
+                    return int(data.get("pid") or 0)
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue
+        try:  # the window that started the daemon keeps its pid
+            return int(os.environ.get("KOLLAB_DAEMON_PID") or 0)
+        except ValueError:
+            return 0
+
+    def _attach_daemon_alive(self) -> bool | None:
+        """True while the daemon this window attached to runs, False once it is gone, None when its pid is unknown.
+
+        A restart in place keeps the pid, so a connection that ended with the daemon
+        alive is a restart or a dropped link, never an exit (#968).
+        """
+        pid = getattr(self, "_attach_daemon_pid", 0)
+        if not pid:
+            return None
+        from plugins.hub.presence import pid_alive
+
+        return pid_alive(pid)
+
+    async def _attach_again(
+        self, identity: str, announced: bool, agent_id: str | None
+    ) -> tuple[tuple[Any, dict] | None, str | None]:
+        """Attach this window to its daemon again once its connection ended (#968).
+
+        A restart in place replaces the daemon's process image: the pid and the
+        socket path stay, the connection closes, a new image listens a few seconds
+        later. While the daemon lives, or said it was restarting, keep trying for
+        ``daemon.REATTACH_WAIT`` seconds.
+
+        Returns ``((reader, ack), None)`` once attached. Otherwise ``(None, line)``,
+        the one line that is true when the window ends, or ``(None, None)`` when the
+        window is quitting anyway.
+        """
+        from kollabor_rpc.transport import LARGE_BUFFER_LIMIT
+
+        from . import daemon as daemon_module
+
+        def quitting() -> bool:
+            return not self.running or getattr(self, "_attach_detaching", False)
+
+        show = self.renderer.message_coordinator.display_message_sequence
+        gone = f"{identity} disconnected — daemon exited"
+        rpc_client = getattr(self, "_rpc_client", None)
+        if rpc_client is not None:
+            rpc_client.close()  # calls waiting on the dead connection fail now
+        if quitting():
+            return None, None
+        if not announced and self._attach_daemon_alive() is not True:
+            return None, gone
+        if not announced:
+            show(
+                [
+                    (
+                        "system",
+                        f"lost connection to {identity}, reconnecting...",
+                        {"display_type": "warning"},
+                    )
+                ]
+            )
+        deadline = time.monotonic() + daemon_module.REATTACH_WAIT
+        while not quitting():
+            try:
+                new_reader, new_writer = await local_ipc.connect(
+                    self._attach_socket, limit=LARGE_BUFFER_LIMIT
+                )
+                try:
+                    new_ack = await self._attach_handshake(new_reader, new_writer)
+                except BaseException:
+                    new_writer.close()
+                    raise
+            except Exception as e:
+                logger.debug(f"attach again to {identity} failed: {e}")
+            else:
+                try:
+                    self._attach_writer.close()
+                except Exception:
+                    pass
+                self._attach_writer = new_writer
+                if rpc_client is not None:
+                    rpc_client.reconnect(new_writer)
+                runtime = self.event_bus.get_service("attach_runtime_state")
+                if isinstance(runtime, dict):
+                    runtime.update(connected_at=time.time(), last_heartbeat_at=0.0)
+                if new_ack.get("agent_id") != agent_id:
+                    self.renderer.update_thinking(False, "")  # the new image runs no turn
+                    version = new_ack.get("version")
+                    line = f"Restarted on {version}" if version else "Restarted"
+                else:
+                    line = f"reconnected to {identity}"
+                show([("system", line, {"display_type": "success"})])
+                return (new_reader, new_ack), None
+            if self._attach_daemon_alive() is False:
+                return None, gone
+            if time.monotonic() >= deadline:
+                return None, (
+                    "Restarted. Run kollab again to attach."
+                    if announced
+                    else f"lost connection to {identity}. Run kollab again to attach."
+                )
+            await asyncio.sleep(0.5)
+        return None, None
+
     async def _initialize_attach_proxy(self) -> None:
         """Initialize attach proxy mode: connect to remote agent, mirror display.
 
@@ -2275,24 +2415,9 @@ class TerminalLLMChat:
             self.create_background_task(self.shutdown(), "attach_client_shutdown")
             return
 
-        # Send attach request (interactive - we want to send input)
-        req = (
-            _json.dumps(
-                {
-                    "action": "attach",
-                    "mode": "interactive",
-                    "client_id": f"attach-{os.getpid()}",
-                }
-            )
-            + "\n"
-        )
-        writer.write(req.encode())
-        await writer.drain()
-
-        # Read ack
+        # Send attach request (interactive - we want to send input) and read the ack
         try:
-            ack_line = await asyncio.wait_for(reader.readline(), timeout=5.0)
-            ack = _json.loads(ack_line.decode().strip())
+            ack = await self._attach_handshake(reader, writer)
         except Exception as e:
             self.renderer.message_coordinator.display_message_sequence(
                 [
@@ -2302,18 +2427,9 @@ class TerminalLLMChat:
             self._startup_ready.set()
             return
 
-        if ack.get("type") != "attach_ack":
-            self.renderer.message_coordinator.display_message_sequence(
-                [
-                    (
-                        "system",
-                        f"attach failed: {ack.get('msg', 'unexpected response')}",
-                        {"display_type": "error"},
-                    ),
-                ]
-            )
-            self._startup_ready.set()
-            return
+        # The daemon's pid, read now: its presence record goes away while it
+        # restarts in place, and the pid is what says the daemon is still alive.
+        self._attach_daemon_pid = self._attach_find_daemon_pid()
 
         uptime = ack.get("uptime", 0)
         uptime_str = f"{uptime // 60}m{uptime % 60}s" if uptime else "0s"
@@ -2402,11 +2518,12 @@ class TerminalLLMChat:
             if not message:
                 return data
 
-            # Send to remote agent
+            # Send to remote agent (over the current connection: a restart of
+            # the daemon replaces it)
             try:
                 msg = _json.dumps({"type": "input", "text": message}) + "\n"
-                writer.write(msg.encode())
-                await writer.drain()
+                self._attach_writer.write(msg.encode())
+                await self._attach_writer.drain()
             except (ConnectionError, OSError):
                 self.renderer.message_coordinator.display_message_sequence(
                     [
@@ -2442,13 +2559,13 @@ class TerminalLLMChat:
             # Send detach message so server cleans up subscriber
             try:
                 detach_msg = _json.dumps({"type": "detach"}) + "\n"
-                writer.write(detach_msg.encode())
-                await writer.drain()
+                self._attach_writer.write(detach_msg.encode())
+                await self._attach_writer.drain()
             except Exception:
                 pass
 
             try:
-                writer.close()
+                self._attach_writer.close()
             except Exception:
                 pass
 
@@ -2510,13 +2627,31 @@ class TerminalLLMChat:
             LLM pipeline uses. The local renderer handles all formatting.
             """
             coordinator = self.renderer.message_coordinator
+            stream = reader  # the connection being read; a restart in place replaces it
+            agent_id = ack.get("agent_id")  # names the daemon's image
+            last_seq = None  # newest event number shown from this image
+            announced = False  # the daemon said it replaces its process image next
+            closing = None  # what to tell the user when the window ends
             while self.running:
                 try:
-                    line = await reader.readline()
+                    line = await stream.readline()
                 except (ConnectionError, OSError):
-                    break
+                    line = b""
                 if not line:
-                    break
+                    # The connection ended. A restart in place keeps the daemon's
+                    # pid and socket path: while it lives, attach again and keep
+                    # the scrollback (#968).
+                    attached, closing = await self._attach_again(
+                        identity, announced, agent_id
+                    )
+                    if attached is None:
+                        break
+                    stream, new_ack = attached
+                    if new_ack.get("agent_id") != agent_id:
+                        # A new image numbers its events from 1 again.
+                        agent_id, last_seq = new_ack.get("agent_id"), None
+                    announced = False
+                    continue
 
                 try:
                     event = _json.loads(line.decode().strip())
@@ -2531,6 +2666,14 @@ class TerminalLLMChat:
                     if hasattr(self, "_rpc_client") and self._rpc_client is not None:
                         self._rpc_client.on_reply(event)
                     continue
+
+                # The daemon replays its recent events on every attach: what this
+                # window already showed from this image is not shown twice.
+                seq = event.get("seq")
+                if isinstance(seq, int):
+                    if last_seq is not None and seq <= last_seq:
+                        continue
+                    last_seq = seq
 
                 etype = event.get("type", "")
 
@@ -2665,6 +2808,32 @@ class TerminalLLMChat:
                     if isinstance(runtime, dict):
                         runtime["last_heartbeat_at"] = time.time()
 
+                elif etype == "agent_restart_failed":
+                    failed_identity = event.get("identity", identity)
+                    coordinator.display_message_sequence(
+                        [
+                            (
+                                "system",
+                                f"Restart of {failed_identity} failed; the agent is still running.",
+                                {"display_type": "error"},
+                            ),
+                        ]
+                    )
+
+                elif etype == "daemon_restarting":
+                    # The daemon replaces its process image next (#968): this
+                    # window waits for the new one and attaches again.
+                    announced = True
+                    coordinator.display_message_sequence(
+                        [
+                            (
+                                "system",
+                                f"Restarting {identity}...",
+                                {"display_type": "info"},
+                            ),
+                        ]
+                    )
+
             # Connection ended (skip message if we detached intentionally)
             daemon_gone = self.running and not getattr(self, "_attach_detaching", False)
             if daemon_gone:
@@ -2672,7 +2841,7 @@ class TerminalLLMChat:
                     [
                         (
                             "system",
-                            f"{identity} disconnected — daemon exited",
+                            closing or f"{identity} disconnected — daemon exited",
                             {"display_type": "warning"},
                         ),
                     ]

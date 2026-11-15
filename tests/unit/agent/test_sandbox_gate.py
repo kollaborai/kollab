@@ -7,10 +7,12 @@ not in a prompt.
 import json
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from kollabor_agent.sandbox_gate import SandboxGate
 from kollabor_agent.tool_executor import ToolExecutor
 
 pytestmark = pytest.mark.asyncio
@@ -106,6 +108,22 @@ async def test_write_into_protected_root_is_refused_and_logged(env):
     refused = [r for r in records(env.audit) if r["event"] == "refused"]
     assert refused and refused[0]["agent"] == "ruby"
     assert refused[0]["root"] == str(env.shared.resolve())
+
+
+async def test_case_variant_of_protected_root_is_refused_on_case_insensitive_fs(env):
+    root = Path.cwd().resolve()
+    variant = Path(str(root).replace("/Users/", "/USERS/", 1))
+    if variant == root or not variant.exists() or not variant.samefile(root):
+        pytest.skip("filesystem is case-sensitive")
+
+    gate = SandboxGate()
+    touched = gate._roots_touched(
+        {"type": "file_create", "file": str(variant / "case-variant.txt")},
+        root,
+        [root],
+    )
+
+    assert touched == [root]
 
 
 async def test_gate_is_off_by_default(env):

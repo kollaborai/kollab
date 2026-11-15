@@ -573,6 +573,15 @@ class ConfigWidgetDefinitions:
                             "config_path": "kollabor.updates.auto_update_enabled",
                             "help": "Automatically update Kollab when a newer release is available",
                         },
+                        {
+                            "type": "checkbox",
+                            "label": "Restart Agent Button",
+                            "config_path": "kollabor.updates.restart_agents",
+                            "help": (
+                                "Offer a Restart Agent button in the web chat of an agent that runs an older "
+                                "version than the engine; with it off the chat points at /restart"
+                            ),
+                        },
                     ],
                 },
                 {

@@ -7,9 +7,11 @@ check; only running the command does.
 
 import json
 import re
+import sys
 import time
 import uuid
 
+import psutil
 import pytest
 import pytest_asyncio
 
@@ -353,6 +355,35 @@ async def test_the_shell_sits_on_a_real_terminal_and_leads_its_process_group(tmp
     assert shell_pid == process_group
 
 
+async def test_linux_supervisor_uses_its_source_file_for_isolated_python(monkeypatch, tmp_path):
+    import os
+    from types import SimpleNamespace
+
+    commands = []
+
+    class Session:
+        def __init__(self, _sid, _proc, fd, **_kwargs):
+            self.fd = fd
+
+    def fake_popen(argv, **kwargs):
+        commands.append(argv)
+        os.write(kwargs["pass_fds"][0], b"4242\n")
+        return SimpleNamespace(pid=4241, returncode=None)
+
+    monkeypatch.setattr(terminal.sys, "platform", "linux")
+    monkeypatch.setattr(terminal, "_set_winsize", lambda *_args: None)
+    monkeypatch.setattr(terminal, "_login_shell", lambda *_args: "/bin/sh")
+    monkeypatch.setattr(terminal, "_shell_env", lambda *_args: {})
+    monkeypatch.setattr(terminal.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(terminal, "_Session", Session)
+    session = terminal._spawn(str(tmp_path), 80, 24)
+    try:
+        expected = os.path.join(os.path.dirname(terminal.__file__), "_terminal_supervisor.py")
+        assert commands[0][2] == expected
+    finally:
+        os.close(session.fd)
+
+
 async def test_ctrl_c_interrupts_a_running_command_and_the_shell_prompts_again(tmp_path):
     link = Link(tmp_path)
     await link.open()
@@ -379,3 +410,353 @@ async def test_a_shell_that_exits_ends_the_stream_with_an_exit_message(tmp_path)
         kinds += [message["type"] for message in await link.poll()]
 
     assert kinds[-1] == "exit"
+
+
+@pytest.mark.parametrize("mode", ["close", "idle", "shutdown"])
+async def test_teardown_ends_background_job_after_shell_exits(tmp_path, mode):
+    """A job in its own shell process group must not outlive any terminal teardown path."""
+    import asyncio
+    import contextlib
+    import os
+    import shlex
+    import sys
+
+    link = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
+    sid = await link.open()
+    session = terminal._SESSIONS[sid]
+    marker = tmp_path / "job.pid"
+    heartbeat = tmp_path / "job-heartbeat"
+    program = (
+        "import os,signal,time\n"
+        "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"open({str(marker)!r}, 'w').write(str(os.getpid()))\n"
+        "while True:\n"
+        f"    open({str(heartbeat)!r}, 'a').write('x')\n"
+        "    time.sleep(0.02)\n"
+    )
+    child_pid = None
+    process = None
+    try:
+        await link.send(type="input", data=f"{shlex.quote(sys.executable)} -c {shlex.quote(program)} &\n")
+        for _ in range(200):
+            if marker.exists() and marker.read_text().strip() and heartbeat.exists():
+                child_pid = int(marker.read_text())
+                process = psutil.Process(child_pid)
+                break
+            await asyncio.sleep(0.02)
+        assert child_pid is not None, "background job did not start"
+        assert os.getsid(child_pid) == session.pid
+        if mode == "close":
+            await link.send(type="close")
+        elif mode == "idle":
+            await link.call("detach")
+            session._reap_seconds = 0.01
+            session.schedule_reap()
+        else:
+            await terminal.shutdown_terminals()
+        for _ in range(200):
+            if not _job_is_running(process):
+                break
+            await asyncio.sleep(0.02)
+        else:
+            pytest.fail(f"background job survived {mode}")
+        size = heartbeat.stat().st_size
+        await asyncio.sleep(0.15)
+        assert heartbeat.stat().st_size == size, "background job continued to do work"
+    finally:
+        # psutil verifies the recorded process identity before signalling it.
+        if process is not None:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                process.kill()
+
+
+
+async def test_closing_one_terminal_does_not_signal_another(tmp_path):
+    import asyncio
+
+    first = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
+    other = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
+    try:
+        async with asyncio.timeout(10):
+            first_id = await first.open()
+            other_id = await other.open()
+            first_session = terminal._SESSIONS[first_id]
+            await first.send(type="close")
+            task = first_session.destroy()
+            if task is not None:
+                await asyncio.shield(task)
+            other_session = terminal._SESSIONS[other_id]
+            assert other_session.pid not in {process.pid for process in first_session._owned_processes}
+            assert not other_session.exited
+            await other.send(type="input", data="echo still-alive-91''23\n")
+            assert "still-alive-9123" in await other.until("still-alive-9123")
+    except TimeoutError:
+        pytest.fail("Closing one terminal or checking its neighbor exceeded 10 seconds")
+
+
+async def test_teardown_does_not_wait_forever_for_an_unreaped_shell(tmp_path, monkeypatch):
+    import asyncio
+    import contextlib
+
+    link = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
+    sid = await link.open()
+    await link.send(type="input", data="echo shell-ready-57''9\n")
+    await link.until("shell-ready-579")
+    session = terminal._SESSIONS[sid]
+    monkeypatch.setattr(session, "_collect_processes", lambda known: known)
+    monkeypatch.setattr(session, "_signal_owned", lambda *_args: None)
+    monkeypatch.setattr(terminal, "KILL_AFTER_SECONDS", 0.05)
+    try:
+        task = session.destroy()
+        assert task is not None
+        async with asyncio.timeout(1.0):
+            await asyncio.shield(task)
+    finally:
+        # This is the exact shell started by this test; Popen guards against signalling a reused PID.
+        with contextlib.suppress(ProcessLookupError):
+            session._proc.kill()
+        if session._watch_task is not None:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(session._watch_task, 3)
+        if session._teardown_task is not None:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(session._teardown_task, 3)
+
+
+def _job_is_running(process):
+    """Whether the test process can still execute."""
+    try:
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+
+
+async def test_job_liveness_does_not_count_a_zombie():
+    import asyncio
+    import os
+
+    import psutil
+
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)
+    process = psutil.Process(pid)
+    try:
+        for _ in range(100):
+            if process.status() == psutil.STATUS_ZOMBIE:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("test child did not become a zombie")
+        assert not _job_is_running(process)
+    finally:
+        os.waitpid(pid, 0)
+
+
+@pytest.mark.parametrize("mode", ["close", "idle", "shutdown"])
+@pytest.mark.parametrize("delay", [0.0, 0.01, 0.04, 0.06])
+@pytest.mark.parametrize("close_fds", [
+    False,
+    pytest.param(True, marks=pytest.mark.xfail(
+        sys.platform == "darwin", strict=True,
+        reason="macOS cannot discover a detached child that closes every inherited PTY descriptor between scans",
+    )),
+])
+async def test_teardown_stops_fast_detached_descendant(tmp_path, mode, delay, close_fds):
+    import asyncio
+    import contextlib
+    import shlex
+    import sys
+
+    import psutil
+
+    marker = tmp_path / "detached.pid"
+    heartbeat = tmp_path / "heartbeat"
+    program = tmp_path / "spawn_job.py"
+    program.write_text(
+        "import os, signal, time\n"
+        f"time.sleep({delay!r})\n"
+        "if os.fork(): os._exit(0)\n"
+        "os.setsid()\n"
+        f"if {close_fds!r}: os.closerange(0, 256)\n"
+        "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"open({str(marker)!r}, 'w').write(str(os.getpid()))\n"
+        "while True:\n"
+        f"    open({str(heartbeat)!r}, 'a').write('x')\n"
+        "    time.sleep(0.02)\n"
+    )
+    link = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
+    session_id = await link.open()
+    session = terminal._SESSIONS[session_id]
+    process = None
+    try:
+        await link.send(type="input", data=f"{shlex.quote(sys.executable)} {shlex.quote(str(program))} &\n")
+        for _ in range(250):
+            if marker.exists() and marker.read_text().strip() and heartbeat.exists():
+                process = psutil.Process(int(marker.read_text()))
+                break
+            await asyncio.sleep(0.01)
+        assert process is not None, "detached child did not start"
+        assert _job_is_running(process)
+        if mode == "close":
+            await link.send(type="close")
+            await session.destroy()
+        elif mode == "idle":
+            await link.call("detach")
+            session._reap_seconds = 0.01
+            session.schedule_reap()
+            for _ in range(200):
+                if session.closed:
+                    await session.destroy()
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                pytest.fail("idle reaper did not run")
+        else:
+            await terminal.shutdown_terminals()
+        for _ in range(200):
+            if not _job_is_running(process):
+                break
+            await asyncio.sleep(0.01)
+        assert not _job_is_running(process), "detached child survived terminal teardown"
+        size = heartbeat.stat().st_size
+        await asyncio.sleep(0.15)
+        assert heartbeat.stat().st_size == size, "detached child continued to do work"
+    finally:
+        if process is not None:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                process.kill()  # psutil checks the captured process identity before signalling
+
+
+async def test_slow_process_enumeration_does_not_block_terminal_close(tmp_path, monkeypatch):
+    import asyncio
+
+    link = Link(tmp_path, CodeSettings(shell="/bin/sh", login=False))
+    sid = await link.open()
+    await link.send(type="input", data="echo ready-scan-62''1\n")
+    await link.until("ready-scan-621")
+    session = terminal._SESSIONS[sid]
+
+    def slow_scan():
+        time.sleep(2.0)
+        return iter(())
+
+    monkeypatch.setattr(terminal.psutil, "process_iter", slow_scan)
+    monkeypatch.setattr(terminal, "KILL_AFTER_SECONDS", 0.05)
+    started = time.monotonic()
+    task = session.destroy()
+    assert task is not None
+    async with asyncio.timeout(3):
+        await task
+    assert time.monotonic() - started < 1.2, "process enumeration blocked the event loop during terminal close"
+
+
+async def test_late_process_scan_is_never_signalled_after_close(monkeypatch):
+    import asyncio
+    import os
+    import signal
+    import threading
+
+    # Construct the PTY-scanning lifecycle directly: Linux terminals normally use a supervisor instead.
+    session = object.__new__(terminal._Session)
+    session.sid = f"late-scan-{uuid.uuid4().hex}"
+    session._loop = asyncio.get_running_loop()
+    session._scan_future = None
+    session._capture_task = None
+    session._watch_task = None
+    session._teardown_task = None
+    session._reap_handle = None
+    session._waiters = set()
+    session._owned_processes = set()
+    session._inspection_warnings = set()
+    session._pty_name = "/test/pty"
+    session._pty_anchor = os.open(os.devnull, os.O_RDONLY)  # Only this test-owned descriptor is closed.
+    session._shell_process = object()
+    session._supervised = False
+    session.fd = None
+    session.exited = True
+    session.closed = False
+    started = asyncio.Event()
+    release = threading.Event()
+    sent = []
+
+    class Unrelated:
+        pid = -1
+
+        def send_signal(self, sig):
+            sent.append(sig)
+
+    unrelated = Unrelated()
+
+    def late_scan(known):
+        session._loop.call_soon_threadsafe(started.set)
+        if not release.wait(timeout=15):
+            raise AssertionError("test did not release the blocked scan")
+        return known | {unrelated}
+
+    monkeypatch.setattr(session, "_collect_processes", late_scan)
+    monkeypatch.setattr(terminal, "INITIAL_SCAN_WAIT_SECONDS", 0.1)
+    monkeypatch.setattr(terminal, "KILL_AFTER_SECONDS", 0.05)
+    task = session.destroy()
+    assert task is not None
+    try:
+        async with asyncio.timeout(10):
+            await started.wait()
+            pending = session._scan_future
+            assert pending is not None and not pending.done()
+            await asyncio.shield(task)
+            assert session.closed and session._pty_anchor is None
+            assert not pending.done(), "the test must finish teardown before releasing the scan"
+            release.set()
+            assert unrelated in await asyncio.shield(pending), "the late scan did not return its result"
+            assert await session._capture_async(1) == set(), "a scan completed after close was applied"
+            session._signal_owned(signal.SIGKILL)
+            assert unrelated not in session._owned_processes
+            assert not sent
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if session._pty_anchor is not None:
+            os.close(session._pty_anchor)
+            session._pty_anchor = None
+
+
+
+async def test_supervised_teardown_does_not_schedule_pty_scan(monkeypatch):
+    session = object.__new__(terminal._Session)
+    session._supervised = True
+    session._watch_task = None
+    session._pty_anchor = None
+    session.fd = None
+
+    async def unexpected_scan(_timeout):
+        pytest.fail("supervised teardown must not schedule a PTY-holder scan")
+
+    monkeypatch.setattr(session, "_capture_async", unexpected_scan)
+    await session._finish_teardown()
+
+
+
+async def test_shutdown_does_not_wait_forever_for_a_stalled_teardown(monkeypatch):
+    import asyncio
+    import contextlib
+
+    stalled = asyncio.create_task(asyncio.Event().wait())
+    monkeypatch.setattr(terminal, "_SESSIONS", {})
+    monkeypatch.setattr(terminal, "_TEARDOWNS", {stalled})
+    monkeypatch.setattr(terminal, "SUPERVISOR_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(terminal, "INITIAL_SCAN_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(terminal, "KILL_AFTER_SECONDS", 0.05)
+    monkeypatch.setattr(terminal, "REAP_WAIT_SECONDS", 0.05)
+    try:
+        async with asyncio.timeout(1):
+            await terminal.shutdown_terminals()
+    finally:
+        stalled.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stalled
+        terminal._TEARDOWNS.clear()

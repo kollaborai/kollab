@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
+from urllib.parse import urlsplit
 
 from ..model_registry import resolve_default_model
 from .base import LLMProvider
@@ -358,6 +359,15 @@ def detect_provider_from_profile(profile: Dict[str, Any]) -> ProviderType:
 
     api_key = profile.get("api_key", "")
     api_base = profile.get("api_base", "")
+    api_host = ""
+    if isinstance(api_base, str) and api_base.strip():
+        try:
+            endpoint = urlsplit(api_base)
+            if not endpoint.netloc:
+                endpoint = urlsplit(f"//{api_base}")
+            api_host = (endpoint.hostname or "").lower()
+        except ValueError:
+            pass
 
     # 2. API key format detection (in correct order!)
 
@@ -366,7 +376,10 @@ def detect_provider_from_profile(profile: Dict[str, Any]) -> ProviderType:
         return ProviderType.ANTHROPIC
 
     # Azure OpenAI (specific format)
-    if api_base and "azure.com" in api_base:
+    if any(
+        api_host == domain or api_host.endswith(f".{domain}")
+        for domain in ("azure.com", "azure.openai.com", "openai.azure.com")
+    ):
         return ProviderType.AZURE_OPENAI
 
     # OpenAI (generic sk- prefix)
@@ -376,17 +389,24 @@ def detect_provider_from_profile(profile: Dict[str, Any]) -> ProviderType:
     # 3. API base URL detection
 
     # Gemini (most specific domain match)
-    if api_base and "generativelanguage.googleapis.com" in api_base:
+    if api_host == "generativelanguage.googleapis.com" or api_host.endswith(
+        ".generativelanguage.googleapis.com"
+    ):
         return ProviderType.GEMINI
 
     # OpenRouter
-    if api_base and "openrouter.ai" in api_base:
+    if api_host == "openrouter.ai" or api_host.endswith(".openrouter.ai"):
         return ProviderType.OPENROUTER
 
-    if "anthropic.com" in api_base:
+    if api_host == "anthropic.com" or api_host.endswith(".anthropic.com"):
         return ProviderType.ANTHROPIC
 
-    if "openai.com" in api_base or "azure.com" in api_base:
+    if (
+        api_host == "openai.com"
+        or api_host.endswith(".openai.com")
+        or api_host == "azure.com"
+        or api_host.endswith(".azure.com")
+    ):
         return ProviderType.OPENAI
 
     # 4. "auto" with no detectable provider - raise so caller can handle gracefully

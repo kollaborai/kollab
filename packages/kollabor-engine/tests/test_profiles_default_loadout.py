@@ -139,6 +139,113 @@ async def test_a_default_loadout_effort_wins_over_the_profiles_and_none_stays_no
     assert (await get_profiles(neither)).json()["default_loadout"]["effort"] == ""
 
 
+def _write_folder_config(folder, profiles=None, loadouts=None, default_loadout=None):
+    """A folder whose own .kollab layer carries private profiles and loadouts."""
+    llm = {}
+    if profiles:
+        llm["profiles"] = profiles
+    if loadouts:
+        llm["loadouts"] = loadouts
+    if default_loadout:
+        llm["default_loadout"] = default_loadout
+    (folder / ".kollab").mkdir(parents=True)
+    (folder / ".kollab" / "config.json").write_text(json.dumps({"kollabor": {"llm": llm}}))
+
+
+_FOLDER_PROFILE = {
+    "folder-private": {"provider": "anthropic", "model": "claude-haiku-4.5", "api_key": "k"},
+}
+_FOLDER_LOADOUT = {"luna-max": {"provider_profile": "folder-private", "model": "gpt-6-luna"}}
+
+
+@pytest.mark.asyncio
+async def test_the_chosen_folder_lists_its_own_profile_and_default(
+    tmp_path, tmp_path_is_home, monkeypatch
+):
+    """GET /profiles?workspace=<folder> reads that folder's own layer (#972): a
+    profile saved only in the chosen folder is listed, and a default loadout
+    naming it resolves on it instead of listing null for the folder."""
+    import kollabor_engine.routes.profiles as profile_routes
+
+    folder = tmp_path / "chosen"
+    _write_folder_config(
+        folder,
+        profiles=_FOLDER_PROFILE,
+        loadouts=_FOLDER_LOADOUT,
+        default_loadout={"name": "luna-max", "level": "local"},
+    )
+
+    body = await profile_routes.list_profiles(workspace=str(folder))
+
+    assert "folder-private" in [p["name"] for p in body["profiles"]]
+    assert body["default_loadout"]["profile"] == "folder-private"
+    assert body["default_loadout"]["model"] == "gpt-6-luna"
+
+
+@pytest.mark.asyncio
+async def test_the_model_picker_lists_the_chosen_folder_s_own_profiles(
+    tmp_path, tmp_path_is_home, monkeypatch
+):
+    """GET /profiles/choices?workspace=<folder> lists that folder's own
+    profiles (#972): a profile saved only there offers its rows. Without the
+    parameter the engine's own folder answers, as today. The picker lists no
+    saved loadouts, so the route reads no loadout config at all, through a
+    service or the files (#966); only the profile definitions are read, from
+    that folder's own layers."""
+    import kollabor_engine.routes.profiles as profile_routes
+
+    async def no_catalog_refresh(self):
+        return None
+
+    monkeypatch.setattr(
+        "kollabor_ai.loadout_manager.LoadoutManager.refresh_catalogs", no_catalog_refresh
+    )
+
+    folder = tmp_path / "chosen"
+    _write_folder_config(folder, profiles=_FOLDER_PROFILE, loadouts=_FOLDER_LOADOUT)
+    engine_folder = tmp_path / "engine"
+    engine_folder.mkdir()
+    monkeypatch.chdir(engine_folder)
+
+    def names(rows):
+        return {(row["profile"], row["model"]) for row in rows}
+
+    picked = await profile_routes.list_choices(workspace=str(folder))
+    assert any(name == "folder-private" for name, _model in names(picked["choices"]))
+
+    own = await profile_routes.list_choices()
+    assert not any(name == "folder-private" for name, _model in names(own["choices"]))
+
+
+@pytest.mark.asyncio
+async def test_a_folder_with_no_own_config_is_not_offered_the_engines_folder_s_profiles(
+    tmp_path, tmp_path_is_home, monkeypatch
+):
+    """A chosen folder with no own .kollab/config.json reads no local layer at
+    all (#972): the engine folder's own private profile is not listed or
+    offered for it, the same wrong-folder read the other way round."""
+    import kollabor_engine.routes.profiles as profile_routes
+
+    async def no_catalog_refresh(self):
+        return None
+
+    monkeypatch.setattr(
+        "kollabor_ai.loadout_manager.LoadoutManager.refresh_catalogs", no_catalog_refresh
+    )
+
+    folder = tmp_path / "chosen"
+    folder.mkdir()
+    engine_folder = tmp_path / "engine"
+    _write_folder_config(engine_folder, profiles=_FOLDER_PROFILE)
+    monkeypatch.chdir(engine_folder)
+
+    listed = await profile_routes.list_profiles(workspace=str(folder))
+    assert "folder-private" not in [p["name"] for p in listed["profiles"]]
+
+    picked = await profile_routes.list_choices(workspace=str(folder))
+    assert not any(row["profile"] == "folder-private" for row in picked["choices"])
+
+
 def _pollers():
     """Config services still polling their file on this loop."""
     return [task for task in asyncio.all_tasks() if task.get_name() == "config-mtime-poll" and not task.done()]
@@ -300,6 +407,9 @@ async def _default_of(monkeypatch, workspace=None):
     from kollabor_engine.server import create_app  # type: ignore[import-not-found]
 
     monkeypatch.setattr(profile_routes, "_get_profile_manager", lambda: _Manager())
+    # a named folder gets its own manager (#972): the stub stands in for it too,
+    # the folder's own config still comes from the real layered read
+    monkeypatch.setattr(profile_routes, "_folder_profile_manager", lambda raw: _Manager())
     params = {"workspace": str(workspace)} if workspace is not None else {}
     async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
         response = await client.get("/profiles", params=params)
