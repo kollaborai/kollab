@@ -225,6 +225,7 @@ const mainConfig = defineConfig({
       "tests/team-launch-api.test.ts",
       "tests/model-choices.test.ts",
       "tests/panel-dialog-surface.test.tsx",
+      "tests/setup-guide-close.test.tsx",
     ],
     environment: "node",
   },
