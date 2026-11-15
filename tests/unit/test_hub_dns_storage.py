@@ -214,3 +214,26 @@ def test_registry_deregister_removes_persisted_record(tmp_path):
 
     assert registry.deregister("gone") is True
     assert "gone" not in DNSStorage(tmp_path).load_registry()
+
+
+def test_registry_operations_only_persist_their_changed_agent(tmp_path):
+    from plugins.hub.dns.registry import AgentRegistry
+
+    storage = DNSStorage(tmp_path)
+    storage.save_registry(
+        {
+            "alpha": AgentRecord(designation="alpha", state="idle"),
+            "beta": AgentRecord(designation="beta", state="idle"),
+        }
+    )
+    alpha_writer = AgentRegistry(DNSStorage(tmp_path))
+    beta_writer = AgentRegistry(DNSStorage(tmp_path))
+    alpha_writer.get_all()
+    beta_writer.get_all()
+
+    alpha_writer.update_state("alpha", "busy")
+    beta_writer.update_state("beta", "busy")
+
+    persisted = DNSStorage(tmp_path).load_registry()
+    assert persisted["alpha"].state == "busy"
+    assert persisted["beta"].state == "busy"
