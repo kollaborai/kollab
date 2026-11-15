@@ -415,3 +415,22 @@ def test_invalid_registry_record_field_is_preserved_for_recovery(tmp_path):
         storage.load_registry()
 
     assert storage._registry_path.read_text(encoding="utf-8") == contents
+
+
+def test_stale_registry_update_preserves_independent_field_change(tmp_path):
+    from plugins.hub.dns.registry import AgentRegistry
+
+    AgentRegistry(DNSStorage(tmp_path)).register(
+        AgentRecord(designation="alpha", state="idle", trust_score=0.5)
+    )
+    state_writer = AgentRegistry(DNSStorage(tmp_path))
+    trust_writer = AgentRegistry(DNSStorage(tmp_path))
+    state_writer.get_all()
+    trust_writer.get_all()
+
+    state_writer.update_state("alpha", "busy")
+    trust_writer.update_trust("alpha", 0.8)
+
+    persisted = DNSStorage(tmp_path).load_registry()["alpha"]
+    assert persisted.state == "busy"
+    assert persisted.trust_score == 0.8
