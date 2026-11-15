@@ -92,6 +92,19 @@ describe("plugin host lifecycle", () => {
     host.close();
   });
 
+  it("retains a load error while the plugin is stopping", async () => {
+    const importer = vi.fn(async () => { throw new Error("bad module"); });
+    const { host, setInventory } = setup({ importer });
+    await host.start();
+    const stopping = entry("hello");
+    stopping.state = "stopping";
+    setInventory([stopping]);
+    await host.refresh();
+    expect(host.getSnapshot().errors.hello).toContain("bad module");
+    expect(importer).toHaveBeenCalledTimes(1);
+    host.close();
+  });
+
   it("keeps an error visible when a plugin cannot load", async () => {
     const { host } = setup({ importer: async () => { throw new Error("bad module"); } });
     await host.start();
