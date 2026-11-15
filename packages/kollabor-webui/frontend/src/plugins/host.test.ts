@@ -123,6 +123,22 @@ describe("plugin host lifecycle", () => {
     host.close();
   });
 
+  it("refreshes inventory after the event stream reconnects", async () => {
+    let streamCalls = 0;
+    const request = vi.fn(async () => {
+      streamCalls++;
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) { if (streamCalls === 1) controller.close(); },
+      }));
+    });
+    const { host, json } = setup({ request });
+    await host.start();
+    const initialReads = json.mock.calls.length;
+    await vi.waitFor(() => expect(json.mock.calls.length).toBeGreaterThan(initialReads), { timeout: 2500 });
+    expect(streamCalls).toBeGreaterThanOrEqual(2);
+    host.close();
+  });
+
   it("keeps an error visible when a plugin cannot load", async () => {
     const { host } = setup({ importer: async () => { throw new Error("bad module"); } });
     await host.start();
