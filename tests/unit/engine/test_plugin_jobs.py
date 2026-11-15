@@ -48,6 +48,7 @@ def client(managed_repo, monkeypatch):
 
     from kollabor_engine.auth import generate_token
     from kollabor_engine.server import create_app
+
     from kollabor_plugins import services
 
     async def idle():
@@ -96,3 +97,56 @@ def test_job_management_is_local_even_with_user_token(client):
                            json={"source": "https://example.invalid/repo"})
     assert response.status_code == 403
     assert client.get("/plugins/jobs/missing", headers={"x-kollab-plugin-remote": "1"}).status_code == 403
+
+
+def test_install_staging_is_background_and_does_not_reveal_errors(client, monkeypatch):
+    import threading
+
+    from kollabor_plugins import packages
+
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_failure(*args):
+        entered.set()
+        assert release.wait(5)
+        raise ValueError("private-git-secret https://secret.invalid")
+
+    monkeypatch.setattr(packages, "stage_git_source", slow_failure)
+    try:
+        response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+        assert response.status_code == 202
+        assert entered.wait(2)
+        job_id = response.json()["job_id"]
+        assert client.get(f"/plugins/jobs/{job_id}").json()["status"] == "staging"
+    finally:
+        release.set()
+    state = _ready(client, job_id)
+    assert state["status"] == "error"
+    assert "private-git-secret" not in json.dumps(state)
+    assert "secret.invalid" not in json.dumps(state)
+
+
+def test_install_rejects_modified_staged_files(client, tmp_path):
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    ready = _ready(client, job_id)
+    stage = client.app.state.plugin_jobs.jobs[job_id]["base"] / "package"
+    (stage / "content.txt").write_text("tampered")
+    response = client.post(f"/plugins/jobs/{job_id}/confirm", json={
+        "commit": ready["commit"], "files_sha256": ready["files_sha256"],
+    })
+    assert response.status_code == 409
+    assert not (tmp_path / ".kollab" / "plugins" / "hello").exists()
+    assert not stage.exists()
+
+
+def test_jobs_are_bounded_and_expire(client, monkeypatch):
+    from kollabor_engine import plugin_jobs
+
+    monkeypatch.setattr(plugin_jobs, "_MAX_JOBS", 1)
+    first = client.post("/plugins/install", json={"source": "https://example.invalid/repo"}).json()
+    ready = _ready(client, first["job_id"])
+    assert ready["status"] == "ready"
+    assert client.post("/plugins/install", json={"source": "https://example.invalid/repo"}).status_code == 429
+    monkeypatch.setattr(plugin_jobs, "_JOB_TTL", -1)
+    assert client.get(f"/plugins/jobs/{first['job_id']}").status_code == 404

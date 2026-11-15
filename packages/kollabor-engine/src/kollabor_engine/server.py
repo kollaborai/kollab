@@ -234,6 +234,12 @@ async def _engine_lifespan(app: FastAPI):
             await acp_discovery.stop_warming()
         except Exception:
             logger.exception("Model picker warm-up shutdown failed")
+        jobs = getattr(app.state, "plugin_jobs", None)
+        if jobs is not None:
+            try:
+                await jobs.close()
+            except Exception:
+                logger.exception("Plugin job shutdown failed")
         controls = getattr(app.state, "plugin_service_controls", None)
         if controls is not None:
             try:
@@ -308,6 +314,12 @@ def create_app(port: Optional[int] = None) -> FastAPI:
         app.state.plugin_events, engine_url=app.state.plugin_engine_url
     )
     app.state.plugin_dispatcher = PluginDispatcher(app.state.plugin_events, app.state.plugin_tokens)
+    from .plugin_jobs import PluginJobs
+
+    app.state.plugin_jobs = PluginJobs(
+        app.state.plugin_events, app.state.plugin_dispatcher,
+        app.state.plugin_service_controls, app.state.plugin_engine_url,
+    )
     _wire_voice(app, port)
     from .phone_link import PhoneLink
 

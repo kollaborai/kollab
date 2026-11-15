@@ -158,6 +158,30 @@ async def plugin_changes(request: Request):
     return _event_response(request.app.state.plugin_events, None)
 
 
+class InstallPluginRequest(BaseModel):
+    source: str = Field(min_length=1, max_length=4096)
+
+
+class ConfirmPluginJobRequest(BaseModel):
+    commit: str = Field(min_length=40, max_length=64)
+    files_sha256: str = Field(min_length=64, max_length=64)
+
+
+@router.post("/install", status_code=202)
+async def install_plugin(request: Request, body: InstallPluginRequest):
+    return request.app.state.plugin_jobs.start_install(body.source)
+
+
+@router.get("/jobs/{job_id}")
+async def get_plugin_job(request: Request, job_id: str):
+    return request.app.state.plugin_jobs.get(job_id)
+
+
+@router.post("/jobs/{job_id}/confirm")
+async def confirm_plugin_job(request: Request, job_id: str, body: ConfirmPluginJobRequest):
+    return await request.app.state.plugin_jobs.confirm(job_id, body.commit, body.files_sha256)
+
+
 class PluginEvent(BaseModel):
     topic: str = Field(min_length=1, max_length=200)
     data: Any
