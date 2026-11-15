@@ -21,6 +21,7 @@ import {
   Settings2,
   ShieldCheck,
   ShieldOff,
+  Images,
   SquareTerminal,
   Terminal,
   Trash2,
@@ -84,7 +85,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-export type SessionView = "chat" | "trajectory" | "code" | "git" | "terminal";
+export type SessionView =
+  | "chat"
+  | "trajectory"
+  | "code"
+  | "git"
+  | "terminal"
+  | "gallery";
 
 const VIEWS = [
   ["chat", "Chat", MessageSquare],
@@ -92,6 +99,7 @@ const VIEWS = [
   ["code", "Code Editor", Code],
   ["git", "Git", GitBranch],
   ["terminal", "Terminal", SquareTerminal],
+  ["gallery", "Gallery", Images],
 ] as const;
 
 // Code Editor, Git and Terminal work in the chat's folder, so a chat with no folder has none of them.

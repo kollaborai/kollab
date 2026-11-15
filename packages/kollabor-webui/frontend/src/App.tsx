@@ -31,6 +31,8 @@ import { SupervisorAlertBanner } from "@/components/SupervisorAlertBanner";
 import type { StreamEvent } from "@/supervisor-alerts";
 import { liveActivity, nextLiveActivity, NO_LIVE_ACTIVITY, useThreadActivity } from "@/components/gems/activity";
 import { Avatar, AvatarImageProvider } from "@/components/agents/Avatar";
+import { GalleryView } from "@/components/media/gallery-view";
+import { MediaImageProvider, MediaSessionProvider, MediaViewerProvider } from "@/components/media/media-view";
 import { AgentLibrary } from "@/components/agents/AgentLibrary";
 import { buildLaunchChoices, keepPick } from "@/components/agents/launch-choices";
 import { GemAppearanceProvider } from "@/components/gems/gem-appearance";
@@ -320,6 +322,7 @@ function RuntimeShell({
   }, [session.session_id]);
 
   return (
+    <MediaSessionProvider api={api} sessionId={session.session_id}>
     <>
       <ComposerKeeper sessionId={session.session_id} />
       {/* Below the shared sidebar breakpoint the sidebar and the session panel are sheets. */}
@@ -381,6 +384,8 @@ function RuntimeShell({
               />
             ) : shown === "trajectory" ? (
               <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
+            ) : shown === "gallery" ? (
+              <GalleryView api={api} sessionId={session.session_id} />
             ) : null}
             {/* Opened once, then kept mounted and hidden, so open files and shells survive a switch to Chat. */}
             {workspace && visited.editor ? (
@@ -429,6 +434,7 @@ function RuntimeShell({
         />
       </div>
     </>
+    </MediaSessionProvider>
   );
 }
 
@@ -1753,6 +1759,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   return (
     <GemAppearanceProvider api={api} refreshKey={aliveKey}>
       <AvatarImageProvider api={api}>
+      <MediaImageProvider api={api}>
+      <MediaViewerProvider>
       <SidebarProvider className={`bg-muted/40 dark:bg-black ${contained ? "h-full min-h-0" : ""}`}>
         <AppSidebar
           learnActive={learnRoute !== null}
@@ -2077,6 +2085,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           </div>
         </SidebarInset>
       </SidebarProvider>
+      </MediaViewerProvider>
+      </MediaImageProvider>
       </AvatarImageProvider>
     </GemAppearanceProvider>
   );

@@ -18,7 +18,11 @@ for package_src in (
 ):
     sys.path.insert(0, str(package_src))
 
-from kollabor_agent.mcp_integration import MCPIntegration, MCPServerConnection
+from kollabor_agent.mcp_integration import (
+    MCPIntegration,
+    MCPRequestInterruptedError,
+    MCPServerConnection,
+)
 from kollabor_agent.native_tools_handler import NativeToolsHandler
 from kollabor_events.bus import EventBus
 from kollabor_events.models import EventType, Hook, HookPriority
@@ -284,10 +288,13 @@ class TestMCPServerConnection(unittest.TestCase):
             connection = MCPServerConnection("test", "fake")
             connection.initialized = True
             connection.process = _FakeProcess(stdout=partial)
-            response = await connection._send_request(
-                {"jsonrpc": "2.0", "id": "lost", "method": "lost"}
-            )
-            self.assertIsNone(response)
+            with self.assertRaisesRegex(
+                MCPRequestInterruptedError,
+                "outcome may be unknown because the request was written",
+            ):
+                await connection._send_request(
+                    {"jsonrpc": "2.0", "id": "lost", "method": "lost"}
+                )
             self.assertFalse(connection.initialized)
             self.assertEqual(connection._read_buffer, b"")
 
@@ -478,14 +485,18 @@ class TestMCPServerConnection(unittest.TestCase):
                 stdout=_ChunkedStdout([b'{"jsonrpc":"2.0","id":"req-1"'])
             )
 
-            result = await connection._send_request(
-                {"jsonrpc": "2.0", "id": "req-1", "method": "tools/call"}
-            )
+            with self.assertRaisesRegex(
+                MCPRequestInterruptedError,
+                "outcome may be unknown because the request was written",
+            ):
+                await connection._send_request(
+                    {"jsonrpc": "2.0", "id": "req-1", "method": "tools/call"}
+                )
 
-            self.assertIsNone(result)
             self.assertFalse(connection.initialized)
             self.assertEqual(connection._read_buffer, b"")
             self.assertEqual(connection._pending_requests, {})
+            self.assertEqual(connection._pending_request_written, {})
 
         asyncio.run(run_test())
 
@@ -539,6 +550,42 @@ class TestMCPServerConnection(unittest.TestCase):
                 )
 
             self.assertIsNone(connection.process)
+            self.assertFalse(connection.initialized)
+            self.assertEqual(connection._pending_requests, {})
+
+        asyncio.run(run_test())
+
+    def test_cancelling_one_request_explicitly_interrupts_other_pending_calls(self):
+        """A peer call must not look like an ordinary missing response."""
+
+        async def run_test():
+            connection = MCPServerConnection("test", "echo test")
+            connection.initialized = True
+            process = _FakeProcess(stdout=_HangingStdout())
+            connection.process = process
+
+            first = asyncio.create_task(
+                connection._send_request(
+                    {"jsonrpc": "2.0", "id": "req-1", "method": "tools/call"}
+                )
+            )
+            second = asyncio.create_task(
+                connection._send_request(
+                    {"jsonrpc": "2.0", "id": "req-2", "method": "tools/call"}
+                )
+            )
+            while len(process.stdin.writes) < 2:
+                await asyncio.sleep(0)
+
+            first.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+            with self.assertRaisesRegex(
+                Exception, "interrupted.*outcome may be unknown"
+            ):
+                await second
+
+            self.assertEqual(process.returncode, 0)
             self.assertFalse(connection.initialized)
             self.assertEqual(connection._pending_requests, {})
 
@@ -702,7 +749,10 @@ class TestMCPServerConnection(unittest.TestCase):
             await asyncio.gather(connection.close(), connection.close())
             if not request.done():
                 request.cancel()
-            await request
+            with self.assertRaisesRegex(
+                MCPRequestInterruptedError, "shared MCP connection was closed"
+            ):
+                await request
             self.assertIsNone(connection.process)
             self.assertEqual(connection._pending_requests, {})
             self.assertIsNone(connection._reader_task)
