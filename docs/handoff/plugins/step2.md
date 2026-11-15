@@ -189,3 +189,15 @@ has been created by this step. The base was step 1 commit `7ed6ec82`.
 Earlier in this continuation, one diagnostic pytest invocation used `/tmp` for
 its log and did not set an explicit backup-tree basetemp/HOME. No cleanup was
 performed there; all subsequent test runs above used fresh backup-tree paths.
+
+
+PhoneLink checkpoint (`$WORK` is the brief's backup work directory): `6453422b` added red tests (7 failed, 12 passed;
+`$WORK/phonelink-red-1794702878/test.log`)
+before `9c1d75f1` allowed the shared remote plugin surface, denied management
+before injecting the engine bearer, and injected its own remote marker after
+filtering caller headers. Normalization, header spoofing, and an actual engine
+plugin `@ctx.local_only` route are covered. Focused tests: 28 passed, 1 skipped
+(`$WORK/phonelink-green-1794702920/test.log`);
+Ruff and diff checks passed. Next: audit the agent file-tool deny list against
+all token paths and read entry points; then web assets, changelog, final gates,
+and isolated smoke as specified above. No live phone was exercised.
