@@ -86,6 +86,9 @@
 - Install/update: red browser test commit `9884c0b2` timed out on disabled Review. The dialog now starts/polls the engine's staged job, displays code warning, commit, files hash, uses, services and changes, and only posts `{commit, files_sha256}` after explicit Install/Update. Cancel deletes an unconfirmed job. Fake-engine browser acceptance verifies install preview is non-mutating until confirmation and sends the exact reviewed values; 30 focused tests and typecheck pass. Update, polling failure/retry/cancel, token/permission detail, expired jobs and real-engine install remain unverified; no real repository was contacted.
 
 
+- Badge contract red check: browser acceptance now uses the spec's `{text, hint}` response and fails because MenuCount incorrectly expected `{count, attention}`. Render the returned text and expose its hint accessibly; do not invent a second wire contract.
+
+
 ## Remaining
 
 1. Add explicit late-import removal/replacement and stale awaited-activation tests; then finish item 1: registry, SDK, error boundary, shared React runtime/import map, CSS and integration. The current lifecycle core is not production-wired and cannot load a plugin by itself.

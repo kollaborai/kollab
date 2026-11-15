@@ -56,7 +56,7 @@ try {
        });` });
     if (url.pathname === "/engine/prompts/libraries") return route.fulfill({ json: { libraries: [], roles: [] } });
     if (url.pathname === "/engine/plugins/events") return route.fulfill({ contentType: "text/event-stream", body: ": open\n\n" });
-    if (url.pathname === "/engine/plugins/fixture/api/badge") return route.fulfill({ json: { count: 4, attention: 1 } });
+    if (url.pathname === "/engine/plugins/fixture/api/badge") return route.fulfill({ json: { text: "4", hint: "4 items need attention" } });
     if (url.pathname === "/engine/sessions") return route.fulfill({ json: { sessions: [{ session_id: "fixture-session", name: "Fixture Session", agent: "coder", identity: "local-coder", profile: "default", workspace: "/fixture", external: false }], network: { device: "test", remote: [] }, offline: [], hidden: [] } });
     if (url.pathname.endsWith("/history")) return route.fulfill({ json: { history: [{ role: "assistant", content: "Before <fixture_tag><b>untrusted</b></fixture_tag> after", metadata: {} }], start_index: 0, end_index: 1, has_more_older: false, has_more_newer: false, source: "mirror" } });
     if (url.pathname.startsWith("/api/")) return route.fulfill({ json: { available: false } });
@@ -82,7 +82,10 @@ try {
   await panel.getByRole("button", { name: "Fixture View" }).click();
   await page.getByText("Fixture view body", { exact: true }).waitFor();
   await panel.getByRole("button", { name: "Chat", exact: true }).click();
-  await panel.getByRole("button", { name: /Fixture Board/ }).click();
+  const boardMenu = panel.getByRole("button", { name: /Fixture Board/ });
+  await boardMenu.getByText("4", { exact: true }).waitFor({ timeout: 5000 });
+  assert.equal(await boardMenu.getAttribute("title"), "4 items need attention");
+  await boardMenu.click();
   await page.getByRole("heading", { name: "Fixture Board" }).waitFor({ timeout: 5000 });
   await page.getByText("Fixture page body", { exact: true }).waitFor();
   await page.getByRole("tab", { name: "Second" }).click();
