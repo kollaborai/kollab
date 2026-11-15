@@ -52,3 +52,38 @@ def test_installed_plugin_root_cannot_be_symlinked_outside_plugin_directory(tmp_
     (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {"enabled": True}}, "dev": {}}))
     with TestClient(create_app(), base_url="http://localhost", client=("127.0.0.1", 1234)) as client:
         assert client.get("/plugins/hello/web/main.js").status_code == 404
+
+
+def test_allowed_name_cannot_alias_hidden_or_disallowed_asset(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = tmp_path / ".kollab"
+    dist = home / "plugins/hello/web/dist"
+    dist.mkdir(parents=True)
+    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {"enabled": True}}, "dev": {}}))
+    (dist / ".private.js").write_text("hidden")
+    (dist / "page.html").write_text("<html>private</html>")
+    (dist / "alias.js").symlink_to(dist / ".private.js")
+    (dist / "other.js").symlink_to(dist / "page.html")
+    with TestClient(create_app(), base_url="http://localhost", client=("127.0.0.1", 1234)) as client:
+        assert client.get("/plugins/hello/web/alias.js").status_code == 404
+        assert client.get("/plugins/hello/web/other.js").status_code == 404
+
+
+@pytest.mark.parametrize("component", ["web", "dist"])
+def test_plugin_dist_root_cannot_be_a_symlink_to_other_plugin_content(tmp_path, monkeypatch, component):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = tmp_path / ".kollab"
+    root = home / "plugins/hello"
+    private = root / "private"
+    private.mkdir(parents=True)
+    (private / "main.js").write_text("private")
+    if component == "web":
+        (private / "dist").mkdir()
+        (private / "dist/main.js").write_text("private")
+        (root / "web").symlink_to(private, target_is_directory=True)
+    else:
+        (root / "web").mkdir()
+        (root / "web/dist").symlink_to(private, target_is_directory=True)
+    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {"enabled": True}}, "dev": {}}))
+    with TestClient(create_app(), base_url="http://localhost", client=("127.0.0.1", 1234)) as client:
+        assert client.get("/plugins/hello/web/main.js").status_code == 404
