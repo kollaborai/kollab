@@ -52,7 +52,8 @@ const VERT = "attribute vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }"
 
 /** Starts the mist on `canvas`; returns its stop function, or undefined when the plain mark should stay. */
 export function startMist(canvas: HTMLCanvasElement): (() => void) | undefined {
-  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return undefined;
+  const motion = window.matchMedia?.("(prefers-reduced-motion: reduce)");
+  if (motion?.matches) return undefined;
   const gl = canvas.getContext("webgl", { premultipliedAlpha: false });
   if (!gl) return undefined;
   const prog = gl.createProgram()!;
@@ -77,8 +78,11 @@ export function startMist(canvas: HTMLCanvasElement): (() => void) | undefined {
   gl.uniform3f(gl.getUniformLocation(prog, "uColor"), 0.3, 0.3, 0.3); // neutral grey; the shader blows hot spots out to white
 
   let frame = 0;
+  let running = true;
+  let disposed = false;
   const start = performance.now();
   const draw = () => {
+    if (!running || disposed) return;
     const w = canvas.clientWidth;
     const h = canvas.clientHeight;
     if (canvas.width !== w || canvas.height !== h) {
@@ -91,8 +95,21 @@ export function startMist(canvas: HTMLCanvasElement): (() => void) | undefined {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     frame = requestAnimationFrame(draw);
   };
+  const onMotionChange = (event: MediaQueryListEvent) => {
+    if (event.matches) {
+      running = false;
+      cancelAnimationFrame(frame);
+    } else if (!disposed && !running) {
+      running = true;
+      draw();
+    }
+  };
+  motion?.addEventListener?.("change", onMotionChange);
   draw();
   return () => {
+    disposed = true;
+    running = false;
+    motion?.removeEventListener?.("change", onMotionChange);
     cancelAnimationFrame(frame);
     gl.getExtension("WEBGL_lose_context")?.loseContext();
   };
