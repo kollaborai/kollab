@@ -282,19 +282,71 @@ class DNSStorage:
         with _file_lock(self._reputation_path):
             return self._read_reputation_unlocked()
 
-    def save_reputation(self, scores: Dict[str, ReputationScore]) -> None:
+    def save_reputation(
+        self,
+        scores: Dict[str, ReputationScore],
+        *,
+        base_scores: Optional[Dict[str, ReputationScore]] = None,
+    ) -> Dict[str, ReputationScore]:
         """Merge reputation scores under the cross-process file lock."""
+        import copy
         import time
 
         with _file_lock(self._reputation_path):
             existing = self._read_reputation_unlocked()
-            existing.update(scores)
+            if base_scores is None:
+                existing.update(scores)
+            else:
+                counter_fields = (
+                    "tasks_completed",
+                    "tasks_failed",
+                    "tasks_abandoned",
+                    "uptime_sessions",
+                    "total_uptime_seconds",
+                )
+                for designation, score in scores.items():
+                    base = base_scores.get(designation)
+                    current = existing.get(designation)
+                    if base is None or current is None:
+                        base = base or ReputationScore(designation=designation)
+                        current = current or ReputationScore(designation=designation)
+                        if designation not in existing:
+                            existing[designation] = copy.deepcopy(score)
+                            continue
+                    else:
+                        current = copy.deepcopy(current)
+
+                    for field in counter_fields:
+                        delta = getattr(score, field) - getattr(base, field)
+                        setattr(current, field, getattr(current, field) + delta)
+                    if score.avg_response_time_ms != base.avg_response_time_ms:
+                        current.avg_response_time_ms = score.avg_response_time_ms
+                    base_endorsements = {
+                        (item.from_designation, item.capability): item
+                        for item in base.endorsements
+                    }
+                    for item in score.endorsements:
+                        key = (item.from_designation, item.capability)
+                        previous = base_endorsements.get(key)
+                        if previous is None or previous != item:
+                            for index, current_item in enumerate(current.endorsements):
+                                if (
+                                    current_item.from_designation,
+                                    current_item.capability,
+                                ) == key:
+                                    current.endorsements[index] = copy.deepcopy(item)
+                                    break
+                            else:
+                                current.endorsements.append(copy.deepcopy(item))
+                    current.last_updated = max(current.last_updated, score.last_updated)
+                    existing[designation] = current
             data = {
                 "scores": {k: v.to_dict() for k, v in existing.items()},
                 "version": 1,
                 "updated_at": time.time(),
             }
             _atomic_write_unlocked(self._reputation_path, data)
+            return existing
 
     # --- Capability Index ---
 
@@ -307,6 +359,7 @@ class DNSStorage:
         self,
         index: Dict[str, list],
         *,
+        created_entries=None,
         deleted_entries=(),
         deleted_designations=(),
         replace: bool = False,
@@ -334,7 +387,13 @@ class DNSStorage:
                         capability_name, {}
                     )
                     for entry in entries:
-                        capability_entries[entry["designation"]] = entry
+                        designation = entry["designation"]
+                        if (
+                            created_entries is None
+                            or (capability_name, designation) in created_entries
+                            or designation in capability_entries
+                        ):
+                            capability_entries[designation] = entry
 
                 merged = {
                     name: list(entries.values())

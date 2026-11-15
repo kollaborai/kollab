@@ -50,6 +50,7 @@ class CapabilityRegistry:
         """
         self._ensure_loaded()
         cap_name = capability.name
+        created_entries = set()
 
         if cap_name not in self._index:
             self._index[cap_name] = []
@@ -62,13 +63,18 @@ class CapabilityRegistry:
                 return
 
         self._index[cap_name].append((designation, capability))
-        self._save(updated_entries={(cap_name, designation)})
+        created_entries.add((cap_name, designation))
+        self._save(
+            updated_entries=created_entries,
+            created_entries=created_entries,
+        )
         logger.debug(f"{designation} declared capability: {cap_name} v{capability.version}")
 
     def declare_many(self, designation: str, capabilities: List[CapabilityEntry]) -> None:
         """Declare multiple capabilities at once (batched save)."""
         self._ensure_loaded()
         updated_entries = set()
+        created_entries = set()
         for cap in capabilities:
             cap_name = cap.name
             if cap_name not in self._index:
@@ -82,9 +88,13 @@ class CapabilityRegistry:
                     break
             if not updated:
                 self._index[cap_name].append((designation, cap))
+                created_entries.add((cap_name, designation))
             updated_entries.add((cap_name, designation))
 
-        self._save(updated_entries=updated_entries)
+        self._save(
+            updated_entries=updated_entries,
+            created_entries=created_entries,
+        )
 
     def revoke(self, designation: str, capability_name: str) -> None:
         """Revoke a capability declaration."""
@@ -227,6 +237,7 @@ class CapabilityRegistry:
         self,
         *,
         updated_entries=(),
+        created_entries=(),
         deleted_entries=(),
         deleted_designations=(),
         replace: bool = False,
@@ -259,6 +270,7 @@ class CapabilityRegistry:
                 )
         self._storage.save_capability_index(
             raw,
+            created_entries=created_entries,
             deleted_entries=deleted_entries,
             deleted_designations=deleted_designations,
             replace=replace,

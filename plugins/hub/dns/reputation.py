@@ -11,6 +11,7 @@ Old reputation fades toward 0.5 (neutral), rewarding consistently
 active agents over dormant ones with stale scores.
 """
 
+import copy
 import logging
 import time
 from typing import Dict, List, Tuple
@@ -35,11 +36,13 @@ class ReputationTracker:
         self._storage = storage
         self._decay_halflife = decay_halflife
         self._scores: Dict[str, ReputationScore] = {}
+        self._persisted_scores: Dict[str, ReputationScore] = {}
         self._loaded = False
 
     def _ensure_loaded(self) -> None:
         if not self._loaded:
             self._scores = self._storage.load_reputation()
+            self._persisted_scores = copy.deepcopy(self._scores)
             self._loaded = True
 
     def _get_or_create(self, designation: str) -> ReputationScore:
@@ -235,4 +238,14 @@ class ReputationTracker:
                 for designation in designations
                 if designation in self._scores
             }
-        self._storage.save_reputation(scores)
+        base_scores = {
+            designation: self._persisted_scores[designation]
+            for designation in scores
+            if designation in self._persisted_scores
+        }
+        persisted = self._storage.save_reputation(
+            scores, base_scores=base_scores
+        )
+        if persisted is not None:
+            self._scores.update(persisted)
+            self._persisted_scores = copy.deepcopy(persisted)
