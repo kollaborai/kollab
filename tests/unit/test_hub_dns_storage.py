@@ -204,3 +204,13 @@ def test_stale_snapshot_cannot_resurrect_deleted_record(tmp_path):
     stale_writer.merge_save_registry(stale_snapshot)
 
     assert "agent" not in DNSStorage(tmp_path).load_registry()
+
+
+def test_registry_deregister_removes_persisted_record(tmp_path):
+    from plugins.hub.dns.registry import AgentRegistry
+
+    registry = AgentRegistry(DNSStorage(tmp_path))
+    registry.register(AgentRecord(designation="gone"))
+
+    assert registry.deregister("gone") is True
+    assert "gone" not in DNSStorage(tmp_path).load_registry()
