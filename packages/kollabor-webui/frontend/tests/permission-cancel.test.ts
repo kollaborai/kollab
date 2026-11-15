@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EngineApi } from "../src/api.ts";
+import { ApiError, EngineApi } from "../src/api.ts";
 import { cancelPendingPermission, pendingPermissions, permissionOwner, promptParkedSinceShown } from "../src/utils/permission-cancel.ts";
 
 const owner = (toolId: string, requestId = toolId) => ({ toolId, requestId, source: "acp" });
@@ -135,7 +135,12 @@ test("an older engine's unsupported owner endpoint never becomes an unscoped can
     expected: [owner("tool", "parent")], current: () => [owner("tool", "parent")],
     readPending: async () => [owner("tool", "parent")],
     cancel: (requestId) => api.cancelOwned("existing-session", requestId!),
-  }), /404/);
+  }), (error: unknown) => {
+    assert.ok(error instanceof ApiError);
+    assert.equal(error.message, "Not Found");
+    assert.equal(error.status, 404);
+    return true;
+  });
   assert.deepEqual(requests, ["http://127.0.0.1:9000/sessions/existing-session/cancel-owned"]);
 });
 
