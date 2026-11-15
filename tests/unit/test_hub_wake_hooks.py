@@ -265,3 +265,23 @@ def test_plugin_alert_hook_notifies_without_a_message():
     assert [a.kind for a in done] == ["alert"]
     plugin._notify_supervisor_alert.assert_awaited_once()
     plugin._route_message.assert_not_called()
+
+
+def test_a_repeat_wakes_a_target_its_cooldown_skipped_once_the_cooldown_ends():
+    engine = _on(
+        "review_ready",
+        **{"plugins.hub.hooks.review_ready.cooldown": 60},
+    )
+    # an older head with lapis as the actor wakes only koordinator and starts
+    # its cooldown; the event under test then skips koordinator (still cooling
+    # down) and wakes lapis
+    assert [
+        a.target for a in engine.handle(_review(sha="old", actor="lapis"), now=1000.0)
+    ] == ["koordinator"]
+    assert [a.target for a in engine.handle(_review(), now=1030.0)] == ["lapis"]
+    # the cooldown ends: a repeat of the same event wakes the skipped target
+    # once and does not wake lapis again
+    repeat = engine.handle(_review(), now=1061.0)
+    assert [a.target for a in repeat] == ["koordinator"]
+    # every target has now had this event once: further repeats do nothing
+    assert engine.handle(_review(), now=1062.0) == []
