@@ -83,6 +83,9 @@ struct Runtime<C> {
     quit_prompt: Option<u64>,
     exit_worker: bool,
     exit_ready: bool,
+    /// Boot saw the web UI answer; the watcher takes this as "was up" even when the
+    /// runtime died before its own first look (#1123).
+    came_up: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -95,7 +98,7 @@ enum Quit {
 impl<C> Default for Runtime<C> {
     fn default() -> Self {
         Self { owned: None, operation: None, next_id: 0, closing: false, quit_prompt: None,
-            exit_worker: false, exit_ready: false }
+            exit_worker: false, exit_ready: false, came_up: false }
     }
 }
 
@@ -116,6 +119,14 @@ impl<C> Runtime<C> {
         if self.owned.is_some() { return Err(std::io::Error::other("the previous runtime has not stopped")); }
         self.owned = Some(spawn()?);
         Ok(true)
+    }
+
+    fn mark_up(&mut self) {
+        self.came_up = true;
+    }
+
+    fn take_up(&mut self) -> bool {
+        std::mem::take(&mut self.came_up)
     }
 
     fn finish(&mut self, operation: u64) {
@@ -156,6 +167,102 @@ impl<C> Runtime<C> {
 
 #[derive(Default)]
 struct Spawned(Mutex<Runtime<Child>>);
+
+/// After launch the app keeps looking at the web UI (#1123): the runtime died
+/// (another program stopped everything on the engine port) and the window kept a
+/// page that could not load anything until Kollab was quit and reopened.
+const WATCH_EVERY: Duration = Duration::from_secs(5);
+/// Failed looks in a row before the web UI counts as gone (a busy one answers late, not never).
+const DOWN_LOOKS: u32 = 3;
+const RESTART_LIMIT: usize = 3;
+const RESTART_WINDOW: Duration = Duration::from_secs(600);
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum Watched {
+    Nothing,
+    Restart,
+    GiveUp,
+}
+
+fn should_start_boot(watched: Watched) -> bool {
+    matches!(watched, Watched::Restart)
+}
+
+/// When a web UI that was answering has gone away. Only a web UI seen up counts:
+/// before that, and after a restart until it answers again, the boot pages own the window.
+#[derive(Default)]
+struct Watch {
+    seen_up: bool,
+    down: u32,
+    restarts: Vec<Instant>,
+}
+
+impl Watch {
+    fn observe(&mut self, up: bool, now: Instant) -> Watched {
+        if up {
+            self.seen_up = true;
+            self.down = 0;
+            return Watched::Nothing;
+        }
+        if !self.seen_up {
+            return Watched::Nothing;
+        }
+        self.down += 1;
+        if self.down < DOWN_LOOKS {
+            return Watched::Nothing;
+        }
+        self.seen_up = false;
+        self.down = 0;
+        self.restarts.retain(|t| now.duration_since(*t) < RESTART_WINDOW);
+        if self.restarts.len() >= RESTART_LIMIT {
+            return Watched::GiveUp;
+        }
+        self.restarts.push(now);
+        Watched::Restart
+    }
+}
+
+/// Restarts a runtime this app owns when its web UI stops answering. A web UI the
+/// app only attached to (started in a terminal) is not replaced behind its owner's
+/// back: the window shows the error page with Retry, and returns by itself when
+/// that web UI answers again.
+fn watch_runtime(app: AppHandle) {
+    let url = ui_url();
+    let mut watch = Watch::default();
+    let mut error_shown = false;
+    loop {
+        std::thread::sleep(WATCH_EVERY);
+        let came_up = {
+            let state = app.state::<Spawned>();
+            let mut runtime = state.0.lock().unwrap();
+            if runtime.closing || runtime.quit_prompt.is_some() || runtime.operation.is_some() {
+                continue; // booting, retrying or quitting: those own the window
+            }
+            runtime.take_up()
+        };
+        if came_up {
+            watch.observe(true, Instant::now());
+        }
+        let up = webui_running(&url);
+        if up && error_shown {
+            error_shown = false;
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.navigate(url.clone());
+            }
+        }
+        let watched = watch.observe(up, Instant::now());
+        if should_start_boot(watched) {
+            eprintln!("kollab-desktop: the web UI stopped answering; restarting the runtime");
+            start_boot(&app, true);
+        } else if watched == Watched::GiveUp {
+            eprintln!("kollab-desktop: the web UI stopped answering; showing the error page");
+            if let Some(win) = app.get_webview_window("main") {
+                show_status(&win, "error", "Kollab stopped answering. Choose Retry to start it again.", "");
+                error_shown = true;
+            }
+        }
+    }
+}
 
 /// The tray's "Launch at Login" item, so its check mark follows the real setting.
 struct LoginItem(CheckMenuItem<Wry>);
@@ -474,6 +581,7 @@ fn boot(app: &AppHandle, operation: u64) {
     let url = ui_url();
     if webui_running(&url) {
         eprintln!("kollab-desktop: attaching to the web UI at {url}");
+        app.state::<Spawned>().0.lock().unwrap().mark_up();
         while_current(app, operation, || { let _ = win.navigate(url); });
         return;
     }
@@ -509,6 +617,7 @@ fn boot(app: &AppHandle, operation: u64) {
         if !while_current(app, operation, || {}) { return; }
         if webui_running(&url) {
             eprintln!("kollab-desktop: web UI is up at {url}");
+            app.state::<Spawned>().0.lock().unwrap().mark_up();
             if notice.is_some() {
                 while_current(app, operation, || show_status(&win, "running", "", &warn));
             } else {
@@ -1142,6 +1251,8 @@ pub fn run() {
             let handle = app.handle().clone();
             quit_on_signals(&handle);
             start_boot(&handle, false);
+            let watcher = handle.clone();
+            std::thread::spawn(move || watch_runtime(watcher));
             updater::watch(&handle);
             Ok(())
         })
@@ -1181,6 +1292,84 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    // #1123: the runtime died after launch and the window kept a dead page until Kollab was reopened.
+    #[test]
+    fn a_web_ui_that_never_came_up_is_left_to_the_boot_pages() {
+        let (mut watch, t0) = (Watch::default(), Instant::now());
+        for n in 0..10 {
+            assert_eq!(watch.observe(false, t0 + WATCH_EVERY * n), Watched::Nothing);
+        }
+    }
+
+    #[test]
+    fn a_web_ui_that_stops_answering_is_restarted_after_three_failed_looks() {
+        let (mut watch, t0) = (Watch::default(), Instant::now());
+        assert_eq!(watch.observe(true, t0), Watched::Nothing);
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY), Watched::Nothing);
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY * 2), Watched::Nothing);
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY * 3), Watched::Restart);
+        // The restart's own boot owns the window now: nothing more until the web UI is up again.
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY * 4), Watched::Nothing);
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY * 9), Watched::Nothing);
+    }
+
+    #[test]
+    fn an_attached_web_ui_restart_is_dispatched_to_boot() {
+        assert!(should_start_boot(Watched::Restart));
+        assert!(!should_start_boot(Watched::GiveUp));
+        assert!(!should_start_boot(Watched::Nothing));
+    }
+
+    #[test]
+    fn a_runtime_that_dies_before_the_first_look_is_still_restarted() {
+        // Boot saw the web UI answer, then the runtime died before the watcher's first look.
+        let mut runtime: Runtime<&str> = Runtime::default();
+        runtime.mark_up();
+        let (mut watch, t0) = (Watch::default(), Instant::now());
+        if runtime.take_up() {
+            assert_eq!(watch.observe(true, t0), Watched::Nothing);
+        }
+        assert!(!runtime.take_up());
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY), Watched::Nothing);
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY * 2), Watched::Nothing);
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY * 3), Watched::Restart);
+    }
+
+    #[test]
+    fn one_slow_answer_is_not_a_restart() {
+        let (mut watch, t0) = (Watch::default(), Instant::now());
+        assert_eq!(watch.observe(true, t0), Watched::Nothing);
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY), Watched::Nothing);
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY * 2), Watched::Nothing);
+        assert_eq!(watch.observe(true, t0 + WATCH_EVERY * 3), Watched::Nothing);
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY * 4), Watched::Nothing);
+    }
+
+    #[test]
+    fn restarts_stop_at_the_limit_and_resume_after_the_window() {
+        let (mut watch, t0) = (Watch::default(), Instant::now());
+        let mut at = t0;
+        let mut acts = Vec::new();
+        for _ in 0..RESTART_LIMIT + 1 {
+            assert_eq!(watch.observe(true, at), Watched::Nothing);
+            for _ in 0..DOWN_LOOKS {
+                at += WATCH_EVERY;
+                acts.push(watch.observe(false, at));
+            }
+        }
+        assert_eq!(acts.iter().filter(|a| **a == Watched::Restart).count(), RESTART_LIMIT);
+        assert_eq!(acts.last(), Some(&Watched::GiveUp));
+
+        at += RESTART_WINDOW;
+        assert_eq!(watch.observe(true, at), Watched::Nothing);
+        let mut last = Watched::Nothing;
+        for _ in 0..DOWN_LOOKS {
+            at += WATCH_EVERY;
+            last = watch.observe(false, at);
+        }
+        assert_eq!(last, Watched::Restart);
+    }
 
     #[test]
     fn web_ui_hosts_flag_is_parsed_from_the_desktop_args() {
