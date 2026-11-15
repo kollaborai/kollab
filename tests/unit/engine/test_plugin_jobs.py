@@ -213,3 +213,85 @@ def test_update_rejects_registry_changes_before_confirmation(client, managed_rep
     })
     assert response.status_code == 409
     assert (tmp_path / ".kollab" / "plugins" / "hello" / "content.txt").read_text() == "one"
+
+
+def test_update_does_not_replace_plugin_with_active_agent_run(client, managed_repo, tmp_path):
+    _install_hello(client)
+    _publish_update(managed_repo)
+    run = tmp_path / ".kollab" / "plugin-data" / "hello" / "run"
+    run.mkdir(parents=True, exist_ok=True)
+    (run / "runs.json").write_text(json.dumps({"runs": [{"status": "running"}]}))
+    job_id = client.post("/plugins/hello/update").json()["job_id"]
+    ready = _ready(client, job_id)
+    response = client.post(f"/plugins/jobs/{job_id}/confirm", json={
+        "commit": ready["commit"], "files_sha256": ready["files_sha256"],
+    })
+    assert response.status_code == 409
+    assert (tmp_path / ".kollab" / "plugins" / "hello" / "content.txt").read_text() == "one"
+
+
+def test_update_blocks_new_router_leases_and_duplicate_confirm(client, managed_repo, monkeypatch):
+    import concurrent.futures
+    import threading
+
+    _install_hello(client)
+    _publish_update(managed_repo)
+    job_id = client.post("/plugins/hello/update").json()["job_id"]
+    ready = _ready(client, job_id)
+    payload = {"commit": ready["commit"], "files_sha256": ready["files_sha256"]}
+    manager = client.app.state.plugin_jobs
+    original = manager._install_update
+    entered, release = threading.Event(), threading.Event()
+
+    def wait_then_install(*args):
+        entered.set()
+        assert release.wait(5)
+        return original(*args)
+
+    monkeypatch.setattr(manager, "_install_update", wait_then_install)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(client.post, f"/plugins/jobs/{job_id}/confirm", json=payload)
+        try:
+            assert entered.wait(2)
+            assert client.get("/plugins/hello/api/anything").status_code == 409
+            assert client.post(f"/plugins/jobs/{job_id}/confirm", json=payload).status_code == 409
+        finally:
+            release.set()
+        assert future.result(timeout=5).status_code == 200
+
+
+def test_update_stops_and_restarts_previously_running_services(client, managed_repo, monkeypatch):
+    from kollabor_plugins import cli, services
+
+    source, bare = managed_repo
+    manifest_path = source / "kollab-plugin.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["services"] = {"worker": {"command": ["python", "worker.py"]}}
+    manifest_path.write_text(json.dumps(manifest))
+    (source / "worker.py").write_text("pass\n")
+    _git("add", ".", cwd=source)
+    _git("commit", "-m", "add service", cwd=source)
+    _git("push", str(bare), "main", cwd=source)
+    state = {"active": True, "events": []}
+    monkeypatch.setattr(services, "supervisor_tick", lambda **kwargs: None)
+    _install_hello(client)
+    _publish_update(managed_repo)
+    monkeypatch.setattr(services, "_recorded_process_alive", lambda path: state["active"])
+
+    def stop(home, plugin_id, declarations):
+        assert plugin_id == "hello" and "worker" in declarations
+        state["events"].append("stop")
+        state["active"] = False
+
+    def control(plugin_id, name, action, **kwargs):
+        state["events"].append((plugin_id, name, action))
+
+    monkeypatch.setattr(cli, "_stop_for_change", stop)
+    monkeypatch.setattr(services, "control_service", control)
+    job_id = client.post("/plugins/hello/update").json()["job_id"]
+    ready = _ready(client, job_id)
+    response = client.post(f"/plugins/jobs/{job_id}/confirm", json={
+        "commit": ready["commit"], "files_sha256": ready["files_sha256"],
+    })
+    assert response.status_code == 200, response.text
+    assert state["events"] == ["stop", ("hello", "worker", "start")]

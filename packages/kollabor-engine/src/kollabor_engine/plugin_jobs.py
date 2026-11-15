@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import shutil
 import tempfile
@@ -67,7 +69,10 @@ class PluginJobs:
     @staticmethod
     def _public(job: dict) -> dict:
         public = {"job_id": job["id"], "status": job["status"], "action": job["action"]}
-        for key in ("commit", "files_sha256", "manifest", "source", "ref", "error", "plugin_id"):
+        for key in (
+            "commit", "files_sha256", "manifest", "source", "ref", "error", "plugin_id",
+            "previous_commit", "changed_folders", "warning",
+        ):
             if key in job:
                 public[key] = job[key]
         return public
@@ -87,6 +92,30 @@ class PluginJobs:
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail="Invalid plugin Git source") from exc
         return self._start("install", source)
+
+    def start_update(self, plugin_id: str) -> dict:
+        from kollabor_plugins.packages import _ID, _read_registry, parse_git_source
+
+        if not _ID.fullmatch(plugin_id):
+            raise HTTPException(status_code=404, detail="Installed plugin not found")
+        home = Path.home() / ".kollab"
+        try:
+            record = _read_registry(home / "plugins.json")["plugins"].get(plugin_id)
+            if not isinstance(record, dict):
+                raise HTTPException(status_code=404, detail="Installed plugin not found")
+            source, ref = record.get("source"), record.get("ref")
+            if not isinstance(source, str) or (ref is not None and not isinstance(ref, str)):
+                raise ValueError("Invalid installed plugin source")
+            source = source + ("#" + ref if ref else "")
+            parse_git_source(source)
+            root = home / "plugins" / plugin_id
+            if root.is_symlink() or not root.is_dir():
+                raise ValueError("Invalid installed plugin directory")
+        except HTTPException:
+            raise
+        except (OSError, ValueError, TypeError) as exc:
+            raise HTTPException(status_code=409, detail="Cannot safely update this plugin") from exc
+        return self._start("update", source, expected_record=record, target_id=plugin_id)
 
     def _start(self, action: str, source: str, **extra) -> dict:
         if self.closing:
@@ -114,6 +143,37 @@ class PluginJobs:
         self._track(self._stage(job))
         return self._public(job)
 
+    @staticmethod
+    def _snapshot(folder: Path) -> dict[str, str]:
+        files = {}
+        for path in folder.rglob("*"):
+            if path.is_symlink():
+                raise ValueError("Plugin folder contains a symlink")
+            if path.is_file():
+                with path.open("rb") as stream:
+                    files[path.relative_to(folder).as_posix()] = hashlib.file_digest(stream, "sha256").hexdigest()
+        return files
+
+    @classmethod
+    def _update_preview(cls, job: dict, staged: dict) -> dict:
+        from kollabor_plugins.packages import _read_registry, files_sha256
+
+        home = Path.home() / ".kollab"
+        plugin_id = job["target_id"]
+        if staged["manifest"]["id"] != plugin_id:
+            raise ValueError("Updated plugin id does not match the installed plugin")
+        if _read_registry(home / "plugins.json")["plugins"].get(plugin_id) != job["expected_record"]:
+            raise ValueError("Plugin registry changed during staging")
+        root = home / "plugins" / plugin_id
+        if root.is_symlink() or not root.is_dir() or files_sha256(root) != job["expected_record"].get("files_sha256"):
+            raise ValueError("Installed plugin files changed")
+        before, after = cls._snapshot(root), cls._snapshot(job["base"] / "package")
+        changed = sorted({
+            str(Path(name).parent)
+            for name in before.keys() | after.keys() if before.get(name) != after.get(name)
+        })
+        return {"previous_commit": job["expected_record"].get("commit"), "changed_folders": changed}
+
     async def _stage(self, job: dict) -> None:
         from kollabor.version import get_runtime_version
         from kollabor_plugins.packages import stage_git_source
@@ -122,6 +182,8 @@ class PluginJobs:
             staged = await asyncio.to_thread(
                 stage_git_source, job["requested_source"], job["base"] / "package", get_runtime_version()
             )
+            if job["action"] == "update":
+                job.update(await asyncio.to_thread(self._update_preview, job, staged))
             job["staged"] = staged
             for key in ("commit", "files_sha256", "manifest", "source", "ref"):
                 job[key] = staged[key]
@@ -152,19 +214,81 @@ class PluginJobs:
         task = self._track(self._apply(job, commit, digest))
         return await asyncio.shield(task)
 
+    @staticmethod
+    def _install_update(job: dict, commit: str, digest: str) -> None:
+        from kollabor_plugins.cli import _locked_service_files, _stop_for_change
+        from kollabor_plugins.packages import _read_registry, files_sha256, install_stage, verify_stage
+        from kollabor_plugins.services import _recorded_process_alive
+
+        from .routes.plugins import _package_context, _with_inactive_runs
+
+        home = Path.home() / ".kollab"
+        plugin_id = job["target_id"]
+        root = home / "plugins" / plugin_id
+        expected = job["expected_record"]
+        stage = job["base"] / "package"
+        verify_stage(stage, job["staged"], commit, digest)
+        if _read_registry(home / "plugins.json")["plugins"].get(plugin_id) != expected:
+            raise ValueError("Plugin registry changed during approval")
+        if root.is_symlink() or not root.is_dir() or files_sha256(root) != expected.get("files_sha256"):
+            raise ValueError("Installed plugin files changed")
+        context = _package_context(plugin_id)
+        if context is None:
+            raise ValueError("Installed plugin is unavailable")
+        old_manifest = json.loads((root / "kollab-plugin.json").read_text(encoding="utf-8"))
+        old_services = old_manifest.get("services", {})
+        new_services = job["staged"]["manifest"].get("services", {})
+        if not isinstance(old_services, dict) or not isinstance(new_services, dict):
+            raise ValueError("Invalid plugin services")
+        run = home / "plugin-data" / plugin_id / "run"
+
+        def swap() -> None:
+            job["restart_services"] = [
+                name for name in old_services if _recorded_process_alive(run / f"{name}.pid")
+            ]
+            _stop_for_change(home, plugin_id, old_services)
+            with _locked_service_files(home, plugin_id, {**old_services, **new_services}):
+                install_stage(stage, job["staged"], commit, digest, expected_record=expected)
+
+        _with_inactive_runs(context, swap)
+
+    async def _restart_after_change(self, job: dict) -> None:
+        from kollabor_plugins.services import control_service, supervisor_tick
+
+        plugin_id = job["plugin_id"]
+        options = {"engine_url": self.engine_url} if self.engine_url else {}
+        for name in job.get("restart_services", []):
+            try:
+                await asyncio.to_thread(control_service, plugin_id, name, "start", **options)
+            except Exception as exc:
+                logger.warning("Plugin service restart failed: %s", type(exc).__name__)
+                job["warning"] = "A previously running service could not be restarted; check its status"
+        if job["status"] == "complete":
+            try:
+                await asyncio.to_thread(supervisor_tick, **options)
+            except Exception as exc:
+                logger.warning("Plugin service supervisor failed: %s", type(exc).__name__)
+                job["warning"] = "Plugin installed, but its services could not be started; check their status"
+
     async def _apply(self, job: dict, commit: str, digest: str) -> dict:
         from kollabor_plugins.packages import EXPECT_ABSENT, install_stage
 
+        changing = False
         try:
-            await asyncio.to_thread(
-                install_stage, job["base"] / "package", job["staged"], commit, digest,
-                expected_record=EXPECT_ABSENT,
-            )
+            if job["action"] == "update":
+                await self.dispatcher.begin_change(job["target_id"])
+                changing = True
+                await self.controls.cancel_plugin(job["target_id"])
+                await asyncio.to_thread(self._install_update, job, commit, digest)
+            else:
+                await asyncio.to_thread(
+                    install_stage, job["base"] / "package", job["staged"], commit, digest,
+                    expected_record=EXPECT_ABSENT,
+                )
             job["status"] = "complete"
-            return self._public(job)
         except ValueError as exc:
             job["status"] = "error"
-            job["error"] = "Plugin approval or files changed; stage it again"
+            job["error"] = "Plugin approval, files, or active runs changed; check plugin status and stage again"
             raise HTTPException(status_code=409, detail=job["error"]) from exc
         except OSError as exc:
             job["status"] = "error"
@@ -176,9 +300,14 @@ class PluginJobs:
             job["error"] = "Cannot install plugin; stage it again"
             raise HTTPException(status_code=503, detail=job["error"]) from exc
         finally:
+            if changing:
+                await self.dispatcher.end_change(job["target_id"])
+            if job["status"] == "complete" or job.get("restart_services"):
+                await self._restart_after_change(job)
             job["updated"] = time.monotonic()
             await asyncio.to_thread(self._cleanup, job)
             self.hub.publish_change()
+        return self._public(job)
 
     async def close(self) -> None:
         self.closing = True

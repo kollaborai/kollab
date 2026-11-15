@@ -553,6 +553,11 @@ def _remove_package_checked(context, purge: bool) -> None:
     _with_inactive_runs(context, remove_when_stopped)
 
 
+@router.post("/{plugin_id}/update", status_code=202)
+async def update_plugin(request: Request, plugin_id: str):
+    return request.app.state.plugin_jobs.start_update(plugin_id)
+
+
 class RemovePluginOptions(BaseModel):
     purge: bool = False
     confirm_purge: bool = False
@@ -1076,6 +1081,7 @@ class PluginDispatcher:
         self._condition = asyncio.Condition()
         self._loaded: dict[str, _LoadedPlugin] = {}
         self._retired: dict[str, list[_LoadedPlugin]] = {}
+        self._changing: set[str] = set()
         self._closing = False
 
     async def _close(self, loaded: _LoadedPlugin) -> None:
@@ -1141,6 +1147,8 @@ class PluginDispatcher:
         async with self._condition:
             if self._closing:
                 raise HTTPException(status_code=503, detail="Plugin dispatcher is shutting down")
+            if plugin_id in self._changing:
+                raise HTTPException(status_code=409, detail="Plugin is being updated")
             if "--no-plugins" in sys.argv[1:]:
                 raise HTTPException(status_code=404, detail="Plugins are disabled")
             try:
@@ -1173,6 +1181,8 @@ class PluginDispatcher:
                 await self._condition.wait()
                 if self._closing:
                     raise HTTPException(status_code=503, detail="Plugin dispatcher is shutting down")
+                if plugin_id in self._changing:
+                    raise HTTPException(status_code=409, detail="Plugin is being updated")
             if loaded is None:
                 try:
                     loaded = await self._load(context, revision, entrypoint)
@@ -1196,6 +1206,27 @@ class PluginDispatcher:
                 if not retired:
                     self._retired.pop(plugin_id, None)
                 self._condition.notify_all()
+
+    async def begin_change(self, plugin_id: str) -> None:
+        """Block new router leases while an approved package is replaced."""
+        async with self._condition:
+            if self._closing or plugin_id in self._changing:
+                raise ValueError("Plugin is already changing or shutting down")
+            self._changing.add(plugin_id)
+            try:
+                await self._retire(plugin_id)
+                if self._retired.get(plugin_id):
+                    raise ValueError("Plugin requests are still running; retry the update")
+                self.errors.pop(plugin_id, None)
+            except BaseException:
+                self._changing.discard(plugin_id)
+                self._condition.notify_all()
+                raise
+
+    async def end_change(self, plugin_id: str) -> None:
+        async with self._condition:
+            self._changing.discard(plugin_id)
+            self._condition.notify_all()
 
     async def invalidate(self, plugin_id: str) -> bool:
         async with self._condition:
