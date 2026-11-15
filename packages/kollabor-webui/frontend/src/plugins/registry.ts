@@ -22,16 +22,36 @@ export interface RegistrySnapshot { plugins: PluginRecords[]; conflicts: Command
 export class PluginDraft {
   readonly records: PluginRecords;
 
-  constructor(id: string) {
+  constructor(id: string, private readonly declarations?: Record<string, unknown>) {
     this.records = { id, menus: [], views: [], pages: [], modals: [], settings: [], commands: [], renderers: [], notices: [] };
   }
-  menu(id: string, options: Omit<PluginMenu, "id"> = {}) { this.records.menus.push({ id, ...options }); }
-  view(view: PluginView) { this.records.views.push(view); }
-  page(page: PluginPage) { this.records.pages.push(page); }
-  modal(modal: PluginModal) { this.records.modals.push(modal); }
+  private declared(group: string, id: string): Record<string, unknown> | null {
+    if (!this.declarations) return {};
+    const declarations = this.declarations[group];
+    const normalized = id.replace(/^\//, "");
+    const found = Array.isArray(declarations) ? declarations.find(item =>
+      typeof item === "string" ? item.replace(/^\//, "") === normalized :
+        item && typeof item === "object" && [item.id, item.name, item.tool, item.tag].includes(id),
+    ) : undefined;
+    if (found === undefined) {
+      console.warn(`Plugin ${this.records.id} attempted undeclared ${group} contribution: ${id}`);
+      return null;
+    }
+    return typeof found === "object" && found !== null ? found as Record<string, unknown> : {};
+  }
+  menu(id: string, options: Omit<PluginMenu, "id"> = {}) {
+    const declared = this.declared("menu", id);
+    if (declared) this.records.menus.push({ ...options, ...declared, id } as PluginMenu);
+  }
+  view(view: PluginView) { if (this.declared("views", view.id)) this.records.views.push(view); }
+  page(page: PluginPage) { if (this.declared("pages", page.id)) this.records.pages.push(page); }
+  modal(modal: PluginModal) { if (this.declared("modals", modal.id)) this.records.modals.push(modal); }
   settings(settings: PluginSettings) { this.records.settings.push(settings); }
-  command(command: PluginCommand) { this.records.commands.push(command); }
-  renderer(renderer: PluginRenderer) { this.records.renderers.push(renderer); }
+  command(command: PluginCommand) { if (this.declared("slash", command.name)) this.records.commands.push(command); }
+  renderer(renderer: PluginRenderer) {
+    const id = renderer.tool ?? renderer.tag;
+    if (id && this.declared("renderers", id)) this.records.renderers.push(renderer);
+  }
   notice(notice: PluginNotice) { this.records.notices.push(notice); }
 }
 
@@ -53,7 +73,7 @@ export class PluginRegistry {
     this.builtins = next;
     this.publish();
   }
-  stage(id: string) { return new PluginDraft(id); }
+  stage(id: string, declarations?: Record<string, unknown>) { return new PluginDraft(id, declarations); }
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);

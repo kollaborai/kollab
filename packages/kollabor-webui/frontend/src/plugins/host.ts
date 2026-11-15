@@ -110,7 +110,7 @@ export class PluginHost {
       },
       createContext: entry => {
         this.release(entry.id);
-        const draft = this.registry.stage(entry.id);
+        const draft = this.registry.stage(entry.id, (entry as PluginEntry).contributes ?? {});
         const events = new PluginEventStream(options.request, `/plugins/${encodeURIComponent(entry.id)}/events`);
         const context = createPluginContext({
           id: entry.id, draft, json: options.json, events,

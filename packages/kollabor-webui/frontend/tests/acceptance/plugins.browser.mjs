@@ -27,7 +27,11 @@ try {
     plugin_id: "fixture-new", manifest: { name: "Fixture New", version: "1.2.3", uses: { tools: ["file_read"], network: ["example.com"] }, services: { worker: {} } },
     changes: { added: ["web/dist/index.js"], modified: [], removed: [], new_grants: ["network:example.com"], new_dependencies: [] } };
   const entry = { id: "fixture", name: "Fixture", kind: "installed", state: "ok", enabled: true, shadowed: false,
-    web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: {} };
+    web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: {
+      menu: [{ id: "board", label: "Fixture Board", open: { page: "board" } }],
+      views: [{ id: "fixture-view" }], pages: [{ id: "board" }], modals: [{ id: "details" }],
+      slash: ["fixture"], renderers: [{ tag: "fixture_tag" }],
+    } };
   await page.route("**/*", async route => {
     const url = new URL(route.request().url());
     if (url.origin !== origin) return route.abort();
