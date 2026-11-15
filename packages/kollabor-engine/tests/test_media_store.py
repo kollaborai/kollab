@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from kollabor_engine.routes.messages import _save_sent_media
 from kollabor_engine.media_store import (
     MAX_DECODED_BYTES,
     REF_RE,
@@ -207,6 +208,153 @@ def test_page_after_mixed_row_skips_once(tmp_path: Path) -> None:
     page = [{"role": "user", "content": "second [image1]"}]
     attach_media_to_rows(tmp_path, "s1", page, skip=1)
     assert [m["ref"] for m in page[0]["media"]] == [refs[1]]
+
+
+def test_failed_part_does_not_starve_later_rows(tmp_path: Path, monkeypatch) -> None:
+    """A part whose storage failed must not shift later rows' refs (#1124 P2).
+
+    row1 sends two images, the first fails to store; row2 sends one that
+    stores. Binding must give row1 its surviving ref and row2 the later
+    one -- not let row1's count consume row2's ref.
+    """
+    dir_ = tmp_path / "conversations"
+    monkeypatch.setattr(
+        "kollabor_config.config_utils.get_project_data_dir", lambda: tmp_path
+    )
+    saved1 = _save_sent_media(
+        [
+            {"type": "text", "text": "look"},
+            {"type": "image", "image": "data:image/png;base64,!!!not-base64"},
+            {"type": "image", "image": PNG},
+        ],
+        "s1",
+    )
+    saved2 = _save_sent_media(
+        [{"type": "text", "text": "and"}, {"type": "image", "image": JPEG}],
+        "s1",
+    )
+    assert len(saved1) == 1
+    rows = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image", "image": None},
+                {"type": "image", "image": None},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "and"},
+                {"type": "image", "image": None},
+            ],
+        },
+    ]
+    attach_media_to_rows(dir_, "s1", rows)
+    assert [m["ref"] for m in rows[0]["media"]] == [saved1[0]["ref"]]
+    assert [m["ref"] for m in rows[1]["media"]] == [saved2[0]["ref"]]
+
+
+def test_page_after_failed_part_binds_its_own_ref(tmp_path: Path, monkeypatch) -> None:
+    """The page-offset skip must count a failed part's slot too."""
+    dir_ = tmp_path / "conversations"
+    monkeypatch.setattr(
+        "kollabor_config.config_utils.get_project_data_dir", lambda: tmp_path
+    )
+    _save_sent_media(
+        [
+            {"type": "text", "text": "look"},
+            {"type": "image", "image": "data:image/png;base64,!!!not-base64"},
+            {"type": "image", "image": PNG},
+        ],
+        "s1",
+    )
+    page = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "next"},
+                {"type": "image", "image": None},
+            ],
+        },
+    ]
+    attach_media_to_rows(dir_, "s1", page, skip=2)
+    real = list_for(dir_, "s1")
+    assert len(real) == 1
+    assert [m["ref"] for m in page[0]["media"]] == [real[0]["ref"]]
+
+
+def test_failure_matrix_binds_exactly_stored_refs(tmp_path: Path, monkeypatch) -> None:
+    """For every valid/invalid part pattern, each row binds exactly the refs
+    its own send stored, in order -- count-vs-store disagreement is the
+    invariant under test, not one patched scenario (#1124 review bar)."""
+    dir_ = tmp_path / "conversations"
+    good = [PNG, JPEG]
+    # (pattern, description): each row is a list of True(valid)/False(failed)
+    # part slots; a trailing text part makes some rows mixed-shape.
+    patterns = [
+        ([], "no images"),
+        ([[]], "one empty row"),
+        ([[True]], "single valid"),
+        ([[False]], "single failed"),
+        ([[True, True]], "two valid one row"),
+        ([[False, True]], "failed then valid"),
+        ([[True, False]], "valid then failed"),
+        ([[False, True], [True]], "failure then a later row"),
+        ([[True, False], [False, True]], "failures interleaved"),
+        ([[False, False, True]], "two failures then valid"),
+        ([[True], [False], [True]], "alternating rows"),
+    ]
+    for i, (rows_pattern, name) in enumerate(patterns):
+        session = f"matrix-{i}"
+        if i == 0:
+            monkeypatch.setattr(
+                "kollabor_config.config_utils.get_project_data_dir",
+                lambda: tmp_path,
+            )
+        for path in dir_.glob("media/*-index.json"):
+            path.unlink()
+        stored_per_row = []
+        for j, row_pattern in enumerate(rows_pattern):
+            parts = [{"type": "text", "text": f"row{j}"}]
+            for ok in row_pattern:
+                parts.append(
+                    {"type": "image", "image": good[j % 2] if ok else "data:image/png;base64,bad"}
+                )
+            stored_per_row.append(_save_sent_media(parts, session))
+        history_rows = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"row{j}"},
+                    *[{"type": "image", "image": None} for _ in row_pattern],
+                ],
+            }
+            for j, row_pattern in enumerate(rows_pattern)
+        ]
+        attach_media_to_rows(dir_, session, history_rows)
+        for j, row in enumerate(history_rows):
+            expected = [entry["ref"] for entry in stored_per_row[j]]
+            bound = [m["ref"] for m in row.get("media") or []]
+            assert bound == expected, f"{name} row{j}: bound {bound} != stored {expected}"
+
+
+def test_failed_slots_stay_out_of_listing(tmp_path: Path, monkeypatch) -> None:
+    dir_ = tmp_path / "conversations"
+    monkeypatch.setattr(
+        "kollabor_config.config_utils.get_project_data_dir", lambda: tmp_path
+    )
+    _save_sent_media(
+        [
+            {"type": "image", "image": "data:image/png;base64,!!!not-base64"},
+            {"type": "image", "image": PNG},
+        ],
+        "s1",
+    )
+    listed = list_for(dir_, "s1")
+    assert len(listed) == 1
+    assert listed[0]["ref"]
 
 
 def test_attach_skip_counts_mirror_part_rows(tmp_path: Path) -> None:
