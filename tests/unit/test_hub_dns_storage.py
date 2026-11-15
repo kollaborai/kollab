@@ -376,3 +376,42 @@ def test_stale_reputation_trackers_merge_response_time_samples(tmp_path):
     persisted = DNSStorage(tmp_path).load_reputation()["alpha"]
     assert persisted.tasks_completed == 2
     assert persisted.avg_response_time_ms == 200
+
+
+def test_stale_public_registry_save_preserves_concurrent_update(tmp_path):
+    from plugins.hub.dns.registry import AgentRegistry
+
+    storage = DNSStorage(tmp_path)
+    storage.save_registry(
+        {
+            "alpha": AgentRecord(designation="alpha", state="idle"),
+            "beta": AgentRecord(designation="beta", state="idle"),
+        }
+    )
+    current = AgentRegistry(DNSStorage(tmp_path))
+    stale = AgentRegistry(DNSStorage(tmp_path))
+    current.get_all()
+    stale.get_all()
+
+    current.update_state("alpha", "busy")
+    stale.save()
+
+    assert DNSStorage(tmp_path).load_registry()["alpha"].state == "busy"
+
+
+def test_invalid_registry_record_field_is_preserved_for_recovery(tmp_path):
+    from plugins.hub.dns.storage import RegistryReadError
+
+    storage = DNSStorage(tmp_path)
+    contents = json.dumps(
+        {
+            "version": 1,
+            "records": {"agent": {"designation": "agent", "trust_score": []}},
+        }
+    )
+    storage._registry_path.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(RegistryReadError, match="invalid record schema"):
+        storage.load_registry()
+
+    assert storage._registry_path.read_text(encoding="utf-8") == contents
