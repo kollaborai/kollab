@@ -3,9 +3,9 @@
 import asyncio
 import json
 
+from kollabor.state.local import LocalStateService
 from kollabor_agent.permissions import PermissionManager, RiskAssessor
 from kollabor_events.permissions_models import ApprovalMode, RiskAssessmentRules
-from kollabor.state.local import LocalStateService
 
 
 def _make_state(tmp_path):

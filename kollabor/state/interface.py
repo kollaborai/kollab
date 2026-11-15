@@ -313,13 +313,17 @@ class StateService(Protocol):
         """
         ...
 
-    async def set_approval_mode(self, mode: str) -> PermissionSnapshot:
+    async def set_approval_mode(
+        self, mode: str, persist: bool = True
+    ) -> PermissionSnapshot:
         """Change the tool permission approval mode.
 
         Args:
             mode: One of "DEFAULT", "CONFIRM_ALL", "AUTO_APPROVE_EDITS",
                 "TRUST_ALL". Case-insensitive; aliases "strict" and "trust"
                 are accepted for backward compatibility.
+            persist: If False the change applies to this session only and
+                the saved default in the config is left alone.
 
         Returns:
             PermissionSnapshot reflecting the updated mode.

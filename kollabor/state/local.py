@@ -1983,7 +1983,9 @@ class LocalStateService(StateService):
         publish_semantic(self._event_bus, "profile_changed", profile=snapshot.to_dict())
         return snapshot
 
-    async def set_approval_mode(self, mode: str) -> PermissionSnapshot:
+    async def set_approval_mode(
+        self, mode: str, persist: bool = True
+    ) -> PermissionSnapshot:
         """Change the tool permission approval mode and return the new snapshot.
 
         Accepts the canonical enum names ("DEFAULT", "CONFIRM_ALL",
@@ -1991,6 +1993,10 @@ class LocalStateService(StateService):
         (-> CONFIRM_ALL) and "trust" (-> TRUST_ALL) so the RPC path
         matches what /permissions strict and /permissions trust already
         send. Case-insensitive.
+
+        With persist=False the mode applies to this session only; the
+        saved default in the config is left alone (a session start must
+        never move a person's saved choice, #1111).
 
         Raises ValueError if the mode name is not recognized or the
         permission manager is not available.
@@ -2024,7 +2030,7 @@ class LocalStateService(StateService):
                 f"unknown approval mode: {mode!r} (expected DEFAULT, CONFIRM_ALL, AUTO_APPROVE_EDITS, or TRUST_ALL)"
             )
 
-        pm.set_approval_mode(enum_val)
+        pm.set_approval_mode(enum_val, persist=persist)
         # Re-read to build the new snapshot -- set_approval_mode may
         # persist side-effects (config save) that we want reflected.
         return await self.get_permission_state()
