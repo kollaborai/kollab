@@ -66,6 +66,21 @@ def test_presence_model_follows_the_live_profile():
     assert plugin._identity.to_presence_dict()["tags"]["model"] == "gpt-b"
 
 
+def test_presence_model_uses_the_active_acp_harness():
+    harness = SimpleNamespace(
+        active=True,
+        advertised_config_options=lambda: [
+            {"id": "model", "category": "model", "currentValue": "haiku"}
+        ],
+    )
+    plugin = HubPlugin(event_bus=_EventBus({"acp_orchestrator": harness}))
+    plugin._identity = _runtime("lapis", "lapis-id")
+
+    plugin._refresh_presence_model()
+
+    assert plugin._identity.to_presence_dict()["tags"]["model"] == "haiku"
+
+
 @pytest.mark.asyncio
 async def test_model_switch_notice_is_delivered_to_each_peer():
     plugin = HubPlugin()
