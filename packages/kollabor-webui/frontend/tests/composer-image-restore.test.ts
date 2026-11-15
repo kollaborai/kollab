@@ -23,6 +23,13 @@ describe("stripImageTokens", () => {
     expect(result).toEqual({ text: "hello from alpha", tokenCount: 1 });
   });
 
+  it("preserves ordinary draft text that happens to contain an image-like token", () => {
+    expect(stripImageTokens("Please print [image1] literally")).toEqual({
+      text: "Please print [image1] literally",
+      tokenCount: 0,
+    });
+  });
+
   it("returns empty text with count when the draft is only tokens", () => {
     const result = stripImageTokens("[image1]\n[image2]");
     expect(result).toEqual({ text: "", tokenCount: 2 });
