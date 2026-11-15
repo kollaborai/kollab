@@ -47,7 +47,7 @@
 - Render isolation: red host test (commit `2a486b3c`) failed because context lookup and render-error reporting were absent. Host now releases the failed plugin's resources and contributions, exposes the error kind and permits retry; isolated plugin tests pass 24/24 and typecheck passes. Actual React boundary behavior remains browser-untested.
 
 
-- App boot browser red check: isolated `CHROME_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' node tests/acceptance/plugins.browser.mjs` starts a local Vite fixture, stubs all engine traffic and times out waiting for the `?plugins=off` notice. It also requires a fixture plugin notice after boot. Mount the host and recovery/contribution notices; expand this test for all actual surfaces and breakages later.
+- App boot: red browser acceptance (test commit `31b14f0a`) timed out waiting for the opt-out notice. App now mounts the host, recovery/notice contributions and a scoped plugin provider; isolated fake-engine browser acceptance passes opt-out plus a loaded notice. `vitest run src/plugins` passes 24/24 and typecheck passes. Browser test uses Vite dev, not the production CSP; fixture route and modal/view/page navigation remain unwired, as do all other real contribution surfaces.
 
 
 ## Remaining

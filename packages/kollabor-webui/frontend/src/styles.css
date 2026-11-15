@@ -180,3 +180,10 @@
     font-size: 16px !important;
   }
 }
+
+/* Plugins inherit the shell's touch sizing without having to supply CSS. */
+@media (pointer: coarse) {
+  [data-plugin] :is(button, input, select, textarea, [role="button"], [role="tab"]) {
+    min-height: 44px;
+  }
+}

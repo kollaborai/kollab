@@ -62,6 +62,10 @@ import { SessionPanel, type SessionView } from "@/components/shell/SessionPanel"
 import { latestTodoBlock } from "@/utils/todo-list";
 import { ShellHeader } from "@/components/shell/ShellHeader";
 import { Button } from "@/components/ui/button";
+import { PluginHostContext, PluginNotices } from "@/plugins/components";
+import { PluginHost } from "@/plugins/host";
+import { pluginUI } from "@/plugins/ui";
+import type { PluginOpen } from "@/plugins/sdk";
 import {
   SidebarInset,
   SidebarProvider,
@@ -433,6 +437,9 @@ function RuntimeShell({
 
 export default function App({ contained = false }: { contained?: boolean } = {}) {
   const [pageRoute, setPageRoute] = useState(() => readMainPageRoute(window.location));
+  const [pluginHost, setPluginHost] = useState<PluginHost | null>(null);
+  const [pluginTarget, setPluginTarget] = useState<{ pluginId: string; target: PluginOpen } | null>(null);
+  const [pluginToast, setPluginToast] = useState<string | null>(null);
   const learnRoute = pageRoute.kind === "learn" ? pageRoute.learn : null;
   const whatsNewActive = pageRoute.kind === "whats-new";
   const pageOpen = pageRoute.kind !== "chat";
@@ -1745,9 +1752,46 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     }
   };
 
+  const pluginActions = useRef({
+    navigate: (_pluginId: string, _target: PluginOpen) => {},
+    openAgent: (_sessionId: string) => {},
+  });
+  pluginActions.current = {
+    navigate: (pluginId, target) => {
+      if ("url" in target) {
+        try {
+          const url = new URL(target.url, window.location.href);
+          if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Unsupported link");
+          window.open(url.href, "_blank", "noopener,noreferrer");
+        } catch { setPluginToast("This plugin link is not a valid web address."); }
+      } else setPluginTarget({ pluginId, target });
+    },
+    openAgent: sessionId => { setPluginTarget(null); returnToChat(); void selectSession(sessionId); },
+  };
+  useEffect(() => {
+    const host = new PluginHost({
+      json: (path, init) => api.json(path, init), request: (path, init) => api.request(path, init),
+      importer: url => import(/* @vite-ignore */ url), storage: window.sessionStorage,
+      disabled: new URLSearchParams(window.location.search).get("plugins") === "off",
+      navigate: (id, target) => pluginActions.current.navigate(id, target),
+      openAgent: id => pluginActions.current.openAgent(id),
+      copy: text => navigator.clipboard.writeText(text), toast: setPluginToast, ui: pluginUI,
+      builtinCommands: DEFAULT_SLASH_COMMANDS.flatMap(command => [command.name, ...(command.aliases ?? [])]),
+    });
+    setPluginHost(host);
+    void host.start();
+    return () => host.close();
+  }, []);
+  useEffect(() => {
+    if (!pluginToast) return;
+    const timer = window.setTimeout(() => setPluginToast(null), 5000);
+    return () => window.clearTimeout(timer);
+  }, [pluginToast]);
+
   const aliveKey = agents.filter((agent) => agent.active).map((agent) => agent.name).join(",");
 
   return (
+    <PluginHostContext.Provider value={pluginHost}>
     <GemAppearanceProvider api={api} refreshKey={aliveKey}>
       <AvatarImageProvider api={api}>
       <SidebarProvider className={`bg-muted/40 dark:bg-black ${contained ? "h-full min-h-0" : ""}`}>
@@ -1890,6 +1934,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           tabIndex={-1}
           className={`${contained ? "h-[calc(100%-1rem)] max-h-[calc(100%-1rem)]" : "h-[calc(100svh-1rem)] max-h-[calc(100svh-1rem)]"} min-h-0 overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`}
         >
+          {pluginHost ? <PluginNotices host={pluginHost} /> : null}
+          {pluginToast ? <NoticeBar onDismiss={() => setPluginToast(null)}>{pluginToast}</NoticeBar> : null}
           {whatsNewActive ? <WhatsNewPage onExit={returnToChat} /> : null}
           <div className={whatsNewActive ? "hidden" : "contents"}>
           {versionMismatch ? (
@@ -2076,5 +2122,6 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       </SidebarProvider>
       </AvatarImageProvider>
     </GemAppearanceProvider>
+    </PluginHostContext.Provider>
   );
 }

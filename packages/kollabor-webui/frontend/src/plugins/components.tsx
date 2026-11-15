@@ -55,3 +55,17 @@ export class PluginRenderBoundary extends Component<BoundaryProps, BoundaryState
     return this.props.children;
   }
 }
+
+export function PluginNotices({ host }: { host: PluginHost }) {
+  const snapshot = usePluginSnapshot(host);
+  return <>
+    <PluginRecoveryNotices disabled={snapshot.disabled} skipped={snapshot.skipped} onTurnOnAgain={id => { void host.turnOnAgain(id); }} />
+    {snapshot.inventoryError ? <NoticeBar urgent>Plugins could not be loaded: {snapshot.inventoryError}</NoticeBar> : null}
+    {snapshot.registry.plugins.flatMap(plugin => plugin.notices.map((notice, index) =>
+      <NoticeBar key={`${plugin.id}:${index}`} actions={notice.button ? <Button type="button" size="sm" variant="outline"
+        onClick={() => { if (notice.button) host.getContext(plugin.id)?.navigate(notice.button.open); }}>{notice.button.label}</Button> : null}>
+        {notice.text}
+      </NoticeBar>,
+    ))}
+  </>;
+}
