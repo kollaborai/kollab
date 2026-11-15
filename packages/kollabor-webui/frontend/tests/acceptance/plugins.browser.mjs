@@ -8,7 +8,9 @@ import { chromium } from "playwright-core";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "../..");
-const vite = await createServer({ root, configFile: path.join(root, "vite.config.ts"), logLevel: "error", server: { host: "127.0.0.1", port: 0 } });
+const vite = await createServer({ root, configFile: path.join(root, "vite.config.ts"), logLevel: "error",
+  cacheDir: path.join(process.env.KOLLAB_PLUGIN_TEST_DIR || process.env.HOME, "plugin-vite-cache"),
+  server: { host: "127.0.0.1", port: 0, hmr: false } });
 let browser;
 try {
   await vite.listen();
@@ -42,6 +44,7 @@ try {
     if (url.pathname === "/engine/plugins/fixture/api/badge") return route.fulfill({ json: { count: 4, attention: 1 } });
     if (url.pathname === "/engine/sessions") return route.fulfill({ json: { sessions: [{ session_id: "fixture-session", name: "Fixture Session", agent: "coder", identity: "local-coder", profile: "default", workspace: "/fixture", external: false }], network: { device: "test", remote: [] }, offline: [], hidden: [] } });
     if (url.pathname.endsWith("/history")) return route.fulfill({ json: { history: [], start_index: 0, end_index: 0, has_more_older: false, has_more_newer: false, source: "mirror" } });
+    if (url.pathname.startsWith("/api/")) return route.fulfill({ json: { available: false } });
     if (url.pathname.startsWith("/engine/")) return route.fulfill({ json: { sessions: [], profiles: [], agents: [], live: [], bundles: [], identities: [], teams: [], models: [], commands: [], network: {device:"",remote:[]}, offline: [], hidden: [], order: [] } });
     return route.continue();
   });

@@ -412,7 +412,7 @@ export function SessionPanel({
             <span>{label}</span>
           </Button>
         ))}
-        {pluginHost ? <PluginSessionControls host={pluginHost} session={session} view={view} onViewChange={next => {
+        {pluginHost ? <PluginSessionControls host={pluginHost} session={session} view={view} onNavigate={() => onSheetOpenChange(false)} onViewChange={next => {
           onViewChange(next);
           onSheetOpenChange(false);
         }} /> : null}

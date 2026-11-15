@@ -56,7 +56,8 @@
 - Session views/menu: red browser check (test commit `ac9d778d`) timed out waiting for Fixture View. Session Controls now shows plugin views and menu entries; views render in the center with scoped `k` and session, selected views are kept per session, folder-required entries are disabled, and menu badge counts use the SDK hook. Fake-engine browser acceptance passes view and menu navigation; typecheck and 24 focused tests pass under isolated HOME. Badge values, independent session persistence, mobile sheet closing, live count changes, and multi-width behavior still need explicit browser checks.
 
 
-- Mobile sheet red check: the isolated browser acceptance at 390px shows Session Controls remains open after opening a plugin page. Close the sheet when any plugin menu navigates, then rerun.
+- Mobile sheet: red browser check (test commit `48f0e7ae`) showed Session Controls remained open after plugin page navigation. The sheet now closes before menu navigation; isolated browser acceptance passes at 390px and typecheck passes.
+- Browser isolation correction: a previous Vite acceptance run attempted GET `/api/update/check` against localhost:8080; the connection was refused. It did not reach an engine, but this violated the intended all-fake network setup. The harness now intercepts every `/api/` route and stores Vite cache under `KOLLAB_PLUGIN_TEST_DIR` (set to `~/backups/plugins-step3-work`); the rerun passed without proxy attempts. All future acceptance commands must set that variable as well as isolated HOME/KOLLAB_NO_KEYRING.
 
 
 ## Remaining

@@ -27,8 +27,8 @@ function MenuCount({ context, count }: { context: PluginContext; count: NonNulla
 }
 
 /** Appends plugin entries to the existing session controls, not a separate sidebar. */
-export function PluginSessionControls({ host, session, view, onViewChange }: {
-  host: PluginHost; session: Session; view: SessionView; onViewChange: (view: SessionView) => void;
+export function PluginSessionControls({ host, session, view, onViewChange, onNavigate }: {
+  host: PluginHost; session: Session; view: SessionView; onViewChange: (view: SessionView) => void; onNavigate: () => void;
 }) {
   const snapshot = usePluginSnapshot(host);
   const plugins = [...snapshot.registry.plugins].sort((a, b) => {
@@ -57,6 +57,7 @@ export function PluginSessionControls({ host, session, view, onViewChange }: {
       return <Button key={`menu:${plugin.id}:${menu.id}`} type="button" variant="ghost" size="sm" disabled={disabled} className={ROW}
         title={disabled ? "This plugin action is unavailable" : undefined}
         onClick={() => {
+          onNavigate();
           if (menu.open) context?.navigate(menu.open);
           else if (linkedView) onViewChange(pluginViewKey(plugin.id, linkedView.id));
           else if (page) context?.navigate({ page: page.id });
