@@ -107,6 +107,10 @@ LINKED_ISSUE_RE = re.compile(
     re.IGNORECASE,
 )
 TOKEN_RE = re.compile(r"(ghp_|github_pat_)[A-Za-z0-9_]+")
+# Ruff's pyflakes rules share the finding-id shape (F63, F7, F82). A comma-joined
+# code list that names another rule family, like the CI lint selection
+# E9,F63,F7,F82, is a rule list and names no findings (#1024).
+RULE_CODE_LIST_RE = re.compile(r"\b[A-Z]+\d+(?:,[A-Z]+\d+)+\b")
 
 
 class ConfigError(Exception):
@@ -443,6 +447,20 @@ def _mentions_finding(content: str, finding: str) -> bool:
     return re.search(pattern, content, re.IGNORECASE) is not None
 
 
+def _finding_matches(pattern: re.Pattern[str], body: str) -> list[re.Match[str]]:
+    """Finding-id matches in body, outside lint rule lists (#1024)."""
+    rule_lists = [
+        run.span()
+        for run in RULE_CODE_LIST_RE.finditer(body)
+        if any(pattern.fullmatch(code) is None for code in run.group(0).split(","))
+    ]
+    return [
+        match
+        for match in pattern.finditer(body)
+        if not any(start <= match.start() < end for start, end in rule_lists)
+    ]
+
+
 def _json_object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -574,7 +592,7 @@ def _finding_suppressions(
         occurrence = annotation["occurrence"]
         matches = [
             match.group(0)
-            for match in pattern.finditer(source.body)
+            for match in _finding_matches(pattern, source.body)
             if match.group(0) == finding_id
         ]
         if occurrence > len(matches):
@@ -627,7 +645,7 @@ def _check_regression_test(
                 if comment.comment_id in marker_comment_ids and comment.kind == "issue_comment":
                     continue
                 occurrence_counts: dict[str, int] = {}
-                for match in pattern.finditer(comment.body or ""):
+                for match in _finding_matches(pattern, comment.body or ""):
                     finding_id = match.group(0)
                     occurrence_counts[finding_id] = occurrence_counts.get(finding_id, 0) + 1
                     suppression_key = (
@@ -642,13 +660,13 @@ def _check_regression_test(
             # Incomplete or mismatched metadata cannot authorize any exception.
             audit_notes = []
             for body in (*data.review_comment_bodies, *(c.body for c in data.comments)):
-                findings.update(match.group(0) for match in pattern.finditer(body or ""))
+                findings.update(match.group(0) for match in _finding_matches(pattern, body or ""))
     else:
         # Legacy/local test callers have no comment metadata, so no annotation
         # can be trusted and every ID remains gate-relevant.
         audit_notes = []
         for body in data.review_comment_bodies or ():
-            findings.update(match.group(0) for match in pattern.finditer(body or ""))
+            findings.update(match.group(0) for match in _finding_matches(pattern, body or ""))
     if not findings:
         return "", audit_notes
     test_files = [
