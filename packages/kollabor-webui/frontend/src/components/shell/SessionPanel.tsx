@@ -1,4 +1,6 @@
 import { Avatar } from "@/components/agents/Avatar";
+import { usePluginHost } from "@/plugins/components";
+import { PluginSessionControls } from "@/plugins/session";
 import {
   useCallback,
   useEffect,
@@ -84,7 +86,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-export type SessionView = "chat" | "trajectory" | "code" | "git" | "terminal";
+export type SessionView = "chat" | "trajectory" | "code" | "git" | "terminal" | `plugin:${string}`;
 
 const VIEWS = [
   ["chat", "Chat", MessageSquare],
@@ -165,6 +167,7 @@ export function SessionPanel({
   onSheetOpenChange: (open: boolean) => void;
 }) {
   const isMobile = useIsMobile(SIDEBAR_BREAKPOINT);
+  const pluginHost = usePluginHost();
   const hasFolder = Boolean(session.workspace);
   const views = VIEWS.filter(([id]) => hasFolder || !FOLDER_VIEWS.includes(id));
   const [open, setOpen] = useState(storedOpen);
@@ -409,6 +412,10 @@ export function SessionPanel({
             <span>{label}</span>
           </Button>
         ))}
+        {pluginHost ? <PluginSessionControls host={pluginHost} session={session} view={view} onViewChange={next => {
+          onViewChange(next);
+          onSheetOpenChange(false);
+        }} /> : null}
       </div>
       <Separator />
       <div className="flex min-w-0 flex-col gap-1">

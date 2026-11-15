@@ -62,7 +62,8 @@ import { SessionPanel, type SessionView } from "@/components/shell/SessionPanel"
 import { latestTodoBlock } from "@/utils/todo-list";
 import { ShellHeader } from "@/components/shell/ShellHeader";
 import { Button } from "@/components/ui/button";
-import { PluginHostContext, PluginNotices } from "@/plugins/components";
+import { PluginHostContext, PluginNotices, usePluginHost } from "@/plugins/components";
+import { PluginSessionView, pluginViewKey } from "@/plugins/session";
 import { PluginHost } from "@/plugins/host";
 import { pluginUI } from "@/plugins/ui";
 import type { PluginOpen } from "@/plugins/sdk";
@@ -194,6 +195,7 @@ function RuntimeShell({
   supervisorEvents,
   view,
   onViewChange: setView,
+  onPluginTurnOff,
   locked,
   historyStatus,
   onLoadOlder,
@@ -222,6 +224,7 @@ function RuntimeShell({
   /** Held by App so a runtime remount (Clear history) keeps the open view. */
   view: SessionView;
   onViewChange: (view: SessionView) => void;
+  onPluginTurnOff: (id: string) => void;
   /** Why the composer is closed while another chat starts or loads; empty when open. */
   locked: string;
   historyStatus: { kind: string; message: string } | undefined;
@@ -230,6 +233,7 @@ function RuntimeShell({
   historyStartIndex: number;
 }) {
   const runtimeState = useEngineRuntimeState();
+  const pluginHost = usePluginHost();
   const [status, setStatus] = useState<string | null>(null);
   const [panelSheetOpen, setPanelSheetOpen] = useState(false);
   const workspace = session.workspace ?? "";
@@ -386,6 +390,8 @@ function RuntimeShell({
             ) : shown === "trajectory" ? (
               <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
             ) : null}
+            {pluginHost && shown.startsWith("plugin:") ? <PluginSessionView host={pluginHost} view={shown} session={session}
+              onBack={() => setView("chat")} onTurnOff={onPluginTurnOff} /> : null}
             {/* Opened once, then kept mounted and hidden, so open files and shells survive a switch to Chat. */}
             {workspace && visited.editor ? (
               <div className={shown === "code" || shown === "git" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
@@ -612,7 +618,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   // Live-turn events flow from followEvents into the open thread's runtime;
   // the runtime registers its handler through this ref on mount.
   const liveEventsRef = useRef<((event: SessionEvent) => void) | null>(null);
-  const [sessionView, setSessionView] = useState<SessionView>("chat");
+  const [sessionViews, setSessionViews] = useState<Record<string, SessionView>>({});
+  const sessionView = (activeId ? sessionViews[activeId] : undefined) ?? "chat";
+  const setSessionView = (view: SessionView) => {
+    if (activeId) setSessionViews(current => ({ ...current, [activeId]: view }));
+  };
   const [activeActivity, setActiveActivity] = useState<Activity | null>(null);
   // Folded from the open session's events, so a hub-driven turn still animates.
   const eventActivityRef = useRef(NO_LIVE_ACTIVITY);
@@ -1779,6 +1789,10 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Unsupported link");
           window.open(url.href, "_blank", "noopener,noreferrer");
         } catch { setPluginToast("This plugin link is not a valid web address."); }
+      } else if ("view" in target) {
+        if (!activeId) { setPluginToast("Open a chat to use this view."); return; }
+        returnToChat();
+        setSessionView(pluginViewKey(pluginId, target.view));
       } else {
         if ("page" in target) returnToChat();
         setPluginTarget({ pluginId, target });
@@ -2064,6 +2078,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                   onOpenProperties={() => openProperties(activeSession.session_id)}
                   view={sessionView}
                   onViewChange={setSessionView}
+                  onPluginTurnOff={turnOffPlugin}
                   locked={busy ? busyMessage || "Loading…" : ""}
 
                   historyStatus={historyStatus?.sessionId === activeSession.session_id

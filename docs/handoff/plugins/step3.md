@@ -53,7 +53,7 @@
 - Page/modal: red browser check (test commit `99bae3e8`) timed out on plugin page navigation. App now opens plugin pages and Radix dialogs with their tabs, passes `k`/session, and wraps tab renders in the plugin error boundary. Isolated fake-engine browser acceptance passes page tab switching, Back to Chat, modal and Escape, and plugin tests/typecheck pass. Multi-width, focus restoration, page-off transitions, production CSP and real-engine behavior remain unverified. The current native `window.confirm` for turning a failed plugin off is a placeholder: replace it with the specified styled dialog and exact active-run/process detail before completion.
 
 
-- Session view/menu red check: fake-engine browser acceptance restores a workspace session, then times out waiting for contributed Fixture View in Session Controls. It also specifies opening a page from a plugin menu and loading a count badge. Wire views and menu actions into the existing SessionPanel and center runtime; preserve each session's selected view.
+- Session views/menu: red browser check (test commit `ac9d778d`) timed out waiting for Fixture View. Session Controls now shows plugin views and menu entries; views render in the center with scoped `k` and session, selected views are kept per session, folder-required entries are disabled, and menu badge counts use the SDK hook. Fake-engine browser acceptance passes view and menu navigation; typecheck and 24 focused tests pass under isolated HOME. Badge values, independent session persistence, mobile sheet closing, live count changes, and multi-width behavior still need explicit browser checks.
 
 
 ## Remaining
