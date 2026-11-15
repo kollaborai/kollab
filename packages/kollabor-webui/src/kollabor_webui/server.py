@@ -383,7 +383,8 @@ def create_app(
         parts = asset_path.split("/")
         if any(not part or part.startswith(".") for part in parts):
             return missing
-        if Path(asset_path).suffix not in {".js", ".mjs", ".css", ".png", ".woff2", ".json"}:
+        extensions = {".js", ".mjs", ".css", ".png", ".woff2", ".json"}
+        if Path(asset_path).suffix not in extensions:
             return missing
         home = Path.home() / ".kollab"
         try:
@@ -401,10 +402,15 @@ def create_app(
                 root = (installed_root / base_id).resolve()
                 if root.parent != installed_root:
                     return missing
-            dist = root / "web" / "dist"
-            if not dist.resolve().is_relative_to(root):
+            web = root / "web"
+            dist = web / "dist"
+            if web.is_symlink() or dist.is_symlink() or not dist.resolve().is_relative_to(root):
                 return missing
             asset = _safe_asset(dist, asset_path)
+            if asset is not None:
+                relative = asset.relative_to(dist.resolve())
+                if any(part.startswith(".") for part in relative.parts) or asset.suffix not in extensions:
+                    return missing
         except (OSError, ValueError, RuntimeError):
             return missing
         return FileResponse(asset) if asset is not None else missing
