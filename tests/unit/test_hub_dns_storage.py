@@ -434,3 +434,45 @@ def test_stale_registry_update_preserves_independent_field_change(tmp_path):
     persisted = DNSStorage(tmp_path).load_registry()["alpha"]
     assert persisted.state == "busy"
     assert persisted.trust_score == 0.8
+
+
+def test_stale_capability_declaration_preserves_independent_promotion(tmp_path):
+    from plugins.hub.dns.capabilities import CapabilityRegistry
+    from plugins.hub.dns.models import CapabilityEntry
+
+    CapabilityRegistry(DNSStorage(tmp_path)).declare(
+        "alpha", CapabilityEntry(name="review", confidence=0.5)
+    )
+    current = CapabilityRegistry(DNSStorage(tmp_path))
+    stale = CapabilityRegistry(DNSStorage(tmp_path))
+    current.get_capabilities("alpha")
+    stale.get_capabilities("alpha")
+
+    current.promote("alpha", "review", "task-proven")
+    stale.declare("alpha", CapabilityEntry(name="review", endorsed_by=["beta"]))
+
+    persisted = DNSStorage(tmp_path).load_capability_index()["review"][0]["capability"]
+    assert persisted["evidence"] == "task-proven"
+    assert persisted["endorsed_by"] == ["beta"]
+
+
+def test_registry_rejects_out_of_range_embedded_capability_confidence(tmp_path):
+    from plugins.hub.dns.storage import RegistryReadError
+
+    storage = DNSStorage(tmp_path)
+    contents = json.dumps(
+        {
+            "records": {
+                "agent": {
+                    "designation": "agent",
+                    "capabilities": [{"name": "review", "confidence": 2.0}],
+                }
+            }
+        }
+    )
+    storage._registry_path.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(RegistryReadError, match="invalid record schema"):
+        storage.load_registry()
+
+    assert storage._registry_path.read_text(encoding="utf-8") == contents
