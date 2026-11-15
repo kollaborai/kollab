@@ -7,9 +7,12 @@ describe("plugin recovery surfaces", () => {
     const markup = renderToStaticMarkup(<PluginFailure name="Hello" kind="render" error="broken" onRetry={() => {}} onTurnOff={() => {}} />);
     expect(markup).toContain("Hello");
     expect(markup).toContain("Failed to Render");
+    expect(markup).toContain("Hello could not draw this page.");
     expect(markup).toContain("Retry");
     expect(markup).toContain("View Error");
     expect(markup).toContain("Turn Off");
+    expect(markup.indexOf("Retry")).toBeLessThan(markup.indexOf("View Error"));
+    expect(markup.indexOf("View Error")).toBeLessThan(markup.indexOf("Turn Off"));
   });
   it("explains the page-wide opt-out and names a skipped plugin", () => {
     const markup = renderToStaticMarkup(<PluginRecoveryNotices disabled skipped={["hello"]} names={{ hello: "Hello Plugin" }} onTurnOnAgain={() => {}} />);

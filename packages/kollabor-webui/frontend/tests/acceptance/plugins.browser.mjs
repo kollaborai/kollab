@@ -20,6 +20,12 @@ try {
   assert.ok(address && typeof address !== "string");
   const origin = `http://127.0.0.1:${address.port}`;
   browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_PATH || chromium.executablePath() });
+  if (process.env.PLUGIN_SCREENSHOTS && process.env.PLUGIN_REFERENCE_URL) {
+    const reference = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    await reference.goto(process.env.PLUGIN_REFERENCE_URL);
+    await reference.screenshot({ path: resolve(process.env.PLUGIN_SCREENSHOTS, "failed-load-reference.png") });
+    await reference.close();
+  }
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   let inventoryReads = 0;
   let confirmedInstall = null;
@@ -164,6 +170,7 @@ try {
   await page.getByRole("button", { name: "Back to Chat" }).click();
   await panel.getByRole("button", { name: /Broken Board/ }).click({ timeout: 5000 });
   await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
+  if (process.env.PLUGIN_SCREENSHOTS) await page.screenshot({ path: resolve(process.env.PLUGIN_SCREENSHOTS, "failed-load-actual.png") });
   await page.getByText("View Error", { exact: true }).click();
   await page.getByRole("alert").locator("pre").waitFor();
   await Promise.all([
