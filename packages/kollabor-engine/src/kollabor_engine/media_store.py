@@ -174,17 +174,23 @@ def count_image_tokens(content: object) -> int:
     if isinstance(content, str):
         return len(_IMAGE_TOKEN_RE.findall(content))
     if isinstance(content, list):
-        total = 0
+        tokens = 0
+        parts = 0
         for part in content:
             if isinstance(part, str):
-                total += len(_IMAGE_TOKEN_RE.findall(part))
+                tokens += len(_IMAGE_TOKEN_RE.findall(part))
             elif isinstance(part, dict):
                 text = part.get("text")
                 if isinstance(text, str):
-                    total += len(_IMAGE_TOKEN_RE.findall(text))
+                    tokens += len(_IMAGE_TOKEN_RE.findall(text))
                 if part.get("type") == "image":
-                    total += 1
-        return total
+                    parts += 1
+        # Image parts are authoritative: _save_sent_media stores exactly one
+        # ref per part, so a row that also carries token text (the same
+        # images rendered) must count once, not twice — counting both made
+        # the binding slice another row's ref (#1124 clean-room review P2).
+        # Token-only rows (the disk jsonl rendering) count their tokens.
+        return parts if parts else tokens
     return 0
 
 
