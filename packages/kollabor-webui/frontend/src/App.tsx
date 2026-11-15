@@ -1977,7 +1977,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           {pluginToast ? <NoticeBar onDismiss={() => setPluginToast(null)}>{pluginToast}</NoticeBar> : null}
           {whatsNewActive ? <WhatsNewPage onExit={returnToChat} /> : null}
           {pluginHost && pluginPage && "page" in pluginPage.target ? <PluginPageSurface host={pluginHost} pluginId={pluginPage.pluginId}
-            pageId={pluginPage.target.page} session={activeSession ?? undefined} onClose={returnToChat} onTurnOff={turnOffPlugin} /> : null}
+            pageId={pluginPage.target.page} session={activeSession ?? undefined} onClose={() => { returnToChat(); setSessionView("chat"); }} onTurnOff={turnOffPlugin} /> : null}
           <div className={whatsNewActive || pluginPage ? "hidden" : "contents"}>
           {versionMismatch ? (
             <NoticeBar
