@@ -7,6 +7,7 @@
 - Recovery-state sketch: `docs/handoff/plugins/step3-states.html` is a static, responsive light/dark gallery covering off, stopping, failed load/render, crash-stopped, empty, page-wide off, changed-on-disk and skipped. Canvas source is `~/backups/plugin-spec-work/canvas/project/`. Buttons are intentionally nonfunctional in this sketch.
 - Red check: `node --test packages/kollabor-webui/frontend/tests/plugin-state-sketch.test.mjs` failed both cases with ENOENT before the gallery was added (test commit `a035e60c`). Afterward the same command passed 2/2. These check required copy and responsive markup only; no visual review or functional UI coverage is implied.
 - No browser screenshot tool was discovered. Chrome is installed; screenshots and the required visual review remain outstanding.
+- Loader core red check: `cd packages/kollabor-webui/frontend && ./node_modules/.bin/vitest run tests/plugin-loader.test.ts` fails because `src/plugins/loader` does not yet exist. It covers parallel activation, removal vs late import, timeout/retry cache busting, and isolated errors; it does not cover host integration.
 
 ## Remaining
 
