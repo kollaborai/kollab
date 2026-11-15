@@ -47,6 +47,9 @@
 - Render isolation: red host test (commit `2a486b3c`) failed because context lookup and render-error reporting were absent. Host now releases the failed plugin's resources and contributions, exposes the error kind and permits retry; isolated plugin tests pass 24/24 and typecheck passes. Actual React boundary behavior remains browser-untested.
 
 
+- App boot browser red check: isolated `CHROME_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' node tests/acceptance/plugins.browser.mjs` starts a local Vite fixture, stubs all engine traffic and times out waiting for the `?plugins=off` notice. It also requires a fixture plugin notice after boot. Mount the host and recovery/contribution notices; expand this test for all actual surfaces and breakages later.
+
+
 ## Remaining
 
 1. Add explicit late-import removal/replacement and stale awaited-activation tests; then finish item 1: registry, SDK, error boundary, shared React runtime/import map, CSS and integration. The current lifecycle core is not production-wired and cannot load a plugin by itself.
