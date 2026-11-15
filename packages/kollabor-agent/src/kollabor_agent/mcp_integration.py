@@ -125,6 +125,7 @@ class MCPServerConnection:
 
     DEFAULT_REQUEST_TIMEOUT = 300.0
     DEFAULT_STARTUP_TIMEOUT = 15.0
+    MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 
     def __init__(
         self,
@@ -143,7 +144,7 @@ class MCPServerConnection:
         self.startup_timeout = startup_timeout
         self.process: Optional[asyncio.subprocess.Process] = None
         self.initialized = False
-        self._read_buffer = ""
+        self._read_buffer = b""
         self._pending_requests: Dict[str, asyncio.Future] = {}
         self._reader_task: Optional[asyncio.Task] = None
         self._write_lock = asyncio.Lock()
@@ -390,14 +391,49 @@ class MCPServerConnection:
         if not self.process or not self.process.stdout:
             return
 
+        discarding_oversized_message = False
         try:
             while True:
-                while "\n" in self._read_buffer:
-                    line, self._read_buffer = self._read_buffer.split("\n", 1)
+                chunk = await self.process.stdout.read(4096)
+                if not chunk:
+                    break
+                self._read_buffer += chunk
+
+                while True:
+                    if discarding_oversized_message:
+                        newline_index = self._read_buffer.find(b"\n")
+                        if newline_index < 0:
+                            self._read_buffer = b""
+                            break
+                        self._read_buffer = self._read_buffer[newline_index + 1 :]
+                        discarding_oversized_message = False
+                        continue
+
+                    newline_index = self._read_buffer.find(b"\n")
+                    if newline_index < 0:
+                        if len(self._read_buffer) > self.MAX_MESSAGE_BYTES:
+                            logger.warning(
+                                "Discarding oversized MCP message from %s (limit: %s bytes)",
+                                self.server_name,
+                                self.MAX_MESSAGE_BYTES,
+                            )
+                            self._read_buffer = b""
+                            discarding_oversized_message = True
+                        break
+
+                    line = self._read_buffer[:newline_index]
+                    self._read_buffer = self._read_buffer[newline_index + 1 :]
+                    if len(line) > self.MAX_MESSAGE_BYTES:
+                        logger.warning(
+                            "Ignoring oversized MCP message from %s (limit: %s bytes)",
+                            self.server_name,
+                            self.MAX_MESSAGE_BYTES,
+                        )
+                        continue
                     if not line.strip():
                         continue
                     try:
-                        message = json.loads(line)
+                        message = json.loads(line.decode("utf-8", errors="replace"))
                     except json.JSONDecodeError:
                         logger.debug(
                             "Ignoring invalid JSON from MCP server %s: %s",
@@ -406,11 +442,6 @@ class MCPServerConnection:
                         )
                         continue
                     self._dispatch_incoming_message(message)
-
-                chunk = await self.process.stdout.read(4096)
-                if not chunk:
-                    break
-                self._read_buffer += chunk.decode()
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -430,7 +461,7 @@ class MCPServerConnection:
                     self.server_name,
                 )
             self.initialized = False
-            self._read_buffer = ""
+            self._read_buffer = b""
 
     def _dispatch_incoming_message(self, message: Dict[str, Any]) -> None:
         """Resolve matched responses and ignore notifications."""
