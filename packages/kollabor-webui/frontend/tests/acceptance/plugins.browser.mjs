@@ -163,6 +163,14 @@ try {
   assert.equal(await input.inputValue(), "", "plugin command clears the composer");
   const panel = page.getByRole("complementary", { name: "Session Controls" });
   await panel.waitFor({ timeout: 15000 });
+  await panel.getByRole("button", { name: "Hide Session Panel" }).click();
+  const collapsedView = panel.getByRole("button", { name: "Fixture View", exact: true });
+  await collapsedView.waitFor({ timeout: 5000 });
+  await collapsedView.hover();
+  await page.getByRole("tooltip").getByText("Fixture View", { exact: true }).waitFor();
+  await collapsedView.click();
+  await page.getByText("Fixture view body", { exact: true }).waitFor();
+  await panel.getByRole("button", { name: "Show Session Panel" }).click();
   await panel.getByRole("button", { name: "Fixture View" }).click();
   await panel.getByRole("button", { name: "Hello View", exact: true }).click({ timeout: 5000 });
   await page.getByText("Hello from your plugin!", { exact: true }).waitFor();
