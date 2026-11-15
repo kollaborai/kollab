@@ -289,6 +289,49 @@ def test_invalid_nested_capability_index_is_preserved_for_recovery(tmp_path):
     assert storage._capability_index_path.read_text(encoding="utf-8") == contents
 
 
+def test_invalid_nested_capability_field_is_rejected_for_recovery(tmp_path):
+    from plugins.hub.dns.capabilities import CapabilityRegistry
+    from plugins.hub.dns.storage import DNSStorageReadError
+
+    storage = DNSStorage(tmp_path)
+    contents = json.dumps(
+        {
+            "review": [
+                {
+                    "designation": "agent",
+                    "capability": {"name": "review", "confidence": []},
+                }
+            ]
+        }
+    )
+    storage._capability_index_path.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(DNSStorageReadError, match="capability index"):
+        CapabilityRegistry(storage).query("review", min_confidence=0.1)
+
+    assert storage._capability_index_path.read_text(encoding="utf-8") == contents
+
+
+def test_invalid_nested_reputation_field_is_rejected_for_recovery(tmp_path):
+    from plugins.hub.dns.reputation import ReputationTracker
+    from plugins.hub.dns.storage import DNSStorageReadError
+
+    storage = DNSStorage(tmp_path)
+    contents = json.dumps(
+        {
+            "scores": {
+                "agent": {"designation": "agent", "tasks_completed": "bad"}
+            }
+        }
+    )
+    storage._reputation_path.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(DNSStorageReadError, match="reputation"):
+        ReputationTracker(storage).get_trust("agent")
+
+    assert storage._reputation_path.read_text(encoding="utf-8") == contents
+
+
 def test_capability_revoke_wins_over_stale_registry_instance(tmp_path):
     from plugins.hub.dns.capabilities import CapabilityRegistry
     from plugins.hub.dns.models import CapabilityEntry
