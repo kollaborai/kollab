@@ -35,8 +35,10 @@ try {
   const commit = "a".repeat(40);
   const filesHash = "b".repeat(64);
   const preview = { job_id: "install-fixture", action: "install", status: "ready", commit, files_sha256: filesHash,
-    plugin_id: "fixture-new", manifest: { name: "Fixture New", version: "1.2.3", uses: { tools: ["file_read"], network: ["example.com"] }, services: { worker: {} } },
-    changes: { added: ["web/dist/index.js"], modified: [], removed: [], new_grants: ["network:example.com"], new_dependencies: [] } };
+    plugin_id: "fixture-new", source: "https://github.com/example/fixture.git", ref: "main",
+    manifest: { name: "Fixture New", version: "1.2.3", uses: ["agents", "agents:unattended", "secret:API_TOKEN", "run:git", "net:example.com"],
+      services: { worker: { command: ["git", "status"], secrets: ["API_TOKEN"] } }, python: "python/plugin.py:Plugin",
+      engine: "python/engine.py:make_router", web: { entry: "web/dist/index.js" }, contributes: { views: [{ id: "main" }], slash: ["fixture"] } } };
   const entry = { id: "fixture", name: "Fixture", version: "1.2.3", commit: "1234567890abcdef1234567890abcdef12345678", kind: "installed", state: "ok", enabled: true, shadowed: false,
     web: { entry: "web/dist/index.js", style: "web/dist/index.css", hash: "1" }, contributes: {
       menu: [{ id: "board", label: "Fixture Board", open: { page: "board" } }],
@@ -219,7 +221,13 @@ try {
   await add.getByRole("button", { name: "Review" }).click({ timeout: 5000 });
   await add.getByText("Fixture New", { exact: true }).waitFor();
   await add.getByText(commit, { exact: false }).waitFor();
-  await add.getByText("network:example.com", { exact: false }).waitFor();
+  await add.getByText("https://github.com/example/fixture.git", { exact: false }).waitFor();
+  await add.getByText("main", { exact: false }).first().waitFor();
+  await add.getByText("API_TOKEN", { exact: false }).first().waitFor();
+  await add.getByText(/refuses requests made through kollab/i).waitFor();
+  await add.getByText(/plugin code.*runs as you/i).waitFor();
+  await add.getByText(/without asking/i).waitFor();
+  await add.getByText(/unreported.*not capped/i).waitFor();
   assert.equal(confirmedInstall, null, "preview must not install before confirmation");
   await add.getByRole("button", { name: "Install", exact: true }).click();
   await add.waitFor({ state: "hidden" });
