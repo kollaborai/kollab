@@ -28,6 +28,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.file_lock import locked_file
+from kollabor_plugins.tokens import PluginTokenFiles
 
 logger = logging.getLogger(__name__)
 
@@ -557,7 +558,9 @@ async def set_plugin_enabled(request: Request, plugin_id: str):
             except HTTPException as exc:
                 if exc.status_code not in {404, 503}:
                     raise
-            await asyncio.to_thread(supervisor_tick)
+            engine_url = getattr(request.app.state, "plugin_engine_url", None)
+            options = {"engine_url": engine_url} if engine_url else {}
+            await asyncio.to_thread(supervisor_tick, **options)
         else:
             await request.app.state.plugin_service_controls.cancel_plugin(plugin_id)
             await request.app.state.plugin_dispatcher.invalidate(plugin_id)
@@ -830,55 +833,8 @@ def _plugin_token_target(method: str, path: str) -> str | None:
     return parts[1] if allowed else None
 
 
-class PluginTokenStore:
-    """Stable, private plugin tokens; reading never creates credentials."""
-
-    @staticmethod
-    def _run(context, create: bool) -> Path:
-        data_root = Path.home() / ".kollab" / "plugin-data"
-        data = data_root / context.id
-        if context.data != data:
-            raise ValueError("Invalid plugin data directory")
-        run = data / "run"
-        for path in (data_root, data, run):
-            if path.is_symlink():
-                raise ValueError("Plugin token directory cannot be a symlink")
-        if create:
-            run.mkdir(parents=True, exist_ok=True, mode=0o700)
-            for path in (data_root, data, run):
-                if path.is_symlink():
-                    raise ValueError("Plugin token directory cannot be a symlink")
-        return run
-
-    @staticmethod
-    def _read(path: Path) -> str:
-        if path.is_symlink():
-            raise ValueError("Plugin token cannot be a symlink")
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        try:
-            info = os.fstat(descriptor)
-            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.getuid():
-                raise ValueError("Plugin token file must be private")
-            raw = os.read(descriptor, 128)
-        finally:
-            os.close(descriptor)
-        try:
-            token = raw.decode("ascii")
-        except UnicodeError as exc:
-            raise ValueError("Invalid plugin token") from exc
-        if len(token) != 43 or not all(ch.isascii() and (ch.isalnum() or ch in "-_") for ch in token):
-            raise ValueError("Invalid plugin token")
-        return token
-
-    def mint(self, context) -> str:
-        run = self._run(context, create=True)
-        path = run / "token"
-        with locked_file(run / "token.lock", private=True):
-            if path.is_symlink():
-                raise ValueError("Plugin token cannot be a symlink")
-            if not path.exists():
-                write_text_atomic(path, secrets.token_urlsafe(32))
-            return self._read(path)
+class PluginTokenStore(PluginTokenFiles):
+    """Authorize scoped engine requests using the shared private token file."""
 
     def authorize(self, token: str, method: str, path: str, hub: PluginEventHub) -> bool:
         from kollabor_plugins.packages import _read_registry
@@ -996,8 +952,9 @@ class _LoadedPlugin:
 
 
 class PluginServiceControls:
-    def __init__(self, hub: PluginEventHub):
+    def __init__(self, hub: PluginEventHub, *, engine_url: str | None = None):
         self.hub = hub
+        self.engine_url = engine_url
         self.tasks: dict[tuple[str, str], asyncio.Task] = {}
         self._lock = asyncio.Lock()
 
@@ -1016,7 +973,8 @@ class PluginServiceControls:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         if action != "restart":
-            await asyncio.to_thread(control_service, context.id, service_name, action)
+            options = {"engine_url": self.engine_url} if self.engine_url else {}
+            await asyncio.to_thread(control_service, context.id, service_name, action, **options)
             self.hub.publish_change()
             return False
         await asyncio.to_thread(control_service, context.id, service_name, "stop")
@@ -1048,7 +1006,10 @@ class PluginServiceControls:
                     raise TimeoutError("Service did not stop before the restart deadline")
                 await asyncio.sleep(0.25)
             async with self._lock:
-                operation = asyncio.create_task(asyncio.to_thread(control_service, context.id, service_name, "start"))
+                options = {"engine_url": self.engine_url} if self.engine_url else {}
+                operation = asyncio.create_task(
+                    asyncio.to_thread(control_service, context.id, service_name, "start", **options)
+                )
                 try:
                     await asyncio.shield(operation)
                 except asyncio.CancelledError:

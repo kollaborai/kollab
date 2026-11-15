@@ -209,7 +209,9 @@ async def _engine_lifespan(app: FastAPI):
         dispatcher = getattr(app.state, "plugin_dispatcher", None)
         if dispatcher is not None:
             await dispatcher.warm()
-        supervisor_task = asyncio.create_task(supervise_services(), name="plugin-supervisor")
+        engine_url = getattr(app.state, "plugin_engine_url", None)
+        supervisor = supervise_services(engine_url=engine_url) if engine_url else supervise_services()
+        supervisor_task = asyncio.create_task(supervisor, name="plugin-supervisor")
         if getattr(app.state, "warm_model_choices", False):  # set by `serve`, never by a test's app
             warm_task = asyncio.create_task(_warm_model_choices(), name="model-picker-warm")
         phone_link = getattr(app.state, "phone_link", None)
@@ -301,7 +303,10 @@ def create_app(port: Optional[int] = None) -> FastAPI:
 
     app.state.plugin_events = PluginEventHub()
     app.state.plugin_tokens = PluginTokenStore()
-    app.state.plugin_service_controls = PluginServiceControls(app.state.plugin_events)
+    app.state.plugin_engine_url = f"http://127.0.0.1:{port}" if port is not None else None
+    app.state.plugin_service_controls = PluginServiceControls(
+        app.state.plugin_events, engine_url=app.state.plugin_engine_url
+    )
     app.state.plugin_dispatcher = PluginDispatcher(app.state.plugin_events, app.state.plugin_tokens)
     _wire_voice(app, port)
     from .phone_link import PhoneLink
