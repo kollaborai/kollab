@@ -1,0 +1,14 @@
+{
+ "home-desktop-dark": false,
+ "guided-desktop-dark": false,
+ "home-desktop-light": false,
+ "guided-desktop-light": false,
+ "home-tablet-dark": false,
+ "guided-tablet-dark": false,
+ "home-tablet-light": false,
+ "guided-tablet-light": false,
+ "home-phone-dark": false,
+ "guided-phone-dark": false,
+ "home-phone-light": false,
+ "guided-phone-light": false
+}
