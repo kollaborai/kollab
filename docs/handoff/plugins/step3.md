@@ -29,6 +29,9 @@
 - Host lifecycle: isolated red check (test commit `8194c085`) failed because `./host` did not exist. Implementation joins inventory, loader, registry, SDK, SSE, stylesheet lifetime and session freeze recovery; focused `vitest run src/plugins` passes 17/17 and frontend typecheck passes under the isolated HOME. It is still not mounted in the app. Audit style/import races, marker ownership, stream reconnect/reconciliation and real browser behavior before treating it as complete.
 
 
+- Marker race red check: isolated host test now fails because an older completed import clears the freeze marker belonging to its newer replacement. Fix ownership before continuing.
+
+
 ## Remaining
 
 1. Add explicit late-import removal/replacement and stale awaited-activation tests; then finish item 1: registry, SDK, error boundary, shared React runtime/import map, CSS and integration. The current lifecycle core is not production-wired and cannot load a plugin by itself.

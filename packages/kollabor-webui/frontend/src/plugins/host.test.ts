@@ -58,6 +58,25 @@ describe("plugin host lifecycle", () => {
     host.close();
   });
 
+  it("does not clear a newer import's freeze marker when an old import finishes", async () => {
+    const completions: ((module: unknown) => void)[] = [];
+    const importer = vi.fn(() => new Promise<unknown>(resolve => completions.push(resolve)));
+    const { host, session, setInventory } = setup({ importer });
+    const first = host.start();
+    await vi.waitFor(() => expect(completions).toHaveLength(1));
+    const updated = entry("hello");
+    updated.web.hash = "b";
+    setInventory([updated]);
+    const second = host.refresh();
+    await vi.waitFor(() => expect(completions).toHaveLength(2));
+    completions[0]({ default: () => {} });
+    await first;
+    expect(session.getItem("kollab:plugin:loading:hello")).not.toBeNull();
+    completions[1]({ default: () => {} });
+    await second;
+    host.close();
+  });
+
   it("keeps an error visible when a plugin cannot load", async () => {
     const { host } = setup({ importer: async () => { throw new Error("bad module"); } });
     await host.start();
