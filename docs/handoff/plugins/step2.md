@@ -149,9 +149,19 @@ on a different port: that multi-supervisor case still needs design/verification.
 Plugin and engine regression: 257 passed, 1 skipped (`service-regression.log`);
 scoped Ruff and git diff --check passed. No live engine/service smoke yet.
 
-Next: remaining item 5 management routes, then PhoneLink filtering,
-spoofing/normalization tests, all gates and smoke. The branch is not ready to
-deploy: install/update jobs and PhoneLink management blocking are absent.
+Install jobs: `8a70a999` was red before `8e795a0` added local-only install,
+poll, and confirm routes. Jobs stage away from the event loop, pin commit and
+file hash, re-verify via install_stage, reject repeat confirmation, expire with
+bounded job count, and clean their own stage directories. Tampering, error
+redaction, local-only access and boundedness are tested. Engine regression:
+28 passed (`plugin-jobs-regression.log`); scoped Ruff and diff checks passed.
+Existing stage_git_source invokes Git without a timeout; shutdown currently
+waits for active staging to finish, so an indefinitely stalled Git operation
+remains an operational gap requiring resolution without changing step 1 ownership.
+
+Next: update jobs, then PhoneLink filtering, spoofing/normalization tests, all
+gates and smoke. The branch is not ready to deploy: update jobs, the stalled-Git
+shutdown gap, and PhoneLink management blocking remain.
 The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
 `packages/kollabor-engine/src/kollabor_engine/phone_link.py` is in scope only
 for refusing the spec's remote-disallowed plugin routes and its tests;
