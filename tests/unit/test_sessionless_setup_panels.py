@@ -81,6 +81,28 @@ async def test_setup_finish_creates_and_activates_profile_sessionless(client):
     assert active.name == name
 
 
+async def test_setup_finish_save_failure_is_outcome_not_400(client, monkeypatch):
+    # The shared panel contract (kollabor/panels/base.py): a failed action
+    # without field errors is an outcome - HTTP 200, {ok: false, message},
+    # errors {} - not a rejected request. 400 is reserved for a non-empty
+    # errors mapping.
+    async def failing_save(*args, **kwargs):
+        raise RuntimeError("disk full during profile save")
+
+    monkeypatch.setattr(
+        "kollabor.panels.setup.create_and_activate_profile", failing_save
+    )
+    async with client as c:
+        response = await c.post(
+            "/setup/panels/setup/actions/finish", json=SETUP_FINISH_PAYLOAD
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert "disk full during profile save" in body["message"]
+    assert body["errors"] == {}
+
+
 async def test_connect_join_degrades_gracefully_sessionless(client):
     async with client as c:
         response = await c.post(
