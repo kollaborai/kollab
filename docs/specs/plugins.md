@@ -348,6 +348,7 @@ All sit behind the existing bearer-token middleware.
 | `GET /plugins/{id}/services/{name}/log?tail=200` | the process log, redacted like Agent Output | own id | yes |
 | `POST /plugins/install`, `POST /plugins/{id}/update` → `{job_id}`; `GET /plugins/jobs/{job_id}` | clone or fetch into staging, check, then report the sheet facts | no | no |
 | `POST /plugins/jobs/{job_id}/confirm` | `{commit, files_sha256}`: refused unless both match the staged copy; then move into place | no | no |
+| `DELETE /plugins/jobs/{job_id}` | cancel an unconfirmed staging or ready job, stop staging and remove its files; a cleanup failure is reported and can be retried | no | no |
 | `POST /plugins/{id}/enable`, `/disable`, `/remove` | manage | no | no |
 
 "Plugin token: no" means only the user's engine token works. "Remote page: no" means the web UI's
