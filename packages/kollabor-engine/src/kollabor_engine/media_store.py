@@ -137,6 +137,26 @@ def save(
     return record
 
 
+def record_failed(
+    conversations_dir: Path,
+    session_id: str,
+    mime: str = "application/octet-stream",
+) -> None:
+    """Record a send-time storage failure as an index slot.
+
+    The overlay binds by counting a row's image parts against the session's
+    dense index. A dropped slot shifts every later row's ref (the failed
+    row consumes its neighbor's image). The tombstone keeps one index slot
+    per attempted part, so count and store stay aligned; listing and
+    binding skip it.
+    """
+    entries = _read_index(conversations_dir, session_id)
+    entries.append(
+        {"ref": "", "mime": mime, "ts": time.time(), "failed": True}
+    )
+    _write_index(conversations_dir, session_id, entries)
+
+
 def open_media(conversations_dir: Path, ref: str) -> Tuple[bytes, str]:
     """Return (bytes, mime) for a ref, or raise FileNotFoundError."""
     if not REF_RE.match(ref or ""):
@@ -155,7 +175,7 @@ def open_media(conversations_dir: Path, ref: str) -> Tuple[bytes, str]:
 
 def list_for(conversations_dir: Path, session_id: str) -> List[Dict[str, object]]:
     """The session's images oldest first: the viewer's and gallery's source."""
-    return list(_read_index(conversations_dir, session_id))
+    return [e for e in _read_index(conversations_dir, session_id) if e.get("ref")]
 
 
 _IMAGE_TOKEN_RE = re.compile(r"\[image\d+\]")
@@ -230,4 +250,9 @@ def attach_media_to_rows(
         cursor += len(taken)
         if not taken:
             break
-        row["media"] = [{"ref": e.get("ref"), "mime": e.get("mime")} for e in taken]
+        # Tombstoned slots (a part whose storage failed) hold the row's
+        # place in the count but bind nothing.
+        bound = [e for e in taken if e.get("ref")]
+        row["media"] = [
+            {"ref": e.get("ref"), "mime": e.get("mime")} for e in bound
+        ]

@@ -466,6 +466,14 @@ def _save_sent_media(content: MessageContent, session_id: str) -> List[Dict[str,
         try:
             record = media_store.save(conversations_dir, session_id, image)
         except media_store.MediaError as error:
+            # Keep one index slot per attempted part: the history overlay
+            # counts every image part, and a dropped slot would shift every
+            # later row's refs. The tombstone binds nothing and stays out
+            # of listings (#1124 review P2).
+            mime = image.split(";", 1)[0].removeprefix("data:")
+            media_store.record_failed(
+                conversations_dir, session_id, mime or "application/octet-stream"
+            )
             logger.warning("sent image not stored: %s", error)
             continue
         saved.append({"ref": record.ref, "mime": record.mime})

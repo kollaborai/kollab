@@ -270,6 +270,13 @@ def test_page_after_failed_part_binds_its_own_ref(tmp_path: Path, monkeypatch) -
         ],
         "s1",
     )
+    later = _save_sent_media(
+        [
+            {"type": "text", "text": "next"},
+            {"type": "image", "image": JPEG},
+        ],
+        "s1",
+    )
     page = [
         {
             "role": "user",
@@ -280,9 +287,11 @@ def test_page_after_failed_part_binds_its_own_ref(tmp_path: Path, monkeypatch) -
         },
     ]
     attach_media_to_rows(dir_, "s1", page, skip=2)
+    # The earlier row's surviving ref (slot 1) is outside this page; the
+    # page row binds the later send's ref, not the earlier survivor.
+    assert [m["ref"] for m in page[0]["media"]] == [later[0]["ref"]]
     real = list_for(dir_, "s1")
-    assert len(real) == 1
-    assert [m["ref"] for m in page[0]["media"]] == [real[0]["ref"]]
+    assert [m["ref"] for m in page[0]["media"]] != [real[0]["ref"]]
 
 
 def test_failure_matrix_binds_exactly_stored_refs(tmp_path: Path, monkeypatch) -> None:
