@@ -116,7 +116,14 @@ def save(
     that points at nothing.
     """
     ext, decoded = decode_data_url(data_url)
-    ref = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
+    media_root = Path(conversations_dir) / "media"
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    while True:
+        ref = timestamp + "-" + secrets.token_hex(2)
+        # Refs are looked up without a session id, so they must be unique
+        # across sessions and extensions as well as within one directory.
+        if not any(media_root.glob(f"*/{ref}.*")):
+            break
     target = session_media_dir(conversations_dir, session_id) / f"{ref}.{ext}"
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(".tmp")

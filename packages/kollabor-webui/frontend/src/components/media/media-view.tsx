@@ -18,6 +18,42 @@ type LoadImage = (path: string) => Promise<string | null>;
 
 const MediaImageContext = createContext<LoadImage | null>(null);
 
+const SessionMediaContext = createContext<MediaEntry[] | null>(null);
+
+/** Loads the active session's complete image list so chat thumbnails share the Gallery viewer order. */
+export function MediaSessionProvider({
+  api,
+  sessionId,
+  children,
+}: {
+  api: EngineApi;
+  sessionId: string;
+  children: ReactNode;
+}) {
+  const [media, setMedia] = useState<MediaEntry[] | null>(null);
+  useEffect(() => {
+    let current = true;
+    setMedia(null);
+    void api.listMedia(sessionId).then(
+      (response) => {
+        if (current) setMedia(response.media);
+      },
+      () => {
+        if (current) setMedia(null);
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [api, sessionId]);
+  return <SessionMediaContext.Provider value={media}>{children}</SessionMediaContext.Provider>;
+}
+
+/** All images sent in the active chat, oldest first, once the list is loaded. */
+export function useSessionMedia(): MediaEntry[] | null {
+  return useContext(SessionMediaContext);
+}
+
 /**
  * Fetches the images the engine serves from /media/{ref}. An <img> cannot send
  * the bearer token, so each file is fetched once with it and shown from a blob

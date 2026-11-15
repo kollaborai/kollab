@@ -9,9 +9,10 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from kollabor_config.config_utils import get_project_data_dir
 from kollabor_engine.media_store import list_for, save
 from kollabor_engine.server import create_app
+
+from kollabor_config.config_utils import get_project_data_dir
 
 PNG = "data:image/png;base64,AQID"
 JPEG = "data:image/jpeg;base64,BAUF"
@@ -57,6 +58,23 @@ class TestMediaRoutes:
 
 
 class TestArtifactRoutes:
+    async def test_distinct_long_sessions_do_not_share_artifacts(
+        self, client: AsyncClient, monkeypatch
+    ) -> None:
+        import kollabor_engine.routes.artifacts as artifacts
+
+        first = "a" * 80 + "x"
+        second = "a" * 80 + "y"
+        monkeypatch.setattr(artifacts, "_conversations_dir", conversations_dir)
+        root = artifacts._artifacts_root(first)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "private.output").write_text("first session only")
+
+        listed = await client.get(f"/sessions/{second}/artifacts")
+
+        assert listed.status_code == 200
+        assert listed.json()["artifacts"] == []
+
     async def test_list_and_read(self, client: AsyncClient) -> None:
         root = conversations_dir() / "tool_outputs" / "s4"
         root.mkdir(parents=True, exist_ok=True)
@@ -128,6 +146,17 @@ class TestHistoryOverlay:
         assert [m["ref"] for m in rows[0]["media"]] == refs
         assert "media" not in rows[1] and "media" not in rows[2]
 
+    async def test_compacted_history_binds_surviving_rows_to_latest_media(self, monkeypatch):
+        from kollabor_engine.routes.sessions import get_history
+
+        refs = [save(conversations_dir(), "s10", url).ref for url in (PNG, JPEG)]
+        # The daemon replaced its history with a compacted snapshot, dropping
+        # the first sender while retaining the later sender.
+        history = [{"role": "user", "content": "later [image1]"}]
+        self.stub_registry(monkeypatch, "s10", history)
+        page = await get_history("s10")
+        assert [m["ref"] for m in page["history"][0]["media"]] == [refs[1]]
+
     async def test_older_page_skips_bound_images(self, monkeypatch):
         from kollabor_engine.routes.sessions import get_history
 
@@ -153,7 +182,6 @@ class TestHistoryOverlay:
         assert all("media" not in row for row in page["history"])
 
     async def test_unknown_session_404(self):
-        import pytest
         from fastapi import HTTPException
         from kollabor_engine.routes.sessions import get_history
 

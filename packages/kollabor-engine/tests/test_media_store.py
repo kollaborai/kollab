@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
-
 from kollabor_engine.media_store import (
     MAX_DECODED_BYTES,
     REF_RE,
@@ -61,6 +59,18 @@ def test_save_rejects_oversize(tmp_path: Path) -> None:
     blob = base64.b64encode(bytes(MAX_DECODED_BYTES + 1)).decode()
     with pytest.raises(ValueError):
         save(tmp_path, "s1", f"data:image/png;base64,{blob}")
+
+
+def test_save_retries_a_colliding_ref(tmp_path: Path, monkeypatch) -> None:
+    import kollabor_engine.media_store as media_store
+
+    suffixes = iter(("abcd", "abcd", "ef01"))
+    monkeypatch.setattr(media_store.time, "strftime", lambda _fmt: "20261115-120000")
+    monkeypatch.setattr(media_store.secrets, "token_hex", lambda _size: next(suffixes))
+    first = save(tmp_path, "s1", PNG)
+    second = save(tmp_path, "s1", JPEG)
+    assert first.ref != second.ref
+    assert open_media(tmp_path, first.ref)[0] == bytes([1, 2, 3])
 
 
 def test_list_for_is_oldest_first(tmp_path: Path) -> None:

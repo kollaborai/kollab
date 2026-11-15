@@ -27,12 +27,10 @@ const MEDIA = [
   { ref: "20261114-210100-bbbb", mime: "image/png" },
 ];
 const HISTORY = [
-  {
-    role: "user",
-    content: "look [image1] and [image2]",
-    media: MEDIA,
-  },
-  { role: "assistant", content: "Got both." },
+  { role: "user", content: "first [image1]", media: [MEDIA[0]] },
+  { role: "assistant", content: "Got the first." },
+  { role: "user", content: "second [image1]", media: [MEDIA[1]] },
+  { role: "assistant", content: "Got the second." },
   // The live daemon-mirror shape (koordinator's live gate, #1124): the text
   // carries no token and the picture is a bytes-less image part. The engine
   // binds media refs onto such rows by part count; the thread must render

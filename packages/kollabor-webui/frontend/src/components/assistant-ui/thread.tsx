@@ -27,7 +27,7 @@ import {
 } from "@/components/assistant-ui/tool-group";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { splitMediaSegments } from "@/components/media/media-tokens";
-import { MediaThumb, useMediaViewer } from "@/components/media/media-view";
+import { MediaThumb, useMediaViewer, useSessionMedia } from "@/components/media/media-view";
 import { agentStatus, bundleName } from "@/components/panels/panel-model";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -1309,6 +1309,7 @@ const UserText: FC<{ text?: string }> = ({ text }) => {
     (s) => s.message.parts.filter((part) => part.type === "image").length,
   );
   const openViewer = useMediaViewer();
+  const sessionMedia = useSessionMedia();
   if (!text) return null;
   const segments = splitMediaSegments(text);
   return (
@@ -1318,12 +1319,14 @@ const UserText: FC<{ text?: string }> = ({ text }) => {
         if (imageParts > 0) return null;
         const entry = media?.[segment.index];
         if (!entry) return <span key={index}>[image{segment.index + 1}]</span>;
+        const viewerItems = sessionMedia?.length ? sessionMedia : media;
+        const viewerIndex = viewerItems?.findIndex((item) => item.ref === entry.ref) ?? -1;
         return (
           <MediaThumb
             key={index}
             ref_={entry.ref}
             className="my-1 align-middle"
-            onOpen={openViewer ? () => openViewer(media, segment.index) : undefined}
+            onOpen={openViewer ? () => openViewer(viewerItems ?? media, viewerIndex >= 0 ? viewerIndex : segment.index) : undefined}
           />
         );
       })}
