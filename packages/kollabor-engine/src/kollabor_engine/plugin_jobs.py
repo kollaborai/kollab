@@ -63,8 +63,8 @@ class PluginJobs:
                 self._track(asyncio.to_thread(self._cleanup, job))
 
     @staticmethod
-    def _cleanup(job: dict) -> None:
-        base = job.pop("base", None)
+    def _cleanup(job: dict) -> bool:
+        base = job.get("base")
         if base is not None:
             try:
                 shutil.rmtree(base)
@@ -72,6 +72,9 @@ class PluginJobs:
                 pass
             except OSError as exc:
                 logger.warning("Cannot clean plugin job staging directory: %s", type(exc).__name__)
+                return False
+            job.pop("base", None)
+        return True
 
     @staticmethod
     def _public(job: dict) -> dict:
@@ -266,8 +269,9 @@ class PluginJobs:
             pending = job.get("cancel_task")
             if pending is not None:
                 return await asyncio.shield(pending)
-            return self._public(job)
-        if job["status"] not in {"staging", "ready"}:
+            if "base" not in job:
+                return self._public(job)
+        elif job["status"] not in {"staging", "ready"}:
             raise HTTPException(status_code=409, detail="Plugin job cannot be cancelled")
         job["status"] = "cancelled"
         stage_task = job.get("stage_task")
@@ -275,13 +279,17 @@ class PluginJobs:
             stage_task.cancel()
 
         async def finish() -> dict:
-            if stage_task is not None:
-                await asyncio.gather(stage_task, return_exceptions=True)
-            job["status"] = "cancelled"
-            job["updated"] = time.monotonic()
-            await asyncio.to_thread(self._cleanup, job)
-            self.hub.publish_change()
-            return self._public(job)
+            try:
+                if stage_task is not None:
+                    await asyncio.gather(stage_task, return_exceptions=True)
+                job["status"] = "cancelled"
+                job["updated"] = time.monotonic()
+                if not await asyncio.to_thread(self._cleanup, job):
+                    raise HTTPException(status_code=503, detail="Cannot remove staged plugin files; try again")
+                self.hub.publish_change()
+                return self._public(job)
+            finally:
+                job.pop("cancel_task", None)
 
         task = self._track(finish())
         job["cancel_task"] = task
