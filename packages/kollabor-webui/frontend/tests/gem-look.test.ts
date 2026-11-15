@@ -4,6 +4,8 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import { drawn, lookKey, resolveGemLook, withLook } from "../src/components/gems/gem-look.ts";
 
+const luma = ([red, green, blue]: readonly number[]) => 0.299 * red + 0.587 * green + 0.114 * blue;
+
 // Nothing to draw a born look from: these tests read the engine's rolls alone.
 const VOCABULARY = {
   faces: new Set(["pill", "disney", "kawaii"]),
@@ -287,6 +289,20 @@ test("a crew gem rolled with a hat before the rule wears the crew coat and keeps
     { fur: look.fur, furColor: look.furColor, hair: look.hair, hairColor: look.hairColor },
     { fur: "long", furColor: [235, 232, 225], hair: "crop", hairColor: [30, 26, 24] },
   );
+});
+
+test("a hatless furry crew gem with noncontrasting hair gets the crew coat", () => {
+  const look = resolveGemLook(
+    {
+      crew: ["support-lead"],
+      born: { "support-lead": { face: "kawaii", hat: "none", fur: "short", furColor: [30, 26, 24], hair: "short", hairColor: [30, 26, 24] } },
+    },
+    "support-lead",
+    CREW_VOCABULARY,
+  );
+  assert.equal(look.face, "kawaii");
+  assert.equal(look.bornHat, "none");
+  assert.ok(Math.abs(luma(look.hairColor!) - luma(look.furColor!)) >= 80);
 });
 
 test("a pool gem keeps its born hat and coat; the user's picks still win on a crew gem", () => {
