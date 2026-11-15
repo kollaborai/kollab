@@ -30,10 +30,12 @@ from ..history_paging import (
     resolve_history_output,
 )
 from ..hub_bridge import HubBridge, network_daemons
+from ..media_store import attach_media_to_rows, count_image_tokens
 from ..network_aggregate import merge_view_and_memberships
 from ..server import get_session_registry, open_named_session
 from ..session import INLINE_PROFILE, EngineSession
 from ..workspace_folder import folder_or_400
+from .media import _conversations_dir
 from .rosters import apply_persona
 from .workspaces import remember_workspace
 
@@ -1320,6 +1322,21 @@ async def get_history(
         raise HTTPException(status_code=400, detail=str(error)) from error
     except HistoryPageTooLarge as error:
         raise HTTPException(status_code=413, detail=str(error)) from error
+
+    # Durable copies of the images this session sent (#1088): bind the
+    # stored refs onto the page's user rows. Older pages skip the images
+    # bound to rows before start_index so each page binds its own sends.
+    page_rows = page.get("history")
+    if isinstance(page_rows, list) and page_rows:
+        start = page.get("start_index")
+        skip = 0
+        if isinstance(start, int) and not isinstance(start, bool) and start > 0:
+            skip = sum(
+                count_image_tokens(row.get("content"))
+                for row in history[:start]
+                if isinstance(row, dict) and row.get("role") == "user"
+            )
+        attach_media_to_rows(_conversations_dir(), session_id, page_rows, skip=skip)
 
     # Preserve the existing turn-error offset semantics, now relative to the
     # bounded page. An error outside an older page is not duplicated there.
