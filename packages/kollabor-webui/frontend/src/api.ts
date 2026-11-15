@@ -107,7 +107,12 @@ export type HistoryMessage = {
   timestamp?: string | null;
   metadata?: Record<string, unknown>;
   thinking?: string | null;
+  /** Stored copies of the images this row sent (#1088), in [imageN] order. */
+  media?: Array<{ ref: string; mime: string }>;
 };
+
+/** The engine's stored copy of one image a session sent (#1088). */
+export type MediaEntry = { ref: string; mime: string };
 
 /** Why the session's last turn failed; it goes after `history_length` messages. */
 export type TurnError = { message: string; history_length: number };
@@ -1246,6 +1251,18 @@ export class EngineApi {
     return this.json<{ ok: boolean }>(`/sessions/${encodeURIComponent(sessionId)}`, {
       method: "DELETE",
     });
+  }
+
+  /** The session's stored sent images, oldest first (#1088). */
+  listMedia(sessionId: string) {
+    return this.json<{ session_id: string; media: MediaEntry[] }>(
+      `/media?session_id=${encodeURIComponent(sessionId)}`,
+    );
+  }
+
+  /** The engine path that serves one stored image; the request adds the bearer token. */
+  mediaPath(ref: string) {
+    return `/media/${encodeURIComponent(ref)}`;
   }
 
   getHistoryPage(sessionId: string, options: HistoryPageOptions = {}) {
