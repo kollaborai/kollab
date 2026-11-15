@@ -8,6 +8,7 @@ Compatible with ANS semantic capability matching and ARDP
 capability advertisement.
 """
 
+import copy
 import logging
 import time
 from typing import TYPE_CHECKING, Dict, List, Tuple
@@ -28,11 +29,13 @@ class CapabilityRegistry:
         self._storage = storage
         # Reverse index: capability_name -> [(designation, CapabilityEntry)]
         self._index: Dict[str, List[Tuple[str, CapabilityEntry]]] = {}
+        self._persisted_index: Dict[str, list] = {}
         self._loaded = False
 
     def _ensure_loaded(self) -> None:
         if not self._loaded:
             raw = self._storage.load_capability_index()
+            self._persisted_index = copy.deepcopy(raw)
             self._index = {}
             for cap_name, entries in raw.items():
                 self._index[cap_name] = [
@@ -244,6 +247,7 @@ class CapabilityRegistry:
     ) -> None:
         """Persist only this registry operation's changes to storage."""
         raw = {}
+        base_entries = {}
         if replace:
             updated_entries = {
                 (cap_name, designation)
@@ -262,16 +266,58 @@ class CapabilityRegistry:
                 None,
             )
             if capability is not None:
-                raw.setdefault(cap_name, []).append(
-                    {
-                        "designation": designation,
-                        "capability": capability.to_dict(),
-                    }
+                entry = {
+                    "designation": designation,
+                    "capability": capability.to_dict(),
+                }
+                raw.setdefault(cap_name, []).append(entry)
+                persisted_entry = next(
+                    (
+                        item
+                        for item in self._persisted_index.get(cap_name, [])
+                        if item.get("designation") == designation
+                    ),
+                    None,
                 )
+                if persisted_entry is not None:
+                    base_entries[(cap_name, designation)] = copy.deepcopy(
+                        persisted_entry
+                    )
         self._storage.save_capability_index(
             raw,
+            base_entries=base_entries,
             created_entries=created_entries,
             deleted_entries=deleted_entries,
             deleted_designations=deleted_designations,
             replace=replace,
         )
+        if replace:
+            self._persisted_index = copy.deepcopy(raw)
+            return
+        for designation in deleted_designations:
+            for cap_name in list(self._persisted_index):
+                self._persisted_index[cap_name] = [
+                    item
+                    for item in self._persisted_index[cap_name]
+                    if item.get("designation") != designation
+                ]
+                if not self._persisted_index[cap_name]:
+                    del self._persisted_index[cap_name]
+        for cap_name, designation in deleted_entries:
+            self._persisted_index[cap_name] = [
+                item
+                for item in self._persisted_index.get(cap_name, [])
+                if item.get("designation") != designation
+            ]
+            if not self._persisted_index[cap_name]:
+                del self._persisted_index[cap_name]
+        for cap_name, entries in raw.items():
+            persisted_entries = self._persisted_index.setdefault(cap_name, [])
+            for entry in entries:
+                designation = entry["designation"]
+                for index, persisted_entry in enumerate(persisted_entries):
+                    if persisted_entry.get("designation") == designation:
+                        persisted_entries[index] = copy.deepcopy(entry)
+                        break
+                else:
+                    persisted_entries.append(copy.deepcopy(entry))

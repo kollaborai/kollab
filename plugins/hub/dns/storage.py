@@ -88,6 +88,10 @@ def _validate_agent_record_data(designation: str, data: dict) -> None:
         for field in ("confidence", "last_demonstrated"):
             if field in capability and not _is_finite_number(capability[field]):
                 raise TypeError(f"record capability {field} must be a finite number")
+        if "confidence" in capability and not 0 <= capability["confidence"] <= 1:
+            raise ValueError("record capability confidence is out of range")
+        if "last_demonstrated" in capability and capability["last_demonstrated"] < 0:
+            raise ValueError("record capability demonstration time is negative")
         if "endorsed_by" in capability and (
             not isinstance(capability["endorsed_by"], list)
             or any(not isinstance(item, str) for item in capability["endorsed_by"])
@@ -499,6 +503,7 @@ class DNSStorage:
         self,
         index: Dict[str, list],
         *,
+        base_entries=None,
         created_entries=None,
         deleted_entries=(),
         deleted_designations=(),
@@ -533,7 +538,24 @@ class DNSStorage:
                             or (capability_name, designation) in created_entries
                             or designation in capability_entries
                         ):
-                            capability_entries[designation] = entry
+                            base_entry = (base_entries or {}).get(
+                                (capability_name, designation)
+                            )
+                            current_entry = capability_entries.get(designation)
+                            if base_entry is None or current_entry is None:
+                                capability_entries[designation] = entry
+                                continue
+                            base_capability = base_entry.get("capability", {})
+                            current_capability = current_entry.get("capability", {})
+                            incoming_capability = entry.get("capability", {})
+                            merged_capability = dict(current_capability)
+                            for field, value in incoming_capability.items():
+                                if base_capability.get(field) != value:
+                                    merged_capability[field] = value
+                            merged_entry = dict(current_entry)
+                            merged_entry.update(entry)
+                            merged_entry["capability"] = merged_capability
+                            capability_entries[designation] = merged_entry
 
                 merged = {
                     name: list(entries.values())
