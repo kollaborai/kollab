@@ -485,14 +485,18 @@ class TestMCPServerConnection(unittest.TestCase):
                 stdout=_ChunkedStdout([b'{"jsonrpc":"2.0","id":"req-1"'])
             )
 
-            result = await connection._send_request(
-                {"jsonrpc": "2.0", "id": "req-1", "method": "tools/call"}
-            )
+            with self.assertRaisesRegex(
+                MCPRequestInterruptedError,
+                "outcome may be unknown because the request was written",
+            ):
+                await connection._send_request(
+                    {"jsonrpc": "2.0", "id": "req-1", "method": "tools/call"}
+                )
 
-            self.assertIsNone(result)
             self.assertFalse(connection.initialized)
             self.assertEqual(connection._read_buffer, b"")
             self.assertEqual(connection._pending_requests, {})
+            self.assertEqual(connection._pending_request_written, {})
 
         asyncio.run(run_test())
 
