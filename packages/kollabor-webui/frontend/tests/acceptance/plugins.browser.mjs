@@ -29,6 +29,7 @@ try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   let inventoryReads = 0;
   let confirmedInstall = null;
+  let installSource = null;
   const brokenImports = [];
   let brokenDisabled = false;
   let fixtureRemoved = false;
@@ -58,7 +59,11 @@ try {
     if (url.origin !== origin) return route.abort();
     if (url.pathname === "/api/config") return route.fulfill({ json: { engine_url: "/engine" } });
     if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, plugins: [...(fixtureRemoved ? [] : [entry]), broken, crasher, hello] } }); }
-    if (url.pathname === "/engine/plugins/install/preview" && route.request().method() === "POST") return route.fulfill({ json: { job_id: "install-fixture", status: "staging" } });
+    if (url.pathname === "/engine/plugins/install" && route.request().method() === "POST") {
+      installSource = route.request().postDataJSON();
+      if (!installSource?.source) return route.fulfill({ status: 422, json: { detail: "source is required" } });
+      return route.fulfill({ status: 202, json: { job_id: "install-fixture", status: "staging" } });
+    }
     if (url.pathname === "/engine/plugins/jobs/install-fixture" && route.request().method() === "GET") return route.fulfill({ json: preview });
     if (url.pathname === "/engine/plugins/jobs/install-fixture/confirm" && route.request().method() === "POST") {
       confirmedInstall = route.request().postDataJSON();
@@ -228,6 +233,7 @@ try {
   await add.getByText(/plugin code.*runs as you/i).waitFor();
   await add.getByText(/without asking/i).waitFor();
   await add.getByText(/unreported.*not capped/i).waitFor();
+  assert.deepEqual(installSource, { source: "https://github.com/example/fixture.git" });
   assert.equal(confirmedInstall, null, "preview must not install before confirmation");
   await add.getByRole("button", { name: "Install", exact: true }).click();
   await add.waitFor({ state: "hidden" });
