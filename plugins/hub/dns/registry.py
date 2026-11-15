@@ -91,7 +91,7 @@ class AgentRegistry:
         self._ensure_loaded()
         if designation in self._records:
             del self._records[designation]
-            self._save()
+            self._save(deleted_keys=[designation])
             logger.info(f"deregistered DNS record for {designation}")
             return True
         return False
