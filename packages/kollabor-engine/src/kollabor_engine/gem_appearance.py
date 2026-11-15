@@ -93,7 +93,22 @@ BIRTH_HATS = (
     "halo",
     "propeller",
 )
-BIRTH_HAIRS = ("short", "long", "spiky", "mohawk", "buzz", "crop", "fringe", "bob", "page", "mane", "plume", "crest", "quiff", "halo")
+BIRTH_HAIRS = (
+    "short",
+    "long",
+    "spiky",
+    "mohawk",
+    "buzz",
+    "crop",
+    "fringe",
+    "bob",
+    "page",
+    "mane",
+    "plume",
+    "crest",
+    "quiff",
+    "halo",
+)
 BIRTH_HAIR_COLORS = (
     (30, 26, 24),
     (95, 60, 35),
