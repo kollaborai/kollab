@@ -55,6 +55,15 @@ async def test_rosters_lists_gems_and_the_example_crew_with_avatar_descriptors(c
 
 
 @pytest.mark.asyncio
+async def test_marketing_roster_description_matches_its_gem_avatars(client, folders):
+    body = (await client.get("/rosters", params={"workspace": folders.project})).json()
+    marketing = next(roster for roster in body["rosters"] if roster["name"] == "marketing-crew")
+
+    assert "emoji avatars" not in marketing["description"]
+    assert {persona["avatar"]["kind"] for persona in marketing["personas"]} == {"gem"}
+
+
+@pytest.mark.asyncio
 async def test_project_roster_with_an_image_avatar_and_the_default_roster(client, folders):
     put(
         folders.project + "/.kollab/rosters/crew.json",
