@@ -175,3 +175,20 @@ test("shouldPersistGuide: identical states and pristine reverts do not write", (
   const dismissed: GuideState = { step: "done", dismissed: true };
   assert.equal(shouldPersistGuide(dismissed, initialGuideState()), false);
 });
+
+test("SetupGuide gates its storage write through the persistence policy", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(
+    new URL("../src/setup/SetupGuide.tsx", import.meta.url),
+    "utf8",
+  );
+  const effect = source.slice(
+    source.indexOf("const prevStateRef"),
+    source.indexOf("// Re-read engine facts"),
+  );
+  assert.match(effect, /shouldPersistGuide\(prev, state\)/);
+  assert.match(
+    effect,
+    /window\.localStorage\.setItem\(STORAGE_KEY, saveGuideState\(state\)\)/,
+  );
+});
