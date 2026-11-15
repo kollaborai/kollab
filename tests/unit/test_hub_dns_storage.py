@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from plugins.hub.dns.models import AgentRecord
+from plugins.hub.dns.models import AgentRecord, ReputationScore
 from plugins.hub.dns.storage import DNSStorage
 
 
@@ -35,6 +35,24 @@ def test_capability_index_saves_keep_updates_from_stale_snapshots(tmp_path):
     assert set(final_index) == {"alpha-capability", "beta-capability"}
     assert final_index["alpha-capability"][0]["designation"] == "alpha"
     assert final_index["beta-capability"][0]["designation"] == "beta"
+
+
+def test_reputation_saves_keep_updates_from_stale_snapshots(tmp_path):
+    first = DNSStorage(tmp_path)
+    second = DNSStorage(tmp_path)
+    first_snapshot = first.load_reputation()
+    second_snapshot = second.load_reputation()
+    assert first_snapshot == second_snapshot == {}
+
+    first_snapshot["alpha"] = ReputationScore(designation="alpha", tasks_completed=1)
+    second_snapshot["beta"] = ReputationScore(designation="beta", tasks_completed=1)
+    first.save_reputation(first_snapshot)
+    second.save_reputation(second_snapshot)
+
+    persisted = DNSStorage(tmp_path).load_reputation()
+    assert set(persisted) == {"alpha", "beta"}
+    assert persisted["alpha"].tasks_completed == 1
+    assert persisted["beta"].tasks_completed == 1
 
 
 def test_concurrent_registry_merges_keep_both_updates(tmp_path, monkeypatch):
