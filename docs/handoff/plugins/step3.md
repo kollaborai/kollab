@@ -97,6 +97,8 @@
 
 - Stopping recovery: red test commit `40931426` exposed host refresh clearing a load error when inventory changed from `ok` to `stopping`, while the loader retained the failed attempt. Fix `798f9618` aligns host eligibility with the loader. Focused `vitest run src/plugins/host.test.ts` under throwaway HOME and `KOLLAB_NO_KEYRING=1` passed 7/7; red and green logs are `~/backups/plugins-step3-work/host-stopping-red.log` and `host-stopping-green.log`. Broader `vitest run src/plugins` passed 32/32 and `npm run typecheck` passed under the same isolated environment; logs are `~/backups/plugins-step3-work/stopping-plugin-tests.log` and `stopping-typecheck.log`. These do not prove the recovery surface in a browser.
 
+- CSS scope: browser red test `9a7829fe` and fix `6b7f0df3` give pages, views, modals and tool/tag renderers `data-plugin="<id>"`; fixture CSS applies in the browser. Isolated Chrome acceptance passed (`css-scope-green.log`), plugin Vitest 32/32 (`css-scope-vitest.log`), typecheck passed (`css-scope-typecheck.log`). The acceptance uses fake engine routes, not the required live smoke. Next test and fix custom settings CSS scope separately.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
