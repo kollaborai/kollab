@@ -84,7 +84,7 @@ try {
   await panel.getByRole("button", { name: "Chat", exact: true }).click();
   const boardMenu = panel.getByRole("button", { name: /Fixture Board/ });
   await boardMenu.getByText("4", { exact: true }).waitFor({ timeout: 5000 });
-  assert.equal(await boardMenu.getAttribute("title"), "4 items need attention");
+  assert.equal(await boardMenu.getByText("4", { exact: true }).getAttribute("title"), "4 items need attention");
   await boardMenu.click();
   await page.getByRole("heading", { name: "Fixture Board" }).waitFor({ timeout: 5000 });
   await page.getByText("Fixture page body", { exact: true }).waitFor();

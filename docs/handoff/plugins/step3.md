@@ -86,7 +86,7 @@
 - Install/update: red browser test commit `9884c0b2` timed out on disabled Review. The dialog now starts/polls the engine's staged job, displays code warning, commit, files hash, uses, services and changes, and only posts `{commit, files_sha256}` after explicit Install/Update. Cancel deletes an unconfirmed job. Fake-engine browser acceptance verifies install preview is non-mutating until confirmation and sends the exact reviewed values; 30 focused tests and typecheck pass. Update, polling failure/retry/cancel, token/permission detail, expired jobs and real-engine install remain unverified; no real repository was contacted.
 
 
-- Badge contract red check: browser acceptance now uses the spec's `{text, hint}` response and fails because MenuCount incorrectly expected `{count, attention}`. Render the returned text and expose its hint accessibly; do not invent a second wire contract.
+- Badge contract: red browser test commit `2ce2860e` caught MenuCount expecting `{count, attention}` instead of the spec's `{text, hint}`. It now renders the declared text with the hint on the badge. Isolated browser acceptance and typecheck pass; live event-based count refresh still needs an explicit check.
 
 
 ## Remaining

@@ -21,9 +21,9 @@ export function parsePluginView(view: SessionView): { pluginId: string; viewId: 
   catch { return null; }
 }
 function MenuCount({ context, count }: { context: PluginContext; count: NonNullable<PluginMenu["count"]> }) {
-  const { data } = context.useApi<{ count?: number; attention?: number }>(count.path, { refreshOn: count.refreshOn });
-  if (!data?.count) return null;
-  return <Badge variant={data.attention ? "destructive" : "secondary"} className="ml-auto">{data.count}</Badge>;
+  const { data } = context.useApi<{ text?: string; hint?: string }>(count.path, { refreshOn: count.refreshOn });
+  if (!data?.text) return null;
+  return <Badge variant="secondary" className="ml-auto" title={data.hint}>{data.text}</Badge>;
 }
 
 /** Appends plugin entries to the existing session controls, not a separate sidebar. */
