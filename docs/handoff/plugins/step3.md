@@ -70,6 +70,9 @@
 - Regression corrected: after previously running composer checks I added an untested `visible` reference that did not exist in `RuntimeShell`, so commit `a7fac235` crashed the session UI. The subsequent browser/typecheck run caught it; this change removes the reference and both checks now pass. Do not report the earlier composer commit as independently green.
 
 
+- Tagged-text red check: isolated `vitest run src/plugins/tagged-text.test.ts` fails because the splitter does not exist. It specifies registered complete tags, nested and multiple tags, and preserving unknown, incomplete, escaped, inline-code and fenced-code text. Implement without evaluating tag content as HTML; hook into assistant Markdown only after the parser is tested.
+
+
 ## Remaining
 
 1. Add explicit late-import removal/replacement and stale awaited-activation tests; then finish item 1: registry, SDK, error boundary, shared React runtime/import map, CSS and integration. The current lifecycle core is not production-wired and cannot load a plugin by itself.
