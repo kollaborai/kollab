@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type ComponentType } from "react";
 import type { Session } from "../api";
 import type { PluginDraft } from "./registry";
+import type { PluginUi } from "./ui";
 
 export type PluginOpen = { page: string } | { modal: string } | { view: string } | { url: string };
 export type PluginRenderProps = { k: PluginContext; session?: Session };
@@ -43,7 +44,7 @@ export interface PluginContext extends PluginContributions {
   navigate(target: PluginOpen): void;
   copy(text: string): Promise<void>;
   toast(text: string): void;
-  ui: Record<string, unknown>;
+  ui: PluginUi;
 }
 
 /** Type-check a plugin's activation while leaving the function available as the default export. */
@@ -137,7 +138,7 @@ export function createPluginContext(options: PluginContextOptions): PluginContex
     modal: draft.modal.bind(draft), settings, command: draft.command.bind(draft),
     renderer: draft.renderer.bind(draft), notice: draft.notice.bind(draft),
     api, useApi, events: { on }, agents: { open: options.openAgent },
-    navigate: options.navigate, copy: options.copy, toast: options.toast, ui: options.ui,
+    navigate: options.navigate, copy: options.copy, toast: options.toast, ui: options.ui as PluginUi,
     dispose: () => { disposed = true; for (const dispose of [...disposers]) dispose(); },
   };
 }

@@ -41,7 +41,7 @@
 - Recovery UI: red SSR checks (test commit `ea12be9f`) failed because the components did not exist. Added a shared error boundary, failure controls and opt-out/skipped notices using Button and NoticeBar. Isolated `vitest run src/plugins` passes 22/22 and typecheck passes. The components are not mounted; SSR does not replace real browser error-boundary tests.
 
 
-- Design-system API red check: isolated `vitest run src/plugins/ui.test.tsx` fails because the `k.ui` primitive map does not exist. Expose the documented host primitives and typed SDK surface; no duplicate plugin-specific widget system.
+- Design-system API: red check (test commit `7ea7595b`) failed because the `k.ui` map did not exist. It now exposes typed host primitives, using NoticeBar for Alert and a semantic overflow-contained Table. Isolated `vitest run src/plugins` passes 23/23 and typecheck passes. The host still needs to pass `pluginUI`, and a published plugin declaration/template must carry usable UI types.
 
 
 ## Remaining
