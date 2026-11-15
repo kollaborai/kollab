@@ -98,14 +98,14 @@ export function PluginSessionView({ host, view, session, onBack, onTurnOff }: {
   const item = plugin?.views.find(candidate => candidate.id === key.viewId);
   const context = host.getContext(key.pluginId);
   const error = snapshot.errors[key.pluginId];
-  if (error) return <PluginFailure name={key.pluginId} kind={snapshot.renderFailed.includes(key.pluginId) ? "render" : "load"}
+  if (error) return <PluginFailure name={entry?.name ?? "Plugin"} kind={snapshot.renderFailed.includes(key.pluginId) ? "render" : "load"}
     error={error} onRetry={() => { void host.retry(key.pluginId); }} onTurnOff={() => onTurnOff(key.pluginId)} />;
   if (!item || !context || (item.needs_folder && !session.workspace)) return <div data-plugin className="flex flex-col items-start gap-3 p-4">
     <p className="text-sm">This plugin view is unavailable for this chat.</p><Button type="button" variant="outline" onClick={onBack}>Back to Chat</Button>
   </div>;
   const Render = item.render;
   return <div data-plugin={key.pluginId} className="min-h-0 min-w-0 flex-1 overflow-auto">
-    <PluginRenderBoundary name={key.pluginId} onError={error => host.reportRenderError(key.pluginId, error)}
+    <PluginRenderBoundary name={entry?.name ?? "Plugin"} onError={error => host.reportRenderError(key.pluginId, error)}
       onRetry={() => { void host.retry(key.pluginId); }} onTurnOff={() => onTurnOff(key.pluginId)}>
       <Render k={context} session={session} />
     </PluginRenderBoundary>
