@@ -14,53 +14,66 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
+from kollabor_agent.tool_output_budget import session_output_dirname
+
 from .media import _conversations_dir
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
-# Mirrors tool_output_budget._safe_name so the root matches the store's.
-_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _ARTIFACT_REF_RE = re.compile(r"^[A-Za-z0-9._-]+\.output$")
+_LEGACY_SESSION_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,78}[A-Za-z0-9])?$"
+)
 _SERVE_BYTES = 2_000_000
 
 
-def _session_name(session_id: str) -> str:
-    text = _SAFE_NAME_RE.sub("-", session_id).strip("-.")
-    return (text or "session")[:80]
-
-
 def _artifacts_root(session_id: str) -> Path:
-    return _conversations_dir() / "tool_outputs" / _session_name(session_id)
+    return _conversations_dir() / "tool_outputs" / session_output_dirname(session_id)
+
+
+def _artifact_roots(session_id: str) -> tuple[Path, ...]:
+    roots: list[Path] = []
+    root = _artifacts_root(session_id)
+    if root.is_dir():
+        roots.append(root)
+    # Read old directories only when the old sanitizer was injective for this
+    # exact id. Sanitized or truncated legacy names can alias another session.
+    if _LEGACY_SESSION_RE.fullmatch(session_id):
+        legacy_root = _conversations_dir() / "tool_outputs" / session_id
+        if legacy_root.is_dir() and legacy_root != root:
+            roots.append(legacy_root)
+    return tuple(roots) or (root,)
 
 
 def _artifact_path(session_id: str, ref: str) -> Path:
     if not _ARTIFACT_REF_RE.match(ref):
         raise HTTPException(status_code=400, detail="Invalid artifact reference")
-    path = _artifacts_root(session_id) / ref
-    if path.parent != _artifacts_root(session_id) or not path.is_file():
-        raise HTTPException(status_code=404, detail="Artifact not found")
-    return path
+    for root in _artifact_roots(session_id):
+        path = root / ref
+        if path.parent == root and path.is_file():
+            return path
+    raise HTTPException(status_code=404, detail="Artifact not found")
 
 
 def _listing(session_id: str) -> list[dict[str, Any]]:
-    root = _artifacts_root(session_id)
-    if not root.is_dir():
-        return []
     entries = []
-    for path in root.glob("*.output"):
-        if not path.is_file():
-            continue
-        stat = path.stat()
-        entries.append(
-            {
-                "ref": path.name,
-                "name": path.name.removesuffix(".output"),
-                "bytes": stat.st_size,
-                "modified": time.strftime(
-                    "%Y-%m-%dT%H:%M:%S", time.localtime(stat.st_mtime)
-                ),
-            }
-        )
+    seen_refs: set[str] = set()
+    for root in _artifact_roots(session_id):
+        for path in root.glob("*.output"):
+            if not path.is_file() or path.name in seen_refs:
+                continue
+            seen_refs.add(path.name)
+            stat = path.stat()
+            entries.append(
+                {
+                    "ref": path.name,
+                    "name": path.name.removesuffix(".output"),
+                    "bytes": stat.st_size,
+                    "modified": time.strftime(
+                        "%Y-%m-%dT%H:%M:%S", time.localtime(stat.st_mtime)
+                    ),
+                }
+            )
     entries.sort(key=lambda entry: entry["modified"], reverse=True)
     return entries
 
@@ -88,4 +101,3 @@ async def read_artifact(session_id: str, ref: str) -> dict[str, Any]:
 
 
 __all__ = ["router"]
-
