@@ -268,8 +268,12 @@ try {
   assert.equal(await customSettings.evaluate(node => getComputedStyle(node).color), "rgb(12, 34, 56)");
   await settings.getByRole("button", { name: "Add Plugin" }).click();
   const add = page.getByRole("dialog", { name: "Add Plugin" });
-  await add.getByLabel("Git URL").fill("https://github.com/example/fixture.git");
+  await add.getByLabel("Git URL").fill("https://github.com/example/fixture.git#other");
   await add.getByLabel("Branch or Tag").fill("release/demo", { timeout: 5000 });
+  await add.getByRole("button", { name: "Review" }).click({ timeout: 5000 });
+  await add.getByText("Put the branch or tag in one field, not both.").waitFor();
+  assert.equal(installSource, null, "ambiguous branch must not start a job");
+  await add.getByLabel("Git URL").fill("https://github.com/example/fixture.git");
   await add.getByRole("button", { name: "Review" }).click({ timeout: 5000 });
   await add.getByText("Fixture New", { exact: true }).waitFor();
   await add.getByText(commit, { exact: false }).waitFor();

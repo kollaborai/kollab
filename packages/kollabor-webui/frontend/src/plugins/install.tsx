@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { TriangleAlert } from "lucide-react";
 import type { EngineApi } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -17,7 +18,7 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : S
 function DetailsList({ label, values }: { label: string; values: unknown }) {
   if (!values || (Array.isArray(values) && !values.length) || (typeof values === "object" && !Object.keys(values).length)) return null;
   const lines = Array.isArray(values) ? values : typeof values === "object" ? Object.entries(values).map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`) : [values];
-  return <div><h3 className="text-sm font-semibold">{label}</h3><ul className="text-muted-foreground list-disc break-all pl-5 text-sm">{lines.map((item, index) => <li key={index}>{typeof item === "string" ? item : JSON.stringify(item)}</li>)}</ul></div>;
+  return <div className="grid min-w-0 gap-1 sm:grid-cols-[8rem_minmax(0,1fr)] sm:gap-3"><h3 className="text-muted-foreground text-sm">{label}</h3><ul className="min-w-0 space-y-1 text-sm">{lines.map((item, index) => <li className="break-words" key={index}>{typeof item === "string" ? item : JSON.stringify(item)}</li>)}</ul></div>;
 }
 
 /** Preview stages untrusted source; only the explicit second action confirms its exact bytes. */
@@ -25,6 +26,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
   api: EngineApi; action: "install" | "update"; pluginId?: string; onClose: () => void; onApplied: () => Promise<void>;
 }) {
   const [url, setUrl] = useState("");
+  const [gitRef, setGitRef] = useState("");
   const [job, setJob] = useState<Job | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -33,8 +35,10 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
   const start = async () => {
     setBusy(true); setError(null);
     try {
+      if (action === "install" && gitRef.trim() && url.includes("#")) throw new Error("Put the branch or tag in one field, not both.");
       const endpoint = action === "install" ? "/plugins/install" : `/plugins/${encodeURIComponent(pluginId ?? "")}/update`;
-      const result = await api.json<Job>(endpoint, { method: "POST", body: JSON.stringify(action === "install" ? { source: url.trim() } : {}) });
+      const source = `${url.trim()}${gitRef.trim() ? `#${gitRef.trim()}` : ""}`;
+      const result = await api.json<Job>(endpoint, { method: "POST", body: JSON.stringify(action === "install" ? { source } : {}) });
       if (!result.job_id) throw new Error("The plugin manager did not return a review job.");
       setJob(result);
     } catch (caught) { setError(errorText(caught)); } finally { setBusy(false); }
@@ -107,11 +111,14 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
     return [];
   });
   return <Dialog open onOpenChange={open => { if (!open) void close(); }}>
-    <DialogContent data-plugin className="flex max-h-[100dvh] min-h-0 flex-col overflow-hidden max-sm:h-[100dvh] max-sm:max-w-none max-sm:rounded-none">
+    <DialogContent className="flex max-h-[100dvh] min-h-0 flex-col overflow-hidden sm:max-w-[640px] max-sm:h-[100dvh] max-sm:max-w-none max-sm:rounded-none">
       <DialogHeader><DialogTitle>{action === "install" ? "Add Plugin" : "Update Plugin"}</DialogTitle>
         <DialogDescription>Review the exact source and permissions before anything is installed or run.</DialogDescription></DialogHeader>
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
-        {action === "install" && !job ? <label className="flex flex-col gap-2 text-sm">Git URL<Input value={url} onChange={event => setUrl(event.target.value)} placeholder="https://github.com/owner/plugin.git" autoComplete="url" /></label> : null}
+        {action === "install" && !job ? <div className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
+          <label className="text-muted-foreground flex min-w-0 flex-col gap-2 text-sm">Git URL<Input value={url} onChange={event => setUrl(event.target.value)} placeholder="https://github.com/owner/plugin.git" autoComplete="url" /></label>
+          <label className="text-muted-foreground flex min-w-0 flex-col gap-2 text-sm">Branch or Tag<Input value={gitRef} onChange={event => setGitRef(event.target.value)} placeholder="Default branch" /></label>
+        </div> : null}
         {job?.status === "staging" ? <p role="status" className="text-muted-foreground text-sm">Fetching and checking the plugin…</p> : null}
         {job?.status === "error" ? <p role="alert" className="text-destructive text-sm">{job.error || "Plugin review failed."}</p> : null}
         {ready && job ? <>
@@ -133,9 +140,9 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
           ]} />
           <DetailsList label="Through Kollab" values={throughKollab} />
           <DetailsList label="On Its Own" values={onItsOwn} />
-          {uses.includes("agents") ? <p className="text-sm">Agent limits cover Kollab runs and usage the plugin reports; unreported spend is not capped.</p> : null}
+          {uses.includes("agents") ? <DetailsList label="Limits" values={["When available, agent limits cover Kollab runs and usage the plugin reports; unreported spend is not capped."]} /> : null}
           {job.warning ? <p className="text-sm">{job.warning}</p> : null}
-          <p className="text-sm">Kollab refuses requests made through Kollab that the plugin did not declare. Plugin code runs as you, as do agents with a shell; they have your files and keys and can do more. Add only plugins you trust.</p>
+          <div className="bg-muted flex gap-3 rounded-lg p-3 text-sm"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-amber-500" aria-hidden="true" /><p>Kollab refuses requests made through Kollab that the plugin did not declare. Plugin code runs as you, as do agents with a shell; they have your files and keys and can do more. Add only plugins you trust.</p></div>
           <DetailsList label="New grants" values={job.changes?.new_grants} /><DetailsList label="New dependencies" values={job.changes?.new_dependencies} />
           <DetailsList label="Added files" values={job.changes?.added} /><DetailsList label="Changed files" values={job.changes?.modified} /><DetailsList label="Removed files" values={job.changes?.removed} />
         </> : null}
