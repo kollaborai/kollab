@@ -113,6 +113,8 @@
 
 - Failed declared views now remain clickable and open the failure panel: browser red test `612a0930`, fix `08c7fd69`; isolated Chrome acceptance passed (`failed-view-green.log`), typecheck passed (`failed-view-typecheck.log`). Labels use declared labels when available, otherwise plugin name plus an ordinal. Next cover failed slash commands and active-view removal.
 
+- Failed declared slash commands remain in the palette and open the failure panel both on selection and typed submission; built-in and already-bound commands take priority. Browser red test `d98312ab`, fix plus typed-path test `396e9b0e`; isolated Chrome passed (`failed-command-green.log`), typecheck passed (`failed-command-typecheck.log`). Render-failure description and collision edge cases need further targeted checks.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
