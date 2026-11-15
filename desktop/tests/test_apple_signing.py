@@ -657,6 +657,15 @@ class WorkflowContractTests(unittest.TestCase):
                                         env={"APPLE_SIGNING_MODE": mode, "GITHUB_REF": ref})
                 self.assertEqual(result.returncode == 0, succeeds)
 
+    def test_dmg_cleanup_retry_uses_the_dmg_signing_state(self):
+        workflow = load_yaml(PACKAGING_WORKFLOW.read_text())
+        steps = workflow["jobs"]["desktop"]["steps"]
+        dmg_step = next(step for step in steps if step.get("name") == "Notarize and staple the dmg")
+        cleanup = next(step for step in steps if step.get("name") == "Retry the signing-state cleanup once, always")
+        self.assertIn('printf \'APPLE_SIGNING_STATE_DIR=%s\\n\' "$APPLE_SIGNING_STATE_DIR" >> "$GITHUB_ENV"', dmg_step["run"])
+        self.assertIn("-dmg", dmg_step["run"])
+        self.assertEqual(cleanup["run"], "bash desktop/scripts/sign-macos.sh cleanup")
+
     def test_workflow_and_example_run_blocks_have_valid_shell_syntax(self):
         steps = self.workflow["jobs"]["validate"]["steps"] + self.job_example["steps"]
         for step in steps:
