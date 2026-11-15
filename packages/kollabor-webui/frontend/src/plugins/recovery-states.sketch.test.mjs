@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-const sketch = fileURLToPath(new URL('../../../../docs/handoff/plugins/step3-states.html', import.meta.url));
+const sketch = fileURLToPath(new URL('./recovery-states.sketch.html', import.meta.url));
 
 describe('plugin recovery state sketch', () => {
   it('shows each recovery state and its recovery action', () => {

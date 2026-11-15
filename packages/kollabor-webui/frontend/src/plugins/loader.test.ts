@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { PluginLoader, type WebPluginEntry } from "../src/plugins/loader";
+import { PluginLoader, type WebPluginEntry } from "./loader";
 
 const entry = (id: string, overrides: Partial<WebPluginEntry> = {}): WebPluginEntry => ({
   id, enabled: true, shadowed: false, state: "ok", web: { entry: "web/dist/index.js", style: null, hash: "abc" }, ...overrides,
