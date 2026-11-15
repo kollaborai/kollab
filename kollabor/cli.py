@@ -2903,6 +2903,64 @@ def _engine_is_ours(port: int) -> bool:
     return False
 
 
+ENGINE_DOWN_GRACE = 3.0  # seconds nothing answers on the engine port before --web-ui starts it again
+WEBUI_WATCH_INTERVAL = 1.0  # how often --web-ui looks at its web UI and engine
+
+
+class _EngineKeeper:
+    """Keeps an engine answering on the port the web UI was started against (#1123).
+
+    The web UI talks to one engine URL for its whole life. When that engine died
+    (another program's dev script sent SIGTERM to everything on 7433), the web UI
+    kept running against an empty port and every panel showed "Load failed" until
+    Kollab was restarted by hand. ``check()`` runs once per watch interval:
+
+    - our engine process still running: never touched, even when it is slow;
+    - any engine answering on the port (ours reused, or one another program put
+      there): left alone;
+    - otherwise, after ``grace`` seconds of silence, ``start()`` runs again on the
+      same port, at most ``limit`` times per ``window`` seconds.
+
+    Returns a line for the log when it acts, else None.
+    """
+
+    def __init__(self, start, healthy, proc=None, *, grace=3.0, limit=5, window=600.0, clock=None):
+        import time
+
+        self.start, self.healthy, self.proc = start, healthy, proc
+        self.grace, self.limit, self.window = grace, limit, window
+        self.clock = clock or time.monotonic
+        self.down_since = None
+        self.restarts: list[float] = []
+        self.warned = False
+
+    def check(self):
+        if self.proc is not None and self.proc.poll() is None:
+            self.down_since = None
+            return None
+        if self.healthy():
+            self.down_since = None
+            return None
+        now = self.clock()
+        if self.down_since is None:
+            self.down_since = now
+        if now - self.down_since < self.grace:
+            return None
+        self.restarts = [t for t in self.restarts if now - t < self.window]
+        if len(self.restarts) >= self.limit:
+            if self.warned:
+                return None
+            self.warned = True
+            return (f"engine is down; it was started {self.limit} times in {int(self.window)} s, "
+                    "not restarting it for now")
+        self.warned = False
+        self.restarts.append(now)
+        self.down_since = None
+        self.proc = self.start()
+        return (f"engine stopped answering; started it again "
+                f"({len(self.restarts)} of {self.limit} in {int(self.window)} s)")
+
+
 def _pick_engine_port(
     version: str, engine_version, ours, port: int = 7433, tries: int = 10
 ) -> tuple[int, bool]:
@@ -3059,14 +3117,17 @@ async def _handle_cli_web_ui(restart: bool = False, hosts: Optional[str] = None)
         if os.name == "nt"
         else {}
     )
+    def start_engine():
+        return subprocess.Popen(
+            [*py, "-m", "kollabor_engine", "serve", "--port", str(engine_port)],
+            **group_flags,
+        )
+
     engine_proc = None
     if reuse:
         print(f"  (reusing engine already running on {engine_port})")
     else:
-        engine_proc = subprocess.Popen(
-            [*py, "-m", "kollabor_engine", "serve", "--port", str(engine_port)],
-            **group_flags,
-        )
+        engine_proc = start_engine()
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline and not engine_healthy():
             if engine_proc.poll() is not None:
@@ -3107,22 +3168,24 @@ async def _handle_cli_web_ui(restart: bool = False, hosts: Optional[str] = None)
     stop = threading.Event()
     if os.name == "nt" and os.environ.get("KOLLAB_STOP_ON_STDIN_EOF") == "1":
         threading.Thread(target=_stop_on_stdin_eof, args=(stop,), daemon=True).start()
+    # Poll rather than wait: Windows' Popen.wait() ignores Ctrl+C, and the engine
+    # needs watching too, so a dead one is started again (#1123).
+    keeper = _EngineKeeper(start_engine, engine_healthy, engine_proc, grace=ENGINE_DOWN_GRACE)
     try:
-        if os.name == "nt":
-            # Windows: Popen.wait() ignores Ctrl+C; poll instead.
-            while webui_proc.poll() is None and not stop.wait(0.5):
-                pass
-        else:
-            webui_proc.wait()
+        while webui_proc.poll() is None and not stop.wait(WEBUI_WATCH_INTERVAL):
+            note = keeper.check()
+            if note:
+                print(f"  {note}", flush=True)
+                logging.getLogger(__name__).warning("web ui launcher: %s", note)
     except KeyboardInterrupt:
         pass
     finally:
         signal_module.signal(signal_module.SIGTERM, previous_sigterm)
         if os.name == "nt":
-            _stop_children_nt({"web ui": webui_proc, "engine": engine_proc})
+            _stop_children_nt({"web ui": webui_proc, "engine": keeper.proc})
         else:
             _terminate_child(webui_proc)
-            _terminate_child(engine_proc)
+            _terminate_child(keeper.proc)
 
 
 def _kill_owned_daemon() -> None:
