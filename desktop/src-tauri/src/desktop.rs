@@ -1314,6 +1314,13 @@ mod tests {
     }
 
     #[test]
+    fn an_attached_web_ui_restart_is_dispatched_to_boot() {
+        assert!(should_start_boot(Watched::Restart));
+        assert!(!should_start_boot(Watched::GiveUp));
+        assert!(!should_start_boot(Watched::Nothing));
+    }
+
+    #[test]
     fn a_runtime_that_dies_before_the_first_look_is_still_restarted() {
         // Boot saw the web UI answer, then the runtime died before the watcher's first look.
         let mut runtime: Runtime<&str> = Runtime::default();
