@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { Box, Plus } from "lucide-react";
 import type { EngineApi, PanelField, Session } from "@/api";
 import { FieldRenderer, type Draft } from "@/components/panels/FieldRenderer";
 import { Badge } from "@/components/ui/badge";
@@ -48,9 +48,8 @@ function ServiceRow({ service, api, id, canManage, refresh, onError }: {
   </div>;
 }
 
-function PluginRow({ entry, host, api, session, canManage, onUpdate }: { entry: PluginEntry; host: PluginHost; api: EngineApi; session?: Session; canManage: boolean; onUpdate: (id: string) => void }) {
+function PluginDetail({ entry, host, api, session, canManage, onUpdate }: { entry: PluginEntry; host: PluginHost; api: EngineApi; session?: Session; canManage: boolean; onUpdate: (id: string) => void }) {
   const snapshot = usePluginSnapshot(host);
-  const [expanded, setExpanded] = useState(false);
   const [draft, setDraft] = useState<Draft>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -74,18 +73,17 @@ function PluginRow({ entry, host, api, session, canManage, onUpdate }: { entry: 
   };
   const status = failure ? (snapshot.renderFailed.includes(entry.id) ? "Failed to Render" : "Failed to Load") :
     entry.state === "changed_on_disk" ? "Changed on Disk" : entry.state === "stopping" ? "Stopping" : entry.enabled ? "On" : "Off";
-  return <section className="border-border border-b py-3 last:border-0" data-plugin>
-    <div className="flex min-w-0 items-center gap-2">
-      <Button type="button" variant="ghost" size="sm" className="min-w-0 flex-1 justify-start gap-2 px-1" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
-        {expanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}<span className="min-w-0 truncate font-semibold">{entry.name}</span>
-      </Button>
+  return <section aria-label={`${entry.name} details`} className="min-w-0 py-1">
+    <div className="flex min-w-0 flex-wrap items-center gap-2">
+      <h2 className="min-w-0 truncate font-semibold">{entry.name}</h2>
       <Badge variant={failure || entry.state === "changed_on_disk" ? "destructive" : "secondary"}>{status}</Badge>
       {canManage && !entry.read_only ? <Switch aria-label={`${entry.name} enabled`} checked={entry.enabled} disabled={!canChange || busy}
         onCheckedChange={checked => { if (checked) void perform("enable"); else setConfirmation("disable"); }} /> : null}
+      {canChange && entry.kind === "installed" ? <div className="ml-auto flex flex-wrap gap-2"><Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => onUpdate(entry.id)}>Update</Button><Button type="button" size="xs" variant="ghost" disabled={busy} onClick={() => setConfirmation("remove")}>Remove</Button></div> : null}
     </div>
-    <p className="text-muted-foreground truncate pl-8 text-xs">{entry.kind === "built-in" ? "Built In" : entry.kind === "dev" ? "Development" : "Installed"}{entry.source ? ` · ${entry.source}` : ""}</p>
-    {error ? <p role="alert" className="text-destructive mt-2 break-words pl-8 text-sm">{error}</p> : null}
-    {expanded ? <div className="flex min-w-0 flex-col gap-3 py-3 pl-8">
+    <p className="text-muted-foreground mt-2 break-words text-xs">{entry.kind === "built-in" ? "Built In" : entry.kind === "dev" ? "Development" : "Installed"}{entry.source ? ` · ${entry.source}` : ""}</p>
+    {error ? <p role="alert" className="text-destructive mt-2 break-words text-sm">{error}</p> : null}
+    <div className="flex min-w-0 flex-col gap-4 py-4">
       {failure ? <div className="flex flex-wrap gap-2"><Button type="button" size="xs" onClick={() => { void host.retry(entry.id); }}>Retry</Button><details className="text-sm"><summary>View Error</summary><pre className="whitespace-pre-wrap break-words">{failure}</pre></details></div> : null}
       {entry.kind === "dev" && entry.source ? <p className="text-muted-foreground break-all text-sm">Development folder: {entry.source}</p> : null}
       {services.length ? <div><h3 className="text-sm font-semibold">Background Processes</h3>{services.map(service => <ServiceRow key={service.name} service={service} api={api} id={entry.id} canManage={canChange} refresh={() => host.refresh()} onError={setError} />)}</div> : null}
@@ -95,8 +93,7 @@ function PluginRow({ entry, host, api, session, canManage, onUpdate }: { entry: 
       {custom && context ? <div data-plugin={entry.id}><PluginRenderBoundary name={entry.name} onError={error => host.reportRenderError(entry.id, error)} onRetry={() => { void host.retry(entry.id); }} onTurnOff={() => setConfirmation("disable")}>
         <custom.render k={context} session={session} />
       </PluginRenderBoundary></div> : null}
-      {canChange && entry.kind === "installed" ? <div className="flex flex-wrap gap-2"><Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => onUpdate(entry.id)}>Update</Button><Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => setConfirmation("remove")}>Remove</Button></div> : null}
-    </div> : null}
+    </div>
     <Dialog open={confirmation !== null} onOpenChange={open => { if (!open && !busy) setConfirmation(null); }}><DialogContent>
       <DialogHeader><DialogTitle>{confirmation === "remove" ? "Remove" : "Turn off"} {entry.name}?</DialogTitle><DialogDescription>Its background processes will stop. Any working plugin runs must finish before this action can continue.</DialogDescription></DialogHeader>
       <DialogFooter><Button type="button" variant="outline" disabled={busy} onClick={() => setConfirmation(null)}>Cancel</Button><Button type="button" disabled={busy || !confirmation} onClick={() => { if (confirmation) void perform(confirmation); }}>{confirmation === "remove" ? "Remove" : "Turn Off"}</Button></DialogFooter>
@@ -107,20 +104,44 @@ function PluginRow({ entry, host, api, session, canManage, onUpdate }: { entry: 
 export function PluginsSettings({ host, api, session, canManage }: { host: PluginHost; api: EngineApi; session?: Session; canManage: boolean }) {
   const snapshot = usePluginSnapshot(host);
   const [operation, setOperation] = useState<{ action: "install" | "update"; pluginId?: string } | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const entryKey = (entry: PluginEntry) => `${entry.kind}:${entry.id}:${entry.source ?? ""}`;
   const groups = [
-    { title: "Built In", entries: snapshot.entries.filter(entry => entry.kind === "built-in") },
     { title: "Installed", entries: snapshot.entries.filter(entry => entry.kind === "installed") },
     { title: "Development", entries: snapshot.entries.filter(entry => entry.kind === "dev") },
+    { title: "Built In", entries: snapshot.entries.filter(entry => entry.kind === "built-in") },
   ];
+  const entries = groups.flatMap(group => group.entries);
+  const selected = entries.find(entry => entryKey(entry) === selectedKey) ?? entries[0];
   return <div data-plugin className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
     {!canManage ? <p className="text-muted-foreground mb-4 text-sm">Manage plugins on this computer</p> : null}
     {snapshot.disabled ? <p className="text-muted-foreground mb-4 text-sm">Plugins are off for this page. Remove <code>?plugins=off</code> and reload.</p> : null}
     {snapshot.inventoryError ? <p role="alert" className="text-destructive text-sm">{snapshot.inventoryError}</p> : null}
-    {canManage && !snapshot.disabled ? <div className="mb-4 flex justify-end"><Button type="button" size="sm" onClick={() => setOperation({ action: "install" })}>Add Plugin</Button></div> : null}
     {snapshot.loading && !snapshot.entries.length ? <p className="text-muted-foreground text-sm">Loading plugins…</p> : null}
-    {!snapshot.loading && !snapshot.entries.length && !snapshot.disabled ? <p className="text-muted-foreground text-sm">No plugins installed.</p> : null}
-    {groups.filter(group => group.entries.length).map(group => <section key={group.title} className="mb-5"><h2 className="text-muted-foreground mb-2 text-xs font-semibold uppercase">{group.title}</h2>
-      {group.entries.map(entry => <PluginRow key={`${entry.kind}:${entry.id}`} entry={entry} host={host} api={api} session={session} canManage={canManage} onUpdate={pluginId => setOperation({ action: "update", pluginId })} />)}</section>)}
+    {!snapshot.loading && !snapshot.entries.length && !snapshot.disabled ? <p className="text-muted-foreground mb-4 text-sm">No plugins installed.</p> : null}
+    <div className="grid min-w-0 gap-5 md:grid-cols-[minmax(10rem,15rem)_minmax(0,1fr)] md:gap-6">
+      <nav aria-label="Plugin list" className="min-w-0">
+        {groups.filter(group => group.entries.length || group.title === "Installed").map(group => <section key={group.title} className="mb-5">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <h2 className="text-muted-foreground text-xs font-semibold uppercase">{group.title}</h2>
+            {group.title === "Installed" && canManage && !snapshot.disabled ? <Button type="button" size="xs" variant="outline" onClick={() => setOperation({ action: "install" })}><Plus className="size-3" /> Add Plugin</Button> : null}
+          </div>
+          <div className="flex flex-col gap-1">{group.entries.map(entry => {
+            const key = entryKey(entry);
+            const failure = snapshot.errors[entry.id] ?? entry.error;
+            const status = failure ? "Failed" : entry.state === "changed_on_disk" ? "Changed on Disk" : entry.state === "stopping" ? "Stopping" : entry.enabled ? "On" : "Off";
+            return <Button key={key} type="button" variant={selected && entryKey(selected) === key ? "secondary" : "ghost"}
+              className="h-auto min-h-12 w-full min-w-0 justify-start gap-2 px-2 py-2 text-left" aria-label={entry.name}
+              aria-pressed={Boolean(selected && entryKey(selected) === key)} onClick={() => setSelectedKey(key)}>
+              <Box className="size-4 shrink-0" /><span className="flex min-w-0 flex-col items-start"><span className="max-w-full truncate font-medium">{entry.name}</span>
+                <span className="text-muted-foreground text-xs">{status}</span></span>
+            </Button>;
+          })}</div>
+        </section>)}
+        <p className="text-muted-foreground text-xs">The terminal's /config lists the same plugins and settings.</p>
+      </nav>
+      {selected ? <PluginDetail key={entryKey(selected)} entry={selected} host={host} api={api} session={session} canManage={canManage} onUpdate={pluginId => setOperation({ action: "update", pluginId })} /> : null}
+    </div>
     {operation ? <PluginInstallDialog api={api} action={operation.action} pluginId={operation.pluginId}
       onClose={() => setOperation(null)} onApplied={() => host.refresh()} /> : null}
   </div>;
