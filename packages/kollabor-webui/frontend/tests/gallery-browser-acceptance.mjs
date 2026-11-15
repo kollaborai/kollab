@@ -33,6 +33,19 @@ const HISTORY = [
     media: MEDIA,
   },
   { role: "assistant", content: "Got both." },
+  // The live daemon-mirror shape (koordinator's live gate, #1124): the text
+  // carries no token and the picture is a bytes-less image part. The engine
+  // binds media refs onto such rows by part count; the thread must render
+  // the thumbnail from the converted [image1] placeholder text.
+  {
+    role: "user",
+    content: [
+      { type: "text", text: "one more" },
+      { type: "image", image: null },
+    ],
+    media: [MEDIA[0]],
+  },
+  { role: "assistant", content: "Got that too." },
 ];
 const ARTIFACT = {
   ref: "shell-exec-call1-aaaa.output",
@@ -154,7 +167,9 @@ async function openSessionPage(browser, baseUrl, options = {}, width = 0) {
 async function verifyViewer(shell) {
   const { page } = shell;
   const thumbs = page.getByRole("button", { name: "Open image" });
-  assert.equal(await waitForThumbnails(page), 2, "expected two sent-image thumbnails");
+  // Two token thumbs from the first row plus the mirror-shaped row's part
+  // thumbnail (#1124 live gate).
+  assert.equal(await waitForThumbnails(page), 3, "expected three sent-image thumbnails");
   await assertNoRawTokens(page);
 
   await thumbs.first().click();
