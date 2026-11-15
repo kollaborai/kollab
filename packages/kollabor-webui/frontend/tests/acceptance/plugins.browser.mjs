@@ -20,6 +20,12 @@ try {
   browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_PATH || chromium.executablePath() });
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   let inventoryReads = 0;
+  let confirmedInstall = null;
+  const commit = "a".repeat(40);
+  const filesHash = "b".repeat(64);
+  const preview = { job_id: "install-fixture", action: "install", status: "ready", commit, files_sha256: filesHash,
+    plugin_id: "fixture-new", manifest: { name: "Fixture New", version: "1.2.3", uses: { tools: ["file_read"], network: ["example.com"] }, services: { worker: {} } },
+    changes: { added: ["web/dist/index.js"], modified: [], removed: [], new_grants: ["network:example.com"], new_dependencies: [] } };
   const entry = { id: "fixture", name: "Fixture", kind: "installed", state: "ok", enabled: true, shadowed: false,
     web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: {} };
   await page.route("**/*", async route => {
@@ -27,6 +33,12 @@ try {
     if (url.origin !== origin) return route.abort();
     if (url.pathname === "/api/config") return route.fulfill({ json: { engine_url: "/engine" } });
     if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, plugins: [entry] } }); }
+    if (url.pathname === "/engine/plugins/install/preview" && route.request().method() === "POST") return route.fulfill({ json: { job_id: "install-fixture", status: "staging" } });
+    if (url.pathname === "/engine/plugins/jobs/install-fixture" && route.request().method() === "GET") return route.fulfill({ json: preview });
+    if (url.pathname === "/engine/plugins/jobs/install-fixture/confirm" && route.request().method() === "POST") {
+      confirmedInstall = route.request().postDataJSON();
+      return route.fulfill({ json: { ...preview, status: "complete" } });
+    }
     if (url.pathname === "/plugins/fixture/web/index.js") return route.fulfill({ contentType: "text/javascript", body:
       `import React from "react"; import { definePlugin } from "@kollab/plugin";
        export default definePlugin(k => {
@@ -84,7 +96,17 @@ try {
   const settings = page.getByRole("dialog", { name: "Settings" });
   await settings.getByRole("tab", { name: "Plugins" }).click({ timeout: 5000 });
   await settings.getByText("Fixture", { exact: true }).waitFor();
-  await settings.getByRole("button", { name: "Add Plugin" }).waitFor();
+  await settings.getByRole("button", { name: "Add Plugin" }).click();
+  const add = page.getByRole("dialog", { name: "Add Plugin" });
+  await add.getByLabel("Git URL").fill("https://github.com/example/fixture.git");
+  await add.getByRole("button", { name: "Review" }).click({ timeout: 5000 });
+  await add.getByText("Fixture New", { exact: true }).waitFor();
+  await add.getByText(commit, { exact: false }).waitFor();
+  await add.getByText("network:example.com", { exact: false }).waitFor();
+  assert.equal(confirmedInstall, null, "preview must not install before confirmation");
+  await add.getByRole("button", { name: "Install", exact: true }).click();
+  await add.waitFor({ state: "hidden" });
+  assert.deepEqual(confirmedInstall, { commit, files_sha256: filesHash });
   await page.keyboard.press("Escape");
   await settings.waitFor({ state: "hidden" });
   await page.setViewportSize({ width: 390, height: 844 });

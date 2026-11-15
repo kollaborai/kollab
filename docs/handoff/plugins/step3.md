@@ -83,6 +83,9 @@
 - Backend constraint for later disable work: step 2 `_assert_no_active_runs` returns 409 when `.data/run/runs.json` has queued/running work, and `PluginContext.agents.run()` currently reports unavailable until step 4. The required confirmation promises cancellation. Trace the real run owner before changing that behavior; never claim a cancellation that the engine cannot perform. Do not reset persisted run state.
 
 
+- Add flow red check: isolated fake-engine browser test fills a Git URL and times out on the intentionally disabled Review button. It requires the staged preview to show plugin name, exact commit, requested grant, and an explicit Install click whose JSON matches the reviewed commit/files hash. Implement the same job-backed preview for Update, without ever installing at preview time.
+
+
 ## Remaining
 
 1. Add explicit late-import removal/replacement and stale awaited-activation tests; then finish item 1: registry, SDK, error boundary, shared React runtime/import map, CSS and integration. The current lifecycle core is not production-wired and cannot load a plugin by itself.
