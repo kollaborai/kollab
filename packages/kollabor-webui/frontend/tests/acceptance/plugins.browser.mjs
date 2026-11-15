@@ -269,6 +269,7 @@ try {
   await settings.getByRole("button", { name: "Add Plugin" }).click();
   const add = page.getByRole("dialog", { name: "Add Plugin" });
   await add.getByLabel("Git URL").fill("https://github.com/example/fixture.git");
+  await add.getByLabel("Branch or Tag").fill("release/demo", { timeout: 5000 });
   await add.getByRole("button", { name: "Review" }).click({ timeout: 5000 });
   await add.getByText("Fixture New", { exact: true }).waitFor();
   await add.getByText(commit, { exact: false }).waitFor();
@@ -280,7 +281,7 @@ try {
   await add.getByText(/without asking/i).waitFor();
   await add.getByText(/unreported.*not capped/i).waitFor();
   if (process.env.PLUGIN_SCREENSHOTS) await page.screenshot({ path: resolve(process.env.PLUGIN_SCREENSHOTS, "install-review-actual.png") });
-  assert.deepEqual(installSource, { source: "https://github.com/example/fixture.git" });
+  assert.deepEqual(installSource, { source: "https://github.com/example/fixture.git#release/demo" });
   assert.equal(confirmedInstall, null, "preview must not install before confirmation");
   await add.getByRole("button", { name: "Cancel", exact: true }).click();
   await add.getByText(/Cannot remove staged plugin files/).waitFor();
