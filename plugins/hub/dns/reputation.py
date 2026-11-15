@@ -244,7 +244,9 @@ class ReputationTracker:
             if designation in self._persisted_scores
         }
         persisted = self._storage.save_reputation(
-            scores, base_scores=base_scores
+            scores,
+            base_scores=base_scores,
+            created_designations=set(scores) - set(self._persisted_scores),
         )
         if persisted is not None:
             self._scores.update(persisted)

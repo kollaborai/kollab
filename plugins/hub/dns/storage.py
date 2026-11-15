@@ -423,6 +423,7 @@ class DNSStorage:
         scores: Dict[str, ReputationScore],
         *,
         base_scores: Optional[Dict[str, ReputationScore]] = None,
+        created_designations=(),
     ) -> Dict[str, ReputationScore]:
         """Merge reputation scores under the cross-process file lock."""
         import copy
@@ -443,6 +444,19 @@ class DNSStorage:
                     )
                 existing.update(scores)
             else:
+                missing_baselines = [
+                    designation
+                    for designation, score in scores.items()
+                    if designation in existing
+                    and designation not in base_scores
+                    and designation not in created_designations
+                    and existing[designation] != score
+                ]
+                if missing_baselines:
+                    raise ValueError(
+                        "base_scores must include every existing reputation "
+                        "score being updated"
+                    )
                 counter_fields = (
                     "tasks_completed",
                     "tasks_failed",
