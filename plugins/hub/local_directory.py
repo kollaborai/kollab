@@ -135,8 +135,13 @@ def _json_file(parent: int, name: str) -> dict:
 
 
 def _short_text(value: object) -> str:
-    """A presence string a peer may see (a version, a build id), bounded; anything else is empty."""
-    return value[:128] if isinstance(value, str) else ""
+    """A presence string a peer may see (a version, a build id), bounded; anything else is empty.
+
+    A peer refuses a directory row with an unprintable one (#1093), so those are empty too.
+    """
+    if not isinstance(value, str) or not value[:128].isprintable():
+        return ""
+    return value[:128]
 
 
 def _running_tool(value) -> tuple[str, str]:
