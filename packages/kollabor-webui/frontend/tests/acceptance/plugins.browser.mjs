@@ -124,7 +124,7 @@ try {
     if (url.pathname === "/engine/plugins/events") return route.fulfill({ contentType: "text/event-stream", body: ": open\n\n" });
     if (url.pathname === "/engine/plugins/fixture/api/badge") return route.fulfill({ json: { text: "4", hint: "4 items need attention" } });
     if (url.pathname === "/engine/sessions") return route.fulfill({ json: { sessions: [{ session_id: "fixture-session", name: "Fixture Session", agent: "coder", identity: "local-coder", profile: "default", workspace: "/fixture", external: false }], network: { device: "test", remote: [] }, offline: [], hidden: [] } });
-    if (url.pathname.endsWith("/history")) return route.fulfill({ json: { history: [{ role: "assistant", content: "Before <fixture_tag><b>untrusted</b></fixture_tag> after", metadata: {} }], start_index: 0, end_index: 1, has_more_older: false, has_more_newer: false, source: "mirror" } });
+    if (url.pathname.endsWith("/history")) return route.fulfill({ json: { history: [{ role: "assistant", content: "Before <fixture_tag><b>untrusted</b></fixture_tag> after <hello_note>Welcome</hello_note>", metadata: {} }], start_index: 0, end_index: 1, has_more_older: false, has_more_newer: false, source: "mirror" } });
     if (url.pathname.startsWith("/api/")) return route.fulfill({ json: { available: false } });
     if (url.pathname.startsWith("/engine/")) return route.fulfill({ json: { sessions: [], profiles: [], agents: [], live: [], bundles: [], variants: {}, roles: [], libraries: [], sections: [], identities: [], teams: [], models: [], commands: [], network: {device:"",remote:[]}, offline: [], hidden: [], order: [] } });
     return route.continue();
@@ -136,6 +136,8 @@ try {
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   assert.ok(inventoryReads > 0, "host must fetch inventory");
   await page.getByTestId("plugin-tag").waitFor({ timeout: 5000 });
+  await page.getByText("Hello note: Welcome", { exact: true }).waitFor({ timeout: 5000 });
+  await page.getByText("Hello plugin is ready.", { exact: true }).waitFor();
   assert.equal(await page.getByTestId("plugin-tag").locator('xpath=ancestor::*[@data-plugin="fixture"]').count(), 1, "renderer has plugin-specific CSS scope");
   assert.equal(await page.getByTestId("plugin-tag").textContent(), "<b>untrusted</b>");
   assert.equal(await page.getByTestId("plugin-tag").locator("b").count(), 0, "tag content stays untrusted text");
@@ -151,10 +153,20 @@ try {
   await page.getByText("Hello from your plugin!", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Say Hello" }).click();
   await page.getByText("Hello count: 1", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Open Hello Dialog" }).click();
+  const helloModal = page.getByRole("dialog", { name: "Hello Dialog" });
+  await helloModal.getByText("Hello from the dialog.", { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await helloModal.waitFor({ state: "hidden" });
   await panel.getByRole("button", { name: "Hello Page", exact: true }).click();
   await page.getByRole("heading", { name: "Hello Page" }).waitFor();
   await page.getByText("This page is provided by the Hello plugin.", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Back to Chat" }).click();
+  const helloInput = page.getByRole("textbox", { name: "Message input" });
+  await helloInput.fill("/hello-web World");
+  await helloInput.press("Escape");
+  await helloInput.press("Enter");
+  await page.getByText("Hello, World!", { exact: true }).waitFor();
   await panel.getByRole("button", { name: "Crash View" }).click();
   const crashAlert = page.getByRole("alert");
   await crashAlert.waitFor({ timeout: 5000 });
@@ -219,6 +231,8 @@ try {
   await page.getByRole("button", { name: "Settings", exact: true }).first().click();
   const settings = page.getByRole("dialog", { name: "Settings" });
   await settings.getByRole("tab", { name: "Plugins" }).click({ timeout: 5000 });
+  await settings.getByRole("button", { name: "Hello", exact: true }).click();
+  await settings.getByText("Hello plugin settings example.", { exact: true }).waitFor();
   await settings.getByRole("button", { name: "Fixture", exact: true }).click();
   const fixtureRow = settings.getByRole("button", { name: "Fixture", exact: true }).locator("xpath=ancestor::section[1]");
   assert.doesNotMatch(await fixtureRow.innerText(), /v1\.2\.3|1234567890ab/, "settings rows hide version and commit identifiers");
