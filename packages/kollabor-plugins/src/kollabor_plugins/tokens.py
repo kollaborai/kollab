@@ -15,7 +15,7 @@ class PluginTokenFiles:
     @staticmethod
     def _run(context, create: bool) -> Path:
         data_root = Path.home() / ".kollab" / "plugin-data"
-        data = data_root / context.id
+        data: Path = data_root / context.id
         if context.data != data:
             raise ValueError("Invalid plugin data directory")
         run = data / "run"

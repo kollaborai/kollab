@@ -183,7 +183,7 @@ def apply_config_changes(
                     path = field.get("path") if isinstance(field, dict) else None
                     if isinstance(path, str) and path.startswith(prefix):
                         paths[path] = plugin_id
-            builtin_values = {}
+            builtin_values: dict[str, dict[str, Any]] = {}
             enabled = {}
             for key in list(changes):
                 plugin_id = paths.get(key)

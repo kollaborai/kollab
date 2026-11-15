@@ -19,7 +19,7 @@ from contextvars import ContextVar
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, WebSocketException
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -814,7 +814,7 @@ def _ingest_plugin_usage(run: Path, today: str) -> int:
                         break
         _reconcile_finished_runs(run)
         with locked_file(run / f"usage-{today}.json.lock", private=True):
-            return _daily_usage(run, today)["total"]
+            return cast(int, _daily_usage(run, today)["total"])
 
 
 @router.get("/{plugin_id}/usage")
