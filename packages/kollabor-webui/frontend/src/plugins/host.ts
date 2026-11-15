@@ -129,6 +129,7 @@ export class PluginHost {
       },
       remove: id => { this.release(id); this.registry.remove(id); this.removeStorage(LOADING + id); },
       fail: (id, error) => {
+        this.renderFailed.delete(id);
         this.removeStorage(LOADING + id);
         this.release(id);
         this.registry.remove(id);
@@ -163,6 +164,7 @@ export class PluginHost {
       const included = this.entries.filter(entry => !this.skipped.has(entry.id));
       const desired = new Set(included.filter(entry => entry.enabled && !entry.shadowed && (entry.state === "ok" || entry.state === "stopping") && entry.web).map(entry => entry.id));
       this.errors = Object.fromEntries(Object.entries(this.errors).filter(([id]) => desired.has(id)));
+      for (const id of this.renderFailed) if (!desired.has(id)) this.renderFailed.delete(id);
       this.loading = false;
       this.publish();
       await this.loader.reconcile(included);
