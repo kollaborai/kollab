@@ -29,7 +29,7 @@
 - Host lifecycle: isolated red check (test commit `8194c085`) failed because `./host` did not exist. Implementation joins inventory, loader, registry, SDK, SSE, stylesheet lifetime and session freeze recovery; focused `vitest run src/plugins` passes 17/17 and frontend typecheck passes under the isolated HOME. It is still not mounted in the app. Audit style/import races, marker ownership, stream reconnect/reconciliation and real browser behavior before treating it as complete.
 
 
-- Marker race red check: isolated host test now fails because an older completed import clears the freeze marker belonging to its newer replacement. Fix ownership before continuing.
+- Marker race: red check (test commit `abe9c1c8`) exposed an old import clearing the newer replacement's freeze marker. Per-attempt markers and cancellation checks fixed it; isolated `vitest run src/plugins` passes 18/18 and frontend typecheck passes. Browser-level freeze recovery remains unverified.
 
 
 ## Remaining

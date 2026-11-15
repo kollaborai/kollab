@@ -81,6 +81,7 @@ export class PluginHost {
   private started = false;
   private closed = false;
   private sequence = 0;
+  private markerSequence = 0;
   private snapshot: PluginHostSnapshot;
 
   constructor(private readonly options: PluginHostOptions) {
@@ -93,9 +94,15 @@ export class PluginHost {
         const id = decodeURIComponent(url.split("/")[2]);
         const resource = this.resources.get(id);
         await resource?.style?.ready;
-        this.putStorage(LOADING + id, "1");
+        if (!resource || this.closed || this.resources.get(id) !== resource) throw new Error("Plugin load was cancelled");
+        const marker = String(++this.markerSequence);
+        this.putStorage(LOADING + id, marker);
         try { return await options.importer(url); }
-        finally { this.removeStorage(LOADING + id); }
+        finally {
+          try {
+            if (this.options.storage.getItem(LOADING + id) === marker) this.removeStorage(LOADING + id);
+          } catch (error) { console.warn("Plugin recovery storage is unavailable", error); }
+        }
       },
       createContext: entry => {
         this.release(entry.id);
