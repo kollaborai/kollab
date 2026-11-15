@@ -559,6 +559,7 @@ const Composer: FC<{
     }
     // Re-add each kept image; the token synchronizer rewrites fresh
     // [imageN] tokens, so text and attachments never disagree.
+    let restoredImageCount = 0;
     const reattach = async () => {
       for (const image of keptImages) {
         // Pending attachments restore through the adapter exactly as a
@@ -573,10 +574,21 @@ const Composer: FC<{
             content: [...(image.content ?? [])] as ThreadUserMessagePart[],
           });
         }
+        restoredImageCount += 1;
       }
     };
     if (keptImages.length > 0 && attachmentsEnabled) {
-      reattach().catch(() => setOrphanTokenNotice(orphanImageNotice(restored.tokenCount, 0)));
+      reattach()
+        .then(() =>
+          setOrphanTokenNotice(
+            orphanImageNotice(restored.tokenCount, restoredImageCount),
+          ),
+        )
+        .catch(() =>
+          setOrphanTokenNotice(
+            orphanImageNotice(restored.tokenCount, restoredImageCount),
+          ),
+        );
     }
   }, [aui, draftKey, attachmentsEnabled]);
 
