@@ -12,9 +12,10 @@ describe("plugin recovery surfaces", () => {
     expect(markup).toContain("Turn Off");
   });
   it("explains the page-wide opt-out and names a skipped plugin", () => {
-    const markup = renderToStaticMarkup(<PluginRecoveryNotices disabled skipped={["hello"]} onTurnOnAgain={() => {}} />);
+    const markup = renderToStaticMarkup(<PluginRecoveryNotices disabled skipped={["hello"]} names={{ hello: "Hello Plugin" }} onTurnOnAgain={() => {}} />);
     expect(markup).toContain("Plugins are off for this page");
-    expect(markup).toContain("hello was skipped: it froze the page last time.");
+    expect(markup).toContain("Hello Plugin was skipped: it froze the page last time.");
+    expect(markup).not.toContain("hello was skipped");
     expect(markup).toContain("Turn On Again");
   });
 });
