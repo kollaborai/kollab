@@ -366,11 +366,19 @@ class DNSStorage:
                     else:
                         current = copy.deepcopy(current)
 
+                    current_task_total = current.total_tasks
                     for field in counter_fields:
                         delta = getattr(score, field) - getattr(base, field)
                         setattr(current, field, getattr(current, field) + delta)
-                    if score.avg_response_time_ms != base.avg_response_time_ms:
-                        current.avg_response_time_ms = score.avg_response_time_ms
+                    response_time_delta = (
+                        score.avg_response_time_ms * score.total_tasks
+                        - base.avg_response_time_ms * base.total_tasks
+                    )
+                    if current.total_tasks > 0:
+                        current.avg_response_time_ms = (
+                            current.avg_response_time_ms * current_task_total
+                            + response_time_delta
+                        ) / current.total_tasks
                     base_endorsements = {
                         (item.from_designation, item.capability): item
                         for item in base.endorsements
