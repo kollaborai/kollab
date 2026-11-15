@@ -48,6 +48,20 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
       </Button>;
     }))}
     {snapshot.entries.filter(entry => entry.enabled && !entry.shadowed && snapshot.errors[entry.id]).flatMap(entry => {
+      const declared = Array.isArray(entry.contributes?.views) ? entry.contributes.views : [];
+      return declared.flatMap((raw: unknown, index: number) => {
+        const item = typeof raw === "string" ? { id: raw } : raw && typeof raw === "object" ? raw as { id?: unknown; label?: unknown } : null;
+        if (!item || typeof item.id !== "string") return [];
+        const label = typeof item.label === "string" && item.label ? item.label : `${entry.name}${index ? ` View ${index + 1}` : ""}`;
+        const key = pluginViewKey(entry.id, item.id);
+        return [<Button key={`failed-view:${key}`} type="button" variant="ghost" size="sm" className={ROW}
+          onClick={() => onViewChange(key)}>
+          <Puzzle className="size-3.5" /><span className="min-w-0 truncate">{label}</span>
+          <Badge variant="destructive" className="ml-auto">Failed</Badge>
+        </Button>];
+      });
+    })}
+    {snapshot.entries.filter(entry => entry.enabled && !entry.shadowed && snapshot.errors[entry.id]).flatMap(entry => {
       const declared = Array.isArray(entry.contributes?.menu) ? entry.contributes.menu : [];
       return declared.flatMap((raw: unknown) => {
         if (!raw || typeof raw !== "object") return [];
