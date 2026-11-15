@@ -44,7 +44,7 @@
 - Design-system API: red check (test commit `7ea7595b`) failed because the `k.ui` map did not exist. It now exposes typed host primitives, using NoticeBar for Alert and a semantic overflow-contained Table. Isolated `vitest run src/plugins` passes 23/23 and typecheck passes. The host still needs to pass `pluginUI`, and a published plugin declaration/template must carry usable UI types.
 
 
-- Render isolation red check: host test fails because `getContext` and `reportRenderError` are missing. The host must remove only the failing plugin's resources/contributions and permit retry; verify before mounting the error boundary.
+- Render isolation: red host test (commit `2a486b3c`) failed because context lookup and render-error reporting were absent. Host now releases the failed plugin's resources and contributions, exposes the error kind and permits retry; isolated plugin tests pass 24/24 and typecheck passes. Actual React boundary behavior remains browser-untested.
 
 
 ## Remaining

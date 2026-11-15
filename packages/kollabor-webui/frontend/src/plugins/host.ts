@@ -24,6 +24,7 @@ export interface PluginHostSnapshot {
   registry: RegistrySnapshot;
   errors: Record<string, string>;
   skipped: string[];
+  renderFailed: string[];
 }
 export interface PluginHostOptions {
   json: (path: string, init?: RequestInit) => Promise<unknown>;
@@ -74,6 +75,7 @@ export class PluginHost {
   private readonly resources = new Map<string, Resources>();
   private readonly listeners = new Set<() => void>();
   private readonly skipped = new Set<string>();
+  private readonly renderFailed = new Set<string>();
   private errors: Record<string, string> = {};
   private entries: PluginEntry[] = [];
   private loading = false;
@@ -120,6 +122,7 @@ export class PluginHost {
       commit: (id, resource) => {
         if (this.resources.get(id) !== resource || this.closed) return;
         delete this.errors[id];
+        this.renderFailed.delete(id);
         this.registry.commit(resource.draft);
       },
       remove: id => { this.release(id); this.registry.remove(id); this.removeStorage(LOADING + id); },
@@ -169,6 +172,15 @@ export class PluginHost {
     }
   }
 
+  getContext(id: string) { return this.resources.get(id)?.context; }
+  reportRenderError(id: string, error: unknown) {
+    if (!this.resources.has(id)) return;
+    this.release(id);
+    this.errors = { ...this.errors, [id]: error instanceof Error ? error.message : String(error) };
+    this.renderFailed.add(id);
+    this.registry.remove(id);
+    this.publish();
+  }
   async retry(id: string) { await this.loader.retry(id); }
   async turnOnAgain(id: string) {
     this.skipped.delete(id);
@@ -218,7 +230,7 @@ export class PluginHost {
   }
   private makeSnapshot(): PluginHostSnapshot {
     return { disabled: this.options.disabled, loading: this.loading, inventoryError: this.inventoryError,
-      entries: this.entries, registry: this.registry.getSnapshot(), errors: this.errors, skipped: [...this.skipped] };
+      entries: this.entries, registry: this.registry.getSnapshot(), errors: this.errors, skipped: [...this.skipped], renderFailed: [...this.renderFailed] };
   }
   private publish() {
     this.snapshot = this.makeSnapshot();
