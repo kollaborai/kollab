@@ -82,7 +82,7 @@ class AgentRegistry:
             record.endpoint_state = "fresh"
             record.tags["endpoint_state"] = "fresh"
             self._records[record.designation] = record
-            self._save()
+            self._save(created_keys=[record.designation])
             logger.info(f"registered DNS record for {record.designation}")
             return record
 
@@ -394,9 +394,20 @@ class AgentRegistry:
 
     # --- Internal ---
 
-    def _save(self, deleted_keys: Optional[List[str]] = None) -> None:
+    def _save(
+        self, deleted_keys: Optional[List[str]] = None, created_keys=()
+    ) -> None:
         """Persist records to storage."""
         if hasattr(self._storage, "merge_save_registry"):
-            self._storage.merge_save_registry(self._records, deleted_keys=deleted_keys)
+            if created_keys:
+                self._storage.merge_save_registry(
+                    self._records,
+                    deleted_keys=deleted_keys,
+                    created_keys=created_keys,
+                )
+            else:
+                self._storage.merge_save_registry(
+                    self._records, deleted_keys=deleted_keys
+                )
         else:
             self._storage.save_registry(self._records)

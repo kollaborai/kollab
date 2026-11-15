@@ -149,10 +149,10 @@ class DNSStorage:
 
     # --- Registry ---
 
-    def _read_registry_unlocked(self) -> Dict[str, AgentRecord]:
-        """Read and validate registry data while the caller holds its lock."""
+    def _read_registry_state_unlocked(self):
+        """Read registry records and deletion markers under the file lock."""
         if not self._registry_path.exists():
-            return {}
+            return {}, set()
         try:
             with open(self._registry_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -168,6 +168,8 @@ class DNSStorage:
                 and (type(data["version"]) is not int or data["version"] != 1)
             )
             or not isinstance(data.get("records"), dict)
+            or not isinstance(data.get("deleted", []), list)
+            or any(not isinstance(key, str) for key in data.get("deleted", []))
         ):
             raise RegistryReadError(self._registry_path, "invalid schema")
 
@@ -183,14 +185,22 @@ class DNSStorage:
             raise RegistryReadError(
                 self._registry_path, "invalid record schema"
             ) from exc
+        return records, set(data.get("deleted", []))
+
+    def _read_registry_unlocked(self) -> Dict[str, AgentRecord]:
+        """Read and validate registry records while holding its file lock."""
+        records, _ = self._read_registry_state_unlocked()
         return records
 
     @staticmethod
-    def _registry_document(records: Dict[str, AgentRecord]) -> dict:
+    def _registry_document(
+        records: Dict[str, AgentRecord], deleted_keys=()
+    ) -> dict:
         import time
 
         return {
             "records": {k: v.to_dict() for k, v in records.items()},
+            "deleted": sorted(deleted_keys),
             "version": 1,
             "updated_at": time.time(),
         }
@@ -211,15 +221,25 @@ class DNSStorage:
         self,
         records: Dict[str, AgentRecord],
         deleted_keys: Optional[List[str]] = None,
+        created_keys=(),
     ) -> None:
-        """Merge records atomically; explicit deletions win over stale updates."""
+        """Merge updates atomically; deletion markers reject stale snapshots."""
         with _file_lock(self._registry_path):
-            existing = self._read_registry_unlocked()
-            existing.update(records)
+            existing, tombstones = self._read_registry_state_unlocked()
+            tombstones.difference_update(created_keys)
+            existing.update(
+                {
+                    key: record
+                    for key, record in records.items()
+                    if key not in tombstones or key in created_keys
+                }
+            )
             for key in deleted_keys or []:
                 existing.pop(key, None)
+                tombstones.add(key)
             _atomic_write_unlocked(
-                self._registry_path, self._registry_document(existing)
+                self._registry_path,
+                self._registry_document(existing, tombstones),
             )
 
     # --- Reputation ---
