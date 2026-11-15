@@ -212,7 +212,7 @@ const mainConfig = defineConfig({
   test: {
     // Vitest suites; Node's built-in test runner remains for older tests.
     include: [
-      "src/plugins/*.test.ts",
+      "src/plugins/*.test.{ts,tsx}",
       "tests/prompts-page.test.ts",
       "tests/terminal-ws-protocol.test.ts",
       "tests/lazy-file-list.test.ts",
