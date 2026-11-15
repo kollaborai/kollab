@@ -34,6 +34,7 @@ try {
   let cancelAttempts = 0;
   const brokenImports = [];
   let brokenDisabled = false;
+  let brokenDisableCalls = 0;
   let fixtureRemoved = false;
   const commit = "a".repeat(40);
   const filesHash = "b".repeat(64);
@@ -100,6 +101,8 @@ try {
       return route.fulfill({ json: { ok: true } });
     }
     if (url.pathname === "/engine/plugins/broken/disable" && route.request().method() === "POST") {
+      brokenDisableCalls++;
+      if (brokenDisableCalls === 1) return route.fulfill({ status: 409, json: { detail: "Wait for active runs to finish" } });
       brokenDisabled = true;
       broken.enabled = false;
       return route.fulfill({ json: { ok: true } });
@@ -220,6 +223,9 @@ try {
   await page.getByRole("alert").getByRole("button", { name: "Turn Off" }).click();
   const failureTurnOff = page.getByRole("dialog", { name: "Turn off Broken?" });
   await failureTurnOff.getByText(/Background processes may take time to stop/).waitFor({ timeout: 5000 });
+  await failureTurnOff.getByRole("button", { name: "Turn Off", exact: true }).click();
+  await failureTurnOff.getByText("Wait for active runs to finish", { exact: false }).waitFor();
+  assert.equal(brokenDisabled, false, "failed turn off remains actionable");
   await failureTurnOff.getByRole("button", { name: "Turn Off", exact: true }).click();
   await page.getByText("Broken is off", { exact: true }).waitFor();
   assert.equal(brokenDisabled, true, "Turn Off calls the disable route");

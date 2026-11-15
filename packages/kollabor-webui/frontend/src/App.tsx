@@ -62,6 +62,7 @@ import { SessionPanel, type SessionView } from "@/components/shell/SessionPanel"
 import { latestTodoBlock } from "@/utils/todo-list";
 import { ShellHeader } from "@/components/shell/ShellHeader";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { PluginHostContext, PluginNotices, PluginSessionContext, PluginTurnOffContext, usePluginHost } from "@/plugins/components";
 import { PluginSessionView, pluginViewKey } from "@/plugins/session";
 import { PluginHost } from "@/plugins/host";
@@ -450,6 +451,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [pluginHost, setPluginHost] = useState<PluginHost | null>(null);
   const [pluginTarget, setPluginTarget] = useState<{ pluginId: string; target: PluginOpen } | null>(null);
   const [pluginToast, setPluginToast] = useState<string | null>(null);
+  const [turnOffTarget, setTurnOffTarget] = useState<{ id: string; name: string } | null>(null);
+  const [turnOffBusy, setTurnOffBusy] = useState(false);
+  const [turnOffError, setTurnOffError] = useState<string | null>(null);
   const learnRoute = pageRoute.kind === "learn" ? pageRoute.learn : null;
   const whatsNewActive = pageRoute.kind === "whats-new";
   const pluginPage = pluginTarget && "page" in pluginTarget.target ? pluginTarget : null;
@@ -1774,11 +1778,23 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       setPluginToast("Manage plugins on this computer");
       return;
     }
-    const name = pluginHost?.getSnapshot().entries.find(entry => entry.id === id)?.name ?? id;
-    if (!window.confirm(`Turn off ${name}? Its agent runs may be cancelled and background processes may need time to stop.`)) return;
-    void api.json(`/plugins/${encodeURIComponent(id)}/disable`, { method: "POST" })
-      .then(() => pluginHost?.refresh())
-      .catch(error => setPluginToast(error instanceof Error ? error.message : String(error)));
+    const name = pluginHost?.getSnapshot().entries.find(entry => entry.id === id)?.name ?? "this plugin";
+    setTurnOffError(null);
+    setTurnOffTarget({ id, name });
+  };
+  const confirmTurnOffPlugin = async () => {
+    if (!turnOffTarget || turnOffBusy) return;
+    setTurnOffBusy(true);
+    setTurnOffError(null);
+    try {
+      await api.json(`/plugins/${encodeURIComponent(turnOffTarget.id)}/disable`, { method: "POST" });
+      await pluginHost?.refresh();
+      setTurnOffTarget(null);
+    } catch (error) {
+      setTurnOffError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTurnOffBusy(false);
+    }
   };
   const pluginActions = useRef({
     navigate: (_pluginId: string, _target: PluginOpen) => {},
@@ -2163,6 +2179,19 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           )}
           </div>
         </SidebarInset>
+        <Dialog open={Boolean(turnOffTarget)} onOpenChange={open => { if (!open && !turnOffBusy) setTurnOffTarget(null); }}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Turn off {turnOffTarget?.name}?</DialogTitle>
+              <DialogDescription>Background processes may take time to stop. Active agent runs must finish before this plugin can be turned off.</DialogDescription>
+            </DialogHeader>
+            {turnOffError ? <p role="alert" className="text-destructive text-sm">{turnOffError}</p> : null}
+            <DialogFooter>
+              <Button type="button" variant="outline" disabled={turnOffBusy} onClick={() => setTurnOffTarget(null)}>Cancel</Button>
+              <Button type="button" variant="destructive" disabled={turnOffBusy} onClick={() => { void confirmTurnOffPlugin(); }}>Turn Off</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </SidebarProvider>
       </AvatarImageProvider>
     </GemAppearanceProvider>
