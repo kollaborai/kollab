@@ -30,7 +30,7 @@ from ..history_paging import (
     resolve_history_output,
 )
 from ..hub_bridge import HubBridge, network_daemons
-from ..media_store import attach_media_to_rows, count_image_tokens
+from ..media_store import attach_media_to_rows, count_image_tokens, list_for
 from ..network_aggregate import merge_view_and_memberships
 from ..server import get_session_registry, open_named_session
 from ..session import INLINE_PROFILE, EngineSession
@@ -1329,9 +1329,18 @@ async def get_history(
     page_rows = page.get("history")
     if isinstance(page_rows, list) and page_rows:
         start = page.get("start_index")
-        skip = 0
+        history_image_count = sum(
+            count_image_tokens(row.get("content"))
+            for row in history
+            if isinstance(row, dict) and row.get("role") == "user"
+        )
+        # A compaction can drop old sender rows while the durable media index
+        # still contains their refs. Align the surviving history with the
+        # matching suffix; otherwise its first image would inherit a dropped
+        # message's ref.
+        skip = max(0, len(list_for(_conversations_dir(), session_id)) - history_image_count)
         if isinstance(start, int) and not isinstance(start, bool) and start > 0:
-            skip = sum(
+            skip += sum(
                 count_image_tokens(row.get("content"))
                 for row in history[:start]
                 if isinstance(row, dict) and row.get("role") == "user"
