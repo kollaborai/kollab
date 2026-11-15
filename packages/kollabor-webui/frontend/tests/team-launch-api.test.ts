@@ -117,3 +117,33 @@ test("prompt API errors show detail while retaining the HTTP status", async () =
     return true;
   });
 });
+
+test("engine request errors retain a visible fallback when status text and detail are absent", async () => {
+  let call = 0;
+  vi.stubGlobal("fetch", async () =>
+    ++call === 1
+      ? new Response("{}", { status: 200 })
+      : new Response("upstream failed", { status: 503, statusText: "" }),
+  );
+
+  const api = new EngineApi("http://engine");
+  await assert.rejects(api.request("/profiles"), (error: unknown) => {
+    assert.ok(error instanceof ApiError);
+    assert.equal(error.message, "HTTP 503");
+    assert.equal(error.status, 503);
+    return true;
+  });
+});
+
+test("prompt API errors retain a visible fallback when status text and detail are absent", async () => {
+  const api = new PromptsApi({
+    request: async () => new Response("upstream failed", { status: 503, statusText: "" }),
+  });
+
+  await assert.rejects(api.listPrompts(), (error: unknown) => {
+    assert.ok(error instanceof PromptsApiError);
+    assert.equal(error.message, "HTTP 503");
+    assert.equal(error.status, 503);
+    return true;
+  });
+});
