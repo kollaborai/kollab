@@ -44,6 +44,18 @@ describe("plugin contribution registry", () => {
     ]);
   });
 
+  it("reconciles plugin commands when the session's engine command registry changes", () => {
+    const registry = new PluginRegistry();
+    const draft = registry.stage("example");
+    draft.command({ name: "dynamic", description: "Plugin", run: () => {} });
+    registry.commit(draft);
+    registry.setBuiltinCommands(["dynamic"]);
+    expect(registry.getSnapshot().plugins[0].commands).toEqual([]);
+    expect(registry.getSnapshot().conflicts).toEqual([{ pluginId: "example", command: "dynamic", owner: "built-in" }]);
+    registry.setBuiltinCommands([]);
+    expect(registry.getSnapshot().plugins[0].commands.map(command => command.name)).toEqual(["dynamic"]);
+  });
+
   it("replaces a plugin atomically and releases its old command", () => {
     const registry = new PluginRegistry();
     const first = registry.stage("example");

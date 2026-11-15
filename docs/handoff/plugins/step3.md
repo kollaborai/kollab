@@ -60,6 +60,9 @@
 - Browser isolation correction: a previous Vite acceptance run attempted GET `/api/update/check` against localhost:8080; the connection was refused. It did not reach an engine, but this violated the intended all-fake network setup. The harness now intercepts every `/api/` route and stores Vite cache under `KOLLAB_PLUGIN_TEST_DIR` (set to `~/backups/plugins-step3-work`); the rerun passed without proxy attempts. All future acceptance commands must set that variable as well as isolated HOME/KOLLAB_NO_KEYRING.
 
 
+- Dynamic command collision red check: the registry test fails because session-specific engine commands cannot yet replace the built-in command reservation set. Implement reconciliation before connecting plugin commands to the composer; engine commands must always win.
+
+
 ## Remaining
 
 1. Add explicit late-import removal/replacement and stale awaited-activation tests; then finish item 1: registry, SDK, error boundary, shared React runtime/import map, CSS and integration. The current lifecycle core is not production-wired and cannot load a plugin by itself.
