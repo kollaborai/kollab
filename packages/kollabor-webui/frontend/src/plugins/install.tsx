@@ -33,8 +33,8 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
   const start = async () => {
     setBusy(true); setError(null);
     try {
-      const endpoint = action === "install" ? "/plugins/install/preview" : `/plugins/${encodeURIComponent(pluginId ?? "")}/update/preview`;
-      const result = await api.json<Job>(endpoint, { method: "POST", body: JSON.stringify(action === "install" ? { url: url.trim() } : {}) });
+      const endpoint = action === "install" ? "/plugins/install" : `/plugins/${encodeURIComponent(pluginId ?? "")}/update`;
+      const result = await api.json<Job>(endpoint, { method: "POST", body: JSON.stringify(action === "install" ? { source: url.trim() } : {}) });
       if (!result.job_id) throw new Error("The plugin manager did not return a review job.");
       setJob(result);
     } catch (caught) { setError(errorText(caught)); } finally { setBusy(false); }
