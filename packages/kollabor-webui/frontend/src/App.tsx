@@ -51,6 +51,7 @@ import { AgentVersionNotice, agentVersionNotice } from "@/components/shell/Agent
 import { liveAgentOf, poolSeenBy } from "@/components/shell/live-agent";
 import { PanelHost } from "@/components/panels/PanelHost";
 import { WaiterChat } from "@/components/shell/WaiterChat";
+import { panelHostMount } from "@/components/panels/panel-model";
 import type {
   PanelIntent,
   PanelOpenRequest,
@@ -613,6 +614,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     () => sessions.find((session) => session.session_id === activeId),
     [activeId, sessions],
   );
+  // Where the Settings host lives: a live session, the halt waiter, or sessionless setup.
+  const host = panelHostMount(activeSession, settingsOpen, api.haltFolder);
   const operationRef = useRef(0);
   // True once a chat is open or being opened, by the person or by the restore on load: the
   // restore never switches away from it, even when startup runs again (a saved edit's Fast Refresh).
@@ -1866,12 +1869,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             await loadSessions();
           }}
         />
-        {(activeSession && !activeSession.halted) || (settingsOpen && api.haltFolder) ? (
+        {host.mount ? (
           <PanelHost
-            key={activeSession && !activeSession.halted ? activeSession.session_id : "halt"}
+            key={host.key}
             api={api}
-            // No chat open, or a halt waiter's: the session-less Halt and Resume screen for that folder.
-            session={activeSession && !activeSession.halted ? activeSession : { session_id: "", workspace: api.haltFolder }}
+            // A live session, a halt waiter, or sessionless setup (#1114/#1115).
+            session={host.session ?? { session_id: "", workspace: "" }}
             displayName={agents.find((agent) => agent.name === activeSession?.identity)?.display_name}
             profiles={profiles}
             open={settingsOpen}

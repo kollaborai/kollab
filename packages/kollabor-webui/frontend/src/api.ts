@@ -900,6 +900,9 @@ export function errorText(reason: unknown): string {
  */
 export const SESSIONLESS_PANELS = new Set(["connect-halt", "connect-halt-new"]);
 
+/** The panels the engine serves with no session at all: first-run setup (#1114/#1115). */
+export const SETUP_PANELS = new Set(["setup", "connect"]);
+
 export class EngineApi {
   /** The folder the session-less halt panels ask about (the open chat's, else the sidebar's). */
   haltFolder = "";
@@ -1169,20 +1172,28 @@ export class EngineApi {
     const query = new URLSearchParams(
       Object.entries(params).filter(([, value]) => value !== ""),
     ).toString();
+    const queryless = SESSIONLESS_PANELS.has(name) || (sessionId === "" && SETUP_PANELS.has(name));
     return this.json<PanelDescription>(
-      SESSIONLESS_PANELS.has(name)
-        ? this.panelPath(sessionId, name) // the halt panels take no filters
+      queryless
+        ? this.panelPath(sessionId, name) // the halt and setup panels take no filters
         : `${this.panelPath(sessionId, name)}${query ? `?${query}` : ""}`,
       { signal },
     );
   }
 
-  /** `/network/halt/{name}?folder=` for SESSIONLESS_PANELS, `/sessions/{id}/panels/{name}` for the rest. */
+  /**
+   * `/network/halt/{name}?folder=` for SESSIONLESS_PANELS, `/setup/panels/{name}`
+   * for the setup family with no session (#1114/#1115), and
+   * `/sessions/{id}/panels/{name}` for the rest.
+   */
   panelPath(sessionId: string, name: string, suffix = ""): string {
-    if (!SESSIONLESS_PANELS.has(name)) {
-      return `/sessions/${encodeURIComponent(sessionId)}/panels/${encodeURIComponent(name)}${suffix}`;
+    if (SESSIONLESS_PANELS.has(name)) {
+      return `/network/halt/${encodeURIComponent(name)}${suffix}?folder=${encodeURIComponent(this.haltFolder)}`;
     }
-    return `/network/halt/${encodeURIComponent(name)}${suffix}?folder=${encodeURIComponent(this.haltFolder)}`;
+    if (sessionId === "" && SETUP_PANELS.has(name)) {
+      return `/setup/panels/${encodeURIComponent(name)}${suffix}`;
+    }
+    return `/sessions/${encodeURIComponent(sessionId)}/panels/${encodeURIComponent(name)}${suffix}`;
   }
 
   /** The halt screen for one folder with no chat open (the sidebar's halted line). */
