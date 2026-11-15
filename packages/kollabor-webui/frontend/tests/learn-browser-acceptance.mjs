@@ -325,7 +325,7 @@ export async function openPage(browser, baseUrl, fixtures, options = {}) {
     hasTouch: options.isMobile ?? false,
   });
   await context.addInitScript(() => {
-    localStorage.setItem("kollab.setup-guide.v1", "dismissed");
+    localStorage.setItem("kollab.setup-guide.v1", JSON.stringify({ step: "done", dismissed: true }));
   });
 
   const page = await context.newPage();
