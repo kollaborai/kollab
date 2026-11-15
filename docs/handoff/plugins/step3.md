@@ -117,6 +117,8 @@
 
 - The bundled Hello template now has a real React/SDK view, interactive button, menu page and scoped stylesheet: browser red test `bd829112`, implementation `0ad99b17`. Browser test reads the actual bundled JS/CSS and manifest and passed against mocked engine inventory (`hello-template-green.log`); four existing Python Hello tests passed (`hello-template-pytest.log`). The first test run's fake inventory needed engine-shaped settings/services; it does not prove installation or the live engine path.
 
+- Failure card canvas check: captured supplied `StateFailed-load.html` and fake-engine UI at 1280×800 under `~/backups/plugins-step3-work/design-review/`. Image analysis showed a missing card and wrong action order; red test `e61970ec`, fix `3ba8acce` restores a 460px card, explanatory copy and Retry/View Error/Turn Off hierarchy. Browser acceptance (`failure-design-green.log`) and plugin Vitest 33/33 (`failure-design-vitest.log`) passed; post-fix image analysis confirmed the card and order. This is one state, not design approval or the required live screenshots; remaining canvas states and desktop/tablet/phone still need review. The diff-check service timed out, so reference and actual were analyzed separately.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
