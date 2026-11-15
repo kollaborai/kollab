@@ -127,6 +127,8 @@
 
 - Hello completion: the brief requires all eight contribution points, not only the initial view/page. Browser red test `68c8faad` and implementation `03958452` now exercise the real bundled view, menu, page, modal, custom settings, command, tag renderer and notice. The committed no-dependency `web/build.mjs` copies `web/src` into `web/dist`; `cmp` verified source and dist match. The same browser test exposed Back to Chat retaining the old plugin view; fix `e25e4e01` returns to Chat. Isolated fake-engine browser acceptance passed (`hello-all-green.log`), existing Hello Python tests 4/4 (`hello-all-pytest.log`), and frontend typecheck passed (`hello-all-typecheck.log`). Live installed-template behavior remains unverified.
 
+- Failure-panel Turn Off now uses the product Dialog instead of `window.confirm`: red browser test `8ce8d5eb`, fix `998054ee`. The browser test also simulates a 409 active-run refusal and confirms the error remains visible and retryable; fake-engine Chrome passed (`turnoff-dialog-green.log`), typecheck passed (`turnoff-dialog-typecheck.log`). This honestly says active runs must finish; it does not claim step 4 run cancellation exists.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
