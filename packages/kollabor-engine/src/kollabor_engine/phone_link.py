@@ -73,7 +73,7 @@ MAX_BODY = 8 * 1024 * 1024
 API_ROOTS = frozenset(
     {
         "sessions", "agents", "profiles", "workspaces", "mcp", "hub", "sidebar", "rosters", "teams",
-        "prompts", "voice", "phone-app",
+        "prompts", "voice", "phone-app", "plugins",
     }
 )
 APP_PROTOCOL = "kollab-phonelink-app/1"
@@ -1238,6 +1238,8 @@ class PhoneLink:
         key = (phone, identifier)
         exchange = self.exchanges.get(key)
         if operation == "start":
+            from .routes.plugins import remote_plugin_route_allowed
+
             if exchange or sum(k[0] == phone for k in self.exchanges) >= 16:
                 raise PhoneLinkError("Too many app requests. Try again shortly.")
             method, path, headers, size = (request.get(n) for n in ("method", "path", "headers", "size"))
@@ -1258,6 +1260,7 @@ class PhoneLink:
                 or parsed.fragment
                 or decoded.split("/")[1] not in API_ROOTS
                 or not voice_route_allowed(method, decoded)
+                or not remote_plugin_route_allowed(method, decoded)
             ):
                 raise PhoneLinkError("This action is available only on the computer.")
             if type(size) is not int or not 0 <= size <= MAX_BODY or not isinstance(headers, list):
@@ -1418,6 +1421,7 @@ class PhoneLink:
         headers += [
             (b"authorization", ("Bearer " + (get_token() or read_token_from_disk())).encode()),
             (b"host", b"127.0.0.1"),
+            (b"x-kollab-plugin-remote", b"1"),
         ]
         scope = {
             "type": "http",

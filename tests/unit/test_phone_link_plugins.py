@@ -5,7 +5,6 @@ import shutil
 from pathlib import Path
 
 import pytest
-
 from kollabor_engine import phone_link
 from kollabor_engine.phone_link import PhoneLink, PhoneLinkError
 
@@ -79,6 +78,7 @@ async def test_phone_replaces_caller_credentials_and_remote_marker(tmp_path, mon
 @pytest.mark.asyncio
 async def test_phone_local_only_plugin_api_is_denied_by_real_engine(tmp_path, monkeypatch):
     from kollabor_engine.server import create_app
+
     from kollabor_plugins.packages import files_sha256
 
     monkeypatch.setenv("HOME", str(tmp_path))
