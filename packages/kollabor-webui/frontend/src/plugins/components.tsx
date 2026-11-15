@@ -1,4 +1,4 @@
-import { Component, createContext, useContext, useSyncExternalStore, type ErrorInfo, type ReactNode } from "react";
+import { Component, createContext, useContext, useState, useSyncExternalStore, type ErrorInfo, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { NoticeBar } from "@/components/shell/NoticeBar";
 import type { PluginHost, PluginHostSnapshot } from "./host";
@@ -24,15 +24,19 @@ export function useOptionalPluginSnapshot(host: PluginHost | null): PluginHostSn
 export function PluginFailure({ name, kind, error, onRetry, onTurnOff }: {
   name: string; kind: "load" | "render"; error: string; onRetry: () => void; onTurnOff: () => void;
 }) {
+  const [showError, setShowError] = useState(false);
   return (
-    <div data-plugin className="flex min-w-0 flex-col items-start gap-3 p-4" role="alert">
-      <p className="text-sm font-semibold">{name} · Failed to {kind === "load" ? "Load" : "Render"}</p>
-      <p className="text-muted-foreground text-sm">The rest of Kollab is still available.</p>
-      <div className="flex flex-wrap gap-2">
-        <Button type="button" size="sm" onClick={onRetry}>Retry</Button>
-        <Button type="button" size="sm" variant="outline" onClick={onTurnOff}>Turn Off</Button>
-      </div>
-      <details className="max-w-full text-sm"><summary className="cursor-pointer">View Error</summary><pre className="mt-2 overflow-auto whitespace-pre-wrap break-words">{error}</pre></details>
+    <div className="min-w-0 p-4" role="alert">
+      <section className="bg-card flex w-full max-w-[460px] min-w-0 flex-col items-start gap-3 rounded-xl p-4 text-sm">
+        <p className="font-semibold">{name} · Failed to {kind === "load" ? "Load" : "Render"}</p>
+        <p>{name} {kind === "load" ? "could not load." : "could not draw this page."}</p>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" size="sm" onClick={onRetry}>Retry</Button>
+          <Button type="button" size="sm" variant="secondary" aria-expanded={showError} onClick={() => setShowError(value => !value)}>View Error</Button>
+          <Button type="button" size="sm" variant="ghost" onClick={onTurnOff}>Turn Off</Button>
+        </div>
+        {showError ? <pre className="max-w-full overflow-auto whitespace-pre-wrap break-words">{error}</pre> : null}
+      </section>
     </div>
   );
 }
