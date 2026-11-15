@@ -392,7 +392,16 @@ def crew_coat(name: str) -> Dict[str, Any]:
 
 
 def _crew_shaped(look: Dict[str, Any]) -> bool:
-    return look.get("hat") == "none" and look.get("fur", "none") != "none" and look.get("hair", "none") != "none"
+    fur_color = _color(look.get("furColor"))
+    hair_color = _color(look.get("hairColor"))
+    return (
+        look.get("hat") == "none"
+        and look.get("fur") in BIRTH_FURS
+        and look.get("hair") in CREW_HAIRS
+        and fur_color is not None
+        and hair_color is not None
+        and abs(_luma(fur_color) - _luma(hair_color)) >= CREW_CONTRAST
+    )
 
 
 def record_births(names: Iterable[str], crew: Iterable[str] = ()) -> None:

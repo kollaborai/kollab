@@ -160,14 +160,20 @@ export function crewCoat(key: string, vocabulary: GemLookVocabulary): Omit<GemLo
   };
 }
 
-const crewShaped = (look: GemLook) =>
-  look.hat === "none" && !!look.fur && look.fur !== "none" && !!look.hair && look.hair !== "none";
-
 const isColor = (value: unknown): value is [number, number, number] =>
   Array.isArray(value) &&
   value.length === 3 &&
   value.every((channel) => Number.isInteger(channel) && channel >= 0 && channel <= 255);
 const lookColor = (value: unknown): LookColor | undefined => (value === "gem" || isColor(value) ? value : undefined);
+
+const crewShaped = (look: GemLook) =>
+  look.hat === "none" &&
+  !!look.fur &&
+  look.fur !== "none" &&
+  CREW_HAIRS.includes(look.hair as (typeof CREW_HAIRS)[number]) &&
+  isColor(look.furColor) &&
+  isColor(look.hairColor) &&
+  Math.abs(luma(look.hairColor) - luma(look.furColor)) >= CREW_CONTRAST;
 
 /** Known knobs only, each held to its range. */
 function knobSettings(value: unknown, ranges: Readonly<Record<string, readonly [number, number]>>) {
