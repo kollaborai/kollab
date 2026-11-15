@@ -1,0 +1,86 @@
+import { renderToStaticMarkup } from "react-dom/server";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { KollabLogo, startMist } from "@/components/icons/kollab-logo";
+
+/** A WebGL stub that records draw calls; `linked` controls the link result. */
+function fakeGl(linked = true) {
+  const calls: string[] = [];
+  const gl = new Proxy(
+    { LINK_STATUS: 1, VERTEX_SHADER: 2, FRAGMENT_SHADER: 3, ARRAY_BUFFER: 4, STATIC_DRAW: 5, FLOAT: 6, TRIANGLES: 7 },
+    {
+      get(target, key: string) {
+        if (key in target) return target[key as keyof typeof target];
+        return (...args: unknown[]) => {
+          calls.push(key);
+          if (key === "getProgramParameter") return linked;
+          if (key === "getExtension") return { loseContext: () => calls.push("loseContext") };
+          return args.length ? {} : {};
+        };
+      },
+    },
+  );
+  return { gl, calls };
+}
+
+function fakeCanvas(gl: unknown) {
+  return { getContext: () => gl, clientWidth: 40, clientHeight: 22, width: 0, height: 0 } as unknown as HTMLCanvasElement;
+}
+
+function stubWindow(reduceMotion: boolean) {
+  vi.stubGlobal("window", { matchMedia: () => ({ matches: reduceMotion }) });
+  vi.stubGlobal("requestAnimationFrame", () => 1);
+  vi.stubGlobal("cancelAnimationFrame", vi.fn());
+}
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe("KollabLogo", () => {
+  it("renders the bare mark without mist", () => {
+    const html = renderToStaticMarkup(<KollabLogo className="h-6 w-auto" />);
+    expect(html.startsWith("<svg")).toBe(true);
+    expect(html).toContain('class="h-6 w-auto"');
+    expect(html).not.toContain("<canvas");
+  });
+
+  it("keeps the plain mark under a K-masked canvas with mist", () => {
+    const html = renderToStaticMarkup(<KollabLogo mist className="h-6 w-auto" />);
+    expect(html).toMatch(/^<span class="relative inline-block h-6 w-auto">/);
+    expect(html).toContain('fill="currentColor"');
+    expect(html).toContain("<canvas");
+    expect(html).toContain("mask-image:url(&quot;data:image/svg+xml,");
+    expect(html).toContain(encodeURIComponent("m297.89 726.61"));
+  });
+});
+
+describe("startMist", () => {
+  it("leaves the plain mark when reduced motion is on", () => {
+    stubWindow(true);
+    const { gl, calls } = fakeGl();
+    expect(startMist(fakeCanvas(gl))).toBeUndefined();
+    expect(calls).toEqual([]);
+  });
+
+  it("leaves the plain mark when WebGL is unavailable", () => {
+    stubWindow(false);
+    expect(startMist(fakeCanvas(null))).toBeUndefined();
+  });
+
+  it("leaves the plain mark when the shader fails to link", () => {
+    stubWindow(false);
+    const { gl, calls } = fakeGl(false);
+    expect(startMist(fakeCanvas(gl))).toBeUndefined();
+    expect(calls).not.toContain("drawArrays");
+  });
+
+  it("draws, sizes the canvas, and releases the context on stop", () => {
+    stubWindow(false);
+    const { gl, calls } = fakeGl();
+    const canvas = fakeCanvas(gl);
+    const stop = startMist(canvas);
+    expect(calls).toContain("drawArrays");
+    expect([canvas.width, canvas.height]).toEqual([40, 22]);
+    stop!();
+    expect(cancelAnimationFrame).toHaveBeenCalledWith(1);
+    expect(calls).toContain("loseContext");
+  });
+});

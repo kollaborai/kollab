@@ -50,7 +50,9 @@ void main(){
 }`;
 const VERT = "attribute vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }";
 
-function startMist(canvas: HTMLCanvasElement): (() => void) | undefined {
+/** Starts the mist on `canvas`; returns its stop function, or undefined when the plain mark should stay. */
+export function startMist(canvas: HTMLCanvasElement): (() => void) | undefined {
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return undefined;
   const gl = canvas.getContext("webgl", { premultipliedAlpha: false });
   if (!gl) return undefined;
   const prog = gl.createProgram()!;
@@ -107,7 +109,6 @@ export function KollabLogo({ className, mist = false }: { className?: string; mi
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!mist || !canvas) return;
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     return startMist(canvas);
   }, [mist]);
 
