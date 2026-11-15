@@ -6,9 +6,11 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from kollabor_voice.voice_context import VOICE_NUDGE, VOICE_RULES_MARK, voice_preamble
 
 from kollabor.llm import acp_orchestrator as mod
 from kollabor.state.local import LocalStateService
+from kollabor_agent.voice_admission import issue_voice_admission_context
 from kollabor_ai.conversation_logger import KollaborConversationLogger
 from kollabor_ai.conversation_manager import ConversationManager
 from kollabor_ai.profile_manager import LLMProfile
@@ -76,6 +78,64 @@ async def test_operator_input_provenance_is_persisted_only_for_trusted_sources(
         assert human_row["metadata"]["operator_inputs"] == [record]
         assert "operator_inputs" not in peer_row["metadata"]
         assert llm.conversation_history[0].metadata["operator_inputs"] == [record]
+    finally:
+        await orchestrator.close()
+
+
+@pytest.mark.asyncio
+async def test_voice_preamble_is_sent_to_harness_but_not_persisted_as_user_text(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(mod, "ACPRunner", FakeRunner)
+    configuration = SimpleNamespace(
+        _conversations_dir=tmp_path / "conversations",
+        get=lambda key, default=None: False if key == "kollabor.llm.save_conversations" else default,
+    )
+    conversation_logger = KollaborConversationLogger(configuration._conversations_dir)
+    manager = ConversationManager(configuration, conversation_logger)
+    llm = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_logger=conversation_logger,
+        conversation_history=[],
+        message_display_service=MagicMock(),
+    )
+    bus = Bus()
+    bus.services["llm_service"] = llm
+    orchestrator = mod.ACPOrchestrator(bus)
+    await orchestrator.start(LLMProfile(name="fake", provider="acp", command=("fake",)))
+    origin = issue_voice_admission_context(
+        {
+            "owner_id": "room-owner",
+            "voice_session_id": "vs-history",
+            "control_session_id": "cs-history",
+            "conversation_session_id": "conv-history",
+            "agent_id": "agent-history",
+            "thread_id": None,
+            "voice_provider_profile_id": "pp-history",
+            "voice_prompt_revision": "rev-history",
+            "voice_tool_policy": "standard",
+            "generation": 1,
+            "service_lease_epoch": 1,
+        },
+        "lv-history-turn",
+    )
+    transcript = "Please run the tests."
+    tagged_prompt = voice_preamble({}, rules_sent=False) + transcript
+    try:
+        admission = orchestrator.admit(
+            tagged_prompt,
+            request_id="livekit-history",
+            source="state_rpc",
+            origin=origin,
+        )
+        await admission.future
+        await asyncio.gather(*orchestrator._completion_tasks)
+
+        user_row = next(message for message in manager.messages if message["role"] == "user")
+        assert orchestrator.runner._updates[0]["text"] == tagged_prompt
+        assert user_row["content"] == transcript
+        assert VOICE_RULES_MARK not in user_row["content"]
+        assert VOICE_NUDGE not in user_row["content"]
     finally:
         await orchestrator.close()
 
