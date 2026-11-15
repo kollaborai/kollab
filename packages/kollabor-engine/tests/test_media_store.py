@@ -124,9 +124,56 @@ def test_attach_without_index_is_a_no_op(tmp_path: Path) -> None:
 def test_count_image_tokens_shapes() -> None:
     assert count_image_tokens("a [image1] b") == 1
     assert count_image_tokens([{"type": "text", "text": "[image2]"}]) == 1
-    assert count_image_tokens(["plain", {"type": "image"}]) == 0
+    # The daemon mirror stores a sent picture as an image part with no bytes
+    # ({"type": "image", "image": None}); the [imageN] text is only the
+    # content_to_text rendering. Both shapes are one image (#1088).
+    assert count_image_tokens(["plain", {"type": "image"}]) == 1
+    assert count_image_tokens([{"type": "image", "image": None}]) == 1
     assert count_image_tokens(None) == 0
     assert count_image_tokens(42) == 0
+
+
+def test_attach_binds_mirror_part_rows(tmp_path: Path) -> None:
+    """Live daemon-mirror shape: text carries no token, the picture is a part."""
+    refs = [save(tmp_path, "s1", url).ref for url in (PNG, JPEG)]
+    rows = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look at this"},
+                {"type": "image", "image": None},
+            ],
+        },
+        {"role": "assistant", "content": "ok"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "and this one"},
+                {"type": "image", "image": None},
+            ],
+        },
+    ]
+    attach_media_to_rows(tmp_path, "s1", rows)
+    assert [m["ref"] for m in rows[0]["media"]] == [refs[0]]
+    assert [m["ref"] for m in rows[2]["media"]] == [refs[1]]
+
+
+def test_attach_skip_counts_mirror_part_rows(tmp_path: Path) -> None:
+    """Page offsets must count part-shaped rows, not only token text (#1088)."""
+    refs = [save(tmp_path, "s1", url).ref for url in (PNG, JPEG)]
+    earlier = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look at this"},
+                {"type": "image", "image": None},
+            ],
+        },
+    ]
+    assert count_image_tokens(earlier[0]["content"]) == 1
+    page = [{"role": "user", "content": "second [image2]"}]
+    attach_media_to_rows(tmp_path, "s1", page, skip=1)
+    assert [m["ref"] for m in page[0]["media"]] == [refs[1]]
 
 
 def test_ref_shape() -> None:

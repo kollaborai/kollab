@@ -155,7 +155,15 @@ _IMAGE_TOKEN_RE = re.compile(r"\[image\d+\]")
 
 
 def count_image_tokens(content: object) -> int:
-    """How many [imageN] tokens a row's content carries (str or parts)."""
+    """How many sent images a row's content carries (str or parts).
+
+    Two shapes say "one image" (#1088): a ``[imageN]`` token in text — the
+    ``content_to_text`` rendering the disk jsonl keeps — and an image part
+    with no bytes, which is how the daemon's conversation mirror stores a
+    sent picture (``{"type": "image", "image": None}``, JSON-safe). History
+    pages mix both shapes depending on their source, so the counter and the
+    page-offset skip must count them identically.
+    """
     if isinstance(content, str):
         return len(_IMAGE_TOKEN_RE.findall(content))
     if isinstance(content, list):
@@ -163,8 +171,12 @@ def count_image_tokens(content: object) -> int:
         for part in content:
             if isinstance(part, str):
                 total += len(_IMAGE_TOKEN_RE.findall(part))
-            elif isinstance(part, dict) and isinstance(part.get("text"), str):
-                total += len(_IMAGE_TOKEN_RE.findall(part["text"]))
+            elif isinstance(part, dict):
+                text = part.get("text")
+                if isinstance(text, str):
+                    total += len(_IMAGE_TOKEN_RE.findall(text))
+                if part.get("type") == "image":
+                    total += 1
         return total
     return 0
 
