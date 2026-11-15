@@ -647,7 +647,8 @@ export function AppSidebar({
                     size="sm"
                     onClick={() => {
                       setOptionsOpen(false);
-                      onManageProfiles();
+                      // Let the Popover restore focus before the Dialog takes focus.
+                      requestAnimationFrame(() => onManageProfiles());
                     }}
                   >
                     Manage Profiles
