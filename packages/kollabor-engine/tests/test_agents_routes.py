@@ -296,6 +296,8 @@ class TestAgentPoolFolders:
                 "current_tool": None,
                 "solo": True,
                 "project": str(home),
+                "version": "",
+                "build": "",
             },
             {
                 "name": "koordinator",
@@ -306,6 +308,8 @@ class TestAgentPoolFolders:
                 "current_tool": {"name": "terminal", "type": "terminal"},
                 "solo": False,
                 "project": str(other),
+                "version": "",
+                "build": "",
             },
         ]
 

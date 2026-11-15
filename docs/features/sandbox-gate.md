@@ -55,6 +55,9 @@ use is logged.
 - MCP and plugin tools are not inspected.
 - An agent that can edit the config file can switch the gate off. Protect the
   config the same way as a root.
+- A case-variant path is recognized when an existing ancestor is the protected
+  root on a case-insensitive filesystem. On a case-sensitive filesystem,
+  differently cased path components name a different path and are not aliases.
 - Passing validation is the entry ticket, not proof the change is right.
 
 ## Enable steps

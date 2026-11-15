@@ -16,13 +16,17 @@ Field groups:
   vault        persistent memory reference (stream, working, crystallized)
 """
 
+import logging
 import os
 import sys
 import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, cast
+
+logger = logging.getLogger(__name__)
 
 
 def _presence_tags(tags: Any) -> Dict[str, Any]:
@@ -105,7 +109,7 @@ def get_agent_tool_scope(agent: Any) -> Optional[List[str]]:
     Returns None (all tools allowed) when:
     - agent is None
     - no tools field is defined
-    - tools is ["*"] (wildcard = allow all)
+    - tools contains "*" (wildcard = allow all)
     """
     if agent is None:
         return None
@@ -121,7 +125,13 @@ def get_agent_tool_scope(agent: Any) -> Optional[List[str]]:
         return None
 
     # Wildcard: allow all tools (same as no scope)
-    if isinstance(tools, list) and len(tools) == 1 and tools[0] == "*":
+    if isinstance(tools, list) and "*" in tools:
+        redundant_names = [name for name in tools if name != "*"]
+        if redundant_names:
+            logger.warning(
+                "Agent bundle tools include '*' alongside redundant tool names: %s",
+                ", ".join(redundant_names),
+            )
         return None
 
     return list(tools)
@@ -190,6 +200,23 @@ def own_start_token() -> str:
         _OWN_START_TOKENS.clear()  # a forked child has a new pid; keep one entry
         _OWN_START_TOKENS[pid] = process_start_token(pid)
     return _OWN_START_TOKENS[pid] or ""
+
+
+@lru_cache(maxsize=1)
+def own_build() -> tuple[str, str]:
+    """The version and full build SHA this process runs, as ("", "") when unreadable.
+
+    Read once, when the process first publishes: an agent keeps the code it
+    started with, so the first answer is the one that stays true (an exec starts
+    a new image, which reads again). Imported lazily because this package must
+    load without the app around it.
+    """
+    try:
+        from kollabor.version import get_build_provenance, get_runtime_version
+
+        return get_runtime_version(), get_build_provenance().sha
+    except Exception:
+        return "", ""
 
 
 @dataclass
@@ -299,6 +326,14 @@ class AgentRuntime:
     into the presence record. A peer compares it to the process now at ``pid`` to
     tell a reused pid from a live owner; empty when unreadable or from an older
     record, which a peer never reclaims on."""
+
+    version: str = ""
+    """The app version this process runs (``kollabor.version.get_runtime_version``),
+    stamped into the presence record so the web UI can tell an agent that kept
+    its old code through an upgrade. Empty on a record from an older agent."""
+
+    build: str = ""
+    """The full commit SHA of that build; empty on a record from an older agent."""
 
     last_heartbeat: float = field(default_factory=time.time)
     """Unix timestamp of last heartbeat update.
@@ -716,6 +751,8 @@ class AgentRuntime:
             "started_at": self.started_at,
             "start_token": self.start_token
             or (own_start_token() if self.pid == os.getpid() else ""),
+            "version": self.version or (own_build()[0] if self.pid == os.getpid() else ""),
+            "build": self.build or (own_build()[1] if self.pid == os.getpid() else ""),
             "last_heartbeat": self.last_heartbeat,
             "state": self.state,
             "state_changed_at": self.state_changed_at,
@@ -761,6 +798,8 @@ class AgentRuntime:
             "socket_path",
             "started_at",
             "start_token",
+            "version",
+            "build",
             "last_heartbeat",
             "state",
             "state_changed_at",

@@ -350,6 +350,11 @@ class TestInternalTypeBypass:
         assert error is not None
         assert "mcp-tool" in error
 
+    def test_mcp_tool_is_allowed_with_explicit_tool_name_grant(self):
+        executor = self._make_scoped_executor()
+        executor.set_bundle_scope(["terminal", "create_issue"])
+        assert executor._check_bundle_scope("mcp_tool", "create_issue") is None
+
     def test_malformed_file_op_bypasses_scope(self):
         executor = self._make_scoped_executor()
         assert executor._check_bundle_scope("malformed_file_op") is None
@@ -468,6 +473,21 @@ class TestXmlTagReverseLookup:
 
 class TestWildcardScope:
     """Test ["*"] wildcard support for allow-all tool scope."""
+
+    def test_wildcard_mixed_with_names_allows_all_tools(self):
+        """A wildcard makes additional listed names redundant for scope checks."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        executor = ToolExecutor(
+            mcp_integration=None,
+            event_bus=None,
+            terminal_timeout=30,
+            mcp_timeout=30,
+        )
+        executor.set_bundle_scope(["*", "file-read"])
+
+        assert executor._bundle_tools is None
+        assert executor._check_bundle_scope("terminal") is None
 
     def test_wildcard_in_set_bundle_scope_allows_all(self):
         """["*"] passed to set_bundle_scope should be treated as None (all allowed)."""

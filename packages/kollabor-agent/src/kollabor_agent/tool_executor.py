@@ -6,7 +6,9 @@ file operations with proper error handling, logging, and result processing.
 
 import asyncio
 import logging
+import os
 import re
+import shlex
 import time
 import uuid
 from pathlib import Path
@@ -21,11 +23,19 @@ from .shell_executor import ShellExecutor
 from .tool_output_budget import ToolOutputArtifactStore
 from .voice_admission import is_voice_origin
 from .voice_tool_policy import (
+    _SHELL_OPERATOR_CHARS,
+    MAX_VOICE_COMMAND_BYTES,
     MAX_VOICE_COMMAND_SECONDS,
     MAX_VOICE_OUTPUT_BYTES,
     VoiceTerminalPlan,
     VoiceToolDecision,
     VoiceToolExecutionGuard,
+    _git_leaves_project,
+    _has_unsafe_ls_flags,
+    _is_hard_blocked,
+    _is_path_qualified_executable,
+    _is_read_only_action,
+    _resolve_trusted_executable,
 )
 from .yes_approval import NEEDS_YES, NOT_IN_HIDDEN_TURN, YesApprovals, call_approval
 
@@ -139,8 +149,11 @@ def _is_blocked_kollab_spawn(
                     action, tail = tail[0], tail[1:]
                 else:
                     continue
-                if action in {"stop", "kill"} and "all" in tail:
-                    return True
+                if action in {"stop", "kill"}:
+                    return bool(tail and tail[0] == "all")
+                # Hub subcommands own the rest of argv. In particular, msg
+                # text is free text and may look like a Kollab launch flag.
+                return False
         return False
 
     def python_code_spawns(code: str, is_background: bool, depth: int) -> bool:
@@ -767,9 +780,9 @@ class ToolExecutor:
             allowed_tools: List of registry tool names (e.g. ['file-read',
                 'terminal', 'hub-msg']) this agent has access to.
                 None = all tools allowed (legacy default).
-                ["*"] = wildcard, treated as None (all tools allowed).
+                Any list containing "*" = wildcard, treated as None (all tools allowed).
         """
-        if allowed_tools == ["*"]:
+        if allowed_tools is not None and "*" in allowed_tools:
             allowed_tools = None
         self._bundle_tools = allowed_tools
         logger.debug(
@@ -837,7 +850,7 @@ class ToolExecutor:
 
         Args:
             tool_type: The dispatch tool type to check.
-            tool_name: The concrete MCP tool name, when checking an MCP call.
+            tool_name: Optional MCP tool name for per-tool scope checks.
 
         Returns:
             None if allowed, error message string if denied.
@@ -879,6 +892,20 @@ class ToolExecutor:
         # Direct match against bundle tools
         if registry_name in self._bundle_tools:
             return None
+
+        # MCP schemas can be scoped to a single tool name as well as to the
+        # generic mcp-tool capability. Keep execution aligned with that list.
+        if tool_type == "mcp_tool" and isinstance(tool_name, str):
+            if tool_name in self._bundle_tools:
+                return None
+            mcp_tool = (
+                self.mcp_integration.tool_registry.get(tool_name)
+                if self.mcp_integration is not None
+                else None
+            )
+            server = mcp_tool.get("server", "") if mcp_tool else ""
+            if server and f"mcp:{server}:{tool_name}" in self._bundle_tools:
+                return None
 
         # Also check the original tool_type (some tools like 'terminal'
         # are the same in both forms)
@@ -1167,10 +1194,7 @@ class ToolExecutor:
             )
 
         # Check bundle scope — reject tools not in the agent's allowed set
-        scope_error = self._check_bundle_scope(
-            tool_type,
-            tool_name=tool_data.get("name") if tool_type == "mcp_tool" else None,
-        )
+        scope_error = self._check_bundle_scope(tool_type, tool_data.get("name"))
         if scope_error:
             logger.warning(f"Tool {tool_id} rejected by bundle scope: {tool_type}")
             return ToolExecutionResult(
@@ -1266,6 +1290,7 @@ class ToolExecutor:
                         result = await self._plugin_handlers[_plugin_key](tool_data)
                     elif tool_type in (
                         "terminal",
+                        "terminal_read",
                         "terminal_status",
                         "terminal_output",
                         "terminal_send",
@@ -1550,6 +1575,9 @@ class ToolExecutor:
         tool_id = tool_data.get("id", "unknown")
         tool_type = tool_data.get("type", "terminal")
 
+        if tool_type == "terminal_read":
+            return await self._execute_read_only_terminal_command(tool_data)
+
         # Route to specific handler based on type
         if tool_type == "terminal_status":
             return await self._execute_terminal_status(tool_data)
@@ -1663,6 +1691,127 @@ class ToolExecutor:
             success=result.success,
             output=output,
             error=error,
+        )
+
+    async def _execute_read_only_terminal_command(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Run a classifier-approved terminal command without a shell."""
+        tool_id = tool_data.get("id", "unknown")
+        command = tool_data.get("command")
+
+        def refuse(reason: str) -> ToolExecutionResult:
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_read",
+                success=False,
+                error=f"Read-only terminal refused command: {reason}",
+            )
+
+        if not isinstance(command, str) or not command.strip():
+            return refuse("command is empty or malformed")
+        try:
+            if len(command.encode("utf-8")) > MAX_VOICE_COMMAND_BYTES:
+                return refuse("command exceeds the read-only policy size limit")
+        except UnicodeEncodeError:
+            return refuse("command is not valid UTF-8")
+        if any(char in _SHELL_OPERATOR_CHARS for char in command):
+            return refuse("compound shell syntax is not supported")
+        if tool_data.get("background"):
+            return refuse("background sessions are not supported")
+
+        try:
+            argv = tuple(shlex.split(command, posix=True))
+        except ValueError:
+            return refuse("command could not be parsed safely")
+        if not argv or any(not part or "\\" in part for part in argv):
+            return refuse("command contains unsupported escaping")
+        if _has_unsafe_ls_flags(argv):
+            return refuse("recursive or symlink-following ls is not allowed")
+        if _is_path_qualified_executable(argv[0]):
+            return refuse("executable must use a trusted bare command name")
+
+        root = Path(self.workspace or Path.cwd()).expanduser().resolve()
+        cwd = self._resolve_terminal_cwd(tool_data.get("cwd")) or root
+        try:
+            cwd = cwd.resolve()
+            cwd.relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            return refuse("working directory must stay inside the project")
+
+        if _is_hard_blocked(argv):
+            return refuse("command is permanently blocked by the read-only policy")
+        if Path(argv[0]).name.lower() == "git" and any(
+            token.split("=", 1)[0].lower() == "--no-index" for token in argv[1:]
+        ):
+            return refuse("Git diff --no-index may read files outside the project")
+        if _git_leaves_project(argv, cwd, root):
+            return refuse("Git command must stay inside the project")
+        if not _is_read_only_action(argv, cwd, root):
+            return refuse("command is not classified as read-only")
+
+        if Path(argv[0]).name.lower() == "git" and len(argv) > 1:
+            subcommand = argv[1].lower()
+            emits_diff = subcommand in {"diff", "show"} or (
+                subcommand == "log"
+                and any(token.lower() in {"-p", "--patch"} for token in argv[2:])
+            )
+            if emits_diff:
+                if any(
+                    token.split("=", 1)[0].lower() in {"--ext-diff", "--textconv"}
+                    for token in argv[2:]
+                ):
+                    return refuse("external Git helpers are not allowed")
+                argv = (
+                    argv[0],
+                    argv[1],
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    *argv[2:],
+                )
+            elif subcommand == "blame" and any(
+                token.split("=", 1)[0].lower() == "--textconv" for token in argv[2:]
+            ):
+                return refuse("external Git helpers are not allowed")
+
+        executable = _resolve_trusted_executable(argv[0], root)
+        if executable is None:
+            return refuse("executable is not on the trusted system path")
+        argv = (str(executable), *argv[1:])
+        if Path(executable).stem.lower() == "git":
+            argv = (argv[0], "-c", "core.fsmonitor=false", *argv[1:])
+        command_env = self.shell_executor._filter_env(os.environ.copy())
+        if Path(argv[0]).stem.lower() == "git":
+            command_env = {
+                name: value
+                for name, value in command_env.items()
+                if not name.upper().startswith("GIT_")
+            }
+
+        self._active_shell_executor = self.shell_executor
+        try:
+            result = await self.shell_executor.run_argv(
+                argv,
+                timeout=min(self.terminal_timeout, MAX_VOICE_COMMAND_SECONDS),
+                cwd=cwd,
+                env=command_env,
+                max_output_bytes=MAX_VOICE_OUTPUT_BYTES,
+            )
+        finally:
+            self._active_shell_executor = None
+
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            tool_type="terminal_read",
+            success=result.success,
+            output=result.stdout if result.success else result.stderr,
+            error=(
+                ""
+                if result.success
+                else result.error or f"Exit code {result.exit_code}: {result.stderr}"
+            ),
+            execution_time=result.execution_time,
+            metadata={"exit_code": result.exit_code},
         )
 
     async def _execute_terminal_status(
@@ -2472,9 +2621,9 @@ class ToolExecutor:
     ) -> ToolExecutionResult:
         """Load a tool's full definition into the active session.
 
-        For built-in tools: adds the tool name to _bundle_tools so it
-        passes the bundle scope check. Returns the full markdown docs.
-        For MCP tools: marks the tool as enabled and returns its schema.
+        For built-in tools: returns full markdown docs when the tool is in
+        the bundle's declared scope. For MCP tools: marks a declared tool as
+        enabled and returns its schema. Loading never expands bundle scope.
 
         Args:
             tool_data: Tool information containing 'name' (required).
@@ -2501,6 +2650,32 @@ class ToolExecutor:
                 success=False,
                 error="Missing required parameter: name",
             )
+
+        # A tool-load call may expose documentation, but it must not grant
+        # capabilities outside the bundle's declared tool list.
+        if (
+            tool_name.startswith("mcp:")
+            and self._enforce_bundle_scope
+            and self._bundle_tools is not None
+        ):
+            parts = tool_name.split(":", 2)
+            mcp_tool_name = parts[2] if len(parts) == 3 else ""
+            if not (
+                "mcp" in self._bundle_tools
+                or "mcp-tool" in self._bundle_tools
+                or mcp_tool_name in self._bundle_tools
+                or tool_name in self._bundle_tools
+            ):
+                allowed_tools = ", ".join(sorted(set(self._bundle_tools)))
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type="tool_load",
+                    success=False,
+                    error=(
+                        f"Tool '{tool_name}' is not in this agent's allowed "
+                        f"tools list: {allowed_tools}"
+                    ),
+                )
 
         # Check if it's an MCP tool (format: mcp:server:tool_name)
         if tool_name.startswith("mcp:"):
@@ -2536,12 +2711,22 @@ class ToolExecutor:
                 metadata={"available_tools": available},
             )
 
-        # Add to bundle scope if active
-        newly_loaded = False
-        if self._bundle_tools is not None and tool_def.name not in self._bundle_tools:
-            self._bundle_tools.append(tool_def.name)
-            newly_loaded = True
-            logger.info(f"Tool loaded into active set: {tool_def.name}")
+        declared_names = {tool_def.name, tool_name}
+        if (
+            self._enforce_bundle_scope
+            and self._bundle_tools is not None
+            and not declared_names.intersection(self._bundle_tools)
+        ):
+            allowed_tools = ", ".join(sorted(set(self._bundle_tools)))
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="tool_load",
+                success=False,
+                error=(
+                    f"Tool '{tool_def.name}' is not in this agent's allowed "
+                    f"tools list: {allowed_tools}"
+                ),
+            )
 
         # Generate full documentation
         markdown = tool_def.to_markdown()
@@ -2564,7 +2749,7 @@ class ToolExecutor:
             metadata={
                 "loaded_tool": tool_def.name,
                 "category": tool_def.category,
-                "already_active": not newly_loaded,
+                "already_active": True,
             },
         )
 

@@ -4555,6 +4555,75 @@ class HubPlugin(BasePlugin):
             output=f"{self._identity.identity} restarting...",
         )
 
+    async def restart_in_place(self) -> dict:
+        """Restart this detached agent on the installed code, same conversation (#968).
+
+        Replies at once. A task lets the turn in progress end (a running tool is
+        never cut), saves the conversation, runs the graceful shutdown and replaces
+        the process image: same pid, same flags, still detached, started through
+        ``kollab_argv()``. The hub socket is named by identity, so the engine's open
+        chat reattaches to the same path with no page reload.
+        """
+        import sys
+
+        from kollabor.daemon import DETACHED_CHILD_ENV
+
+        if not self._identity:
+            raise ValueError("hub not initialized")
+        if not {"--detached", "-d"} & set(sys.argv) and os.environ.get(DETACHED_CHILD_ENV) != "1":
+            raise ValueError("this window runs without a daemon: quit and start Kollab again to update it")
+        if getattr(self, "_self_restart_requested", False):
+            return {"restarting": True, "waiting_for_turn": False}
+        llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+        busy = bool(getattr(llm, "is_processing", False))
+        self._self_restart_requested = True
+        self._restart_task = asyncio.create_task(self._restart_when_idle(llm))
+        return {"restarting": True, "waiting_for_turn": busy}
+
+    async def _restart_when_idle(self, llm: Any) -> None:
+        import sys
+
+        from kollabor.daemon import restart_command, restart_env, wait_until_idle
+
+        def busy() -> bool:
+            return bool(getattr(llm, "is_processing", False)) or self.network_turn_open()
+
+        if not await wait_until_idle(busy):
+            logger.warning("restart in place: the turn never ended, so the agent keeps running")
+            self._self_restart_requested = False
+            return
+        conv = getattr(llm, "conversation_manager", None)
+        session_id = str(getattr(conv, "current_session_id", "") or "")
+        try:
+            if conv is not None and getattr(conv, "messages", None):
+                conv.save_conversation()
+        except Exception as e:
+            logger.warning(f"restart in place: could not save the conversation: {e}")
+            self._self_restart_requested = False
+            from kollabor_tui.display_tap import publish_semantic
+
+            publish_semantic(
+                self.event_bus,
+                "agent_restart_failed",
+                identity=self._identity.identity,
+            )
+            return
+        # Past this point the process image is replaced or the process ends: tell every
+        # attached window now, so a terminal waits and attaches again instead of
+        # reporting an exit, and give the attach streams time to write it out first.
+        from kollabor_tui.display_tap import publish_semantic
+
+        publish_semantic(self.event_bus, "daemon_restarting", identity=self._identity.identity)
+        await asyncio.sleep(0.25)
+        exec_argv = restart_command(sys.argv)
+        os.environ.update(restart_env(session_id))  # execvp hands the environment on
+        self._self_restart_cmd = exec_argv
+        self._self_stop_requested = True
+        self._self_restart_watchdog_task = asyncio.create_task(
+            self._self_restart_watchdog(exec_argv, self._identity.identity)
+        )
+        await self._perform_self_restart()
+
     async def _self_restart_watchdog(self, exec_argv, identity: str) -> None:
         try:
             await asyncio.sleep(8.0)
@@ -5389,12 +5458,13 @@ class HubPlugin(BasePlugin):
         """Execute a hub_work tool."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
-        result = self._format_work()
+        result, ledger_available = self._format_work_report()
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="hub_work",
-            success=True,
+            success=ledger_available,
             output=result,
+            error="" if ledger_available else "TaskLedger unavailable",
         )
 
     async def _handle_hub_vault_tool(self, tool_data: dict):
@@ -5982,6 +6052,11 @@ class HubPlugin(BasePlugin):
                             preferred,
                             holder.pid,
                         )
+                        from kollabor.daemon import report_detached_startup
+
+                        report_detached_startup(
+                            ready=False, reason=f"{preferred} is already running"
+                        )
                         _os._exit(1)
 
             self._identity.identity = self._designator.assign(taken, preferred)
@@ -6406,6 +6481,17 @@ class HubPlugin(BasePlugin):
                     f"({'coordinator' if is_coordinator else 'peer'})",
                     from_agent=self._identity.identity,
                 )
+
+            # A restart in place (#968) names the conversation to pick back up. It runs before
+            # the session log path below is published, so peers read the resumed file.
+            try:
+                from kollabor.daemon import resume_after_restart
+
+                state_svc = self.event_bus.get_service("state_service") if self.event_bus else None
+                if state_svc is not None:
+                    await resume_after_restart(state_svc)
+            except Exception as e:
+                logger.warning(f"restart: could not resume the conversation: {e}")
 
             # Set session log path so other agents can find our conversation file
             llm_svc = (
@@ -7896,7 +7982,9 @@ class HubPlugin(BasePlugin):
         hub_msg uses: handle resolution, trust and relay. The router reports a
         refusal instead of raising, so it is read here, logged with its reason
         and kept for hub_cron_list; a job whose device is not on the network is
-        dropped rather than failing on every interval.
+        dropped rather than failing on every interval. A plain local target's
+        refusal is recorded the same way, so a recurring job does not count it
+        as delivered (#870).
         """
         target = job.target
         scope = self._resolve_scope(target)
@@ -7924,10 +8012,10 @@ class HubPlugin(BasePlugin):
             # unexpected, so only its class is kept.
             rejections = [(target, f"send failed ({type(exc).__name__})")]
 
-        if handle and rejections:
+        if rejections and to != "*":
             reason = rejections[0][1]
             job.last_error = reason
-            if await self._cron_device_gone(handle[1]):
+            if handle and await self._cron_device_gone(handle[1]):
                 logger.warning(
                     "hub cron %s dropped: device %s is not on this network (%s)",
                     job.id,
@@ -7947,9 +8035,9 @@ class HubPlugin(BasePlugin):
             await self._on_message_received(msg)
 
         if handle:
-            job.last_error = ""
             # One dim line per fire: a 30 s job must not draw a message box every 30 s.
             self.show_network_notice(f"cron {job.id} -> {target}")
+        job.last_error = ""
         logger.info(f"hub cron fired: {job.id}" f" -> {job.target}")
         return False
 
@@ -8307,6 +8395,7 @@ class HubPlugin(BasePlugin):
                     e,
                 )
                 continue
+            self._work_queue.mark_task_card_terminalized(slot.id)
             if card is None:
                 logger.warning(
                     "Task card %s for retired work slot %s is missing",
@@ -16743,26 +16832,49 @@ class HubPlugin(BasePlugin):
         return sum(await asyncio.gather(*sends))
 
     def _format_work(self) -> str:
+        return self._format_work_report()[0]
+
+    def _format_work_report(self) -> Tuple[str, bool]:
         lines: List[str] = []
-        if self._work_queue:
-            slots = self._work_queue.get_all()
-            if slots:
-                lines.append(f"work queue: {len(slots)} slot(s)")
-                for s in slots:
-                    assigned = f" -> {s.assigned_to}" if s.assigned_to else ""
-                    lines.append(f"  [{s.id}] {s.status}{assigned}: {s.task[:60]}")
-        if self._task_ledger:
+        slots = self._work_queue.get_all() if self._work_queue else []
+        ledger_available = self._task_ledger is not None
+
+        if self._task_ledger is not None:
             try:
                 open_cards = self._task_ledger.get_open()
-                if open_cards:
-                    lines.append(f"open ledger cards: {len(open_cards)}")
-                    for c in open_cards:
-                        lines.append(f"  [{c.id}] open (p{c.priority}): {c.directive[:60]}")
-            except Exception as e:
-                logger.debug(f"open card listing failed: {e}")
+            except Exception:
+                logger.warning("TaskLedger read failed while formatting hub work")
+                open_cards = None
+                ledger_available = False
+        else:
+            open_cards = None
+
+        if slots:
+            queue_status = "work queue: {} slot(s)".format(len(slots))
+            if not ledger_available:
+                queue_status += " (partial; TaskLedger unavailable)"
+            lines.append(queue_status)
+            for s in slots:
+                assigned = f" -> {s.assigned_to}" if s.assigned_to else ""
+                lines.append(f"  [{s.id}] {s.status}{assigned}: {s.task[:60]}")
+        elif not ledger_available:
+            lines.append("in-memory queue: empty (partial; TaskLedger unavailable)")
+
+        if ledger_available and open_cards:
+            lines.append(f"open ledger cards: {len(open_cards)}")
+            for c in open_cards:
+                lines.append(f"  [{c.id}] open (p{c.priority}): {c.directive[:60]}")
+
+        if not ledger_available:
+            reason = "read failed" if self._task_ledger is not None else "not configured"
+            lines.append(
+                f"TaskLedger: unavailable ({reason}; do not assume empty)"
+            )
+            return "\n".join(lines), False
+
         if not lines:
-            return "work queue: empty"
-        return "\n".join(lines)
+            return "work queue: empty", True
+        return "\n".join(lines), True
 
     def _handle_queue_command(
         self, task: str, upstream_refs: Optional[List[str]] = None

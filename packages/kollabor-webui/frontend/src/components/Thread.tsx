@@ -27,6 +27,7 @@ import { resolveAgentSender, type HubNote } from "@/hub-notes";
 import type { PanelOpenRequest } from "@/components/panels/panel-model";
 import { agentName } from "@/utils/session-display";
 import { cn } from "@/lib/utils";
+import { composerDraftStorageKey } from "../composer-draft";
 
 type WelcomeGem = { name: string; pool?: AgentPoolEntry; activity?: Activity | null; onOpen?: () => void };
 
@@ -325,6 +326,8 @@ export const Thread: FC<{
   attachmentsEnabled?: boolean;
   /** The session's gem, which greets on the empty thread. */
   identity?: string;
+  /** The engine session, used to scope the persisted composer draft. */
+  sessionId?: string;
   /** The selected session's live activity, shared with its sidebar gem. */
   activity?: Activity | null;
   /** Opens the session's Properties (double-click on the greeting gem). */
@@ -342,7 +345,7 @@ export const Thread: FC<{
   onLoadOlder?: () => Promise<boolean | void>;
   onRetryHistory?: () => void;
   historyStartIndex?: number;
-}> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true, identity, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", historyStatus, onLoadOlder, onRetryHistory, historyStartIndex = 0 }) => (
+}> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true, identity, sessionId, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", historyStatus, onLoadOlder, onRetryHistory, historyStartIndex = 0 }) => (
   <PoolContext.Provider value={agents}>
   <WhereContext.Provider value={device || workspace}>
   <ComposerHubContext.Provider value={{ workspace, remote: remoteAgents }}>
@@ -366,6 +369,7 @@ export const Thread: FC<{
             commands={commands}
             onOpenPanel={onOpenPanel}
             attachmentsEnabled={attachmentsEnabled}
+            draftKey={composerDraftStorageKey(identity, sessionId)}
 
             historyStatus={historyStatus}
             onLoadOlder={onLoadOlder}

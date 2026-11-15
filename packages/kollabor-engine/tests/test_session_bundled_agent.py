@@ -49,7 +49,9 @@ async def client(empty_home, monkeypatch):
     profiles = SimpleNamespace(
         active_profile_name="saved", get_profile=lambda name: SimpleNamespace(name=name)
     )
-    monkeypatch.setattr("kollabor_ai.ProfileManager", lambda: profiles)
+    monkeypatch.setattr(
+        "kollabor_ai.ProfileManager", lambda local_folder=None: profiles
+    )
     monkeypatch.setattr(
         teams_routes, "_bridge", SimpleNamespace(get_agents=lambda use_cache=True: [])
     )
@@ -75,6 +77,15 @@ async def test_a_session_starts_a_bundled_agent_on_an_empty_home(client, empty_h
         "kollabor" in started["system_prompt"]
     )  # the bundle's rendered prompt, not an empty one
     assert not empty_home.global_agents.exists()  # resolving seeds nothing
+
+
+def test_session_profile_manager_stub_accepts_local_folder(client, empty_home):
+    """The fixture must match the workspace-scoped constructor used by sessions."""
+    import kollabor_ai
+
+    profiles = kollabor_ai.ProfileManager(local_folder=empty_home.project)
+
+    assert profiles.active_profile_name == "saved"
 
 
 @pytest.mark.asyncio

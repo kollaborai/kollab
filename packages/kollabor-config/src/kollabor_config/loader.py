@@ -590,6 +590,7 @@ class ConfigLoader:
                 "updates": {
                     "check_enabled": True,
                     "auto_update_enabled": False,
+                    "restart_agents": False,
                     "check_interval_hours": 24,
                     "github_repo": "kollaborai/kollab",
                     "timeout_seconds": 5,

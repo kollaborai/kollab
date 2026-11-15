@@ -60,7 +60,28 @@ def _approved_command(text):
 
 
 def _native_calls(body):
-    if _answers_a_tool(body) or "echocall" not in _last_line(body):
+    last = _last_line(body)
+    if _answers_a_tool(body):
+        return []
+    if "terminal-read-safe" in last:
+        arguments = json.dumps({"command": "git log --oneline -1"})
+        return [
+            {
+                "id": "call_read_1",
+                "type": "function",
+                "function": {"name": "terminal_read", "arguments": arguments},
+            }
+        ]
+    if "terminal-read-write" in last:
+        arguments = json.dumps({"command": "touch x.txt"})
+        return [
+            {
+                "id": "call_read_2",
+                "type": "function",
+                "function": {"name": "terminal_read", "arguments": arguments},
+            }
+        ]
+    if "echocall" not in last:
         return []
     arguments = json.dumps({"command": "printf 'native-%s-ran' once"})
     return [{"id": "call_echo_1", "type": "function", "function": {"name": "terminal", "arguments": arguments}}]
@@ -73,6 +94,10 @@ def _reply(body):
     if approved:
         return f"Running it.\n<terminal>{approved}</terminal>"
     last = _last_line(body)
+    if "terminal-read-safe" in last:
+        return "Checking the latest commit."
+    if "terminal-read-write" in last:
+        return "Checking that writes are refused."
     if "echocall" in last:
         # Text copies beside the native call: echo-*-ran shows only if one runs.
         nameless = json.dumps({"command": "printf 'echo-%s-ran' nameless"})
