@@ -119,6 +119,13 @@ import { LearnDialog } from "@/components/learn/LearnDialog";
 import { WhatsNewPage } from "@/components/updates/WhatsNewPage";
 import { navigateToLearn } from "@/learn/catalog";
 import { navigateToWhatsNew, pagePath, readMainPageRoute } from "@/utils/page-route";
+import { loadCanonicalWhatsNew } from "@/learn/changelog";
+import { WhatsNewDialog } from "@/whats-new/WhatsNewDialog";
+import {
+  decideWhatsNew,
+  readWhatsNewSeenRaw,
+  type DialogRelease,
+} from "@/whats-new/whats-new-model";
 
 function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current: number | null }) {
   return new Promise<void>((resolve) => {
@@ -476,6 +483,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [agentLibraryInitialTab, setAgentLibraryInitialTab] = useState<"rosters" | "teams">("rosters");
   const [setupGuideOpen, setSetupGuideOpen] = useState(false);
+  // What's New dialog: the release to announce and whether it is open.
+  const [whatsNewRelease, setWhatsNewRelease] = useState<DialogRelease | null>(null);
+  const [whatsNewDialogOpen, setWhatsNewDialogOpen] = useState(false);
   // Settings (PanelHost): one open state for the sidebar button, the toolbar
   // button and the composer's /config-style commands.
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1403,9 +1413,22 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         setActiveId(first.session_id);
         setInitialState(firstState);
         recoverPendingTurn(first.session_id, hasPendingPermission(firstState));
-      } else if (noGuideYet()) {
+      }
+      if (noGuideYet()) {
         // First run: nothing to restore and no dismissal on record.
         setSetupGuideOpen(true);
+      } else {
+        void (async () => {
+          const decision = decideWhatsNew({
+            result: await loadCanonicalWhatsNew(),
+            seenRaw: readWhatsNewSeenRaw(),
+            firstRun: noGuideYet(),
+          });
+          if (decision.show && decision.release) {
+            setWhatsNewRelease(decision.release);
+            setWhatsNewDialogOpen(true);
+          }
+        })();
       }
       setError(null);
     })()
@@ -1846,6 +1869,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           onOpenChange={setSetupGuideOpen}
           onOpenSettings={(tab) => openSettings({ tab })}
           onStartSession={() => void createSession()}
+        />
+        <WhatsNewDialog
+          open={whatsNewDialogOpen}
+          release={whatsNewRelease}
+          onOpenChange={setWhatsNewDialogOpen}
+          onSeeAllChanges={navigateToWhatsNew}
         />
         <PrChainDialog api={api} open={prChainOpen} onOpenChange={setPrChainOpen} />
         {activeSession ? (
