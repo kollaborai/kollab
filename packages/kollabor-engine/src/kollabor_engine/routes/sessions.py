@@ -30,7 +30,7 @@ from ..history_paging import (
     resolve_history_output,
 )
 from ..hub_bridge import HubBridge, network_daemons
-from ..media_store import attach_media_to_rows, count_image_tokens, list_for
+from ..media_store import attach_media_to_rows, count_image_tokens, slot_count
 from ..network_aggregate import merge_view_and_memberships
 from ..server import get_session_registry, open_named_session
 from ..session import INLINE_PROFILE, EngineSession
@@ -1338,7 +1338,9 @@ async def get_history(
         # still contains their refs. Align the surviving history with the
         # matching suffix; otherwise its first image would inherit a dropped
         # message's ref.
-        skip = max(0, len(list_for(_conversations_dir(), session_id)) - history_image_count)
+        # Count the raw slots, tombstones included: attach walks the raw
+        # index, so skip and walk must read the same sequence (#1124 review).
+        skip = max(0, slot_count(_conversations_dir(), session_id) - history_image_count)
         if isinstance(start, int) and not isinstance(start, bool) and start > 0:
             skip += sum(
                 count_image_tokens(row.get("content"))

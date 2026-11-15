@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from kollabor_engine.media_store import list_for, save
+from kollabor_engine.media_store import list_for, record_failed, save
 from kollabor_engine.routes.messages import _save_sent_media
 from kollabor_engine.server import create_app
 
@@ -157,6 +157,52 @@ class TestHistoryOverlay:
         self.stub_registry(monkeypatch, "s10", history)
         page = await get_history("s10")
         assert [m["ref"] for m in page["history"][0]["media"]] == [refs[1]]
+
+    async def test_compacted_prefix_tombstone_binds_latest_through_real_skip(
+        self, monkeypatch
+    ):
+        """Skip must count raw slots, tombstones included (#1124 review P2b).
+
+        A failed part left a tombstone in the index; compaction then dropped
+        the failed row and one valid sender, retaining only the last sender.
+        Raw slots [T, V1, V2]: the retained row's image is slot 2, so the
+        prefix path through get_history (no skip injection) must bind V2.
+        Counting the filtered listing (len 2) would skip 1 and bind V1.
+        """
+        from kollabor_engine.routes.sessions import get_history
+
+        record_failed(conversations_dir(), "s11")
+        refs = [save(conversations_dir(), "s11", url).ref for url in (PNG, JPEG)]
+        # Raw slots: [T, PNG, JPEG]; the retained row sent the JPEG (slot 2).
+        history = [{"role": "user", "content": "later [image1]"}]
+        self.stub_registry(monkeypatch, "s11", history)
+        page = await get_history("s11")
+        assert [m["ref"] for m in page["history"][0]["media"]] == [refs[1]]
+
+    async def test_tombstone_inside_page_consumes_slot_binds_nothing(
+        self, monkeypatch
+    ):
+        """A tombstoned row inside a retained page holds its slot and binds
+        nothing; the following row still binds its own ref (#1124 review)."""
+        from kollabor_engine.routes.sessions import get_history
+
+        record_failed(conversations_dir(), "s12")
+        png = save(conversations_dir(), "s12", PNG).ref
+        history = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "lost"},
+                    {"type": "image", "image": None},
+                ],
+            },
+            {"role": "user", "content": "kept [image1]"},
+        ]
+        self.stub_registry(monkeypatch, "s12", history)
+        page = await get_history("s12")
+        rows = page["history"]
+        assert rows[0].get("media") == []
+        assert [m["ref"] for m in rows[1]["media"]] == [png]
 
     async def test_older_page_skips_bound_images(self, monkeypatch):
         from kollabor_engine.routes.sessions import get_history

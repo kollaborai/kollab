@@ -178,6 +178,16 @@ def list_for(conversations_dir: Path, session_id: str) -> List[Dict[str, object]
     return [e for e in _read_index(conversations_dir, session_id) if e.get("ref")]
 
 
+def slot_count(conversations_dir: Path, session_id: str) -> int:
+    """The raw number of index slots, tombstones included.
+
+    The history overlay walks the raw index, so the page-offset skip must
+    count the same sequence. ``list_for`` is the filtered view for the
+    gallery and viewer; binding arithmetic never uses it (#1124 review).
+    """
+    return len(_read_index(conversations_dir, session_id))
+
+
 _IMAGE_TOKEN_RE = re.compile(r"\[image\d+\]")
 
 
