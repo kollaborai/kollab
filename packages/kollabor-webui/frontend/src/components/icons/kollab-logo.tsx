@@ -72,7 +72,7 @@ function startMist(canvas: HTMLCanvasElement): (() => void) | undefined {
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
   const uTime = gl.getUniformLocation(prog, "uTime");
   const uRes = gl.getUniformLocation(prog, "uRes");
-  gl.uniform3f(gl.getUniformLocation(prog, "uColor"), 0.09, 0.64, 0.29); // #16a34a, darker step of the TUI green #22c55e
+  gl.uniform3f(gl.getUniformLocation(prog, "uColor"), 0.3, 0.3, 0.3); // neutral grey; the shader blows hot spots out to white
 
   let frame = 0;
   const start = performance.now();
