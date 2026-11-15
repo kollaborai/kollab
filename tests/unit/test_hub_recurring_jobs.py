@@ -7,6 +7,7 @@ file; only the hub router is replaced, to record what would have been sent.
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -250,3 +251,52 @@ async def test_job_aimed_at_the_coordinator_itself_is_delivered_locally(
 def test_each_job_has_a_settings_toggle():
     paths = {w["config_path"] for w in HubPlugin.get_config_widgets()["widgets"]}
     assert {f"plugins.hub.hub_jobs.{name}.enabled" for name in JOBS} <= paths
+
+
+@pytest.mark.asyncio
+async def test_the_cap_counts_accepted_sends_but_never_refusals(tmp_path, monkeypatch):
+    plugin = make_plugin(
+        tmp_path,
+        monkeypatch,
+        jobs={
+            "idle_sweep": {
+                "enabled": True,
+                "schedule": "1m",
+                "target": ["a", "b"],
+                "max_messages_per_hour": 2,
+            }
+        },
+    )
+    # a refuses every fire; b accepts: only accepted sends fill the cap
+    route = AsyncMock(side_effect=[("a", "refused"), [], ("a", "refused"), []])
+    plugin._route_message = route
+    await plugin._run_hub_jobs(now=0.0)  # arms the schedule
+    await plugin._run_hub_jobs(now=60.0)
+    await plugin._run_hub_jobs(now=120.0)
+    assert [m.to for m in sent_to(plugin)] == ["a", "b", "a", "b"]
+    state = json.loads((tmp_path / "hub_jobs_state.json").read_text())
+    assert len(state["idle_sweep"]["sent"]) == 2  # b's two accepted sends
+    # the cap is now full from accepted sends alone: nothing is attempted
+    await plugin._run_hub_jobs(now=180.0)
+    assert len(sent_to(plugin)) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_refused_local_send_is_not_counted_and_sets_last_error(
+    tmp_path, monkeypatch
+):
+    plugin = make_plugin(
+        tmp_path,
+        monkeypatch,
+        jobs={"hub_heartbeat": {"enabled": True, "schedule": "5m", "target": "ruby"}},
+        route=AsyncMock(return_value=[("ruby", "target refused the send")]),
+    )
+    await plugin._run_hub_jobs(now=0.0)  # arms the schedule
+    await plugin._run_hub_jobs(now=300.0)  # due: the router refuses the local send
+    state = json.loads((tmp_path / "hub_jobs_state.json").read_text())
+    entry = state["hub_heartbeat"]
+    assert entry["sent"] == []  # a refusal does not use up the hourly cap
+    assert entry["last_error"]  # the refusal is recorded
+    # a later fire is still attempted: nothing was counted as sent
+    await plugin._run_hub_jobs(now=600.0)
+    assert len(sent_to(plugin)) == 2

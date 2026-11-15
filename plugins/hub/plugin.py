@@ -7982,7 +7982,9 @@ class HubPlugin(BasePlugin):
         hub_msg uses: handle resolution, trust and relay. The router reports a
         refusal instead of raising, so it is read here, logged with its reason
         and kept for hub_cron_list; a job whose device is not on the network is
-        dropped rather than failing on every interval.
+        dropped rather than failing on every interval. A plain local target's
+        refusal is recorded the same way, so a recurring job does not count it
+        as delivered (#870).
         """
         target = job.target
         scope = self._resolve_scope(target)
@@ -8010,10 +8012,10 @@ class HubPlugin(BasePlugin):
             # unexpected, so only its class is kept.
             rejections = [(target, f"send failed ({type(exc).__name__})")]
 
-        if handle and rejections:
+        if rejections and to != "*":
             reason = rejections[0][1]
             job.last_error = reason
-            if await self._cron_device_gone(handle[1]):
+            if handle and await self._cron_device_gone(handle[1]):
                 logger.warning(
                     "hub cron %s dropped: device %s is not on this network (%s)",
                     job.id,
@@ -8033,9 +8035,9 @@ class HubPlugin(BasePlugin):
             await self._on_message_received(msg)
 
         if handle:
-            job.last_error = ""
             # One dim line per fire: a 30 s job must not draw a message box every 30 s.
             self.show_network_notice(f"cron {job.id} -> {target}")
+        job.last_error = ""
         logger.info(f"hub cron fired: {job.id}" f" -> {job.target}")
         return False
 
