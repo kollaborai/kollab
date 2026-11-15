@@ -95,16 +95,21 @@ export class PluginLoader<Api, Value> {
 
   private async activate(entry: WebPluginEntry, token: object, retry: number): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let expired = false;
     try {
       const { api, value } = this.options.createContext(entry);
       const work = (async () => {
         const module = await this.options.importer(entryUrl(entry, retry));
+        if (expired || this.attempts.get(entry.id)?.token !== token) return;
         const activate = (module as { default?: unknown } | null)?.default;
         if (typeof activate !== "function") throw new Error("Plugin has no default activation function");
         await activate(api);
       })();
       const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("Plugin loading timed out")), this.options.timeoutMs ?? 5000);
+        timer = setTimeout(() => {
+          expired = true;
+          reject(new Error("Plugin loading timed out"));
+        }, this.options.timeoutMs ?? 5000);
       });
       await Promise.race([work, timeout]);
       if (this.attempts.get(entry.id)?.token === token) this.options.commit(entry.id, value);

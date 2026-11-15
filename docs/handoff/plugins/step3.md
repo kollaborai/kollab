@@ -9,7 +9,7 @@
 - No browser screenshot tool was discovered. Chrome is installed; screenshots and the required visual review remain outstanding.
 - Loader core red check: `cd packages/kollabor-webui/frontend && ./node_modules/.bin/vitest run tests/plugin-loader.test.ts` failed because `src/plugins/loader` did not exist (test commit `28ea17fc`). After adding the lifecycle core it passes 4/4; `npm run typecheck` also passes. Vite reports existing native config-loader warnings.
 - The loader is not connected to the app, registry, CSS, events or SDK. Its tests cover parallel activation, discarded late results, timeout/retry cache busting and isolated errors; they do not prove the full contract.
-- Follow-up red check: the loader test now requires a timed-out import not to call its activation function; Vitest reports 1 failure because it is currently called once. Fix before integration.
+- Follow-up red check (test commit `a0ad435c`): a timed-out import previously called its activation function. After the guard, focused Vitest passes 4/4 and `npm run typecheck` passes. The guard also suppresses activation after replacement or removal; add explicit tests for those cases and for stale async activation before integration.
 
 ## Remaining
 
