@@ -7,8 +7,9 @@ import { Input } from "@/components/ui/input";
 type Job = {
   job_id: string; status: "staging" | "ready" | "installing" | "complete" | "error" | "cancelled";
   action?: "install" | "update"; plugin_id?: string; commit?: string; files_sha256?: string;
+  source?: string; ref?: string; previous_commit?: string; changed_folders?: string[];
   error?: string | null; warning?: string | null;
-  manifest?: { name?: string; version?: string; description?: string; uses?: unknown; services?: unknown; python?: unknown; web?: unknown; agents?: unknown };
+  manifest?: { name?: string; version?: string; description?: string; uses?: unknown; services?: unknown; python?: unknown; engine?: unknown; web?: unknown; agents?: unknown; contributes?: unknown; hooks?: unknown; mcp?: unknown };
   changes?: { added?: string[]; modified?: string[]; removed?: string[]; new_grants?: string[]; new_dependencies?: string[] };
 };
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -81,6 +82,30 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
     } catch (caught) { setError(errorText(caught)); } finally { setBusy(false); }
   };
   const ready = job?.status === "ready" && Boolean(job.commit && job.files_sha256);
+  const uses = Array.isArray(job?.manifest?.uses) ? job.manifest.uses.filter((item): item is string => typeof item === "string") : [];
+  const services = job?.manifest?.services && typeof job.manifest.services === "object" && !Array.isArray(job.manifest.services)
+    ? Object.entries(job.manifest.services) : [];
+  const contributions = job?.manifest?.contributes && typeof job.manifest.contributes === "object" && !Array.isArray(job.manifest.contributes)
+    ? Object.entries(job.manifest.contributes).flatMap(([kind, entries]) => Array.isArray(entries) && entries.length ? [`${entries.length} ${kind}`] : []) : [];
+  const throughKollab = [
+    ...(uses.includes("agents") ? ["Can start agent runs through Kollab."] : []),
+    ...(uses.includes("agents:unattended") ? ["Can run agent tools without asking; those agents can do anything you can."] : []),
+    ...uses.filter(item => item.startsWith("secret:")).map(item => `Can request the secret ${item.slice(7)} through Kollab.`),
+    ...services.flatMap(([name, value]) => {
+      if (!value || typeof value !== "object" || !("secrets" in value) || !Array.isArray(value.secrets)) return [];
+      const secrets = value.secrets.filter((item: unknown): item is string => typeof item === "string");
+      return secrets.length ? [`Background process ${name} receives: ${secrets.join(", ")}.`] : [];
+    }),
+  ];
+  const onItsOwn = uses.flatMap(item => {
+    const [kind, ...rest] = item.split(":");
+    const value = rest.join(":");
+    if (!value) return [];
+    if (kind === "run") return [`Runs: ${value}.`];
+    if (kind === "net") return [`Talks to: ${value}.`];
+    if (kind === "files") return [`Reads or writes: ${value}.`];
+    return [];
+  });
   return <Dialog open onOpenChange={open => { if (!open) void close(); }}>
     <DialogContent data-plugin className="flex max-h-[100dvh] min-h-0 flex-col overflow-hidden max-sm:h-[100dvh] max-sm:max-w-none max-sm:rounded-none">
       <DialogHeader><DialogTitle>{action === "install" ? "Add Plugin" : "Update Plugin"}</DialogTitle>
@@ -92,11 +117,25 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
         {ready && job ? <>
           <p className="text-sm font-semibold">{job.manifest?.name ?? job.plugin_id ?? "Plugin"}</p>
           {job.manifest?.description ? <p className="text-muted-foreground text-sm">{job.manifest.description}</p> : null}
-          <p className="text-sm">This plugin can run code on your computer. Install only from a source you trust.</p>
-          {job.manifest?.version ? <p className="text-sm">Version: {job.manifest.version}</p> : null}
+          {job.source ? <p className="break-all text-sm">From: {job.source}{job.ref ? ` (${job.ref})` : ""}</p> : null}
+          {job.previous_commit ? <p className="break-all text-xs">Previous commit: {job.previous_commit}</p> : null}
           <p className="break-all text-xs">Commit: {job.commit}</p><p className="break-all text-xs">Files SHA-256: {job.files_sha256}</p>
-          <DetailsList label="What it uses" values={job.manifest?.uses} /><DetailsList label="Background processes" values={job.manifest?.services} />
-          <DetailsList label="Agent runs" values={job.manifest?.agents} /><DetailsList label="Python code" values={job.manifest?.python} /><DetailsList label="Browser code" values={job.manifest?.web} />
+          <DetailsList label="Changed folders" values={job.changed_folders} />
+          <DetailsList label="Adds" values={[
+            ...contributions,
+            ...(job.manifest?.python ? ["Code that runs in every agent"] : []),
+            ...(job.manifest?.engine ? ["Engine routes"] : []),
+            ...(job.manifest?.web ? ["Browser code"] : []),
+            ...(job.manifest?.agents ? ["Agent definitions"] : []),
+            ...(job.manifest?.hooks ? ["Hooks"] : []),
+            ...(job.manifest?.mcp ? ["MCP servers"] : []),
+            ...(services.length ? [`${services.length} background process${services.length === 1 ? "" : "es"}`] : []),
+          ]} />
+          <DetailsList label="Through Kollab" values={throughKollab} />
+          <DetailsList label="On Its Own" values={onItsOwn} />
+          {uses.includes("agents") ? <p className="text-sm">Agent limits cover Kollab runs and usage the plugin reports; unreported spend is not capped.</p> : null}
+          {job.warning ? <p className="text-sm">{job.warning}</p> : null}
+          <p className="text-sm">Kollab refuses requests made through Kollab that the plugin did not declare. Plugin code runs as you, as do agents with a shell; they have your files and keys and can do more. Add only plugins you trust.</p>
           <DetailsList label="New grants" values={job.changes?.new_grants} /><DetailsList label="New dependencies" values={job.changes?.new_dependencies} />
           <DetailsList label="Added files" values={job.changes?.added} /><DetailsList label="Changed files" values={job.changes?.modified} /><DetailsList label="Removed files" values={job.changes?.removed} />
         </> : null}
