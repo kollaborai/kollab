@@ -212,3 +212,11 @@ file list, glob, or recursive-search operation. Shell and external MCP tools are
 not sandboxed by this deny list, as the spec states. Token producers checked:
 `auth._token_file` (including `KOLLAB_CONFIG_DIR`) and `PluginTokenFiles` at
 `~/.kollab/plugin-data/<id>/run/token` (which rejects symlinks).
+
+Web asset audit: red test `bb39f51b` showed a permitted filename could alias
+hidden or HTML content, and `web`/`dist` symlinks could redirect the root inside
+the plugin. `f379acc1` rejects these and checks resolved asset names as well as
+request names. Existing containment, registration order and nosniff remain.
+10 tests passed (`$WORK/assets-green-1794703194/test.log`); Ruff and diff checks
+passed. Next append the step 2 changelog line, then final fixed-HEAD gates and
+isolated smoke.
