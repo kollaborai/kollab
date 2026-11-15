@@ -25,6 +25,7 @@ try {
   let confirmedInstall = null;
   const brokenImports = [];
   let brokenDisabled = false;
+  let fixtureRemoved = false;
   const commit = "a".repeat(40);
   const filesHash = "b".repeat(64);
   const preview = { job_id: "install-fixture", action: "install", status: "ready", commit, files_sha256: filesHash,
@@ -48,12 +49,20 @@ try {
     const url = new URL(route.request().url());
     if (url.origin !== origin) return route.abort();
     if (url.pathname === "/api/config") return route.fulfill({ json: { engine_url: "/engine" } });
-    if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, plugins: [entry, broken, crasher, hello] } }); }
+    if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, plugins: [...(fixtureRemoved ? [] : [entry]), broken, crasher, hello] } }); }
     if (url.pathname === "/engine/plugins/install/preview" && route.request().method() === "POST") return route.fulfill({ json: { job_id: "install-fixture", status: "staging" } });
     if (url.pathname === "/engine/plugins/jobs/install-fixture" && route.request().method() === "GET") return route.fulfill({ json: preview });
     if (url.pathname === "/engine/plugins/jobs/install-fixture/confirm" && route.request().method() === "POST") {
       confirmedInstall = route.request().postDataJSON();
       return route.fulfill({ json: { ...preview, status: "complete" } });
+    }
+    if (url.pathname === "/engine/plugins/fixture/enable" && route.request().method() === "POST") {
+      entry.enabled = true;
+      return route.fulfill({ json: { ok: true } });
+    }
+    if (url.pathname === "/engine/plugins/fixture/remove" && route.request().method() === "POST") {
+      fixtureRemoved = true;
+      return route.fulfill({ json: { ok: true } });
     }
     if (url.pathname === "/engine/plugins/fixture/disable" && route.request().method() === "POST") {
       entry.enabled = false;
@@ -231,6 +240,25 @@ try {
   await settings.waitFor({ state: "hidden" });
   await page.getByRole("textbox", { name: "Message input" }).waitFor({ timeout: 5000 });
   assert.equal(await page.getByText("This plugin view is unavailable for this chat.").count(), 0, "disabled active view returns to Chat");
+  await page.getByRole("button", { name: "Settings", exact: true }).first().click();
+  await settings.getByRole("tab", { name: "Plugins" }).click();
+  await settings.getByRole("switch", { name: "Fixture enabled" }).click();
+  await page.waitForFunction(() => document.querySelector('[role="switch"][aria-label="Fixture enabled"]')?.getAttribute('aria-checked') === 'true');
+  await page.keyboard.press("Escape");
+  await settings.waitFor({ state: "hidden" });
+  await panel.getByRole("button", { name: "Fixture View" }).click();
+  await page.getByText("Fixture view body", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Settings", exact: true }).first().click();
+  await settings.getByRole("tab", { name: "Plugins" }).click();
+  await settings.getByRole("button", { name: "Fixture", exact: true }).click();
+  await settings.getByRole("button", { name: "Remove", exact: true }).click();
+  const remove = page.getByRole("dialog", { name: "Remove Fixture?" });
+  await remove.getByRole("button", { name: "Remove", exact: true }).click();
+  await remove.waitFor({ state: "hidden" });
+  await page.keyboard.press("Escape");
+  await settings.waitFor({ state: "hidden" });
+  await page.getByRole("textbox", { name: "Message input" }).waitFor({ timeout: 5000 });
+  assert.equal(await page.getByText("This plugin view is unavailable for this chat.").count(), 0, "removed active view returns to Chat");
   console.log("plugin browser acceptance: opt-out, view, menu, page, modal and mobile sheet passed");
 } finally {
   await browser?.close();
