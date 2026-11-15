@@ -303,6 +303,17 @@ try {
   await update.getByRole("button", { name: "Update", exact: true }).click();
   await update.waitFor({ state: "hidden" });
   assert.deepEqual(confirmedUpdate, { commit, files_sha256: filesHash });
+  for (const width of [320, 768, 1440]) {
+    await page.setViewportSize({ width, height: 800 });
+    await page.waitForTimeout(650); // Allow the mobile sheet's 500 ms entrance animation to finish.
+    const overflow = await page.evaluate(() => ({ document: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      body: document.body.scrollWidth - document.body.clientWidth }));
+    assert.ok(overflow.document <= 0 && overflow.body <= 0, `settings overflow at ${width}px: ${JSON.stringify(overflow)}`);
+    const bounds = await settings.boundingBox();
+    assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width + 1, `settings dialog fits at ${width}px: ${JSON.stringify(bounds)}`);
+    if (process.env.PLUGIN_SCREENSHOTS) await page.screenshot({ path: resolve(process.env.PLUGIN_SCREENSHOTS, `settings-${width}.png`) });
+  }
+  await page.setViewportSize({ width: 1280, height: 800 });
   await page.keyboard.press("Escape");
   await settings.waitFor({ state: "hidden" });
   await page.setViewportSize({ width: 390, height: 844 });
