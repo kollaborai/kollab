@@ -9,9 +9,10 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from kollabor_config.config_utils import get_project_data_dir
 from kollabor_engine.media_store import list_for, save
 from kollabor_engine.server import create_app
+
+from kollabor_config.config_utils import get_project_data_dir
 
 PNG = "data:image/png;base64,AQID"
 JPEG = "data:image/jpeg;base64,BAUF"
@@ -153,7 +154,6 @@ class TestHistoryOverlay:
         assert all("media" not in row for row in page["history"])
 
     async def test_unknown_session_404(self):
-        import pytest
         from fastapi import HTTPException
         from kollabor_engine.routes.sessions import get_history
 

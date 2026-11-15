@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
-
 from kollabor_engine.media_store import (
     MAX_DECODED_BYTES,
     REF_RE,
