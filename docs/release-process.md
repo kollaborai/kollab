@@ -54,10 +54,10 @@ integration checkout with `origin/main`.
    - update `uv.lock` using the supported lock command, then inspect the diff;
    - refresh the model directory from its external sources with
      `python scripts/update_model_directory.py && python scripts/validate_models.py`
-     and include `bundles/data/models.json` in the release commit. The weekly
-     automation PR may already have brought it current; the refresh command is
-     idempotent and reports "already matches the sources" when there is nothing
-     to update.
+     and include `bundles/data/models.json` in the release commit. The command
+     is idempotent and reports "already matches the sources" when the directory
+     is current; regeneration belongs to the release PR, never to a workflow
+     that pushes on its own.
    - run `python scripts/changelog.py build`, which folds every entry file in
      `changes/` into `[Unreleased]` of both changelogs and deletes the files;
    - move intended entries from `[Unreleased]` into
