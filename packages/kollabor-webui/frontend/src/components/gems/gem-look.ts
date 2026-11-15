@@ -205,7 +205,10 @@ export function resolveGemLook(
   const own: GemLook = (key && appearance?.gems?.[key]) || {};
   const recorded: GemLook = (key && appearance?.born?.[key]) || {};
   // A crew persona wears the crew coat and no hat; one rolled before that rule keeps only its eyes.
-  const crew = !!key && !!appearance?.crew?.includes(key.split("@")[0]);
+  const identity = key?.split("@")[0];
+  const crew =
+    !!identity &&
+    !!appearance?.crew?.some((name) => name === identity || name === identity.replace(/-\d+$/, ""));
   const rolled: GemLook = crew && !crewShaped(recorded) ? { ...recorded, ...crewCoat(key, vocabulary) } : recorded;
   const known = (value: string | undefined, valid: ReadonlySet<string>) =>
     value && valid.has(value) ? value : undefined;
