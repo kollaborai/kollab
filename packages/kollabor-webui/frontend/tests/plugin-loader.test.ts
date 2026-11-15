@@ -49,8 +49,10 @@ describe("web plugin loader", () => {
       await vi.advanceTimersByTimeAsync(51);
       await pending;
       expect(errors.get("a")).toContain("timed out");
-      finish({ default: (k: { add(s: string): void }) => k.add("late") });
+      const lateActivation = vi.fn((k: { add(s: string): void }) => k.add("late"));
+      finish({ default: lateActivation });
       await Promise.resolve();
+      expect(lateActivation).not.toHaveBeenCalled();
       expect(active.size).toBe(0);
       await loader.retry("a");
       expect(active.get("a")).toEqual(["recovered"]);
