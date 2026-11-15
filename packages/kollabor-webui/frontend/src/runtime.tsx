@@ -1027,12 +1027,40 @@ export function EngineRuntimeProvider({
     if (ownsPendingInput(thread)) {
       if (initialState.messages === reloaded.current) return;
       if (initialState.synced?.olderWindow) deferredOlderWindow.current = initialState;
-      // As before, an event refresh received during our own run is consumed;
-      // replaying it later as authoritative can remove that run's messages
-      // when the engine mirror has not caught up. Only retry the older-page
-      // work, against the newest available snapshot, after the run ends.
-      reloaded.current = initialState.messages;
-      deferredHistorySync.current = deferredOlderWindow.current !== null;
+      const shown = (thread.extras as { state?: EngineState } | undefined)?.state;
+      const from = shown?.synced;
+      if (shown && from && initialState.synced &&
+        initialState.synced.authoritative !== false && !initialState.synced.olderWindow &&
+        shown.sessionId === initialState.sessionId &&
+        (!shown.conversationUid || !initialState.conversationUid ||
+          shown.conversationUid === initialState.conversationUid)) {
+        // Publish only newly arrived canonical history rows while this page's
+        // turn is active. Preserve its in-flight messages and defer any full
+        // reconciliation until settlement, when the engine mirror has caught up.
+        const historyIndex = (message: ThreadMessageLike) => {
+          const index = /^history-(\d+)/.exec(String(message.id ?? ""))?.[1];
+          return index === undefined ? null : Number(index);
+        };
+        const tail = initialState.messages.filter((message) => {
+          const index = historyIndex(message);
+          return index !== null && index >= from.history;
+        });
+        const merged = mergeMissingHistoryMessages(shown.messages, tail);
+        if (merged.added.length) {
+          runtime.thread.importExternalState({
+            ...shown,
+            messages: merged.messages,
+            synced: {
+              ...from,
+              history: Math.max(from.history, initialState.synced.history),
+              messages: merged.messages.length,
+            },
+          });
+        }
+      }
+      // Keep the deferred marker so the newest snapshot is reconciled after
+      // settlement, preserving this turn if the engine mirror was behind.
+      deferredHistorySync.current = true;
       return;
     }
     const pendingOlder = deferredOlderWindow.current;
