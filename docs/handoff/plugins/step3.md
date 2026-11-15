@@ -60,7 +60,7 @@
 - Browser isolation correction: a previous Vite acceptance run attempted GET `/api/update/check` against localhost:8080; the connection was refused. It did not reach an engine, but this violated the intended all-fake network setup. The harness now intercepts every `/api/` route and stores Vite cache under `KOLLAB_PLUGIN_TEST_DIR` (set to `~/backups/plugins-step3-work`); the rerun passed without proxy attempts. All future acceptance commands must set that variable as well as isolated HOME/KOLLAB_NO_KEYRING.
 
 
-- Dynamic command collision red check: the registry test fails because session-specific engine commands cannot yet replace the built-in command reservation set. Implement reconciliation before connecting plugin commands to the composer; engine commands must always win.
+- Dynamic command collisions: red test commit `ad8de7f7` failed because engine-command reservations were fixed at construction. Registry can now reconcile a new built-in set while retaining staged plugin commands; 25 focused tests and typecheck pass under the isolated HOME. The composer must call this with the actual session registry before exposing plugin commands.
 
 
 ## Remaining

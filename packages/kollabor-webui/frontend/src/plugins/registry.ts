@@ -39,7 +39,7 @@ export class PluginDraft {
 export class PluginRegistry {
   private readonly drafts = new Map<string, PluginRecords>();
   private readonly listeners = new Set<() => void>();
-  private readonly builtins: Set<string>;
+  private builtins: Set<string>;
   private snapshot: RegistrySnapshot = { plugins: [], conflicts: [] };
 
   constructor(builtinCommands: readonly string[] = []) {
@@ -47,6 +47,12 @@ export class PluginRegistry {
   }
 
   private static commandKey(name: string) { return name.replace(/^\//, "").toLowerCase(); }
+  setBuiltinCommands(commands: readonly string[]) {
+    const next = new Set(commands.map(PluginRegistry.commandKey));
+    if (next.size === this.builtins.size && [...next].every(name => this.builtins.has(name))) return;
+    this.builtins = next;
+    this.publish();
+  }
   stage(id: string) { return new PluginDraft(id); }
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => {
