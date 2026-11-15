@@ -60,6 +60,35 @@ describe("startMist", () => {
     expect(calls).toEqual([]);
   });
 
+  it("stops drawing when reduced motion is enabled while the logo is mounted", () => {
+    let onChange: ((event: { matches: boolean }) => void) | undefined;
+    const media = {
+      matches: false,
+      addEventListener: (_type: string, callback: (event: { matches: boolean }) => void) => {
+        onChange = callback;
+      },
+      removeEventListener: vi.fn(),
+    };
+    vi.stubGlobal("window", { matchMedia: () => media });
+    let scheduled: FrameRequestCallback | undefined;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      scheduled = callback;
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const { gl, calls } = fakeGl();
+    const stop = startMist(fakeCanvas(gl));
+    const drawCount = calls.filter((call) => call === "drawArrays").length;
+
+    media.matches = true;
+    onChange?.({ matches: true });
+    scheduled?.(0);
+
+    expect(cancelAnimationFrame).toHaveBeenCalledWith(1);
+    expect(calls.filter((call) => call === "drawArrays")).toHaveLength(drawCount);
+    stop?.();
+  });
+
   it("leaves the plain mark when WebGL is unavailable", () => {
     stubWindow(false);
     expect(startMist(fakeCanvas(null))).toBeUndefined();
