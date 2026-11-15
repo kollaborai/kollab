@@ -360,3 +360,19 @@ def test_stale_reputation_tracker_preserves_both_completion_events(tmp_path):
     second.record_task_completed("alpha")
 
     assert DNSStorage(tmp_path).load_reputation()["alpha"].tasks_completed == 2
+
+
+def test_stale_reputation_trackers_merge_response_time_samples(tmp_path):
+    from plugins.hub.dns.reputation import ReputationTracker
+
+    first = ReputationTracker(DNSStorage(tmp_path))
+    second = ReputationTracker(DNSStorage(tmp_path))
+    first.get_score("alpha")
+    second.get_score("alpha")
+
+    first.record_task_completed("alpha", 100)
+    second.record_task_completed("alpha", 300)
+
+    persisted = DNSStorage(tmp_path).load_reputation()["alpha"]
+    assert persisted.tasks_completed == 2
+    assert persisted.avg_response_time_ms == 200
