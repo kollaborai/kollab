@@ -12,6 +12,7 @@ export const browserSuites = Object.freeze([
   { name: "learn-retries", script: "tests/learn-retries-browser-acceptance.mjs" },
   { name: "profile-rows", script: "tests/acceptance/profile-rows.browser.mjs" },
   { name: "profile-copy", script: "tests/acceptance/profile-copy.browser.mjs" },
+  { name: "gallery", script: "tests/gallery-browser-acceptance.mjs" },
   { name: "agent-sidebar", script: "tests/agent-sidebar-glyph-browser-acceptance.mjs" },
   { name: "team-launch", script: "tests/team-launch-browser-acceptance.mjs" },
   { name: "remote-chat-lifecycle", script: "tests/remote-chat-lifecycle-browser-acceptance.mjs" },
