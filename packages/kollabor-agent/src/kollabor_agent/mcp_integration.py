@@ -66,6 +66,10 @@ class MCPRequestTimeoutError(TimeoutError):
     """Raised when an MCP JSON-RPC request times out and closes the connection."""
 
 
+class MCPRequestInterruptedError(RuntimeError):
+    """Raised when a shared MCP session closes while a request is pending."""
+
+
 def _get_loop():
     """Return the running event loop, or create one if none is running."""
     try:
@@ -147,8 +151,10 @@ class MCPServerConnection:
         self.startup_timeout = startup_timeout
         self.process: Optional[asyncio.subprocess.Process] = None
         self.initialized = False
+        self._closing = False
         self._read_buffer = b""
         self._pending_requests: Dict[str, asyncio.Future] = {}
+        self._pending_request_written: Dict[str, bool] = {}
         self._reader_task: Optional[asyncio.Task] = None
         self._write_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
@@ -166,6 +172,7 @@ class MCPServerConnection:
                 cwd=str(self.cwd) if self.cwd else None,
                 env=env,
             )
+            self._closing = False
             logger.info(f"Started MCP server process: {self.server_name}")
             self._ensure_reader_task()
             return True
@@ -193,7 +200,7 @@ class MCPServerConnection:
         logger.debug(f"Sending initialize request to {self.server_name}")
         try:
             response = await self._send_request(request, timeout=self.startup_timeout)
-        except MCPRequestTimeoutError:
+        except (MCPRequestTimeoutError, MCPRequestInterruptedError):
             response = None
 
         if response is None:
@@ -267,7 +274,7 @@ class MCPServerConnection:
 
         try:
             response = await self._send_request(request, timeout=self.startup_timeout)
-        except MCPRequestTimeoutError:
+        except (MCPRequestTimeoutError, MCPRequestInterruptedError):
             return []
         if response and "result" in response:
             tools = response["result"].get("tools", [])
@@ -297,6 +304,8 @@ class MCPServerConnection:
             response = await self._send_request(request, timeout=timeout)
         except MCPRequestTimeoutError as e:
             return {"error": str(e)}
+        except MCPRequestInterruptedError as e:
+            return {"error": str(e)}
         if response:
             if "result" in response:
                 return response["result"]  # type: ignore[no-any-return]
@@ -323,21 +332,29 @@ class MCPServerConnection:
         loop = asyncio.get_running_loop()
         response_future = loop.create_future()
         self._pending_requests[request_id] = response_future
+        self._pending_request_written[request_id] = False
         self._ensure_reader_task()
+        effective_timeout = self.request_timeout if timeout is None else float(timeout)
 
         try:
             message = json.dumps(request) + "\n"
-            async with self._write_lock:
-                self.process.stdin.write(message.encode())
-                await self.process.stdin.drain()
-
-            effective_timeout = (
-                self.request_timeout if timeout is None else float(timeout)
-            )
-            return await asyncio.wait_for(
-                response_future,
-                timeout=effective_timeout,
-            )
+            async with asyncio.timeout(effective_timeout):
+                async with self._write_lock:
+                    stdin = self.process.stdin if self.process else None
+                    if (
+                        self._closing
+                        or request_id not in self._pending_requests
+                        or stdin is None
+                        or stdin.is_closing()
+                    ):
+                        raise MCPRequestInterruptedError(
+                            "MCP request interrupted because the shared MCP connection "
+                            "is closing; the request was not written"
+                        )
+                    self._pending_request_written[request_id] = True
+                    stdin.write(message.encode())
+                    await stdin.drain()
+                return await response_future
         except asyncio.TimeoutError:
             timeout_display = self._format_timeout(effective_timeout)
             logger.warning(
@@ -345,21 +362,36 @@ class MCPServerConnection:
                 timeout_display,
                 self.server_name,
             )
+            self._closing = True
+            if not response_future.done():
+                response_future.cancel()
+            was_written = self._pending_request_written.get(request_id, False)
+            detail = (
+                "the outcome may be unknown because the request was written"
+                if was_written
+                else "the request was not written"
+            )
             await self.close()
             raise MCPRequestTimeoutError(
-                f"MCP request timed out after {timeout_display} seconds"
+                f"MCP request timed out after {timeout_display} seconds; {detail}"
             )
         except asyncio.CancelledError:
             logger.warning(
                 f"MCP request cancelled for {self.server_name}; closing connection"
             )
+            self._closing = True
+            if not response_future.done():
+                response_future.cancel()
             await self.close()
+            raise
+        except MCPRequestInterruptedError:
             raise
         except Exception as e:
             logger.error(f"Error sending request to {self.server_name}: {e}")
             return None
         finally:
             self._pending_requests.pop(request_id, None)
+            self._pending_request_written.pop(request_id, None)
 
     @staticmethod
     def _format_timeout(timeout: float) -> str:
@@ -450,10 +482,8 @@ class MCPServerConnection:
         except Exception as e:
             logger.error(f"MCP reader failed for {self.server_name}: {e}")
         finally:
-            for request_id, future in list(self._pending_requests.items()):
-                if not future.done():
-                    future.set_result(None)
-                self._pending_requests.pop(request_id, None)
+            self._closing = True
+            self._interrupt_pending_requests("the MCP server closed its output stream")
             # EOF or a reader failure means the stdio process is no longer a
             # usable MCP session. Leave the process object for the normal
             # cleanup path, but make the integration's reconnect gate see the
@@ -465,6 +495,23 @@ class MCPServerConnection:
                 )
             self.initialized = False
             self._read_buffer = b""
+
+    def _interrupt_pending_requests(self, reason: str) -> None:
+        for request_id, future in list(self._pending_requests.items()):
+            if not future.done():
+                was_written = self._pending_request_written.get(request_id, False)
+                detail = (
+                    "the outcome may be unknown because the request was written"
+                    if was_written
+                    else "the request was not written"
+                )
+                future.set_exception(
+                    MCPRequestInterruptedError(
+                        f"MCP request interrupted because {reason}; {detail}"
+                    )
+                )
+            self._pending_requests.pop(request_id, None)
+            self._pending_request_written.pop(request_id, None)
 
     def _dispatch_incoming_message(self, message: Dict[str, Any]) -> None:
         """Resolve matched responses and ignore notifications."""
@@ -499,7 +546,9 @@ class MCPServerConnection:
 
     async def _close_impl(self) -> None:
         """Close the connection; caller must hold ``_close_lock``."""
+        self._closing = True
         if self.process:
+            self._interrupt_pending_requests("the shared MCP connection was closed")
             if self._reader_task and not self._reader_task.done():
                 self._reader_task.cancel()
                 try:
@@ -509,10 +558,6 @@ class MCPServerConnection:
                 except Exception as e:
                     logger.debug("MCP reader shutdown failed for %s: %s", self.server_name, e)
             self._reader_task = None
-            for request_id, future in list(self._pending_requests.items()):
-                if not future.done():
-                    future.set_result(None)
-                self._pending_requests.pop(request_id, None)
 
             try:
                 # Close stdin first to signal server
