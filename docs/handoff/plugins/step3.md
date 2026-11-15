@@ -92,7 +92,7 @@
 - Manifest binding: red test commit `5618b7bc` exposed undeclared registration and lost manifest menu targets. The host now stages declared `menu`, `views`, `pages`, `modals`, `slash` and `renderers`, warns/ignores unknown ids, and merges menu label/open from the manifest; fake browser fixtures now declare their ids. Isolated tests pass 31/31, typecheck and browser flow pass. Manifest-declared rows when loading fails are still missing and must be added/tested next; collision handling and malformed manifest elements need further coverage.
 
 
-- Failed-load manifest row red check: fake browser now includes a second plugin whose JS returns HTTP 500 but whose manifest declares a Broken Board menu. The test times out because the row disappears. Keep the declared row visible, open the failure recovery surface, and offer Back to Chat.
+- Failed-load manifest rows: red browser test commit `0cdd9fce` timed out because a 500-loading plugin's declared menu disappeared. Session Controls now retains that manifest row, opens its failure recovery surface, and provides Back to Chat. Isolated browser flow, 31 focused tests and typecheck pass. Declared view/command labels for failed bundles, collapsed desktop controls, and retry/turn-off interaction still require coverage.
 
 
 ## Remaining

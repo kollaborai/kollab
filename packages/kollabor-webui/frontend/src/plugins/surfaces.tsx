@@ -35,8 +35,9 @@ function PluginUnavailable({ host, pluginId, onClose, onTurnOff }: {
   const snapshot = usePluginSnapshot(host);
   const entry = snapshot.entries.find(item => item.id === pluginId);
   const error = snapshot.errors[pluginId];
-  if (error) return <PluginFailure name={entry?.name ?? pluginId} kind={snapshot.renderFailed.includes(pluginId) ? "render" : "load"}
-    error={error} onRetry={() => { void host.retry(pluginId); }} onTurnOff={() => onTurnOff(pluginId)} />;
+  if (error) return <><PluginFailure name={entry?.name ?? pluginId} kind={snapshot.renderFailed.includes(pluginId) ? "render" : "load"}
+    error={error} onRetry={() => { void host.retry(pluginId); }} onTurnOff={() => onTurnOff(pluginId)} />
+    <div className="px-4 pb-4"><Button type="button" variant="outline" onClick={onClose}>Back to Chat</Button></div></>;
   return <div data-plugin className="flex flex-col items-start gap-3 p-4">
     <p className="text-sm font-semibold">{entry?.name ?? pluginId} {entry && !entry.enabled ? "is off" : "is unavailable"}</p>
     <Button type="button" variant="outline" onClick={onClose}>Back to Chat</Button>

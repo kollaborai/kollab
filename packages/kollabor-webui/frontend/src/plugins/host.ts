@@ -174,6 +174,7 @@ export class PluginHost {
     }
   }
 
+  navigate(id: string, target: PluginOpen) { this.options.navigate(id, target); }
   getContext(id: string) { return this.resources.get(id)?.context; }
   reportRenderError(id: string, error: unknown) {
     if (!this.resources.has(id)) return;

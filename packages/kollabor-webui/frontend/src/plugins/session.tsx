@@ -46,6 +46,19 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
         <Icon className="size-3.5" /><span className="min-w-0 truncate">{item.label}</span>
       </Button>;
     }))}
+    {snapshot.entries.filter(entry => entry.enabled && !entry.shadowed && snapshot.errors[entry.id]).flatMap(entry => {
+      const declared = Array.isArray(entry.contributes?.menu) ? entry.contributes.menu : [];
+      return declared.flatMap((raw: unknown) => {
+        if (!raw || typeof raw !== "object") return [];
+        const menu = raw as PluginMenu;
+        if (typeof menu.id !== "string") return [];
+        return [<Button key={`failed:${entry.id}:${menu.id}`} type="button" variant="ghost" size="sm" className={ROW}
+          onClick={() => { onNavigate(); host.navigate(entry.id, menu.open ?? { page: menu.id }); }}>
+          <Puzzle className="size-3.5" /><span className="min-w-0 truncate">{menu.label ?? entry.name}</span>
+          <Badge variant="destructive" className="ml-auto">Failed</Badge>
+        </Button>];
+      });
+    })}
     {plugins.flatMap(plugin => plugin.menus.map(menu => {
       const context = host.getContext(plugin.id);
       const linkedView = plugin.views.find(item => item.id === menu.id);
