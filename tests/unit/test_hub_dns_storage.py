@@ -189,3 +189,18 @@ def test_merge_preserves_existing_approval_and_trust_values(tmp_path):
     trusted = storage.load_registry()["trusted"]
     assert trusted.approval_state == "approved"
     assert trusted.trust_score == 0.93
+
+
+def test_stale_snapshot_cannot_resurrect_deleted_record(tmp_path):
+    stale_writer = DNSStorage(tmp_path)
+    deleter = DNSStorage(tmp_path)
+    stale_writer.save_registry(
+        {"agent": AgentRecord(designation="agent", approval_state="pending")}
+    )
+    stale_snapshot = stale_writer.load_registry()
+
+    deleter.merge_save_registry({}, deleted_keys=["agent"])
+    stale_snapshot["agent"].approval_state = "approved"
+    stale_writer.merge_save_registry(stale_snapshot)
+
+    assert "agent" not in DNSStorage(tmp_path).load_registry()
