@@ -37,13 +37,13 @@ export function PluginFailure({ name, kind, error, onRetry, onTurnOff }: {
   );
 }
 
-export function PluginRecoveryNotices({ disabled, skipped, onTurnOnAgain }: {
-  disabled: boolean; skipped: string[]; onTurnOnAgain: (id: string) => void;
+export function PluginRecoveryNotices({ disabled, skipped, names, onTurnOnAgain }: {
+  disabled: boolean; skipped: string[]; names: Record<string, string>; onTurnOnAgain: (id: string) => void;
 }) {
   return <>
     {disabled ? <NoticeBar>Plugins are off for this page. Remove <code>?plugins=off</code> from the URL and reload.</NoticeBar> : null}
     {skipped.map(id => <NoticeBar key={id} actions={<Button type="button" size="sm" variant="outline" onClick={() => onTurnOnAgain(id)}>Turn On Again</Button>}>
-      {id} was skipped: it froze the page last time.
+      {names[id] ?? "A plugin"} was skipped: it froze the page last time.
     </NoticeBar>)}
   </>;
 }
@@ -69,7 +69,7 @@ export class PluginRenderBoundary extends Component<BoundaryProps, BoundaryState
 export function PluginNotices({ host }: { host: PluginHost }) {
   const snapshot = usePluginSnapshot(host);
   return <>
-    <PluginRecoveryNotices disabled={snapshot.disabled} skipped={snapshot.skipped} onTurnOnAgain={id => { void host.turnOnAgain(id); }} />
+    <PluginRecoveryNotices disabled={snapshot.disabled} skipped={snapshot.skipped} names={Object.fromEntries(snapshot.entries.map(entry => [entry.id, entry.name]))} onTurnOnAgain={id => { void host.turnOnAgain(id); }} />
     {snapshot.inventoryError ? <NoticeBar urgent>Plugins could not be loaded: {snapshot.inventoryError}</NoticeBar> : null}
     {snapshot.registry.plugins.flatMap(plugin => plugin.notices.map((notice, index) =>
       <NoticeBar key={`${plugin.id}:${index}`} actions={notice.button ? <Button type="button" size="sm" variant="outline"
