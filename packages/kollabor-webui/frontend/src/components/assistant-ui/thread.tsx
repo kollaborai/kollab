@@ -551,9 +551,7 @@ const Composer: FC<{
     const keptImages = loadComposerAttachments(key);
     restoredDraft.current = { key, text: restored.text };
     skipEmptyDraftPersist.current = false;
-    setOrphanTokenNotice(
-      orphanImageNotice(restored.tokenCount, keptImages.length),
-    );
+    setOrphanTokenNotice(orphanImageNotice(restored.tokenCount, attachmentsEnabled ? keptImages.length : 0));
     if (aui.composer.getState().text !== restored.text) {
       aui.composer.setText(restored.text);
     }
