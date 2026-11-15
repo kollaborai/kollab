@@ -21,6 +21,8 @@ try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   let inventoryReads = 0;
   let confirmedInstall = null;
+  const brokenImports = [];
+  let brokenDisabled = false;
   const commit = "a".repeat(40);
   const filesHash = "b".repeat(64);
   const preview = { job_id: "install-fixture", action: "install", status: "ready", commit, files_sha256: filesHash,
@@ -45,7 +47,15 @@ try {
       confirmedInstall = route.request().postDataJSON();
       return route.fulfill({ json: { ...preview, status: "complete" } });
     }
-    if (url.pathname === "/plugins/broken/web/index.js") return route.fulfill({ status: 500, contentType: "text/plain", body: "broken" });
+    if (url.pathname === "/engine/plugins/broken/disable" && route.request().method() === "POST") {
+      brokenDisabled = true;
+      broken.enabled = false;
+      return route.fulfill({ json: { ok: true } });
+    }
+    if (url.pathname === "/plugins/broken/web/index.js") {
+      brokenImports.push(url.href);
+      return route.fulfill({ status: 500, contentType: "text/plain", body: "broken" });
+    }
     if (url.pathname === "/plugins/fixture/web/index.css") return route.fulfill({ contentType: "text/css", body: '[data-plugin="fixture"] .scope-probe { color: rgb(12, 34, 56); }' });
     if (url.pathname === "/plugins/fixture/web/index.js") return route.fulfill({ contentType: "text/javascript", body:
       `import React from "react"; import { definePlugin } from "@kollab/plugin";
@@ -96,6 +106,19 @@ try {
   await panel.getByRole("button", { name: "Chat", exact: true }).click();
   await panel.getByRole("button", { name: /Broken Board/ }).click({ timeout: 5000 });
   await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
+  await page.getByText("View Error", { exact: true }).click();
+  await page.getByRole("alert").locator("pre").waitFor();
+  await Promise.all([
+    page.waitForRequest(request => request.url().includes("/plugins/broken/web/index.js") && request.url().includes("retry="), { timeout: 5000 }),
+    page.getByRole("alert").getByRole("button", { name: "Retry" }).click(),
+  ]);
+  await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
+  assert.ok(brokenImports.length >= 2, "retry imports the broken bundle again");
+  assert.notEqual(brokenImports[0], brokenImports[1], "retry uses a new bundle URL");
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("alert").getByRole("button", { name: "Turn Off" }).click();
+  await page.getByText("Broken is off", { exact: true }).waitFor();
+  assert.equal(brokenDisabled, true, "Turn Off calls the disable route");
   await page.getByRole("button", { name: "Back to Chat" }).click();
   const boardMenu = panel.getByRole("button", { name: /Fixture Board/ });
   await boardMenu.getByText("4", { exact: true }).waitFor({ timeout: 5000 });
