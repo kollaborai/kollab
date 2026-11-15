@@ -84,6 +84,8 @@ def test_reputation_rejects_update_without_snapshot_baseline(tmp_path):
 
     with pytest.raises(ValueError, match="base_scores"):
         storage.save_reputation(stale_snapshot)
+    with pytest.raises(ValueError, match="base_scores"):
+        storage.save_reputation(stale_snapshot, base_scores={})
 
     persisted = storage.load_reputation()["alpha"]
     assert (persisted.tasks_completed, persisted.tasks_failed) == (1, 0)
