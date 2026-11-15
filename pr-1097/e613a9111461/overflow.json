@@ -1,0 +1,15 @@
+{
+ "guided-setup-desktop-dark": false,
+ "guided-setup-desktop-light": false,
+ "guided-setup-tablet-dark": false,
+ "guided-setup-tablet-light": false,
+ "guided-setup-phone-dark": false,
+ "guided-setup-phone-light": false,
+ "learn-preview-desktop-dark": false,
+ "learn-preview-desktop-light": false,
+ "learn-preview-tablet-dark": false,
+ "learn-preview-tablet-light": false,
+ "learn-preview-phone-dark": false,
+ "learn-preview-phone-light": false,
+ "guided-setup-filled-desktop-dark": false
+}
