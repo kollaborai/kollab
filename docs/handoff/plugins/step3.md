@@ -50,7 +50,7 @@
 - App boot: red browser acceptance (test commit `31b14f0a`) timed out waiting for the opt-out notice. App now mounts the host, recovery/notice contributions and a scoped plugin provider; isolated fake-engine browser acceptance passes opt-out plus a loaded notice. `vitest run src/plugins` passes 24/24 and typecheck passes. Browser test uses Vite dev, not the production CSP; fixture route and modal/view/page navigation remain unwired, as do all other real contribution surfaces.
 
 
-- Page/modal red check: isolated browser acceptance now exercises plugin-contributed page tabs, Back to Chat, modal and Escape; it times out waiting for the page heading because navigation is not mounted. Implement these surfaces with the existing shell and dialog primitives.
+- Page/modal: red browser check (test commit `99bae3e8`) timed out on plugin page navigation. App now opens plugin pages and Radix dialogs with their tabs, passes `k`/session, and wraps tab renders in the plugin error boundary. Isolated fake-engine browser acceptance passes page tab switching, Back to Chat, modal and Escape, and plugin tests/typecheck pass. Multi-width, focus restoration, page-off transitions, production CSP and real-engine behavior remain unverified. The current native `window.confirm` for turning a failed plugin off is a placeholder: replace it with the specified styled dialog and exact active-run/process detail before completion.
 
 
 ## Remaining

@@ -66,6 +66,7 @@ import { PluginHostContext, PluginNotices } from "@/plugins/components";
 import { PluginHost } from "@/plugins/host";
 import { pluginUI } from "@/plugins/ui";
 import type { PluginOpen } from "@/plugins/sdk";
+import { PluginModalSurface, PluginPageSurface } from "@/plugins/surfaces";
 import {
   SidebarInset,
   SidebarProvider,
@@ -442,7 +443,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [pluginToast, setPluginToast] = useState<string | null>(null);
   const learnRoute = pageRoute.kind === "learn" ? pageRoute.learn : null;
   const whatsNewActive = pageRoute.kind === "whats-new";
-  const pageOpen = pageRoute.kind !== "chat";
+  const pluginPage = pluginTarget && "page" in pluginTarget.target ? pluginTarget : null;
+  const pluginModal = pluginTarget && "modal" in pluginTarget.target ? pluginTarget : null;
+  const pageOpen = pageRoute.kind !== "chat" || pluginPage !== null;
   const previousPageOpenRef = useRef(pageOpen);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -514,6 +517,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   }, [pageOpen]);
 
   const returnToChat = useCallback(() => {
+    setPluginTarget(null);
     if (readMainPageRoute(window.location).kind === "chat") return;
     window.history.pushState(null, "", pagePath("/", window.location.pathname));
     setPageRoute({ kind: "chat" });
@@ -1752,6 +1756,17 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     }
   };
 
+  const turnOffPlugin = (id: string) => {
+    if (contained || !["localhost", "127.0.0.1", "::1", "[::1]"].includes(window.location.hostname)) {
+      setPluginToast("Manage plugins on this computer");
+      return;
+    }
+    const name = pluginHost?.getSnapshot().entries.find(entry => entry.id === id)?.name ?? id;
+    if (!window.confirm(`Turn off ${name}? Its agent runs may be cancelled and background processes may need time to stop.`)) return;
+    void api.json(`/plugins/${encodeURIComponent(id)}/disable`, { method: "POST" })
+      .then(() => pluginHost?.refresh())
+      .catch(error => setPluginToast(error instanceof Error ? error.message : String(error)));
+  };
   const pluginActions = useRef({
     navigate: (_pluginId: string, _target: PluginOpen) => {},
     openAgent: (_sessionId: string) => {},
@@ -1764,7 +1779,10 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Unsupported link");
           window.open(url.href, "_blank", "noopener,noreferrer");
         } catch { setPluginToast("This plugin link is not a valid web address."); }
-      } else setPluginTarget({ pluginId, target });
+      } else {
+        if ("page" in target) returnToChat();
+        setPluginTarget({ pluginId, target });
+      }
     },
     openAgent: sessionId => { setPluginTarget(null); returnToChat(); void selectSession(sessionId); },
   };
@@ -1929,6 +1947,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           />
         ) : null}
         {learnRoute ? <LearnDialog route={learnRoute} onNavigate={navigateToLearn} onExit={returnToChat} /> : null}
+        {pluginHost && pluginModal && "modal" in pluginModal.target ? <PluginModalSurface host={pluginHost} pluginId={pluginModal.pluginId}
+          modalId={pluginModal.target.modal} session={activeSession ?? undefined} onClose={() => setPluginTarget(null)} onTurnOff={turnOffPlugin} /> : null}
         <SidebarInset
           id="app-main-pane"
           tabIndex={-1}
@@ -1937,7 +1957,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           {pluginHost ? <PluginNotices host={pluginHost} /> : null}
           {pluginToast ? <NoticeBar onDismiss={() => setPluginToast(null)}>{pluginToast}</NoticeBar> : null}
           {whatsNewActive ? <WhatsNewPage onExit={returnToChat} /> : null}
-          <div className={whatsNewActive ? "hidden" : "contents"}>
+          {pluginHost && pluginPage && "page" in pluginPage.target ? <PluginPageSurface host={pluginHost} pluginId={pluginPage.pluginId}
+            pageId={pluginPage.target.page} session={activeSession ?? undefined} onClose={returnToChat} onTurnOff={turnOffPlugin} /> : null}
+          <div className={whatsNewActive || pluginPage ? "hidden" : "contents"}>
           {versionMismatch ? (
             <NoticeBar
               detail={`Page v${versionMismatch.page} · engine v${versionMismatch.engine}`}
