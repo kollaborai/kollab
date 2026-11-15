@@ -668,6 +668,8 @@ class RelayAgentBridge:
                         "workspace_id": row["workspace_id"],
                         "harness": row.get("harness") or "",
                         "acp_waiting": bool(row.get("acp_waiting")),
+                        # The agent bundle it runs ("" from a peer that does not say).
+                        "agent_type": row.get("agent_type") or "",
                         # {name, type} while it runs a tool, else None (the gem acts it out).
                         "current_tool": row.get("current_tool") or None,
                     }
@@ -2176,11 +2178,20 @@ class RelayAgentBridge:
                 raise RelayError("opening agents from the network is unavailable")
             return await self.network_attach.receive(peer, method, payload)
         if method == "directory":
-            if payload != {}:
+            if (
+                not isinstance(payload, dict)
+                or set(payload) not in (set(), {"agent_type"})
+                or type(payload.get("agent_type", False)) is not bool
+            ):
                 raise RelayError("invalid directory request")
             agents = self.directory.publishable_agents(
                 self.workspace, client.state.workspace_id, self.device_name()
             )
+            if not payload.get("agent_type", False):
+                agents = [
+                    {key: value for key, value in row.items() if key != "agent_type"}
+                    for row in agents
+                ]
             if stranger:
                 # A stranger sees only the agents it may message.
                 granted = {
@@ -2921,9 +2932,22 @@ class RelayAgentBridge:
                         continue
                     if self.secure_transport is None:
                         raise RelayError("secure directory transport is unavailable")
-                    result = await self.secure_transport.request(
-                        peer_key, "directory", {}, timeout=3
-                    )
+                    try:
+                        result = await self.secure_transport.request(
+                            peer_key, "directory", {"agent_type": True}, timeout=3
+                        )
+                    except RelayError as exc:
+                        # Older peers reject the extended shape at their
+                        # application handler. Retry only that sanitized
+                        # application failure; carrier failures and deadlines
+                        # must not double the wait for an unreachable peer.
+                        if str(exc) != "invalid directory request" and getattr(
+                            exc, "code", None
+                        ) != "peer_application":
+                            raise
+                        result = await self.secure_transport.request(
+                            peer_key, "directory", {}, timeout=3
+                        )
                     agents = result.get("agents")
                     if not isinstance(agents, list) or len(agents) > MAX_DIRECTORY:
                         raise RelayError("invalid remote directory")
@@ -2940,7 +2964,9 @@ class RelayAgentBridge:
                         # A peer on this version always sends "device" too; an
                         # older peer has none, and its agents fall back to a
                         # stable per-peer stand-in below.
-                        optional_fields = {"device", "harness", "acp_waiting", "current_tool"}
+                        optional_fields = {
+                            "device", "harness", "acp_waiting", "current_tool", "agent_type"
+                        }
                         if (
                             not isinstance(row, dict)
                             or not fields <= set(row)
@@ -2967,6 +2993,12 @@ class RelayAgentBridge:
                             raise RelayError("invalid remote harness descriptor")
                         if "acp_waiting" in row and type(row["acp_waiting"]) is not bool:
                             raise RelayError("invalid remote harness waiting state")
+                        if "agent_type" in row and (
+                            not isinstance(row["agent_type"], str)
+                            or len(row["agent_type"]) > 128
+                            or not row["agent_type"].isprintable()
+                        ):
+                            raise RelayError("invalid remote agent type")
                         tool = row.get("current_tool")
                         if "current_tool" in row and (
                             not isinstance(tool, dict)

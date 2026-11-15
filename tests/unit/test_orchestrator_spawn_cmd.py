@@ -145,6 +145,31 @@ class TestCreateSessionInitialTask(unittest.TestCase):
         sep_idx = cmd.index("--")
         self.assertEqual(cmd[sep_idx + 1], "-not-a-flag really")
 
+    @patch("plugins.agent_orchestrator.orchestrator.threading.Thread")
+    @patch("kollabor_config.proc_ctl.start_child")
+    def test_acp_role_spawn_uses_resolved_identity_without_bundle_flag(
+        self, mock_popen, mock_thread
+    ):
+        """An ACP child launches as its assigned persona, not its bundle role."""
+        mock_popen.return_value = self._make_proc_mock()
+
+        _run(
+            self.orch._create_session(
+                full_name="test-proj-jasper",
+                agent_name="coder",
+                identity="jasper",
+                profile="codex-cli",
+                harness=True,
+            )
+        )
+
+        cmd = mock_popen.call_args.args[0]
+        self.assertIn("--llm", cmd)
+        self.assertEqual(cmd[cmd.index("--llm") + 1], "codex-cli")
+        self.assertIn("--as", cmd)
+        self.assertEqual(cmd[cmd.index("--as") + 1], "jasper")
+        self.assertNotIn("--agent", cmd)
+
 
 if __name__ == "__main__":
     unittest.main()

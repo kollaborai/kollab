@@ -866,7 +866,10 @@ class LoggingRedactor:
     # Comprehensive regex patterns
     PATTERNS = [
         # OpenAI API keys
-        (re.compile(r"sk-[a-zA-Z0-9_-]{20,}"), "[REDACTED-OPENAI-KEY]"),
+        (
+            re.compile(r"(?<![A-Za-z0-9])sk-[a-zA-Z0-9_-]{20,}"),
+            "[REDACTED-OPENAI-KEY]",
+        ),
         (re.compile(r"sk-proj-[a-zA-Z0-9_-]{20,}"), "[REDACTED-OPENAI-PROJECT-KEY]"),
         # Anthropic API keys
         (re.compile(r"sk-ant-[a-zA-Z0-9_-]{20,}"), "[REDACTED-ANTHROPIC-KEY]"),
@@ -1151,7 +1154,10 @@ class SecretRedactionFilter(logging.Filter):
             record.msg = redacted
             record.args = None
         if record.exc_info and not record.exc_text:
-            record.exc_text = logging.Formatter().formatException(record.exc_info)
+            try:
+                record.exc_text = logging.Formatter().formatException(record.exc_info)
+            except Exception:
+                pass  # malformed exception info is the formatter's problem
         if record.exc_text:
             record.exc_text = LoggingRedactor.redact(record.exc_text)
         if record.stack_info:

@@ -329,6 +329,29 @@ async def test_call_after_close_raises_immediately() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reconnect_sends_over_the_new_writer_and_fails_calls_on_the_old_one() -> None:
+    old, new = FakeStreamWriter(), FakeStreamWriter()
+    client = RpcClient(old)
+
+    waiting = asyncio.create_task(client.call("slow", timeout=30.0))
+    await _wait_for_write(old, expected=1)
+
+    client.reconnect(new)
+
+    with pytest.raises(RpcError) as excinfo:  # its reply can never arrive on the new connection
+        await asyncio.wait_for(waiting, timeout=1.0)
+    assert "closed" in str(excinfo.value)
+
+    call = asyncio.create_task(client.call("ping", {}, timeout=5.0))
+    await _wait_for_write(new, expected=1)
+    request = new.get_all_writes()[0]
+    client.on_reply({"action": "rpc_reply", "request_id": request["request_id"], "result": {"ok": True}})
+
+    assert await asyncio.wait_for(call, timeout=1.0) == {"ok": True}
+    assert len(old.get_all_writes()) == 1  # nothing more went to the old connection
+
+
+@pytest.mark.asyncio
 async def test_close_then_cancel_call_does_not_leave_unretrieved_future_error() -> None:
     """Closing and immediately cancelling a caller must not leak a Future error."""
     import gc

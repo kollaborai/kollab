@@ -26,6 +26,7 @@ import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 from .config_utils import get_existing_global_config_path, get_global_config_path
 from .loader import CONFIG_VERSION, VERSION_KEY
@@ -63,6 +64,15 @@ def detect_provider_from_profile(profile: Dict[str, Any]) -> str:
 
     api_key = profile.get("api_key", "")
     api_base = profile.get("api_base", "") or profile.get("base_url", "")
+    api_host = ""
+    if isinstance(api_base, str) and api_base.strip():
+        try:
+            endpoint = urlsplit(api_base)
+            if not endpoint.netloc:
+                endpoint = urlsplit(f"//{api_base}")
+            api_host = (endpoint.hostname or "").lower()
+        except ValueError:
+            pass
     azure_base_url = profile.get("azure_base_url", "")
     api_type = profile.get("api_type", "")
 
@@ -75,17 +85,12 @@ def detect_provider_from_profile(profile: Dict[str, Any]) -> str:
     if api_type and isinstance(api_type, str) and api_type.lower() == "azure":
         return "azure_openai"
 
-    # Check for azure.com in api_base
-    if api_base and isinstance(api_base, str) and "azure.com" in api_base.lower():
+    # Check Azure vendor domains in the endpoint host.
+    if any(
+        api_host == domain or api_host.endswith(f".{domain}")
+        for domain in ("azure.com", "azure.openai.com", "openai.azure.com")
+    ):
         return "azure_openai"
-
-    # Check for azure.openai.com or openai.azure.com in api_base
-    if api_base and isinstance(api_base, str):
-        if (
-            "azure.openai.com" in api_base.lower()
-            or "openai.azure.com" in api_base.lower()
-        ):
-            return "azure_openai"
 
     # 3. Anthropic detection (sk-ant- prefix is MORE SPECIFIC than sk-)
     if api_key and isinstance(api_key, str):
@@ -99,12 +104,10 @@ def detect_provider_from_profile(profile: Dict[str, Any]) -> str:
             return "openai"
 
     # 5. API base URL detection (after key format check)
-    if api_base and isinstance(api_base, str):
-        api_base_lower = api_base.lower()
-        if "anthropic.com" in api_base_lower:
-            return "anthropic"
-        if "openai.com" in api_base_lower and "azure" not in api_base_lower:
-            return "openai"
+    if api_host == "anthropic.com" or api_host.endswith(".anthropic.com"):
+        return "anthropic"
+    if api_host == "openai.com" or api_host.endswith(".openai.com"):
+        return "openai"
 
     # 6. Default for legacy configs
     return "auto"

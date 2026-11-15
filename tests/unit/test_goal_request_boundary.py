@@ -633,6 +633,29 @@ async def test_pending_submission_replay_after_restart_and_discard(boundary):
     assert boundary.service.discard_attachment_request('conversation-a', request_id)
     discarded = await boundary.state.send_message(content, request_id='restart-key')
     assert not discarded['accepted'] and 'discarded' in discarded['reason']
+
+
+@pytest.mark.asyncio
+async def test_expired_discarded_submission_is_admitted_and_dispatched_again(boundary):
+    now = [1_000_000.0]
+    boundary.store._clock = lambda: now[0]
+    content = message('/goal inspect expired replay', b'expired-image')
+
+    first = await boundary.state.send_message(content, request_id='expired-key')
+    assert first['accepted']
+    await finish(boundary)
+    original = boundary.store.get_active('conversation-a')
+    assert original is not None
+    boundary.service.clear(original.goal_id)
+
+    now[0] += 8 * 24 * 3600
+    replay = await boundary.state.send_message(content, request_id='expired-key')
+    assert replay['accepted'] and replay.get('completed') is not True
+    assert len(boundary.service.pending_attachment_requests('conversation-a')) == 1
+    await finish(boundary)
+
+    replayed = boundary.store.get_active('conversation-a')
+    assert replayed is not None and replayed.goal_id != original.goal_id
     assert boundary.service.pending_attachment_requests('conversation-a') == []
 
 

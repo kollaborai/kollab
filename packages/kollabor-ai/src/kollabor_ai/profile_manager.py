@@ -852,7 +852,7 @@ class LLMProfile:
         endpoint, _hidden = redact_profile_endpoint(self.get_endpoint())
         return str(endpoint or "")
 
-    def get_api_key(self) -> str:
+    def get_api_key(self, *, migrate_plaintext: bool = True) -> str:
         """Get API key with tiered resolution.
 
         Resolution order:
@@ -894,7 +894,11 @@ class LLMProfile:
         # the mark lives at module level, not on the object. An OAuth access
         # token is not an API key: it refreshes and never goes to the keyring.
         if raw:
-            if self.api_key_from_env or self.auth_type == "oauth":
+            if (
+                self.api_key_from_env
+                or self.auth_type == "oauth"
+                or not migrate_plaintext
+            ):
                 return raw
             if (self.name, raw) not in _KEYRING_MIGRATION_TRIED:
                 _KEYRING_MIGRATION_TRIED.add((self.name, raw))
@@ -1037,12 +1041,16 @@ class LLMProfile:
             return global_val.lower()
         return self.provider or "openai"
 
-    def get_effort_provider(self) -> str:
+    def get_effort_provider(self, *, migrate_plaintext: bool = True) -> str:
         """``get_provider()`` with ``auto`` resolved to the provider requests use."""
         provider = self.get_provider()
         if provider != "auto":
             return provider
-        return resolve_effort_provider(provider, self.get_api_key(), self.get_endpoint())
+        return resolve_effort_provider(
+            provider,
+            self.get_api_key(migrate_plaintext=migrate_plaintext),
+            self.get_endpoint(),
+        )
 
     def get_provider_type(self) -> str:
         """
@@ -1330,7 +1338,12 @@ class ProfileManager:
         },
     }
 
-    def __init__(self, config=None, cli_profile: Optional[str] = None):
+    def __init__(
+        self,
+        config=None,
+        cli_profile: Optional[str] = None,
+        local_folder: Optional[Path] = None,
+    ):
         """
         Initialize profile manager.
 
@@ -1338,8 +1351,13 @@ class ProfileManager:
             config: Configuration object with get() method
             cli_profile: CLI --llm override (auto-detected profiles are
                 registered but never activated over it)
+            local_folder: another folder whose own ``.kollab`` local layer
+                overrides the shared ones when reading profiles (the web UI
+                lists the chosen workspace). None is this process's
+                working directory.
         """
         self.config = config
+        self._local_folder = local_folder
         self._profiles: Dict[str, LLMProfile] = {}
         self._invalid_profile_errors: Dict[str, str] = {}
         self._active_profile_name: str = "default"
@@ -1836,10 +1854,18 @@ class ProfileManager:
                 logger.debug(f"Loaded profiles from: {global_config}")
 
         local_config = next(
-            (path for path in get_local_config_path_candidates() if path.exists()),
-            get_local_config_path(),
+            (
+                path
+                for path in get_local_config_path_candidates(self._local_folder)
+                if path.exists()
+            ),
+            # A chosen folder with no own config reads no local layer: falling
+            # back to this engine folder's own config would list its private
+            # profiles for the chosen workspace (#972). None keeps today's
+            # behavior for the engine's own folder.
+            get_local_config_path() if self._local_folder is None else None,
         )
-        if local_config.exists():
+        if local_config and local_config.exists():
             config_data = _read_config(local_config)
             llm_config = config_data.get("kollabor", {}).get("llm", {})
             local_profiles = llm_config.get("profiles", {}) or {}

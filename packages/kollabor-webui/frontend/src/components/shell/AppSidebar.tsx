@@ -1,7 +1,8 @@
 import { Fragment, useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
-import { BookOpen, ChevronDown, Eye, EyeOff, LayoutGrid, Loader2, Newspaper, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
+import { BookOpen, ChevronDown, Eye, EyeOff, GitPullRequest, LayoutGrid, Loader2, Newspaper, Palette, Plus, Settings2, SlidersHorizontal, Users } from "lucide-react";
 import type { EngineApi, AgentBundleEntry, AgentNetwork, AgentPoolEntry, LiveAgent, ModelChoice, OfflineAgent, Profile, Session } from "@/api";
 import { ModelPicker } from "@/components/shell/ModelPicker";
+import { loadModelChoices, profileChoicesKey } from "@/components/shell/model-choices";
 import { AgentPicker, choiceLabel } from "@/components/agents/AgentPicker";
 import { Avatar } from "@/components/agents/Avatar";
 import type { LaunchChoice } from "@/components/agents/launch-choices";
@@ -159,6 +160,7 @@ export function AppSidebar({
   onSettings,
   onHalt,
   onLearn,
+  onPrChain,
   learnActive,
   onWhatsNew,
   whatsNewActive,
@@ -219,6 +221,8 @@ export function AppSidebar({
   /** Open Settings on the Halt and Resume screen (works with no chat open). */
   onHalt: () => void;
   onLearn: () => void;
+  /** Opens the PR Chain dialog; works without a session. */
+  onPrChain: () => void;
   learnActive: boolean;
   onWhatsNew: () => void;
   whatsNewActive: boolean;
@@ -263,6 +267,12 @@ export function AppSidebar({
   }, [learnActive, whatsNewActive]);
   // A lifted row's clone replaces the element a touch started on; keep that touch reaching the drag.
   useEffect(() => relayDetachedTouches(window), []);
+  // The model picker's list is asked for as the shell loads, and again when the profiles change, so the Model
+  // button opens on a list that is already complete (#953). The engine has been learning it since it started.
+  const profilesKey = profileChoicesKey(profiles);
+  useEffect(() => {
+    void loadModelChoices(api, { profiles });
+  }, [api, profilesKey]);
   // Every live agent on this computer is a session row (the engine lists them); these are the other computers'.
   // The #158 tree: NETWORKS > DEVICES > WORKSPACES > AGENTS across every network
   // this device belongs to; an engine without the aggregate synthesizes one
@@ -604,6 +614,7 @@ export function AppSidebar({
                   value={{ profile: selectedProfile, model: selectedModel, effort: selectedEffort }}
                   onPick={onModelPick}
                   disabled={!profiles.length}
+                  folder={workspacePath.trim()}
                 />
                 <Label htmlFor="new-session-workspace" className="text-muted-foreground text-xs font-normal">
                   Workspace
@@ -785,6 +796,7 @@ export function AppSidebar({
                               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                                 <span className="flex min-w-0 items-baseline text-sm leading-snug font-medium">
                                   <span className="min-w-0 truncate">{remoteName(agent.name)}</span>
+                                  <AgentTypeGlyph type={agent.agent_type} />
                                 </span>
                                 <span className="text-muted-foreground truncate text-[0.8125rem] leading-snug">
                                   {note && !note.error
@@ -870,10 +882,10 @@ export function AppSidebar({
             Could not save sidebar order: {sidebarOrder.error}
           </p>
         ) : null}
-        {/* Use one row when it fits, otherwise center four actions over three. */}
+        {/* Use one row when it fits, otherwise two rows of four. */}
         <div
           data-sidebar="footer-actions"
-          className="grid grid-cols-8 items-center justify-items-center gap-y-1 [&>button]:col-span-2 [&>button:nth-of-type(5)]:col-start-2 [&>button:nth-of-type(6)]:col-start-4 [&>button:nth-of-type(7)]:col-start-6 @min-[17rem]:flex @min-[17rem]:justify-between md:@min-[14rem]:flex md:@min-[14rem]:justify-between"
+          className="grid grid-cols-8 items-center justify-items-center gap-y-1 [&>button]:col-span-2 @min-[17rem]:flex @min-[17rem]:justify-between md:@min-[14rem]:flex md:@min-[14rem]:justify-between"
         >
           <Popover>
             <PopoverTrigger asChild>
@@ -934,6 +946,17 @@ export function AppSidebar({
             }}
           >
             <BookOpen className="size-4" />
+          </TooltipIconButton>
+          <TooltipIconButton
+            tooltip="PR Chain"
+            side="top"
+            className={FOOTER_BUTTON}
+            onClick={() => {
+              setOpenMobile(false);
+              onPrChain();
+            }}
+          >
+            <GitPullRequest className="size-4" />
           </TooltipIconButton>
           <TooltipIconButton
             tooltip="What’s New"

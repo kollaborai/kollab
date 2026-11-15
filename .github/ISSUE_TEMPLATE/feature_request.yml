@@ -40,4 +40,11 @@ body:
     attributes:
       label: Acceptance criteria
       description: What would make this complete?
+  - type: textarea
+    id: spec
+    attributes:
+      label: Spec
+      description: The feature owner writes or links a spec before implementation. Link docs/specs/<name>.md, or write "to be written in the PR that builds it" and use docs/specs/TEMPLATE.md.
+    validations:
+      required: true
 

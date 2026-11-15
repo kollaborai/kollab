@@ -74,6 +74,20 @@ Execution methods:
 - tmux sessions (preferred, supports background jobs)
 - direct subprocess (fallback)
 
+Agent bundles that need terminal inspection without shell writes can grant the
+`terminal-read` tool alongside `file-read` and `file-grep`:
+
+```json
+{"tools": ["file-read", "file-grep", "terminal-read"]}
+```
+
+Call it with a read-only command such as `git log --oneline -1`. It parses the
+command into argv and runs it without a shell. Writes, unsupported shell syntax,
+untrusted executables, and working directories outside the project are refused
+with a reason. The existing `terminal` tool keeps its normal behavior. See the
+[read-only terminal specification](../specs/agent-read-only-terminal.md) for
+the full policy.
+
 ### Workspace Switching
 
 `workspace-set` changes the agent's session workspace at runtime:

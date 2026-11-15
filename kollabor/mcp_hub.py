@@ -107,8 +107,9 @@ def _tools() -> list[Tool]:
         tool("hub_ask", "Ask an agent and wait for its final turn, or a question back. Circular asks return busy.",
              {"to": address, "question": text, "thread": thread,
               "timeout": {"type": "number", "minimum": 1, "maximum": 600, "default": 300}}, ["to", "question"]),
-        tool("hub_spawn", "Start an agent on a named LLM profile or loadout with an initial task.",
-             {"name": text, "task": text, "llm": text}, ["name", "task", "llm"]),
+        tool("hub_spawn", "Start an agent on a named LLM profile or loadout with an initial task. "
+             "identity picks a specific roster identity.",
+             {"name": text, "task": text, "llm": text, "identity": text}, ["name", "task", "llm"]),
     ]
 
 

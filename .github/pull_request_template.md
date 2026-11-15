@@ -84,6 +84,8 @@ in `docs/product-ready-checklist.md`.
 - [ ] The PR title and commit messages follow Conventional Commits.
 - [ ] The PR body says what changed, why, and how to try it, and includes
   `Fixes #<issue-number>` when an issue tracks the work.
+- [ ] Feature PRs add or link a feature spec; fix PRs include a Fix brief in
+  this body or the linked issue; other types are N/A.
 - [ ] This complete checklist is present in the PR body, and every item is
   filled with evidence or a specific N/A reason; no result is guessed or left
   blank.
