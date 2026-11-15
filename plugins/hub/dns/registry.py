@@ -10,6 +10,7 @@ Managed by the coordinator (primary writer), readable by all agents
 (filesystem is the IPC channel, same as presence).
 """
 
+import copy
 import logging
 import time
 from typing import Dict, Iterable, List, Optional
@@ -28,12 +29,17 @@ class AgentRegistry:
     def __init__(self, storage: DNSStorage):
         self._storage = storage
         self._records: Dict[str, AgentRecord] = {}
+        self._persisted_records: Dict[str, dict] = {}
         self._loaded = False
 
     def _ensure_loaded(self) -> None:
         """Lazy-load records from storage on first access."""
         if not self._loaded:
             self._records = self._storage.load_registry()
+            self._persisted_records = {
+                key: copy.deepcopy(record.to_dict())
+                for key, record in self._records.items()
+            }
             self._loaded = True
 
     # --- Registration ---
@@ -295,6 +301,7 @@ class AgentRegistry:
 
     def save(self) -> None:
         """Persist current records to storage (public API)."""
+        self._ensure_loaded()
         self._save()
 
     def reload(self) -> None:
@@ -408,12 +415,26 @@ class AgentRegistry:
     ) -> None:
         """Persist records to storage."""
         if hasattr(self._storage, "merge_save_registry"):
-            records = self._records
-            if updated_keys is not None:
-                keys = set(updated_keys) | set(created_keys)
-                records = {
-                    key: self._records[key] for key in keys if key in self._records
+            if updated_keys is None:
+                current_records = {
+                    key: copy.deepcopy(record.to_dict())
+                    for key, record in self._records.items()
                 }
+                created_keys = set(created_keys) | (
+                    set(current_records) - set(self._persisted_records)
+                )
+                updated_keys = {
+                    key
+                    for key, record_data in current_records.items()
+                    if self._persisted_records.get(key) != record_data
+                }
+                deleted_keys = list(deleted_keys or []) + list(
+                    set(self._persisted_records) - set(current_records)
+                )
+            keys = set(updated_keys) | set(created_keys)
+            records = {
+                key: self._records[key] for key in keys if key in self._records
+            }
             if created_keys:
                 self._storage.merge_save_registry(
                     records,
@@ -424,5 +445,15 @@ class AgentRegistry:
                 self._storage.merge_save_registry(
                     records, deleted_keys=deleted_keys
                 )
+            for key in deleted_keys or []:
+                self._persisted_records.pop(key, None)
+            for key in keys:
+                record = self._records.get(key)
+                if record is not None:
+                    self._persisted_records[key] = copy.deepcopy(record.to_dict())
         else:
             self._storage.save_registry(self._records)
+            self._persisted_records = {
+                key: copy.deepcopy(record.to_dict())
+                for key, record in self._records.items()
+            }

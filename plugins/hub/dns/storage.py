@@ -33,6 +33,79 @@ def _is_finite_number(value: Any) -> bool:
         return False
 
 
+def _validate_agent_record_data(designation: str, data: dict) -> None:
+    """Reject malformed persisted fields before constructing a live record."""
+    if data.get("designation") != designation:
+        raise TypeError("record designation must match its registry key")
+
+    string_fields = (
+        "agent_id",
+        "runtime",
+        "authority",
+        "socket_path",
+        "endpoint_uri",
+        "project",
+        "public_key",
+        "approval_state",
+        "state",
+        "current_task",
+        "endpoint_state",
+        "caste",
+    )
+    if any(field in data and not isinstance(data[field], str) for field in string_fields):
+        raise TypeError("record string field has an invalid type")
+    if "pid" in data and type(data["pid"]) is not int:
+        raise TypeError("record pid must be an integer")
+    if "is_coordinator" in data and type(data["is_coordinator"]) is not bool:
+        raise TypeError("record coordinator flag must be a boolean")
+
+    for field in ("trust_score", "registered_at", "last_seen", "last_endpoint_seen", "ttl"):
+        if field in data and not _is_finite_number(data[field]):
+            raise TypeError(f"record {field} must be a finite number")
+    if "trust_score" in data and not 0 <= data["trust_score"] <= 1:
+        raise ValueError("record trust score is out of range")
+    if "ttl" in data and data["ttl"] < 0:
+        raise ValueError("record ttl is negative")
+
+    protocols = data.get("protocols", ["socket"])
+    tags = data.get("tags", {})
+    capabilities = data.get("capabilities", [])
+    if not isinstance(protocols, list) or any(not isinstance(item, str) for item in protocols):
+        raise TypeError("record protocols must be a list of strings")
+    if not isinstance(tags, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in tags.items()
+    ):
+        raise TypeError("record tags must map strings to strings")
+    if not isinstance(capabilities, list):
+        raise TypeError("record capabilities must be a list")
+    for capability in capabilities:
+        if not isinstance(capability, dict):
+            raise TypeError("record capability must be an object")
+        for field in ("name", "version", "evidence"):
+            if field in capability and not isinstance(capability[field], str):
+                raise TypeError(f"record capability {field} must be a string")
+        for field in ("confidence", "last_demonstrated"):
+            if field in capability and not _is_finite_number(capability[field]):
+                raise TypeError(f"record capability {field} must be a finite number")
+        if "endorsed_by" in capability and (
+            not isinstance(capability["endorsed_by"], list)
+            or any(not isinstance(item, str) for item in capability["endorsed_by"])
+        ):
+            raise TypeError("record capability endorsements must be strings")
+
+    attestation = data.get("attestation")
+    if attestation is not None:
+        if not isinstance(attestation, dict):
+            raise TypeError("record attestation must be an object")
+        for field in ("subject", "issuer", "public_key", "signature", "attestation_type"):
+            if field in attestation and not isinstance(attestation[field], str):
+                raise TypeError(f"record attestation {field} must be a string")
+        for field in ("issued_at", "expires_at"):
+            if field in attestation and not _is_finite_number(attestation[field]):
+                raise TypeError(f"record attestation {field} must be a finite number")
+
+
 class DNSStorageReadError(RuntimeError):
     """Existing DNS persistence data could not be read safely."""
 
@@ -190,6 +263,7 @@ class DNSStorage:
                     record_data, dict
                 ):
                     raise TypeError("registry records must map names to objects")
+                _validate_agent_record_data(designation, record_data)
                 records[designation] = AgentRecord.from_dict(record_data)
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
             raise RegistryReadError(
