@@ -128,6 +128,7 @@ class MCPServerConnection:
 
     DEFAULT_REQUEST_TIMEOUT = 300.0
     DEFAULT_STARTUP_TIMEOUT = 15.0
+    MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 
     def __init__(
         self,
@@ -404,13 +405,7 @@ class MCPServerConnection:
                     if not line.strip():
                         continue
                     try:
-                        message = json.loads(line.decode("utf-8"))
-                    except UnicodeDecodeError:
-                        logger.debug(
-                            "Ignoring MCP frame with invalid UTF-8 from %s",
-                            self.server_name,
-                        )
-                        continue
+                        message = json.loads(line.decode("utf-8", errors="replace"))
                     except json.JSONDecodeError:
                         logger.debug(
                             "Ignoring invalid JSON from MCP server %s: %s",
@@ -419,7 +414,6 @@ class MCPServerConnection:
                         )
                         continue
                     self._dispatch_incoming_message(message)
-
                 if len(self._read_buffer) > MAX_MCP_FRAME_BYTES:
                     oversized_frame = True
                 if oversized_frame:

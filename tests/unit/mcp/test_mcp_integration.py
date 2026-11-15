@@ -72,12 +72,16 @@ class _HangingStdout:
 
 
 class _ChunkedStdout:
-    def __init__(self, chunks):
+    def __init__(self, chunks, hold_open=False):
         self._chunks = list(chunks)
+        self._hold_open = hold_open
+        self._closed = asyncio.Event()
 
     async def read(self, size):
         await asyncio.sleep(0)
         if not self._chunks:
+            if self._hold_open:
+                await self._closed.wait()
             return b""
         chunk = self._chunks[0]
         result, remainder = chunk[:size], chunk[size:]
@@ -88,7 +92,7 @@ class _ChunkedStdout:
         return result
 
     def close(self):
-        pass
+        self._closed.set()
 
 
 class _FakeStderr:
@@ -150,6 +154,204 @@ class TestMCPServerConnection(unittest.TestCase):
 
             self.assertFalse(connection.initialized)
             self.assertEqual(connection._read_buffer, b"")
+
+        asyncio.run(run_test())
+
+    def test_request_reader_preserves_utf8_at_every_byte_boundary(self):
+        """Valid 2, 3, and 4 byte characters survive every split point."""
+
+        async def run_test():
+            for text in ("é", "€", "😀"):
+                encoded = text.encode("utf-8")
+                for split_offset in range(1, len(encoded)):
+                    with self.subTest(text=text, split_offset=split_offset):
+                        message = {
+                            "jsonrpc": "2.0",
+                            "id": "utf8-request",
+                            "result": {"text": text},
+                        }
+                        frame = (
+                            json.dumps(message, ensure_ascii=False) + "\n"
+                        ).encode("utf-8")
+                        split = frame.index(encoded) + split_offset
+                        connection = MCPServerConnection("test", "fake")
+                        connection.initialized = True
+                        connection.process = _FakeProcess(
+                            stdout=_ChunkedStdout(
+                                [frame[:split], frame[split:]], hold_open=True
+                            )
+                        )
+
+                        response = await connection._send_request(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": "utf8-request",
+                                "method": "tools/call",
+                            }
+                        )
+
+                        self.assertEqual(response["result"]["text"], text)
+                        self.assertTrue(connection.initialized)
+                        self.assertEqual(connection._pending_requests, {})
+                        await connection.close()
+
+        asyncio.run(run_test())
+
+    def test_request_reader_frames_partial_multi_message_chunks_by_id(self):
+        """Partial JSON lines and multiple frames retain out-of-order correlation."""
+
+        async def run_test():
+            frames = (
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "second",
+                        "result": {"text": "two €"},
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "first",
+                        "result": {"text": "one 😀"},
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            ).encode("utf-8")
+            connection = MCPServerConnection("test", "fake")
+            connection.initialized = True
+            connection.process = _FakeProcess(
+                stdout=_ChunkedStdout(
+                    [frames[:11], frames[11:37], frames[37:]], hold_open=True
+                )
+            )
+            first_request = asyncio.create_task(
+                connection._send_request(
+                    {"jsonrpc": "2.0", "id": "first", "method": "first"}
+                )
+            )
+            second_request = asyncio.create_task(
+                connection._send_request(
+                    {"jsonrpc": "2.0", "id": "second", "method": "second"}
+                )
+            )
+
+            first, second = await asyncio.gather(first_request, second_request)
+
+            self.assertEqual(first["result"]["text"], "one 😀")
+            self.assertEqual(second["result"]["text"], "two €")
+            self.assertTrue(connection.initialized)
+            self.assertEqual(connection._pending_requests, {})
+            await connection.close()
+
+        asyncio.run(run_test())
+
+    def test_request_reader_replaces_malformed_utf8_and_discards_partial_eof(self):
+        """Malformed text stays within its frame; an incomplete EOF clears state."""
+
+        async def run_test():
+            malformed = (
+                b'{"jsonrpc":"2.0","id":"bad","result":{"text":"caf\xc3("}}\n'
+            )
+            valid = (
+                b'{"jsonrpc":"2.0","id":"good","result":{"text":"ok"}}\n'
+            )
+            connection = MCPServerConnection("test", "fake")
+            connection.initialized = True
+            connection.process = _FakeProcess(
+                stdout=_ChunkedStdout([malformed + valid], hold_open=True)
+            )
+            bad_request = asyncio.create_task(
+                connection._send_request(
+                    {"jsonrpc": "2.0", "id": "bad", "method": "first"}
+                )
+            )
+            good_request = asyncio.create_task(
+                connection._send_request(
+                    {"jsonrpc": "2.0", "id": "good", "method": "second"}
+                )
+            )
+            bad, good = await asyncio.gather(bad_request, good_request)
+            self.assertEqual(bad["result"]["text"], "caf�(")
+            self.assertEqual(good["result"]["text"], "ok")
+            self.assertTrue(connection.initialized)
+            await connection.close()
+
+            partial = _ChunkedStdout([b'{"jsonrpc":"2.0","id":"lost"'])
+            connection = MCPServerConnection("test", "fake")
+            connection.initialized = True
+            connection.process = _FakeProcess(stdout=partial)
+            response = await connection._send_request(
+                {"jsonrpc": "2.0", "id": "lost", "method": "lost"}
+            )
+            self.assertIsNone(response)
+            self.assertFalse(connection.initialized)
+            self.assertEqual(connection._read_buffer, b"")
+
+        asyncio.run(run_test())
+
+    def test_request_reader_retires_connection_after_oversized_frame(self):
+        """An over-limit JSON-RPC line fails pending calls with bounded errors."""
+
+        async def run_test():
+            oversized = (
+                b'{"jsonrpc":"2.0","id":"too-big","result":{"text":"'
+                + b"x" * 256
+                + b'"}}\n'
+            )
+            chunks = [
+                oversized[index : index + 7] for index in range(0, len(oversized), 7)
+            ]
+            connection = MCPServerConnection("test", "fake")
+            connection.initialized = True
+            connection.process = _FakeProcess(stdout=_ChunkedStdout(chunks))
+
+            with patch("kollabor_agent.mcp_integration.MAX_MCP_FRAME_BYTES", 128):
+                response = await connection._send_request(
+                    {"jsonrpc": "2.0", "id": "good", "method": "tools/call"}
+                )
+
+            self.assertIn("error", response)
+            self.assertIn("exceeded the 128-byte limit", response["error"]["message"])
+            self.assertFalse(connection.initialized)
+            self.assertEqual(connection._read_buffer, b"")
+            self.assertEqual(connection._pending_requests, {})
+
+        asyncio.run(run_test())
+
+    def test_request_reader_decodes_utf8_split_across_real_pipe_reads(self):
+        """A child process pipe can split a valid UTF-8 code point between writes."""
+
+        async def run_test():
+            child = (
+                "import os, sys, time; "
+                "frame = b'{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":\\\"pipe\\\","
+                "\\\"result\\\":{\\\"text\\\":\\\"caf' + bytes([195, 169]) + b'\\\"}}\\n'; "
+                "cut = frame.index(bytes([195])) + 1; "
+                "os.write(1, frame[:cut]); time.sleep(0.02); "
+                "os.write(1, frame[cut:]); sys.stdin.buffer.readline()"
+            )
+            connection = MCPServerConnection("pipe-test", "unused")
+            connection.initialized = True
+            connection.process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                child,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            response = await connection._send_request(
+                {"jsonrpc": "2.0", "id": "pipe", "method": "tools/call"}
+            )
+
+            self.assertEqual(response["result"]["text"], "café")
+            self.assertTrue(connection.initialized)
+            await connection.close()
 
         asyncio.run(run_test())
 
