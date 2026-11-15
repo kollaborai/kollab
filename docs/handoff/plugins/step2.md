@@ -105,8 +105,8 @@ Step 2 is not complete. Item 4 requires each background process to receive
 at `packages/kollabor-plugins/src/kollabor_plugins/services.py:251-264` constructs
 a strict child environment that omits both, and the supervisor at lines 473-480
 starts that wrapper independently. The fresh step 2 instructions expressly
-expand ownership to the minimal service-child token/URL provisioning and redaction.
-No change has yet been made to `services.py`; this is the next active item.
+expanded ownership for minimal service-child token/URL provisioning; `b04f296b`
+implements it as described above. Multi-supervisor port changes remain unverified.
 
 Token progress: tests `921d01c6`, `90ae0f15`, and `1a6918b2` were red before
 `6d389eff` added per-plugin stable 0600 token files, scoped HTTP authorization,
@@ -138,10 +138,20 @@ disable and remove guards; `6198e2b5` holds service locks during removal;
 `e869b785` honors the log tail limit. Install/update staging, polling and
 confirmation remain to be implemented and verified.
 
-Next: service-child environment provisioning and remaining item 5 management
-routes, then PhoneLink filtering, spoofing/normalization tests, all gates and
-smoke. The branch is not ready to deploy: service-child environment
-provisioning, install/update jobs and PhoneLink management blocking are absent.
+Service-child credentials: `737a5dcc` was red before `b04f296b`. The engine
+and wrapper now use the same private token-file implementation; wrappers pass
+a scoped token and validated loopback origin to children, redact token values,
+and report credential preparation failures without exposing details. Engine
+supervision and service actions pass their configured port to new wrappers.
+Terminal-only supervision uses KOLLAB_ENGINE_URL or the default 7433. Existing
+wrappers are intentionally not restarted merely because a later engine starts
+on a different port: that multi-supervisor case still needs design/verification.
+Plugin and engine regression: 257 passed, 1 skipped (`service-regression.log`);
+scoped Ruff and git diff --check passed. No live engine/service smoke yet.
+
+Next: remaining item 5 management routes, then PhoneLink filtering,
+spoofing/normalization tests, all gates and smoke. The branch is not ready to
+deploy: install/update jobs and PhoneLink management blocking are absent.
 The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
 `packages/kollabor-engine/src/kollabor_engine/phone_link.py` is in scope only
 for refusing the spec's remote-disallowed plugin routes and its tests;
