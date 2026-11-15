@@ -278,17 +278,25 @@ class FileOperationsExecutor:
             path = Path(filepath).expanduser()
             if not path.is_absolute():
                 path = self.project_root / path
-            path = path.resolve()
-            root = Path.home().joinpath(".kollab").resolve()
-            token_root = Path(os.environ.get("KOLLAB_CONFIG_DIR") or root).expanduser().resolve()
-            if path == token_root / "engine.token" or path == root / "engine.token":
+            lexical = Path(os.path.abspath(path))
+            resolved = lexical.resolve()
+            home_root = Path.home() / ".kollab"
+            roots = {Path(os.path.abspath(home_root)), home_root.resolve()}
+            override = os.environ.get("KOLLAB_CONFIG_DIR", "").strip()
+            token_roots = roots | ({Path(override).expanduser().resolve()} if override else set())
+            token_paths = {root / "engine.token" for root in token_roots}
+            token_paths |= {token.resolve() for token in token_paths}
+            if lexical in token_paths or resolved in token_paths:
                 return True
-            if path.is_relative_to(root / "plugins"):
-                return True
-            data = root / "plugin-data"
-            if path.is_relative_to(data):
-                parts = path.relative_to(data).parts
-                return len(parts) == 3 and parts[1:] == ("run", "token")
+            for candidate in (lexical, resolved):
+                for root in roots:
+                    if candidate.is_relative_to(root / "plugins"):
+                        return True
+                    data = root / "plugin-data"
+                    if candidate.is_relative_to(data):
+                        parts = candidate.relative_to(data).parts
+                        if len(parts) == 3 and parts[1:] == ("run", "token"):
+                            return True
             return False
         except (OSError, RuntimeError, ValueError):
             return True
