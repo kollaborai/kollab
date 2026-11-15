@@ -220,3 +220,7 @@ request names. Existing containment, registration order and nosniff remain.
 10 tests passed (`$WORK/assets-green-1794703194/test.log`); Ruff and diff checks
 passed. Next append the step 2 changelog line, then final fixed-HEAD gates and
 isolated smoke.
+
+Changelog: `fa161011` appends the step 2 entry. Next: fetch and inspect the
+step 1 branch, merge if needed, then run all final gates and live isolated smoke
+on a fixed HEAD before rewriting this handoff and pushing.
