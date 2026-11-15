@@ -23,7 +23,7 @@
 - SDK runtime: isolated red check (test commit `9b5a5ee7`) failed 4/4 because `createPluginContext` did not exist. After implementation, isolated loader, registry and SDK tests pass 11/11; isolated frontend typecheck passes. The SDK stages contributions, scopes authenticated engine API and settings calls, rejects obvious path traversal, exposes events/navigation and disposes subscriptions. Hook behavior, real event transport, UI components and host integration remain to be exercised.
 
 
-- Event transport red check: isolated `vitest run src/plugins/events.test.ts` fails because `./events` does not yet exist. It specifies authenticated SSE framing, topic isolation and subscriber cleanup. Reconnect and stream failure behavior still need explicit tests.
+- Event transport: isolated red check (test commit `1a29cd4c`) failed because `./events` did not exist. After implementation, `vitest run src/plugins` passes 13/13 and frontend typecheck passes under the isolated HOME. The transport uses authenticated requests, topic routing, abort on unsubscribe and bounded retry; reconnect and stream failure behavior still need explicit tests and host integration.
 
 
 ## Remaining
