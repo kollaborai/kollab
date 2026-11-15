@@ -47,6 +47,10 @@ try {
       confirmedInstall = route.request().postDataJSON();
       return route.fulfill({ json: { ...preview, status: "complete" } });
     }
+    if (url.pathname === "/engine/plugins/fixture/disable" && route.request().method() === "POST") {
+      entry.enabled = false;
+      return route.fulfill({ json: { ok: true } });
+    }
     if (url.pathname === "/engine/plugins/broken/disable" && route.request().method() === "POST") {
       brokenDisabled = true;
       broken.enabled = false;
@@ -165,6 +169,21 @@ try {
   await sheet.getByRole("button", { name: /Fixture Board/ }).click();
   await page.getByRole("heading", { name: "Fixture Board" }).waitFor();
   await sheet.waitFor({ state: "hidden", timeout: 3000 });
+  await page.getByRole("button", { name: "Back to Chat" }).click();
+  await page.getByRole("button", { name: "Session Controls" }).click();
+  await sheet.getByRole("button", { name: "Fixture View" }).click();
+  await page.getByText("Fixture view body", { exact: true }).waitFor();
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.getByRole("button", { name: "Settings", exact: true }).first().click();
+  await settings.getByRole("tab", { name: "Plugins" }).click();
+  await settings.getByRole("switch", { name: "Fixture enabled" }).click();
+  const turnOff = page.getByRole("dialog", { name: "Turn off Fixture?" });
+  await turnOff.getByRole("button", { name: "Turn Off" }).click();
+  await turnOff.waitFor({ state: "hidden" });
+  await page.keyboard.press("Escape");
+  await settings.waitFor({ state: "hidden" });
+  await page.getByRole("textbox", { name: "Message input" }).waitFor({ timeout: 5000 });
+  assert.equal(await page.getByText("This plugin view is unavailable for this chat.").count(), 0, "disabled active view returns to Chat");
   console.log("plugin browser acceptance: opt-out, view, menu, page, modal and mobile sheet passed");
 } finally {
   await browser?.close();
