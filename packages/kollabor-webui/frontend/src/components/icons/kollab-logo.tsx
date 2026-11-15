@@ -84,7 +84,7 @@ function startMist(canvas: HTMLCanvasElement): (() => void) | undefined {
       gl.viewport(0, 0, w, h);
     }
     gl.uniform2f(uRes, w, h);
-    gl.uniform1f(uTime, ((performance.now() - start) / 1000) * 0.7);
+    gl.uniform1f(uTime, ((performance.now() - start) / 1000) * 1.8);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     frame = requestAnimationFrame(draw);
   };
