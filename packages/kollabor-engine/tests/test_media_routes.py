@@ -146,6 +146,17 @@ class TestHistoryOverlay:
         assert [m["ref"] for m in rows[0]["media"]] == refs
         assert "media" not in rows[1] and "media" not in rows[2]
 
+    async def test_compacted_history_binds_surviving_rows_to_latest_media(self, monkeypatch):
+        from kollabor_engine.routes.sessions import get_history
+
+        refs = [save(conversations_dir(), "s10", url).ref for url in (PNG, JPEG)]
+        # The daemon replaced its history with a compacted snapshot, dropping
+        # the first sender while retaining the later sender.
+        history = [{"role": "user", "content": "later [image1]"}]
+        self.stub_registry(monkeypatch, "s10", history)
+        page = await get_history("s10")
+        assert [m["ref"] for m in page["history"][0]["media"]] == [refs[1]]
+
     async def test_older_page_skips_bound_images(self, monkeypatch):
         from kollabor_engine.routes.sessions import get_history
 
