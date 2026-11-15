@@ -95,7 +95,7 @@
 - Failed-load manifest rows: red browser test commit `0cdd9fce` timed out because a 500-loading plugin's declared menu disappeared. Session Controls now retains that manifest row, opens its failure recovery surface, and provides Back to Chat. Isolated browser flow, 31 focused tests and typecheck pass. Declared view/command labels for failed bundles, collapsed desktop controls, and retry/turn-off interaction still require coverage.
 
 
-- Stopping recovery: red test commit `40931426` exposed host refresh clearing a load error when inventory changed from `ok` to `stopping`, while the loader retained the failed attempt. Fix `798f9618` aligns host eligibility with the loader. Focused `vitest run src/plugins/host.test.ts` under throwaway HOME and `KOLLAB_NO_KEYRING=1` passed 7/7; red and green logs are `~/backups/plugins-step3-work/host-stopping-red.log` and `host-stopping-green.log`. This does not prove the recovery surface in a browser.
+- Stopping recovery: red test commit `40931426` exposed host refresh clearing a load error when inventory changed from `ok` to `stopping`, while the loader retained the failed attempt. Fix `798f9618` aligns host eligibility with the loader. Focused `vitest run src/plugins/host.test.ts` under throwaway HOME and `KOLLAB_NO_KEYRING=1` passed 7/7; red and green logs are `~/backups/plugins-step3-work/host-stopping-red.log` and `host-stopping-green.log`. Broader `vitest run src/plugins` passed 32/32 and `npm run typecheck` passed under the same isolated environment; logs are `~/backups/plugins-step3-work/stopping-plugin-tests.log` and `stopping-typecheck.log`. These do not prove the recovery surface in a browser.
 
 ## Remaining
 
