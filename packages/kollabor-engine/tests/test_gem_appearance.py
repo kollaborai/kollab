@@ -381,7 +381,11 @@ class TestBirths:
         gem_appearance.record_births(["support-lead"], crew=["support-lead"])
         first = gem_appearance.load_appearance()["born"]["support-lead"]
         assert first["face"] == "bean"
-        assert abs(gem_appearance._luma(first["hairColor"]) - gem_appearance._luma(first["furColor"])) >= gem_appearance.CREW_CONTRAST
+        contrast = abs(
+            gem_appearance._luma(first["hairColor"])
+            - gem_appearance._luma(first["furColor"])
+        )
+        assert contrast >= gem_appearance.CREW_CONTRAST
         gem_appearance.record_births(["support-lead"], crew=["support-lead"])
         assert gem_appearance.load_appearance()["born"]["support-lead"] == first
 
