@@ -1,5 +1,7 @@
-// A no-build example: kollab supplies the same React instance as its web UI.
+// Kollab supplies the same React instance and SDK as its web UI.
 import React, { useState } from "react";
+import { definePlugin } from "@kollab/plugin";
+import "./index.css";
 
 function HelloView({ k }) {
   const [count, setCount] = useState(0);
@@ -16,7 +18,7 @@ function HelloPage() {
 }
 
 // Every contribution ID is declared in kollab-plugin.json.
-export default function activate(k) {
+export default definePlugin(function activate(k) {
   k.view({ id: "hello-view", label: "Hello View", icon: "box", render: HelloView });
   k.menu("hello-page");
   k.page({ id: "hello-page", title: "Hello Page", tabs: [{ id: "hello", label: "Hello", render: HelloPage }] });
@@ -26,4 +28,4 @@ export default function activate(k) {
   k.command({ name: "hello-web", description: "Say hello in this chat", run: args => k.toast(`Hello, ${args.trim() || "world"}!`) });
   k.renderer({ tag: "hello_note", render: ({ tag }) => React.createElement("span", null, `Hello note: ${tag.content}`) });
   k.notice({ text: "Hello plugin is ready." });
-}
+});
