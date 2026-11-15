@@ -248,7 +248,7 @@ try {
   await add.waitFor({ state: "hidden" });
   assert.equal(cancelAttempts, 2);
   await settings.getByRole("button", { name: "Add Plugin" }).click();
-  await add.getByLabel("Plugin Git URL").fill("https://github.com/example/fixture.git", { timeout: 5000 });
+  await add.getByLabel("Git URL").fill("https://github.com/example/fixture.git", { timeout: 5000 });
   await add.getByRole("button", { name: "Review" }).click();
   await add.getByText(filesHash, { exact: false }).waitFor();
   await add.getByRole("button", { name: "Install", exact: true }).click();
