@@ -24,7 +24,6 @@ SETUP_FINISH_PAYLOAD = {
 @pytest.fixture()
 def client(monkeypatch, tmp_path):
     from httpx import ASGITransport, AsyncClient
-
     from kollabor_engine.server import create_app
 
     # Test-client auth bypass (the same gate every engine route test uses).
