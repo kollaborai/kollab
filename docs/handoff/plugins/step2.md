@@ -201,3 +201,14 @@ plugin `@ctx.local_only` route are covered. Focused tests: 28 passed, 1 skipped
 Ruff and diff checks passed. Next: audit the agent file-tool deny list against
 all token paths and read entry points; then web assets, changelog, final gates,
 and isolated smoke as specified above. No live phone was exercised.
+
+Agent file-tool audit: `22e4e163` exposed seven failures before `a277cf90`
+closed a symlink gap for the engine token and files under the plugin directory.
+The check now covers lexical paths and resolved targets, including an engine
+credential symlink's target. Tests: 24 passed (`$WORK/deny-green-1794703081/test.log`);
+Ruff and diff checks passed. The file-operation registry has read and grep,
+plus copy/move/edit and snapshots through the same preflight; it has no dedicated
+file list, glob, or recursive-search operation. Shell and external MCP tools are
+not sandboxed by this deny list, as the spec states. Token producers checked:
+`auth._token_file` (including `KOLLAB_CONFIG_DIR`) and `PluginTokenFiles` at
+`~/.kollab/plugin-data/<id>/run/token` (which rejects symlinks).
