@@ -79,6 +79,10 @@
 - CSP: red test commit `5f0a995b` failed because `script-src 'self'` lacked the exact inline import-map SHA-256. `server.py` now adds that fixed hash without `unsafe-inline`, `unsafe-eval` or wildcard; its regression computes the hash from source. Under isolated HOME/TMPDIR, `python -m pytest --noconftest -q tests/unit/test_webui_remote.py -p no:cacheprovider` passes 17/17, Ruff passes on both Python files and py_compile passes with cache under backups. A preliminary built index had the same hash, but a final-head production browser still must prove CSP behavior. The first test attempt without `--noconftest` could not load shared unit fixtures because the shell's Python lacks `acp`; the active PEX Python has `acp` but lacks pytest. Resolve the full-suite environment before final gates; the scoped check skipped shared conftest and is not full-suite validation.
 
 
+- Settings red browser check: after correcting fake prompt response shapes, isolated acceptance opens Settings but times out because there is no Plugins tab. Add a sessionless-capable Settings → Plugins surface using the actual inventory, stable FieldRenderer, and local-only engine actions; the full install flow has separate requirements.
+- Backend constraint for later disable work: step 2 `_assert_no_active_runs` returns 409 when `.data/run/runs.json` has queued/running work, and `PluginContext.agents.run()` currently reports unavailable until step 4. The required confirmation promises cancellation. Trace the real run owner before changing that behavior; never claim a cancellation that the engine cannot perform. Do not reset persisted run state.
+
+
 ## Remaining
 
 1. Add explicit late-import removal/replacement and stale awaited-activation tests; then finish item 1: registry, SDK, error boundary, shared React runtime/import map, CSS and integration. The current lifecycle core is not production-wired and cannot load a plugin by itself.

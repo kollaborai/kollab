@@ -42,12 +42,13 @@ try {
          k.notice({text:"Fixture plugin notice",button:{label:"Open board",open:{page:"board"}}});
          k.notice({text:"Fixture modal notice",button:{label:"Open details",open:{modal:"details"}}});
        });` });
+    if (url.pathname === "/engine/prompts/libraries") return route.fulfill({ json: { libraries: [], roles: [] } });
     if (url.pathname === "/engine/plugins/events") return route.fulfill({ contentType: "text/event-stream", body: ": open\n\n" });
     if (url.pathname === "/engine/plugins/fixture/api/badge") return route.fulfill({ json: { count: 4, attention: 1 } });
     if (url.pathname === "/engine/sessions") return route.fulfill({ json: { sessions: [{ session_id: "fixture-session", name: "Fixture Session", agent: "coder", identity: "local-coder", profile: "default", workspace: "/fixture", external: false }], network: { device: "test", remote: [] }, offline: [], hidden: [] } });
     if (url.pathname.endsWith("/history")) return route.fulfill({ json: { history: [{ role: "assistant", content: "Before <fixture_tag><b>untrusted</b></fixture_tag> after", metadata: {} }], start_index: 0, end_index: 1, has_more_older: false, has_more_newer: false, source: "mirror" } });
     if (url.pathname.startsWith("/api/")) return route.fulfill({ json: { available: false } });
-    if (url.pathname.startsWith("/engine/")) return route.fulfill({ json: { sessions: [], profiles: [], agents: [], live: [], bundles: [], identities: [], teams: [], models: [], commands: [], network: {device:"",remote:[]}, offline: [], hidden: [], order: [] } });
+    if (url.pathname.startsWith("/engine/")) return route.fulfill({ json: { sessions: [], profiles: [], agents: [], live: [], bundles: [], variants: {}, roles: [], libraries: [], sections: [], identities: [], teams: [], models: [], commands: [], network: {device:"",remote:[]}, offline: [], hidden: [], order: [] } });
     return route.continue();
   });
   await page.goto(`${origin}/?plugins=off`, { waitUntil: "domcontentloaded" });
@@ -79,6 +80,13 @@ try {
   await page.getByRole("dialog", { name: "Fixture Details" }).getByText("Fixture modal body").waitFor();
   await page.keyboard.press("Escape");
   await page.getByRole("dialog", { name: "Fixture Details" }).waitFor({ state: "hidden" });
+  await page.getByRole("button", { name: "Settings", exact: true }).first().click();
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  await settings.getByRole("tab", { name: "Plugins" }).click({ timeout: 5000 });
+  await settings.getByText("Fixture", { exact: true }).waitFor();
+  await settings.getByRole("button", { name: "Add Plugin" }).waitFor();
+  await page.keyboard.press("Escape");
+  await settings.waitFor({ state: "hidden" });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "Session Controls" }).click();
   const sheet = page.getByRole("dialog", { name: "Session Controls" });
