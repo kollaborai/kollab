@@ -1,0 +1,98 @@
+"""Local management jobs stage exact Git versions before confirmation."""
+
+import json
+import subprocess
+import time
+
+import pytest
+from fastapi.testclient import TestClient
+
+
+def _git(*args, cwd):
+    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+@pytest.fixture
+def managed_repo(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_CONFIG_DIR", str(tmp_path / "engine-config"))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+    monkeypatch.delenv("KOLLAB_ENGINE_BYPASS_AUTH", raising=False)
+    source = tmp_path / "source"
+    source.mkdir()
+    _git("init", "-b", "main", cwd=source)
+    _git("config", "user.name", "Test", cwd=source)
+    _git("config", "user.email", "test@example.invalid", cwd=source)
+    (source / "kollab-plugin.json").write_text(json.dumps({
+        "format": 1, "id": "hello", "name": "Hello", "version": "1.0.0",
+        "description": "Example", "kollab": ">=0", "uses": [],
+    }))
+    (source / "content.txt").write_text("one")
+    _git("add", ".", cwd=source)
+    _git("commit", "-m", "first", cwd=source)
+    bare = tmp_path / "repo.git"
+    _git("clone", "--bare", str(source), str(bare), cwd=tmp_path)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{bare.as_uri()}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://example.invalid/repo")
+    monkeypatch.setenv("GIT_CONFIG_KEY_1", "protocol.file.allow")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_1", "always")
+    return source, bare
+
+
+@pytest.fixture
+def client(managed_repo, monkeypatch):
+    import asyncio
+
+    from kollabor_engine.auth import generate_token
+    from kollabor_engine.server import create_app
+    from kollabor_plugins import services
+
+    async def idle():
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(services, "supervise_services", idle)
+    token = generate_token()
+    with TestClient(create_app(), headers={"Authorization": f"Bearer {token}"}) as client:
+        yield client
+
+
+def _ready(client, job_id):
+    for _ in range(500):
+        response = client.get(f"/plugins/jobs/{job_id}")
+        assert response.status_code == 200, response.text
+        state = response.json()
+        if state["status"] != "staging":
+            return state
+        time.sleep(0.01)
+    pytest.fail("plugin staging did not finish")
+
+
+def test_install_job_requires_exact_commit_and_file_hash(client, managed_repo, tmp_path):
+    source, _ = managed_repo
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo#main"})
+    assert response.status_code == 202, response.text
+    job_id = response.json()["job_id"]
+    ready = _ready(client, job_id)
+    assert ready["status"] == "ready", ready
+    assert ready["commit"] == _git("rev-parse", "HEAD", cwd=source)
+    assert len(ready["files_sha256"]) == 64
+    assert ready["manifest"]["id"] == "hello"
+    root = tmp_path / ".kollab" / "plugins" / "hello"
+    assert not root.exists()
+    wrong = {"commit": ready["commit"], "files_sha256": "0" * 64}
+    assert client.post(f"/plugins/jobs/{job_id}/confirm", json=wrong).status_code == 409
+    assert not root.exists()
+    accepted = {"commit": ready["commit"], "files_sha256": ready["files_sha256"]}
+    assert client.post(f"/plugins/jobs/{job_id}/confirm", json=accepted).status_code == 200
+    assert (root / "content.txt").read_text() == "one"
+    assert client.post(f"/plugins/jobs/{job_id}/confirm", json=accepted).status_code == 409
+
+
+def test_job_management_is_local_even_with_user_token(client):
+    response = client.post("/plugins/install", headers={"x-kollab-plugin-remote": "1"},
+                           json={"source": "https://example.invalid/repo"})
+    assert response.status_code == 403
+    assert client.get("/plugins/jobs/missing", headers={"x-kollab-plugin-remote": "1"}).status_code == 403
