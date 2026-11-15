@@ -6,7 +6,34 @@ export type ComposerDraftSubmission = Readonly<{
   revision: number;
 }>;
 
+import type { StoredComposerAttachment } from "@/composer-restore";
+
 const DRAFT_PREFIX = "kollab:webui:composer-draft:v1";
+
+/**
+ * In-memory image attachment retention per draft key. localStorage keeps
+ * draft text only; an image attachment lives in the composer runtime, which
+ * a session switch drops (issue #1103). Memory-only by design: a page reload
+ * intentionally starts without the images, and the orphan-token notice tells
+ * the user to paste them again.
+ */
+const attachmentsByKey = new Map<string, readonly StoredComposerAttachment[]>();
+
+export function saveComposerAttachments(
+  key: string | null | undefined,
+  attachments: readonly StoredComposerAttachment[],
+): void {
+  if (!key) return;
+  if (attachments.length === 0) attachmentsByKey.delete(key);
+  else attachmentsByKey.set(key, attachments);
+}
+
+export function loadComposerAttachments(
+  key: string | null | undefined,
+): readonly StoredComposerAttachment[] {
+  if (!key) return [];
+  return attachmentsByKey.get(key) ?? [];
+}
 const revisions = new Map<string, number>();
 const pendingSubmissions = new Map<string, ComposerDraftSubmission[]>();
 // Keep failed requests' tickets until a newer edit or a successful response.

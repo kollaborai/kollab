@@ -30,10 +30,18 @@ import { agentStatus, bundleName } from "@/components/panels/panel-model";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
+  loadComposerAttachments,
   loadComposerDraft,
   queueComposerDraftSubmission,
+  saveComposerAttachments,
   saveComposerDraft,
 } from "@/composer-draft";
+import {
+  collectImageAttachments,
+  orphanImageNotice,
+  stripImageTokens,
+} from "@/composer-restore";
+import { useShallow } from "zustand/shallow";
 import {
   useVoiceMode,
   type VoiceActivity,
@@ -84,6 +92,7 @@ import {
   useMemo,
   useLayoutEffect,
   useRef,
+  useState,
   type ComponentType,
   type FC,
   type KeyboardEvent,
@@ -524,16 +533,56 @@ const Composer: FC<{
   );
   const isRunning = useAuiState((s) => s.thread.isRunning);
   const composerText = useAuiState((s) => s.composer.text);
+  const composerImages = useAuiState(
+    useShallow((s) => s.composer.attachments),
+  );
+  const [orphanTokenNotice, setOrphanTokenNotice] = useState<string | null>(
+    null,
+  );
   const restoredDraft = useRef<{ key: string | null; text: string } | null>(null);
   const skipEmptyDraftPersist = useRef(false);
 
   useLayoutEffect(() => {
     const key = draftKey ?? null;
-    const text = loadComposerDraft(key) ?? "";
-    restoredDraft.current = { key, text };
+    // Token lines belong to attachments, and attachments do not live in the
+    // text draft. Strip them first, then restore what the same tab kept.
+    const restored = stripImageTokens(loadComposerDraft(key) ?? "");
+    const keptImages = loadComposerAttachments(key);
+    restoredDraft.current = { key, text: restored.text };
     skipEmptyDraftPersist.current = false;
-    if (aui.composer.getState().text !== text) aui.composer.setText(text);
-  }, [aui, draftKey]);
+    setOrphanTokenNotice(
+      orphanImageNotice(restored.tokenCount, keptImages.length),
+    );
+    if (aui.composer.getState().text !== restored.text) {
+      aui.composer.setText(restored.text);
+    }
+    // Re-add each kept image; the token synchronizer rewrites fresh
+    // [imageN] tokens, so text and attachments never disagree.
+    const reattach = async () => {
+      for (const image of keptImages) {
+        await aui.composer.addAttachment({
+          type: "image",
+          name: image.name,
+          contentType: image.contentType,
+          content: [...image.content],
+        });
+      }
+    };
+    if (keptImages.length > 0 && attachmentsEnabled) void reattach();
+  }, [aui, draftKey, attachmentsEnabled]);
+
+  // Keep the per-key image retention in step with the composer; a session
+  // switch drops the runtime, the next mount reads this back.
+  useEffect(() => {
+    saveComposerAttachments(draftKey ?? null, collectImageAttachments(composerImages));
+  }, [composerImages, draftKey]);
+
+  // The orphan notice describes the restored draft; the first user edit or
+  // send after the restore retires it.
+  useEffect(() => {
+    if (restoredDraft.current !== null) return;
+    setOrphanTokenNotice(null);
+  }, [composerText]);
 
   useEffect(() => {
     const key = draftKey ?? null;
@@ -918,6 +967,14 @@ const Composer: FC<{
             data-slot="aui_composer-shell"
             className="flex w-full flex-col gap-2 rounded-(--composer-radius) bg-(--composer-bg) focus-within:bg-[color-mix(in_oklab,var(--color-muted)_45%,var(--color-background))] p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[background-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
           >
+            {orphanTokenNotice ? (
+              <p
+                role="status"
+                className="aui-composer-orphan-notice text-muted-foreground/90 px-1 text-xs leading-4"
+              >
+                {orphanTokenNotice}
+              </p>
+            ) : null}
             <ComposerAttachments />
             {voiceAvailable && terminalVoice.on ? (
               <VoiceStatus activity={terminalVoice.activity} />
