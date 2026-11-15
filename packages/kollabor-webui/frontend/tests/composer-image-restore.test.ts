@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import {
   loadComposerAttachments,
@@ -153,5 +155,27 @@ describe("composer attachment retention per draft key", () => {
   it("ignores a null draft key", () => {
     expect(() => saveComposerAttachments(null, [])).not.toThrow();
     expect(loadComposerAttachments(null)).toEqual([]);
+  });
+});
+
+describe("composer restore wiring", () => {
+  const threadSource = readFileSync(
+    fileURLToPath(
+      new URL("../src/components/assistant-ui/thread.tsx", import.meta.url),
+    ),
+    "utf8",
+  );
+
+  it("restores retained attachments through the live composer and sends them", () => {
+    expect(threadSource).toContain("const keptImages = loadComposerAttachments(key)");
+    expect(threadSource).toContain("aui.composer.addAttachment(image.file)");
+    expect(threadSource).toContain("role=\"status\"");
+    expect(threadSource).toContain("for (const attachment of state.attachments)");
+  });
+
+  it("reports only images that failed to reattach", () => {
+    expect(threadSource).toContain(
+      "orphanImageNotice(restored.tokenCount, restoredImageCount)",
+    );
   });
 });
