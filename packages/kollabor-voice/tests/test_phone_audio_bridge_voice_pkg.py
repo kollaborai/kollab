@@ -10,11 +10,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
+import subprocess
 import sys
 from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 
+import kollabor_voice
 import kollabor_voice.phone_audio_bridge as pab
 import pytest
 
@@ -216,5 +219,30 @@ def test_bridge_never_opens_sound_device():
     text = Path(pab.__file__).read_text()
     for name in banned:
         assert name not in text, f"phone_audio_bridge references {name}"
-    for name in banned:
-        assert name not in sys.modules, f"{name} imported by bridge tests"
+    # The suite shares one pytest process, and other tests import audio
+    # libraries for real (the fifty-client service test imports
+    # sounddevice), so this process's sys.modules says nothing about the
+    # bridge. The bridge runs as its own interpreter in production too:
+    # import it in a pristine subprocess and assert no sound library was
+    # pulled in anywhere in its import chain.
+    src_root = Path(kollabor_voice.__file__).resolve().parents[1]
+    env = dict(os.environ)
+    extra = [str(src_root), env.get("PYTHONPATH", "")]
+    env["PYTHONPATH"] = os.pathsep.join(entry for entry in extra if entry)
+    script = (
+        "import sys\n"
+        "import kollabor_voice.phone_audio_bridge\n"
+        f"banned = {banned!r}\n"
+        "leaked = sorted(set(banned) & set(sys.modules))\n"
+        "assert not leaked, f'sound libraries in the bridge import: {leaked}'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        "the bridge import chain pulled in a sound library:\n" + result.stderr
+    )
