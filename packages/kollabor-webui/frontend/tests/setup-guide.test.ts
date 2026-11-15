@@ -138,6 +138,13 @@ test("shouldAutoOpenGuide: no record or stale welcome record is a first run", ()
   assert.equal(shouldAutoOpenGuide("not-json{"), true);
 });
 
+test("shouldAutoOpenGuide: valid malformed storage opens its normalized welcome state", () => {
+  assert.equal(
+    shouldAutoOpenGuide('{"step":"unknown-step","dismissed":"yes"}'),
+    true,
+  );
+});
+
 test("shouldAutoOpenGuide: engaged or dismissed records never reopen", () => {
   assert.equal(shouldAutoOpenGuide('{"step":"provider","dismissed":false}'), false);
   assert.equal(shouldAutoOpenGuide('{"step":"agent","dismissed":false}'), false);
