@@ -8581,7 +8581,7 @@ class HubPlugin(BasePlugin):
             return "", ""
         return (
             str(getattr(agent, "name", "") or ""),
-            str(getattr(agent, "description", "") or ""),
+            " ".join(str(getattr(agent, "description", "") or "").split()),
         )
 
     def _profile_model_details(self) -> Tuple[str, str, str, str]:
