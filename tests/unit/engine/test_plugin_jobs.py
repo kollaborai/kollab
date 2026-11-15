@@ -108,6 +108,33 @@ def test_cancel_ready_job_removes_stage_and_rejects_confirmation(client, tmp_pat
     assert not (tmp_path / ".kollab" / "plugins" / "hello").exists()
 
 
+def test_cancel_reports_cleanup_failure_and_allows_retry(client, monkeypatch):
+    import shutil
+
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
+    job_id = response.json()["job_id"]
+    ready = _ready(client, job_id)
+    base = client.app.state.plugin_jobs.jobs[job_id]["base"]
+    original = shutil.rmtree
+
+    def fail_base(path, *args, **kwargs):
+        if path == base:
+            raise PermissionError("private path")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", fail_base)
+    result = client.delete(f"/plugins/jobs/{job_id}")
+    assert result.status_code == 503
+    assert "private path" not in result.text
+    assert base.exists()
+    assert client.post(f"/plugins/jobs/{job_id}/confirm", json={
+        "commit": ready["commit"], "files_sha256": ready["files_sha256"],
+    }).status_code == 409
+    monkeypatch.setattr(shutil, "rmtree", original)
+    assert client.delete(f"/plugins/jobs/{job_id}").status_code == 200
+    assert not base.exists()
+
+
 def test_cancel_staging_job_stops_worker_and_cleans_stage(client, monkeypatch):
     import asyncio
     import threading
