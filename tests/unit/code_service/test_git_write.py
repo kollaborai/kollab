@@ -518,3 +518,20 @@ async def test_conflicting_branch_switch_does_not_change_branch_or_create_confli
     assert _git(repo, "branch", "--show-current").strip() == "main"
     assert (repo / "tracked.txt").read_text() == "local edit\n"
     assert _git(repo, "diff", "--name-only", "--diff-filter=U") == ""
+
+
+@pytest.mark.asyncio
+async def test_subfolder_stash_refuses_before_changing_any_files(client, machine):
+    inside = machine.repo / "sub"
+    inside.mkdir()
+    (inside / "file.txt").write_text("base\n")
+    _git(machine.repo, "add", "sub/file.txt")
+    _git(machine.repo, "commit", "-m", "add subfolder")
+    (machine.repo / "tracked.txt").write_text("outside staged\n")
+    _git(machine.repo, "add", "tracked.txt")
+    (inside / "file.txt").write_text("inside change\n")
+    before = _git(machine.repo, "status", "--porcelain")
+    result = await client.post("/code/git", json={"workspace": str(inside), "action": "create_stash"})
+    assert result.status_code == 409
+    assert _git(machine.repo, "status", "--porcelain") == before
+    assert _git(machine.repo, "stash", "list") == ""

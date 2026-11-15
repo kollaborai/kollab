@@ -731,11 +731,13 @@ class APICommunicationService:
         # Keep this state across attempts so the outer retry loop can stop at
         # that boundary.
         stream_has_emitted = False
+        self.last_call_streamed = False  # a failed turn's fallback reads it (#548)
 
         async def tracked_streaming_callback(chunk):
             nonlocal stream_has_emitted
             if chunk:
                 stream_has_emitted = True
+                self.last_call_streamed = True
                 if operation_started:
                     self._notify_operation_observer(
                         "provider_streaming",

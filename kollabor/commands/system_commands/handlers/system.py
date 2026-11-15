@@ -169,16 +169,28 @@ class SystemCommandHandler(BaseCommandHandler):
         )
         self.command_registry.register_command(version_command)
 
-        # Register /restart command
+        # Register /new command (/clear is its alias): clears the conversation
+        new_command = CommandDefinition(
+            name="new",
+            description="Clear conversation and start fresh session",
+            handler=self.handle_new,
+            plugin_name="system",
+            category=CommandCategory.SYSTEM,
+            mode=CommandMode.INSTANT,
+            aliases=["clear"],
+            icon="[NEW]",
+        )
+        self.command_registry.register_command(new_command)
+
+        # Register /restart command: restarts the agent process, keeps the conversation (#968)
         restart_command = CommandDefinition(
             name="restart",
-            description="Clear conversation and start fresh session",
+            description="Restart this agent on the installed version, keeping the conversation",
             handler=self.handle_restart,
             plugin_name="system",
             category=CommandCategory.SYSTEM,
             mode=CommandMode.INSTANT,
-            aliases=["new", "clear"],
-            icon="[NEW]",
+            icon="[SYS]",
         )
         self.command_registry.register_command(restart_command)
 
@@ -1370,7 +1382,62 @@ Platform: {version_info['platform']}"""
             )
 
     async def handle_restart(self, command: SlashCommand) -> CommandResult:
-        """Handle /restart command - clear conversation and start fresh.
+        """Handle /restart: restart this agent on the installed code, keeping its conversation (#968).
+
+        The daemon lets the turn in progress end (a running tool is never cut),
+        saves its state and replaces its process image, still detached, with the
+        same folder, identity and flags. The same state RPC serves the TUI, an
+        attached window and the web chat. /new and /clear are the commands that
+        clear the conversation.
+
+        Args:
+            command: Parsed slash command.
+
+        Returns:
+            Command execution result.
+        """
+        try:
+            state_service = None
+            if self.event_bus and hasattr(self.event_bus, "get_service"):
+                state_service = self.event_bus.get_service("state_service")
+            if state_service is None:
+                return CommandResult(
+                    success=False,
+                    message="State service not available -- cannot restart.",
+                    display_type="error",
+                )
+            try:
+                outcome = await state_service.restart_agent()
+            except ValueError as e:
+                return CommandResult(
+                    success=False,
+                    message=f"[error] Failed to restart: {e}",
+                    display_type="error",
+                )
+            except Exception as e:
+                self.logger.error(f"state_service.restart_agent failed: {e}")
+                return CommandResult(
+                    success=False,
+                    message=f"Error restarting agent: {e}",
+                    display_type="error",
+                )
+            waiting = isinstance(outcome, dict) and bool(outcome.get("waiting_for_turn"))
+            when = " once the turn in progress ends" if waiting else ""
+            return CommandResult(
+                success=True,
+                message=f"[ok] Restarting this agent{when}. The conversation stays.",
+                display_type="success",
+            )
+        except Exception as e:
+            self.logger.error(f"Error in restart command: {e}")
+            return CommandResult(
+                success=False,
+                message=f"Error restarting agent: {str(e)}",
+                display_type="error",
+            )
+
+    async def handle_new(self, command: SlashCommand) -> CommandResult:
+        """Handle /new (and /clear) command - clear conversation and start fresh.
 
         Phase 4.5 step 7: state_service is the only path. Works in
         local and attach mode. No legacy fallback.
@@ -1425,14 +1492,14 @@ Platform: {version_info['platform']}"""
             return CommandResult(
                 success=True,
                 message=(
-                    f"[ok] Session restarted\n  Agent: {agent_name}\n"
+                    f"[ok] Session cleared\n  Agent: {agent_name}\n"
                     f"  Cleared: {old_message_count} messages"
                 ),
                 display_type="success",
             )
 
         except Exception as e:
-            self.logger.error(f"Error in restart command: {e}")
+            self.logger.error(f"Error in new command: {e}")
             return CommandResult(
                 success=False,
                 message=f"Error restarting session: {str(e)}",

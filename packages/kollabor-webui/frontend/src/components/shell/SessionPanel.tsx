@@ -424,6 +424,7 @@ export function SessionPanel({
           onPick={(choice) => void changeProfile(choice)}
           disabled={!profiles.length}
           className="h-7 text-xs"
+          folder={session.workspace || ""}
         />
       </div>
       <div className="flex min-w-0 flex-col gap-1">

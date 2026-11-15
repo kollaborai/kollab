@@ -87,6 +87,64 @@ def registry(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_folder_private_profile_starts_a_session_in_its_own_folder(
+    monkeypatch, registry, tmp_path, tmp_path_is_home
+):
+    """POST /sessions resolves the named profile for the workspace the request
+    names (#972): a profile saved only in that folder's own .kollab/config.json
+    — the same folder-scoped read GET /profiles uses — starts the session,
+    instead of 404ing because only the engine folder's own profiles were read.
+    The daemon never spawns here; reaching EngineSession is the pass bar."""
+    import json
+
+    folder = tmp_path / "chosen"
+    (folder / ".kollab").mkdir(parents=True)
+    (folder / ".kollab" / "config.json").write_text(
+        json.dumps(
+            {
+                "kollabor": {
+                    "llm": {
+                        "profiles": {
+                            "folder-private": {
+                                "provider": "anthropic",
+                                "model": "claude-haiku-4.5",
+                                "api_key": "k",
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    )
+    engine_folder = tmp_path / "engine"
+    engine_folder.mkdir()
+    monkeypatch.chdir(engine_folder)
+
+    started = {}
+
+    class _NoDaemon:
+        def __init__(self, **kwargs):
+            self.profile = kwargs["profile"]
+            self.workspace = kwargs.get("workspace")
+            started["profile"] = self.profile.name
+
+        async def initialize(self, on_spawned=None) -> None:
+            if on_spawned is not None:
+                await on_spawned(self)
+
+        def to_dict(self):
+            return {"session_id": "no-daemon"}
+
+    monkeypatch.setattr(sessions, "EngineSession", _NoDaemon)
+
+    body = sessions.CreateSessionRequest(profile="folder-private", workspace=str(folder))
+    response = await sessions.create_session(body, _request())
+
+    assert started["profile"] == "folder-private"
+    assert response["session_id"] == "no-daemon"
+
+
+@pytest.mark.asyncio
 async def test_registered_caller_session_id_conflicts_before_spawn(
     monkeypatch, registry
 ):
