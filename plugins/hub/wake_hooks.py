@@ -9,7 +9,9 @@ below are the same for every source and every repo.
 Rules, all from the issue:
 
 * Every hook is opt-in and off by default (``plugins.hub.hooks.<name>``).
-* One event key per (hook, PR, head SHA, ref, agent): a repeat does nothing.
+* One event key per (hook, PR, head SHA, ref, agent) per target: every target
+  hears an event once, and a target skipped by its cooldown is woken by a
+  later repeat of the event (#867).
 * Per-hook cooldown per target and a rolling hourly cap on actions.
 * A target never hears about an event it caused (``WakeEvent.actor``).
 * A hook never triggers another hook: events marked ``from_hook`` are dropped.
@@ -175,8 +177,6 @@ class WakeHookEngine:
             return []
 
         key = (hook, event.pr, event.sha, event.ref, event.agent)
-        if key in self._seen:
-            return []
 
         targets = self._targets(hook, event)
         if not targets and kind != "alert":
@@ -194,11 +194,16 @@ class WakeHookEngine:
         for target in targets:
             if len(window) >= cap:
                 break
+            if (key, target) in self._seen:
+                continue  # this target already had the event
             last = self._last.get((hook, target))
             if last is not None and now - last < cooldown:
-                continue
+                continue  # still cooling down: left unseen for a later repeat
             self._last[(hook, target)] = now
             window.append(now)
+            self._seen[(key, target)] = None
+            while len(self._seen) > _MAX_SEEN:
+                self._seen.popitem(last=False)
             actions.append(
                 WakeAction(
                     hook=hook,
@@ -207,8 +212,4 @@ class WakeHookEngine:
                     text=self._text(hook, event),
                 )
             )
-        if actions:
-            self._seen[key] = None
-            while len(self._seen) > _MAX_SEEN:
-                self._seen.popitem(last=False)
         return actions
