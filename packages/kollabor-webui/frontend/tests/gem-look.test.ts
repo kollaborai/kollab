@@ -277,6 +277,15 @@ test("a crew gem is born with the engine's crew coat and no hat", () => {
   assert.ok(other.fur && other.hair, "a crew gem in another folder is crew too");
 });
 
+test("numbered crew gems use their base persona's coat", () => {
+  const appearance = { crew: ["brand-strategist"] };
+  for (const key of ["brand-strategist-2", "brand-strategist-2@/some/folder"]) {
+    const look = resolveGemLook(appearance, key, CREW_VOCABULARY);
+    assert.equal(look.bornHat, "none", `${key} should not be born with a hat`);
+    assert.ok(look.fur && look.hair, `${key} should receive a furry crew coat`);
+  }
+});
+
 test("a crew gem rolled with a hat before the rule wears the crew coat and keeps its eyes", () => {
   const look = resolveGemLook(
     { crew: ["support-lead"], born: { "support-lead": { face: "kawaii", hat: "crown" } } },
