@@ -58,6 +58,23 @@ class TestMediaRoutes:
 
 
 class TestArtifactRoutes:
+    async def test_distinct_long_sessions_do_not_share_artifacts(
+        self, client: AsyncClient, monkeypatch
+    ) -> None:
+        import kollabor_engine.routes.artifacts as artifacts
+
+        first = "a" * 80 + "x"
+        second = "a" * 80 + "y"
+        monkeypatch.setattr(artifacts, "_conversations_dir", conversations_dir)
+        root = artifacts._artifacts_root(first)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "private.output").write_text("first session only")
+
+        listed = await client.get(f"/sessions/{second}/artifacts")
+
+        assert listed.status_code == 200
+        assert listed.json()["artifacts"] == []
+
     async def test_list_and_read(self, client: AsyncClient) -> None:
         root = conversations_dir() / "tool_outputs" / "s4"
         root.mkdir(parents=True, exist_ok=True)
