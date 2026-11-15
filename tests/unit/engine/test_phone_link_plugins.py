@@ -85,7 +85,7 @@ async def test_phone_local_only_plugin_api_is_denied_by_real_engine(tmp_path, mo
     monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
     monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
     monkeypatch.setattr(phone_link, "get_token", lambda: "host-secret")
-    source = Path(__file__).resolve().parents[2] / "bundles/plugins/hello"
+    source = Path(__file__).resolve().parents[3] / "bundles/plugins/hello"
     home = tmp_path / ".kollab"
     root = home / "plugins/hello"
     shutil.copytree(source, root)

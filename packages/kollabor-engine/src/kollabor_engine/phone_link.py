@@ -73,7 +73,7 @@ MAX_BODY = 8 * 1024 * 1024
 API_ROOTS = frozenset(
     {
         "sessions", "agents", "profiles", "workspaces", "mcp", "hub", "sidebar", "rosters", "teams",
-        "prompts", "voice", "phone-app", "plugins",
+        "prompts", "voice", "phone-app",
     }
 )
 APP_PROTOCOL = "kollab-phonelink-app/1"
@@ -1258,7 +1258,8 @@ class PhoneLink:
                 or "\x00" in decoded
                 or any(part in {".", ".."} for part in decoded.split("/"))
                 or parsed.fragment
-                or decoded.split("/")[1] not in API_ROOTS
+                # Plugin routes use an additional, narrower remote policy below.
+                or (decoded.split("/")[1] not in API_ROOTS and decoded.split("/")[1] != "plugins")
                 or not voice_route_allowed(method, decoded)
                 or not remote_plugin_route_allowed(method, decoded)
             ):
