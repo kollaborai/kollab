@@ -100,18 +100,17 @@ def test_job_management_is_local_even_with_user_token(client):
 
 
 def test_install_staging_is_background_and_does_not_reveal_errors(client, monkeypatch):
+    import asyncio
     import threading
-
-    from kollabor_plugins import packages
 
     entered, release = threading.Event(), threading.Event()
 
-    def slow_failure(*args):
+    async def slow_failure(*args):
         entered.set()
-        assert release.wait(5)
+        assert await asyncio.to_thread(release.wait, 5)
         raise ValueError("private-git-secret https://secret.invalid")
 
-    monkeypatch.setattr(packages, "stage_git_source", slow_failure)
+    monkeypatch.setattr(client.app.state.plugin_jobs, "_run_staging", slow_failure)
     try:
         response = client.post("/plugins/install", json={"source": "https://example.invalid/repo"})
         assert response.status_code == 202
@@ -316,3 +315,22 @@ def test_shutdown_terminates_owned_stalled_git_without_leaving_stage(client, tmp
     assert time.monotonic() - start < 2
     assert not base.exists()
     assert client.post("/plugins/install", json={"source": "https://example.invalid/repo"}).status_code == 503
+
+
+def test_staging_timeout_stops_git_and_cleans_own_files(client, tmp_path, monkeypatch):
+    from kollabor_engine import plugin_jobs
+
+    fake_bin = tmp_path / "slow-bin"
+    fake_bin.mkdir()
+    marker = tmp_path / "slow-git-started"
+    fake_git = fake_bin / "git"
+    fake_git.write_text(f"#!/bin/sh\necho $$ > '{marker}'\nsleep 4\nexit 1\n")
+    fake_git.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:/usr/bin:/bin")
+    monkeypatch.setattr(plugin_jobs, "_STAGE_TIMEOUT", 1.5)
+    job_id = client.post("/plugins/install", json={"source": "https://example.invalid/repo"}).json()["job_id"]
+    base = client.app.state.plugin_jobs.jobs[job_id]["base"]
+    state = _ready(client, job_id)
+    assert marker.exists()
+    assert state["status"] == "error"
+    assert not base.exists()

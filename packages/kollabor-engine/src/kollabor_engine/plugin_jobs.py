@@ -6,7 +6,10 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import shutil
+import signal
+import sys
 import tempfile
 import time
 import uuid
@@ -17,7 +20,9 @@ from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
 _MAX_JOBS = 32
+_MAX_STAGING = 4
 _JOB_TTL = 3600
+_STAGE_TIMEOUT = 120
 
 
 class PluginJobs:
@@ -28,6 +33,8 @@ class PluginJobs:
         self.engine_url = engine_url
         self.jobs: dict[str, dict] = {}
         self.tasks: set[asyncio.Task] = set()
+        self.staging_tasks: set[asyncio.Task] = set()
+        self.stage_slots = asyncio.Semaphore(_MAX_STAGING)
         self.reaper: asyncio.Task | None = None
         self.closing = False
 
@@ -140,7 +147,9 @@ class PluginJobs:
         self.jobs[job_id] = job
         if self.reaper is None:
             self.reaper = asyncio.create_task(self._reap(), name="plugin-job-reaper")
-        self._track(self._stage(job))
+        task = self._track(self._stage(job))
+        self.staging_tasks.add(task)
+        task.add_done_callback(self.staging_tasks.discard)
         return self._public(job)
 
     @staticmethod
@@ -174,21 +183,70 @@ class PluginJobs:
         })
         return {"previous_commit": job["expected_record"].get("commit"), "changed_folders": changed}
 
-    async def _stage(self, job: dict) -> None:
-        from kollabor.version import get_runtime_version
-        from kollabor_plugins.packages import stage_git_source
-
+    @staticmethod
+    async def _stop_staging_process(process: asyncio.subprocess.Process) -> None:
+        if process.returncode is not None:
+            return
+        # Kill this job's private process group together. Waiting for the worker
+        # alone after SIGTERM could leave a Git/SSH child that ignores SIGTERM.
         try:
-            staged = await asyncio.to_thread(
-                stage_git_source, job["requested_source"], job["base"] / "package", get_runtime_version()
-            )
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await process.communicate()
+
+    @classmethod
+    async def _run_staging(cls, source: str, stage: Path, update: dict | None = None) -> tuple[dict, dict]:
+        # This is a short-lived Python helper, not a second Kollab entrypoint or
+        # agent. Its process group contains only this job's Git/SSH children.
+        payload = json.dumps({"source": source, "stage": str(stage), "update": update}).encode("utf-8")
+        if len(payload) > 1024 * 1024:
+            raise ValueError("Plugin staging request is too large")
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        creation = asyncio.create_task(asyncio.create_subprocess_exec(
+            sys.executable, "-m", "kollabor_engine.plugin_stage",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=True, env=env,
+        ))
+        try:
+            process = await asyncio.shield(creation)
+        except asyncio.CancelledError:
+            process = await creation
+            await cls._stop_staging_process(process)
+            raise
+        try:
+            output, _ = await asyncio.wait_for(process.communicate(payload), timeout=_STAGE_TIMEOUT)
+        except BaseException:
+            await cls._stop_staging_process(process)
+            raise
+        if process.returncode != 0 or len(output) > 1024 * 1024:
+            raise ValueError("Plugin staging worker failed")
+        result = json.loads(output)
+        if (
+            not isinstance(result, dict) or result.get("ok") is not True
+            or not isinstance(result.get("result"), dict) or not isinstance(result.get("preview"), dict)
+        ):
+            raise ValueError("Invalid plugin staging result")
+        return result["result"], result["preview"]
+
+    async def _stage(self, job: dict) -> None:
+        try:
+            update = None
             if job["action"] == "update":
-                job.update(await asyncio.to_thread(self._update_preview, job, staged))
+                update = {"target_id": job["target_id"], "expected_record": job["expected_record"]}
+            async with self.stage_slots:
+                staged, preview = await self._run_staging(job["requested_source"], job["base"] / "package", update)
+            job.update(preview)
             job["staged"] = staged
             for key in ("commit", "files_sha256", "manifest", "source", "ref"):
                 job[key] = staged[key]
             job["plugin_id"] = staged["manifest"]["id"]
             job["status"] = "ready"
+        except asyncio.CancelledError:
+            job["status"] = "cancelled"
+            await asyncio.to_thread(self._cleanup, job)
+            raise
         except Exception as exc:
             logger.warning("Plugin staging failed: %s", type(exc).__name__)
             job["error"] = "Cannot stage plugin source; check the URL, ref, and plugin manifest"
@@ -314,6 +372,8 @@ class PluginJobs:
         if self.reaper is not None:
             self.reaper.cancel()
             await asyncio.gather(self.reaper, return_exceptions=True)
+        for task in list(self.staging_tasks):
+            task.cancel()
         if self.tasks:
             await asyncio.gather(*list(self.tasks), return_exceptions=True)
         for job in self.jobs.values():
