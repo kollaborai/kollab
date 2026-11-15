@@ -295,3 +295,24 @@ def test_update_stops_and_restarts_previously_running_services(client, managed_r
     })
     assert response.status_code == 200, response.text
     assert state["events"] == ["stop", ("hello", "worker", "start")]
+
+
+def test_shutdown_terminates_owned_stalled_git_without_leaving_stage(client, tmp_path, monkeypatch):
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    marker = tmp_path / "git-started"
+    fake_git = fake_bin / "git"
+    fake_git.write_text(f"#!/bin/sh\necho $$ > '{marker}'\nsleep 4\nexit 1\n")
+    fake_git.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:/usr/bin:/bin")
+    job_id = client.post("/plugins/install", json={"source": "https://example.invalid/repo"}).json()["job_id"]
+    deadline = time.monotonic() + 3
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert marker.exists()
+    base = client.app.state.plugin_jobs.jobs[job_id]["base"]
+    start = time.monotonic()
+    client.portal.call(client.app.state.plugin_jobs.close)
+    assert time.monotonic() - start < 2
+    assert not base.exists()
+    assert client.post("/plugins/install", json={"source": "https://example.invalid/repo"}).status_code == 503
