@@ -482,6 +482,25 @@ def test_regression_test_counts_a_bare_finding_list_1024(tmp_path: Path) -> None
     )
 
 
+def test_regression_test_keeps_finding_beside_severity_code_1024(tmp_path: Path) -> None:
+    cfg = regression_cfg(tmp_path)
+    report = pr_gates_dod.evaluate(
+        cfg,
+        make_data(
+            comments=(
+                source_comment(
+                    "issue_comment",
+                    1,
+                    "F14,P1: regression test required for the open bypass",
+                ),
+            )
+        ),
+    )
+    assert report.detail_for("regression_test") == (
+        "no regression test covers finding id(s): F14 under tests/"
+    )
+
+
 # --- report shape -----------------------------------------------------------
 
 
