@@ -129,6 +129,11 @@ try {
   await failedCommand.click();
   await page.getByText("Broken · Failed to Load", { exact: true }).waitFor({ timeout: 5000 });
   await page.getByRole("button", { name: "Back to Chat" }).click();
+  await chatInput.fill("/broken-command args");
+  await chatInput.press("Escape");
+  await chatInput.press("Enter");
+  await page.getByText("Broken · Failed to Load", { exact: true }).waitFor({ timeout: 5000 });
+  await page.getByRole("button", { name: "Back to Chat" }).click();
   await panel.getByRole("button", { name: /Broken Board/ }).click({ timeout: 5000 });
   await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
   await page.getByText("View Error", { exact: true }).click();

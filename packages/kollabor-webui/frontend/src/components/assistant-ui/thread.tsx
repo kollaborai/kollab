@@ -514,9 +514,27 @@ const Composer: FC<{
       .filter(command => !reserved.has(command.name.replace(/^\//, "").toLowerCase()))
       .map(command => ({ pluginId: plugin.id, command })));
   }, [commands, pluginSnapshot.registry]);
+  const failedPluginCommands = useMemo(() => {
+    const used = new Set([...commands.flatMap(command => [command.name, ...(command.aliases ?? [])]),
+      ...pluginCommands.map(({ command }) => command.name)].map(name => name.replace(/^\//, "").toLowerCase()));
+    return pluginSnapshot.entries.flatMap(entry => {
+      if (!entry.enabled || entry.shadowed || !pluginSnapshot.errors[entry.id]) return [];
+      const declared = Array.isArray(entry.contributes?.slash) ? entry.contributes.slash : [];
+      return declared.flatMap((raw: unknown) => {
+        const name = typeof raw === "string" ? raw : raw && typeof raw === "object" && "name" in raw && typeof raw.name === "string" ? raw.name : "";
+        const normalized = name.replace(/^\//, "").toLowerCase();
+        if (!normalized || used.has(normalized)) return [];
+        used.add(normalized);
+        return [{ name: name.replace(/^\//, ""), pluginId: entry.id, pluginName: entry.name,
+          renderFailed: pluginSnapshot.renderFailed.includes(entry.id) }];
+      });
+    });
+  }, [commands, pluginCommands, pluginSnapshot.entries, pluginSnapshot.errors, pluginSnapshot.renderFailed]);
   const allCommands = useMemo<readonly SlashCommand[]>(() => [...commands, ...pluginCommands.map(({ pluginId, command }) => ({
     name: command.name.replace(/^\//, ""), description: command.description, category: "plugins", plugin: pluginId,
-  }))], [commands, pluginCommands]);
+  })), ...failedPluginCommands.map(({ name, pluginId, pluginName, renderFailed }) => ({
+    name, description: `${pluginName} · Failed to ${renderFailed ? "Render" : "Load"}`, category: "plugins", plugin: pluginId,
+  }))], [commands, pluginCommands, failedPluginCommands]);
   const sendTransportCommand = useAssistantTransportSendCommand();
   // The mic starts the LiveKit room in this browser; /voice (the computer
   // running the agent listens) stays a typed command, and its status line shows.
@@ -640,6 +658,13 @@ const Composer: FC<{
     if (attachments.length) return;
     const match = text.trim().match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
     if (!match) return;
+    const failed = failedPluginCommands.find(command => command.name.toLowerCase() === match[1].toLowerCase());
+    if (failed) {
+      event.preventDefault();
+      aui.composer.setText("");
+      pluginHost.navigate(failed.pluginId, { page: "" });
+      return;
+    }
     const found = pluginCommands.find(({ command }) => command.name.replace(/^\//, "").toLowerCase() === match[1].toLowerCase());
     if (!found) return;
     event.preventDefault();
@@ -688,7 +713,14 @@ const Composer: FC<{
     id: string;
     metadata?: Record<string, unknown> | undefined;
   }) => {
-    if (!onOpenPanel || aui.composer.getState().attachments.length > 0) return;
+    if (aui.composer.getState().attachments.length > 0) return;
+    const failed = failedPluginCommands.find(command => command.name.toLowerCase() === item.id.toLowerCase());
+    if (failed && pluginHost) {
+      aui.composer.setText("");
+      pluginHost.navigate(failed.pluginId, { page: "" });
+      return;
+    }
+    if (!onOpenPanel) return;
     const insert = item.metadata?.insertText;
     const request = panelCommandRequest(
       `/${typeof insert === "string" ? insert : item.id}`,
