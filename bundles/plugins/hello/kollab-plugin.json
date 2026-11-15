@@ -19,7 +19,10 @@
   "contributes": {
     "views": [{"id": "hello-view"}],
     "menu": [{"id": "hello-page", "label": "Hello Page", "icon": "box", "open": {"page": "hello-page"}}],
-    "pages": [{"id": "hello-page"}]
+    "pages": [{"id": "hello-page"}],
+    "modals": [{"id": "hello-dialog"}],
+    "slash": ["hello-web"],
+    "renderers": [{"tag": "hello_note"}]
   },
   "uses": ["run:python3"]
 }
