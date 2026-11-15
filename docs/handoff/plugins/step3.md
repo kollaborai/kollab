@@ -89,6 +89,9 @@
 - Badge contract: red browser test commit `2ce2860e` caught MenuCount expecting `{count, attention}` instead of the spec's `{text, hint}`. It now renders the declared text with the hint on the badge. Isolated browser acceptance and typecheck pass; live event-based count refresh still needs an explicit check.
 
 
+- Manifest binding red check: `registry.test.ts` exposes that undeclared page/command calls currently register and `k.menu('row')` loses the manifest's label/open target. The spec requires undeclared ids ignored with a warning, manifest-declared rows visible even when loading fails, and the real PR Chain example maps a menu id to a differently named page. Implement strict host binding and failed-load rows; update fake fixtures with real declarations.
+
+
 ## Remaining
 
 1. Add explicit late-import removal/replacement and stale awaited-activation tests; then finish item 1: registry, SDK, error boundary, shared React runtime/import map, CSS and integration. The current lifecycle core is not production-wired and cannot load a plugin by itself.

@@ -26,6 +26,28 @@ describe("plugin contribution registry", () => {
     expect(notify).toHaveBeenCalledTimes(2);
   });
 
+  it("binds only declared contributions and uses the manifest menu target", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const registry = new PluginRegistry();
+      const draft = registry.stage("example", {
+        menu: [{ id: "row", label: "Declared Row", open: { page: "board" } }],
+        pages: [{ id: "board", title: "Board" }], slash: ["safe"], views: [], modals: [], renderers: [],
+      });
+      draft.menu("row", { count: { path: "/badge" } });
+      draft.page({ id: "board", title: "Board", tabs: [] });
+      draft.page({ id: "undeclared", title: "Hidden", tabs: [] });
+      draft.command({ name: "danger", description: "Undeclared", run: () => {} });
+      draft.command({ name: "safe", description: "Declared", run: () => {} });
+      registry.commit(draft);
+      const plugin = registry.getSnapshot().plugins[0];
+      expect(plugin.menus[0]).toEqual({ id: "row", label: "Declared Row", open: { page: "board" }, count: { path: "/badge" } });
+      expect(plugin.pages.map(page => page.id)).toEqual(["board"]);
+      expect(plugin.commands.map(command => command.name)).toEqual(["safe"]);
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally { warn.mockRestore(); }
+  });
+
   it("keeps built-in and earlier plugin commands and reports the losing plugin", () => {
     const registry = new PluginRegistry(["help"]);
     const first = registry.stage("first");
