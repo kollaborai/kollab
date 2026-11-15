@@ -26,6 +26,9 @@
 - Event transport: isolated red check (test commit `1a29cd4c`) failed because `./events` did not exist. After implementation, `vitest run src/plugins` passes 13/13 and frontend typecheck passes under the isolated HOME. The transport uses authenticated requests, topic routing, abort on unsubscribe and bounded retry; reconnect and stream failure behavior still need explicit tests and host integration.
 
 
+- Host lifecycle red check: isolated `vitest run src/plugins/host.test.ts` fails because `./host` does not exist. Contract covers page-wide opt-out, loading/removal, persistent freeze recovery, and visible load failures. The host must connect the existing loader, registry, SDK, SSE, stylesheet lifetime, and inventory rather than duplicate those services.
+
+
 ## Remaining
 
 1. Add explicit late-import removal/replacement and stale awaited-activation tests; then finish item 1: registry, SDK, error boundary, shared React runtime/import map, CSS and integration. The current lifecycle core is not production-wired and cannot load a plugin by itself.
