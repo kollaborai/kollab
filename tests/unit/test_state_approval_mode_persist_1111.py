@@ -49,3 +49,33 @@ def test_persist_true_still_saves_the_default(tmp_path):
     asyncio.run(state.set_approval_mode("trust_all", persist=True))
 
     assert _saved_mode(config_path) == "trust_all"
+
+
+class _InProcessRpc:
+    """Routes RemoteStateService calls to the daemon's registered handlers."""
+
+    def __init__(self):
+        self.handlers = {}
+
+    def register(self, method, handler):
+        self.handlers[method] = handler
+
+    async def call(self, method, params, timeout=None):
+        return await self.handlers[method](params)
+
+
+def test_engine_rpc_path_keeps_the_saved_default(tmp_path):
+    """The engine reaches the daemon through RemoteStateService and the RPC handler."""
+    from kollabor.state.handlers import register_state_handlers
+    from kollabor.state.remote import RemoteStateService
+
+    config_path, local = _make_state(tmp_path)
+    rpc = _InProcessRpc()
+    register_state_handlers(rpc, local)
+    remote = RemoteStateService(rpc)
+
+    snapshot = asyncio.run(remote.set_approval_mode("trust_all", persist=False))
+
+    assert snapshot.approval_mode == "TRUST_ALL"
+    assert local._permission_manager.approval_mode is ApprovalMode.TRUST_ALL
+    assert _saved_mode(config_path) == "default"
