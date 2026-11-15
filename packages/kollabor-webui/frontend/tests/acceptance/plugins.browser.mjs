@@ -34,13 +34,15 @@ try {
       views: [{ id: "fixture-view" }], pages: [{ id: "board" }], modals: [{ id: "details" }],
       slash: ["fixture"], renderers: [{ tag: "fixture_tag" }],
     } };
+  const crasher = { id: "crasher", name: "Crash Test", kind: "installed", state: "ok", enabled: true, shadowed: false,
+    web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: { views: [{ id: "crash-view" }] } };
   const broken = { id: "broken", name: "Broken", kind: "installed", state: "ok", enabled: true, shadowed: false,
     web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: { menu: [{ id: "broken-row", label: "Broken Board", open: { page: "board" } }], pages: [{ id: "board" }] } };
   await page.route("**/*", async route => {
     const url = new URL(route.request().url());
     if (url.origin !== origin) return route.abort();
     if (url.pathname === "/api/config") return route.fulfill({ json: { engine_url: "/engine" } });
-    if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, plugins: [entry, broken] } }); }
+    if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, plugins: [entry, broken, crasher] } }); }
     if (url.pathname === "/engine/plugins/install/preview" && route.request().method() === "POST") return route.fulfill({ json: { job_id: "install-fixture", status: "staging" } });
     if (url.pathname === "/engine/plugins/jobs/install-fixture" && route.request().method() === "GET") return route.fulfill({ json: preview });
     if (url.pathname === "/engine/plugins/jobs/install-fixture/confirm" && route.request().method() === "POST") {
@@ -60,6 +62,8 @@ try {
       brokenImports.push(url.href);
       return route.fulfill({ status: 500, contentType: "text/plain", body: "broken" });
     }
+    if (url.pathname === "/plugins/crasher/web/index.js") return route.fulfill({ contentType: "text/javascript", body:
+      `import React from 'react'; export default k => k.view({id:'crash-view', label:'Crash View', render:() => { ${url.searchParams.has("retry") ? `return React.createElement('p', null, 'Recovered view');` : `throw new Error('view exploded');`} }});` });
     if (url.pathname === "/plugins/fixture/web/index.css") return route.fulfill({ contentType: "text/css", body: '[data-plugin="fixture"] .scope-probe { color: rgb(12, 34, 56); }' });
     if (url.pathname === "/plugins/fixture/web/index.js") return route.fulfill({ contentType: "text/javascript", body:
       `import React from "react"; import { definePlugin } from "@kollab/plugin";
@@ -103,6 +107,13 @@ try {
   assert.equal(await input.inputValue(), "", "plugin command clears the composer");
   const panel = page.getByRole("complementary", { name: "Session Controls" });
   await panel.waitFor({ timeout: 15000 });
+  await panel.getByRole("button", { name: "Fixture View" }).click();
+  await panel.getByRole("button", { name: "Crash View" }).click();
+  const crashAlert = page.getByRole("alert");
+  await crashAlert.waitFor({ timeout: 5000 });
+  assert.match(await crashAlert.innerText(), /Crash Test · Failed to Render/, "render failure names the plugin");
+  await page.getByRole("alert").getByRole("button", { name: "Retry" }).click();
+  await page.getByText("Recovered view", { exact: true }).waitFor({ timeout: 5000 });
   await panel.getByRole("button", { name: "Fixture View" }).click();
   const viewBody = page.getByText("Fixture view body", { exact: true });
   await viewBody.waitFor();
