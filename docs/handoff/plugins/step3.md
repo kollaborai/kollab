@@ -111,6 +111,8 @@
 
 - A real throwing view now displays the plugin's name, not its ID, and Retry recovers it: browser red test `bfb45310`, fix `503cfe08`, isolated Chrome acceptance passed (`throwing-view-green.log`; its console error is the intentionally thrown fixture). Next audit failed declared views/commands and removal while a view is open.
 
+- Failed declared views now remain clickable and open the failure panel: browser red test `612a0930`, fix `08c7fd69`; isolated Chrome acceptance passed (`failed-view-green.log`), typecheck passed (`failed-view-typecheck.log`). Labels use declared labels when available, otherwise plugin name plus an ordinal. Next cover failed slash commands and active-view removal.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
