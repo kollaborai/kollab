@@ -115,8 +115,10 @@
 
 - Failed declared slash commands remain in the palette and open the failure panel both on selection and typed submission; built-in and already-bound commands take priority. Browser red test `d98312ab`, fix plus typed-path test `396e9b0e`; isolated Chrome passed (`failed-command-green.log`), typecheck passed (`failed-command-typecheck.log`). Render-failure description and collision edge cases need further targeted checks.
 
+- The bundled Hello template now has a real React/SDK view, interactive button, menu page and scoped stylesheet: browser red test `bd829112`, implementation `0ad99b17`. Browser test reads the actual bundled JS/CSS and manifest and passed against mocked engine inventory (`hello-template-green.log`); four existing Python Hello tests passed (`hello-template-pytest.log`). The first test run's fake inventory needed engine-shaped settings/services; it does not prove installation or the live engine path.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
-2. Finish uncovered behavior and tests, real hello web template and changelog. Review the recovery mockups visually against the canvas; the static gallery is not design approval. Investigate the exact cancellation behavior before promising it.
+2. Finish uncovered behavior and tests and changelog. Review the recovery mockups visually against the canvas; the static gallery is not design approval. Investigate the exact cancellation behavior before promising it.
 3. Check whether step 2 moved, then run all prescribed gates and isolated live smoke on one fixed HEAD, capture screenshots/overflow, update this handoff, push and follow the PR authorization conditions. Final-head full frontend suite, production browser smoke, screenshot evidence and PR gate are not complete. No PR is authorized while #1065 is open or step 2 has no merged PR.
