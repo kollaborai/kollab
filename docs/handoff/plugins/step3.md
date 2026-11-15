@@ -70,7 +70,7 @@
 - Regression corrected: after previously running composer checks I added an untested `visible` reference that did not exist in `RuntimeShell`, so commit `a7fac235` crashed the session UI. The subsequent browser/typecheck run caught it; this change removes the reference and both checks now pass. Do not report the earlier composer commit as independently green.
 
 
-- Tagged-text red check: isolated `vitest run src/plugins/tagged-text.test.ts` fails because the splitter does not exist. It specifies registered complete tags, nested and multiple tags, and preserving unknown, incomplete, escaped, inline-code and fenced-code text. Implement without evaluating tag content as HTML; hook into assistant Markdown only after the parser is tested.
+- Tagged-text parser: red test commit `7338ff97` failed because the splitter did not exist. `splitPluginTags` now handles tested registered/complete tags, nested blocks, and preserves unknown, incomplete, escaped and code-fenced text; isolated 3/3 parser tests and typecheck pass. Assistant Markdown is not yet wired; browser streaming, more Markdown edge cases and HTML-safety still need verification.
 
 
 ## Remaining
