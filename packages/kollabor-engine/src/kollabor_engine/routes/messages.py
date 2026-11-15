@@ -1721,7 +1721,6 @@ async def assistant_transport(
                         session_id,
                         submitted_contents,
                         assistant_parts,
-                        submitted_media,
                         (
                             {
                                 "type": "incomplete", "reason": "error",
@@ -1730,6 +1729,7 @@ async def assistant_transport(
                             if turn_error
                             else {"type": "complete", "reason": "stop"}
                         ),
+                        submitted_media,
                     )
                     if persist_message_state:
                         if goal_pump is not None:
