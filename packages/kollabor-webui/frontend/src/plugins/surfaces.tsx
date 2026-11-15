@@ -55,7 +55,7 @@ export function PluginPageSurface({ host, pluginId, pageId, session, onClose, on
   if (!page || !context) return <main aria-label="Plugin page" className="flex h-full min-h-0 flex-col">
     <PluginUnavailable host={host} pluginId={pluginId} onClose={onClose} onTurnOff={onTurnOff} />
   </main>;
-  return <main data-plugin aria-label={page.title} className="flex h-full min-h-0 min-w-0 flex-col bg-background text-sm">
+  return <main data-plugin={pluginId} aria-label={page.title} className="flex h-full min-h-0 min-w-0 flex-col bg-background text-sm">
     <header className="flex shrink-0 items-center gap-3 px-4 py-3 sm:px-6">
       <SidebarTrigger className="-ml-1 lg:hidden" />
       <h1 ref={titleRef} tabIndex={-1} className="min-w-0 flex-1 text-lg font-semibold outline-none">{page.title}</h1>
@@ -72,7 +72,7 @@ export function PluginModalSurface({ host, pluginId, modalId, session, onClose, 
   const modal = snapshot.registry.plugins.find(item => item.id === pluginId)?.modals.find(item => item.id === modalId);
   const context = host.getContext(pluginId);
   return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
-    <DialogContent data-plugin className="flex max-h-[100dvh] min-h-0 flex-col overflow-hidden max-sm:h-[100dvh] max-sm:max-w-none max-sm:rounded-none">
+    <DialogContent data-plugin={pluginId} className="flex max-h-[100dvh] min-h-0 flex-col overflow-hidden max-sm:h-[100dvh] max-sm:max-w-none max-sm:rounded-none">
       <DialogHeader><DialogTitle>{modal?.title ?? pluginId}</DialogTitle><DialogDescription className="sr-only">Plugin dialog</DialogDescription></DialogHeader>
       {modal && context ? <PluginTabs key={`${pluginId}:${modalId}`} host={host} pluginId={pluginId} tabs={modal.tabs} context={context} session={session} onTurnOff={onTurnOff} /> :
         <PluginUnavailable host={host} pluginId={pluginId} onClose={onClose} onTurnOff={onTurnOff} />}

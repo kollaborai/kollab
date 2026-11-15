@@ -99,7 +99,7 @@ export function PluginSessionView({ host, view, session, onBack, onTurnOff }: {
     <p className="text-sm">This plugin view is unavailable for this chat.</p><Button type="button" variant="outline" onClick={onBack}>Back to Chat</Button>
   </div>;
   const Render = item.render;
-  return <div data-plugin className="min-h-0 min-w-0 flex-1 overflow-auto">
+  return <div data-plugin={key.pluginId} className="min-h-0 min-w-0 flex-1 overflow-auto">
     <PluginRenderBoundary name={key.pluginId} onError={error => host.reportRenderError(key.pluginId, error)}
       onRetry={() => { void host.retry(key.pluginId); }} onTurnOff={() => onTurnOff(key.pluginId)}>
       <Render k={context} session={session} />

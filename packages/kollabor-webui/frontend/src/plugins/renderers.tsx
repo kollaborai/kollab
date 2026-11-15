@@ -18,7 +18,7 @@ export function PluginToolPart({ part, fallback }: { part: ToolCallMessagePartPr
   const context = match && host?.getContext(match.pluginId);
   if (!match || !host || !context) return fallback;
   const Render = match.renderer.render;
-  return <div data-plugin><PluginRenderBoundary name={match.pluginId} onError={error => host.reportRenderError(match.pluginId, error)}
+  return <div data-plugin={match.pluginId}><PluginRenderBoundary name={match.pluginId} onError={error => host.reportRenderError(match.pluginId, error)}
     onRetry={() => { void host.retry(match.pluginId); }} onTurnOff={() => turnOff(match.pluginId)}>
     <Render k={context} session={session} toolCall={{ name: part.toolName, args: part.args, result: part.result, status: part.status }} />
   </PluginRenderBoundary></div>;
@@ -43,7 +43,7 @@ export function PluginTaggedText({ text }: { text: string }) {
     const context = match && host.getContext(match.pluginId);
     if (!match || !context) return null;
     const Render = match.renderer.render;
-    return <div data-plugin key={index}><PluginRenderBoundary name={match.pluginId} onError={error => host.reportRenderError(match.pluginId, error)}
+    return <div data-plugin={match.pluginId} key={index}><PluginRenderBoundary name={match.pluginId} onError={error => host.reportRenderError(match.pluginId, error)}
       onRetry={() => { void host.retry(match.pluginId); }} onTurnOff={() => turnOff(match.pluginId)}>
       <Render k={context} session={session} tag={{ name: part.name, content: part.content }} />
     </PluginRenderBoundary></div>;
