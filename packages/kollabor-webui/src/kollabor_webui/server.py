@@ -43,6 +43,9 @@ _HOP_BY_HOP = {
     "trailer", "transfer-encoding", "upgrade", "host", "content-length", "date", "server",
 }
 logger = logging.getLogger(__name__)
+# SHA-256 of the exact inline import map in frontend/index.html. Keep this in
+# sync when that map changes; the focused CSP regression computes it from source.
+_PLUGIN_IMPORT_MAP_HASH = "sha256-14tjK1nx63EIg3a0XPGk0Gmhk18LvkNGqQ0pAFK/lmI="
 NO_STORE_HEADERS = {
     "Cache-Control": "no-store",
     "Pragma": "no-cache",
@@ -186,7 +189,9 @@ def create_app(
         if sensitive:
             response.headers.update(NO_STORE_HEADERS)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("Content-Security-Policy", "script-src 'self'")
+        response.headers.setdefault(
+            "Content-Security-Policy", f"script-src 'self' '{_PLUGIN_IMPORT_MAP_HASH}'"
+        )
         response.headers.setdefault("X-Frame-Options", "DENY")
         return response
 
