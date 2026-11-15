@@ -1,0 +1,14 @@
+{
+ "setup-desktop-dark": false,
+ "network-desktop-dark": false,
+ "setup-desktop-light": false,
+ "network-desktop-light": false,
+ "setup-tablet-dark": false,
+ "network-tablet-dark": false,
+ "setup-tablet-light": false,
+ "network-tablet-light": false,
+ "setup-phone-dark": false,
+ "network-phone-dark": false,
+ "setup-phone-light": false,
+ "network-phone-light": false
+}
