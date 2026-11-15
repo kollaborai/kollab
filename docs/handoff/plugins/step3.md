@@ -63,6 +63,9 @@
 - Dynamic command collisions: red test commit `ad8de7f7` failed because engine-command reservations were fixed at construction. Registry can now reconcile a new built-in set while retaining staged plugin commands; 25 focused tests and typecheck pass under the isolated HOME. The composer must call this with the actual session registry before exposing plugin commands.
 
 
+- Composer command red check: fake-engine browser acceptance submits `/fixture test arguments` and times out waiting for the SDK command's toast. Wire plugin commands into the palette and intercept submission before transport, using actual engine commands to reserve collisions.
+
+
 ## Remaining
 
 1. Add explicit late-import removal/replacement and stale awaited-activation tests; then finish item 1: registry, SDK, error boundary, shared React runtime/import map, CSS and integration. The current lifecycle core is not production-wired and cannot load a plugin by itself.

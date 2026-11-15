@@ -35,6 +35,7 @@ try {
          const modal = () => React.createElement("p", null, "Fixture modal body");
          k.page({id:"board",title:"Fixture Board",tabs:[{id:"first",label:"First",render:body},{id:"second",label:"Second",render:second}]});
          k.menu("board",{count:{path:"/badge",refreshOn:"changed"}});
+         k.command({name:"fixture",description:"Run fixture",run:args=>k.toast("Fixture ran: "+args)});
          k.view({id:"fixture-view",label:"Fixture View",needs_folder:true,render:() => React.createElement("p",null,"Fixture view body")});
          k.modal({id:"details",title:"Fixture Details",tabs:[{id:"info",label:"Info",render:modal}]});
          k.notice({text:"Fixture plugin notice",button:{label:"Open board",open:{page:"board"}}});
@@ -54,6 +55,11 @@ try {
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   assert.ok(inventoryReads > 0, "host must fetch inventory");
+  const input = page.getByRole("textbox", { name: "Message input" });
+  await input.fill("/fixture test arguments");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await page.getByText("Fixture ran: test arguments", { exact: true }).waitFor({ timeout: 5000 });
+  assert.equal(await input.inputValue(), "", "plugin command clears the composer");
   const panel = page.getByRole("complementary", { name: "Session Controls" });
   await panel.waitFor({ timeout: 15000 });
   await panel.getByRole("button", { name: "Fixture View" }).click();
