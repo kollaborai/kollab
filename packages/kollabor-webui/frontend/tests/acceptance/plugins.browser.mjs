@@ -23,7 +23,7 @@ try {
   if (process.env.PLUGIN_SCREENSHOTS && process.env.PLUGIN_REFERENCE_URL) {
     const reference = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     await reference.goto(process.env.PLUGIN_REFERENCE_URL);
-    await reference.screenshot({ path: resolve(process.env.PLUGIN_SCREENSHOTS, "failed-load-reference.png") });
+    await reference.screenshot({ path: resolve(process.env.PLUGIN_SCREENSHOTS, `${process.env.PLUGIN_REFERENCE_NAME || "failed-load"}-reference.png`) });
     await reference.close();
   }
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
@@ -254,7 +254,13 @@ try {
   await settings.getByRole("button", { name: "Hello", exact: true }).click();
   await settings.getByText("Hello plugin settings example.", { exact: true }).waitFor();
   await settings.getByRole("button", { name: "Fixture", exact: true }).click();
-  const fixtureRow = settings.getByRole("button", { name: "Fixture", exact: true }).locator("xpath=ancestor::section[1]");
+  if (process.env.PLUGIN_SCREENSHOTS) await page.screenshot({ path: resolve(process.env.PLUGIN_SCREENSHOTS, "settings-actual.png") });
+  const fixtureRow = settings.getByRole("region", { name: "Fixture details" });
+  await fixtureRow.waitFor({ timeout: 5000 });
+  assert.equal(await settings.getByText("Hello plugin settings example.", { exact: true }).count(), 0, "only the selected plugin shows details");
+  const listBox = await settings.getByRole("navigation", { name: "Plugin list" }).boundingBox();
+  const detailBox = await fixtureRow.boundingBox();
+  assert.ok(listBox && detailBox && listBox.x + listBox.width <= detailBox.x, "desktop uses separate list and details columns");
   assert.doesNotMatch(await fixtureRow.innerText(), /v1\.2\.3|1234567890ab/, "settings rows hide version and commit identifiers");
   const customSettings = settings.getByText("Fixture custom settings", { exact: true });
   await customSettings.waitFor();
@@ -273,6 +279,7 @@ try {
   await add.getByText(/plugin code.*runs as you/i).waitFor();
   await add.getByText(/without asking/i).waitFor();
   await add.getByText(/unreported.*not capped/i).waitFor();
+  if (process.env.PLUGIN_SCREENSHOTS) await page.screenshot({ path: resolve(process.env.PLUGIN_SCREENSHOTS, "install-review-actual.png") });
   assert.deepEqual(installSource, { source: "https://github.com/example/fixture.git" });
   assert.equal(confirmedInstall, null, "preview must not install before confirmation");
   await add.getByRole("button", { name: "Cancel", exact: true }).click();
