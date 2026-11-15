@@ -435,15 +435,23 @@ class AgentRegistry:
             records = {
                 key: self._records[key] for key in keys if key in self._records
             }
+            base_records = {
+                key: self._persisted_records[key]
+                for key in records
+                if key in self._persisted_records
+            }
             if created_keys:
                 self._storage.merge_save_registry(
                     records,
                     deleted_keys=deleted_keys,
                     created_keys=created_keys,
+                    base_records=base_records,
                 )
             else:
                 self._storage.merge_save_registry(
-                    records, deleted_keys=deleted_keys
+                    records,
+                    deleted_keys=deleted_keys,
+                    base_records=base_records,
                 )
             for key in deleted_keys or []:
                 self._persisted_records.pop(key, None)

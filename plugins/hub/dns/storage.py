@@ -306,18 +306,26 @@ class DNSStorage:
         records: Dict[str, AgentRecord],
         deleted_keys: Optional[List[str]] = None,
         created_keys=(),
+        base_records: Optional[Dict[str, dict]] = None,
     ) -> None:
         """Merge updates atomically; deletion markers reject stale snapshots."""
         with _file_lock(self._registry_path):
             existing, tombstones = self._read_registry_state_unlocked()
             tombstones.difference_update(created_keys)
-            existing.update(
-                {
-                    key: record
-                    for key, record in records.items()
-                    if key not in tombstones or key in created_keys
-                }
-            )
+            for key, record in records.items():
+                if key in tombstones and key not in created_keys:
+                    continue
+                base = (base_records or {}).get(key)
+                current = existing.get(key)
+                if base is None or current is None or key in created_keys:
+                    existing[key] = record
+                    continue
+                current_data = current.to_dict()
+                incoming_data = record.to_dict()
+                for field, value in incoming_data.items():
+                    if base.get(field) != value:
+                        current_data[field] = value
+                existing[key] = AgentRecord.from_dict(current_data)
             for key in deleted_keys or []:
                 existing.pop(key, None)
                 tombstones.add(key)
