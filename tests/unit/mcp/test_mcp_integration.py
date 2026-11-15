@@ -282,10 +282,13 @@ class TestMCPServerConnection(unittest.TestCase):
             connection = MCPServerConnection("test", "fake")
             connection.initialized = True
             connection.process = _FakeProcess(stdout=partial)
-            response = await connection._send_request(
-                {"jsonrpc": "2.0", "id": "lost", "method": "lost"}
-            )
-            self.assertIsNone(response)
+            with self.assertRaisesRegex(
+                MCPRequestInterruptedError,
+                "outcome may be unknown because the request was written",
+            ):
+                await connection._send_request(
+                    {"jsonrpc": "2.0", "id": "lost", "method": "lost"}
+                )
             self.assertFalse(connection.initialized)
             self.assertEqual(connection._read_buffer, b"")
 
