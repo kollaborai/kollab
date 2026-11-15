@@ -25,10 +25,24 @@ def test_capability_index_saves_keep_updates_from_stale_snapshots(tmp_path):
     assert first_snapshot == second_snapshot == {}
 
     first.save_capability_index(
-        {"alpha-capability": [{"designation": "alpha", "capability": {}}]}
+        {
+            "alpha-capability": [
+                {
+                    "designation": "alpha",
+                    "capability": {"name": "alpha-capability"},
+                }
+            ]
+        }
     )
     second.save_capability_index(
-        {"beta-capability": [{"designation": "beta", "capability": {}}]}
+        {
+            "beta-capability": [
+                {
+                    "designation": "beta",
+                    "capability": {"name": "beta-capability"},
+                }
+            ]
+        }
     )
 
     final_index = DNSStorage(tmp_path).load_capability_index()
