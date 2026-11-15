@@ -723,9 +723,17 @@ class ACPOrchestrator:
         self._turn_conversations[turn_key] = self._conversation_id()
         if record:
             try:
+                record_text = text
+                if origin is not None:
+                    from kollabor_agent.voice_admission import validate_voice_admission_context
+
+                    if validate_voice_admission_context(origin):
+                        from kollabor_voice.voice_context import strip_voice_preamble
+
+                        record_text = strip_voice_preamble(text)
                 self._record_user(
                     request_id,
-                    text,
+                    record_text,
                     source,
                     thread_id,
                     track_completion=True,
