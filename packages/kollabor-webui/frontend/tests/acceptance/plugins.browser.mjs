@@ -30,6 +30,7 @@ try {
   let inventoryReads = 0;
   let confirmedInstall = null;
   let installSource = null;
+  let cancelAttempts = 0;
   const brokenImports = [];
   let brokenDisabled = false;
   let fixtureRemoved = false;
@@ -63,6 +64,11 @@ try {
       installSource = route.request().postDataJSON();
       if (!installSource?.source) return route.fulfill({ status: 422, json: { detail: "source is required" } });
       return route.fulfill({ status: 202, json: { job_id: "install-fixture", status: "staging" } });
+    }
+    if (url.pathname === "/engine/plugins/jobs/install-fixture" && route.request().method() === "DELETE") {
+      cancelAttempts++;
+      if (cancelAttempts === 1) return route.fulfill({ status: 503, json: { detail: "Cannot remove staged plugin files; try again" } });
+      return route.fulfill({ json: { ...preview, status: "cancelled" } });
     }
     if (url.pathname === "/engine/plugins/jobs/install-fixture" && route.request().method() === "GET") return route.fulfill({ json: preview });
     if (url.pathname === "/engine/plugins/jobs/install-fixture/confirm" && route.request().method() === "POST") {
@@ -235,6 +241,16 @@ try {
   await add.getByText(/unreported.*not capped/i).waitFor();
   assert.deepEqual(installSource, { source: "https://github.com/example/fixture.git" });
   assert.equal(confirmedInstall, null, "preview must not install before confirmation");
+  await add.getByRole("button", { name: "Cancel", exact: true }).click();
+  await add.getByText(/Cannot remove staged plugin files/).waitFor();
+  assert.equal(await add.isVisible(), true, "failed cancellation remains visible and retryable");
+  await add.getByRole("button", { name: "Cancel", exact: true }).click();
+  await add.waitFor({ state: "hidden" });
+  assert.equal(cancelAttempts, 2);
+  await settings.getByRole("button", { name: "Add Plugin" }).click();
+  await add.getByLabel("Plugin Git URL").fill("https://github.com/example/fixture.git", { timeout: 5000 });
+  await add.getByRole("button", { name: "Review" }).click();
+  await add.getByText(filesHash, { exact: false }).waitFor();
   await add.getByRole("button", { name: "Install", exact: true }).click();
   await add.waitFor({ state: "hidden" });
   assert.deepEqual(confirmedInstall, { commit, files_sha256: filesHash });
