@@ -38,7 +38,7 @@
 - Production runtime: red test commit `d13c7497` caught Vite stripping the stable entrypoint exports. Preserving entry signatures and explicitly re-exporting CommonJS ReactDOM/JSX names fixed it; the isolated `node --test src/plugins/runtime-build.test.mjs` now passes against a fresh production build under `~/backups/plugins-step3-work/`. The source-level identity tests alone did not detect this. The test proves the entrypoints export functions, not browser module identity under CSP.
 
 
-- Recovery UI red check: isolated `vitest run src/plugins/components.test.tsx` fails both SSR tests because the named recovery components do not yet exist. Add the shared boundary, explicit failure controls and opt-out/skipped notices with existing UI primitives; SSR does not replace real browser error-boundary tests.
+- Recovery UI: red SSR checks (test commit `ea12be9f`) failed because the components did not exist. Added a shared error boundary, failure controls and opt-out/skipped notices using Button and NoticeBar. Isolated `vitest run src/plugins` passes 22/22 and typecheck passes. The components are not mounted; SSR does not replace real browser error-boundary tests.
 
 
 ## Remaining
