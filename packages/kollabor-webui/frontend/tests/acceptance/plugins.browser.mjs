@@ -37,7 +37,7 @@ try {
   const crasher = { id: "crasher", name: "Crash Test", kind: "installed", state: "ok", enabled: true, shadowed: false,
     web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: { views: [{ id: "crash-view" }] } };
   const broken = { id: "broken", name: "Broken", kind: "installed", state: "ok", enabled: true, shadowed: false,
-    web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: { views: [{ id: "broken-view" }], menu: [{ id: "broken-row", label: "Broken Board", open: { page: "board" } }], pages: [{ id: "board" }] } };
+    web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: { slash: ["broken-command"], views: [{ id: "broken-view" }], menu: [{ id: "broken-row", label: "Broken Board", open: { page: "board" } }], pages: [{ id: "board" }] } };
   await page.route("**/*", async route => {
     const url = new URL(route.request().url());
     if (url.origin !== origin) return route.abort();
@@ -122,6 +122,13 @@ try {
   await panel.getByRole("button", { name: /^Broken Failed$/ }).click({ timeout: 5000 });
   await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
   await panel.getByRole("button", { name: "Chat", exact: true }).click();
+  const chatInput = page.getByRole("textbox", { name: "Message input" });
+  await chatInput.fill("/broken-command");
+  const failedCommand = page.getByText("Broken Command", { exact: true });
+  await failedCommand.waitFor({ timeout: 5000 });
+  await failedCommand.click();
+  await page.getByText("Broken · Failed to Load", { exact: true }).waitFor({ timeout: 5000 });
+  await page.getByRole("button", { name: "Back to Chat" }).click();
   await panel.getByRole("button", { name: /Broken Board/ }).click({ timeout: 5000 });
   await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
   await page.getByText("View Error", { exact: true }).click();
