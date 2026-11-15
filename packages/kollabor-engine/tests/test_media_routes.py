@@ -10,6 +10,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from kollabor_engine.media_store import list_for, save
+from kollabor_engine.routes.messages import _save_sent_media
 from kollabor_engine.server import create_app
 
 from kollabor_config.config_utils import get_project_data_dir
@@ -195,3 +196,37 @@ def test_list_endpoint_matches_store(tmp_path: Path) -> None:
     listed = list_for(tmp_path, "s8")
     assert [entry["ref"] for entry in listed] == refs
     assert listed[0]["mime"] == "image/png"
+
+
+class TestSentMediaWiring:
+    """The submit path's media wiring (#1088 sibling sweep).
+
+    ACP sessions submit prompts through the same messages route as the
+    browser (input_source differs, the content pipeline does not), so the
+    parts-shaped content an ACP client sends must store and serve exactly
+    like a paste.
+    """
+
+    def test_acp_shape_parts_are_saved(self) -> None:
+        content = [
+            {"type": "text", "text": "look at this"},
+            {"type": "image", "image": PNG},
+            {"type": "image", "image": JPEG},
+        ]
+        saved = _save_sent_media(content, "acp-s1")
+        assert [entry["mime"] for entry in saved] == ["image/png", "image/jpeg"]
+        stored = list_for(conversations_dir(), "acp-s1")
+        assert [entry["ref"] for entry in stored] == [entry["ref"] for entry in saved]
+
+    def test_text_only_is_empty(self) -> None:
+        assert _save_sent_media("plain text", "acp-s2") == []
+
+    def test_bad_part_dropped_send_unaffected(self) -> None:
+        content = [
+            {"type": "text", "text": "mixed"},
+            {"type": "image", "image": "data:image/png;base64,!!!not-base64"},
+            {"type": "image", "image": PNG},
+        ]
+        saved = _save_sent_media(content, "acp-s3")
+        assert len(saved) == 1
+        assert saved[0]["mime"] == "image/png"
