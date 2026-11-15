@@ -150,3 +150,66 @@ def test_jobs_are_bounded_and_expire(client, monkeypatch):
     assert client.post("/plugins/install", json={"source": "https://example.invalid/repo"}).status_code == 429
     monkeypatch.setattr(plugin_jobs, "_JOB_TTL", -1)
     assert client.get(f"/plugins/jobs/{first['job_id']}").status_code == 404
+
+
+def _install_hello(client):
+    response = client.post("/plugins/install", json={"source": "https://example.invalid/repo#main"})
+    job_id = response.json()["job_id"]
+    ready = _ready(client, job_id)
+    assert ready["status"] == "ready"
+    response = client.post(f"/plugins/jobs/{job_id}/confirm", json={
+        "commit": ready["commit"], "files_sha256": ready["files_sha256"],
+    })
+    assert response.status_code == 200, response.text
+    return ready
+
+
+def _publish_update(managed_repo):
+    source, bare = managed_repo
+    (source / "content.txt").write_text("two")
+    _git("add", ".", cwd=source)
+    _git("commit", "-m", "second", cwd=source)
+    _git("push", str(bare), "main", cwd=source)
+    return _git("rev-parse", "HEAD", cwd=source)
+
+
+def test_update_job_previews_and_preserves_data_and_disabled_state(client, managed_repo, tmp_path):
+    first = _install_hello(client)
+    data = tmp_path / ".kollab" / "plugin-data" / "hello"
+    data.mkdir(parents=True, exist_ok=True)
+    (data / "personal.txt").write_text("keep")
+    assert client.post("/plugins/hello/disable").status_code == 200
+    new_commit = _publish_update(managed_repo)
+    response = client.post("/plugins/hello/update")
+    assert response.status_code == 202, response.text
+    job_id = response.json()["job_id"]
+    ready = _ready(client, job_id)
+    assert ready["status"] == "ready", ready
+    assert ready["previous_commit"] == first["commit"]
+    assert ready["commit"] == new_commit
+    assert "." in ready["changed_folders"]
+    root = tmp_path / ".kollab" / "plugins" / "hello"
+    assert (root / "content.txt").read_text() == "one"
+    response = client.post(f"/plugins/jobs/{job_id}/confirm", json={
+        "commit": ready["commit"], "files_sha256": ready["files_sha256"],
+    })
+    assert response.status_code == 200, response.text
+    assert (root / "content.txt").read_text() == "two"
+    assert (data / "personal.txt").read_text() == "keep"
+    registry = json.loads((tmp_path / ".kollab" / "plugins.json").read_text())
+    assert registry["plugins"]["hello"]["enabled"] is False
+
+
+def test_update_rejects_registry_changes_before_confirmation(client, managed_repo, tmp_path):
+    _install_hello(client)
+    _publish_update(managed_repo)
+    response = client.post("/plugins/hello/update")
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    ready = _ready(client, job_id)
+    assert client.post("/plugins/hello/disable").status_code == 200
+    response = client.post(f"/plugins/jobs/{job_id}/confirm", json={
+        "commit": ready["commit"], "files_sha256": ready["files_sha256"],
+    })
+    assert response.status_code == 409
+    assert (tmp_path / ".kollab" / "plugins" / "hello" / "content.txt").read_text() == "one"
