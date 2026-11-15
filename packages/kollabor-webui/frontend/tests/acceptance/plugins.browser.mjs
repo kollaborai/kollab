@@ -59,6 +59,7 @@ try {
          k.renderer({tag:"fixture_tag",render:props=>React.createElement("p",{"data-testid":"plugin-tag"},props.tag.content)});
          k.view({id:"fixture-view",label:"Fixture View",needs_folder:true,render:() => React.createElement("p",null,"Fixture view body")});
          k.modal({id:"details",title:"Fixture Details",tabs:[{id:"info",label:"Info",render:modal}]});
+         k.settings({render:() => React.createElement("p", {className:"scope-probe"}, "Fixture custom settings")});
          k.notice({text:"Fixture plugin notice",button:{label:"Open board",open:{page:"board"}}});
          k.notice({text:"Fixture modal notice",button:{label:"Open details",open:{modal:"details"}}});
        });` });
@@ -117,7 +118,11 @@ try {
   await page.getByRole("button", { name: "Settings", exact: true }).first().click();
   const settings = page.getByRole("dialog", { name: "Settings" });
   await settings.getByRole("tab", { name: "Plugins" }).click({ timeout: 5000 });
-  await settings.getByText("Fixture", { exact: true }).waitFor();
+  await settings.getByRole("button", { name: "Fixture", exact: true }).click();
+  const customSettings = settings.getByText("Fixture custom settings", { exact: true });
+  await customSettings.waitFor();
+  assert.equal(await customSettings.locator('xpath=ancestor::*[@data-plugin="fixture"]').count(), 1, "custom settings have plugin-specific CSS scope");
+  assert.equal(await customSettings.evaluate(node => getComputedStyle(node).color), "rgb(12, 34, 56)");
   await settings.getByRole("button", { name: "Add Plugin" }).click();
   const add = page.getByRole("dialog", { name: "Add Plugin" });
   await add.getByLabel("Git URL").fill("https://github.com/example/fixture.git");
