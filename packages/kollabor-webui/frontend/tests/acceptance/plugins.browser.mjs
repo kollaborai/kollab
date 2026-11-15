@@ -32,17 +32,20 @@ try {
       views: [{ id: "fixture-view" }], pages: [{ id: "board" }], modals: [{ id: "details" }],
       slash: ["fixture"], renderers: [{ tag: "fixture_tag" }],
     } };
+  const broken = { id: "broken", name: "Broken", kind: "installed", state: "ok", enabled: true, shadowed: false,
+    web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: { menu: [{ id: "broken-row", label: "Broken Board", open: { page: "board" } }], pages: [{ id: "board" }] } };
   await page.route("**/*", async route => {
     const url = new URL(route.request().url());
     if (url.origin !== origin) return route.abort();
     if (url.pathname === "/api/config") return route.fulfill({ json: { engine_url: "/engine" } });
-    if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, plugins: [entry] } }); }
+    if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, plugins: [entry, broken] } }); }
     if (url.pathname === "/engine/plugins/install/preview" && route.request().method() === "POST") return route.fulfill({ json: { job_id: "install-fixture", status: "staging" } });
     if (url.pathname === "/engine/plugins/jobs/install-fixture" && route.request().method() === "GET") return route.fulfill({ json: preview });
     if (url.pathname === "/engine/plugins/jobs/install-fixture/confirm" && route.request().method() === "POST") {
       confirmedInstall = route.request().postDataJSON();
       return route.fulfill({ json: { ...preview, status: "complete" } });
     }
+    if (url.pathname === "/plugins/broken/web/index.js") return route.fulfill({ status: 500, contentType: "text/plain", body: "broken" });
     if (url.pathname === "/plugins/fixture/web/index.js") return route.fulfill({ contentType: "text/javascript", body:
       `import React from "react"; import { definePlugin } from "@kollab/plugin";
        export default definePlugin(k => {
@@ -86,6 +89,9 @@ try {
   await panel.getByRole("button", { name: "Fixture View" }).click();
   await page.getByText("Fixture view body", { exact: true }).waitFor();
   await panel.getByRole("button", { name: "Chat", exact: true }).click();
+  await panel.getByRole("button", { name: /Broken Board/ }).click({ timeout: 5000 });
+  await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Back to Chat" }).click();
   const boardMenu = panel.getByRole("button", { name: /Fixture Board/ });
   await boardMenu.getByText("4", { exact: true }).waitFor({ timeout: 5000 });
   assert.equal(await boardMenu.getByText("4", { exact: true }).getAttribute("title"), "4 items need attention");
