@@ -103,6 +103,8 @@
 
 - Skipped-plugin recovery notice now displays the inventory name instead of the internal ID (generic fallback before inventory arrives): red test `ca0a172b`, fix `279f0aaf`. Isolated plugin Vitest passed 33/33 (`recovery-name-green.log`), typecheck passed (`recovery-name-typecheck.log`). Next exercise Retry and Turn Off through the browser.
 
+- Browser fake-engine acceptance `58fd7ea4` now exercises Failed to Load → View Error → Retry (distinct URL) → Turn Off (disable route and off page), passed in isolated Chrome (`recovery-browser.log`). This is not the live-engine smoke. Next test retry success and a throwing view's recovery.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
