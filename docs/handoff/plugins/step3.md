@@ -32,6 +32,9 @@
 - Marker race: red check (test commit `abe9c1c8`) exposed an old import clearing the newer replacement's freeze marker. Per-attempt markers and cancellation checks fixed it; isolated `vitest run src/plugins` passes 18/18 and frontend typecheck passes. Browser-level freeze recovery remains unverified.
 
 
+- Shared-runtime red check: isolated `vitest run src/plugins/runtime.test.ts` fails because the React runtime entry does not exist. It checks module identity and the import map; a production build and real CSP/browser loading are still required.
+
+
 ## Remaining
 
 1. Add explicit late-import removal/replacement and stale awaited-activation tests; then finish item 1: registry, SDK, error boundary, shared React runtime/import map, CSS and integration. The current lifecycle core is not production-wired and cannot load a plugin by itself.
