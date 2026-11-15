@@ -20,7 +20,7 @@
 - Blocker: `packages/kollabor-webui/src/kollabor_webui/server.py:189` sets HTTP CSP to `script-src 'self'`; the inline import map required by `docs/specs/plugins.md` needs its SHA-256 authorized in that header. This server file is outside the brief's explicit step 3 ownership. A frontend-only meta CSP cannot relax the HTTP header. Do not weaken CSP; obtain authorization to update the server and its tests or land the required hash through the owning lane before claiming the shared runtime works in browsers.
 
 
-- SDK runtime red check: isolated `vitest run src/plugins/sdk.test.ts` fails 4/4 because `createPluginContext` is not implemented. The tests cover staged calls, scoped engine API/settings requests, path traversal rejection, events and navigation; hook behavior and the full host are separate work.
+- SDK runtime: isolated red check (test commit `9b5a5ee7`) failed 4/4 because `createPluginContext` did not exist. After implementation, isolated loader, registry and SDK tests pass 11/11; isolated frontend typecheck passes. The SDK stages contributions, scopes authenticated engine API and settings calls, rejects obvious path traversal, exposes events/navigation and disposes subscriptions. Hook behavior, real event transport, UI components and host integration remain to be exercised.
 
 
 ## Remaining
