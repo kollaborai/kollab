@@ -155,9 +155,14 @@ file hash, re-verify via install_stage, reject repeat confirmation, expire with
 bounded job count, and clean their own stage directories. Tampering, error
 redaction, local-only access and boundedness are tested. Engine regression:
 28 passed (`plugin-jobs-regression.log`); scoped Ruff and diff checks passed.
-Existing stage_git_source invokes Git without a timeout; shutdown currently
-waits for active staging to finish, so an indefinitely stalled Git operation
-remains an operational gap requiring resolution without changing step 1 ownership.
+`5c195d60` exposed stalled Git shutdown before `adfc1db` moved staging and
+update preview into a short-lived, owned worker process group. It still calls
+step 1's stage_git_source, limits concurrent workers to four, caps staging at
+120 seconds, suppresses Git diagnostics, and kills only that job's process
+group on timeout or shutdown before cleaning its own stage. Real fake-Git
+process tests cover timeout and shutdown; focused engine regression: 35 passed
+(`plugin-worker-regression.log`). Frozen/installed binary behavior remains to
+be covered by the requested isolated smoke; this is not a live deployment.
 
 Update jobs: `9494c116` was red before `1950172c` added the update route,
 old/new commit and changed-folder preview, approval against the same registry
@@ -169,8 +174,8 @@ restart. Plugin/engine regression: 267 passed, 1 skipped
 restart has not yet been verified with an actual wrapper in the engine smoke.
 
 Next: PhoneLink filtering, spoofing/normalization tests, all gates and smoke.
-The branch is not ready to deploy: the stalled-Git shutdown gap and PhoneLink
-management blocking remain.
+The branch is not ready to deploy: PhoneLink management blocking and final
+verification remain.
 The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
 `packages/kollabor-engine/src/kollabor_engine/phone_link.py` is in scope only
 for refusing the spec's remote-disallowed plugin routes and its tests;
