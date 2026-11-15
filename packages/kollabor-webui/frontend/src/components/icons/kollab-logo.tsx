@@ -38,6 +38,7 @@ float fbm(vec2 p, int oct){
 void main(){
   vec2 p = gl_FragCoord.xy / uRes * 2.0 - 1.0;
   p.x *= uRes.x / uRes.y;
+  p *= makem2(uTime * 0.5); // spin the whole field, ~7 s per turn
   vec2 bp = p;
   p = (p + 5.0) * 0.5;
   float rb = fbm(p*0.5 + time*0.17, 3) * 0.1;
