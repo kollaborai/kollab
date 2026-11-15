@@ -8,6 +8,7 @@ serving a page that could not load anything until the user restarted Kollab.
 import asyncio
 import http.server
 import json
+import signal
 import socket
 import subprocess
 import threading
@@ -96,6 +97,8 @@ def stack(monkeypatch):
         return webuis[-1]
 
     monkeypatch.setattr(subprocess, "Popen", popen)
+    # The launcher runs on a test thread here; only the main thread may set signal handlers.
+    monkeypatch.setattr(signal, "signal", lambda *a, **k: None)
     monkeypatch.setattr(cli, "_pick_engine_port", lambda *a, **k: (port, False))
     monkeypatch.setattr(cli, "_adopt_login_path", lambda: None)
     monkeypatch.setenv("KOLLAB_WEBUI_PORT", str(free_port()))
