@@ -119,6 +119,8 @@
 
 - Failure card canvas check: captured supplied `StateFailed-load.html` and fake-engine UI at 1280×800 under `~/backups/plugins-step3-work/design-review/`. Image analysis showed a missing card and wrong action order; red test `e61970ec`, fix `3ba8acce` restores a 460px card, explanatory copy and Retry/View Error/Turn Off hierarchy. Browser acceptance (`failure-design-green.log`) and plugin Vitest 33/33 (`failure-design-vitest.log`) passed; post-fix image analysis confirmed the card and order. This is one state, not design approval or the required live screenshots; remaining canvas states and desktop/tablet/phone still need review. The diff-check service timed out, so reference and actual were analyzed separately.
 
+- Global SSE reconnect now refreshes inventory after a dropped connection, since the engine stream does not replay missed events. Red test `7c0d0398`, fix `55c74f2c`; non-2xx stream responses also report an error instead of being consumed. Plugin Vitest 35/35 (`reconnect-refresh-green.log`) and typecheck (`reconnect-refresh-typecheck.log`) passed; no real network outage test yet.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
