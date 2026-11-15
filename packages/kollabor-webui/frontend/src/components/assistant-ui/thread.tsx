@@ -42,6 +42,7 @@ import {
   stripImageTokens,
 } from "@/composer-restore";
 import { useShallow } from "zustand/shallow";
+import type { ThreadUserMessagePart } from "@assistant-ui/core";
 import {
   useVoiceMode,
   type VoiceActivity,
@@ -560,15 +561,23 @@ const Composer: FC<{
     // [imageN] tokens, so text and attachments never disagree.
     const reattach = async () => {
       for (const image of keptImages) {
-        await aui.composer.addAttachment({
-          type: "image",
-          name: image.name,
-          contentType: image.contentType,
-          content: [...image.content],
-        });
+        // Pending attachments restore through the adapter exactly as a
+        // manual attach does; complete ones come back as descriptors.
+        if (image.file instanceof File) {
+          await aui.composer.addAttachment(image.file);
+        } else {
+          await aui.composer.addAttachment({
+            type: "image",
+            name: image.name,
+            contentType: image.contentType,
+            content: [...(image.content ?? [])] as ThreadUserMessagePart[],
+          });
+        }
       }
     };
-    if (keptImages.length > 0 && attachmentsEnabled) void reattach();
+    if (keptImages.length > 0 && attachmentsEnabled) {
+      reattach().catch(() => setOrphanTokenNotice(orphanImageNotice(restored.tokenCount, 0)));
+    }
   }, [aui, draftKey, attachmentsEnabled]);
 
   // Keep the per-key image retention in step with the composer; a session

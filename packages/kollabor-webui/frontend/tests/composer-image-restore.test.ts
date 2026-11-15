@@ -16,9 +16,9 @@ describe("stripImageTokens", () => {
     expect(result).toEqual({ text: "hello world", tokenCount: 2 });
   });
 
-  it("keeps text that merely mentions image-like syntax inside a sentence", () => {
-    const result = stripImageTokens("see [image1] below");
-    expect(result).toEqual({ text: "see [image1] below", tokenCount: 0 });
+  it("strips tokens typed inline with the text (the synchronizer writes a bare token first)", () => {
+    const result = stripImageTokens("[image1]hello from alpha");
+    expect(result).toEqual({ text: "hello from alpha", tokenCount: 1 });
   });
 
   it("returns empty text with count when the draft is only tokens", () => {
@@ -41,7 +41,15 @@ describe("stripImageTokens", () => {
 });
 
 describe("collectImageAttachments", () => {
-  const image = (id: string) => ({
+  const pendingImage = (id: string) => ({
+    id,
+    type: "image",
+    name: `${id}.png`,
+    contentType: "image/png",
+    status: { type: "requires-action", reason: "composer-send" },
+    file: new File([], `${id}.png`, { type: "image/png" }),
+  });
+  const completeImage = (id: string) => ({
     id,
     type: "image",
     name: `${id}.png`,
@@ -50,14 +58,21 @@ describe("collectImageAttachments", () => {
     content: [{ type: "image", image: "data:image/png;base64,AAAA" }],
   });
 
-  it("serializes complete image attachments for in-memory retention", () => {
-    const stored = collectImageAttachments([image("a1"), image("a2")]);
+  it("retains pending image attachments (the composer's pre-send state)", () => {
+    const stored = collectImageAttachments([pendingImage("a1"), pendingImage("a2")]);
     expect(stored).toHaveLength(2);
-    expect(stored[0]).toMatchObject({ id: "a1", name: "a1.png" });
+    expect(stored[0]?.file).toBeInstanceOf(File);
+    expect(stored[0]?.name).toBe("a1.png");
   });
 
-  it("skips non-image, pending, and content-less attachments", () => {
-    const pending = { ...image("p1"), status: { type: "running" } };
+  it("retains complete image attachments by their content parts", () => {
+    const stored = collectImageAttachments([completeImage("a1")]);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.file).toBeUndefined();
+    expect(stored[0]?.content).toHaveLength(1);
+  });
+
+  it("skips non-image attachments and images with neither file nor content", () => {
     const document = {
       id: "d1",
       type: "document",
@@ -65,8 +80,14 @@ describe("collectImageAttachments", () => {
       status: { type: "complete" },
       content: [{ type: "text", text: "hi" }],
     };
-    const noContent = { ...image("n1"), content: [] };
-    expect(collectImageAttachments([pending, document, noContent])).toEqual([]);
+    const bare = {
+      id: "b1",
+      type: "image",
+      name: "bare.png",
+      contentType: "image/png",
+      status: { type: "requires-action", reason: "composer-send" },
+    };
+    expect(collectImageAttachments([document, bare])).toEqual([]);
   });
 });
 
@@ -96,7 +117,13 @@ describe("composer attachment retention per draft key", () => {
     const { loadComposerAttachments: freshLoad, saveComposerAttachments: freshSave } =
       await import("@/composer-draft");
     const stored = [
-      { id: "a1", name: "a.png", contentType: "image/png", content: [{ type: "image" }] },
+      {
+        id: "a1",
+        type: "image",
+        name: "a.png",
+        contentType: "image/png",
+        file: new File([], "a.png", { type: "image/png" }),
+      },
     ];
     freshSave("k1", stored);
     expect(freshLoad("k1")).toEqual(stored);
@@ -107,7 +134,7 @@ describe("composer attachment retention per draft key", () => {
     const { loadComposerAttachments: freshLoad, saveComposerAttachments: freshSave } =
       await import("@/composer-draft");
     freshSave("k3", [
-      { id: "a1", name: "a.png", contentType: "image/png", content: [] },
+      { id: "a1", type: "image", name: "a.png", contentType: "image/png" },
     ]);
     freshSave("k3", []);
     expect(freshLoad("k3")).toEqual([]);
@@ -116,7 +143,7 @@ describe("composer attachment retention per draft key", () => {
   it("retention is memory-only: a reload (module re-import) starts empty", async () => {
     const { saveComposerAttachments: freshSave } = await import("@/composer-draft");
     freshSave("k4", [
-      { id: "a1", name: "a.png", contentType: "image/png", content: [] },
+      { id: "a1", type: "image", name: "a.png", contentType: "image/png" },
     ]);
     vi.resetModules();
     const reloaded = await import("@/composer-draft");
