@@ -34,6 +34,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Keep large MCP tool results usable while bounding per-connection stdout memory.
+MAX_MCP_FRAME_BYTES = 16 * 1024 * 1024
+
 
 def split_command(command: str) -> list[str]:
     """Split a configured MCP command into the argv that starts it.
@@ -391,45 +394,14 @@ class MCPServerConnection:
         if not self.process or not self.process.stdout:
             return
 
-        discarding_oversized_message = False
         try:
             while True:
-                chunk = await self.process.stdout.read(4096)
-                if not chunk:
-                    break
-                self._read_buffer += chunk
-
-                while True:
-                    if discarding_oversized_message:
-                        newline_index = self._read_buffer.find(b"\n")
-                        if newline_index < 0:
-                            self._read_buffer = b""
-                            break
-                        self._read_buffer = self._read_buffer[newline_index + 1 :]
-                        discarding_oversized_message = False
-                        continue
-
-                    newline_index = self._read_buffer.find(b"\n")
-                    if newline_index < 0:
-                        if len(self._read_buffer) > self.MAX_MESSAGE_BYTES:
-                            logger.warning(
-                                "Discarding oversized MCP message from %s (limit: %s bytes)",
-                                self.server_name,
-                                self.MAX_MESSAGE_BYTES,
-                            )
-                            self._read_buffer = b""
-                            discarding_oversized_message = True
+                oversized_frame = False
+                while b"\n" in self._read_buffer:
+                    line, self._read_buffer = self._read_buffer.split(b"\n", 1)
+                    if len(line) > MAX_MCP_FRAME_BYTES:
+                        oversized_frame = True
                         break
-
-                    line = self._read_buffer[:newline_index]
-                    self._read_buffer = self._read_buffer[newline_index + 1 :]
-                    if len(line) > self.MAX_MESSAGE_BYTES:
-                        logger.warning(
-                            "Ignoring oversized MCP message from %s (limit: %s bytes)",
-                            self.server_name,
-                            self.MAX_MESSAGE_BYTES,
-                        )
-                        continue
                     if not line.strip():
                         continue
                     try:
@@ -438,10 +410,41 @@ class MCPServerConnection:
                         logger.debug(
                             "Ignoring invalid JSON from MCP server %s: %s",
                             self.server_name,
-                            line[:120],
+                            line[:120].decode("utf-8", errors="replace"),
                         )
                         continue
                     self._dispatch_incoming_message(message)
+                if len(self._read_buffer) > MAX_MCP_FRAME_BYTES:
+                    oversized_frame = True
+                if oversized_frame:
+                    error_message = (
+                        "MCP server frame exceeded the "
+                        f"{MAX_MCP_FRAME_BYTES}-byte limit"
+                    )
+                    logger.warning(
+                        "MCP server %s sent a frame over the %d-byte limit",
+                        self.server_name,
+                        MAX_MCP_FRAME_BYTES,
+                    )
+                    for request_id, future in list(self._pending_requests.items()):
+                        if not future.done():
+                            future.set_result(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": request_id,
+                                    "error": {"code": -32000, "message": error_message},
+                                }
+                            )
+                    break
+
+                read_size = min(
+                    4096,
+                    MAX_MCP_FRAME_BYTES - len(self._read_buffer) + 1,
+                )
+                chunk = await self.process.stdout.read(read_size)
+                if not chunk:
+                    break
+                self._read_buffer += chunk
         except asyncio.CancelledError:
             raise
         except Exception as e:

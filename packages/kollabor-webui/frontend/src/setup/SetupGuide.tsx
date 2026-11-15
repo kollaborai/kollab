@@ -128,7 +128,12 @@ export function SetupGuide({
         if (!next) dismiss();
       }}
     >
-      <DialogContent className="flex h-[min(30rem,80dvh)] w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-xl">
+      {/* The guide draws its own header skip button; suppress the
+          DialogContent default close so the dialog shows one X, not two. */}
+      <DialogContent
+        showCloseButton={false}
+        className="flex h-[min(30rem,80dvh)] w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-xl"
+      >
         <div className="flex shrink-0 items-start justify-between gap-2 px-6 pt-5">
           <div className="min-w-0">
             <DialogTitle className="text-lg leading-none font-semibold">
