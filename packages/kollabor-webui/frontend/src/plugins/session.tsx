@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Box, FileCode, GitBranch, LayoutDashboard, ListTodo, Plug, Puzzle, Terminal, type LucideIcon } from "lucide-react";
 import type { Session } from "@/api";
 import { Badge } from "@/components/ui/badge";
@@ -88,6 +89,10 @@ export function PluginSessionView({ host, view, session, onBack, onTurnOff }: {
 }) {
   const snapshot = usePluginSnapshot(host);
   const key = parsePluginView(view);
+  const entry = snapshot.entries.find(item => item.id === key?.pluginId);
+  useEffect(() => {
+    if (key && !snapshot.loading && !snapshot.inventoryError && (!entry || !entry.enabled)) onBack();
+  }, [key?.pluginId, entry, snapshot.loading, snapshot.inventoryError, onBack]);
   if (!key) return null;
   const plugin = snapshot.registry.plugins.find(item => item.id === key.pluginId);
   const item = plugin?.views.find(candidate => candidate.id === key.viewId);
