@@ -28,7 +28,7 @@ try {
   const preview = { job_id: "install-fixture", action: "install", status: "ready", commit, files_sha256: filesHash,
     plugin_id: "fixture-new", manifest: { name: "Fixture New", version: "1.2.3", uses: { tools: ["file_read"], network: ["example.com"] }, services: { worker: {} } },
     changes: { added: ["web/dist/index.js"], modified: [], removed: [], new_grants: ["network:example.com"], new_dependencies: [] } };
-  const entry = { id: "fixture", name: "Fixture", kind: "installed", state: "ok", enabled: true, shadowed: false,
+  const entry = { id: "fixture", name: "Fixture", version: "1.2.3", commit: "1234567890abcdef1234567890abcdef12345678", kind: "installed", state: "ok", enabled: true, shadowed: false,
     web: { entry: "web/dist/index.js", style: "web/dist/index.css", hash: "1" }, contributes: {
       menu: [{ id: "board", label: "Fixture Board", open: { page: "board" } }],
       views: [{ id: "fixture-view" }], pages: [{ id: "board" }], modals: [{ id: "details" }],
@@ -146,6 +146,8 @@ try {
   const settings = page.getByRole("dialog", { name: "Settings" });
   await settings.getByRole("tab", { name: "Plugins" }).click({ timeout: 5000 });
   await settings.getByRole("button", { name: "Fixture", exact: true }).click();
+  const fixtureRow = settings.getByRole("button", { name: "Fixture", exact: true }).locator("xpath=ancestor::section[1]");
+  assert.doesNotMatch(await fixtureRow.innerText(), /v1\.2\.3|1234567890ab/, "settings rows hide version and commit identifiers");
   const customSettings = settings.getByText("Fixture custom settings", { exact: true });
   await customSettings.waitFor();
   assert.equal(await customSettings.locator('xpath=ancestor::*[@data-plugin="fixture"]').count(), 1, "custom settings have plugin-specific CSS scope");
