@@ -157,6 +157,98 @@ impl<C> Runtime<C> {
 #[derive(Default)]
 struct Spawned(Mutex<Runtime<Child>>);
 
+/// After launch the app keeps looking at the web UI (#1123): the runtime died
+/// (another program stopped everything on the engine port) and the window kept a
+/// page that could not load anything until Kollab was quit and reopened.
+const WATCH_EVERY: Duration = Duration::from_secs(5);
+/// Failed looks in a row before the web UI counts as gone (a busy one answers late, not never).
+const DOWN_LOOKS: u32 = 3;
+const RESTART_LIMIT: usize = 3;
+const RESTART_WINDOW: Duration = Duration::from_secs(600);
+
+#[derive(Debug, PartialEq)]
+enum Watched {
+    Nothing,
+    Restart,
+    GiveUp,
+}
+
+/// When a web UI that was answering has gone away. Only a web UI seen up counts:
+/// before that, and after a restart until it answers again, the boot pages own the window.
+#[derive(Default)]
+struct Watch {
+    seen_up: bool,
+    down: u32,
+    restarts: Vec<Instant>,
+}
+
+impl Watch {
+    fn observe(&mut self, up: bool, now: Instant) -> Watched {
+        if up {
+            self.seen_up = true;
+            self.down = 0;
+            return Watched::Nothing;
+        }
+        if !self.seen_up {
+            return Watched::Nothing;
+        }
+        self.down += 1;
+        if self.down < DOWN_LOOKS {
+            return Watched::Nothing;
+        }
+        self.seen_up = false;
+        self.down = 0;
+        self.restarts.retain(|t| now.duration_since(*t) < RESTART_WINDOW);
+        if self.restarts.len() >= RESTART_LIMIT {
+            return Watched::GiveUp;
+        }
+        self.restarts.push(now);
+        Watched::Restart
+    }
+}
+
+/// Restarts a runtime this app owns when its web UI stops answering. A web UI the
+/// app only attached to (started in a terminal) is not replaced behind its owner's
+/// back: the window shows the error page with Retry, and returns by itself when
+/// that web UI answers again.
+fn watch_runtime(app: AppHandle) {
+    let url = ui_url();
+    let mut watch = Watch::default();
+    let mut error_shown = false;
+    loop {
+        std::thread::sleep(WATCH_EVERY);
+        let owned = {
+            let state = app.state::<Spawned>();
+            let runtime = state.0.lock().unwrap();
+            if runtime.closing || runtime.quit_prompt.is_some() || runtime.operation.is_some() {
+                continue; // booting, retrying or quitting: those own the window
+            }
+            runtime.owned.is_some()
+        };
+        let up = webui_running(&url);
+        if up && error_shown {
+            error_shown = false;
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.navigate(url.clone());
+            }
+        }
+        match watch.observe(up, Instant::now()) {
+            Watched::Nothing => {}
+            Watched::Restart if owned => {
+                eprintln!("kollab-desktop: the web UI stopped answering; restarting the runtime");
+                start_boot(&app, true);
+            }
+            _ => {
+                eprintln!("kollab-desktop: the web UI stopped answering; showing the error page");
+                if let Some(win) = app.get_webview_window("main") {
+                    show_status(&win, "error", "Kollab stopped answering. Choose Retry to start it again.", "");
+                    error_shown = true;
+                }
+            }
+        }
+    }
+}
+
 /// The tray's "Launch at Login" item, so its check mark follows the real setting.
 struct LoginItem(CheckMenuItem<Wry>);
 
@@ -1142,6 +1234,8 @@ pub fn run() {
             let handle = app.handle().clone();
             quit_on_signals(&handle);
             start_boot(&handle, false);
+            let watcher = handle.clone();
+            std::thread::spawn(move || watch_runtime(watcher));
             updater::watch(&handle);
             Ok(())
         })
