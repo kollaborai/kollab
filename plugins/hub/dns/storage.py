@@ -7,6 +7,7 @@ Designation names are sanitized to prevent path traversal.
 
 import json
 import logging
+import math
 import os
 import re
 import tempfile
@@ -21,6 +22,15 @@ logger = logging.getLogger(__name__)
 
 # Allowed characters in designation names (alphanumeric, hyphen, underscore)
 _SAFE_DESIGNATION_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _is_finite_number(value: Any) -> bool:
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 class DNSStorageReadError(RuntimeError):
@@ -251,7 +261,7 @@ class DNSStorage:
         try:
             with open(self._reputation_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise DNSStorageReadError(
                 "reputation", self._reputation_path, "malformed JSON"
             ) from exc
@@ -266,6 +276,46 @@ class DNSStorage:
         scores: Dict[str, ReputationScore] = {}
         for designation, score_data in data.get("scores", {}).items():
             if not isinstance(designation, str) or not isinstance(score_data, dict):
+                raise DNSStorageReadError(
+                    "reputation", self._reputation_path, "an invalid score schema"
+                )
+            counter_fields = (
+                "tasks_completed",
+                "tasks_failed",
+                "tasks_abandoned",
+                "uptime_sessions",
+            )
+            endorsements = score_data.get("endorsements", [])
+            if (
+                score_data.get("designation") != designation
+                or any(
+                    type(score_data.get(field, 0)) is not int
+                    or score_data.get(field, 0) < 0
+                    for field in counter_fields
+                )
+                or any(
+                    not _is_finite_number(score_data.get(field, default))
+                    or score_data.get(field, default) < 0
+                    for field, default in (
+                        ("avg_response_time_ms", 0.0),
+                        ("total_uptime_seconds", 0.0),
+                        ("last_updated", 0.0),
+                    )
+                )
+                or not isinstance(endorsements, list)
+                or any(
+                    not isinstance(item, dict)
+                    or not isinstance(item.get("from_designation"), str)
+                    or not isinstance(item.get("to_designation"), str)
+                    or not isinstance(item.get("capability", ""), str)
+                    or not isinstance(item.get("signature", ""), str)
+                    or not _is_finite_number(item.get("endorsed_at", 0.0))
+                    or item.get("endorsed_at", 0.0) < 0
+                    or not _is_finite_number(item.get("weight", 1.0))
+                    or item.get("weight", 1.0) < 0
+                    for item in endorsements
+                )
+            ):
                 raise DNSStorageReadError(
                     "reputation", self._reputation_path, "an invalid score schema"
                 )
@@ -409,7 +459,7 @@ class DNSStorage:
         try:
             with open(self._capability_index_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise DNSStorageReadError(
                 "capability index", self._capability_index_path, "malformed JSON"
             ) from exc
@@ -424,17 +474,36 @@ class DNSStorage:
             raise DNSStorageReadError(
                 "capability index", self._capability_index_path, "an invalid schema"
             )
-        if any(
-            not isinstance(entry, dict)
-            or not isinstance(entry.get("designation"), str)
-            or not isinstance(entry.get("capability"), dict)
-            or not isinstance(entry["capability"].get("name"), str)
-            for entries in data.values()
-            for entry in entries
-        ):
-            raise DNSStorageReadError(
-                "capability index", self._capability_index_path, "an invalid entry schema"
-            )
+        for capability_name, entries in data.items():
+            for entry in entries:
+                capability = entry.get("capability") if isinstance(entry, dict) else None
+                if (
+                    not isinstance(entry, dict)
+                    or not isinstance(entry.get("designation"), str)
+                    or not isinstance(capability, dict)
+                    or capability.get("name") != capability_name
+                    or not isinstance(capability.get("name"), str)
+                    or not isinstance(capability.get("version", "1.0"), str)
+                    or not isinstance(
+                        capability.get("evidence", "self-declared"), str
+                    )
+                    or not _is_finite_number(capability.get("confidence", 0.5))
+                    or not 0 <= capability.get("confidence", 0.5) <= 1
+                    or not _is_finite_number(
+                        capability.get("last_demonstrated", 0.0)
+                    )
+                    or capability.get("last_demonstrated", 0.0) < 0
+                    or not isinstance(capability.get("endorsed_by", []), list)
+                    or any(
+                        not isinstance(item, str)
+                        for item in capability.get("endorsed_by", [])
+                    )
+                ):
+                    raise DNSStorageReadError(
+                        "capability index",
+                        self._capability_index_path,
+                        "an invalid entry schema",
+                    )
         return data
 
     # --- Key Files ---
