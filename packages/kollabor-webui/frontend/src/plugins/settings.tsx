@@ -1,14 +1,14 @@
 import { useState } from "react";
-import { ChevronDown, ChevronRight, ExternalLink } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import type { EngineApi, PanelField, Session } from "@/api";
 import { FieldRenderer, type Draft } from "@/components/panels/FieldRenderer";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { PluginRenderBoundary, usePluginSnapshot } from "./components";
 import type { PluginEntry, PluginHost } from "./host";
+import { PluginInstallDialog } from "./install";
 
 type PluginService = { name: string; state: string; desired?: string; since?: number | null; restarts?: number; heartbeat?: number | null; error?: string | null };
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -48,7 +48,7 @@ function ServiceRow({ service, api, id, canManage, refresh, onError }: {
   </div>;
 }
 
-function PluginRow({ entry, host, api, session, canManage }: { entry: PluginEntry; host: PluginHost; api: EngineApi; session?: Session; canManage: boolean }) {
+function PluginRow({ entry, host, api, session, canManage, onUpdate }: { entry: PluginEntry; host: PluginHost; api: EngineApi; session?: Session; canManage: boolean; onUpdate: (id: string) => void }) {
   const snapshot = usePluginSnapshot(host);
   const [expanded, setExpanded] = useState(false);
   const [draft, setDraft] = useState<Draft>({});
@@ -95,7 +95,7 @@ function PluginRow({ entry, host, api, session, canManage }: { entry: PluginEntr
       {custom && context ? <PluginRenderBoundary name={entry.name} onError={error => host.reportRenderError(entry.id, error)} onRetry={() => { void host.retry(entry.id); }} onTurnOff={() => setConfirmation("disable")}>
         <custom.render k={context} session={session} />
       </PluginRenderBoundary> : null}
-      {canChange && entry.kind === "installed" ? <div className="flex flex-wrap gap-2"><Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => setError("Update preview is not available yet.")}>Update</Button><Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => setConfirmation("remove")}>Remove</Button></div> : null}
+      {canChange && entry.kind === "installed" ? <div className="flex flex-wrap gap-2"><Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => onUpdate(entry.id)}>Update</Button><Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => setConfirmation("remove")}>Remove</Button></div> : null}
     </div> : null}
     <Dialog open={confirmation !== null} onOpenChange={open => { if (!open && !busy) setConfirmation(null); }}><DialogContent>
       <DialogHeader><DialogTitle>{confirmation === "remove" ? "Remove" : "Turn off"} {entry.name}?</DialogTitle><DialogDescription>Its background processes will stop. Any working plugin runs must finish before this action can continue.</DialogDescription></DialogHeader>
@@ -106,8 +106,7 @@ function PluginRow({ entry, host, api, session, canManage }: { entry: PluginEntr
 
 export function PluginsSettings({ host, api, session, canManage }: { host: PluginHost; api: EngineApi; session?: Session; canManage: boolean }) {
   const snapshot = usePluginSnapshot(host);
-  const [addOpen, setAddOpen] = useState(false);
-  const [url, setUrl] = useState("");
+  const [operation, setOperation] = useState<{ action: "install" | "update"; pluginId?: string } | null>(null);
   const groups = [
     { title: "Built In", entries: snapshot.entries.filter(entry => entry.kind === "built-in") },
     { title: "Installed", entries: snapshot.entries.filter(entry => entry.kind === "installed") },
@@ -117,14 +116,12 @@ export function PluginsSettings({ host, api, session, canManage }: { host: Plugi
     {!canManage ? <p className="text-muted-foreground mb-4 text-sm">Manage plugins on this computer</p> : null}
     {snapshot.disabled ? <p className="text-muted-foreground mb-4 text-sm">Plugins are off for this page. Remove <code>?plugins=off</code> and reload.</p> : null}
     {snapshot.inventoryError ? <p role="alert" className="text-destructive text-sm">{snapshot.inventoryError}</p> : null}
-    {canManage && !snapshot.disabled ? <div className="mb-4 flex justify-end"><Button type="button" size="sm" onClick={() => setAddOpen(true)}>Add Plugin</Button></div> : null}
+    {canManage && !snapshot.disabled ? <div className="mb-4 flex justify-end"><Button type="button" size="sm" onClick={() => setOperation({ action: "install" })}>Add Plugin</Button></div> : null}
     {snapshot.loading && !snapshot.entries.length ? <p className="text-muted-foreground text-sm">Loading plugins…</p> : null}
     {!snapshot.loading && !snapshot.entries.length && !snapshot.disabled ? <p className="text-muted-foreground text-sm">No plugins installed.</p> : null}
     {groups.filter(group => group.entries.length).map(group => <section key={group.title} className="mb-5"><h2 className="text-muted-foreground mb-2 text-xs font-semibold uppercase">{group.title}</h2>
-      {group.entries.map(entry => <PluginRow key={`${entry.kind}:${entry.id}`} entry={entry} host={host} api={api} session={session} canManage={canManage} />)}</section>)}
-    <Dialog open={addOpen} onOpenChange={setAddOpen}><DialogContent><DialogHeader><DialogTitle>Add Plugin</DialogTitle><DialogDescription>Review a trusted git source before installation.</DialogDescription></DialogHeader>
-      <label className="flex flex-col gap-2 text-sm">Git URL<Input value={url} onChange={event => setUrl(event.target.value)} placeholder="https://github.com/owner/plugin.git" /></label>
-      <p className="text-muted-foreground text-sm">The review step is not available yet.</p><DialogFooter><Button type="button" variant="outline" onClick={() => setAddOpen(false)}>Cancel</Button><Button type="button" disabled>Review <ExternalLink className="size-3" /></Button></DialogFooter>
-    </DialogContent></Dialog>
+      {group.entries.map(entry => <PluginRow key={`${entry.kind}:${entry.id}`} entry={entry} host={host} api={api} session={session} canManage={canManage} onUpdate={pluginId => setOperation({ action: "update", pluginId })} />)}</section>)}
+    {operation ? <PluginInstallDialog api={api} action={operation.action} pluginId={operation.pluginId}
+      onClose={() => setOperation(null)} onApplied={() => host.refresh()} /> : null}
   </div>;
 }
