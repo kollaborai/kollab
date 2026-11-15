@@ -32,10 +32,10 @@
 - Marker race: red check (test commit `abe9c1c8`) exposed an old import clearing the newer replacement's freeze marker. Per-attempt markers and cancellation checks fixed it; isolated `vitest run src/plugins` passes 18/18 and frontend typecheck passes. Browser-level freeze recovery remains unverified.
 
 
-- Shared-runtime red check: isolated `vitest run src/plugins/runtime.test.ts` fails because the React runtime entry does not exist. It checks module identity and the import map; a production build and real CSP/browser loading are still required.
+- Shared runtime: source-level red check `src/plugins/runtime.test.ts` (test commit `ab2ba19d`) failed because runtime entries did not exist. Implementation adds a static import map, stable Vite entries and a development map. Isolated frontend typecheck and `vitest run src/plugins` pass (20/20). CSP/browser loading remains blocked as noted below; PhoneLink's separate IIFE build also needs a concrete same-React/import-map design and test before remote support can be claimed.
 
 
-- Production-runtime red check: a preliminary isolated Vite build emitted the four stable entry filenames but stripped their exports. `node --test src/plugins/runtime-build.test.mjs` builds to `~/backups/plugins-step3-work/` and currently fails because `plugin-react.js` exports no `useState`; preserve entry signatures and verify all four exports before committing the runtime implementation. The source-level identity tests alone did not detect this.
+- Production runtime: red test commit `d13c7497` caught Vite stripping the stable entrypoint exports. Preserving entry signatures and explicitly re-exporting CommonJS ReactDOM/JSX names fixed it; the isolated `node --test src/plugins/runtime-build.test.mjs` now passes against a fresh production build under `~/backups/plugins-step3-work/`. The source-level identity tests alone did not detect this. The test proves the entrypoints export functions, not browser module identity under CSP.
 
 
 ## Remaining

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import html from "../../index.html?raw";
 import { describe, expect, it } from "vitest";
 import * as React from "react";
 import * as ReactDOM from "react-dom";
@@ -19,7 +19,6 @@ describe("shared plugin runtime", () => {
   });
 
   it("declares all plugin bare imports in the app's import map", () => {
-    const html = readFileSync(new URL("../../index.html", import.meta.url), "utf8");
     const match = html.match(/<script type="importmap">\s*([\s\S]*?)\s*<\/script>/);
     expect(match).not.toBeNull();
     const { imports } = JSON.parse(match![1]);

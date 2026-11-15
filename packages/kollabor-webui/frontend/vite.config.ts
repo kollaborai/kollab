@@ -152,8 +152,20 @@ export default defineConfig(({ mode }) => {
   };
 });
 
+const pluginRuntimeDevMap: Plugin = {
+  name: "kollab-plugin-runtime-dev-map",
+  apply: "serve",
+  transformIndexHtml(html) {
+    return html
+      .replace("./assets/plugin-react.js", "/src/plugins/runtime/react.ts")
+      .replace("./assets/plugin-react-dom.js", "/src/plugins/runtime/react-dom.ts")
+      .replace("./assets/plugin-jsx-runtime.js", "/src/plugins/runtime/jsx-runtime.ts")
+      .replace("./assets/plugin-sdk.js", "/src/plugins/runtime/plugin.ts");
+  },
+};
+
 const mainConfig = defineConfig({
-  plugins: [kollabCanonicalChangelogPlugin(), phoneLearnMedia(false), react(), tailwindcss()],
+  plugins: [kollabCanonicalChangelogPlugin(), phoneLearnMedia(false), react(), tailwindcss(), pluginRuntimeDevMap],
   base: "./",
   define: {
     __APP_VERSION__: __APP_VERSION__,
@@ -168,6 +180,19 @@ const mainConfig = defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    rollupOptions: {
+      preserveEntrySignatures: "strict",
+      input: {
+        index: path.resolve(frontendDir, "index.html"),
+        "plugin-react": path.resolve(frontendDir, "src/plugins/runtime/react.ts"),
+        "plugin-react-dom": path.resolve(frontendDir, "src/plugins/runtime/react-dom.ts"),
+        "plugin-jsx-runtime": path.resolve(frontendDir, "src/plugins/runtime/jsx-runtime.ts"),
+        "plugin-sdk": path.resolve(frontendDir, "src/plugins/runtime/plugin.ts"),
+      },
+      output: {
+        entryFileNames: chunk => chunk.name.startsWith("plugin-") ? "assets/[name].js" : "assets/[name]-[hash].js",
+      },
+    },
   },
   server: {
     host: "127.0.0.1",
@@ -180,6 +205,8 @@ const mainConfig = defineConfig({
       "/mcp": "http://127.0.0.1:7433",
       "/hub": "http://127.0.0.1:7433",
       "/prompts": "http://127.0.0.1:7433",
+      "/plugins": "http://127.0.0.1:8080",
+      "/engine": "http://127.0.0.1:8080",
     },
   },
   test: {
