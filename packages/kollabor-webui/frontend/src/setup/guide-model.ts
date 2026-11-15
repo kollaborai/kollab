@@ -73,7 +73,8 @@ export function loadGuideState(raw: string | null): GuideState {
       dismissed?: unknown;
     };
     const step =
-      typeof parsed.step === "string" && parsed.step in STEP_INDEX
+      typeof parsed.step === "string" &&
+      Object.prototype.hasOwnProperty.call(STEP_INDEX, parsed.step)
         ? (parsed.step as SetupStepId)
         : "welcome";
     return { step, dismissed: parsed.dismissed === true };
@@ -170,7 +171,7 @@ export function stepTarget(
 }
 
 export const isSetupStepId = (value: string): value is SetupStepId =>
-  value in STEP_INDEX;
+  Object.prototype.hasOwnProperty.call(STEP_INDEX, value);
 
 /** The untouched first-run state: the tour has not engaged yet. */
 export function isInitialGuideState(state: GuideState): boolean {
