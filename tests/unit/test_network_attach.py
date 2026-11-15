@@ -356,13 +356,19 @@ def test_a_withdrawal_and_the_cap_count_only_the_agents_the_peer_holds_here():
     async def run():
         pair = Pair(mac_runs_agent=True)
         await pair.start_agent()
+        attached = []
         for _ in range(network_attach.MAX_CHANNELS_PER_PEER):
-            await pair.server.open(MAC, AGENT_ID, "lapis")  # the server opens 4 of the mac's agents
+            path = await pair.server.open(MAC, AGENT_ID, "lapis")  # the server opens 4 of the mac's agents
+            reader, writer = await asyncio.open_unix_connection(path)
+            assert await asyncio.wait_for(reader.readline(), 3) == b"hello\n"
+            attached.append(writer)
         await pair.mac.open(SERVER, AGENT_ID, "lapis")  # the mac still opens one of the server's
         pair.refuse = "mac is not a member of server's network"  # the server withdraws the mac's access
         await pair.server.recheck()
         assert [ch.requester for ch in pair.server._channels.values()] == [True] * 4
         await pair.stop()
+        for writer in attached:
+            writer.close()
 
     asyncio.run(run())
 
