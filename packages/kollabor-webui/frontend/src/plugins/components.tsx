@@ -10,6 +10,13 @@ export function usePluginHost() { return useContext(PluginHostContext); }
 export function usePluginSnapshot(host: PluginHost): PluginHostSnapshot {
   return useSyncExternalStore(host.subscribe, host.getSnapshot, host.getSnapshot);
 }
+const EMPTY_SNAPSHOT: PluginHostSnapshot = { disabled: true, loading: false, inventoryError: null, entries: [],
+  registry: { plugins: [], conflicts: [] }, errors: {}, skipped: [], renderFailed: [] };
+const emptySnapshot = () => EMPTY_SNAPSHOT;
+const emptySubscribe = () => () => {};
+export function useOptionalPluginSnapshot(host: PluginHost | null): PluginHostSnapshot {
+  return useSyncExternalStore(host?.subscribe ?? emptySubscribe, host?.getSnapshot ?? emptySnapshot, host?.getSnapshot ?? emptySnapshot);
+}
 
 export function PluginFailure({ name, kind, error, onRetry, onTurnOff }: {
   name: string; kind: "load" | "render"; error: string; onRetry: () => void; onTurnOff: () => void;

@@ -20,6 +20,7 @@ import {
   ReasoningTrigger,
 } from "@/components/assistant-ui/reasoning";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
+import { useOptionalPluginSnapshot, usePluginHost } from "@/plugins/components";
 import {
   ToolGroupContent,
   ToolGroupRoot,
@@ -504,6 +505,17 @@ const Composer: FC<{
   draftKey: ThreadProps["draftKey"];
 }> = ({ agents, commands, onOpenPanel, attachmentsEnabled, draftKey }) => {
   const aui = useAui();
+  const pluginHost = usePluginHost();
+  const pluginSnapshot = useOptionalPluginSnapshot(pluginHost);
+  const pluginCommands = useMemo(() => {
+    const reserved = new Set(commands.flatMap(command => [command.name, ...(command.aliases ?? [])]).map(name => name.replace(/^\//, "").toLowerCase()));
+    return pluginSnapshot.registry.plugins.flatMap(plugin => plugin.commands
+      .filter(command => !reserved.has(command.name.replace(/^\//, "").toLowerCase()))
+      .map(command => ({ pluginId: plugin.id, command })));
+  }, [commands, pluginSnapshot.registry]);
+  const allCommands = useMemo<readonly SlashCommand[]>(() => [...commands, ...pluginCommands.map(({ pluginId, command }) => ({
+    name: command.name.replace(/^\//, ""), description: command.description, category: "plugins", plugin: pluginId,
+  }))], [commands, pluginCommands]);
   const sendTransportCommand = useAssistantTransportSendCommand();
   // The mic starts the LiveKit room in this browser; /voice (the computer
   // running the agent listens) stays a typed command, and its status line shows.
@@ -621,11 +633,33 @@ const Composer: FC<{
     void aui.composer.reset();
   };
 
+  const submitPluginCommand = (event: { preventDefault: () => void; defaultPrevented?: boolean }) => {
+    if (event.defaultPrevented || !pluginHost) return;
+    const { text, attachments } = aui.composer.getState();
+    if (attachments.length) return;
+    const match = text.trim().match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
+    if (!match) return;
+    const found = pluginCommands.find(({ command }) => command.name.replace(/^\//, "").toLowerCase() === match[1].toLowerCase());
+    if (!found) return;
+    event.preventDefault();
+    aui.composer.setText("");
+    const fail = (error: unknown) => {
+      pluginHost.getContext(found.pluginId)?.toast(`Plugin command failed: ${error instanceof Error ? error.message : String(error)}`);
+      pluginHost.reportRenderError(found.pluginId, error);
+    };
+    try { void Promise.resolve(found.command.run(match[2] ?? "")).catch(fail); }
+    catch (error) { fail(error); }
+  };
+  const interceptComposer = (event: { preventDefault: () => void; defaultPrevented?: boolean }) => {
+    submitPluginCommand(event);
+    if (!event.defaultPrevented) openPanelFromComposer(event);
+  };
+
   const submitBusyMessage = (event: {
     preventDefault: () => void;
     defaultPrevented?: boolean;
   }) => {
-    openPanelFromComposer(event);
+    interceptComposer(event);
     sendBusyMessage(event);
   };
 
@@ -636,7 +670,7 @@ const Composer: FC<{
     // Keep panel commands on their existing path, then bypass assistant-ui's
     // disabled-send predicate while a turn is running. The transport already
     // queues this append message behind the active run.
-    openPanelFromComposer(event);
+    interceptComposer(event);
     if (event.defaultPrevented) return;
     if (isRunning) {
       sendBusyMessage(event);
@@ -666,7 +700,7 @@ const Composer: FC<{
 
   const commandItems = useMemo<readonly ComposerPaletteItem[]>(
     () => {
-      const visibleCommands = [...commands]
+      const visibleCommands = [...allCommands]
         .filter((command) => command.enabled !== false && command.name)
         .sort((left, right) => {
           const categoryCompare = (left.category || "system").localeCompare(
@@ -766,7 +800,7 @@ const Composer: FC<{
         return [parent, ...nestedSubcommands, ...nestedParameters];
       });
     },
-    [commands],
+    [allCommands],
   );
 
   const nestedCommandNames = useMemo(() => {
@@ -940,7 +974,7 @@ const Composer: FC<{
                 voice={voiceAvailable ? voice : null}
                 running={isRunning}
                 permissionStop={permissionStop}
-                onBeforeSend={openPanelFromComposer}
+                onBeforeSend={interceptComposer}
                 onSteer={submitBusyMessage}
               />
             </div>

@@ -326,6 +326,9 @@ function RuntimeShell({
       mounted = false;
     };
   }, [session.session_id]);
+  useEffect(() => {
+    if (visible) pluginHost?.registry.setBuiltinCommands(commands.flatMap(command => [command.name, ...(command.aliases ?? [])]));
+  }, [pluginHost, commands, visible]);
 
   return (
     <>
