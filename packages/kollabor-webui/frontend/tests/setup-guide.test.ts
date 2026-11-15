@@ -145,6 +145,16 @@ test("shouldAutoOpenGuide: valid malformed storage opens its normalized welcome 
   );
 });
 
+test("shouldAutoOpenGuide: prototype property names are corrupt steps", () => {
+  for (const step of ["toString", "constructor", "__proto__"]) {
+    assert.equal(
+      shouldAutoOpenGuide(JSON.stringify({ step, dismissed: false })),
+      true,
+      `${step} is not a setup step`,
+    );
+  }
+});
+
 test("shouldAutoOpenGuide: engaged or dismissed records never reopen", () => {
   assert.equal(shouldAutoOpenGuide('{"step":"provider","dismissed":false}'), false);
   assert.equal(shouldAutoOpenGuide('{"step":"agent","dismissed":false}'), false);
