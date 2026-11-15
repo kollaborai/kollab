@@ -29,6 +29,7 @@ try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   let inventoryReads = 0;
   let confirmedInstall = null;
+  let confirmedUpdate = null;
   let installSource = null;
   let cancelAttempts = 0;
   const brokenImports = [];
@@ -36,6 +37,7 @@ try {
   let fixtureRemoved = false;
   const commit = "a".repeat(40);
   const filesHash = "b".repeat(64);
+  const previousCommit = "c".repeat(40);
   const preview = { job_id: "install-fixture", action: "install", status: "ready", commit, files_sha256: filesHash,
     plugin_id: "fixture-new", source: "https://github.com/example/fixture.git", ref: "main",
     manifest: { name: "Fixture New", version: "1.2.3", uses: ["agents", "agents:unattended", "secret:API_TOKEN", "run:git", "net:example.com"],
@@ -74,6 +76,16 @@ try {
     if (url.pathname === "/engine/plugins/jobs/install-fixture/confirm" && route.request().method() === "POST") {
       confirmedInstall = route.request().postDataJSON();
       return route.fulfill({ json: { ...preview, status: "complete" } });
+    }
+    if (url.pathname === "/engine/plugins/fixture/update" && route.request().method() === "POST") {
+      return route.fulfill({ status: 202, json: { job_id: "update-fixture", status: "staging" } });
+    }
+    if (url.pathname === "/engine/plugins/jobs/update-fixture" && route.request().method() === "GET") {
+      return route.fulfill({ json: { ...preview, job_id: "update-fixture", action: "update", plugin_id: "fixture", previous_commit: previousCommit, changed_folders: ["web/dist", "python"] } });
+    }
+    if (url.pathname === "/engine/plugins/jobs/update-fixture/confirm" && route.request().method() === "POST") {
+      confirmedUpdate = route.request().postDataJSON();
+      return route.fulfill({ json: { ...preview, job_id: "update-fixture", action: "update", status: "complete" } });
     }
     if (url.pathname === "/engine/plugins/fixture/enable" && route.request().method() === "POST") {
       entry.enabled = true;
@@ -268,6 +280,14 @@ try {
   await add.getByRole("button", { name: "Install", exact: true }).click();
   await add.waitFor({ state: "hidden" });
   assert.deepEqual(confirmedInstall, { commit, files_sha256: filesHash });
+  await fixtureRow.getByRole("button", { name: "Update", exact: true }).click();
+  const update = page.getByRole("dialog", { name: "Update Plugin" });
+  await update.getByText(previousCommit, { exact: false }).waitFor();
+  await update.getByText("web/dist", { exact: false }).waitFor();
+  assert.equal(confirmedUpdate, null, "update preview must not apply before confirmation");
+  await update.getByRole("button", { name: "Update", exact: true }).click();
+  await update.waitFor({ state: "hidden" });
+  assert.deepEqual(confirmedUpdate, { commit, files_sha256: filesHash });
   await page.keyboard.press("Escape");
   await settings.waitFor({ state: "hidden" });
   await page.setViewportSize({ width: 390, height: 844 });
