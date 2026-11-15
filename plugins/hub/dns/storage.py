@@ -365,6 +365,17 @@ class DNSStorage:
             raise DNSStorageReadError(
                 "capability index", self._capability_index_path, "an invalid schema"
             )
+        if any(
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("designation"), str)
+            or not isinstance(entry.get("capability"), dict)
+            or not isinstance(entry["capability"].get("name"), str)
+            for entries in data.values()
+            for entry in entries
+        ):
+            raise DNSStorageReadError(
+                "capability index", self._capability_index_path, "an invalid entry schema"
+            )
         return data
 
     # --- Key Files ---
