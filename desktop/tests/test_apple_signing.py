@@ -662,7 +662,8 @@ class WorkflowContractTests(unittest.TestCase):
         steps = workflow["jobs"]["desktop"]["steps"]
         dmg_step = next(step for step in steps if step.get("name") == "Notarize and staple the dmg")
         cleanup = next(step for step in steps if step.get("name") == "Retry the signing-state cleanup once, always")
-        self.assertIn('printf \'APPLE_SIGNING_STATE_DIR=%s\\n\' "$APPLE_SIGNING_STATE_DIR" >> "$GITHUB_ENV"', dmg_step["run"])
+        env_append = 'printf \'APPLE_SIGNING_STATE_DIR=%s\\n\' "$APPLE_SIGNING_STATE_DIR" >> "$GITHUB_ENV"'
+        self.assertIn(env_append, dmg_step["run"])
         self.assertIn("-dmg", dmg_step["run"])
         self.assertEqual(cleanup["run"], "bash desktop/scripts/sign-macos.sh cleanup")
 
