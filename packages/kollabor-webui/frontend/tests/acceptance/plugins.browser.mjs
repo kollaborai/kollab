@@ -217,8 +217,10 @@ try {
   await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
   assert.ok(brokenImports.length >= 2, "retry imports the broken bundle again");
   assert.notEqual(brokenImports[0], brokenImports[1], "retry uses a new bundle URL");
-  page.once("dialog", dialog => dialog.accept());
   await page.getByRole("alert").getByRole("button", { name: "Turn Off" }).click();
+  const failureTurnOff = page.getByRole("dialog", { name: "Turn off Broken?" });
+  await failureTurnOff.getByText(/Background processes may take time to stop/).waitFor({ timeout: 5000 });
+  await failureTurnOff.getByRole("button", { name: "Turn Off", exact: true }).click();
   await page.getByText("Broken is off", { exact: true }).waitFor();
   assert.equal(brokenDisabled, true, "Turn Off calls the disable route");
   await page.getByRole("button", { name: "Back to Chat" }).click();
