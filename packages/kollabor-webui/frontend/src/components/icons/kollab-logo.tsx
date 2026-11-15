@@ -72,7 +72,7 @@ function startMist(canvas: HTMLCanvasElement): (() => void) | undefined {
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
   const uTime = gl.getUniformLocation(prog, "uTime");
   const uRes = gl.getUniformLocation(prog, "uRes");
-  gl.uniform3f(gl.getUniformLocation(prog, "uColor"), 0.49, 0.23, 0.93); // #7c3aed
+  gl.uniform3f(gl.getUniformLocation(prog, "uColor"), 0.09, 0.64, 0.29); // #16a34a, darker step of the TUI green #22c55e
 
   let frame = 0;
   const start = performance.now();
