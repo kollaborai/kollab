@@ -83,7 +83,7 @@ function PluginRow({ entry, host, api, session, canManage, onUpdate }: { entry: 
       {canManage && !entry.read_only ? <Switch aria-label={`${entry.name} enabled`} checked={entry.enabled} disabled={!canChange || busy}
         onCheckedChange={checked => { if (checked) void perform("enable"); else setConfirmation("disable"); }} /> : null}
     </div>
-    <p className="text-muted-foreground truncate pl-8 text-xs">{entry.version ? `v${entry.version} · ` : ""}{entry.kind === "built-in" ? "Built In" : entry.kind === "dev" ? "Development" : "Installed"}{entry.source ? ` · ${entry.source}` : ""}{entry.commit ? ` · ${entry.commit.slice(0, 12)}` : ""}</p>
+    <p className="text-muted-foreground truncate pl-8 text-xs">{entry.kind === "built-in" ? "Built In" : entry.kind === "dev" ? "Development" : "Installed"}{entry.source ? ` · ${entry.source}` : ""}</p>
     {error ? <p role="alert" className="text-destructive mt-2 break-words pl-8 text-sm">{error}</p> : null}
     {expanded ? <div className="flex min-w-0 flex-col gap-3 py-3 pl-8">
       {failure ? <div className="flex flex-wrap gap-2"><Button type="button" size="xs" onClick={() => { void host.retry(entry.id); }}>Retry</Button><details className="text-sm"><summary>View Error</summary><pre className="whitespace-pre-wrap break-words">{failure}</pre></details></div> : null}
