@@ -109,6 +109,8 @@
 
 - Settings rows no longer show version or commit identifiers, per the brief: browser red test `e3d01c02`, fix `5b82b333`; isolated browser acceptance passed (`settings-metadata-green.log`). The install preview must still show its explicitly required pinned commit and hash.
 
+- A real throwing view now displays the plugin's name, not its ID, and Retry recovers it: browser red test `bfb45310`, fix `503cfe08`, isolated Chrome acceptance passed (`throwing-view-green.log`; its console error is the intentionally thrown fixture). Next audit failed declared views/commands and removal while a view is open.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
