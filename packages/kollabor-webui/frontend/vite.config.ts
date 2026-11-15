@@ -226,6 +226,7 @@ const mainConfig = defineConfig({
       "tests/model-choices.test.ts",
       "tests/panel-dialog-surface.test.tsx",
       "tests/setup-guide-close.test.tsx",
+      "tests/setup-guide-followups.test.tsx",
     ],
     environment: "node",
   },
