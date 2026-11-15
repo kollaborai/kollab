@@ -168,6 +168,47 @@ def test_attach_binds_mirror_part_rows(tmp_path: Path) -> None:
     assert [m["ref"] for m in rows[2]["media"]] == [refs[1]]
 
 
+def test_mixed_row_counts_once(tmp_path: Path) -> None:
+    """A row with a [imageN] token in text AND an image part is one image.
+
+    _save_sent_media stores one ref per image part; the token text is the
+    same image's rendering. Counting both made the row slice two refs,
+    starving the row after it (#1124 clean-room review P2).
+    """
+    refs = [save(tmp_path, "s1", url).ref for url in (PNG, JPEG)]
+    rows = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look [image1]"},
+                {"type": "image", "image": None},
+            ],
+        },
+        {"role": "user", "content": "second [image1]"},
+    ]
+    assert count_image_tokens(rows[0]["content"]) == 1
+    attach_media_to_rows(tmp_path, "s1", rows)
+    assert [m["ref"] for m in rows[0]["media"]] == [refs[0]]
+    assert [m["ref"] for m in rows[1]["media"]] == [refs[1]]
+
+
+def test_page_after_mixed_row_skips_once(tmp_path: Path) -> None:
+    """The older-page offset must count a mixed row once too."""
+    refs = [save(tmp_path, "s1", url).ref for url in (PNG, JPEG)]
+    earlier = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look [image1]"},
+                {"type": "image", "image": None},
+            ],
+        },
+    ]
+    page = [{"role": "user", "content": "second [image1]"}]
+    attach_media_to_rows(tmp_path, "s1", page, skip=1)
+    assert [m["ref"] for m in page[0]["media"]] == [refs[1]]
+
+
 def test_attach_skip_counts_mirror_part_rows(tmp_path: Path) -> None:
     """Page offsets must count part-shaped rows, not only token text (#1088)."""
     refs = [save(tmp_path, "s1", url).ref for url in (PNG, JPEG)]
