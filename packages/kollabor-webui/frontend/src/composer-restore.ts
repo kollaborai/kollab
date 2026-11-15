@@ -40,25 +40,26 @@ export type StoredComposerAttachment = Readonly<{
   content?: readonly ThreadUserMessagePart[] | undefined;
 }>;
 
-const TOKEN = /\[image\d+\]/g;
+const LEADING_TOKEN_LINES = /^(?:\[image\d+\](?:\n|$))+/;
 
 /**
- * Remove managed `[imageN]` tokens wherever they appear (own line or inline;
- * the synchronizer writes a bare token when the composer text is empty) and
- * report how many were removed. Non-token text is untouched.
+ * Remove the leading `[imageN]` lines written by the attachment synchronizer
+ * (including its bare-token form when the composer text is empty) and report
+ * how many were removed. Token-like text elsewhere is ordinary draft content.
  */
 export function stripImageTokens(text: string): {
   text: string;
   tokenCount: number;
 } {
-  const matches = text.match(TOKEN) ?? [];
-  if (matches.length === 0) return { text, tokenCount: 0 };
+  const prefix = text.match(LEADING_TOKEN_LINES)?.[0];
+  if (!prefix) return { text, tokenCount: 0 };
+  const tokenCount = prefix.match(/\[image\d+\]/g)?.length ?? 0;
   const cleaned = text
-    .replace(TOKEN, "")
+    .slice(prefix.length)
     .replace(/^[ \t\n]+/, "")
     .replace(/\n{3,}/g, "\n\n")
     .replace(/\s+$/, "");
-  return { text: cleaned, tokenCount: matches.length };
+  return { text: cleaned, tokenCount };
 }
 
 /**

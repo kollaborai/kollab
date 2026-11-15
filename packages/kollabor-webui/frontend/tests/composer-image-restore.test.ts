@@ -18,9 +18,9 @@ describe("stripImageTokens", () => {
     expect(result).toEqual({ text: "hello world", tokenCount: 2 });
   });
 
-  it("strips tokens typed inline with the text (the synchronizer writes a bare token first)", () => {
+  it("preserves image-like text inline with the draft", () => {
     const result = stripImageTokens("[image1]hello from alpha");
-    expect(result).toEqual({ text: "hello from alpha", tokenCount: 1 });
+    expect(result).toEqual({ text: "[image1]hello from alpha", tokenCount: 0 });
   });
 
   it("preserves ordinary draft text that happens to contain an image-like token", () => {
