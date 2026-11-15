@@ -11,6 +11,7 @@ export class PluginEventStream {
     private readonly request: Request,
     private readonly path: string,
     private readonly onError: (error: unknown) => void = error => console.warn("Plugin event stream disconnected", error),
+    private readonly onReconnect: () => void = () => {},
   ) {}
 
   on(topic: string, listener: Listener): () => void {
@@ -44,11 +45,18 @@ export class PluginEventStream {
   private async run(controller: AbortController) {
     const { signal } = controller;
     let delay = 250;
+    let connected = false;
     while (!signal.aborted) {
       try {
         const response = await this.request(this.path, { method: "GET", signal });
         if (signal.aborted) { await response.body?.cancel(); break; }
+        if (!response.ok) {
+          await response.body?.cancel();
+          throw new Error(`Plugin event stream returned ${response.status}`);
+        }
         if (!response.body) throw new Error("Plugin event stream has no body");
+        if (connected) this.onReconnect();
+        connected = true;
         delay = 250;
         await this.read(response.body, signal);
       } catch (error) {

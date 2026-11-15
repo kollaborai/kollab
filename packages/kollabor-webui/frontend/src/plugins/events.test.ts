@@ -24,6 +24,16 @@ describe("plugin event stream", () => {
     stream.close();
   });
 
+  it("reports non-success HTTP responses instead of treating them as event streams", async () => {
+    const request = vi.fn(async () => new Response("unavailable", { status: 503 }));
+    const onError = vi.fn();
+    const stream = new PluginEventStream(request, "/plugins/events", onError);
+    stream.on("plugins-changed", vi.fn());
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    expect(String(onError.mock.calls[0][0])).toContain("503");
+    stream.close();
+  });
+
   it("stops all subscriptions when closed", async () => {
     let signal: AbortSignal | null | undefined;
     const request = vi.fn(async (_path: string, init?: RequestInit) => {

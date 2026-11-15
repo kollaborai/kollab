@@ -90,7 +90,7 @@ export class PluginHost {
 
   constructor(private readonly options: PluginHostOptions) {
     this.registry = new PluginRegistry(options.builtinCommands);
-    this.globalEvents = new PluginEventStream(options.request, "/plugins/events");
+    this.globalEvents = new PluginEventStream(options.request, "/plugins/events", undefined, () => { void this.refresh(); });
     this.snapshot = this.makeSnapshot();
     this.registry.subscribe(() => this.publish());
     this.loader = new PluginLoader({
