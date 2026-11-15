@@ -121,6 +121,8 @@
 
 - Global SSE reconnect now refreshes inventory after a dropped connection, since the engine stream does not replay missed events. Red test `7c0d0398`, fix `55c74f2c`; non-2xx stream responses also report an error instead of being consumed. Plugin Vitest 35/35 (`reconnect-refresh-green.log`) and typecheck (`reconnect-refresh-typecheck.log`) passed; no real network outage test yet.
 
+- Install preview trust disclosure: red browser test `8db2dca9` against engine-shaped manifest, fix `d0868e28`. It now shows source/ref, exact commit/hash, contribution/process summary, through-Kollab grants, declared own actions, unattended-agent and unreported-spend warnings, and the explicit no-sandbox trust boundary. It also reads the engine's actual `previous_commit`, `changed_folders`, and `warning` fields for updates. Browser acceptance passed (`trust-sheet-green.log`), typecheck passed (`trust-sheet-typecheck.log`). Actual limit values are not present in the job response; do not claim the sheet shows them. Add real update-preview browser coverage and verify the data contract before closing the trust-sheet requirement.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
