@@ -111,6 +111,12 @@ TOKEN_RE = re.compile(r"(ghp_|github_pat_)[A-Za-z0-9_]+")
 # code list that names another rule family, like the CI lint selection
 # E9,F63,F7,F82, is a rule list and names no findings (#1024).
 RULE_CODE_LIST_RE = re.compile(r"\b[A-Z]+\d+(?:,[A-Z]+\d+)+\b")
+RUFF_RULE_CODE_RE = re.compile(
+    r"(?:E|F|W|I|N|D|UP|YTT|ANN|ASYNC|B|BLE|A|C4|C90|COM|CPY|DJ|DOC|DTZ|"
+    r"T10|EM|EXE|FA|"
+    r"ISC|ICN|LOG|G|INP|PIE|T20|PYI|Q|RSE|RET|SLF|SIM|TID|TCH|INT|ARG|"
+    r"PTH|TD|FIX|ERA|PGH|PL|TRY|FLY|PERF|FURB|RUF)\d+"
+)
 
 
 class ConfigError(Exception):
@@ -452,7 +458,11 @@ def _finding_matches(pattern: re.Pattern[str], body: str) -> list[re.Match[str]]
     rule_lists = [
         run.span()
         for run in RULE_CODE_LIST_RE.finditer(body)
-        if any(pattern.fullmatch(code) is None for code in run.group(0).split(","))
+        if all(
+            RUFF_RULE_CODE_RE.fullmatch(code) is not None
+            for code in run.group(0).split(",")
+        )
+        and any(pattern.fullmatch(code) is None for code in run.group(0).split(","))
     ]
     return [
         match
