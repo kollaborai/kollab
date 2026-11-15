@@ -170,8 +170,8 @@ def test_restarts_stop_after_the_cap():
     assert len(starts) == 3
     assert any(n and "not restarting" in n for n in notes)
 
-    now[0] += 61  # the window has passed: it may try again
-    for _ in range(4):
+    now[0] += 61  # the window has passed: it may try again, once per grace period while the engine stays down
+    for _ in range(2):
         now[0] += 0.5
         keeper.check()
     assert len(starts) == 4
