@@ -83,6 +83,9 @@ struct Runtime<C> {
     quit_prompt: Option<u64>,
     exit_worker: bool,
     exit_ready: bool,
+    /// Boot saw the web UI answer; the watcher takes this as "was up" even when the
+    /// runtime died before its own first look (#1123).
+    came_up: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -95,7 +98,7 @@ enum Quit {
 impl<C> Default for Runtime<C> {
     fn default() -> Self {
         Self { owned: None, operation: None, next_id: 0, closing: false, quit_prompt: None,
-            exit_worker: false, exit_ready: false }
+            exit_worker: false, exit_ready: false, came_up: false }
     }
 }
 
@@ -116,6 +119,14 @@ impl<C> Runtime<C> {
         if self.owned.is_some() { return Err(std::io::Error::other("the previous runtime has not stopped")); }
         self.owned = Some(spawn()?);
         Ok(true)
+    }
+
+    fn mark_up(&mut self) {
+        self.came_up = true;
+    }
+
+    fn take_up(&mut self) -> bool {
+        std::mem::take(&mut self.came_up)
     }
 
     fn finish(&mut self, operation: u64) {
@@ -217,14 +228,17 @@ fn watch_runtime(app: AppHandle) {
     let mut error_shown = false;
     loop {
         std::thread::sleep(WATCH_EVERY);
-        let owned = {
+        let (owned, came_up) = {
             let state = app.state::<Spawned>();
-            let runtime = state.0.lock().unwrap();
+            let mut runtime = state.0.lock().unwrap();
             if runtime.closing || runtime.quit_prompt.is_some() || runtime.operation.is_some() {
                 continue; // booting, retrying or quitting: those own the window
             }
-            runtime.owned.is_some()
+            (runtime.owned.is_some(), runtime.take_up())
         };
+        if came_up {
+            watch.observe(true, Instant::now());
+        }
         let up = webui_running(&url);
         if up && error_shown {
             error_shown = false;
@@ -566,6 +580,7 @@ fn boot(app: &AppHandle, operation: u64) {
     let url = ui_url();
     if webui_running(&url) {
         eprintln!("kollab-desktop: attaching to the web UI at {url}");
+        app.state::<Spawned>().0.lock().unwrap().mark_up();
         while_current(app, operation, || { let _ = win.navigate(url); });
         return;
     }
@@ -601,6 +616,7 @@ fn boot(app: &AppHandle, operation: u64) {
         if !while_current(app, operation, || {}) { return; }
         if webui_running(&url) {
             eprintln!("kollab-desktop: web UI is up at {url}");
+            app.state::<Spawned>().0.lock().unwrap().mark_up();
             if notice.is_some() {
                 while_current(app, operation, || show_status(&win, "running", "", &warn));
             } else {
