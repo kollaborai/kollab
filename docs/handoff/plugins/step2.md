@@ -159,9 +159,18 @@ Existing stage_git_source invokes Git without a timeout; shutdown currently
 waits for active staging to finish, so an indefinitely stalled Git operation
 remains an operational gap requiring resolution without changing step 1 ownership.
 
-Next: update jobs, then PhoneLink filtering, spoofing/normalization tests, all
-gates and smoke. The branch is not ready to deploy: update jobs, the stalled-Git
-shutdown gap, and PhoneLink management blocking remain.
+Update jobs: `9494c116` was red before `1950172c` added the update route,
+old/new commit and changed-folder preview, approval against the same registry
+record, service stop/restart, and router lease exclusion during replacement.
+Tests cover disabled-state and data preservation, active agent runs, concurrent
+router leases, duplicate confirmation, registry changes and mocked service
+restart. Plugin/engine regression: 267 passed, 1 skipped
+(`plugin-update-regression.log`); scoped Ruff and diff checks passed. Service
+restart has not yet been verified with an actual wrapper in the engine smoke.
+
+Next: PhoneLink filtering, spoofing/normalization tests, all gates and smoke.
+The branch is not ready to deploy: the stalled-Git shutdown gap and PhoneLink
+management blocking remain.
 The lead resolved the PhoneLink scope mismatch: the ASGI bridge in
 `packages/kollabor-engine/src/kollabor_engine/phone_link.py` is in scope only
 for refusing the spec's remote-disallowed plugin routes and its tests;
