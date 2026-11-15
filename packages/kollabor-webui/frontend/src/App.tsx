@@ -62,7 +62,7 @@ import { SessionPanel, type SessionView } from "@/components/shell/SessionPanel"
 import { latestTodoBlock } from "@/utils/todo-list";
 import { ShellHeader } from "@/components/shell/ShellHeader";
 import { Button } from "@/components/ui/button";
-import { PluginHostContext, PluginNotices, usePluginHost } from "@/plugins/components";
+import { PluginHostContext, PluginNotices, PluginSessionContext, PluginTurnOffContext, usePluginHost } from "@/plugins/components";
 import { PluginSessionView, pluginViewKey } from "@/plugins/session";
 import { PluginHost } from "@/plugins/host";
 import { pluginUI } from "@/plugins/ui";
@@ -327,8 +327,8 @@ function RuntimeShell({
     };
   }, [session.session_id]);
   useEffect(() => {
-    if (visible) pluginHost?.registry.setBuiltinCommands(commands.flatMap(command => [command.name, ...(command.aliases ?? [])]));
-  }, [pluginHost, commands, visible]);
+    pluginHost?.registry.setBuiltinCommands(commands.flatMap(command => [command.name, ...(command.aliases ?? [])]));
+  }, [pluginHost, commands]);
 
   return (
     <>
@@ -1827,6 +1827,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
 
   return (
     <PluginHostContext.Provider value={pluginHost}>
+    <PluginTurnOffContext.Provider value={turnOffPlugin}>
     <GemAppearanceProvider api={api} refreshKey={aliveKey}>
       <AvatarImageProvider api={api}>
       <SidebarProvider className={`bg-muted/40 dark:bg-black ${contained ? "h-full min-h-0" : ""}`}>
@@ -2065,6 +2066,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                 onStale={(stillCurrent) => resetThread(activeSession.session_id, stillCurrent)}
                 liveEvents={liveEventsRef}
               >
+                <PluginSessionContext.Provider value={activeSession}>
                 <RuntimeShell
                   session={activeSession}
                   profiles={profiles}
@@ -2091,6 +2093,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                   onRetryHistory={retryHistory}
                   historyStartIndex={initialState.synced?.start ?? 0}
                 />
+                </PluginSessionContext.Provider>
               </EngineRuntimeProvider>
             </VoiceRoomProvider>
           ) : (
@@ -2162,6 +2165,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       </SidebarProvider>
       </AvatarImageProvider>
     </GemAppearanceProvider>
+    </PluginTurnOffContext.Provider>
     </PluginHostContext.Provider>
   );
 }

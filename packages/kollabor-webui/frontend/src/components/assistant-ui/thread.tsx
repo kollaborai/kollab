@@ -21,6 +21,7 @@ import {
 } from "@/components/assistant-ui/reasoning";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { useOptionalPluginSnapshot, usePluginHost } from "@/plugins/components";
+import { PluginToolPart } from "@/plugins/renderers";
 import {
   ToolGroupContent,
   ToolGroupRoot,
@@ -1240,7 +1241,7 @@ const AssistantMessage: FC = () => {
               case "reasoning":
                 return <Reasoning {...part} />;
               case "tool-call":
-                return part.toolUI ?? <ToolFallbackComponent {...part} />;
+                return part.toolUI ?? <PluginToolPart part={part} fallback={<ToolFallbackComponent {...part} />} />;
               case "data":
                 return part.dataRendererUI;
               case "indicator":

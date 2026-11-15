@@ -66,7 +66,8 @@
 - Composer commands: red browser test (commit `9a1bd151`) timed out after submitting `/fixture test arguments`. Plugin commands now appear in the palette and are intercepted before transport, with local engine commands winning collisions and active-session reservations updated. The isolated fake-engine browser acceptance passes the command invocation and composer clearing; 25 focused tests/typecheck pass. Still verify no transport submission, Enter vs button, busy/attachments, command error handling, and multi-session collision changes in browser tests.
 
 
-- Tool renderer red check: isolated SSR `vitest run src/plugins/renderers.test.tsx` fails because `./renderers` does not exist. It requires a plugin to receive a matching tool result and the native fallback to remain when unmatched. Implement a boundary and session-aware renderer; tagged text remains separate work.
+- Tool renderer: isolated SSR red test commit `9ebc093e` failed because `./renderers` did not exist. Matching tool output now renders a session-aware plugin component inside an error boundary; unmatched and pre-existing built-in tool UIs retain their fallbacks. Isolated plugin tests pass 27/27, typecheck passes and fake-engine browser acceptance passes. Actual tool-output behavior in a live browser and tagged text remain to test.
+- Regression corrected: after previously running composer checks I added an untested `visible` reference that did not exist in `RuntimeShell`, so commit `a7fac235` crashed the session UI. The subsequent browser/typecheck run caught it; this change removes the reference and both checks now pass. Do not report the earlier composer commit as independently green.
 
 
 ## Remaining

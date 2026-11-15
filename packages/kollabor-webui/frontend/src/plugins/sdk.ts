@@ -13,7 +13,11 @@ export type PluginPage = { id: string; title: string; tabs: PluginTab[] };
 export type PluginModal = PluginPage;
 export type PluginSettings = { render: PluginRender };
 export type PluginCommand = { name: string; description: string; run: (args: string) => unknown };
-export type PluginRenderer = { tool?: string; tag?: string; render: PluginRender };
+export type PluginRendererProps = PluginRenderProps & {
+  toolCall?: { name: string; args: unknown; result: unknown; status: unknown };
+  tag?: { name: string; content: string };
+};
+export type PluginRenderer = { tool?: string; tag?: string; render: ComponentType<PluginRendererProps> };
 export type PluginNotice = { text: string; button?: { label: string; open: PluginOpen } };
 export type PluginApiState<T> = { data: T | null; error: string | null; loading: boolean; refresh: () => void };
 

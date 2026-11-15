@@ -2,8 +2,11 @@ import { Component, createContext, useContext, useSyncExternalStore, type ErrorI
 import { Button } from "@/components/ui/button";
 import { NoticeBar } from "@/components/shell/NoticeBar";
 import type { PluginHost, PluginHostSnapshot } from "./host";
+import type { Session } from "@/api";
 
 export const PluginHostContext = createContext<PluginHost | null>(null);
+export const PluginSessionContext = createContext<Session | undefined>(undefined);
+export const PluginTurnOffContext = createContext<(id: string) => void>(() => {});
 
 /** Components outside the provider (for example the PhoneLink loader) stay usable. */
 export function usePluginHost() { return useContext(PluginHostContext); }
