@@ -99,6 +99,8 @@
 
 - CSS scope: browser red test `9a7829fe` and fix `6b7f0df3` give pages, views, modals and tool/tag renderers `data-plugin="<id>"`; fixture CSS applies in the browser. Isolated Chrome acceptance passed (`css-scope-green.log`), plugin Vitest 32/32 (`css-scope-vitest.log`), typecheck passed (`css-scope-typecheck.log`). The acceptance uses fake engine routes, not the required live smoke. Custom settings were covered separately by red test `9c04a318` and fix `d93a61e4`; isolated browser acceptance passed with computed scoped color (`css-settings-green.log`). Next audit recovery behavior, including failed declared controls, Retry and Turn Off.
 
+- Failure classification: red test `4619a3f7` and fix `365d0ca4` clear stale render-failure state when a plugin leaves eligible inventory and when a new load fails. Isolated plugin Vitest passed 33/33 (`failure-kind-green.log`); typecheck passed (`failure-kind-typecheck.log`). Next exercise Retry and Turn Off through the browser and audit failure states.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
