@@ -287,3 +287,33 @@ def test_invalid_nested_capability_index_is_preserved_for_recovery(tmp_path):
         storage.load_capability_index()
 
     assert storage._capability_index_path.read_text(encoding="utf-8") == contents
+
+
+def test_capability_revoke_wins_over_stale_registry_instance(tmp_path):
+    from plugins.hub.dns.capabilities import CapabilityRegistry
+    from plugins.hub.dns.models import CapabilityEntry
+
+    seed = CapabilityRegistry(DNSStorage(tmp_path))
+    seed.declare("alpha", CapabilityEntry(name="review", version="1"))
+    stale = CapabilityRegistry(DNSStorage(tmp_path))
+    assert stale.get_capabilities("alpha")
+    remover = CapabilityRegistry(DNSStorage(tmp_path))
+    remover.revoke("alpha", "review")
+
+    stale.declare("alpha", CapabilityEntry(name="review", version="1"))
+
+    assert DNSStorage(tmp_path).load_capability_index() == {}
+
+
+def test_stale_reputation_tracker_preserves_both_completion_events(tmp_path):
+    from plugins.hub.dns.reputation import ReputationTracker
+
+    first = ReputationTracker(DNSStorage(tmp_path))
+    second = ReputationTracker(DNSStorage(tmp_path))
+    first.get_score("alpha")
+    second.get_score("alpha")
+
+    first.record_task_completed("alpha")
+    second.record_task_completed("alpha")
+
+    assert DNSStorage(tmp_path).load_reputation()["alpha"].tasks_completed == 2
