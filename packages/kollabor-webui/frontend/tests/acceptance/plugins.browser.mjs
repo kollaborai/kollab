@@ -1,6 +1,8 @@
 // Browser acceptance for plugin surfaces. All engine responses below are fake;
 // this script never starts an engine or touches a real Kollab config/keyring.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
@@ -34,6 +36,10 @@ try {
       views: [{ id: "fixture-view" }], pages: [{ id: "board" }], modals: [{ id: "details" }],
       slash: ["fixture"], renderers: [{ tag: "fixture_tag" }],
     } };
+  const helloRoot = resolve("../../../bundles/plugins/hello");
+  const helloManifest = JSON.parse(readFileSync(resolve(helloRoot, "kollab-plugin.json"), "utf8"));
+  const hello = { ...helloManifest, kind: "installed", state: "ok", enabled: true, shadowed: false,
+    web: { ...helloManifest.web, hash: "hello" } };
   const crasher = { id: "crasher", name: "Crash Test", kind: "installed", state: "ok", enabled: true, shadowed: false,
     web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: { views: [{ id: "crash-view" }] } };
   const broken = { id: "broken", name: "Broken", kind: "installed", state: "ok", enabled: true, shadowed: false,
@@ -42,7 +48,7 @@ try {
     const url = new URL(route.request().url());
     if (url.origin !== origin) return route.abort();
     if (url.pathname === "/api/config") return route.fulfill({ json: { engine_url: "/engine" } });
-    if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, plugins: [entry, broken, crasher] } }); }
+    if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, plugins: [entry, broken, crasher, hello] } }); }
     if (url.pathname === "/engine/plugins/install/preview" && route.request().method() === "POST") return route.fulfill({ json: { job_id: "install-fixture", status: "staging" } });
     if (url.pathname === "/engine/plugins/jobs/install-fixture" && route.request().method() === "GET") return route.fulfill({ json: preview });
     if (url.pathname === "/engine/plugins/jobs/install-fixture/confirm" && route.request().method() === "POST") {
@@ -61,6 +67,11 @@ try {
     if (url.pathname === "/plugins/broken/web/index.js") {
       brokenImports.push(url.href);
       return route.fulfill({ status: 500, contentType: "text/plain", body: "broken" });
+    }
+    if (url.pathname === "/plugins/hello/web/index.js" || url.pathname === "/plugins/hello/web/index.css") {
+      const filename = url.pathname.endsWith(".js") ? "index.js" : "index.css";
+      return route.fulfill({ contentType: filename.endsWith(".js") ? "text/javascript" : "text/css",
+        body: readFileSync(resolve(helloRoot, "web/dist", filename), "utf8") });
     }
     if (url.pathname === "/plugins/crasher/web/index.js") return route.fulfill({ contentType: "text/javascript", body:
       `import React from 'react'; export default k => k.view({id:'crash-view', label:'Crash View', render:() => { ${url.searchParams.has("retry") ? `return React.createElement('p', null, 'Recovered view');` : `throw new Error('view exploded');`} }});` });
@@ -108,6 +119,14 @@ try {
   const panel = page.getByRole("complementary", { name: "Session Controls" });
   await panel.waitFor({ timeout: 15000 });
   await panel.getByRole("button", { name: "Fixture View" }).click();
+  await panel.getByRole("button", { name: "Hello View", exact: true }).click({ timeout: 5000 });
+  await page.getByText("Hello from your plugin!", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Say Hello" }).click();
+  await page.getByText("Hello count: 1", { exact: true }).waitFor();
+  await panel.getByRole("button", { name: "Hello Page", exact: true }).click();
+  await page.getByRole("heading", { name: "Hello Page" }).waitFor();
+  await page.getByText("This page is provided by the Hello plugin.", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Back to Chat" }).click();
   await panel.getByRole("button", { name: "Crash View" }).click();
   const crashAlert = page.getByRole("alert");
   await crashAlert.waitFor({ timeout: 5000 });
