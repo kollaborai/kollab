@@ -218,8 +218,14 @@ jobs:
           mkdir -p dist/desktop
           base="kollab-desktop-${{ matrix.platform }}-${VERSION}"
           ditto -c -k --keepParent "$APP" "dist/desktop/${base}.app.zip"
-          hdiutil create -volname "Kollab" -srcfolder "$APP" \
+          # The dmg is an install image: the app sits next to an
+          # Applications symlink so the standard drag-to-install works (#1083).
+          staging="$(mktemp -d)"
+          ditto "$APP" "$staging/Kollab.app"
+          ln -s /Applications "$staging/Applications"
+          hdiutil create -volname "Kollab" -srcfolder "$staging" \
             -ov -format UDZO "dist/desktop/${base}.dmg"
+          rm -rf "$staging"
           (
             cd dist/desktop
             for asset in "${base}.app.zip" "${base}.dmg"; do
@@ -227,6 +233,18 @@ jobs:
             done
           )
           ls -lh dist/desktop
+
+      - name: Verify the dmg layout (Applications shortcut, sealed app)
+        run: |
+          VERSION="$(python -c 'import json; print(json.load(open("desktop/src-tauri/tauri.release.json"))["version"])')"
+          base="kollab-desktop-${{ matrix.platform }}-${VERSION}"
+          mount_dir="$(mktemp -d)"
+          hdiutil attach "dist/desktop/${base}.dmg" -nobrowse -readonly -mountpoint "$mount_dir"
+          test -L "$mount_dir/Applications"
+          test "$(readlink "$mount_dir/Applications")" = "/Applications"
+          test -d "$mount_dir/Kollab.app"
+          codesign --verify --deep --strict "$mount_dir/Kollab.app"
+          hdiutil detach "$mount_dir"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
