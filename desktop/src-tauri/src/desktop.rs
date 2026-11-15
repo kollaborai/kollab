@@ -1298,6 +1298,21 @@ mod tests {
     }
 
     #[test]
+    fn a_runtime_that_dies_before_the_first_look_is_still_restarted() {
+        // Boot saw the web UI answer, then the runtime died before the watcher's first look.
+        let mut runtime: Runtime<&str> = Runtime::default();
+        runtime.mark_up();
+        let (mut watch, t0) = (Watch::default(), Instant::now());
+        if runtime.take_up() {
+            assert_eq!(watch.observe(true, t0), Watched::Nothing);
+        }
+        assert!(!runtime.take_up());
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY), Watched::Nothing);
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY * 2), Watched::Nothing);
+        assert_eq!(watch.observe(false, t0 + WATCH_EVERY * 3), Watched::Restart);
+    }
+
+    #[test]
     fn one_slow_answer_is_not_a_restart() {
         let (mut watch, t0) = (Watch::default(), Instant::now());
         assert_eq!(watch.observe(true, t0), Watched::Nothing);
