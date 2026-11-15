@@ -20,7 +20,7 @@ function setup(importer: (url: string) => Promise<unknown>, timeoutMs = 5000) {
 
 describe("web plugin loader", () => {
   it("loads enabled entries in parallel and gives each its own context", async () => {
-    const importer = vi.fn(async () => ({ default: async (k: { add(s: string): void }) => k.add("ready") }));
+    const importer = vi.fn(async (_url: string) => ({ default: async (k: { add(s: string): void }) => k.add("ready") }));
     const { loader, active } = setup(importer);
     await loader.reconcile([entry("a"), entry("b"), entry("off", { enabled: false }), entry("shadow", { shadowed: true })]);
     expect([...active]).toEqual([["a", ["ready"]], ["b", ["ready"]]]);
