@@ -260,3 +260,16 @@ def test_reputation_tracker_persists_only_the_changed_agent_score(tmp_path):
     persisted = DNSStorage(tmp_path).load_reputation()
     assert persisted["alpha"].tasks_completed == 1
     assert persisted["beta"].tasks_completed == 1
+
+
+def test_invalid_nested_capability_index_is_preserved_for_recovery(tmp_path):
+    from plugins.hub.dns.storage import DNSStorageReadError
+
+    storage = DNSStorage(tmp_path)
+    contents = json.dumps({"review": [{}]})
+    storage._capability_index_path.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(DNSStorageReadError, match="capability index"):
+        storage.load_capability_index()
+
+    assert storage._capability_index_path.read_text(encoding="utf-8") == contents
