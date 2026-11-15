@@ -431,6 +431,16 @@ class DNSStorage:
         with _file_lock(self._reputation_path):
             existing = self._read_reputation_unlocked()
             if base_scores is None:
+                conflicting = [
+                    designation
+                    for designation, score in scores.items()
+                    if designation in existing and existing[designation] != score
+                ]
+                if conflicting:
+                    raise ValueError(
+                        "base_scores is required to update existing reputation "
+                        "scores safely"
+                    )
                 existing.update(scores)
             else:
                 counter_fields = (
@@ -519,6 +529,25 @@ class DNSStorage:
                     name: {entry["designation"]: entry for entry in entries}
                     for name, entries in merged.items()
                 }
+
+                for capability_name, entries in index.items():
+                    current_entries = entries_by_capability.get(capability_name, {})
+                    for entry in entries:
+                        designation = entry["designation"]
+                        current_entry = current_entries.get(designation)
+                        has_baseline = (
+                            base_entries is not None
+                            and (capability_name, designation) in base_entries
+                        )
+                        if (
+                            current_entry is not None
+                            and current_entry != entry
+                            and not has_baseline
+                        ):
+                            raise ValueError(
+                                "base_entries is required to update existing "
+                                "capabilities safely"
+                            )
 
                 for designation in deleted_designations:
                     for entries in entries_by_capability.values():
