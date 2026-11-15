@@ -471,6 +471,17 @@ def test_regression_test_counts_a_finding_beside_rule_codes_1024(tmp_path: Path)
     )
 
 
+def test_regression_test_counts_a_bare_finding_list_1024(tmp_path: Path) -> None:
+    # Only a list that names another rule family is a lint selection.
+    cfg = regression_cfg(tmp_path)
+    report = pr_gates_dod.evaluate(
+        cfg, make_data(comments=(source_comment("issue_comment", 1, "F1,F2: both open"),))
+    )
+    assert report.detail_for("regression_test") == (
+        "no regression test covers finding id(s): F1, F2 under tests/"
+    )
+
+
 # --- report shape -----------------------------------------------------------
 
 
