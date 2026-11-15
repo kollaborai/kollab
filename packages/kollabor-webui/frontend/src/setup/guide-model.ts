@@ -185,13 +185,7 @@ export function isInitialGuideState(state: GuideState): boolean {
  * person engaged the tour or dismissed it, and neither reopens on its own.
  */
 export function shouldAutoOpenGuide(raw: string | null): boolean {
-  if (raw === null) return true;
-  try {
-    const parsed = JSON.parse(raw) as { step?: unknown; dismissed?: unknown };
-    return parsed.step === "welcome" && parsed.dismissed !== true;
-  } catch {
-    return true;
-  }
+  return isInitialGuideState(loadGuideState(raw));
 }
 
 /**
