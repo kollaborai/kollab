@@ -1608,7 +1608,7 @@ async def connect_server(session_id: str, server_name: str):
                 status_code=409, detail=f"Server '{server_name}' is already connected"
             )
 
-        await session.state.enable_mcp_server(server_name)
+        await session.state.enable_mcp_server(server_name, persist=False)
         await session.state.reload_mcp_servers()
         names = list(session.mcp_server_names or [])
         if server_name not in names:
