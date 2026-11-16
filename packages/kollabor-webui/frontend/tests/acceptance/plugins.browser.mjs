@@ -237,13 +237,14 @@ try {
   if (process.env.PLUGIN_SCREENSHOTS) await page.screenshot({ path: resolve(process.env.PLUGIN_SCREENSHOTS, "failed-load-actual.png") });
   await page.getByText("View Error", { exact: true }).click();
   await page.getByRole("alert").locator("pre").waitFor();
+  const brokenImportBeforeRetry = brokenImports.at(-1);
   await Promise.all([
     page.waitForRequest(request => request.url().includes("/plugins/broken/web/index.js") && request.url().includes("retry="), { timeout: 5000 }),
     page.getByRole("alert").getByRole("button", { name: "Retry" }).click(),
   ]);
   await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
   assert.ok(brokenImports.length >= 2, "retry imports the broken bundle again");
-  assert.notEqual(brokenImports[0], brokenImports[1], "retry uses a new bundle URL");
+  assert.notEqual(brokenImports.at(-1), brokenImportBeforeRetry, "retry uses a new bundle URL");
   await page.getByRole("alert").getByRole("button", { name: "Turn Off" }).click();
   const failureTurnOff = page.getByRole("dialog", { name: "Turn off Broken?" });
   await failureTurnOff.getByText(/Background processes may take time to stop/).waitFor({ timeout: 5000 });

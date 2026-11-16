@@ -139,6 +139,8 @@
 
 - Collapsed failed-menu accessibility: browser red test commit `02e8309b` could not find `Broken Board Failed` (`collapsed-failed-name-red.log`); the icon-only button now exposes its failure in its accessible name. The isolated browser acceptance passes after returning through the page's Back to Chat control (`collapsed-failed-name-green.log`), and typecheck passes (`collapsed-failed-name-typecheck.log`). Next: red-first coverage for collapsed menu counts and disabled states, stopping recovery, then the remaining spec audit and gates.
 
+- Folder-required tabs: red browser commit `78e22f15` demonstrated that a folderless chat still showed Fixture View (`folderless-red.log`); controls now hide those registered views in both desktop states. Isolated browser acceptance passes (`folderless-green.log`) and typecheck passes (`folderless-typecheck.log`). The test's extra reload required comparing the retry URL with the last prior import rather than the first import. Direct navigation to a folder-required view and session changes still need explicit coverage.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.

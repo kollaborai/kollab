@@ -55,12 +55,11 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
     return name(a.id).localeCompare(name(b.id)) || a.id.localeCompare(b.id);
   });
   return <>
-    {plugins.flatMap(plugin => plugin.views.map(item => {
+    {plugins.flatMap(plugin => plugin.views.filter(item => !item.needs_folder || session.workspace).map(item => {
       const key = pluginViewKey(plugin.id, item.id);
       const Icon = ICONS[item.icon ?? ""] ?? Puzzle;
-      const disabled = item.needs_folder && !session.workspace;
-      return <SessionControl key={`view:${key}`} label={item.label} Icon={Icon} collapsed={collapsed} disabled={disabled}
-        disabledReason="Open a chat with a folder to use this view" active={view === key} onClick={() => onViewChange(key)} />;
+      return <SessionControl key={`view:${key}`} label={item.label} Icon={Icon} collapsed={collapsed}
+        active={view === key} onClick={() => onViewChange(key)} />;
     }))}
     {snapshot.entries.filter(entry => entry.enabled && !entry.shadowed && snapshot.errors[entry.id]).flatMap(entry => {
       const declared = Array.isArray(entry.contributes?.views) ? entry.contributes.views : [];
