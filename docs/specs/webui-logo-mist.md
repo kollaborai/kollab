@@ -47,7 +47,7 @@ Show slow-moving grey and white electric mist clipped to the K in the sidebar he
 
 ## Test plan
 - `packages/kollabor-webui/frontend/tests/kollab-logo.test.tsx`: cover plain SVG rendering, masked canvas rendering, reduced motion, unavailable WebGL, shader link failure, drawing/canvas sizing, and cleanup.
-- The PR description records `npx vitest run tests/kollab-logo.test.tsx` (6 passed), the full Vitest suite (41 files, 377 tests), TypeScript checking, and a production build.
+- The PR description records `npx vitest run tests/kollab-logo.test.tsx` (21 passed), the full Vitest suite (44 files, 403 tests), TypeScript checking, and a production build.
 - The PR description records visual review at desktop, 390 px, and 820 px in dark and light themes. Reduced-motion fallback was covered by unit test only; browser observation of that fallback remains unverified.
 - Sweep both opt-in locations: sidebar header and Start a Session screen, including the 390 px layout where the sidebar collapses.
 
