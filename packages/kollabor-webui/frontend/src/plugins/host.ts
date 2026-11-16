@@ -249,7 +249,9 @@ export class PluginHost {
       .flatMap(entry => entry.services ?? [])
       .filter(service => typeof service === "object" && service !== null && "state" in service);
     const transitioning = services.some(service => ["starting", "backoff", "stopping"].includes(String(service.state)));
-    const active = services.some(service => service.state === "running" || ("desired" in service && service.desired === "running"));
+    const active = services.some(service => service.state === "running" ||
+      (!["exited", "crash-stopped", "error"].includes(String(service.state)) &&
+       "desired" in service && service.desired === "running"));
     const interval = transitioning ? 5000 : active ? 30_000 : null;
     if (interval === this.serviceInterval) return;
     if (this.serviceTimer !== null) clearInterval(this.serviceTimer);
