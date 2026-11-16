@@ -1,6 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { SetupGuide } from "../src/setup/SetupGuide";
+import { DEFAULT_SLASH_COMMANDS } from "../src/api";
+import { WELCOME_GUIDE_DISMISSED_NOTICE } from "../src/setup/guide-model";
 import type { EngineApi } from "@/api";
 
 // Follow-ups from the #1099 review, all on the guide's chrome:
@@ -78,5 +80,23 @@ describe("guided setup review follow-ups (#1116/#1117/#1118)", () => {
   it("#1118 the footer CTA carries no trailing chevron", () => {
     const markup = guideMarkup(true);
     expect(markup).not.toContain("lucide-chevron-right");
+  });
+});
+
+
+describe("welcome guide recovery entry", () => {
+  it("gives the person the exact command to reopen a dismissed guide", () => {
+    expect(WELCOME_GUIDE_DISMISSED_NOTICE).toBe(
+      "Welcome guide closed. Type /welcome in a chat to open it again.",
+    );
+  });
+
+  it("lists /welcome with its exact slash palette description", () => {
+    expect(DEFAULT_SLASH_COMMANDS).toContainEqual(
+      expect.objectContaining({
+        name: "welcome",
+        description: "Show the welcome guide again",
+      }),
+    );
   });
 });
