@@ -154,6 +154,8 @@ try {
   folderless = true;
   entry.state = "stopping";
   entry.services[0].state = "stopping";
+  entry.services.push({ name: "pulse", state: "running", desired: "running", restarts: 0,
+    heartbeat_s: 60, heartbeat: Date.now() / 1000 - 370, since: Date.now() / 1000 - 600 });
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   const folderlessPanel = page.getByRole("complementary", { name: "Session Controls" });
@@ -165,7 +167,9 @@ try {
   const stoppingDetails = stoppingSettings.getByRole("region", { name: "Fixture details" });
   await stoppingDetails.getByText("Waiting for the plugin to stop.", { exact: true }).waitFor({ timeout: 5000 });
   await stoppingDetails.getByText("worker", { exact: true }).locator("..").getByText("Stopping", { exact: true }).waitFor({ timeout: 5000 });
+  await stoppingDetails.getByText("pulse", { exact: true }).locator("..").getByText("Running · No Heartbeat for 6 min", { exact: true }).waitFor({ timeout: 5000 });
   assert.equal(await stoppingDetails.getByRole("switch", { name: "Fixture enabled" }).isDisabled(), true, "cannot toggle while stopping");
+  entry.services.pop();
   entry.state = "ok";
   entry.services[0].state = "crash-stopped";
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
