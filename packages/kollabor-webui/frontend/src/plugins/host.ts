@@ -96,7 +96,7 @@ export class PluginHost {
   private inventorySettled: Promise<void> = Promise.resolve();
   private settleInventory: () => void = () => {};
   private markerSequence = 0;
-  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private serviceTimer: ReturnType<typeof setInterval> | null = null;
   private stoppingTimer: ReturnType<typeof setInterval> | null = null;
   private crashNotices = new Set<string>();
   private clockSample: { serverTime: unknown; sampledAt: number } | null = null;
@@ -184,7 +184,7 @@ export class PluginHost {
       const priority = (entry: PluginEntry) => Number.isSafeInteger(entry.enable_order) && (entry.enable_order ?? 0) > 0 ? entry.enable_order! : 0;
       this.registry.setEnableOrder([...this.entries].sort((a, b) => priority(a) - priority(b) || a.id.localeCompare(b.id)).map(entry => entry.id));
       this.syncCrashNotices();
-      this.syncHeartbeatPolling();
+      this.syncServicePolling();
       this.syncStoppingPolling();
       this.inventoryError = null;
       const included = this.entries.filter(entry => !this.skipped.has(entry.id));
@@ -241,15 +241,17 @@ export class PluginHost {
     if (!needed && this.stoppingTimer !== null) { clearInterval(this.stoppingTimer); this.stoppingTimer = null; }
   }
 
-  private syncHeartbeatPolling() {
-    const needed = this.entries.some(entry => entry.enabled && entry.services?.some(service =>
-      typeof service === "object" && service !== null && "state" in service && service.state === "running" &&
-      "heartbeat_s" in service && typeof service.heartbeat_s === "number" && Number.isFinite(service.heartbeat_s) && service.heartbeat_s > 0));
-    if (needed && this.heartbeatTimer === null) {
-      this.heartbeatTimer = setInterval(() => { if (!this.loading) void this.refresh(); }, 30_000);
-    } else if (!needed && this.heartbeatTimer !== null) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
+  private syncServicePolling() {
+    // Wrapper state can change without an engine event, including when no heartbeat is declared.
+    const needed = this.entries.some(entry => entry.enabled && entry.state !== "stopping" && entry.services?.some(service =>
+      typeof service === "object" && service !== null && "state" in service &&
+      (["starting", "running", "backoff", "stopping"].includes(String(service.state)) ||
+       ("desired" in service && service.desired === "running"))));
+    if (needed && this.serviceTimer === null) {
+      this.serviceTimer = setInterval(() => { if (!this.loading) void this.refresh(); }, 5000);
+    } else if (!needed && this.serviceTimer !== null) {
+      clearInterval(this.serviceTimer);
+      this.serviceTimer = null;
     }
   }
 
@@ -275,8 +277,8 @@ export class PluginHost {
     this.closed = true;
     this.sequence++;
     this.settleInventory();
-    if (this.heartbeatTimer !== null) clearInterval(this.heartbeatTimer);
-    this.heartbeatTimer = null;
+    if (this.serviceTimer !== null) clearInterval(this.serviceTimer);
+    this.serviceTimer = null;
     if (this.stoppingTimer !== null) clearInterval(this.stoppingTimer);
     this.stoppingTimer = null;
     this.globalEvents.close();

@@ -135,7 +135,7 @@ describe("plugin host lifecycle", () => {
       await host.start();
       expect(json).toHaveBeenCalledTimes(1);
       setInventory([{ ...initial, services: [{ ...initial.services[0], heartbeat: 200 }] }]);
-      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.advanceTimersByTimeAsync(5000);
       expect(json).toHaveBeenCalledTimes(2);
       expect(host.getSnapshot().entries[0].services?.[0]).toMatchObject({ heartbeat: 200 });
       setInventory([entry("hello")]);
