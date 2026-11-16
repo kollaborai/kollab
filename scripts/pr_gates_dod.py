@@ -455,15 +455,21 @@ def _mentions_finding(content: str, finding: str) -> bool:
 
 def _finding_matches(pattern: re.Pattern[str], body: str) -> list[re.Match[str]]:
     """Finding-id matches in body, outside lint rule lists (#1024)."""
-    rule_lists = [
-        run.span()
-        for run in RULE_CODE_LIST_RE.finditer(body)
-        if all(
-            RUFF_RULE_CODE_RE.fullmatch(code) is not None
-            for code in run.group(0).split(",")
-        )
-        and any(pattern.fullmatch(code) is None for code in run.group(0).split(","))
-    ]
+    rule_lists = []
+    for run in RULE_CODE_LIST_RE.finditer(body):
+        codes = run.group(0).split(",")
+        if not all(RUFF_RULE_CODE_RE.fullmatch(code) is not None for code in codes):
+            continue
+        if not any(pattern.fullmatch(code) is None for code in codes):
+            continue
+        line_start = body.rfind("\n", 0, run.start()) + 1
+        line_prefix = body[line_start : run.start()]
+        if re.search(
+            r"\bruff\s+(?:check|lint)\b|\blint\b|--select\b",
+            line_prefix,
+            re.IGNORECASE,
+        ):
+            rule_lists.append(run.span())
     return [
         match
         for match in pattern.finditer(body)
