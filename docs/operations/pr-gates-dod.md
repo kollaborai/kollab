@@ -110,14 +110,15 @@ trusted_reviewers = ["owner-login"]
   it must land a matching test in a test-only commit before each implementation
   commit. A fix commit cannot modify that regression test except to remove its
   sole `@pytest.mark.xfail(strict=True)` marker. Test-only commits must mention
-  the finding ID in a changed test declaration. A fix may remove the strict
+  the finding ID in a changed test declaration and add a non-constant assertion
+  or a strict `xfail` marker in that test. A fix may remove the strict
   xfail only from that finding's test file. The declaration must use a `test_`
   function name containing the finding ID. Commits added before the finding event
   do not count as fixes for this ordering check. If timeline positions or
   changed-file lists are incomplete, the gate fails closed.
-  A non-testable finding is exempt only when every changed file in its fix is a
-  Markdown, reStructuredText, or plain-text documentation file and its commit
-  body contains a line in the form
+  A non-testable finding is exempt only when its post-finding commits contain
+  no implementation changes and its documenting fix changes only Markdown,
+  reStructuredText, or plain-text files and contains a line in the form
   `No regression test: F14 - documentation wording only.`
 
   The collector reads changed test files as immutable GitHub blob data from

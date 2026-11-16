@@ -50,6 +50,7 @@ every exit code is 0. DoD is a hygiene gate, not a correctness verdict.
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import binascii
 import hashlib
@@ -742,8 +743,39 @@ def _declared_non_testable_findings(cfg: DodConfig, data: PRData) -> set[str]:
                     committed_at = _commit_time(commit.committed_at)
                     timestamps = finding_times.get(finding, [])
                     if orders and order is not None and order > max(orders):
+                        post_finding_commits = (
+                            candidate
+                            for candidate in data.commits
+                            if getattr(candidate, "timeline_order", None) is not None
+                            and candidate.timeline_order > max(orders)
+                        )
+                        if any(
+                            not candidate.files
+                            or any(
+                                _is_implementation_path(path, cfg.regression.test_paths)
+                                for path in candidate.files
+                            )
+                            for candidate in post_finding_commits
+                        ):
+                            continue
                         declarations.add(finding)
                     elif not orders and timestamps and committed_at and committed_at >= max(timestamps):
+                        post_finding_commits = (
+                            candidate
+                            for candidate in data.commits
+                            if (candidate_time := _commit_time(candidate.committed_at))
+                            is not None
+                            and candidate_time >= max(timestamps)
+                        )
+                        if any(
+                            not candidate.files
+                            or any(
+                                _is_implementation_path(path, cfg.regression.test_paths)
+                                for path in candidate.files
+                            )
+                            for candidate in post_finding_commits
+                        ):
+                            continue
                         declarations.add(finding)
     return declarations
 
@@ -900,12 +932,46 @@ def _only_strict_xfail_removal(patch: str) -> bool:
 
 
 def _patch_adds_finding(patch: str, finding: str) -> bool:
+    in_matching_test = False
+    pending_strict_xfail = False
+    for line in patch.splitlines():
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        added = line[1:].strip()
+        if added == "@pytest.mark.xfail(strict=True)":
+            pending_strict_xfail = True
+            if in_matching_test:
+                return True
+            continue
+        if re.match(r"(?:async\s+)?def\s+test_\w+\s*\(", added):
+            in_matching_test = _mentions_finding(added, finding)
+            if in_matching_test and pending_strict_xfail:
+                return True
+            pending_strict_xfail = False
+            inline_body = added.split(":", 1)[1] if ":" in added else ""
+            if in_matching_test and _has_nontrivial_test_assertion(inline_body):
+                return True
+            continue
+        if in_matching_test and _has_nontrivial_test_assertion(added):
+            return True
+    return False
+
+
+def _has_nontrivial_test_assertion(line: str) -> bool:
+    assertion = re.search(r"\bassert\s+(.+)", line)
+    if assertion is None:
+        return False
+    expression = assertion.group(1).split("#", 1)[0].split(",", 1)[0].strip()
+    try:
+        tree = ast.parse(expression, mode="eval")
+    except SyntaxError:
+        return False
     return any(
-        line.startswith("+")
-        and not line.startswith("+++")
-        and re.match(r"(?:async\s+)?def\s+test_\w+\s*\(", line[1:].strip())
-        and _mentions_finding(line[1:], finding)
-        for line in patch.splitlines()
+        isinstance(node, ast.Name) and node.id not in {"True", "False", "None"}
+        or isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id not in {"bool", "int", "str", "len", "list", "dict", "set"}
+        for node in ast.walk(tree)
     )
 
 
