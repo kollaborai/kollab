@@ -2,6 +2,18 @@ import { describe, expect, it } from "vitest";
 import { heartbeatAge, heartbeatLabel } from "./heartbeat";
 
 describe("service heartbeat status", () => {
+
+  it("formats a known runtime without inventing time for missing or future starts", async () => {
+    const { runtimeLabel } = await import("./heartbeat");
+    expect(runtimeLabel(2500, 10000)).toBe("2 h");
+    expect(runtimeLabel(9970, 10000)).toBe("less than 1 min");
+    expect(runtimeLabel(9820, 10000)).toBe("3 min");
+    expect(runtimeLabel(null, 10000)).toBeNull();
+    expect(runtimeLabel(10001, 10000)).toBeNull();
+    expect(runtimeLabel(9000, null)).toBeNull();
+    expect(runtimeLabel(Infinity, 10000)).toBeNull();
+  });
+
   it("only reports a promised heartbeat after its interval", () => {
     expect(heartbeatAge({ state: "running", heartbeat_s: 60, heartbeat: 950, since: 900 }, 1000)).toBeNull();
     expect(heartbeatAge({ state: "running", heartbeat_s: 60, heartbeat: 940, since: 900 }, 1000)).toBe(60);
