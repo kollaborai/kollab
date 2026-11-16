@@ -489,6 +489,10 @@ def _is_blocked_kollab_spawn(
                 payload = args[index + 1]
             else:
                 continue
+            # Inline runtimes (for example node's eval flag) execute plain
+            # source rather than PowerShell base64; keep their launches gated.
+            if suspicious_launch(payload, is_background):
+                return True
             try:
                 command_text = (
                     base64.b64decode(payload, validate=True)
