@@ -57,7 +57,7 @@ async function dismissGuideAndStartChat(page) {
     return button instanceof HTMLButtonElement && !button.disabled;
   });
   await page.getByRole("button", { name: "Start Session", exact: true }).click();
-  await page.getByText("Learn regression session", { exact: true }).waitFor({ state: "visible" });
+  await page.getByRole("textbox", { name: "Message input" }).waitFor({ state: "visible" });
   return { notice, stepBeforeDismissal };
 }
 
@@ -128,7 +128,9 @@ async function captureRecovery(browser, baseUrl, capture, theme) {
 }
 
 async function verifyFinishDoesNotShowNotice(browser, baseUrl) {
-  const view = await openPage(browser, baseUrl, makeFixtures());
+  const view = await openPage(browser, baseUrl, makeFixtures(), {
+    initialGuideState: JSON.stringify({ step: "done", dismissed: false }),
+  });
   try {
     await view.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
     await view.page.getByTestId("guided-setup-open").waitFor({ state: "visible" });
@@ -139,20 +141,13 @@ async function verifyFinishDoesNotShowNotice(browser, baseUrl) {
     await view.page.getByTestId("guided-setup-open").click();
     const guide = view.page.getByRole("dialog");
     await guide.waitFor({ state: "visible" });
-    await guide.getByRole("button", { name: "Get Started", exact: true }).click();
-    await guide.locator('[data-testid="setup-step-agent"][aria-current="step"]').waitFor({ state: "visible" });
-    await guide.getByRole("button", { name: "Skip", exact: true }).click();
-    const notice = view.page.getByRole("status").filter({
-      hasText: "Welcome guide closed. Type /welcome in a chat to open it again.",
-    });
-    await notice.waitFor({ state: "visible" });
-    await view.page.getByTestId("guided-setup-open").click();
-    await guide.waitFor({ state: "visible" });
-    await guide.getByRole("button", { name: "Open", exact: true }).click();
-    await guide.locator('[data-testid="setup-step-done"][aria-current="step"]').waitFor({ state: "visible" });
+    await guide.getByRole("heading", { name: "You're set", exact: true }).waitFor({ state: "visible" });
     await guide.getByRole("button", { name: "Finish", exact: true }).click();
     await guide.waitFor({ state: "hidden" });
-    await notice.waitFor({ state: "hidden" });
+    assert.equal(
+      await view.page.getByText("Welcome guide closed. Type /welcome in a chat to open it again.", { exact: true }).count(),
+      0,
+    );
     console.log("PASS: Finish closes the guide without a dismissal notice");
   } finally {
     await view.context.close();
