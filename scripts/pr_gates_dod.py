@@ -112,6 +112,10 @@ TOKEN_RE = re.compile(r"(ghp_|github_pat_)[A-Za-z0-9_]+")
 # not findings (#1024). Only that flag context counts: the same list in prose can
 # be either, so it stays findings.
 RULE_SELECTION_RE = re.compile(r"--(?:extend-)?(?:select|ignore)(?:=|\s+)([A-Z]+\d*(?:,[A-Z]+\d*)*)")
+RUFF_RULE_LIST_RE = re.compile(
+    r"\b(?:ruff|pyflakes)\b[^\n.;!?]{0,120}?(?P<codes>[A-Z]+\d+(?:\s*,\s*[A-Z]+\d+)+)",
+    re.IGNORECASE,
+)
 
 
 class ConfigError(Exception):
@@ -451,6 +455,7 @@ def _mentions_finding(content: str, finding: str) -> bool:
 def _finding_matches(pattern: re.Pattern[str], body: str) -> list[re.Match[str]]:
     """Finding-id matches in body, outside lint flag rule selections (#1024)."""
     selections = [run.span(1) for run in RULE_SELECTION_RE.finditer(body)]
+    selections.extend(run.span("codes") for run in RUFF_RULE_LIST_RE.finditer(body))
     return [
         match
         for match in pattern.finditer(body)
