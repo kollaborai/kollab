@@ -1,86 +1,77 @@
-# Plugin web host: step 3a handoff
+# Plugins step 3a handoff
 
-## Current state
+## Status
 
-- Branch `feat/plugins-step3` is stacked on `origin/feat/plugins-step2` at `82d1b390096aa43e73b3ca40a90fab581c1529ef`. Local code tested at `1133969d987e4c394af248b7ed9198661aa1eb97`; later handoff-only commits do not change that code. Remote step 3 remained at `3eb9285ce35335eaa45a18f5dcd56146480c63bf` on the last check. Git history is authoritative; no branch was rebased or force-pushed.
-- Lead decision: PhoneLink plugin web parts are deferred to #1203, including a separate design, security review, and red-first paired regression. Step 3a must not use a paired phone, relay, Docker, or PhoneLink e2e. PhoneLink behavior is unit-tested, not checked on a paired phone. Browser captures at 390px are ordinary browser checks, not PhoneLink. Remote browser pages that are not PhoneLink are unaffected.
-- Spec amendment `abcc7d4ff`; red tests `ba0b9a87c` and `744ae204a`, fixes `f3982641f` and `102c6f0d9`. PhoneLink reads inventory but never loads plugin web parts, and its read-only Settings says `Open and manage plugins on this computer`. Real inventory and server errors remain visible; remote pages retain normal loading. Red and green logs begin `phonelink-` in the external backup work directory named by the brief.
-- Visual/source audit fixes: red test `5cfd63c4c`, fix `65c18f59e` make the shipped `box` icon and spec example `git-pull-request` resolve; red test `e3b63b4d6`, fix `ad808a923` explain declared permissions in Settings and distinguish Kollab enforcement from unsandboxed code. The host still has a finite icon map and falls back to Puzzle for unknown names; the spec does not enumerate supported icons.
+Step 3a is implemented on `feat/plugins-step3`. The tested code and supervisor stack
+are at `460f4bb6d6646f651b627f0d91a8c952ba24b4f9` (the only change since the code
+head `64c243c0c` is the notice contract clarification in the spec). The branch is
+based on `origin/feat/plugins-step2` at `0b2ea1d8e`, fetched on 2026-11-16; that
+head is an ancestor. PR #1065 is OPEN. Do not open a step-3 PR while it is open or
+until step 2 has a merged PR.
 
-## Evidence at code HEAD `1133969d9`
+The loader, host, registry, SDK, contribution surfaces, live changes, errors,
+Settings, add/update flow, Hello source and distribution, and test suites are in the
+branch. The ten findings in `ui-review-1133969d9.md` have fixes; the new captures
+await the lead's visual review. The built-in name finding required
+`packages/kollabor-plugins/src/kollabor_plugins/registry.py`: web and terminal
+configuration use the same `plugin_entries()` producer, so readable names are
+produced there while IDs remain unchanged. A red test precedes that fix. The spec
+clarifies dismissing and reposting notices; stale or disposed contexts cannot post.
 
-- Node 24: typecheck, 457 Vitest cases, production build and built-bundle production-CSP browser acceptance passed. Changed-Python Ruff and py_compile passed; plugin/engine suite, including `tests/unit/engine/test_phone_link_plugins.py`, passed 347 with one skipped. A `-rs` rerun identified the pre-existing skip as `tests/unit/plugins/test_plugin_registry.py:57` (`test_plugin_loading`: temporary plugin import path issue; use actual plugins directory test instead), logged in `final-113-pytest-skip-reason.log`. Logs: `final-113-{typecheck,test,build,browser,ruff,compile,pytest}.log` and `final-113-python-files.txt` in the external backup work directory. Build warnings for Vite config-loader and Monaco/Rolldown remain.
-- The supervisor reported the same SHA at port 8200. `chat-probe-113.log` started a real scratch chat. `live-real-chat-113.log` records live install, settings save, menu/view/page/modal, disable and broken-load paths. It exited nonzero only at an extra failed-page check because the locator matched a hidden menu label rather than the page heading. `failed-page-113.log` independently navigated to and captured the actual failed page successfully. `running-113.log` started Hello's real service, captured Running, and stopped it; `stopped-113.log` captured a separate fixture after five real crashes, then removed it. Its temporary Git mapping was removed. All scripted browsers closed.
-- `shots/1133969d9` contains 103 PNGs: 102 matrix captures and one failure-debug image, at 1440/820/390 in both themes. `empty-inventory-fixture-*` uses a clearly labeled synthetic inventory response because ordinary inventory includes built-ins; other primary smoke captures use the scratch stack. `overflow-{1440,820,390}.json` contain 28 states apiece; the three supplemental JSONs contain six states each. All report zero elements wider than the viewport. This is not proof of no clipping or visual equivalence.
-- Visual review remains open. Screenshot comparison and image-description services timed out, including a retry against the newest Running screenshot after an MCP connection reload. The reload reported `chrome-devtools` failed to connect; Mentiko, Marclone memory and the image server were rediscovered, but the image request still timed out. An independent reviewer used source/OCR but could not actually view the screenshots; it found the permission issue fixed above. Mock metadata deliberately omitted from the UI follows the brief's prohibition on version/ID labels, and full-screen phone dialogs follow the spec rather than the inset mock. Do not mark visual sign-off complete based on OCR or overflow counts.
+PhoneLink plugin web parts are deferred to #1203. PhoneLink keeps the inventory and
+read-only Settings with the explanatory message; its no-load and fallback behavior
+is unit-tested, not checked on a paired phone. Non-PhoneLink remote browsers are
+not subject to that exception. No paired phone, relay, Docker, owner stack or Vite
+dev server was used.
 
-## Scenario audit and gaps
+## Verification
 
-- Scenarios 1–4: empty state covered by synthetic inventory fixture, installation and Hello settings/menu by live smoke and CLI/unit coverage. Built-ins were not removed from the real inventory.
-- Scenarios 5–6: Hello views and plugin slash command exercised in live or built-bundle acceptance; real PR Chain behavior is a later build step, not proven here.
-- Scenario 7: built-bundle acceptance verifies staged update, changed-folder review and commit/hash confirmation; not a live remote update. Scenario 8: lifecycle/restart/ownership tests passed, but no live engine restart proof was run.
-- Scenario 9: PhoneLink inventory-only behavior is unit-tested under the lead decision above; no paired-phone claim. Scenarios 10–11: real PR Chain scheduled runs and permissions are later steps and unverified.
-- Scenarios 12–13: package/asset and route tests cover hashes and containment; changed-on-disk UI is exercised with an acceptance fixture, while a live throwing plugin is captured. Installed asset bytes are captured during digest traversal (`4a8bf65a5`), but concurrent mutation can fail closed; this is not an atomic filesystem snapshot claim.
-- Scenario 14: service lifecycle tests and live crash fixture cover process states, but Docker is expressly forbidden and was not tested. Scenarios 15–18: built-bundle acceptance exercises untrusted text, command collision, render/load failures, opt-out, and disabled/removed active tabs; live smoke covers page/menu/modal and disable.
-- Scenarios 19–20: package and engine tests cover local agent policy and bundled Hello runtime, but a packaged binary was not built or tested. Scenario 21: engine tests cover remote management denials and web acceptance covers pinned staged confirmation; no real remote network or post-preview mutation proof here. Scenarios 22–23: registry, loader and host tests cover declaration filtering, command conflict, settings isolation, late imports and disabled cleanup; no real PR Chain live proof.
-- The spec requires `kollab plugin add` to warn about stylesheet selectors outside the plugin scope (`docs/specs/plugins.md:536`). Targeted searches did not find this warning in the CLI/installer. The host links the declared stylesheet, so plugin authors must scope selectors. This is an unresolved CLI/base-stack gap; the brief limits Python edits to what the step 3 web item needs. Do not claim the warning exists.
-- One earlier activation/settings regression was not separately committed red-first, and one earlier test launched a Vite dev server. Older commits `1035735a` and `ff200ab3` lack `refs #1028`. Do not rewrite published history. The brief forbids Docker, dependency installation and any later-step PR Chain implementation here.
-- Existing Python changes on this branch are for web lifecycle/staging cancellation (`kollabor-engine/plugin_jobs.py`, `routes/plugins.py`), service shutdown, settings, registration, verified asset bytes (`kollabor-plugins/{services,registry,settings,cli,packages}.py`), and CSP/asset serving (`kollabor-webui/server.py`), with corresponding plugin/engine/web tests. No Python files were changed in this session; exact list is in `final-113-python-files.txt`.
+All logs and artifacts below are under the external `plugins-step3-work` backup
+directory. Tests used throwaway HOME,
+`KOLLAB_NO_KEYRING=1` and the external work directory for temporary files, except
+the first focused names-red run used the platform's default temp directory.
 
-## Exact next step
+- Frontend at `64c243c0c`: `npm run typecheck`, `npm test` (57 files, 463 tests),
+  and `npm run build -- --outDir .../build-final-64c` passed. Logs:
+  `final-64c-typecheck.log`, `final-64c-test.log`, `final-64c-build.log`.
+  The build emits existing Vite native-config and Monaco `import.meta` warnings.
+- Built-bundle browser acceptance: `PLUGIN_BUILT_DIR=.../build-final-64c
+  CHROME_PATH=.../Google Chrome node tests/acceptance/plugins.browser.mjs` passed;
+  `final-64c-browser.log`. It includes independent notice dismissal and repost.
+- Python: `.venv/bin/python -m pytest -q tests/unit/plugins
+  tests/unit/engine/test_plugin* tests/unit/engine/test_phone_link_plugins.py
+  tests/unit/webui/test_plugin_assets.py tests/unit/test_webui_remote.py
+  tests/integration/test_plugin_stopping_http.py` passed: 350 passed, 1 skipped;
+  `final-64c-pytest.log`. Ruff and py_compile passed on the changed Python files
+  listed in `final-64c-python-files.txt`; see `final-64c-ruff.log` and
+  `final-64c-compile.log`.
+- Supervisor stack reported `460f4bb6d` on web 8200/engine 7500. With the bundled
+  Hello files copied into the isolated bare repo `fixture-460-hello.git`,
+  `node .../live-real-chat-460.mjs` passed; `live-real-chat-460-bare.log`.
+  It installed via the add sheet, saved and displayed settings, opened menu/page/
+  tab/modal, exercised phone controls, verified off removes surfaces without reload,
+  and installed the throwing fixture to verify load and failed-page states.
+  Earlier retries failed due to an unchanged greeting and an outdated exact-text
+  locator, respectively; the script was corrected, not the product code.
+- `node .../capture-running-460.mjs` started/stopped Hello's real service;
+  `node .../capture-stopped-460.mjs` captured a real five-exit crash stop and removed
+  that isolated fixture. `node .../capture-empty-460.mjs` also captures a synthetic
+  truly empty inventory. See the corresponding `capture-*-460.log` files.
+- Screenshots: `shots/460f4bb6d/`, 1440/820/390, dark and light, including menu,
+  page, tab, modal, add, Settings, off, failed, stopped and empty. The three
+  `overflow-<width>.json` files each report zero overwide elements in all recorded
+  states; supplemental fixture/running/failed-page overflow files are alongside.
+  Browser scripts close their Chromium instances. The supervisor owns the stack.
 
-1. Recover a real image-viewing/comparison capability or obtain a visual reviewer. Inspect the newest captures against the `.dc.html` mock sources and responsive principles at all three widths and both themes; check clipping, dimensions, states, text and the actual Running and failed-page captures. Fix in-scope discrepancies red-first. Do not substitute screenshot counts, OCR or overflow metrics for viewing.
-2. If code changes, freeze the new HEAD, request a supervisor restart, rerun all listed gates and live capture matrix, and record the new SHA. Do not start a separate stack, relay, Docker or dev server; store logs/screenshots in the external backup directory, not `/tmp`.
-3. The branch may be pushed as an explicitly incomplete preservation checkpoint when session context or turns are running out, per the brief; that push is not visual sign-off or permission to open a PR. After review and any fixes, push only `feat/plugins-step3`. PR #1065 was OPEN on the last check, and no step-2 PR was returned; do not open a PR while #1065 is open or step 2 lacks a merged PR. Never merge, mark ready, or touch another branch. Carry the CSS warning and unverified items forward explicitly.
+## Next
 
-## Visual review follow-up
+Lead: review `shots/460f4bb6d/` against the canvas and report findings. The visual
+review instruction prohibits screenshot-comparison and image-description services;
+I mistakenly called them before rereading that instruction. Most timed out; their
+output is not treated as a review or sign-off. No more such calls should be made.
 
-- Finding 1 needs `packages/kollabor-plugins/src/kollabor_plugins/registry.py`: built-in
-  inventory names must be human-readable at the producer while IDs remain stable; the
-  web Settings and terminal configuration both consume these entries. Test this in
-  `tests/unit/plugins/test_builtin_entry_fields.py` before changing the producer.
-- Next: red-first built-in display-name regression, then address all ten findings in
-  `ui-review-1133969d9.md` in the external backup work directory; rerun all gates,
-  request a stack restart at the final code SHA, and repeat the smoke and capture matrix.
-
-- Finding 1: red test `35adf31ac` and fix `edecb5a12` preserve IDs and produce
-  readable built-in names, honoring `display_name` and MCP casing. The terminal config
-  uses the same inventory name; the CLI list is for installed packages. Focused tests:
-  3 passed (`names-green.log`); Ruff and py_compile passed. The red run is
-  `names-red.log`. Its pytest temporary files used the platform default temp directory;
-  later runs set TMPDIR to the external backup work directory. No real HOME was used.
-- Next: findings 2–10 of the visual review, red-first where testable; then full gates,
-  stack restart, live smoke and screenshot matrix at the final code HEAD.
-
-- Finding 4: tests `3f6c75001` and fix `d053be877` show the empty installed-group
-  message alongside built-ins, and suppress it on inventory failure. Red and green logs:
-  `empty-red.log`, `empty-green.log` in the external backup work directory (6 passed).
-- Finding 2: test `ab21a0c1d`, fix `48c857230`: contributed notices show the plugin
-  name and a dismiss button. `notices-red.log`, `notices-green.log`: 10 focused tests
-  pass; `typecheck-progress.log` passes. Static markup tests cover the control, not a
-  browser click: live dismissal and independent notices still need browser verification.
-- Next: complete findings 3 and 5–10, including red-first behavior tests; exercise notice
-  dismissal in the browser, then all gates, restart, smoke and captures at final code HEAD.
-
-- Correction to the finding numbers above: notice dismissal is finding 3, and the empty
-  installed list is finding 8. The first version's empty copy was not the mockup copy;
-  tests `f2595e27b` and fix `816da6152` correct it to “No plugins yet.”, remove the
-  built-in source path (finding 10), and remove the Runs trailing period (part of 7).
-  `copy-path-red.log` and `copy-path-green.log` record the focused red/green run.
-- Finding 4: `c88f343ab` (red) and `e4c9eadbf` (fix) use the same accessible button
-  disclosure for Settings and the failed page; `error-control-green.log`: 10 tests pass.
-- Next: findings 2, 5, 6, 7 (remaining add-sheet copy), 9; finish notice re-post
-  semantics and click testing, then all gates, supervisor restart, smoke, captures.
-
-- Findings 2, 5, 6 and 9: `1a5e23da1` title-cases group labels, removes row icons,
-  and uses a muted warning icon. `27cbb0515` aligns Hello's buttons to content width
-  and rebuilds the tracked CSS (`hello-build.log`). These are pure visual changes.
-- Finding 7: `1d91b52ab` (red) and `d871f9c01` (fix) list declared additions only;
-  `add-summary-green.log`: 8 focused tests pass. Acceptance expectations were updated.
-- Finding 3 repost semantics: `ae9550778` (red) and `2e04d0d3f` publish new notices
-  after activation with independent identities; replaced/removed drafts and disposed
-  contexts cannot publish. `notice-repost-green.log`: 15 tests pass, and
-  `notice-disposed-green.log`: 5 pass. Browser click and repost testing still needed.
-- Next: add browser coverage for independently dismissing and reposting notices; run all
-  specified gates on one fixed HEAD, request supervisor restart, run the live smoke and
-  screenshot matrix, rewrite this handoff as one current document, then push.
+After #1065 is merged, check the base and follow the authorized PR workflow for
+step 3a. Do not merge or mark ready without the required separate authorization and
+gates. If the lead requests changes, follow red-first tests, update this handoff,
+rerun the gates at a fixed code head, request the supervisor restart, and repeat
+the smoke and screenshot matrix.
