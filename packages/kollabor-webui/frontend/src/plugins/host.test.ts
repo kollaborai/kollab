@@ -442,3 +442,68 @@ describe("plugin host lifecycle", () => {
     host.close();
   });
 });
+
+
+describe("PhoneLink inventory-only capability", () => {
+  const phone = { phoneLink: true } as Partial<PluginHostOptions>;
+
+  it("lists plugins at startup without contexts, styles, imports, or failed rows", async () => {
+    const { host, importer, setInventory } = setup(phone);
+    setInventory([{ ...entry("hello"), web: { entry: "web/dist/index.js", style: "web/dist/style.css", hash: "a" } }]);
+    await host.start();
+    expect(host.getSnapshot().entries.map(item => item.id)).toEqual(["hello"]);
+    expect(host.getSnapshot().disabled).toBe(false);
+    expect(host.getSnapshot().errors).toEqual({});
+    expect(host.getSnapshot().registry.plugins).toEqual([]);
+    expect(host.getContext("hello")).toBeUndefined();
+    expect(importer).not.toHaveBeenCalled();
+    expect(globalThis.document?.querySelector('link[href*="/plugins/hello/"]')).toBeFalsy();
+    host.close();
+  });
+
+  it("keeps inventory current on refresh and retry without activating", async () => {
+    const { host, importer, setInventory } = setup(phone);
+    await host.start();
+    setInventory([entry("next")]);
+    await host.refresh();
+    await host.retry("next");
+    expect(host.getSnapshot().entries.map(item => item.id)).toEqual(["next"]);
+    expect(host.getContext("next")).toBeUndefined();
+    expect(importer).not.toHaveBeenCalled();
+    expect(host.getSnapshot().errors).toEqual({});
+    host.close();
+  });
+
+  it("refreshes inventory on a plugins-changed event without activating", async () => {
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    const request = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({ start(controller) { stream = controller; } })));
+    const { host, importer, setInventory } = setup({ ...phone, request });
+    await host.start();
+    setInventory([entry("changed")]);
+    stream.enqueue(new TextEncoder().encode('event: plugins-changed\ndata: {}\n\n'));
+    await vi.waitFor(() => expect(host.getSnapshot().entries[0]?.id).toBe("changed"));
+    expect(importer).not.toHaveBeenCalled();
+    expect(host.getContext("changed")).toBeUndefined();
+    host.close();
+  });
+
+  it("reports inventory errors and recovers on refresh", async () => {
+    const { host, json, importer } = setup(phone);
+    json.mockRejectedValueOnce(new Error("inventory unavailable"));
+    await host.start();
+    expect(host.getSnapshot().inventoryError).toBe("inventory unavailable");
+    await host.refresh();
+    expect(host.getSnapshot().inventoryError).toBeNull();
+    expect(host.getSnapshot().entries).toHaveLength(1);
+    expect(importer).not.toHaveBeenCalled();
+    host.close();
+  });
+
+  it("does not show page opt-out or skip inventory when plugins=off on PhoneLink", async () => {
+    const { host, json } = setup({ ...phone, disabled: true });
+    await host.start();
+    expect(json).toHaveBeenCalledWith("/plugins");
+    expect(host.getSnapshot().disabled).toBe(false);
+    host.close();
+  });
+});
