@@ -87,6 +87,25 @@ def test_process_enumerator_guard_detects_direct_psutil_imports(tmp_path, monkey
     assert "process_iter" in _enumeration_methods()
 
 
+def test_process_enumerator_guard_detects_local_method_aliases(tmp_path, monkeypatch) -> None:
+    """Aliasing an enumerator must not hide it from the coverage guard."""
+    source_root = tmp_path / "kollabor"
+    source_root.mkdir()
+    (tmp_path / "plugins").mkdir()
+    (tmp_path / "packages").mkdir()
+    (source_root / "aliased_enumerators.py").write_text(
+        "import psutil\n"
+        "all_processes = psutil.pids\n"
+        "all_processes()\n"
+        "read_environment = psutil.Process(1).environ\n"
+        "read_environment()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+
+    assert {"pids", "environ"} <= _enumeration_methods()
+
+
 class _ProcessRow:
     def __init__(self, pid: int, ppid: int, started: float, username: str | None):
         self.info = {
