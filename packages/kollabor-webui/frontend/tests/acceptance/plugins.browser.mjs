@@ -305,7 +305,9 @@ try {
   await page.getByRole("button", { name: "Settings", exact: true }).first().click();
   const partialSettings = page.getByRole("dialog", { name: "Settings" });
   await partialSettings.getByRole("tab", { name: "Plugins" }).click();
-  await partialSettings.getByText("Version 1.2.3", { exact: true }).waitFor({ timeout: 3000 });
+  const partialDetails = partialSettings.getByRole("region", { name: "Fixture details" });
+  await partialDetails.waitFor({ timeout: 3000 });
+  assert.doesNotMatch(await partialDetails.innerText(), /1\.2\.3/, "plugin details do not expose version numbers");
   await partialSettings.getByRole("switch", { name: "Fixture enabled" }).click();
   const partialDialog = page.getByRole("dialog", { name: "Turn off Fixture?" });
   await partialDialog.getByRole("button", { name: "Turn Off", exact: true }).click();
@@ -539,7 +541,7 @@ try {
   const listBox = await settings.getByRole("navigation", { name: "Plugin list" }).boundingBox();
   const detailBox = await fixtureRow.boundingBox();
   assert.ok(listBox && detailBox && listBox.x + listBox.width <= detailBox.x, "desktop uses separate list and details columns");
-  assert.doesNotMatch(await fixtureRow.innerText(), /v1\.2\.3|1234567890ab/, "settings rows hide version and commit identifiers");
+  assert.doesNotMatch(await fixtureRow.innerText(), /1\.2\.3|1234567890ab/, "settings rows hide version and commit identifiers");
   const customSettings = settings.getByText("Fixture custom settings", { exact: true });
   await customSettings.waitFor();
   assert.equal(await customSettings.locator('xpath=ancestor::*[@data-plugin="fixture"]').count(), 1, "custom settings have plugin-specific CSS scope");
