@@ -1,7 +1,9 @@
 # What's New dialog
 
-Issue: #1106  
-Status: Implemented  
+Issue: #1106
+
+Status: Implemented
+
 Owner: Web UI
 
 ## Problem
