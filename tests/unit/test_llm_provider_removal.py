@@ -83,7 +83,7 @@ class _Profiles:
         return [name for name, p in self.profiles.items() if p.provider == provider]
 
 
-def _setup(monkeypatch):
+def _setup(monkeypatch, *, empty_anthropic=False):
     profiles = [
         _Profile("anthropic-cloud", "anthropic"),
         _Profile("anthropic-local", "anthropic"),
@@ -91,6 +91,12 @@ def _setup(monkeypatch):
     ]
     pm = _Profiles(profiles)
     manager = _Manager(profiles)
+    if empty_anthropic:
+        manager.loadouts = [
+            loadout
+            for loadout in manager.loadouts
+            if loadout.provider_profile != "anthropic-cloud" or not loadout.implicit
+        ]
     monkeypatch.setattr("kollabor.panels.llm._manager", lambda ctx: manager)
     return LlmPanel(), SimpleNamespace(_profile_manager=pm), manager, pm
 
@@ -116,3 +122,13 @@ def test_web_provider_action_calls_shared_removal_function(monkeypatch):
 
     assert pm.removed_provider == "anthropic"
     assert "Removed Anthropic provider profiles" in result["message"]
+
+
+def test_web_empty_provider_section_still_offers_removal(monkeypatch):
+    panel, ctx, _, _ = _setup(monkeypatch, empty_anthropic=True)
+
+    result = asyncio.run(panel.describe(ctx, {}))
+
+    empty = next(group for group in result["empty_groups"] if group["group"] == "Models — Anthropic")
+    assert empty["id"] == "anthropic-cloud"
+    assert empty["actions"] == ["remove_provider"]
