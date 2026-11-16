@@ -204,17 +204,22 @@ async function main() {
     const role = teamCard.locator("li button .text-sm.font-medium").nth(1);
     await role.waitFor({ state: "visible" });
     assert.equal(await role.innerText(), "Cloud & Infrastructure Security Engineer");
-    assert.equal(
+    const assertLabelFits = async () => assert.equal(
       await role.evaluate((node) => node.scrollWidth <= node.clientWidth),
       true,
       "the full team role must be visible without horizontal clipping",
     );
+    await assertLabelFits();
     const proofOutput = process.env.KOLLAB_PROOF_OUTPUT_DIR || "/tmp/kollab-issue-1134";
     mkdirSync(proofOutput, { recursive: true });
     await page.evaluate(() => document.documentElement.classList.add("dark"));
+    await assertLabelFits();
     await page.screenshot({ path: path.join(proofOutput, "teams-long-phone-dark.png"), fullPage: true });
     await page.evaluate(() => document.documentElement.classList.remove("dark"));
     await page.screenshot({ path: path.join(proofOutput, "teams-long-phone-light.png"), fullPage: true });
+    await page.setViewportSize({ width: 820, height: 900 });
+    await assertLabelFits();
+    await page.setViewportSize({ width: 390, height: 844 });
     await teamCard.getByRole("button", { name: "Configure & Launch", exact: true }).click();
     await page.getByRole("heading", { name: "Launch Test Team", exact: true }).waitFor({ state: "visible" });
 
