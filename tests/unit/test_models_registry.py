@@ -156,6 +156,8 @@ def test_vendor_prefix_must_match_the_model_provider():
         {"models": None, "provider_defaults": {}},
         {"models": {"gpt-6": 123}, "provider_defaults": {}},
         {"models": {}, "provider_defaults": None},
+        {"models": {"gpt-6": {"context_window": "invalid"}}, "provider_defaults": {}},
+        {"models": {}, "provider_defaults": {"openai": {"context_window": "invalid"}}},
     ],
 )
 def test_malformed_catalog_shapes_use_safe_defaults(monkeypatch, catalog):
