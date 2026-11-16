@@ -33,7 +33,9 @@ describe("PhoneLink plugin UI", () => {
     const host = phoneHost(failed);
     await host.start();
     const html = renderToStaticMarkup(<PluginsSettings host={host} api={{} as EngineApi} canManage={false} />);
-    expect(html).toContain("Server rejected this plugin");
+    expect(html).not.toContain("<summary");
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain("View Error");
     expect(html).not.toContain("Failed to Load");
     expect(html).not.toContain("Retry");
     host.close();
