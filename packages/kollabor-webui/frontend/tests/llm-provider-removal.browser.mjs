@@ -13,7 +13,7 @@ const screenshotDir = path.resolve(
   process.env.LLM_PROVIDER_REMOVE_SCREENSHOT_DIR ?? path.join("/tmp", "kollab-llm-provider-removal-proof"),
 );
 const executablePath = process.env.CHROME_PATH ?? chromium.executablePath();
-const widths = [390, 820, 1280];
+const widths = [390, 820, 1280, 1440];
 const vite = await createServer({
   root: frontendRoot,
   configFile: path.join(frontendRoot, "vite.config.ts"),
@@ -22,6 +22,7 @@ const vite = await createServer({
   server: { host: "127.0.0.1", port: 0, strictPort: false },
 });
 let browser;
+const failures = [];
 
 try {
   await vite.listen();
@@ -61,11 +62,23 @@ try {
     const remove = page.getByRole("button", { name: "Remove Anthropic provider claude-model" });
     await remove.waitFor();
     await remove.click();
-    await page.getByRole("status").getByText(/Press Remove Anthropic provider again/).waitFor();
+    const confirmation = page.getByRole("status");
+    await confirmation.waitFor();
     await page.getByRole("button", { name: "Use gpt-model" }).click();
     assert.equal(await page.evaluate(() => window.llmProviderRemovalCalls), 1);
     await page.getByRole("button", { name: "Remove Anthropic provider claude-model" }).click();
-    await page.getByRole("status").getByText(/Press Remove Anthropic provider again/).waitFor();
+    await confirmation.waitFor();
+    const confirmationText = await confirmation.innerText();
+    if (!confirmationText.includes("Press Confirm again")) failures.push("confirmation copy must match the Confirm button");
+    if (confirmationText.includes("Press Remove Anthropic provider again")) failures.push("confirmation copy still names the wrong action");
+    if (width >= 820) {
+      const row = page.getByRole("button", { name: "Confirm claude-model" }).locator("xpath=ancestor::li[1]");
+      const details = await row.getByText("anthropic-cloud · claude-model").boundingBox();
+      const confirmationBox = await confirmation.boundingBox();
+      if (!(details && confirmationBox && confirmationBox.y >= details.y + details.height)) {
+        failures.push(`confirmation should sit below provider names at ${width}px`);
+      }
+    }
     const confirmShot = `llm-provider-remove-${width}-confirm.png`;
     await page.screenshot({ path: path.join(screenshotDir, confirmShot), fullPage: true });
     await page.getByRole("button", { name: "Confirm claude-model" }).click();
@@ -81,6 +94,7 @@ try {
     await page.screenshot({ path: path.join(screenshotDir, removedShot), fullPage: true });
     console.log(`${width}px: saved ${confirmShot}, ${removedShot}; provider removed`);
   }
+  assert.deepEqual(failures, [], "provider removal confirmation must match the control and preserve provider names");
 } finally {
   await browser?.close();
   await vite.close();
