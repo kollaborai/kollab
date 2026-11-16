@@ -30,7 +30,7 @@ def test_long_stop_timeout_is_preserved(tmp_path, monkeypatch):
     monkeypatch.setattr(services.os, "kill", lambda *_: None)
     before = time.time()
     services.control_service("hello", "worker", "stop")
-    state = json.loads((run / "worker.state.json").read_text())
+    state = json.loads((run / "worker.state").read_text())
     assert 719 <= state["stop_deadline"] - before <= 721
 
 
