@@ -86,6 +86,8 @@ try {
   let brokenDisableCalls = 0;
   let fixtureRemoved = false;
   let folderless = false;
+  // Deliberately skew the engine clock to exercise a remote browser with a different clock.
+  const engineNow = () => Date.now() / 1000 + 10_000;
   const commit = "a".repeat(40);
   const filesHash = "b".repeat(64);
   const previousCommit = "c".repeat(40);
@@ -114,7 +116,7 @@ try {
     const url = new URL(route.request().url());
     if (url.origin !== origin) return route.abort();
     if (url.pathname === "/api/config") return route.fulfill({ json: { engine_url: "/engine" } });
-    if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, plugins: [...(fixtureRemoved ? [] : [entry]), broken, crasher, damaged, hello] } }); }
+    if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, server_time: engineNow(), plugins: [...(fixtureRemoved ? [] : [entry]), broken, crasher, damaged, hello] } }); }
     if (url.pathname === "/engine/plugins/install" && route.request().method() === "POST") {
       installSource = route.request().postDataJSON();
       if (!installSource?.source) return route.fulfill({ status: 422, json: { detail: "source is required" } });
@@ -205,7 +207,7 @@ try {
   entry.state = "stopping";
   entry.services[0].state = "stopping";
   entry.services.push({ name: "pulse", state: "running", desired: "running", restarts: 0,
-    heartbeat_s: 60, heartbeat: Date.now() / 1000 - 370, since: Date.now() / 1000 - 600 });
+    heartbeat_s: 60, heartbeat: engineNow() - 370, since: engineNow() - 600 });
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   const folderlessPanel = page.getByRole("complementary", { name: "Session Controls" });
@@ -237,8 +239,8 @@ try {
   folderless = false;
   entry.services[0].state = "running";
   entry.services[0].heartbeat_s = 60;
-  entry.services[0].heartbeat = Date.now() / 1000 - 370;
-  entry.services[0].since = Date.now() / 1000 - 600;
+  entry.services[0].heartbeat = engineNow() - 370;
+  entry.services[0].since = engineNow() - 600;
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   const stalePanel = page.getByRole("complementary", { name: "Session Controls" });
