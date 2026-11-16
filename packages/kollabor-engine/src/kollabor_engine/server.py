@@ -356,10 +356,13 @@ def create_app(port: Optional[int] = None) -> FastAPI:
         return error_response(request, exc)
 
     # Mount routes
+    from .routes.artifacts import router as artifacts_router
     from .routes.mcp import router as mcp_router
+    from .routes.media import router as media_router
     from .routes.messages import router as messages_router
     from .routes.panels import network_router as halt_panels_router
     from .routes.panels import router as panels_router
+    from .routes.panels import setup_router
     from .routes.permissions import router as permissions_router
     from .routes.profiles import router as profiles_router
     from .routes.sessions import router as sessions_router
@@ -372,6 +375,7 @@ def create_app(port: Optional[int] = None) -> FastAPI:
     app.include_router(mcp_router)
     app.include_router(panels_router, dependencies=opens)
     app.include_router(halt_panels_router)
+    app.include_router(setup_router)
 
     from .routes.agents import router as agents_router
     from .routes.hub import router as hub_router
@@ -388,6 +392,8 @@ def create_app(port: Optional[int] = None) -> FastAPI:
     app.include_router(voice_router)
     app.include_router(prompts_router)
     app.include_router(rosters_router)
+    app.include_router(media_router)
+    app.include_router(artifacts_router)
     app.include_router(teams_router)
 
     from .routes.pr_chain import router as pr_chain_router
