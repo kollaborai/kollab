@@ -101,6 +101,7 @@ describe("seen record storage shape", () => {
     expect(loadSeenRecord("not json")).toBeNull();
     expect(loadSeenRecord(JSON.stringify({ seen: 3 }))).toBeNull();
     expect(loadSeenRecord(JSON.stringify({ seenVersion: 22 }))).toBeNull();
+    expect(loadSeenRecord(JSON.stringify({ seenVersion: "zebra" }))).toBeNull();
   });
 });
 
