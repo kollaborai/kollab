@@ -449,7 +449,8 @@ function RuntimeShell({
 export default function App({ contained = false }: { contained?: boolean } = {}) {
   const [pageRoute, setPageRoute] = useState(() => readMainPageRoute(window.location));
   const [pluginHost, setPluginHost] = useState<PluginHost | null>(null);
-  const [pluginTarget, setPluginTarget] = useState<{ pluginId: string; target: PluginOpen } | null>(null);
+  const [pluginPage, setPluginPage] = useState<{ pluginId: string; target: { page: string } } | null>(null);
+  const [pluginModal, setPluginModal] = useState<{ pluginId: string; target: { modal: string } } | null>(null);
   const [pluginToast, setPluginToast] = useState<string | null>(null);
   const [serviceCrashes, setServiceCrashes] = useState<ServiceCrash[]>([]);
   const [serviceLog, setServiceLog] = useState<{ id: number; name: string; text?: string; error?: string } | null>(null);
@@ -459,8 +460,6 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [turnOffError, setTurnOffError] = useState<string | null>(null);
   const learnRoute = pageRoute.kind === "learn" ? pageRoute.learn : null;
   const whatsNewActive = pageRoute.kind === "whats-new";
-  const pluginPage = pluginTarget && "page" in pluginTarget.target ? pluginTarget : null;
-  const pluginModal = pluginTarget && "modal" in pluginTarget.target ? pluginTarget : null;
   const pageOpen = pageRoute.kind !== "chat" || pluginPage !== null;
   const previousPageOpenRef = useRef(pageOpen);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -533,7 +532,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   }, [pageOpen]);
 
   const returnToChat = useCallback(() => {
-    setPluginTarget(null);
+    setPluginPage(null);
+    setPluginModal(null);
     if (readMainPageRoute(window.location).kind === "chat") return;
     window.history.pushState(null, "", pagePath("/", window.location.pathname));
     setPageRoute({ kind: "chat" });
@@ -1830,12 +1830,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         if (requested?.needs_folder && !activeSession?.workspace) { setPluginToast("Open a chat with a folder to use this view."); return; }
         returnToChat();
         setSessionView(pluginViewKey(pluginId, target.view));
+      } else if ("page" in target) {
+        returnToChat();
+        setPluginPage({ pluginId, target });
       } else {
-        if ("page" in target) returnToChat();
-        setPluginTarget({ pluginId, target });
+        setPluginModal({ pluginId, target });
       }
     },
-    openAgent: sessionId => { setPluginTarget(null); returnToChat(); void selectSession(sessionId); },
+    openAgent: sessionId => { returnToChat(); void selectSession(sessionId); },
   };
   useEffect(() => {
     const host = new PluginHost({
@@ -2005,7 +2007,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         ) : null}
         {learnRoute ? <LearnDialog route={learnRoute} onNavigate={navigateToLearn} onExit={returnToChat} /> : null}
         {pluginHost && pluginModal && "modal" in pluginModal.target ? <PluginModalSurface host={pluginHost} pluginId={pluginModal.pluginId}
-          modalId={pluginModal.target.modal} session={activeSession ?? undefined} onClose={() => setPluginTarget(null)} onTurnOff={turnOffPlugin} /> : null}
+          modalId={pluginModal.target.modal} session={activeSession ?? undefined} onClose={() => setPluginModal(null)} onTurnOff={turnOffPlugin} /> : null}
         <SidebarInset
           id="app-main-pane"
           tabIndex={-1}
