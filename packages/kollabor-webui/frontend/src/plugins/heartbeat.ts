@@ -10,7 +10,8 @@ export function heartbeatAge(value: unknown, now = Date.now() / 1000): number | 
   if (service.state !== "running" || !finitePositive(service.heartbeat_s) || !Number.isFinite(now)) return null;
   const heartbeat = finitePositive(service.heartbeat) ? service.heartbeat : 0;
   const since = finitePositive(service.since) ? service.since : 0;
-  const last = Math.max(heartbeat, since);
+  const monitorSince = finitePositive(service.heartbeat_monitor_since) ? service.heartbeat_monitor_since : 0;
+  const last = Math.max(heartbeat, since, monitorSince);
   if (!last || last > now) return null;
   const age = now - last;
   return age >= service.heartbeat_s ? age : null;
