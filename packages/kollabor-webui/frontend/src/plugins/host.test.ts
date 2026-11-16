@@ -26,6 +26,27 @@ function setup(options: Partial<PluginHostOptions> = {}) {
 
 describe("plugin host lifecycle", () => {
 
+  it("waits for the winning inventory when a refresh is superseded", async () => {
+    let resolveFirst!: (value: unknown) => void;
+    let resolveSecond!: (value: unknown) => void;
+    const first = new Promise<unknown>(resolve => { resolveFirst = resolve; });
+    const second = new Promise<unknown>(resolve => { resolveSecond = resolve; });
+    const { host, json } = setup();
+    json.mockImplementationOnce(() => first).mockImplementationOnce(() => second);
+    let firstDone = false;
+    const stale = host.refresh({ waitForActivation: false }).then(() => { firstDone = true; });
+    const current = host.refresh({ waitForActivation: false });
+    resolveFirst({ schema: 1, plugins: [entry("one")] });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(firstDone).toBe(false);
+    resolveSecond({ schema: 1, plugins: [{ ...entry("one"), enabled: false }] });
+    await Promise.all([stale, current]);
+    expect(host.getSnapshot().entries[0].enabled).toBe(false);
+    host.close();
+  });
+
+
   it("keeps the earlier-enabled command when imports complete in reverse order", async () => {
     let finishFirst!: (module: unknown) => void;
     const firstImport = new Promise<unknown>(resolve => { finishFirst = resolve; });
