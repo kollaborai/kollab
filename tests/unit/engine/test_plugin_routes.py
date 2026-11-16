@@ -959,3 +959,62 @@ def test_disable_partial_stop_failure_publishes_and_revokes(tmp_path, monkeypatc
         app.state.plugin_dispatcher.invalidate.assert_awaited_once_with("hello")
         app.state.plugin_service_controls.cancel_plugin.assert_awaited_once_with("hello")
         app.state.plugin_events.publish_change.assert_called_once()
+
+
+def test_service_signal_failure_publishes_inventory_change(tmp_path, monkeypatch):
+    import json
+    from unittest.mock import AsyncMock, Mock
+
+    from kollabor_plugins.services import ServiceSignalError
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    root = tmp_path / ".kollab" / "plugins" / "hello"
+    root.mkdir(parents=True)
+    (root / "kollab-plugin.json").write_text(json.dumps({"id": "hello", "services": {
+        "worker": {"command": ["/bin/true"]},
+    }}))
+    (root.parent.parent / "plugins.json").write_text(json.dumps({"plugins": {"hello": {"enabled": False}}, "dev": {}}))
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.plugin_service_controls.control = AsyncMock(side_effect=ServiceSignalError("denied"))
+        app.state.plugin_events.publish_change = Mock()
+        response = client.post("/plugins/hello/services/worker/stop")
+        assert response.status_code == 503
+        app.state.plugin_events.publish_change.assert_called_once()
+
+
+def test_remove_partial_stop_failure_publishes_and_revokes(tmp_path, monkeypatch):
+    import json
+    from unittest.mock import AsyncMock, Mock
+
+    from kollabor_plugins import settings
+    from kollabor_plugins.services import ServiceStopError
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    home = tmp_path / ".kollab"
+    root = home / "plugins" / "hello"
+    root.mkdir(parents=True)
+    (root / "kollab-plugin.json").write_text(json.dumps({"id": "hello", "name": "Hello"}))
+    path = home / "plugins.json"
+    path.write_text(json.dumps({"plugins": {"hello": {"enabled": True}}, "dev": {}}))
+
+    def partial_disable(plugin_id, enabled, **_):
+        assert plugin_id == "hello" and enabled is False
+        path.write_text(json.dumps({"plugins": {"hello": {"enabled": False}}, "dev": {}}))
+        raise ServiceStopError("Could not stop background processes")
+
+    monkeypatch.setattr(settings, "set_enabled", partial_disable)
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.plugin_dispatcher.invalidate = AsyncMock(return_value=False)
+        app.state.plugin_service_controls.cancel_plugin = AsyncMock()
+        app.state.plugin_events.publish_change = Mock()
+        response = client.delete("/plugins/hello")
+        assert response.status_code == 409
+        assert root.exists(), "partial stop failure must not remove the plugin"
+        app.state.plugin_dispatcher.invalidate.assert_awaited_once_with("hello")
+        app.state.plugin_service_controls.cancel_plugin.assert_awaited_once_with("hello")
+        app.state.plugin_events.publish_change.assert_called_once()
