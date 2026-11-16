@@ -10,6 +10,31 @@ import { chromium } from "playwright-core";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "../..");
+
+async function captureReview(page, name) {
+  const directory = process.env.PLUGIN_SCREENSHOTS;
+  if (!directory) return;
+  const viewport = page.viewportSize();
+  const wasDark = await page.evaluate(() => document.documentElement.classList.contains("dark"));
+  for (const width of [1440, 820, 390]) {
+    await page.setViewportSize({ width, height: 800 });
+    await page.waitForTimeout(350);
+    for (const theme of ["dark", "light"]) {
+      await page.evaluate(dark => document.documentElement.classList.toggle("dark", dark), theme === "dark");
+      const overflow = await page.evaluate(() => {
+        const dialog = document.querySelector('[role="dialog"]');
+        return { document: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          body: document.body.scrollWidth - document.body.clientWidth,
+          dialog: dialog ? dialog.scrollWidth - dialog.clientWidth : null };
+      });
+      console.log(`${name} overflow ${width}px ${theme}: ${JSON.stringify(overflow)}`);
+      await page.screenshot({ path: resolve(directory, `${name}-${width}-${theme}.png`) });
+    }
+  }
+  await page.evaluate(dark => document.documentElement.classList.toggle("dark", dark), wasDark);
+  if (viewport) await page.setViewportSize(viewport);
+  await page.waitForTimeout(350);
+}
 const vite = await createServer({ root, configFile: path.join(root, "vite.config.ts"), logLevel: "error",
   cacheDir: path.join(process.env.KOLLAB_PLUGIN_TEST_DIR || process.env.HOME, "plugin-vite-cache"),
   server: { host: "127.0.0.1", port: 0, hmr: false } });
@@ -168,6 +193,7 @@ try {
   await stoppingDetails.getByText("Waiting for the plugin to stop.", { exact: true }).waitFor({ timeout: 5000 });
   await stoppingDetails.getByText("worker", { exact: true }).locator("..").getByText("Stopping", { exact: true }).waitFor({ timeout: 5000 });
   await stoppingDetails.getByText("pulse", { exact: true }).locator("..").getByText("Running · No Heartbeat for 6 min", { exact: true }).waitFor({ timeout: 5000 });
+  await captureReview(page, "stopping-heartbeat");
   assert.equal(await stoppingDetails.getByRole("switch", { name: "Fixture enabled" }).isDisabled(), true, "cannot toggle while stopping");
   entry.services.pop();
   entry.state = "ok";
@@ -219,6 +245,7 @@ try {
   await collapsedFailed.waitFor({ timeout: 5000 });
   await collapsedFailed.click();
   await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
+  await captureReview(page, "failed-load");
   await page.getByRole("button", { name: "Back to Chat" }).click();
   const collapsedView = panel.getByRole("button", { name: "Fixture View", exact: true });
   await collapsedView.waitFor({ timeout: 5000 });
@@ -226,6 +253,7 @@ try {
   await page.getByRole("tooltip").getByText("Fixture View", { exact: true }).waitFor();
   await collapsedView.click();
   await page.getByText("Fixture view body", { exact: true }).waitFor();
+  await captureReview(page, "plugin-tab");
   await panel.getByRole("button", { name: "Show Session Panel" }).click();
   await panel.getByRole("button", { name: "Fixture View" }).click();
   await panel.getByRole("button", { name: "Hello View", exact: true }).click({ timeout: 5000 });
@@ -304,6 +332,7 @@ try {
   await pageBody.waitFor();
   assert.equal(await pageBody.locator('xpath=ancestor::*[@data-plugin="fixture"]').count(), 1, "page has plugin-specific CSS scope");
   assert.equal(await pageBody.evaluate(node => getComputedStyle(node).color), "rgb(12, 34, 56)", "plugin stylesheet applies within its scope");
+  await captureReview(page, "plugin-page");
   await page.getByRole("tab", { name: "Second" }).click();
   await page.getByText("Second tab body", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Back to Chat" }).click();
@@ -311,6 +340,7 @@ try {
   const modalBody = page.getByRole("dialog", { name: "Fixture Details" }).getByText("Fixture modal body");
   await modalBody.waitFor();
   assert.equal(await modalBody.locator('xpath=ancestor::*[@data-plugin="fixture"]').count(), 1, "modal has plugin-specific CSS scope");
+  await captureReview(page, "plugin-modal");
   await page.keyboard.press("Escape");
   await page.getByRole("dialog", { name: "Fixture Details" }).waitFor({ state: "hidden" });
   entry.services[0].state = "crash-stopped";
@@ -330,6 +360,7 @@ try {
   const fixtureRow = settings.getByRole("region", { name: "Fixture details" });
   await fixtureRow.waitFor({ timeout: 5000 });
   await fixtureRow.getByText("Stopped After 5 Crashes", { exact: true }).waitFor({ timeout: 5000 });
+  await captureReview(page, "stopped-service");
   assert.equal(await settings.getByText("Hello plugin settings example.", { exact: true }).count(), 0, "only the selected plugin shows details");
   const listBox = await settings.getByRole("navigation", { name: "Plugin list" }).boundingBox();
   const detailBox = await fixtureRow.boundingBox();
@@ -342,6 +373,12 @@ try {
   await settings.getByRole("button", { name: "Add Plugin" }).click();
   const add = page.getByRole("dialog", { name: "Add Plugin" });
   await add.getByLabel("Git URL").fill("https://github.com/example/fixture.git#other");
+  await page.setViewportSize({ width: 390, height: 800 });
+  await add.getByLabel("Git URL").waitFor({ timeout: 5000 });
+  assert.equal(await add.getByLabel("Git URL").inputValue(), "https://github.com/example/fixture.git#other", "open install input survives the mobile breakpoint");
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await add.getByLabel("Git URL").waitFor({ timeout: 5000 });
+  assert.equal(await add.getByLabel("Git URL").inputValue(), "https://github.com/example/fixture.git#other", "open install input survives returning to desktop");
   await add.getByLabel("Branch or Tag").fill("release/demo", { timeout: 5000 });
   await add.getByRole("button", { name: "Review" }).click({ timeout: 5000 });
   await add.getByText("Put the branch or tag in one field, not both.").waitFor();
