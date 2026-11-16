@@ -579,7 +579,8 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
         entries.append(
             {
                 "id": plugin_id,
-                "name": getattr(cls, "name", plugin_id),
+                "name": getattr(cls, "display_name", None)
+                or " ".join("MCP" if word.lower() == "mcp" else word.capitalize() for word in plugin_id.split("_")),
                 "version": None,
                 "kind": "built-in",
                 "source": inspect.getfile(cls),
