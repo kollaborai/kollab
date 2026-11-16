@@ -103,6 +103,16 @@ describe("seen record storage shape", () => {
     expect(loadSeenRecord(JSON.stringify({ seenVersion: 22 }))).toBeNull();
     expect(loadSeenRecord(JSON.stringify({ seenVersion: "zebra" }))).toBeNull();
   });
+
+  it("rejects numeric-looking versions outside the supported safe range", () => {
+    const raw = JSON.stringify({
+      seenVersion: "999999999999999999999999999999999999999999999999999999999999999999",
+    });
+    expect(loadSeenRecord(raw)).toBeNull();
+    expect(
+      decideWhatsNew({ result: release("0.22.1"), seenRaw: raw, firstRun: false }).show,
+    ).toBe(true);
+  });
 });
 
 describe("decideWhatsNew", () => {
