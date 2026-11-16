@@ -1,6 +1,6 @@
 """Print what the web UI's sidebar and New Session get from an engine in this HOME.
 
-Seeds a vault for sapphire (ran 3 days ago) and for maya (a persona of the
+Seeds a vault for sapphire (ran 3 days ago) and for brand-strategist (a persona of the
 marketing-crew roster, just now) in the folder the engine runs in
 and a network roster (lapis@prod-box), starts kollabor_engine from this
 checkout on a free port with no agent running, and prints one line each:
@@ -8,7 +8,7 @@ checkout on a free port with no agent running, and prints one line each:
   first gem: <name> available=<bool>
   sapphire last_ran: <yes|no>
   offline: <identities>
-  offline look: maya=<display name>/<avatar kind> sapphire=<display name>/<avatar kind>
+  offline look: brand-strategist=<display name>/<avatar kind> sapphire=<display name>/<avatar kind>
   network: live=<bool> remote=<handles>
   workspaces: home=<name> browse=<subfolders>
 
@@ -52,7 +52,7 @@ def _seed(folder: Path) -> None:
     stream.write_text('{"type": "session_start"}\n')
     three_days = time.time() - 3 * 86400
     os.utime(stream, (three_days, three_days))
-    maya = vault.parent / "maya"
+    maya = vault.parent / "brand-strategist"
     maya.mkdir(parents=True, exist_ok=True)
     (maya / "stream.jsonl").write_text('{"type": "session_start"}\n')
     (folder / "alpha").mkdir(exist_ok=True)
@@ -105,8 +105,11 @@ def main() -> None:
         _, listing = _get(port, "/sessions")
         print("offline:", ",".join(row["identity"] for row in listing.get("offline", [])) or "none")
         rows = {row["identity"]: row for row in listing.get("offline", [])}
-        look = {name: f"{rows[name].get('display_name')}/{(rows[name].get('avatar') or {}).get('kind')}" for name in ("maya", "sapphire")}
-        print(f"offline look: maya={look['maya']} sapphire={look['sapphire']}")
+        look = {
+            name: f"{rows[name].get('display_name')}/{(rows[name].get('avatar') or {}).get('kind')}"
+            for name in ("brand-strategist", "sapphire")
+        }
+        print(f"offline look: brand-strategist={look['brand-strategist']} sapphire={look['sapphire']}")
         network = listing["network"]
         handles = ",".join(row["handle"] for row in network["remote"]) or "none"
         print(f"network: live={network.get('live')} remote={handles}")

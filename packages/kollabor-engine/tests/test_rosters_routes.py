@@ -14,6 +14,8 @@ from kollabor_engine.server import create_app  # type: ignore[import-not-found]
 
 from plugins.hub import rosters
 
+MARKETING = ["campaign-lead", "brand-strategist", "copywriter", "growth-analyst", "social-lead", "content-editor"]
+
 
 @pytest.fixture
 def folders(tmp_path, monkeypatch):
@@ -48,8 +50,17 @@ async def test_rosters_lists_gems_and_the_example_crew_with_avatar_descriptors(c
     lapis = by_name["gems"]["personas"][0]
     assert lapis["name"] == "lapis" and lapis["avatar"] == {"kind": "gem"} and lapis["agent"] == "coder"
     kinds = {p["avatar"]["kind"] for p in by_name["marketing-crew"]["personas"]}
-    assert kinds == {"emoji", "initials"}
+    assert kinds == {"gem"}
     assert body["problems"] == []
+
+
+@pytest.mark.asyncio
+async def test_marketing_roster_description_matches_its_gem_avatars(client, folders):
+    body = (await client.get("/rosters", params={"workspace": folders.project})).json()
+    marketing = next(roster for roster in body["rosters"] if roster["name"] == "marketing-crew")
+
+    assert "emoji avatars" not in marketing["description"]
+    assert {persona["avatar"]["kind"] for persona in marketing["personas"]} == {"gem"}
 
 
 @pytest.mark.asyncio
@@ -103,9 +114,10 @@ async def test_avatar_files_are_served_from_the_roster_folder_only(client, folde
 async def test_teams_list_resolves_members(client, folders):
     body = (await client.get("/teams", params={"workspace": folders.project})).json()
     marketing = next(t for t in body["teams"] if t["name"] == "marketing")
-    assert marketing["lead"] == "omar" and marketing["roster"] == "marketing-crew"
-    maya = next(m for m in marketing["members"] if m["persona"]["name"] == "maya")
-    assert maya["reports_to"] == "omar" and maya["agent"] == "research" and maya["persona"]["avatar"]["kind"] == "emoji"
+    assert marketing["lead"] == "campaign-lead" and marketing["roster"] == "marketing-crew"
+    maya = next(m for m in marketing["members"] if m["persona"]["name"] == "brand-strategist")
+    assert maya["reports_to"] == "campaign-lead" and maya["agent"] == "research"
+    assert maya["persona"]["avatar"]["kind"] == "gem"
     assert {"engineering", "startup"} <= {t["name"] for t in body["teams"]}
 
 
@@ -136,16 +148,16 @@ def hub(folders, monkeypatch):
 @pytest.mark.asyncio
 async def test_launch_starts_every_member_lead_first_and_a_second_call_starts_none(client, folders, hub):
     first = (await client.post("/teams/marketing/launch", json={"workspace": folders.project})).json()
-    assert first["started"] == ["omar", "maya", "theo", "priya", "luz", "jonas"]
+    assert first["started"] == MARKETING
     assert first["skipped"] == [] and first["failed"] == []
     assert first["excluded"] == []
     assert [s["session_id"] for s in first["sessions"]] == [f"s-{i}" for i in range(1, 7)]
 
     lead, maya = hub.calls[0], hub.calls[1]
-    assert (lead.identity, lead.agent, lead.workspace) == ("marketing-crew/omar", "default", folders.project)
+    assert (lead.identity, lead.agent, lead.workspace) == ("marketing-crew/campaign-lead", "default", folders.project)
     # A member with no profile of its own names none: POST /sessions picks, as it does for New Session.
     assert all(c.profile is None for c in hub.calls)
-    assert maya.agent == "research" and "you report to: omar" in maya.launch_brief
+    assert maya.agent == "research" and "you report to: campaign-lead" in maya.launch_brief
 
     again = (await client.post("/teams/marketing/launch", json={"workspace": folders.project})).json()
     assert again["started"] == [] and again["sessions"] == []
@@ -155,21 +167,22 @@ async def test_launch_starts_every_member_lead_first_and_a_second_call_starts_no
 
 @pytest.mark.asyncio
 async def test_launch_skips_members_already_live_and_reports_failures(client, folders, hub, monkeypatch):
-    hub.agents.append({"identity": "omar", "project": folders.project})
-    hub.agents.append({"identity": "maya", "project": "/some/other/folder"})  # another folder's hub does not count
+    hub.agents.append({"identity": "campaign-lead", "project": folders.project})
+    # another folder's hub does not count
+    hub.agents.append({"identity": "brand-strategist", "project": "/some/other/folder"})
 
     real = hub.create_session
 
     async def flaky(body, request):
-        if body.identity.endswith("theo"):
+        if body.identity.endswith("copywriter"):
             raise teams_routes.HTTPException(status_code=404, detail="Profile 'x' not found")
         return await real(body, request)
 
     monkeypatch.setattr(teams_routes, "create_session", flaky)
     body = (await client.post("/teams/marketing/launch", json={"workspace": folders.project, "profile": "fast"})).json()
-    assert body["skipped"] == [{"persona": "omar", "reason": "live"}]
-    assert body["started"] == ["maya", "priya", "luz", "jonas"]
-    assert body["failed"] == [{"persona": "theo", "error": "Profile 'x' not found"}]
+    assert body["skipped"] == [{"persona": "campaign-lead", "reason": "live"}]
+    assert body["started"] == ["brand-strategist", "growth-analyst", "social-lead", "content-editor"]
+    assert body["failed"] == [{"persona": "copywriter", "error": "Profile 'x' not found"}]
     assert all(c.profile == "fast" for c in hub.calls)
 
 
@@ -180,11 +193,11 @@ async def test_launch_rejects_an_unknown_team_and_a_bad_folder(client, folders, 
 
 
 def test_a_persona_fills_the_session_request_but_the_caller_wins(folders):
-    body = SimpleNamespace(identity="maya", workspace=folders.project, agent=None, profile="default")
+    body = SimpleNamespace(identity="brand-strategist", workspace=folders.project, agent=None, profile="default")
     rosters_routes.apply_persona(body)
     assert body.agent == "research"
 
-    body = SimpleNamespace(identity="maya", workspace=folders.project, agent="coder", profile="mine")
+    body = SimpleNamespace(identity="brand-strategist", workspace=folders.project, agent="coder", profile="mine")
     rosters_routes.apply_persona(body)
     assert (body.agent, body.profile) == ("coder", "mine")
 
@@ -206,30 +219,30 @@ def test_a_persona_profile_applies_when_the_caller_names_none(folders, named):
 async def test_agents_rows_carry_the_folders_roster_and_persona_fields(client, folders, monkeypatch):
     import kollabor_engine.routes.agents as agents_routes  # type: ignore[import-not-found]
 
-    live = [{"agent_id": "a1", "identity": "omar", "state": "idle", "project": folders.project}]
+    live = [{"agent_id": "a1", "identity": "campaign-lead", "state": "idle", "project": folders.project}]
     monkeypatch.setattr(agents_routes, "_bridge", SimpleNamespace(get_agents=lambda use_cache=True: list(live)))
     put(folders.project + "/.kollab/config.json", {"plugins": {"hub": {"roster": "marketing-crew"}}})
 
     rows = (await client.get("/agents", params={"workspace": folders.project})).json()["agents"]
     by_name = {r["name"]: r for r in rows}
-    assert [r["name"] for r in rows][:3] == ["koordinator", "omar", "maya"]
+    assert [r["name"] for r in rows][:3] == ["koordinator", "campaign-lead", "brand-strategist"]
     assert "lapis" not in by_name  # this folder draws from the marketing crew
-    maya = by_name["maya"]
+    maya = by_name["brand-strategist"]
     assert (maya["roster"], maya["display_name"], maya["agent"], maya["agent_type"]) == (
-        "marketing-crew", "Maya Lindqvist", "research", "research")
-    assert maya["avatar"] == {"kind": "emoji", "value": "🎯"} and maya["color"] == [92, 138, 214]
-    assert by_name["omar"]["active"] is True
+        "marketing-crew", "Brand Strategist", "research", "research")
+    assert maya["avatar"] == {"kind": "gem"} and maya["color"] == [92, 138, 214]
+    assert by_name["campaign-lead"]["active"] is True
 
     # another folder still launches gems, and a persona of another roster that is live there is listed
     other = os.path.join(os.path.dirname(folders.project), "other")
     os.makedirs(other, exist_ok=True)
-    live.append({"agent_id": "a2", "identity": "theo", "state": "idle", "project": other})
+    live.append({"agent_id": "a2", "identity": "copywriter", "state": "idle", "project": other})
     rows = (await client.get("/agents", params={"workspace": other})).json()["agents"]
     by_name = {r["name"]: r for r in rows}
     assert by_name["lapis"]["roster"] == "gems" and by_name["lapis"]["avatar"] == {"kind": "gem"}
-    theo = by_name["theo"]
-    assert theo["pool"] is False and theo["roster"] == "marketing-crew" and theo["display_name"] == "Theo Brandt"
-    assert theo["avatar"] == {"kind": "initials"} and theo["color"] == [176, 96, 178]
+    theo = by_name["copywriter"]
+    assert theo["pool"] is False and theo["roster"] == "marketing-crew" and theo["display_name"] == "Copywriter"
+    assert theo["avatar"] == {"kind": "gem"} and theo["color"] == [176, 96, 178]
 
 
 @pytest.mark.asyncio
@@ -261,29 +274,29 @@ async def test_selection_uses_effective_tree_and_sends_mission_only_to_selected_
         "/teams/marketing/launch",
         json={
             "workspace": folders.project,
-            "members": ["omar", "jonas"],
-            "lead": "jonas",
+            "members": ["campaign-lead", "content-editor"],
+            "lead": "content-editor",
             "mission": "prepare the release",
         },
     )
 
     assert response.status_code == 200
     body = response.json()
-    assert body["started"] == ["jonas", "omar"]
-    assert body["excluded"] == ["maya", "theo", "priya", "luz"]
-    assert "you report to: omar" in hub.calls[0].launch_brief
-    assert "theo" not in hub.calls[0].launch_brief
-    assert delivered == [("marketing-crew/jonas", "prepare the release")]
+    assert body["started"] == ["content-editor", "campaign-lead"]
+    assert body["excluded"] == ["brand-strategist", "copywriter", "growth-analyst", "social-lead"]
+    assert "you report to: campaign-lead" in hub.calls[0].launch_brief
+    assert "copywriter" not in hub.calls[0].launch_brief
+    assert delivered == [("marketing-crew/content-editor", "prepare the release")]
 
 
 @pytest.mark.parametrize(
     "selection",
     [
-        {"members": ["omar"], "exclude": ["maya"]},
+        {"members": ["campaign-lead"], "exclude": ["brand-strategist"]},
         {"members": ["unknown"]},
-        {"members": ["omar", "omar"]},
-        {"members": ["maya"]},
-        {"members": ["omar", "maya"], "lead": "theo"},
+        {"members": ["campaign-lead", "campaign-lead"]},
+        {"members": ["brand-strategist"]},
+        {"members": ["campaign-lead", "brand-strategist"], "lead": "copywriter"},
     ],
 )
 @pytest.mark.asyncio
@@ -299,18 +312,18 @@ async def test_invalid_selection_is_a_400_and_starts_nothing(client, folders, hu
 
 @pytest.mark.asyncio
 async def test_live_selected_lead_does_not_receive_mission(client, folders, hub):
-    hub.agents.append({"identity": "omar", "project": folders.project})
+    hub.agents.append({"identity": "campaign-lead", "project": folders.project})
 
     response = await client.post(
         "/teams/marketing/launch",
         json={
             "workspace": folders.project,
-            "members": ["omar", "maya"],
+            "members": ["campaign-lead", "brand-strategist"],
             "mission": "do not send twice",
         },
     )
 
     body = response.json()
-    assert body["skipped"] == [{"persona": "omar", "reason": "live"}]
-    assert body["notes"] == ["mission not sent, omar is already live"]
-    assert body["started"] == ["maya"]
+    assert body["skipped"] == [{"persona": "campaign-lead", "reason": "live"}]
+    assert body["notes"] == ["mission not sent, campaign-lead is already live"]
+    assert body["started"] == ["brand-strategist"]
