@@ -1,8 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { PluginFailure, PluginRecoveryNotices } from "./components";
+import { PluginFailure, PluginNotices, PluginRecoveryNotices } from "./components";
+import type { PluginHost } from "./host";
 
 describe("plugin recovery surfaces", () => {
+
+  it("shows which command was skipped and which plugin or built-in owns it", () => {
+    const snapshot = { disabled: false, loading: false, inventoryError: null, skipped: [], errors: {}, renderFailed: [],
+      entries: [{ id: "later", name: "Later Plugin" }, { id: "first", name: "First Plugin" }],
+      registry: { plugins: [], conflicts: [
+        { pluginId: "later", command: "shared", owner: "first" },
+        { pluginId: "later", command: "help", owner: "built-in" },
+      ] } };
+    const host = { subscribe: () => () => {}, getSnapshot: () => snapshot } as unknown as PluginHost;
+    const markup = renderToStaticMarkup(<PluginNotices host={host} />);
+    expect(markup).toContain("Later Plugin could not register /shared: already used by First Plugin.");
+    expect(markup).toContain("Later Plugin could not register /help: already used by a built-in command.");
+  });
+
   it("offers actionable load and render failure controls", () => {
     const markup = renderToStaticMarkup(<PluginFailure name="Hello" kind="render" error="broken" onRetry={() => {}} onTurnOff={() => {}} />);
     expect(markup).toContain("Hello");
