@@ -5,7 +5,7 @@
 Step 3a is implemented on `feat/plugins-step3`. The tested code and supervisor stack
 are at `460f4bb6d6646f651b627f0d91a8c952ba24b4f9` (the only change since the code
 head `64c243c0c` is the notice contract clarification in the spec). The branch is
-based on `origin/feat/plugins-step2` at `0b2ea1d8e`, fetched on 2026-11-16; that
+based on `origin/feat/plugins-step2` at `82d1b3900`, fetched on 2026-11-16; that
 head is an ancestor. PR #1065 is OPEN. Do not open a step-3 PR while it is open or
 until step 2 has a merged PR.
 
