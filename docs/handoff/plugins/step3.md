@@ -153,6 +153,9 @@
 
 - Mock stopping menu presentation: red browser commit `49dfa56e` proved that an inventory entry with `state: stopping` showed the plugin count rather than Stopping (`stopping-row-red.log`). The menu now exposes Stopping instead; browser acceptance and typecheck passed (`stopping-row-green.log`, `stopping-row-typecheck.log`). This proves only the frontend presentation against a mocked state, not the real disable/stop lifecycle or deadline.
 
+- Frontend preflight at `63ad1900`: typecheck passed, but npm test failed 1/411 when the existing Hello watch test read dist/index.js during Vite's rebuild (`preflight-63ad1900-test.log`). Its polling now retries only transient ENOENT; with isolated `KOLLAB_PLUGIN_TEST_DIR`, npm test passed 411/411 (`watch-race-green-test.log`) and typecheck passed (`watch-race-typecheck.log`). These are preflight results, not the final fixed-head gates.
+- Live smoke is blocked for now: at inspection, 127.0.0.1:7434 was occupied by PID 99374 from `~/dev/kollab`, and :8081 by PID 89456 from `~/backups/sapphire-work/scrollbug/kollab-v0220`. Neither process was started by this lane; do not terminate or reuse them. Recheck ports and obtain authorization to free them if still occupied before the required isolated stack smoke.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.

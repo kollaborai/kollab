@@ -53,7 +53,14 @@ export default definePlugin(k => { k.view({id:"view",label:"View",render:({k}) =
     try {
       await waitFor(() => existsSync(output));
       appendFileSync(join(root, "src/index.js"), '\nconsole.log("hello-watch-marker");\n');
-      await waitFor(() => readFileSync(output, "utf8").includes("hello-watch-marker"));
+      await waitFor(() => {
+        try { return readFileSync(output, "utf8").includes("hello-watch-marker"); }
+        catch (error) {
+          // Vite empties dist during a rebuild; wait for the replacement file.
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+          throw error;
+        }
+      });
     } finally {
       if (child.pid && child.exitCode === null) {
         if (process.platform === "win32") child.kill("SIGTERM");
