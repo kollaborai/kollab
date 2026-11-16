@@ -107,7 +107,7 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate, detailRe
     }
     catch (caught) { setError(message(caught)); } finally { setBusy(false); }
   };
-  const status = failure ? (snapshot.renderFailed.includes(entry.id) ? "Failed to Render" : "Failed to Load") :
+  const status = failure ? (snapshot.phoneLink ? "Error" : snapshot.renderFailed.includes(entry.id) ? "Failed to Render" : "Failed to Load") :
     entry.state === "changed-on-disk" ? "Changed on Disk" : entry.state === "stopping" ? "Stopping" : entry.state === "stop-failed" ? "Failed to Stop" : entry.enabled ? "On" : "Off";
   return <section ref={detailRef} tabIndex={-1} aria-label={`${entry.name} details`} className="min-w-0 py-1">
     <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -122,7 +122,7 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate, detailRe
     {error ? <p role="alert" className="text-destructive mt-2 break-words text-sm">{error}</p> : null}
     {entry.state === "changed-on-disk" && entry.error ? <p className="text-destructive mt-2 break-words text-sm">{entry.error}. Update or reinstall the plugin to review its files again.</p> : null}
     <div className="flex min-w-0 flex-col gap-4 py-4">
-      {failure ? <div className="flex flex-wrap gap-2"><Button type="button" size="xs" onClick={() => { void host.retry(entry.id); }}>Retry</Button><details className="text-sm"><summary>View Error</summary><pre className="whitespace-pre-wrap break-words">{failure}</pre></details></div> : null}
+      {failure ? <div className="flex flex-wrap gap-2">{!snapshot.phoneLink ? <Button type="button" size="xs" onClick={() => { void host.retry(entry.id); }}>Retry</Button> : null}<details className="text-sm"><summary>View Error</summary><pre className="whitespace-pre-wrap break-words">{failure}</pre></details></div> : null}
       {entry.kind === "dev" && entry.source ? <p className="text-muted-foreground break-all text-sm">Development folder: {entry.source}</p> : null}
       {services.length ? <div><h3 className="text-sm font-semibold">Background Processes</h3>{services.map(service => <ServiceRow key={service.name} service={service} host={host} api={api} id={entry.id} canManage={canManageServices} canStart={entry.enabled} refresh={() => host.refresh()} onError={setError} />)}</div> : null}
       {entry.uses?.length ? <div><h3 className="text-sm font-semibold">What it uses</h3><ul className="text-muted-foreground list-disc pl-5 text-sm">{entry.uses.map((value, i) => <li key={i}>{typeof value === "string" ? value : JSON.stringify(value)}</li>)}</ul></div> : null}
