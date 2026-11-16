@@ -14,17 +14,24 @@ import { heartbeatAge, heartbeatLabel, stoppingLabel, useHeartbeatClock } from "
 type PluginService = { name: string; state: string; desired?: string; since?: number | null; restarts?: number; heartbeat?: number | null; heartbeat_s?: number | null; error?: string | null };
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const pathFor = (id: string) => `/plugins/${encodeURIComponent(id)}`;
+const validServices = (entry: PluginEntry): PluginService[] => (entry.services ?? []).filter((item): item is PluginService =>
+  Boolean(item && typeof item === "object" && typeof (item as PluginService).name === "string" && typeof (item as PluginService).state === "string"));
+
+
+function serviceStatus(service: PluginService, now: number | null): string {
+  const staleAge = heartbeatAge(service, now);
+  return service.state === "running" ? (staleAge === null ? "Running" : `Running · ${heartbeatLabel(staleAge)}`) : service.state === "stopping" ? stoppingLabel([service], now) :
+    service.state === "exited" ? "Exited" : service.state === "failed" || service.state === "crash-stopped" ? "Stopped After 5 Crashes" :
+    service.state === "stopped" ? "Stopped" : service.state === "stop-failed" ? "Failed to Stop" : service.state;
+}
 
 function ServiceRow({ service, host, api, id, canManage, canStart, refresh, onError }: {
   service: PluginService; host: PluginHost; api: EngineApi; id: string; canManage: boolean; canStart: boolean; refresh: () => Promise<void>; onError: (message: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string | null>(null);
-  useHeartbeatClock(service.state === "running" && Boolean(service.heartbeat_s));
-  const staleAge = heartbeatAge(service, host.engineTime());
-  const state = service.state === "running" ? (staleAge === null ? "Running" : `Running · ${heartbeatLabel(staleAge)}`) : service.state === "stopping" ? stoppingLabel([service], host.engineTime()) :
-    service.state === "exited" ? "Exited" : service.state === "failed" || service.state === "crash-stopped" ? "Stopped After 5 Crashes" :
-    service.state === "stopped" ? "Stopped" : service.state === "stop-failed" ? "Failed to Stop" : service.state;
+  useHeartbeatClock(service.state === "running" || service.state === "stopping");
+  const state = serviceStatus(service, host.engineTime());
   const control = async (action: string) => {
     setBusy(true);
     try { await api.json(`${pathFor(id)}/services/${encodeURIComponent(service.name)}/${action}`, { method: "POST" }); await refresh(); }
@@ -59,7 +66,7 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate }: { entr
   const [error, setError] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<"disable" | "remove" | null>(null);
   const fields = (entry.settings ?? []).filter((field): field is PanelField => Boolean(field && typeof field === "object" && typeof (field as PanelField).path === "string"));
-  const services = (entry.services ?? []).filter((item): item is PluginService => Boolean(item && typeof item === "object" && typeof (item as PluginService).name === "string"));
+  const services = validServices(entry);
   const plugin = snapshot.registry.plugins.find(item => item.id === entry.id);
   const context = host.getContext(entry.id);
   const custom = plugin?.settings[0];
@@ -120,6 +127,7 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate }: { entr
 
 export function PluginsSettings({ host, api, session, canManage }: { host: PluginHost; api: EngineApi; session?: Session; canManage: boolean }) {
   const snapshot = usePluginSnapshot(host);
+  useHeartbeatClock(snapshot.entries.some(entry => validServices(entry).some(service => service.state === "running" || service.state === "stopping")));
   const [operation, setOperation] = useState<{ action: "install" | "update"; pluginId?: string } | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const entryKey = (entry: PluginEntry) => `${entry.kind}:${entry.id}:${entry.source ?? ""}`;
@@ -145,13 +153,17 @@ export function PluginsSettings({ host, api, session, canManage }: { host: Plugi
           </div>
           <div className="flex flex-col gap-1">{group.entries.map(entry => {
             const key = entryKey(entry);
+            const services = validServices(entry);
             const failure = snapshot.errors[entry.id] ?? (entry.state === "changed-on-disk" ? null : entry.error);
             const status = failure ? "Failed" : entry.state === "changed-on-disk" ? "Changed on Disk" : entry.state === "stopping" ? "Stopping" : entry.state === "stop-failed" ? "Failed to Stop" : entry.enabled ? "On" : "Off";
             return <Button key={key} type="button" variant={selected && entryKey(selected) === key ? "secondary" : "ghost"}
               className="h-auto min-h-12 w-full min-w-0 justify-start gap-2 px-2 py-2 text-left" aria-label={entry.name}
               aria-pressed={Boolean(selected && entryKey(selected) === key)} onClick={() => setSelectedKey(key)}>
               <Box className="size-4 shrink-0" /><span className="flex min-w-0 flex-col items-start"><span className="max-w-full truncate font-medium">{entry.name}</span>
-                <span className="text-muted-foreground text-xs">{status}</span></span>
+                <span className="text-muted-foreground text-xs">{status}</span>
+                {services.map(service => <span key={service.name} className="text-muted-foreground max-w-full break-words text-xs">
+                  {services.length > 1 ? <span>{service.name}: </span> : null}<span>{serviceStatus(service, host.engineTime())}</span>
+                </span>)}</span>
             </Button>;
           })}</div>
         </section>)}
