@@ -7,6 +7,7 @@ import threading
 import pytest
 
 from plugins.hub.dns.models import AgentRecord, ReputationScore
+from plugins.hub.dns.registry import AgentRegistry
 from plugins.hub.dns.storage import DNSStorage
 
 
@@ -522,3 +523,50 @@ def test_registry_rejects_out_of_range_embedded_capability_confidence(tmp_path):
         storage.load_registry()
 
     assert storage._registry_path.read_text(encoding="utf-8") == contents
+
+
+def test_stale_registry_updates_preserve_independent_nested_tag_keys(tmp_path):
+    seed = DNSStorage(tmp_path)
+    seed.save_registry(
+        {
+            "alpha": AgentRecord(
+                designation="alpha", tags={"left": "0", "right": "0"}
+            )
+        }
+    )
+    first, second = DNSStorage(tmp_path), DNSStorage(tmp_path)
+    base = first.load_registry()["alpha"].to_dict()
+    stale_base = second.load_registry()["alpha"].to_dict()
+    first_record = AgentRecord.from_dict(
+        dict(base, tags={"left": "1", "right": "0"})
+    )
+    second_record = AgentRecord.from_dict(
+        dict(stale_base, tags={"left": "0", "right": "1"})
+    )
+
+    first.merge_save_registry({"alpha": first_record}, base_records={"alpha": base})
+    second.merge_save_registry(
+        {"alpha": second_record}, base_records={"alpha": stale_base}
+    )
+
+    assert DNSStorage(tmp_path).load_registry()["alpha"].tags == {
+        "left": "1",
+        "right": "1",
+    }
+
+
+def test_stale_first_registration_preserves_persisted_approval_and_trust(tmp_path):
+    first = AgentRegistry(DNSStorage(tmp_path))
+    stale = AgentRegistry(DNSStorage(tmp_path))
+    first._ensure_loaded()
+    stale._ensure_loaded()
+
+    first.register(
+        AgentRecord(designation="alpha", approval_state="approved", trust_score=0.9)
+    )
+    stale.register(
+        AgentRecord(designation="alpha", approval_state="pending", trust_score=0.2)
+    )
+
+    persisted = DNSStorage(tmp_path).load_registry()["alpha"]
+    assert (persisted.approval_state, persisted.trust_score) == ("approved", 0.9)
