@@ -8,6 +8,7 @@ import type { SessionView } from "@/components/shell/SessionPanel";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { PluginFailure, PluginRenderBoundary, usePluginSnapshot } from "./components";
 import type { PluginHost } from "./host";
+import { heartbeatAge, useHeartbeatClock } from "./heartbeat";
 import type { PluginContext, PluginMenu } from "./sdk";
 
 const ICONS: Record<string, LucideIcon> = { Box, FileCode, GitBranch, LayoutDashboard, ListTodo, Plug, Puzzle, Terminal };
@@ -28,21 +29,22 @@ function MenuCount({ context, count, compact = false }: { context: PluginContext
   return <Badge variant="secondary" className={compact ? "absolute -right-2 -top-1 h-3 min-w-3 px-0.5 text-[8px]" : "ml-auto"} title={data.hint}>{data.text}</Badge>;
 }
 
-function SessionControl({ label, Icon, collapsed, disabled, disabledReason, active, failed, stopping, stopped, count, onClick }: {
-  label: string; Icon: LucideIcon; collapsed: boolean; disabled?: boolean; disabledReason?: string; active?: boolean; failed?: boolean; stopping?: boolean; stopped?: boolean;
+function SessionControl({ label, Icon, collapsed, disabled, disabledReason, active, failed, stopping, stopped, noHeartbeat, count, onClick }: {
+  label: string; Icon: LucideIcon; collapsed: boolean; disabled?: boolean; disabledReason?: string; active?: boolean; failed?: boolean; stopping?: boolean; stopped?: boolean; noHeartbeat?: boolean;
   count?: { context: PluginContext; value: NonNullable<PluginMenu["count"]> }; onClick: () => void;
 }) {
-  const status = failed ? "Failed" : stopping ? "Stopping" : stopped ? "Stopped" : undefined;
+  const status = failed ? "Failed" : stopping ? "Stopping" : stopped ? "Stopped" : noHeartbeat ? "No Heartbeat" : undefined;
   const tooltip = `${label}${status ? ` · ${status}` : disabled ? ` · ${disabledReason ?? "Unavailable"}` : ""}`;
   if (collapsed) return <TooltipIconButton tooltip={tooltip} side="left" aria-label={status ? `${label} ${status}` : label} aria-pressed={active}
     disabled={disabled} title={tooltip} className={cn("size-7 p-1.5", active && "bg-accent text-accent-foreground")} onClick={onClick}>
-    <span className="relative"><Icon className="size-4" />{status ? <span aria-label={status} className="bg-destructive absolute -right-1 -top-1 size-1.5 rounded-full" /> : null}
+    <span className="relative"><Icon className="size-4" />{status ? <span aria-label={status} className={cn("absolute -right-1 -top-1 size-1.5 rounded-full", noHeartbeat && !failed && !stopping && !stopped ? "bg-amber-500" : "bg-destructive")} /> : null}
       {!status && count ? <MenuCount context={count.context} count={count.value} compact /> : null}</span>
   </TooltipIconButton>;
   return <Button type="button" variant="ghost" size="sm" disabled={disabled} aria-pressed={active}
     title={disabled ? tooltip : undefined} onClick={onClick} className={cn(ROW, active && "bg-accent text-accent-foreground font-medium")}>
     <Icon className="size-3.5" /><span className="min-w-0 truncate">{label}</span>
-    {status ? <Badge variant={stopping ? "secondary" : "destructive"} className="ml-auto">{status}</Badge> : count ? <MenuCount context={count.context} count={count.value} /> : null}
+    {status ? <Badge variant={stopping ? "secondary" : noHeartbeat && !failed && !stopped ? "outline" : "destructive"}
+      className={cn("ml-auto", noHeartbeat && !failed && !stopping && !stopped && "border-amber-500 text-amber-700 dark:text-amber-400")}>{status}</Badge> : count ? <MenuCount context={count.context} count={count.value} /> : null}
   </Button>;
 }
 
@@ -51,6 +53,10 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
   host: PluginHost; session: Session; view: SessionView; onViewChange: (view: SessionView) => void; onNavigate: () => void; collapsed?: boolean;
 }) {
   const snapshot = usePluginSnapshot(host);
+  const monitorHeartbeat = snapshot.entries.some(entry => entry.services?.some(service =>
+    typeof service === "object" && service !== null && "state" in service && service.state === "running" &&
+    "heartbeat_s" in service && typeof service.heartbeat_s === "number" && service.heartbeat_s > 0));
+  const now = useHeartbeatClock(monitorHeartbeat);
   const plugins = [...snapshot.registry.plugins].sort((a, b) => {
     const name = (id: string) => snapshot.entries.find(entry => entry.id === id)?.name ?? id;
     return name(a.id).localeCompare(name(b.id)) || a.id.localeCompare(b.id);
@@ -94,7 +100,8 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
       const entry = snapshot.entries.find(item => item.id === plugin.id);
       const stopped = entry?.services?.some(service =>
         typeof service === "object" && service !== null && "state" in service && service.state === "crash-stopped");
-      return <SessionControl key={`menu:${plugin.id}:${menu.id}`} label={label} Icon={Icon} collapsed={collapsed} disabled={disabled} stopping={entry?.state === "stopping"} stopped={stopped}
+      const noHeartbeat = entry?.services?.some(service => heartbeatAge(service, now) !== null);
+      return <SessionControl key={`menu:${plugin.id}:${menu.id}`} label={label} Icon={Icon} collapsed={collapsed} disabled={disabled} stopping={entry?.state === "stopping"} stopped={stopped} noHeartbeat={noHeartbeat}
         disabledReason="This plugin action is unavailable" count={context && menu.count ? { context, value: menu.count } : undefined}
         onClick={() => {
           onNavigate();
