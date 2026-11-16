@@ -2,9 +2,9 @@
 
 ## Status
 
-Step 3a is implemented on `feat/plugins-step3`. The tested code and supervisor stack
-are at `460f4bb6d6646f651b627f0d91a8c952ba24b4f9` (the only change since the code
-head `64c243c0c` is the notice contract clarification in the spec). The branch is
+Step 3a is implemented on `feat/plugins-step3`. The gates and supervisor stack ran
+at the same fixed head, `0ebddff20755311a6f8da79ddc310c673bacdd2a`. Only this
+handoff changed afterward. The branch is
 based on `origin/feat/plugins-step2` at `82d1b3900`, fetched on 2026-11-16; that
 head is an ancestor. PR #1065 is OPEN. Do not open a step-3 PR while it is open or
 until step 2 has a merged PR.
@@ -31,41 +31,41 @@ directory. Tests used throwaway HOME,
 `KOLLAB_NO_KEYRING=1` and the external work directory for temporary files, except
 the first focused names-red run used the platform's default temp directory.
 
-- Frontend at `64c243c0c`: `npm run typecheck`, `npm test` (57 files, 463 tests),
-  and `npm run build -- --outDir .../build-final-64c` passed. Logs:
-  `final-64c-typecheck.log`, `final-64c-test.log`, `final-64c-build.log`.
+- Frontend at `0ebddff20`: `npm run typecheck`, `npm test` (57 files, 463 tests),
+  and `npm run build -- --outDir .../build-final-0eb` passed. Logs:
+  `final-0eb-typecheck.log`, `final-0eb-test.log`, `final-0eb-build.log`.
   The build emits existing Vite native-config and Monaco `import.meta` warnings.
-- Built-bundle browser acceptance: `PLUGIN_BUILT_DIR=.../build-final-64c
+- Built-bundle browser acceptance: `PLUGIN_BUILT_DIR=.../build-final-0eb
   CHROME_PATH=.../Google Chrome node tests/acceptance/plugins.browser.mjs` passed;
-  `final-64c-browser.log`. It includes independent notice dismissal and repost.
+  `final-0eb-browser.log`. It includes independent notice dismissal and repost.
 - Python: `.venv/bin/python -m pytest -q tests/unit/plugins
   tests/unit/engine/test_plugin* tests/unit/engine/test_phone_link_plugins.py
   tests/unit/webui/test_plugin_assets.py tests/unit/test_webui_remote.py
   tests/integration/test_plugin_stopping_http.py` passed: 350 passed, 1 skipped;
-  `final-64c-pytest.log`. Ruff and py_compile passed on the changed Python files
-  listed in `final-64c-python-files.txt`; see `final-64c-ruff.log` and
-  `final-64c-compile.log`.
-- Supervisor stack reported `460f4bb6d` on web 8200/engine 7500. With the bundled
+  `final-0eb-pytest.log`. Ruff and py_compile passed on the changed Python files
+  listed in `final-0eb-python-files.txt`; see `final-0eb-ruff.log` and
+  `final-0eb-compile.log`.
+- Supervisor stack reported `0ebddff20` on web 8200/engine 7500. With the bundled
   Hello files copied into the isolated bare repo `fixture-460-hello.git`,
-  `node .../live-real-chat-460.mjs` passed; `live-real-chat-460-bare.log`.
+  `node .../live-real-chat-0eb.mjs` passed; `live-real-chat-0eb-retry.log`.
   It installed via the add sheet, saved and displayed settings, opened menu/page/
   tab/modal, exercised phone controls, verified off removes surfaces without reload,
   and installed the throwing fixture to verify load and failed-page states.
-  Earlier retries failed due to an unchanged greeting and an outdated exact-text
-  locator, respectively; the script was corrected, not the product code.
-- `node .../capture-running-460.mjs` started/stopped Hello's real service;
-  `node .../capture-stopped-460.mjs` captured a real five-exit crash stop and removed
-  that isolated fixture. `node .../capture-empty-460.mjs` also captures a synthetic
-  truly empty inventory. See the corresponding `capture-*-460.log` files.
-- Screenshots: `shots/460f4bb6d/`, 1440/820/390, dark and light, including menu,
+  Its first 0eb attempt failed because no chat was running after restart; starting
+  a real chat through the web UI allowed the retry to pass.
+- `node .../capture-running-0eb.mjs` started/stopped Hello's real service;
+  `node .../capture-stopped-0eb.mjs` captured a real five-exit crash stop and removed
+  that isolated fixture. `node .../capture-empty-0eb.mjs` also captures a synthetic
+  truly empty inventory. See the corresponding `capture-*-0eb.log` files.
+- Screenshots: `shots/0ebddff20/`, 1440/820/390, dark and light, including menu,
   page, tab, modal, add, Settings, off, failed, stopped and empty. The three
   `overflow-<width>.json` files each report zero overwide elements in all recorded
-  states; supplemental fixture/running/failed-page overflow files are alongside.
+  states; supplemental fixture and running overflow files are alongside.
   Browser scripts close their Chromium instances. The supervisor owns the stack.
 
 ## Next
 
-Lead: review `shots/460f4bb6d/` against the canvas and report findings. The visual
+Lead: review `shots/0ebddff20/` against the canvas and report findings. The visual
 review instruction prohibits screenshot-comparison and image-description services;
 I mistakenly called them before rereading that instruction. Most timed out; their
 output is not treated as a review or sign-off. No more such calls should be made.
