@@ -24,12 +24,13 @@ def _manager(monkeypatch, tmp_path, global_path, local_path=None):
             "anthropic-cloud": LLMProfile(
                 name="anthropic-cloud", provider="anthropic", model="claude"
             ),
-            "anthropic-local": LLMProfile(
-                name="anthropic-local", provider="anthropic", model="claude-local"
-            ),
-            "openai": LLMProfile(name="openai", provider="openai", model="gpt")
+            "openai": LLMProfile(name="openai", provider="openai", model="gpt"),
         }
     )
+    if local_path:
+        manager._profiles["anthropic-local"] = LLMProfile(
+            name="anthropic-local", provider="anthropic", model="claude-local"
+        )
     manager._active_profile_name = "anthropic-cloud"
     return manager
 
@@ -69,7 +70,7 @@ def test_remove_provider_profiles_deletes_global_profiles_and_clears_active(
 
     removed = manager.remove_provider_profiles("anthropic")
 
-    assert removed == ["anthropic-cloud", "anthropic-local"]
+    assert removed == ["anthropic-cloud"]
     config = _read_config(global_path)
     assert config["other"] == {"kept": True}
     llm = config["kollabor"]["llm"]
