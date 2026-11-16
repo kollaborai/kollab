@@ -253,6 +253,11 @@ try {
   await stoppingListRow.getByText("Stopping · 12 min left", { exact: true }).waitFor({ timeout: 3000 });
   await stoppingListRow.getByText("Running · No Heartbeat for 6 min", { exact: true }).waitFor({ timeout: 3000 });
   await stoppingListRow.getByText("Running · 2 h", { exact: true }).waitFor({ timeout: 3000 });
+  const accessibleStates = await stoppingListRow.evaluate(element => {
+    const id = element.getAttribute("aria-describedby");
+    return id ? document.getElementById(id)?.textContent : null;
+  });
+  assert.match(accessibleStates ?? "", /Stopping · 12 min left/, "list row exposes service state as an accessible description");
   const stoppingDetails = stoppingSettings.getByRole("region", { name: "Fixture details" });
   await stoppingDetails.getByText("Waiting for the plugin to stop.", { exact: true }).waitFor({ timeout: 5000 });
   await stoppingDetails.getByText("worker", { exact: true }).locator("..").getByText("Stopping · 12 min left", { exact: true }).waitFor({ timeout: 5000 });
