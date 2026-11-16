@@ -552,22 +552,20 @@ class StateService(Protocol):
 
     # === MCP writes (phase 4.5 step 7) ===
     #
-    # MCP write methods mutate ~/.kollab/mcp/mcp_settings.json on
-    # the daemon side. Hot-reload of MCP server subprocesses is deferred
-    # to phase 4.6; these methods update the file and expect a restart
-    # to apply. Each returns the updated McpSnapshot so callers don't
-    # need a follow-up get_mcp_state() read.
+    # MCP management methods persist settings by default. Callers can enable
+    # a server for the current daemon only; they apply hot-reloads separately.
+    # Each returns an McpSnapshot so callers need no follow-up state read.
 
-    async def enable_mcp_server(self, name: str) -> McpSnapshot:
+    async def enable_mcp_server(self, name: str, *, persist: bool = True) -> McpSnapshot:
         """Enable a configured MCP server.
 
-        Sets `servers[name].enabled = True` in the MCP settings file.
-        Does NOT hot-reload the server subprocess; caller should surface
-        a "restart to apply" message in the success output. Phase 4.6
-        may add hot-reload if the tradeoff is worth the complexity.
+        With persist=True, sets `servers[name].enabled = True` in the MCP
+        settings file. With persist=False, overlays the configured server as
+        enabled in this daemon's memory. Neither path hot-reloads subprocesses.
 
         Args:
             name: MCP server name as it appears in mcp_settings.json.
+            persist: Whether to save the enabled state for later sessions.
 
         Returns:
             Updated McpSnapshot with the new enabled flag reflected.

@@ -726,11 +726,11 @@ class RemoteStateService(StateService):
 
     # === MCP writes (phase 4.5 step 7) ===
 
-    async def enable_mcp_server(self, name: str) -> McpSnapshot:
+    async def enable_mcp_server(self, name: str, *, persist: bool = True) -> McpSnapshot:
         """Ask the daemon to enable an MCP server."""
         logger.debug("state rpc: enable_mcp_server name=%r", name)
         result = await self._rpc.call(
-            "state.enable_mcp_server", {"name": name}, timeout=self._timeout
+            "state.enable_mcp_server", {"name": name, "persist": persist}, timeout=self._timeout
         )
         if not isinstance(result, dict):
             raise TypeError(
