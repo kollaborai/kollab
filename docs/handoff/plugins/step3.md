@@ -174,6 +174,9 @@
 
 - Context-creation isolation test: the first red commit `520ec1b7` was invalid (it referenced a nonexistent test helper, not a product defect; `context-isolation-red.log`). The corrected test passes against the existing loader, confirming context creation failures are already caught per plugin (`context-isolation-corrected-red.log`). No product fix was required. The correction is committed separately to avoid leaving the branch broken.
 
+- SSE framing: red test `1eb80cb3` and its wire-schema correction `0a13c37d` show that two individually valid 600 kB events delivered in one read were rejected by the aggregate buffer limit (`sse-frame-limit-corrected-red.log`). The parser now enforces its existing limit per complete or partial frame; event/host tests passed 16/16 and typecheck passed (`sse-frame-limit-green.log`, `sse-frame-limit-typecheck.log`).
+- Current-code preflight at `72033bf733a6fad93a6900a85c1b71280af7d241` passed 415 frontend tests, typecheck, browser acceptance, production build, and the separate runtime build/export test; logs are `gate-72033bf7-*`. Later commits changed event framing and tests, so rerun all final-head gates. The isolated Python source-CSP hash test passed at `242fea02` with the worktree venv (`csp-unit-242fea02-venv.log`); an initial run with system Python failed due to missing `acp` after HOME isolation (`csp-unit-242fea02.log`). This does not prove CSP against the built page in a live browser.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.

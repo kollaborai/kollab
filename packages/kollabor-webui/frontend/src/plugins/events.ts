@@ -86,10 +86,16 @@ export class PluginEventStream {
         if (done) break;
         if (value?.byteLength) onData();
         buffer += decoder.decode(value, { stream: true });
+        const delimiter = /\r?\n\r?\n/g;
+        let consumed = 0;
+        let match: RegExpExecArray | null;
+        while ((match = delimiter.exec(buffer)) !== null) {
+          if (match.index - consumed > 1_000_000) throw new Error("Plugin event frame is too large");
+          this.dispatch(buffer.slice(consumed, match.index));
+          consumed = delimiter.lastIndex;
+        }
+        buffer = buffer.slice(consumed);
         if (buffer.length > 1_000_000) throw new Error("Plugin event frame is too large");
-        const frames = buffer.split(/\r?\n\r?\n/);
-        buffer = frames.pop() ?? "";
-        for (const frame of frames) this.dispatch(frame);
       }
     } finally {
       signal.removeEventListener("abort", cancel);
