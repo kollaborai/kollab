@@ -1705,14 +1705,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   };
 
   const openSettings = useCallback((request?: PanelOpenRequest) => {
-    setSettingsTab(request?.tab ?? "session");
+    setSettingsTab(request?.tab ?? (activeSession && !activeSession.halted ? "session" : "plugins"));
     setSettingsIntent(
       request?.intent
         ? { action: request.intent, nonce: ++intentNonceRef.current }
         : null,
     );
     setSettingsOpen(true);
-  }, []);
+  }, [activeSession]);
 
   const openProperties = (sessionId: string, tab?: "chat") => {
     const session = sessions.find((item) => item.session_id === sessionId);

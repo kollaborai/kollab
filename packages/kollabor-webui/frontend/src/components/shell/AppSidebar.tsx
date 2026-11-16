@@ -990,7 +990,6 @@ export function AppSidebar({
               setOpenMobile(false);
               onSettings();
             }}
-            disabled={!activeId}
           >
             <Settings2 className="size-4" />
           </TooltipIconButton>
