@@ -108,8 +108,7 @@ describe("orphanImageNotice", () => {
 
   it("explains that the lost image must be pasted again", () => {
     const notice = orphanImageNotice(1, 0);
-    expect(notice).toContain("1 pasted image");
-    expect(notice).toContain("paste");
+    expect(notice).toBe("1 pasted image was not kept; paste it again.");
   });
 
   it("uses the plural for several lost images", () => {
@@ -190,5 +189,12 @@ describe("composer restore wiring", () => {
     expect(threadSource).toContain(
       "orphanImageNotice(restored.tokenCount, attachmentsEnabled ? keptImages.length : 0)",
     );
+  });
+
+  it("does not restore the same draft again when attachment capability changes", () => {
+    expect(threadSource).toContain(
+      "const lastRestoredDraftKey = useRef<string | null | undefined>(undefined)",
+    );
+    expect(threadSource).toContain("if (lastRestoredDraftKey.current === key) return");
   });
 });
