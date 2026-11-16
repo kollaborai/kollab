@@ -124,7 +124,7 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate, detailRe
     {error ? <p role="alert" className="text-destructive mt-2 break-words text-sm">{error}</p> : null}
     {entry.state === "changed-on-disk" && entry.error ? <p className="text-destructive mt-2 break-words text-sm">{entry.error}. Update or reinstall the plugin to review its files again.</p> : null}
     <div className="flex min-w-0 flex-col gap-4 py-4">
-      {failure ? <div className="flex flex-wrap gap-2">{!snapshot.phoneLink ? <Button type="button" size="xs" onClick={() => { void host.retry(entry.id); }}>Retry</Button> : null}<PluginErrorDisclosure error={failure} /></div> : null}
+      {failure ? <div className="flex flex-wrap gap-2">{!snapshot.phoneLink ? <Button type="button" size="sm" onClick={() => { void host.retry(entry.id); }}>Retry</Button> : null}<PluginErrorDisclosure error={failure} /></div> : null}
       {entry.kind === "dev" && entry.source ? <p className="text-muted-foreground break-all text-sm">Development folder: {entry.source}</p> : null}
       {services.length ? <div><h3 className="text-sm font-semibold">Background Processes</h3>{services.map(service => <ServiceRow key={service.name} service={service} host={host} api={api} id={entry.id} canManage={canManageServices} canStart={entry.enabled} refresh={() => host.refresh()} onError={setError} />)}</div> : null}
       {entry.uses?.length ? <div><h3 className="text-sm font-semibold">What It Uses</h3>
