@@ -147,7 +147,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
           <DetailsList label="Other Declarations" values={other} />
           {uses.includes("agents") ? <DetailsList label="Limits" values={["When available, agent limits cover Kollab runs and usage the plugin reports; unreported spend is not capped."]} /> : null}
           {job.warning ? <p className="text-sm">{job.warning}</p> : null}
-          <div className="bg-muted flex gap-3 rounded-lg p-3 text-sm"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-amber-500" aria-hidden="true" /><p>{PLUGIN_TRUST_NOTICE}</p></div>
+          <div className="bg-muted flex gap-3 rounded-lg p-3 text-sm"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" /><p>{PLUGIN_TRUST_NOTICE}</p></div>
           <DetailsList label="New grants" values={job.changes?.new_grants} /><DetailsList label="New dependencies" values={job.changes?.new_dependencies} />
           <DetailsList label="Added files" values={job.changes?.added} /><DetailsList label="Changed files" values={job.changes?.modified} /><DetailsList label="Removed files" values={job.changes?.removed} />
         </> : null}

@@ -1,5 +1,5 @@
 import { useId, useRef, useState, type RefObject } from "react";
-import { Box, Plus } from "lucide-react";
+import { Plus } from "lucide-react";
 import type { EngineApi, PanelField, Session } from "@/api";
 import { FieldRenderer, serializeDraft, type Draft } from "@/components/panels/FieldRenderer";
 import { Button } from "@/components/ui/button";
@@ -169,7 +169,7 @@ export function PluginsSettings({ host, api, session, canManage }: { host: Plugi
       <nav aria-label="Plugin list" className="min-w-0">
         {groups.filter(group => group.entries.length || group.title === "Installed").map(group => <section key={group.title} className="mb-5">
           <div className="mb-2 flex items-center justify-between gap-2">
-            <h2 className="text-muted-foreground text-xs font-semibold uppercase">{group.title}</h2>
+            <h2 className="text-muted-foreground text-xs font-semibold">{group.title}</h2>
             {group.title === "Installed" && canManage && !snapshot.disabled ? <Button type="button" size="xs" variant="outline" onClick={() => setOperation({ action: "install" })}><Plus className="size-3" /> Add Plugin</Button> : null}
           </div>
           {group.title === "Installed" && !group.entries.length && !snapshot.loading && !snapshot.inventoryError && !snapshot.disabled ?
@@ -189,7 +189,7 @@ export function PluginsSettings({ host, api, session, canManage }: { host: Plugi
                   detailRef.current?.focus({ preventScroll: true });
                 });
               }}>
-              <Box className="size-4 shrink-0" /><span className="flex min-w-0 flex-col items-start"><span className="max-w-full truncate font-medium">{entry.name}</span>
+              <span className="flex min-w-0 flex-col items-start"><span className="max-w-full truncate font-medium">{entry.name}</span>
                 <span id={descriptionId} className="text-muted-foreground flex max-w-full flex-col items-start text-xs">
                   <span>{status}</span>
                   {services.map(service => <span key={service.name} className="max-w-full break-words">
