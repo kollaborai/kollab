@@ -164,6 +164,11 @@ try {
   const panel = page.getByRole("complementary", { name: "Session Controls" });
   await panel.waitFor({ timeout: 15000 });
   await panel.getByRole("button", { name: "Hide Session Panel" }).click();
+  const collapsedFailed = panel.getByRole("button", { name: "Broken Board Failed", exact: true });
+  await collapsedFailed.waitFor({ timeout: 5000 });
+  await collapsedFailed.click();
+  await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
+  await panel.getByRole("button", { name: "Chat", exact: true }).click();
   const collapsedView = panel.getByRole("button", { name: "Fixture View", exact: true });
   await collapsedView.waitFor({ timeout: 5000 });
   await collapsedView.hover();
