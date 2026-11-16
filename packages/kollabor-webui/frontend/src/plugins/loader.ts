@@ -4,6 +4,7 @@ export interface WebPluginEntry {
   enabled: boolean;
   shadowed: boolean;
   state: string;
+  contributes?: Record<string, unknown>;
   web: { entry: string; style: string | null; hash: string } | null;
 }
 
@@ -82,7 +83,7 @@ export class PluginLoader<Api, Value> {
   }
 
   private key(entry: WebPluginEntry): string {
-    return `${entry.web?.entry ?? ""}\0${entry.web?.hash ?? ""}`;
+    return JSON.stringify([entry.web?.entry ?? "", entry.web?.hash ?? "", entry.contributes ?? null]);
   }
 
   private start(entry: WebPluginEntry, retry: number): Promise<void> {

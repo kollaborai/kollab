@@ -164,6 +164,8 @@
 - Fixed-source preflight `fd8ef6fa13593539a4283ca64ee38fd896ec6cf5`: isolated frontend npm test passed 411/411, typecheck passed, browser acceptance passed, production build passed to `~/backups/plugins-step3-work/build-gate-fd8ef6fa`, and the separately invoked production runtime build/export test passed. Logs are `gate-fd8ef6fa-{test,typecheck,browser,build,runtime}.log` in that backup directory. Build emitted Vite/Rolldown IIFE/import.meta warnings; production CSP and live runtime behavior remain unverified. No commits ran while the gates were running. This evidence is not final acceptance because the real stopping lifecycle, required full visual review and live smoke are incomplete.
 - PR gate rechecked: #1065 is OPEN, not merged. No PR was opened. The required test ports were still occupied by the unrelated processes noted above; neither was touched. Vision comparison and fallback image analysis timed out.
 
+- Manifest-only live update: red host test commit `acf367fd` showed that changing a declared menu label without changing web/dist left the old row (`manifest-refresh-red.log`). Loader reconciliation now includes the declarations in its activation key; host/loader tests passed 14/14 and typecheck passed (`manifest-refresh-green.log`, `manifest-refresh-typecheck.log`). Test exercises host refresh; a real engine event and running browser still need coverage.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
