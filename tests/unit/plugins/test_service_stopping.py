@@ -58,7 +58,20 @@ def test_disable_cannot_miss_a_starting_wrapper(tmp_path, monkeypatch):
         "files_sha256": files_sha256(root),
     }}, "dev": {}}))
     paused, proceed = tmp_path / "paused", tmp_path / "proceed"
-    source = f'''\nimport time\nfrom pathlib import Path\nfrom kollabor_plugins import services\nwrite = services._write_state\ndef pause(path, value):\n    if path.suffix == ".pid":\n        Path({str(paused)!r}).touch()\n        while not Path({str(proceed)!r}).exists():\n            time.sleep(0.01)\n    return write(path, value)\nservices._write_state = pause\nservices.run_service("hello", "worker", "abcd")\n'''
+    source = f'''
+import time
+from pathlib import Path
+from kollabor_plugins import services
+write = services._write_state
+def pause(path, value):
+    if path.suffix == ".pid":
+        Path({str(paused)!r}).touch()
+        while not Path({str(proceed)!r}).exists():
+            time.sleep(0.01)
+    return write(path, value)
+services._write_state = pause
+services.run_service("hello", "worker", "abcd")
+'''
     wrapper = subprocess.Popen([sys.executable, "-c", source, "abcd"])
     errors = []
 

@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 import psutil
 
 from kollabor_config.atomic_write import write_text_atomic
-from kollabor_config.file_lock import try_lock, unlock
+from kollabor_config.file_lock import locked_file, try_lock, unlock
 
 from .packages import _ID, _SERVICE, _read_registry, files_sha256
 
@@ -270,9 +270,16 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
 
     signal.signal(signal.SIGTERM, stop)
     try:
-        _write_state(pid_path, identity)
-        state = {"desired": "running", "status": "starting", "exit_history": []}
-        _write_state(state_path, state)
+        # Publish a signalable identity atomically with the enabled check. A
+        # concurrent disable holds this same registry lock before signalling
+        # wrappers, so it cannot miss a wrapper between approval and pid write.
+        with locked_file(home / "plugins.json.lock", private=True):
+            current_root, current = _approved_service_root(home, _read_registry(home / "plugins.json"), plugin_id)
+            if current_root != root or current != record:
+                raise ValueError("Plugin approval or files changed while starting service")
+            _write_state(pid_path, identity)
+            state = {"desired": "running", "status": "starting", "exit_history": []}
+            _write_state(state_path, state)
         # The engine and wrapper share one token-file writer. Mint only after
         # rechecking the approved plugin under its service lock.
         try:
