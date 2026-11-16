@@ -307,3 +307,9 @@ def test_git_config_command_launch_is_still_blocked():
     assert _is_blocked_kollab_spawn(
         "git -c 'core.pager=kollab --agent coder' status"
     )
+
+
+def test_git_grep_count_after_global_directory_flag_is_data():
+    assert not _is_blocked_kollab_spawn(
+        "git -C /tmp/project/kollab grep -c 'kollab --agent coder'"
+    )
