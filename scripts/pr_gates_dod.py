@@ -111,7 +111,9 @@ TOKEN_RE = re.compile(r"(ghp_|github_pat_)[A-Za-z0-9_]+")
 # lint flag selects or ignores (ruff check --select E9,F63,F7,F82) names rules,
 # not findings (#1024). Only that flag context counts: the same list in prose can
 # be either, so it stays findings.
-RULE_SELECTION_RE = re.compile(r"--(?:extend-)?(?:select|ignore)(?:=|\s+)([A-Z]+\d*(?:,[A-Z]+\d*)*)")
+RULE_SELECTION_RE = re.compile(
+    r"--(?:extend-)?(?:select|ignore)(?:=|\s+)['\"]?([A-Z]+\d*(?:,[A-Z]+\d*)*)"
+)
 
 
 class ConfigError(Exception):
