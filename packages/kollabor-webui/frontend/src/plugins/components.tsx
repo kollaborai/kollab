@@ -77,6 +77,14 @@ export class PluginRenderBoundary extends Component<BoundaryProps, BoundaryState
   }
 }
 
+const noticeKeys = new WeakMap<PluginNotice, number>();
+let nextNoticeKey = 0;
+function noticeKey(notice: PluginNotice): number {
+  let key = noticeKeys.get(notice);
+  if (key === undefined) { key = nextNoticeKey++; noticeKeys.set(notice, key); }
+  return key;
+}
+
 function ContributedNotice({ host, pluginId, name, notice }: { host: PluginHost; pluginId: string; name: string; notice: PluginNotice }) {
   const [dismissed, setDismissed] = useState(false);
   if (dismissed) return null;
@@ -98,8 +106,8 @@ export function PluginNotices({ host }: { host: PluginHost }) {
         {`${name} could not register /${command}: already used by ${ownerName}.`}
       </NoticeBar>;
     })}
-    {snapshot.registry.plugins.flatMap(plugin => plugin.notices.map((notice, index) =>
-      <ContributedNotice key={`${plugin.id}:${index}`} host={host} pluginId={plugin.id}
+    {snapshot.registry.plugins.flatMap(plugin => plugin.notices.map(notice =>
+      <ContributedNotice key={`${plugin.id}:${noticeKey(notice)}`} host={host} pluginId={plugin.id}
         name={snapshot.entries.find(entry => entry.id === plugin.id)?.name ?? plugin.id} notice={notice} />,
     ))}
   </>;

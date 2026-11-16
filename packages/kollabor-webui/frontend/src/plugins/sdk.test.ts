@@ -52,7 +52,7 @@ describe("plugin SDK", () => {
   });
 
   it("revokes SDK actions and aborts outstanding requests after disposal", async () => {
-    const { k, json, navigate } = setup();
+    const { k, json, navigate, draft } = setup();
     let requestSignal: AbortSignal | undefined;
     json.mockImplementationOnce((_path, init) => {
       requestSignal = init?.signal ?? undefined;
@@ -67,6 +67,8 @@ describe("plugin SDK", () => {
     await expect(k.settings.save({ greeting: "late" })).rejects.toThrow("disposed");
     await expect(k.settings.get()).rejects.toThrow("disposed");
     k.navigate({ page: "board" });
+    k.notice({ text: "late" });
+    expect(draft.records.notices).toEqual([]);
     expect(navigate).not.toHaveBeenCalled();
     expect(json).toHaveBeenCalledTimes(1);
   });

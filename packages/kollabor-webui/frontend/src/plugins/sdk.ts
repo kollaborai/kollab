@@ -156,7 +156,7 @@ export function createPluginContext(options: PluginContextOptions): PluginContex
   return {
     menu: draft.menu.bind(draft), view: draft.view.bind(draft), page: draft.page.bind(draft),
     modal: draft.modal.bind(draft), settings, command: draft.command.bind(draft),
-    renderer: draft.renderer.bind(draft), notice: draft.notice.bind(draft),
+    renderer: draft.renderer.bind(draft), notice: notice => { if (!disposed) draft.notice(notice); },
     api, useApi, events: { on }, agents: { open: id => { if (!disposed) options.openAgent(id); } },
     navigate: target => { if (!disposed) options.navigate(target); },
     copy: async text => { if (disposed) throw new Error("Plugin context is disposed"); await options.copy(text); },

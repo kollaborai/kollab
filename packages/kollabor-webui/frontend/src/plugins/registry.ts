@@ -22,7 +22,8 @@ export interface RegistrySnapshot { plugins: PluginRecords[]; conflicts: Command
 export class PluginDraft {
   readonly records: PluginRecords;
 
-  constructor(id: string, private readonly declarations?: Record<string, unknown>) {
+  constructor(id: string, private readonly declarations?: Record<string, unknown>,
+    private readonly onNotice?: (draft: PluginDraft, notice: PluginNotice) => void) {
     this.records = { id, menus: [], views: [], pages: [], modals: [], settings: [], commands: [], renderers: [], notices: [] };
   }
   private declared(group: string, id: string): Record<string, unknown> | null {
@@ -52,12 +53,17 @@ export class PluginDraft {
     const id = renderer.tool ?? renderer.tag;
     if (id && this.declared("renderers", id)) this.records.renderers.push(renderer);
   }
-  notice(notice: PluginNotice) { this.records.notices.push(notice); }
+  notice(notice: PluginNotice) {
+    const posted = { ...notice };
+    this.records.notices.push(posted);
+    this.onNotice?.(this, posted);
+  }
 }
 
 /** One browser-page registry. Identity belongs to the plugin, not an unqualified contribution id. */
 export class PluginRegistry {
   private readonly drafts = new Map<string, PluginRecords>();
+  private readonly activeDrafts = new Map<string, PluginDraft>();
   private readonly listeners = new Set<() => void>();
   private builtins: Set<string>;
   private enableOrder = new Map<string, number>();
@@ -80,7 +86,15 @@ export class PluginRegistry {
     this.enableOrder = next;
     this.publish();
   }
-  stage(id: string, declarations?: Record<string, unknown>) { return new PluginDraft(id, declarations); }
+  stage(id: string, declarations?: Record<string, unknown>) {
+    return new PluginDraft(id, declarations, (draft, notice) => {
+      if (this.activeDrafts.get(id) !== draft) return;
+      const records = this.drafts.get(id);
+      if (!records) return;
+      this.drafts.set(id, { ...records, notices: [...records.notices, notice] });
+      this.publish();
+    });
+  }
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
@@ -89,6 +103,7 @@ export class PluginRegistry {
 
   commit(draft: PluginDraft) {
     const records = draft.records;
+    this.activeDrafts.set(records.id, draft);
     // Copy arrays so a late callback cannot mutate the published registry.
     this.drafts.set(records.id, {
       ...records, menus: [...records.menus], views: [...records.views], pages: [...records.pages],
@@ -99,6 +114,7 @@ export class PluginRegistry {
   }
 
   remove(id: string) {
+    this.activeDrafts.delete(id);
     if (this.drafts.delete(id)) this.publish();
   }
 
