@@ -114,3 +114,26 @@ def test_remove_provider_profiles_deletes_folder_profiles_only_from_folder_confi
         "openai": {"provider": "openai", "api_key": "keep"}
     }
     assert "active_profile" not in local_llm
+
+
+def test_remove_folder_profile_clears_global_active_profile_reference(
+    monkeypatch, tmp_path
+):
+    global_path = tmp_path / "home" / ".kollab" / "config.json"
+    local_path = tmp_path / "project" / ".kollab" / "config.json"
+    _write_config(
+        global_path,
+        {"openai": {"provider": "openai", "api_key": "keep"}},
+        "anthropic-local",
+    )
+    _write_config(
+        local_path,
+        {"anthropic-local": {"provider": "anthropic", "api_key": "folder"}},
+        "anthropic-local",
+    )
+    manager = _manager(monkeypatch, tmp_path, global_path, local_path)
+
+    assert manager.remove_provider_profiles("anthropic") == ["anthropic-local"]
+
+    global_llm = _read_config(global_path)["kollabor"]["llm"]
+    assert "active_profile" not in global_llm
