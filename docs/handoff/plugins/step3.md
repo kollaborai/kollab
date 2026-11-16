@@ -203,6 +203,10 @@
 - Required live-smoke ports rechecked: `127.0.0.1:7434` PID 33262 and `127.0.0.1:8081` PID 5224 are occupied by `/Applications/Kollab.app` engine and WebUI processes. These are unrelated to this lane; neither was modified or stopped. Their presence prevents the exact-port isolated smoke until the operator frees them. No live smoke, visual approval, final-head gates, push, or PR occurred in this continuation.
 
 
+- At `a9028220`, throwaway-HOME frontend gates: `npm run typecheck` passed, `npm test` passed 53 files / 424 tests, and `npm run build` passed. Logs: `current-typecheck.log`, `current-npm-test.log`, `current-build.log`. Vite reported config-loader and Monaco `import.meta` warnings. These are interim checks, not final fixed-head gates; repeat after remaining implementation. No dependency installation was performed.
+- Exact next implementation step: add a committed failing integration test for a real service that delays SIGTERM, asserting inventory reports stopping and a deadline while disable/cleanup is pending, then implement the lifecycle end-to-end (including enable/retry/removal races and event publication) and exercise it in the browser. `set_enabled()` persists `enabled=false` before calling `stop_services()` in `packages/kollabor-plugins/src/kollabor_plugins/settings.py`; the latter signals verified wrappers without waiting in `services.py`. `registry.py` currently derives the plugin state as `off` immediately. Python changes in those existing owners and the engine route may be necessary to expose a truthful lifecycle; scope them to that step-3 behavior, test them red-first, and retain verified-process safety. Do not rely on the mocked stopping browser fixture as proof.
+
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
