@@ -344,12 +344,21 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
                 selector.register(child.stdout, selectors.EVENT_READ)
                 while selector.get_map() or child.poll() is None:
                     if stopping and not term_sent:
+                        grace = float(service.get("stop_timeout_s", 10))
+                        state.update({"desired": "stopped", "status": "stopping", "stop_deadline": time.time() + grace})
+                        try:
+                            _write_state(state_path, state)
+                        except OSError as exc:
+                            # Failure to publish must never prevent the actual stop.
+                            logger.warning(
+                                "Could not publish service stopping state for %s/%s: %s", plugin_id, service_name, exc
+                            )
                         try:
                             os.killpg(child.pid, signal.SIGTERM)
                         except ProcessLookupError:
                             pass
                         term_sent = True
-                        deadline = time.monotonic() + float(service.get("stop_timeout_s", 10))
+                        deadline = time.monotonic() + grace
                     if deadline is not None and time.monotonic() >= deadline:
                         try:
                             os.killpg(child.pid, signal.SIGKILL)
