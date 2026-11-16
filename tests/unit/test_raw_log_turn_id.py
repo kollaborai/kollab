@@ -107,6 +107,52 @@ class TurnIdLinkageTests(unittest.IsolatedAsyncioTestCase):
         entries = self._read_entries()
         self.assertEqual(len(entries), 1)
 
+    def test_raw_log_stores_only_new_conversation_messages_per_turn(self):
+        first_turn = [
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "answer"},
+        ]
+        continued_turn = first_turn + [{"role": "user", "content": "follow-up"}]
+        self.svc.current_session_id = "delta-test"
+        self.svc.last_turn_id = "first-turn"
+        self.svc._log_raw_interaction(first_turn)
+        self.svc._current_parent_turn_id = "first-turn"
+        self.svc.last_turn_id = "second-turn"
+        self.svc._log_raw_interaction(continued_turn)
+
+        raw_file = self.tmpdir / "delta-test_raw.jsonl"
+        entries = [json.loads(line) for line in raw_file.read_text().splitlines()]
+        second_turn = entries[1]
+        self.assertEqual(second_turn["continuation_of"], "first-turn")
+        self.assertEqual(
+            [message["content"] for message in second_turn["request"]["conversation_local"]],
+            ["follow-up"],
+        )
+
+    def test_raw_log_stores_only_new_wire_messages_per_turn(self):
+        first_turn = [
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "answer"},
+        ]
+        continued_turn = first_turn + [{"role": "user", "content": "follow-up"}]
+        self.svc.current_session_id = "wire-delta-test"
+        self.svc.last_turn_id = "first-turn"
+        self.svc._provider.last_request_payload = {"messages": first_turn}
+        self.svc._log_raw_interaction(first_turn)
+        self.svc._current_parent_turn_id = "first-turn"
+        self.svc.last_turn_id = "second-turn"
+        self.svc._provider.last_request_payload = {"messages": continued_turn}
+        self.svc._log_raw_interaction(continued_turn)
+
+        raw_file = self.tmpdir / "wire-delta-test_raw.jsonl"
+        entries = [json.loads(line) for line in raw_file.read_text().splitlines()]
+        second_turn = entries[1]["request"]
+        self.assertEqual(second_turn["wire_request_previous_turn_id"], "first-turn")
+        self.assertEqual(
+            [message["content"] for message in second_turn["wire_request"]["messages"]],
+            ["follow-up"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
