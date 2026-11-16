@@ -544,8 +544,6 @@ def control_service(
     home = Path.home() / ".kollab"
     registry = _read_registry(home / "plugins.json")
     root, record = _approved_service_root(home, registry, plugin_id, stopping=action == "stop")
-    if action == "start" and not plugin_id.endswith("@dev") and record.get("enabled") is not True:
-        raise ValueError("Enable the plugin before starting its service")
     try:
         manifest = (
             {"services": record.get("services", {})}
@@ -569,6 +567,10 @@ def control_service(
         raise ValueError("Invalid service state")
     pid_path = run_dir / f"{service_name}.pid"
     if action == "start":
+        if state.get("status") == "stopping" and _recorded_process_alive(pid_path):
+            raise ValueError("Service is stopping; wait until it has stopped")
+        if not plugin_id.endswith("@dev") and record.get("enabled") is not True:
+            raise ValueError("Enable the plugin before starting its service")
         if _recorded_process_alive(pid_path):
             raise ValueError("Service is already running or has an unverifiable process")
         state.update({"desired": "running", "status": "starting"})
@@ -605,10 +607,17 @@ def control_service(
     verified = _verified_wrapper(wrapper)
     if not verified and (_identity_alive(wrapper, wrapper=True) or _identity_alive(child)):
         raise ValueError("Service is alive without a verified wrapper")
+    definition = manifest["services"][service_name]
+    timeout = definition.get("stop_timeout_s", 10) if isinstance(definition, dict) else 10
+    if type(timeout) not in (int, float) or not 0 < timeout <= 300:
+        timeout = 10
+    already_stopping = state.get("status") == "stopping" and state.get("desired") == "stopped"
     state.update(
         {
             "desired": "stopped",
             "status": "stopping" if verified else "stopped",
+            "stop_deadline": (state.get("stop_deadline") if already_stopping else time.time() + timeout)
+            if verified else None,
         }
     )
     _write_state(state_path, state)
@@ -626,6 +635,14 @@ def stop_services(plugin_id: str) -> None:
         raise ValueError("Invalid plugin id")
     run_dir = Path.home() / ".kollab" / "plugin-data" / plugin_id / "run"
     for pid_path in run_dir.glob("*.pid"):
+        try:
+            # Record the shutdown interval for the inventory before signalling.
+            control_service(plugin_id, pid_path.stem, "stop")
+            continue
+        except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            # Stopping a verified wrapper remains necessary even when its files
+            # or state are damaged; never let a display failure orphan it.
+            logger.warning("Could not record stop for service %s: %s", pid_path.name, exc)
         try:
             identity = json.loads(pid_path.read_text(encoding="utf-8"))
             wrapper = identity.get("wrapper")

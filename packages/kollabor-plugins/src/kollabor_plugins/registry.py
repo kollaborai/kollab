@@ -503,6 +503,7 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
                 "restarts": len(history) if isinstance(history, list) else 0,
                 "heartbeat": None,
                 "heartbeat_s": heartbeat_s,
+                "stop_deadline": state.get("stop_deadline") if status == "stopping" else None,
                 "error": state.get("error"),
             }
         )
