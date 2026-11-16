@@ -56,23 +56,43 @@ export function startMist(canvas: HTMLCanvasElement): (() => void) | undefined {
   if (motion?.matches) return undefined;
   const gl = canvas.getContext("webgl", { premultipliedAlpha: false });
   if (!gl) return undefined;
-  const prog = gl.createProgram()!;
+  const prog = gl.createProgram();
+  if (!prog) return undefined;
+  const shaders: WebGLShader[] = [];
+  // Full teardown: a valid linker assignment or any setup failure must leave the
+  // static SVG mark in charge, never a blank canvas or leaked GL objects.
+  const bail = () => {
+    for (const sh of shaders) {
+      gl.detachShader(prog, sh);
+      gl.deleteShader(sh);
+    }
+    gl.deleteProgram(prog);
+    return undefined;
+  };
   for (const [type, src] of [
     [gl.VERTEX_SHADER, VERT],
     [gl.FRAGMENT_SHADER, FRAG],
   ] as const) {
-    const sh = gl.createShader(type)!;
+    const sh = gl.createShader(type);
+    if (!sh) return bail();
+    shaders.push(sh);
     gl.shaderSource(sh, src);
     gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) return bail();
     gl.attachShader(prog, sh);
   }
+  // Pin `a` to slot 0 by contract, then honor whatever the linker actually did.
+  gl.bindAttribLocation(prog, 0, "a");
   gl.linkProgram(prog);
-  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return undefined;
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return bail();
+  const attrib = gl.getAttribLocation(prog, "a");
+  if (attrib < 0) return bail();
   gl.useProgram(prog);
-  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  const buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(attrib);
+  gl.vertexAttribPointer(attrib, 2, gl.FLOAT, false, 0, 0);
   const uTime = gl.getUniformLocation(prog, "uTime");
   const uRes = gl.getUniformLocation(prog, "uRes");
   gl.uniform3f(gl.getUniformLocation(prog, "uColor"), 0.3, 0.3, 0.3); // neutral grey; the shader blows hot spots out to white
@@ -111,6 +131,9 @@ export function startMist(canvas: HTMLCanvasElement): (() => void) | undefined {
     running = false;
     motion?.removeEventListener?.("change", onMotionChange);
     cancelAnimationFrame(frame);
+    gl.deleteBuffer(buffer);
+    for (const sh of shaders) gl.deleteShader(sh);
+    gl.deleteProgram(prog);
     gl.getExtension("WEBGL_lose_context")?.loseContext();
   };
 }
