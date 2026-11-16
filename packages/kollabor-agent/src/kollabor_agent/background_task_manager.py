@@ -368,7 +368,9 @@ class BackgroundTaskManager:
                         ),
                         "cancelled": task.cancelled(),
                         "exception": (
-                            str(task.exception()) if task.exception() else None
+                            f"{type(task.exception()).__name__}: {task.exception()}"
+                            if task.exception()
+                            else None
                         ),
                         "completed_at": datetime.now(),
                         "coro_name": metadata.get("coro_name", "unknown"),
@@ -379,12 +381,26 @@ class BackgroundTaskManager:
 
         if task.cancelled():
             if self.task_config.background_tasks.log_task_events:
-                logger.debug(f"Task cancelled: {task_name}")
+                logger.info(f"Task cancelled: {task_name}")
         elif task.exception():
             if self.task_config.background_tasks.log_task_errors:
-                logger.error(
-                    f"Task failed with exception: {task_name} - {task.exception()}"
-                )
+                error = task.exception()
+                if isinstance(
+                    error,
+                    (asyncio.CancelledError, GeneratorExit, KeyboardInterrupt, SystemExit),
+                ):
+                    logger.info(
+                        "Task stopped during shutdown: %s (%s)",
+                        task_name,
+                        type(error).__name__,
+                    )
+                else:
+                    logger.error(
+                        "Task failed with exception: %s - %s: %s",
+                        task_name,
+                        type(error).__name__,
+                        error,
+                    )
         else:
             # Task completed successfully - check circuit breaker state
             if (

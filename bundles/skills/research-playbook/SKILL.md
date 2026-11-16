@@ -33,13 +33,13 @@ Bottom line (3 bullets) - Findings - Evidence table - Open questions - Sources.
 
 ## Team
 
-| Hub name | Name | Role | Bundle | Reports to |
-|---|---|---|---|---|
-| `alistair` | Alistair Grant | Research Director | `research` | human |
-| `ines` | Ines Carvalho | Desk Researcher | `research` | alistair |
-| `kai` | Kai Mercer | Market & Competitive Analyst | `research` | alistair |
-| `vera` | Vera Lund | Fact Checker | `research` | alistair |
-| `tariq` | Tariq Aziz | Report Writer | `technical-writer` | alistair |
+| Hub name | Role | Bundle | Reports to |
+|---|---|---|---|
+| `research-director` | Research Director | `research` | human |
+| `desk-researcher` | Desk Researcher | `research` | research-director |
+| `market-competitive-analyst` | Market & Competitive Analyst | `research` | research-director |
+| `fact-checker` | Fact Checker | `research` | research-director |
+| `report-writer` | Report Writer | `technical-writer` | research-director |
 
 ## Hand-off outside the team
 

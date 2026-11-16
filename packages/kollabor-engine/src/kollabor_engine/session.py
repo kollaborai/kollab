@@ -370,7 +370,8 @@ class EngineSession:
 
         if self.approval_mode:
             try:
-                await self.state.set_approval_mode(self.approval_mode)
+                # Session-only: never move the person's saved default (#1111).
+                await self.state.set_approval_mode(self.approval_mode, persist=False)
             except Exception as e:
                 logger.warning(
                     "session %s: could not set approval mode %s: %s",

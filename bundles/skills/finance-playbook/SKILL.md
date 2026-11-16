@@ -34,13 +34,13 @@ dates. Prepared for an accountant; not tax advice.
 
 ## Team
 
-| Hub name | Name | Role | Bundle | Reports to |
-|---|---|---|---|---|
-| `catherine` | Catherine Shaw | Controller | `data-analyst` | human |
-| `ben` | Ben Okoro | Bookkeeper (AP/AR) | `data-analyst` | catherine |
-| `simone` | Simone Laurent | FP&A Analyst | `data-analyst` | catherine |
-| `raj` | Raj Patel | Procurement & Vendor Manager | `research` | catherine |
-| `olga` | Olga Ivanova | Tax & Audit Coordinator | `research` | catherine |
+| Hub name | Role | Bundle | Reports to |
+|---|---|---|---|
+| `controller` | Controller | `data-analyst` | human |
+| `bookkeeper-ap-ar` | Bookkeeper (AP/AR) | `data-analyst` | controller |
+| `fp-a-analyst` | FP&A Analyst | `data-analyst` | controller |
+| `procurement-vendor-manager` | Procurement & Vendor Manager | `research` | controller |
+| `tax-audit-coordinator` | Tax & Audit Coordinator | `research` | controller |
 
 ## Hand-off outside the team
 
