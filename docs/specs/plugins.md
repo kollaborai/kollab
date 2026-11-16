@@ -149,7 +149,10 @@ goes, a page that was open shows `PR Chain is off` with a Back to Chat button, a
 switches to Chat.
 
 **Notices.** A plugin can raise a NoticeBar notice: one line and one button, with no ids or version
-numbers in the text: `A pull request is waiting for your review.  [Open]`.
+numbers in the text: `A pull request is waiting for your review.  [Open]`. The host identifies
+which plugin posted it and lets the person dismiss each notice independently. A later `k.notice`
+call posts a new notice even if an earlier one was dismissed; callbacks from a disposed or replaced
+plugin cannot post notices.
 
 **Composer and chat.** Plugin slash commands appear in the composer palette. A plugin can draw its own
 card for a tool or message it owns, such as a PR status card.
