@@ -634,6 +634,9 @@ try {
   await page.keyboard.press("Escape");
   await settings.waitFor({ state: "hidden" });
   await page.setViewportSize({ width: 390, height: 844 });
+  const phoneCdp = await page.context().newCDPSession(page);
+  await phoneCdp.send("Emulation.setTouchEmulationEnabled", { enabled: true });
+  assert.equal(await page.evaluate(() => matchMedia("(any-pointer: coarse)").matches), true);
   await page.getByRole("button", { name: "Session Controls" }).click();
   const sheet = page.getByRole("dialog", { name: "Session Controls" });
   await sheet.getByRole("button", { name: /Fixture Board/ }).click();
@@ -643,6 +646,30 @@ try {
   await page.getByRole("button", { name: "Session Controls" }).click();
   await sheet.getByRole("button", { name: "Fixture View" }).click();
   await page.getByText("Fixture view body", { exact: true }).waitFor();
+  await sheet.waitFor({ state: "hidden", timeout: 3000 });
+  await page.getByRole("button", { name: "Session Controls" }).click();
+  const phoneHelloView = sheet.getByRole("button", { name: "Hello View", exact: true });
+  const phoneHelloRow = sheet.getByRole("button", { name: "Hello Page", exact: true });
+  for (const row of [phoneHelloView, phoneHelloRow]) {
+    const size = await row.evaluate(element => ({ width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height }));
+    assert.ok(size.width >= 44 && size.height >= 44, `plugin session control is at least 44x44 on touch: ${JSON.stringify(size)}`);
+  }
+  await phoneHelloView.click();
+  await sheet.waitFor({ state: "hidden", timeout: 3000 });
+  await page.getByText("Hello from your plugin!", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Open Hello Dialog" }).click();
+  const phoneHelloModal = page.getByRole("dialog", { name: "Hello Dialog" });
+  await phoneHelloModal.getByText("Hello from the dialog.", { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await phoneHelloModal.waitFor({ state: "hidden" });
+  await page.getByText("Hello from your plugin!", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Session Controls" }).click();
+  await sheet.getByRole("button", { name: "Hello Page", exact: true }).click();
+  await sheet.waitFor({ state: "hidden", timeout: 3000 });
+  await page.getByText("This page is provided by the Hello plugin.", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Back to Chat" }).click();
+  await phoneCdp.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+  await phoneCdp.detach();
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.getByRole("button", { name: "Settings", exact: true }).first().click();
   await settings.getByRole("tab", { name: "Plugins" }).click();
