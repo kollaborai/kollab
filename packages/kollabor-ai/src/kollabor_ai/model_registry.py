@@ -151,6 +151,15 @@ _VENDOR_REGISTRY_PROVIDERS = {
     "gemini": "gemini",
 }
 
+# These OpenRouter vendor aliases intentionally resolve to the locally curated
+# custom-provider records. Other vendors need an exact OpenRouter catalog entry
+# before their capabilities can be used.
+_VENDOR_FIELD_PROVIDERS = {
+    **_VENDOR_REGISTRY_PROVIDERS,
+    "zai": "custom",
+    "zhipuai": "custom",
+}
+
 
 def _lookup_candidates(model: str, provider: Optional[str] = None) -> List[str]:
     """Candidate forms of a model string, most specific first.
@@ -180,7 +189,9 @@ def _lookup_candidates(model: str, provider: Optional[str] = None) -> List[str]:
     return candidates
 
 
-def _best_match(model: str, field: str) -> Optional[Any]:
+def _best_match(
+    model: str, field: str, provider: Optional[str] = None
+) -> Optional[Any]:
     """Longest-prefix registry lookup for a single field.
 
     ``gpt-5.6-terra-2026-07-09`` matches the ``gpt-5.6-terra`` entry rather
@@ -197,12 +208,16 @@ def _best_match(model: str, field: str) -> Optional[Any]:
     registry_models = _registry_section("models")
     exact = registry_models.get(model_l)
     if isinstance(exact, dict):
+        if provider and str(exact.get("provider") or "").lower() != provider:
+            return None
         return exact.get(field)
 
     best: Optional[Any] = None
     best_len = 0
     for name, info in registry_models.items():
         if not isinstance(name, str) or not isinstance(info, dict):
+            continue
+        if provider and str(info.get("provider") or "").lower() != provider:
             continue
         if not model_l.startswith(name.lower()) or len(name) <= best_len:
             continue
@@ -213,7 +228,9 @@ def _best_match(model: str, field: str) -> Optional[Any]:
     return best
 
 
-def _lookup_field(model: str, field: str) -> Optional[Any]:
+def _lookup_field(
+    model: str, field: str, provider: Optional[str] = None
+) -> Optional[Any]:
     """Resolve a field for a model string, aggregator prefixes included.
 
     Tries :func:`_lookup_candidates` in order. An exact catalog id owns its
@@ -221,11 +238,39 @@ def _lookup_field(model: str, field: str) -> Optional[Any]:
     a value inherited from a stripped fallback form.
     """
     registry_models = _registry_section("models")
-    for candidate in _lookup_candidates(model):
+    model_l = (model or "").lower().strip()
+    vendor = model_l.partition("/")[0].strip() if "/" in model_l else ""
+    vendor_provider = _VENDOR_FIELD_PROVIDERS.get(vendor)
+    provider_l = registry_provider_for(provider) if provider else None
+    candidates = _lookup_candidates(model, provider_l)
+
+    # A vendor-prefixed fallback is safe only when both the vendor and any
+    # explicitly selected provider identify the catalog provider. Exact
+    # aggregator entries still work when a vendor has no native catalog map.
+    fallback_allowed = bool(vendor_provider) and (
+        provider_l in (None, "openrouter", vendor_provider)
+    )
+    if vendor and len(candidates) > 1 and not fallback_allowed:
+        candidates = candidates[:1]
+
+    for index, candidate in enumerate(candidates):
+        candidate_provider: Optional[str] = None
+        if vendor:
+            if index == 0 and provider_l:
+                candidate_provider = (
+                    "openrouter" if provider_l == "openrouter" else provider_l
+                )
+            elif index > 0:
+                candidate_provider = vendor_provider
         if candidate in registry_models:
             exact = registry_models[candidate]
+            if candidate_provider and (
+                not isinstance(exact, dict)
+                or str(exact.get("provider") or "").lower() != candidate_provider
+            ):
+                return None
             return exact.get(field) if isinstance(exact, dict) else None
-        best = _best_match(candidate, field)
+        best = _best_match(candidate, field, candidate_provider)
         if best is not None:
             return best
     return None
@@ -249,7 +294,7 @@ def resolve_context_window(model: str, provider: Optional[str] = None) -> Option
     named ``glm-4.7``), then the provider default. ``None`` if neither resolves
     — callers fall back to the config default.
     """
-    window = _positive_int(_lookup_field(model, "context_window"))
+    window = _positive_int(_lookup_field(model, "context_window", provider))
     if window is not None:
         return window
 
