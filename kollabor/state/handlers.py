@@ -226,8 +226,11 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         mode = params.get("mode", "")
         if not isinstance(mode, str) or not mode.strip():
             return {"error": "approval mode is required"}
+        persist = params.get("persist", True)
+        if not isinstance(persist, bool):
+            return {"error": "persist must be a boolean"}
         try:
-            snapshot = await state_service.set_approval_mode(mode.strip())
+            snapshot = await state_service.set_approval_mode(mode.strip(), persist=persist)
         except ValueError as e:
             return {"error": str(e)}
         return snapshot.to_dict()
