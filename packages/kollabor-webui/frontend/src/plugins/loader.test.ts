@@ -60,6 +60,17 @@ describe("web plugin loader", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("reconciles a changed declared stylesheet even when dist files are unchanged", async () => {
+    const importer = vi.fn(async () => ({ default: (k: { add(s: string): void }) => k.add("ready") }));
+    const { loader, active } = setup(importer);
+    await loader.reconcile([entry("a")]);
+    await loader.reconcile([entry("a")]);
+    expect(importer).toHaveBeenCalledTimes(1);
+    await loader.reconcile([entry("a", { web: { entry: "web/dist/index.js", style: "web/dist/index.css", hash: "abc" } })]);
+    expect(importer).toHaveBeenCalledTimes(2);
+    expect(active.get("a")).toEqual(["ready"]);
+  });
+
   it("contains activation errors and leaves other plugins working", async () => {
     const { loader, active, errors } = setup(async url => ({ default: (k: { add(s: string): void }) => {
       if (url.includes("/bad/")) throw new Error("broken");
