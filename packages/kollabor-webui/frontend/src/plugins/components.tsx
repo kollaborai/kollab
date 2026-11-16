@@ -90,7 +90,7 @@ function ContributedNotice({ host, pluginId, name, notice }: { host: PluginHost;
   if (dismissed) return null;
   return <NoticeBar onDismiss={() => setDismissed(true)} actions={notice.button ? <NoticeAction className="text-foreground any-pointer-coarse:min-h-[44px] any-pointer-coarse:min-w-[44px]"
     onClick={() => { if (notice.button) host.getContext(pluginId)?.navigate(notice.button.open); }}>{notice.button.label}</NoticeAction> : null}>
-    <strong>{name}:</strong> {notice.text}
+    <strong>{name}:</strong> <span>{notice.text}</span>
   </NoticeBar>;
 }
 
