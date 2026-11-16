@@ -73,12 +73,12 @@ def pool_identities(folder: Optional[str] = None) -> List[Any]:
         return []
 
 
-def crew_names() -> set:
-    """Names of the personas of every roster but the gem pool, and of team members written inline: crew gems."""
+def crew_names(folder: Optional[str] = None) -> set:
+    """Names of non-gem personas and inline team members visible from ``folder``."""
     try:
         from plugins.hub.rosters import DEFAULT_ROSTER, load_library
 
-        lib = load_library()
+        lib = load_library(folder)
     except Exception:
         return set()
     names = {
@@ -246,7 +246,7 @@ async def list_agent_pool(
     # A gem's first time alive is its birth: it gets the random look it keeps.
     alive = [agent["name"] for agent in agents if agent["active"]]
     if alive:
-        record_births(alive, crew=crew_names())
+        record_births(alive, crew=crew_names(folder))
 
     # Live agents the pool does not name (numbered gems like lapis-2, a persona
     # of another roster) are listed too, so the sidebar shows every agent.
