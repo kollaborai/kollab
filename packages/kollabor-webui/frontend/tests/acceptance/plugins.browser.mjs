@@ -548,6 +548,18 @@ try {
   assert.equal(await customSettings.evaluate(node => getComputedStyle(node).color), "rgb(12, 34, 56)");
   await page.setViewportSize({ width: 390, height: 800 });
   await settings.getByRole("button", { name: "Hello", exact: true }).click();
+  const settingsTouchCdp = await page.context().newCDPSession(page);
+  await settingsTouchCdp.send("Emulation.setTouchEmulationEnabled", { enabled: true });
+  const switchHitArea = await settings.getByRole("switch", { name: "Hello enabled" }).evaluate(element => {
+    const r = element.getBoundingClientRect(), cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+    return [-21, 21].every(dx => [-21, 21].every(dy => {
+      const hit = document.elementFromPoint(cx + dx, cy + dy);
+      return hit === element || element.contains(hit);
+    }));
+  });
+  assert.ok(switchHitArea, "phone plugin switch has a 44x44 hit area");
+  await settingsTouchCdp.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+  await settingsTouchCdp.detach();
   await page.waitForFunction(() => {
     const detail = document.querySelector('[aria-label="Hello details"]');
     return detail && document.activeElement === detail && detail.getBoundingClientRect().top >= 0 && detail.getBoundingClientRect().top < innerHeight;
