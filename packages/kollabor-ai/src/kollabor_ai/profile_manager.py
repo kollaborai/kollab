@@ -2836,12 +2836,36 @@ class ProfileManager:
         if not removed:
             return []
 
+        retained_names: set[str] = set()
+        retained_profiles: dict[str, LLMProfile] = {}
+        for _, config_data in scanned_configs:
+            llm = config_data.get("kollabor", {}).get("llm", {})
+            profiles = llm.get("profiles", {}) if isinstance(llm, dict) else {}
+            if not isinstance(profiles, dict):
+                continue
+            for name, value in profiles.items():
+                if (
+                    not isinstance(value, dict)
+                    or str(value.get("provider") or "").strip().lower()
+                    == provider_name
+                ):
+                    continue
+                retained_names.add(name)
+                try:
+                    retained_profiles[name] = LLMProfile.from_dict(name, value)
+                except Exception:
+                    logger.debug("Could not reload retained profile %s", name)
+
         updated_paths = {path.resolve() for path, _, _ in updates}
         for path, config_data in scanned_configs:
             if path.resolve() in updated_paths:
                 continue
             llm = config_data.get("kollabor", {}).get("llm", {})
-            if isinstance(llm, dict) and llm.get("active_profile") in removed:
+            if (
+                isinstance(llm, dict)
+                and llm.get("active_profile") in removed
+                and llm.get("active_profile") not in retained_names
+            ):
                 updates.append((path, config_data, set()))
 
         staged_updates: List[tuple[Path, Path]] = []
@@ -2851,7 +2875,10 @@ class ProfileManager:
                 profiles = llm["profiles"]
                 for name in matching:
                     profiles.pop(name, None)
-                if llm.get("active_profile") in removed:
+                if (
+                    llm.get("active_profile") in removed
+                    and llm.get("active_profile") not in retained_names
+                ):
                     llm.pop("active_profile", None)
 
                 target_path = Path(os.path.realpath(path))
@@ -2903,10 +2930,18 @@ class ProfileManager:
             return []
 
         for name in removed:
-            self._profiles.pop(name, None)
+            if name in retained_profiles:
+                self._profiles[name] = retained_profiles[name]
+            elif name not in retained_names:
+                self._profiles.pop(name, None)
         if self._active_profile_name in removed:
-            self._active_profile_name = "default"
-        self._pending_active_profile = None
+            if self._active_profile_name not in retained_names:
+                self._active_profile_name = "default"
+        if (
+            self._pending_active_profile in removed
+            and self._pending_active_profile not in retained_names
+        ):
+            self._pending_active_profile = None
         return sorted(removed)
 
     def update_profile(
