@@ -103,7 +103,6 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate, detailRe
       {canChange && entry.kind === "installed" ? <div className="ml-auto flex flex-wrap gap-2"><Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => onUpdate(entry.id)}>Update</Button><Button type="button" size="xs" variant="ghost" disabled={busy} onClick={() => setConfirmation("remove")}>Remove</Button></div> : null}
     </div>
     <p className="text-muted-foreground mt-2 break-words text-xs">{entry.kind === "built-in" ? "Built In" : entry.kind === "dev" ? "Development" : "Installed"}{entry.source ? ` · ${entry.source}` : ""}</p>
-    {entry.version ? <p className="text-muted-foreground mt-1 break-words text-xs">Version {entry.version}</p> : null}
     {stopping ? <p role="status" className="text-muted-foreground mt-2 text-sm">Waiting for the plugin to stop.</p> : null}
     {error ? <p role="alert" className="text-destructive mt-2 break-words text-sm">{error}</p> : null}
     {entry.state === "changed-on-disk" && entry.error ? <p className="text-destructive mt-2 break-words text-sm">{entry.error}. Update or reinstall the plugin to review its files again.</p> : null}
