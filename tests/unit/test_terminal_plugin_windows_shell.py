@@ -103,7 +103,7 @@ def test_execute_background_windows_routes_to_resolved_shell(monkeypatch):
     assert kwargs["creationflags"] == CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
 
 
-def test_execute_background_posix_unchanged(monkeypatch):
+def test_execute_background_posix_routes_through_user_shell(monkeypatch):
     plugin = TmuxPlugin()
     popen = _RecordingPopen()
     monkeypatch.setattr(tp.subprocess, "Popen", popen)
@@ -114,7 +114,7 @@ def test_execute_background_posix_unchanged(monkeypatch):
 
     assert result["success"] is True
     argv, kwargs = popen.calls[0]
-    assert argv == ["echo", "hi"]  # shlex.split(command), as before
+    assert argv == ["/bin/zsh", "-c", "echo hi"]
     assert kwargs["start_new_session"] is True
     assert "creationflags" not in kwargs
 
