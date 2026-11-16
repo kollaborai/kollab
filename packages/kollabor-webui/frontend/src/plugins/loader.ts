@@ -83,7 +83,7 @@ export class PluginLoader<Api, Value> {
   }
 
   private key(entry: WebPluginEntry): string {
-    return JSON.stringify([entry.web?.entry ?? "", entry.web?.hash ?? "", entry.contributes ?? null]);
+    return JSON.stringify([entry.web?.entry ?? "", entry.web?.style ?? null, entry.web?.hash ?? "", entry.contributes ?? null]);
   }
 
   private start(entry: WebPluginEntry, retry: number): Promise<void> {

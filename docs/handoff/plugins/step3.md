@@ -166,6 +166,8 @@
 
 - Manifest-only live update: red host test commit `acf367fd` showed that changing a declared menu label without changing web/dist left the old row (`manifest-refresh-red.log`). Loader reconciliation now includes the declarations in its activation key; host/loader tests passed 14/14 and typecheck passed (`manifest-refresh-green.log`, `manifest-refresh-typecheck.log`). Test exercises host refresh; a real engine event and running browser still need coverage.
 
+- Stylesheet declaration update: red loader test commit `e83429c2` showed that changing web.style without changing dist bytes left the old activation (`stylesheet-refresh-red.log`). The reconciliation key now includes the declared style; host/loader tests passed 15/15, typecheck passed and isolated browser acceptance passed (`stylesheet-refresh-green.log`, `stylesheet-refresh-typecheck.log`, `reconcile-browser-green.log`). A browser-level assertion of replacement link cleanup remains useful.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
