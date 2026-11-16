@@ -54,7 +54,7 @@ describe("plugin event stream", () => {
 
   it("accepts a large chunk containing individually bounded event frames", async () => {
     const payload = "a".repeat(600_000);
-    const frame = `event: p:status\ndata: {"value":"${payload}"}\n\n`;
+    const frame = `data: {"topic":"p:status","data":{"value":"${payload}"}}\n\n`;
     const request = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
       start(controller) { controller.enqueue(new TextEncoder().encode(frame + frame)); },
     })));
