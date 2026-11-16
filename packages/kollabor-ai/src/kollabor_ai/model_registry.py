@@ -216,10 +216,15 @@ def _best_match(model: str, field: str) -> Optional[Any]:
 def _lookup_field(model: str, field: str) -> Optional[Any]:
     """Resolve a field for a model string, aggregator prefixes included.
 
-    Tries :func:`_lookup_candidates` in order and returns the first hit, so
-    an exact catalog id always wins over its stripped fallback form.
+    Tries :func:`_lookup_candidates` in order. An exact catalog id owns its
+    field even when the field is absent, so its default cannot be replaced by
+    a value inherited from a stripped fallback form.
     """
+    registry_models = _registry_section("models")
     for candidate in _lookup_candidates(model):
+        if candidate in registry_models:
+            exact = registry_models[candidate]
+            return exact.get(field) if isinstance(exact, dict) else None
         best = _best_match(candidate, field)
         if best is not None:
             return best
