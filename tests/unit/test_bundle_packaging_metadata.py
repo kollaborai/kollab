@@ -1,5 +1,6 @@
 """Packaging metadata must include complete bundled skill assets."""
 
+import fnmatch
 import tomllib
 from pathlib import Path
 
@@ -28,6 +29,26 @@ def test_setuptools_package_data_covers_skill_scripts_and_schemas() -> None:
     ]
 
     assert not missing
+
+
+def test_setuptools_package_data_covers_bundled_ai_pricing() -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    pricing = (
+        ROOT
+        / "packages"
+        / "kollabor-ai"
+        / "src"
+        / "kollabor_ai"
+        / "default_pricing.json"
+    )
+    package_patterns = pyproject["tool"]["setuptools"]["package-data"].get(
+        "kollabor_ai", []
+    )
+
+    assert pricing.is_file()
+    assert any(
+        fnmatch.fnmatchcase(pricing.name, pattern) for pattern in package_patterns
+    )
 
 
 def test_manifest_covers_skill_scripts_and_schemas_for_sdist() -> None:
