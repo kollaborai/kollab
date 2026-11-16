@@ -35,6 +35,9 @@ def test_plugin_entries_include_disabled_and_changed(tmp_path, monkeypatch):
 
 
 def test_enabled_plugin_reports_a_manually_stopping_service(tmp_path, monkeypatch):
+    from kollabor_plugins.packages import files_sha256
+    from kollabor_plugins.registry import plugin_entries
+
     monkeypatch.setenv("HOME", str(tmp_path))
     home = tmp_path / ".kollab"
     builtin = tmp_path / "builtin"
