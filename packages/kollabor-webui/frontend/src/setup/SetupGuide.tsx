@@ -100,8 +100,8 @@ export function SetupGuide({
   const target = stepTarget(step);
 
   const advance = useCallback(() => {
-    setState((prev) => ({ ...prev, step: nextStep(prev.step) }));
-  }, []);
+    setState((prev) => ({ ...prev, step: nextStep(resolveStep(prev, facts).step) }));
+  }, [facts]);
 
   const dismiss = useCallback(() => {
     setState((prev) => ({ ...prev, dismissed: true }));
