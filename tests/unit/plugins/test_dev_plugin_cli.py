@@ -25,7 +25,7 @@ def test_dev_registration_copies_settings_once_and_detaches(tmp_path, monkeypatc
                 "version": "1.0.0",
                 "description": "Example",
                 "kollab": ">=0.1",
-                "uses": ["secret:DEV_TOKEN"],
+                "uses": [],
             }
         )
     )
