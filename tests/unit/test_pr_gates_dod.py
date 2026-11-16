@@ -419,9 +419,9 @@ def test_regression_test_no_findings_passes(tmp_path: Path) -> None:
     assert "regression_test" not in report.failed_names()
 
 
-def test_regression_test_covered_and_uncovered(tmp_path: Path) -> None:
-    cfg = pr_gates_dod.load_config(make_config(tmp_path, ENABLED))
-    data_kw = dict(review_comment_bodies=["F14: the psutil bypass is open"])
+def test_regression_test_covered_and_uncovered_with_review(tmp_path: Path) -> None:
+    cfg = regression_cfg(tmp_path)
+    data_kw = dict(review_comment_bodies=["F14: the psutil bypass is open"], reviews=(approved_review(),))
     ok = pr_gates_dod.evaluate(
         cfg,
         make_data(
@@ -489,10 +489,10 @@ def test_regression_test_requires_test_only_commit_before_post_finding_fix(
 
     assert "regression_test" in report.failed_names()
     assert "F14" in report.detail_for("regression_test")
-    assert "before the fix" in report.detail_for("regression_test")
+    assert "independent current-head approval required" in report.detail_for("regression_test")
 
 
-def test_regression_test_passes_when_test_only_commit_precedes_fix(
+def test_regression_test_commit_order_alone_cannot_pass(
     tmp_path: Path,
 ) -> None:
     cfg = regression_cfg(tmp_path)
@@ -535,7 +535,7 @@ def test_regression_test_passes_when_test_only_commit_precedes_fix(
 
     report = pr_gates_dod.evaluate(cfg, data)
 
-    assert "regression_test" not in report.failed_names()
+    assert "regression_test" in report.failed_names()
 
 
 def test_regression_test_rejects_backdated_fix_using_timeline_order(
@@ -587,7 +587,7 @@ def test_regression_test_rejects_backdated_fix_using_timeline_order(
     report = pr_gates_dod.evaluate(cfg, data)
 
     assert "regression_test" in report.failed_names()
-    assert "before the fix" in report.detail_for("regression_test")
+    assert "independent current-head approval required" in report.detail_for("regression_test")
 
 
 def test_regression_test_rejects_fix_commit_that_also_changes_test(
@@ -621,10 +621,10 @@ def test_regression_test_rejects_fix_commit_that_also_changes_test(
     report = pr_gates_dod.evaluate(cfg, data)
 
     assert "regression_test" in report.failed_names()
-    assert "separate commit" in report.detail_for("regression_test")
+    assert "independent current-head approval required" in report.detail_for("regression_test")
 
 
-def test_regression_test_allows_explicit_non_testable_finding(tmp_path: Path) -> None:
+def test_regression_test_contributor_cannot_exempt_non_testable_finding(tmp_path: Path) -> None:
     cfg = regression_cfg(tmp_path)
     data = make_data(
         comments=(
@@ -653,7 +653,7 @@ def test_regression_test_allows_explicit_non_testable_finding(tmp_path: Path) ->
 
     report = pr_gates_dod.evaluate(cfg, data)
 
-    assert "regression_test" not in report.failed_names()
+    assert "regression_test" in report.failed_names()
 
 
 def test_regression_test_requires_test_commit_patch_to_name_finding(
@@ -699,7 +699,7 @@ def test_regression_test_requires_test_commit_patch_to_name_finding(
     report = pr_gates_dod.evaluate(cfg, data)
 
     assert "regression_test" in report.failed_names()
-    assert "no test-only commit" in report.detail_for("regression_test")
+    assert "independent current-head approval required" in report.detail_for("regression_test")
 
 
 def test_regression_test_rejects_placeholder_finding_test(tmp_path: Path) -> None:
@@ -770,7 +770,7 @@ def test_regression_test_requires_reason_for_non_testable_finding(
     assert "F15" in report.detail_for("regression_test")
 
 
-def test_regression_test_allows_strict_xfail_removal_with_fix(tmp_path: Path) -> None:
+def test_regression_test_xfail_removal_alone_cannot_pass(tmp_path: Path) -> None:
     cfg = regression_cfg(tmp_path)
     finding = SimpleNamespace(
         kind="review_comment",
@@ -810,7 +810,7 @@ def test_regression_test_allows_strict_xfail_removal_with_fix(tmp_path: Path) ->
 
     report = pr_gates_dod.evaluate(cfg, data)
 
-    assert "regression_test" not in report.failed_names()
+    assert "regression_test" in report.failed_names()
 
 
 def test_regression_test_ignores_quoted_ruff_rule_codes_1024(tmp_path: Path) -> None:
@@ -1427,133 +1427,6 @@ def test_collect_pr_data_keeps_comment_identity_and_review_approval_metadata(mon
     )
 
 
-def test_collect_pr_data_loads_commit_paths_for_review_findings(monkeypatch):
-    calls: list[list] = []
-    sha = "e" * 40
-    pull = {
-        "title": "fix: close finding",
-        "body": "Fixes #1",
-        "user": {"login": "pr-author"},
-        "base": {"ref": "main", "sha": BASE_TIP},
-        "head": {"sha": HEAD_SHA},
-    }
-    pages = {
-        "rest": {
-            f"repos/o/r/pulls/{PR_NUM}/comments": {
-                1: [
-                    {
-                        "id": 100,
-                        "body": "F14: regression test required",
-                        "created_at": "2026-11-01T12:00:00Z",
-                        "pull_request_review_id": 301,
-                        "user": {"login": "reviewer"},
-                    }
-                ]
-            },
-            f"repos/o/r/pulls/{PR_NUM}/commits": {1: [_commit(sha)]},
-            f"repos/o/r/issues/{PR_NUM}/timeline": {
-                1: [
-                    {"event": "reviewed", "id": 301},
-                    {"event": "committed", "sha": sha},
-                ]
-            },
-            f"repos/o/r/commits/{sha}": {
-                1: {
-                    "commit": {
-                        "committer": {"date": "2026-11-01T12:05:00Z"}
-                    },
-                    "files": [{"filename": "tests/unit/test_security.py"}],
-                }
-            },
-        }
-    }
-    _install_fake_gh(monkeypatch, calls, pull, BASE_TIP, pages)
-
-    data = pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
-
-    assert data.comments[0].created_at == "2026-11-01T12:00:00Z"
-    assert data.commits[0].committed_at == "2026-11-01T12:05:00Z"
-    assert data.commits[0].files == ("tests/unit/test_security.py",)
-    assert any(args[1] == f"repos/o/r/commits/{sha}" for args in calls)
-
-
-def test_collect_pr_data_uses_server_order_for_issue_comment_findings(monkeypatch):
-    calls: list[list] = []
-    sha = "e" * 40
-    comment_url = "https://api.github.com/repos/o/r/issues/comments/88"
-    pull = {
-        "title": "fix: close finding",
-        "body": "Fixes #1",
-        "user": {"login": "pr-author"},
-        "base": {"ref": "main", "sha": BASE_TIP},
-        "head": {"sha": HEAD_SHA},
-    }
-    pages = {
-        "rest": {
-            f"repos/o/r/issues/{PR_NUM}/comments": {
-                1: [
-                    {
-                        "id": 88,
-                        "url": comment_url,
-                        "body": "F14: regression test required",
-                        "created_at": "2026-11-01T12:00:00Z",
-                        "user": {"login": "reviewer"},
-                    }
-                ]
-            },
-            f"repos/o/r/pulls/{PR_NUM}/commits": {1: [_commit(sha)]},
-            f"repos/o/r/issues/{PR_NUM}/timeline": {
-                1: [
-                    {"event": "commented", "id": 88, "url": comment_url},
-                    {"event": "committed", "sha": sha},
-                ]
-            },
-            f"repos/o/r/commits/{sha}": {
-                1: {
-                    "commit": {"committer": {"date": "2026-10-01T00:00:00Z"}},
-                    "files": [{"filename": "scripts/example.py"}],
-                }
-            },
-        }
-    }
-    _install_fake_gh(monkeypatch, calls, pull, BASE_TIP, pages)
-
-    data = pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
-
-    assert data.comments[0].timeline_order == 0
-    assert data.commits[0].timeline_order == 1
-
-
-def test_collect_pr_data_fails_closed_without_finding_timeline_position(monkeypatch):
-    pull = {
-        "title": "fix: close finding",
-        "body": "Fixes #1",
-        "user": {"login": "pr-author"},
-        "base": {"ref": "main", "sha": BASE_TIP},
-        "head": {"sha": HEAD_SHA},
-    }
-    pages = {
-        "rest": {
-            f"repos/o/r/issues/{PR_NUM}/comments": {
-                1: [
-                    {
-                        "id": 88,
-                        "url": "https://api.github.com/repos/o/r/issues/comments/88",
-                        "body": "F14: regression test required",
-                        "created_at": "2026-11-01T12:00:00Z",
-                        "user": {"login": "reviewer"},
-                    }
-                ]
-            },
-            f"repos/o/r/issues/{PR_NUM}/timeline": {1: []},
-        }
-    }
-    _install_fake_gh(monkeypatch, [], pull, BASE_TIP, pages)
-
-    with pytest.raises(RuntimeError, match="timeline position is missing"):
-        pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
-
-
 def test_collect_threads_follow_graphql_pagination(monkeypatch):
     calls: list[list] = []
     nodes1 = [{"isResolved": True} for _ in range(99)] + [{"isResolved": False}]
@@ -1817,11 +1690,10 @@ def test_main_disabled_never_calls_github(tmp_path, monkeypatch, capsys) -> None
     ],
 )
 def test_regression_test_matches_whole_finding_id(tmp_path, test_content, covered) -> None:
-    cfg = pr_gates_dod.load_config(
-        make_config(tmp_path, '[pr_gates.dod]\nenabled = true\nchecks = ["regression_test"]\n')
-    )
+    cfg = regression_cfg(tmp_path)
     data = make_data(
         review_comment_bodies=("F1: the base check is wrong",),
+        reviews=(approved_review(),),
         changed_file_contents={"tests/test_x.py": test_content},
     )
     report = pr_gates_dod.evaluate(cfg, data)
