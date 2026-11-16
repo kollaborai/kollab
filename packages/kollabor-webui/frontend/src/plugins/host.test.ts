@@ -25,6 +25,28 @@ function setup(options: Partial<PluginHostOptions> = {}) {
 }
 
 describe("plugin host lifecycle", () => {
+
+  it("keeps the earlier-enabled command when imports complete in reverse order", async () => {
+    let finishFirst!: (module: unknown) => void;
+    const firstImport = new Promise<unknown>(resolve => { finishFirst = resolve; });
+    const activate = (id: string) => ({ default: (k: { command(value: { name: string; description: string; run: () => void }): void }) =>
+      k.command({ name: "shared", description: id, run: () => {} }) });
+    const importer = vi.fn((url: string) => url.includes("/first/") ? firstImport : Promise.resolve(activate("second")));
+    const first = { ...entry("first"), enable_order: 1, contributes: { slash: ["shared"] } };
+    const second = { ...entry("second"), enable_order: 2, contributes: { slash: ["shared"] } };
+    const { host, setInventory } = setup({ importer });
+    setInventory([first, second]);
+    const start = host.start();
+    await vi.waitFor(() => expect(importer).toHaveBeenCalledTimes(2));
+    finishFirst(activate("first"));
+    await start;
+    const { plugins, conflicts } = host.getSnapshot().registry;
+    expect(plugins.find(plugin => plugin.id === "first")?.commands.map(command => command.name)).toEqual(["shared"]);
+    expect(plugins.find(plugin => plugin.id === "second")?.commands).toEqual([]);
+    expect(conflicts).toEqual([{ pluginId: "second", command: "shared", owner: "first" }]);
+    host.close();
+  });
+
   it("does not fetch or import when plugins are off for the page", async () => {
     const { host, json, importer } = setup({ disabled: true });
     await host.start();
