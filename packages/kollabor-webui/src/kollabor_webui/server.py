@@ -378,7 +378,7 @@ def create_app(
 
     @app.get("/plugins/{plugin_id}/web/{asset_path:path}")
     async def plugin_asset(plugin_id: str, asset_path: str):
-        from kollabor_plugins.packages import _ID, _read_registry
+        from kollabor_plugins.packages import _ID, _read_registry, files_sha256
 
         missing = JSONResponse({"detail": "Not found"}, status_code=404)
         is_dev = plugin_id.endswith("@dev")
@@ -409,6 +409,12 @@ def create_app(
                     return missing
                 root = plugin_root.resolve()
                 if root.parent != installed_root:
+                    return missing
+                approved_hash = record.get("files_sha256")
+                if not isinstance(approved_hash, str) or not approved_hash:
+                    return missing
+                # Hashing may read the entire package; keep it off the event loop.
+                if await anyio.to_thread.run_sync(files_sha256, root) != approved_hash:
                     return missing
             web = root / "web"
             dist = web / "dist"
