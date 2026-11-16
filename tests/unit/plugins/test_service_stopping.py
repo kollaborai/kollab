@@ -10,6 +10,31 @@ from pathlib import Path
 import pytest
 
 
+def test_long_stop_timeout_is_preserved(tmp_path, monkeypatch):
+    from kollabor_plugins import services
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = tmp_path / ".kollab"
+    root = home / "plugins" / "hello"
+    root.mkdir(parents=True)
+    manifest = {"id": "hello", "services": {"worker": {"command": ["/bin/true"], "stop_timeout_s": 720}}}
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {
+        "enabled": False, "granted": [], "files_sha256": files_sha256(root),
+    }}, "dev": {}}))
+    run = home / "plugin-data" / "hello" / "run"
+    run.mkdir(parents=True)
+    (run / "worker.pid").write_text(json.dumps({"wrapper": {"pid": 4321}}))
+    monkeypatch.setattr(services, "_verified_wrapper", lambda _: True)
+    monkeypatch.setattr(services.os, "kill", lambda *_: None)
+    before = time.time()
+    services.control_service("hello", "worker", "stop")
+    state = json.loads((run / "worker.state.json").read_text())
+    assert 719 <= state["stop_deadline"] - before <= 721
+
+
+
 def test_disable_exposes_live_stopping_service_and_rejects_restart(tmp_path, monkeypatch):
     from kollabor_config import file_lock
     from kollabor_plugins import registry, services, settings
