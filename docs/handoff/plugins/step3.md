@@ -227,6 +227,8 @@
 
 - Failure status labels: browser red test commit `1035735a` timed out on the collapsed failed menu expecting `Failed to Load` (`failure-label-red.log`). Session controls now distinguish `Failed to Load` and `Failed to Render` for declared failed views and menus, including collapsed accessible labels; browser tests cover both render and load failures and scope failure content to the alert to avoid tooltip matches. Isolated fake-engine browser acceptance passed in development and production CSP (`failure-label-green.log`, `failure-label-built-browser.log`); typecheck, 53 frontend test files / 428 tests, and production build passed (`failure-label-typecheck.log`, `failure-label-npm-test.log`, `failure-label-build.log`). Build retains Vite/Monaco warnings. These are interim checks, not the final fixed-head gates or real-engine evidence.
 
+- Changelog: appended the step 3 web plugin entry to `changes/1028.added.md`; the file is a release fragment, not `CHANGELOG.md`. Next audit remaining spec and browser gaps; live smoke is still blocked by the unrelated listeners on ports 7434 and 8081.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
