@@ -13,6 +13,7 @@ import importlib.util
 import json
 import re
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -447,6 +448,48 @@ def test_regression_test_covered_and_uncovered(tmp_path: Path) -> None:
     )
     assert "regression_test" in bad.failed_names()
     assert "F14" in bad.detail_for("regression_test")
+
+
+def test_regression_test_requires_test_only_commit_before_post_finding_fix(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment",
+        comment_id=1,
+        body="F14: the psutil bypass is open",
+        author_login="reviewer",
+        created_at="2026-11-01T12:00:00Z",
+    )
+    data = make_data(
+        commits=(
+            SimpleNamespace(
+                sha="a" * 40,
+                message="fix(security): close F14 bypass",
+                verified=True,
+                committed_at="2026-11-01T12:05:00Z",
+                files=("kollabor/security.py",),
+            ),
+            SimpleNamespace(
+                sha="b" * 40,
+                message="test(security): reproduce F14 bypass",
+                verified=True,
+                committed_at="2026-11-01T12:10:00Z",
+                files=("tests/unit/test_security.py",),
+            ),
+        ),
+        changed_files=["kollabor/security.py", "tests/unit/test_security.py"],
+        changed_file_contents={
+            "tests/unit/test_security.py": "def test_f14_bypass(): ..."
+        },
+        comments=(finding,),
+    )
+
+    report = pr_gates_dod.evaluate(cfg, data)
+
+    assert "regression_test" in report.failed_names()
+    assert "F14" in report.detail_for("regression_test")
+    assert "before the fix" in report.detail_for("regression_test")
 
 
 def test_regression_test_ignores_quoted_ruff_rule_codes_1024(tmp_path: Path) -> None:
