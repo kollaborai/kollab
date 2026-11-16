@@ -6,11 +6,14 @@ import asyncio
 import base64
 import json
 import os
+import subprocess
 import sys
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
+import kollabor_engine
+import kollabor_voice
 import kollabor_voice.phone_audio_bridge as pab
 import pytest
 from kollabor_engine.voice_livekit import (
@@ -342,8 +345,37 @@ def test_bridge_never_opens_sound_device():
         text = path.read_text()
         for name in banned:
             assert name not in text, f"{path.name} references {name}"
-    for name in banned:
-        assert name not in sys.modules, f"{name} imported by bridge tests"
+    # The engine suite shares one pytest process, so this process's
+    # sys.modules reflects whatever other tests imported, not the bridge.
+    # Import both guarded modules in a pristine interpreter and assert no
+    # sound library entered their import chain - the same property checked
+    # by the voice-package sibling (kollaborai/kollab#1136), which runs the
+    # bridge as its own subprocess in production too.
+    roots = [
+        str(Path(kollabor_voice.__file__).resolve().parents[1]),
+        str(Path(kollabor_engine.__file__).resolve().parents[1]),
+    ]
+    env = dict(os.environ)
+    extra = [*roots, env.get("PYTHONPATH", "")]
+    env["PYTHONPATH"] = os.pathsep.join(entry for entry in extra if entry)
+    script = (
+        "import sys\n"
+        "import kollabor_voice.phone_audio_bridge\n"
+        "import kollabor_engine.voice_livekit\n"
+        f"banned = {banned!r}\n"
+        "leaked = sorted(set(banned) & set(sys.modules))\n"
+        "assert not leaked, f'sound libraries in the bridge import: {leaked}'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        "the bridge import chain pulled in a sound library:\n" + result.stderr
+    )
 
 
 @pytest.mark.asyncio

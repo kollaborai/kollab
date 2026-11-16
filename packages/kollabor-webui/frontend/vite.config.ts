@@ -185,6 +185,7 @@ const mainConfig = defineConfig({
   test: {
     // Vitest suites; Node's built-in test runner remains for older tests.
     include: [
+      "tests/media-tokens.test.ts",
       "tests/prompts-page.test.ts",
       "tests/terminal-ws-protocol.test.ts",
       "tests/lazy-file-list.test.ts",
@@ -226,6 +227,8 @@ const mainConfig = defineConfig({
       "tests/model-choices.test.ts",
       "tests/panel-dialog-surface.test.tsx",
       "tests/setup-guide-footer.test.tsx",
+      "tests/setup-guide-close.test.tsx",
+      "tests/setup-guide-followups.test.tsx",
     ],
     environment: "node",
   },
