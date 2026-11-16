@@ -115,11 +115,12 @@ try {
   const damaged = { ...entry, id: "damaged", name: "Damaged", state: "changed-on-disk", error: "Plugin files changed since approval", web: null, contributes: {} };
   const broken = { id: "broken", name: "Broken", kind: "installed", state: "ok", enabled: true, shadowed: false,
     web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: { slash: ["broken-command"], views: [{ id: "broken-view" }], menu: [{ id: "broken-row", label: "Broken Board", open: { page: "board" } }], pages: [{ id: "board" }] } };
+  const zulu = { ...broken, id: "zulu", name: "Zulu", contributes: { menu: [{ id: "row", label: "Zulu Board", open: { page: "board" } }] } };
   await page.route("**/*", async route => {
     const url = new URL(route.request().url());
     if (url.origin !== origin) return route.abort();
     if (url.pathname === "/api/config") return route.fulfill({ json: { engine_url: "/engine" } });
-    if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, server_time: engineNow(), plugins: [...(fixtureRemoved ? [] : [entry]), broken, crasher, damaged, hello] } }); }
+    if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, server_time: engineNow(), plugins: [...(fixtureRemoved ? [] : [entry]), broken, crasher, damaged, hello, zulu] } }); }
     if (url.pathname === "/engine/plugins/install" && route.request().method() === "POST") {
       installSource = route.request().postDataJSON();
       if (!installSource?.source) return route.fulfill({ status: 422, json: { detail: "source is required" } });
@@ -178,6 +179,7 @@ try {
       broken.enabled = false;
       return route.fulfill({ json: { ok: true } });
     }
+    if (url.pathname === "/plugins/zulu/web/index.js") return route.fulfill({ status: 500, contentType: "text/plain", body: "broken" });
     if (url.pathname === "/plugins/broken/web/index.js") {
       brokenImports.push(url.href);
       return route.fulfill({ status: 500, contentType: "text/plain", body: "broken" });
@@ -328,6 +330,10 @@ try {
   const panel = page.getByRole("complementary", { name: "Session Controls" });
   await panel.waitFor({ timeout: 15000 });
   await panel.getByRole("button", { name: "Hide Session Panel" }).click();
+  const fixtureMenu = panel.getByRole("button", { name: /Fixture Board/ });
+  const zuluMenu = panel.getByRole("button", { name: "Zulu Board Failed to Load", exact: true });
+  await zuluMenu.waitFor();
+  assert.ok(await fixtureMenu.evaluate((element, other) => Boolean(element.compareDocumentPosition(other) & Node.DOCUMENT_POSITION_FOLLOWING), await zuluMenu.elementHandle()), "menu rows sort by plugin name even when a later plugin fails");
   const collapsedFailed = panel.getByRole("button", { name: "Broken Board Failed to Load", exact: true });
   await collapsedFailed.waitFor({ timeout: 5000 });
   await collapsedFailed.click();
