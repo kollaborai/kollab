@@ -114,7 +114,12 @@ export type HistoryMessage = {
 };
 
 /** The engine's stored copy of one image a session sent (#1088). */
-export type MediaEntry = { ref: string; mime: string };
+export type MediaEntry = {
+  ref: string;
+  mime: string;
+  /** A slot whose storage failed: binds nothing, renders as literal text. */
+  failed?: boolean;
+};
 
 /** Why the session's last turn failed; it goes after `history_length` messages. */
 export type TurnError = { message: string; history_length: number };
