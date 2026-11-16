@@ -88,6 +88,13 @@
 
 ## Remaining work / exact next step
 
+
+### Blocked: disk full (supervisor instruction, 06:32)
+- `df -h .` on the worktree filesystem reported 1.6 GiB available, below the required 8 GB. Until free space is above 8 GB, run no Docker command, browser, or live stack. Docker Desktop is being quit by the supervisor; do not restart it. Do not delete other containers, caches, or user files to free space.
+- Resume only after confirming free disk above 8 GB. The next required visual step is the 390px phone-sized check using a host scratch stack and Playwright, not Docker, followed by the full mockup comparisons described below. Respect the original brief's stack restrictions and obtain any specific stack authorization needed; do not touch the live relay.
+- PhoneLink remains separately broken: design and review a complete no-new-dependency, signed-app-preserving encrypted asset/module solution, then commit a failing paired plugin regression before implementing it. The previous synthetic Docker baseline is not that regression. The supervisor's disk instruction supersedes the earlier temporary-Docker permission; it does not authorize a host scratch relay.
+- No source changed during this stop. Final-HEAD gates, actual PhoneLink plugin coverage, independent visual reviews, and completion remain outstanding. Stop as blocked, not complete.
+
 1. Complete visual review of the settled `shots/39e549dea` captures at all 1440/820/390 widths in light and dark against the `.dc.html` comps and responsive principles, including clipping, states, dimensions and visible text. Captures under `shots/2a28c6ea8` predate the menu-placement fix. The screenshot-diff service timed out; OCR/source comparison is not a substitute. Repeat the live captures on the eventual final stack after any code changes. Record differences and fix them red-first within the owned scope. Do not treat viewport-width checks alone as visual sign-off.
 2. Audit the canonical spec's requested sections and test plan against current implementation; record remaining failures honestly. If a Python edit is necessary, record its path and why here before editing. Any spec contract change needs its own commit.
 3. Keep this handoff current and commit each finished item. After the final code and handoff commit, request supervisor stack restart at that exact HEAD, rerun complete live smoke/screenshots, and rerun frontend typecheck/test/build, production-CSP browser acceptance, Python tests/Ruff/compile at that exact HEAD with isolated HOME. Avoid changing HEAD while gates run. A new handoff commit changes HEAD, so record final run evidence externally as well and state its exact SHA.
