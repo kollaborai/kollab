@@ -144,6 +144,9 @@ try {
       confirmedUpdate = route.request().postDataJSON();
       return route.fulfill({ json: { ...preview, job_id: "update-fixture", action: "update", status: "complete" } });
     }
+    if (url.pathname === "/engine/plugins/fixture/services/worker/log" && route.request().method() === "GET") {
+      return route.fulfill({ contentType: "text/plain", body: "redacted fixture crash log" });
+    }
     if (url.pathname === "/engine/plugins/fixture/services/worker/stop" && route.request().method() === "POST") {
       stopRetryCalls++;
       return route.fulfill({ json: { accepted: true } });
@@ -271,7 +274,12 @@ try {
   entry.services[0].state = "crash-stopped";
   delete entry.services[0].stop_deadline;
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
-  await page.getByText(/Fixture: worker.*stopped after 5 crashes/).waitFor({ timeout: 15000 });
+  const crashNotice = page.getByRole("status").filter({ hasText: /Fixture: worker.*stopped after 5 crashes/ });
+  await crashNotice.waitFor({ timeout: 15000 });
+  await crashNotice.getByRole("button", { name: "View Log", exact: true }).click();
+  const crashLog = page.getByRole("dialog", { name: "worker Log" });
+  await crashLog.getByText("redacted fixture crash log", { exact: true }).waitFor();
+  await crashLog.getByRole("button", { name: "Close" }).click();
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   await folderlessPanel.getByRole("button", { name: /Fixture Board/ }).getByText("Stopped", { exact: true }).waitFor({ timeout: 5000 });
   assert.equal(await folderlessPanel.getByRole("button", { name: "Fixture View", exact: true }).count(), 0, "folder-required tab is hidden without a folder");
