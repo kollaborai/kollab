@@ -70,7 +70,10 @@ async function cachedRemoteHistory(page) {
 }
 
 async function openPageInContext(context, baseUrl, fixtures) {
-  await context.addInitScript(() => localStorage.setItem("kollab.setup-guide.v1", "dismissed"));
+  await context.addInitScript(() => {
+    localStorage.setItem("kollab.setup-guide.v1", "dismissed");
+    localStorage.setItem("kollab.whats-new.v1", JSON.stringify({ seenVersion: "999.999.999" }));
+  });
   const page = await context.newPage();
   const pageErrors = [];
   const consoleErrors = [];
