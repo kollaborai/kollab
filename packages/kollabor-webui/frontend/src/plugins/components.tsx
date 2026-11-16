@@ -2,6 +2,7 @@ import { Component, createContext, useContext, useState, useSyncExternalStore, t
 import { Button } from "@/components/ui/button";
 import { NoticeAction, NoticeBar } from "@/components/shell/NoticeBar";
 import type { PluginHost, PluginHostSnapshot } from "./host";
+import type { PluginNotice } from "./sdk";
 import type { Session } from "@/api";
 
 export const PluginHostContext = createContext<PluginHost | null>(null);
@@ -70,6 +71,15 @@ export class PluginRenderBoundary extends Component<BoundaryProps, BoundaryState
   }
 }
 
+function ContributedNotice({ host, pluginId, name, notice }: { host: PluginHost; pluginId: string; name: string; notice: PluginNotice }) {
+  const [dismissed, setDismissed] = useState(false);
+  if (dismissed) return null;
+  return <NoticeBar onDismiss={() => setDismissed(true)} actions={notice.button ? <NoticeAction className="text-foreground any-pointer-coarse:min-h-[44px] any-pointer-coarse:min-w-[44px]"
+    onClick={() => { if (notice.button) host.getContext(pluginId)?.navigate(notice.button.open); }}>{notice.button.label}</NoticeAction> : null}>
+    <strong>{name}:</strong> {notice.text}
+  </NoticeBar>;
+}
+
 export function PluginNotices({ host }: { host: PluginHost }) {
   const snapshot = usePluginSnapshot(host);
   return <>
@@ -83,10 +93,8 @@ export function PluginNotices({ host }: { host: PluginHost }) {
       </NoticeBar>;
     })}
     {snapshot.registry.plugins.flatMap(plugin => plugin.notices.map((notice, index) =>
-      <NoticeBar key={`${plugin.id}:${index}`} actions={notice.button ? <NoticeAction className="text-foreground any-pointer-coarse:min-h-[44px] any-pointer-coarse:min-w-[44px]"
-        onClick={() => { if (notice.button) host.getContext(plugin.id)?.navigate(notice.button.open); }}>{notice.button.label}</NoticeAction> : null}>
-        {notice.text}
-      </NoticeBar>,
+      <ContributedNotice key={`${plugin.id}:${index}`} host={host} pluginId={plugin.id}
+        name={snapshot.entries.find(entry => entry.id === plugin.id)?.name ?? plugin.id} notice={notice} />,
     ))}
   </>;
 }
