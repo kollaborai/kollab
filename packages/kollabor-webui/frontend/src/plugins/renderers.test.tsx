@@ -22,6 +22,16 @@ describe("plugin tool renderer", () => {
     expect(html).toContain("Plugin result: safe output");
     expect(html).not.toContain("Default tool");
   });
+  it("keeps a failure panel for a tool after its plugin is quarantined", () => {
+    const snapshot = { disabled: false, loading: false, inventoryError: null, entries: [],
+      registry: { plugins: [], conflicts: [] }, errors: { example: "renderer crashed" }, skipped: [], renderFailed: ["example"],
+      failedRenderers: [{ pluginId: "example", tool: "build_report" }] };
+    const host = { subscribe: () => () => {}, getSnapshot: () => snapshot, retry: async () => {} } as unknown as PluginHost;
+    const html = renderToStaticMarkup(<PluginHostContext.Provider value={host}><PluginToolPart part={part} fallback={<span>Default tool</span>} /></PluginHostContext.Provider>);
+    expect(html).toContain("Failed to Render");
+    expect(html).toContain("Retry");
+    expect(html).not.toContain("Default tool");
+  });
   it("uses the original tool UI when no plugin claims the tool", () => {
     const html = renderToStaticMarkup(<PluginHostContext.Provider value={hostWithTool()}><PluginToolPart part={{ ...part, toolName: "other" }} fallback={<span>Default tool</span>} /></PluginHostContext.Provider>);
     expect(html).toContain("Default tool");

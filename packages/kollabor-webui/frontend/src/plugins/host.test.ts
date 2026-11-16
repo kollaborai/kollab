@@ -354,6 +354,25 @@ describe("plugin host lifecycle", () => {
     host.close();
   });
 
+  it("retains failed renderer identities without retaining plugin functions", async () => {
+    const importer = vi.fn().mockResolvedValue({ default: (k: any) => {
+      k.renderer({ tool: "build_report", render: () => null });
+      k.renderer({ tag: "report_tag", render: () => null });
+    } });
+    const configured = entry("hello");
+    configured.contributes = { renderers: [{ tool: "build_report" }, { tag: "report_tag" }] };
+    const { host, setInventory } = setup({ importer });
+    setInventory([configured]);
+    await host.start();
+    host.reportRenderError("hello", new Error("boom"));
+    expect(host.getSnapshot().failedRenderers).toEqual([
+      { pluginId: "hello", tool: "build_report" }, { pluginId: "hello", tag: "report_tag" },
+    ]);
+    await host.retry("hello");
+    expect(host.getSnapshot().failedRenderers).toEqual([]);
+    host.close();
+  });
+
   it("isolates a render failure and retries that plugin", async () => {
     const { host, importer } = setup();
     await host.start();
