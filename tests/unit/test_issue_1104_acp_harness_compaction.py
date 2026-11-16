@@ -262,5 +262,33 @@ class TestExplicitThresholdWins(unittest.TestCase):
         self.assertEqual(plugin._get_token_threshold_details(), (272_000, "automatic"))
 
 
+class TestSessionLoadoutThreshold(unittest.TestCase):
+    """The threshold comes from the loadout the session runs on, not the default one (#1104)."""
+
+    @staticmethod
+    def _session_on(loadout_name, profile="claude"):
+        profiles = MagicMock()
+        profiles.active_profile_name = profile
+        profiles.active_loadout_name = loadout_name
+        return profiles
+
+    def test_session_on_a_non_default_loadout_uses_its_own_threshold(self):
+        settings = {
+            LoadoutManager.CONFIG_KEY: {
+                "acp-claude": {"provider_profile": "claude", "model": "opus"},
+                "acp-claude-500k": {
+                    "provider_profile": "claude",
+                    "model": "opus",
+                    "compaction_threshold_k": 500,
+                },
+            },
+            LoadoutManager.DEFAULT_CONFIG_KEY: "acp-claude",
+        }
+        plugin, _llm, _acp = _plugin(settings)
+        plugin._get_context_window_tokens = lambda: 1_000_000
+        plugin._profile_manager = self._session_on("acp-claude-500k")
+        self.assertEqual(plugin._get_token_threshold_details(), (500_000, "manual"))
+
+
 if __name__ == "__main__":
     unittest.main()
