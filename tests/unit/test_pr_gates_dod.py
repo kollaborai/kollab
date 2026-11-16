@@ -650,6 +650,86 @@ def test_regression_test_allows_explicit_non_testable_finding(tmp_path: Path) ->
     assert "regression_test" not in report.failed_names()
 
 
+def test_regression_test_requires_test_commit_patch_to_name_finding(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment",
+        comment_id=1,
+        body="F14: the issue remains open",
+        author_login="reviewer",
+        created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    data = make_data(
+        commits=(
+            SimpleNamespace(
+                sha="a" * 40,
+                message="test(core): unrelated cleanup",
+                verified=True,
+                committed_at="2026-11-01T12:01:00Z",
+                files=("tests/unit/test_core.py",),
+                file_patches={"tests/unit/test_core.py": "@@\n+assert True"},
+                timeline_order=11,
+            ),
+            SimpleNamespace(
+                sha="b" * 40,
+                message="fix(core): close F14",
+                verified=True,
+                committed_at="2026-11-01T12:02:00Z",
+                files=("kollabor/core.py",),
+                file_patches={},
+                timeline_order=12,
+            ),
+        ),
+        comments=(finding,),
+        changed_files=["tests/unit/test_core.py", "kollabor/core.py"],
+        changed_file_contents={
+            "tests/unit/test_core.py": "# F14 existed before this commit\ndef test_old(): pass"
+        },
+    )
+
+    report = pr_gates_dod.evaluate(cfg, data)
+
+    assert "regression_test" in report.failed_names()
+    assert "no test-only commit" in report.detail_for("regression_test")
+
+
+def test_regression_test_requires_reason_for_non_testable_finding(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment",
+        comment_id=1,
+        body="F15: documentation change needs an explanation",
+        author_login="reviewer",
+        created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    data = make_data(
+        commits=(
+            SimpleNamespace(
+                sha="c" * 40,
+                message="fix(docs): update the guide\n\nNo regression test: F15",
+                verified=True,
+                committed_at="2026-11-01T12:01:00Z",
+                files=("docs/guide.md",),
+                timeline_order=11,
+            ),
+        ),
+        comments=(finding,),
+        changed_files=["docs/guide.md"],
+        changed_file_contents={},
+    )
+
+    report = pr_gates_dod.evaluate(cfg, data)
+
+    assert "regression_test" in report.failed_names()
+    assert "F15" in report.detail_for("regression_test")
+
+
 def test_regression_test_allows_strict_xfail_removal_with_fix(tmp_path: Path) -> None:
     cfg = regression_cfg(tmp_path)
     finding = SimpleNamespace(
