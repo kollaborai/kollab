@@ -88,3 +88,23 @@ def test_total_cap_prunes_oldest_logs_across_project_folders(tmp_path):
     assert not old_log.exists()
     assert current_log.read_bytes() == b"new\n"
     assert sum(path.stat().st_size for path in projects.rglob("*_raw.jsonl")) <= 4
+
+
+def test_total_cap_does_not_prune_non_conversation_raw_files(tmp_path):
+    projects = tmp_path / "projects"
+    current_raw = projects / "active" / "conversations" / "raw"
+    unrelated_raw = projects / "cache" / "raw"
+    current_raw.mkdir(parents=True)
+    unrelated_raw.mkdir(parents=True)
+    current_log = current_raw / "session_raw.jsonl"
+    unrelated_log = unrelated_raw / "metrics_raw.jsonl"
+    current_log.write_bytes(b"keep")
+    unrelated_log.write_bytes(b"other")
+    os.utime(unrelated_log, (1_000_000_000, 1_000_000_000))
+
+    service = _service(current_raw)
+    service._raw_max_total_bytes = current_log.stat().st_size
+    service._prune_raw_logs()
+
+    assert unrelated_log.exists()
+    assert current_log.read_bytes() == b"keep"
