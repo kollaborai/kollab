@@ -239,6 +239,8 @@
 
 - Settings service states: red browser test `7b88f1b2` failed on the missing list-row stopping state (`settings-list-services-red.log`). Fix `9f726eeca` shares the service-state formatter between details and list, including stopping deadlines, missed heartbeat and crash-stop, and updates time-based labels on a clock. Development browser acceptance and typecheck passed (`settings-list-services-green-final.log`, `settings-list-services-typecheck-final.log`). Running duration is now included when an engine start time is known: red browser `e27d1c49e` and red unit `104520dfe` failed as expected (`settings-runtime-red.log`, `settings-runtime-unit-red.log`); fix `64b7c32b0` passes browser, unit, and typecheck (`settings-runtime-green.log`, `settings-runtime-unit-green.log`, `settings-runtime-typecheck.log`). Unknown/future start times do not invent a duration.
 
+- Service list accessibility: red browser `c06beda2b` showed `aria-label` hid the visible process state from the list row's accessible description (`service-a11y-red.log`). Fix `2f364047d` associates the status text through `aria-describedby` while keeping the plugin name as the button name. Browser acceptance and typecheck passed (`service-a11y-green.log`, `service-a11y-typecheck.log`).
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
