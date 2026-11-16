@@ -46,6 +46,26 @@ describe("plugin SDK", () => {
     ]);
   });
 
+  it("revokes SDK actions and aborts outstanding requests after disposal", async () => {
+    const { k, json, navigate } = setup();
+    let requestSignal: AbortSignal | undefined;
+    json.mockImplementationOnce((_path, init) => {
+      requestSignal = init?.signal ?? undefined;
+      return new Promise((_resolve, reject) => requestSignal?.addEventListener("abort", () => reject(new Error("aborted"))));
+    });
+    const inFlight = k.api.get("/slow");
+    expect(requestSignal).toBeInstanceOf(AbortSignal);
+    k.dispose();
+    await expect(inFlight).rejects.toThrow("aborted");
+    expect(requestSignal?.aborted).toBe(true);
+    await expect(k.api.post("/late", { x: 1 })).rejects.toThrow("disposed");
+    await expect(k.settings.save({ greeting: "late" })).rejects.toThrow("disposed");
+    await expect(k.settings.get()).rejects.toThrow("disposed");
+    k.navigate({ page: "board" });
+    expect(navigate).not.toHaveBeenCalled();
+    expect(json).toHaveBeenCalledTimes(1);
+  });
+
   it("refuses traversal, encoded separators, or an absolute URL as an API path", async () => {
     const { k, json } = setup();
     for (const path of ["../other", "/%2e%2e/settings", "/a%2fb", "https://outside.test/a", "//outside.test/a", "/a\\b"]) {
