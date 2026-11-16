@@ -14,7 +14,7 @@ const entry = (id: string, enabled = true) => ({
   web: { entry: "web/dist/index.js", style: null, hash: "a" }, contributes: {},
 });
 function setup(options: Partial<PluginHostOptions> = {}) {
-  let inventory = [entry("hello")];
+  let inventory: (ReturnType<typeof entry> & { services?: unknown[] })[] = [entry("hello")];
   const json = vi.fn(async () => ({ schema: 1, plugins: inventory }));
   const request = vi.fn(async () => new Response(new ReadableStream<Uint8Array>()));
   const importer = vi.fn(async () => ({ default: (k: { notice(value: { text: string }): void }) => k.notice({ text: "Hello" }) }));

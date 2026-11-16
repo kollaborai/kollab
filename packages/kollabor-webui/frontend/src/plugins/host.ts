@@ -86,6 +86,7 @@ export class PluginHost {
   private closed = false;
   private sequence = 0;
   private markerSequence = 0;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private snapshot: PluginHostSnapshot;
 
   constructor(private readonly options: PluginHostOptions) {
@@ -160,6 +161,7 @@ export class PluginHost {
       if (sequence !== this.sequence || this.closed) return;
       if (response.schema !== 1 || !Array.isArray(response.plugins)) throw new Error("Invalid plugin inventory");
       this.entries = response.plugins as PluginEntry[];
+      this.syncHeartbeatPolling();
       this.inventoryError = null;
       const included = this.entries.filter(entry => !this.skipped.has(entry.id));
       const desired = new Set(included.filter(entry => entry.enabled && !entry.shadowed && (entry.state === "ok" || entry.state === "stopping") && entry.web).map(entry => entry.id));
@@ -173,6 +175,18 @@ export class PluginHost {
       this.loading = false;
       this.inventoryError = error instanceof Error ? error.message : String(error);
       this.publish();
+    }
+  }
+
+  private syncHeartbeatPolling() {
+    const needed = this.entries.some(entry => entry.enabled && entry.services?.some(service =>
+      typeof service === "object" && service !== null && "state" in service && service.state === "running" &&
+      "heartbeat_s" in service && typeof service.heartbeat_s === "number" && Number.isFinite(service.heartbeat_s) && service.heartbeat_s > 0));
+    if (needed && this.heartbeatTimer === null) {
+      this.heartbeatTimer = setInterval(() => { if (!this.loading) void this.refresh(); }, 30_000);
+    } else if (!needed && this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
     }
   }
 
@@ -197,6 +211,8 @@ export class PluginHost {
     if (this.closed) return;
     this.closed = true;
     this.sequence++;
+    if (this.heartbeatTimer !== null) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
     this.globalEvents.close();
     for (const id of [...this.resources.keys()]) {
       this.release(id);

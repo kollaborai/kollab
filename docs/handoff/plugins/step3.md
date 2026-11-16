@@ -185,6 +185,8 @@
 
 - Heartbeat menu: browser red test `d4e34ced` showed an overdue service left its plugin count in place (`heartbeat-menu-red.log`). Expanded and collapsed menu controls now show accessible No Heartbeat status; browser acceptance and typecheck passed (`heartbeat-menu-green.log`, `heartbeat-menu-typecheck.log`). The display uses mocked inventory; periodic inventory refresh/recovery still needs a red-first test.
 
+- Heartbeat recovery: red host test `03d0230f` showed inventory never refreshed after a promised heartbeat changed (`heartbeat-poll-red.log`). The host now polls every 30 seconds only while an enabled running service advertises a valid interval, skips overlapping inventory requests and clears its timer on close; host/heartbeat tests passed 14/14, browser acceptance and typecheck passed (`heartbeat-poll-green.log`, `heartbeat-poll-browser.log`, `heartbeat-poll-typecheck.log`). The test checks refreshed data and close cleanup, not a live daemon or visual transition. Test fixture typing required a follow-up correction after the first typecheck.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
