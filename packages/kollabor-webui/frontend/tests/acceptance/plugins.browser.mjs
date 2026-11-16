@@ -86,6 +86,7 @@ try {
   let brokenDisableCalls = 0;
   let stopRetryCalls = 0;
   let partialStopFailure = false;
+  let slowEnabled = false;
   let failCrashLog = true;
   let fixtureRemoved = false;
   let folderless = false;
@@ -118,11 +119,12 @@ try {
   const zulu = { ...broken, id: "zulu", name: "Zulu", contributes: { menu: [{ id: "row", label: "Zulu Board", open: { page: "board" } }] } };
   const contender = { ...entry, id: "contender", name: "Contender", enable_order: 2, services: [],
     web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: { slash: ["fixture"] } };
+  const slow = { ...contender, id: "slow", name: "Slow", enable_order: 3, contributes: {} };
   await page.route("**/*", async route => {
     const url = new URL(route.request().url());
     if (url.origin !== origin) return route.abort();
     if (url.pathname === "/api/config") return route.fulfill({ json: { engine_url: "/engine" } });
-    if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, server_time: engineNow(), plugins: [...(fixtureRemoved ? [] : [entry]), broken, crasher, damaged, hello, zulu, contender] } }); }
+    if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, server_time: engineNow(), plugins: [...(fixtureRemoved ? [] : [entry]), broken, crasher, damaged, hello, zulu, contender, ...(slowEnabled ? [slow] : [])] } }); }
     if (url.pathname === "/engine/plugins/install" && route.request().method() === "POST") {
       installSource = route.request().postDataJSON();
       if (!installSource?.source) return route.fulfill({ status: 422, json: { detail: "source is required" } });
@@ -167,6 +169,7 @@ try {
     if (url.pathname === "/engine/plugins/fixture/disable" && route.request().method() === "POST") {
       entry.enabled = false;
       if (partialStopFailure) {
+        slowEnabled = true;
         entry.state = "stop-failed";
         entry.services[0].state = "stop-failed";
         entry.services[0].error = "Could not stop this process. Retry stopping it.";
@@ -180,6 +183,10 @@ try {
       brokenDisabled = true;
       broken.enabled = false;
       return route.fulfill({ json: { ok: true } });
+    }
+    if (url.pathname === "/plugins/slow/web/index.js") {
+      await new Promise(resolve => setTimeout(resolve, 4000));
+      return route.fulfill({ contentType: "text/javascript", body: "export default () => {};" }).catch(() => {});
     }
     if (url.pathname === "/plugins/contender/web/index.js") return route.fulfill({ contentType: "text/javascript", body:
       `export default k => k.command({name:"fixture",description:"Contending command",run:()=>{}});` });
@@ -259,10 +266,11 @@ try {
   await partialSettings.getByRole("switch", { name: "Fixture enabled" }).click();
   const partialDialog = page.getByRole("dialog", { name: "Turn off Fixture?" });
   await partialDialog.getByRole("button", { name: "Turn Off", exact: true }).click();
-  await partialDialog.waitFor({ state: "hidden", timeout: 5000 });
+  await partialDialog.waitFor({ state: "hidden", timeout: 2000 });
   await partialSettings.getByRole("alert").getByText(/Could not stop background processes/).waitFor();
   await partialSettings.getByRole("button", { name: "Retry Stop", exact: true }).waitFor();
   partialStopFailure = false;
+  slowEnabled = false;
   entry.enabled = false;
   entry.state = "stop-failed";
   entry.services[0].state = "stop-failed";
