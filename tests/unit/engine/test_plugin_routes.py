@@ -923,3 +923,39 @@ def test_package_enable_disable_remove_are_guarded_and_preserve_data(tmp_path, m
         assert any(call[0] == "remove" and call[2]["purge"] is False for call in calls)
         assert client.post("/plugins/missing/enable").status_code == 404
         assert client.post("/plugins/hello/enable", headers={"x-kollab-plugin-remote": "1"}).status_code == 403
+
+
+def test_disable_partial_stop_failure_publishes_and_revokes(tmp_path, monkeypatch):
+    import json
+    from unittest.mock import AsyncMock, Mock
+
+    from kollabor_plugins import settings
+    from kollabor_plugins.services import ServiceStopError
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    home = tmp_path / ".kollab"
+    root = home / "plugins" / "hello"
+    root.mkdir(parents=True)
+    (root / "kollab-plugin.json").write_text(json.dumps({"id": "hello", "name": "Hello"}))
+    path = home / "plugins.json"
+    path.write_text(json.dumps({"plugins": {"hello": {"enabled": True}}, "dev": {}}))
+
+    def partial_disable(plugin_id, enabled, **_):
+        assert plugin_id == "hello" and enabled is False
+        path.write_text(json.dumps({"plugins": {"hello": {"enabled": False}}, "dev": {}}))
+        raise ServiceStopError("Could not stop background processes")
+
+    monkeypatch.setattr(settings, "set_enabled", partial_disable)
+    app = create_app()
+    with TestClient(app) as client:
+        app.state.plugin_dispatcher.invalidate = AsyncMock(return_value=False)
+        app.state.plugin_service_controls.cancel_plugin = AsyncMock()
+        app.state.plugin_events.publish_change = Mock()
+        response = client.post("/plugins/hello/disable")
+        assert response.status_code == 409
+        assert "Could not stop" in response.json()["detail"]
+        app.state.plugin_dispatcher.invalidate.assert_awaited_once_with("hello")
+        app.state.plugin_service_controls.cancel_plugin.assert_awaited_once_with("hello")
+        app.state.plugin_events.publish_change.assert_called_once()
