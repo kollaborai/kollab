@@ -51,3 +51,13 @@
   later runs set TMPDIR to the external backup work directory. No real HOME was used.
 - Next: findings 2–10 of the visual review, red-first where testable; then full gates,
   stack restart, live smoke and screenshot matrix at the final code HEAD.
+
+- Finding 4: tests `3f6c75001` and fix `d053be877` show the empty installed-group
+  message alongside built-ins, and suppress it on inventory failure. Red and green logs:
+  `empty-red.log`, `empty-green.log` in the external backup work directory (6 passed).
+- Finding 2: test `ab21a0c1d`, fix `48c857230`: contributed notices show the plugin
+  name and a dismiss button. `notices-red.log`, `notices-green.log`: 10 focused tests
+  pass; `typecheck-progress.log` passes. Static markup tests cover the control, not a
+  browser click: live dismissal and independent notices still need browser verification.
+- Next: complete findings 3 and 5–10, including red-first behavior tests; exercise notice
+  dismissal in the browser, then all gates, restart, smoke and captures at final code HEAD.
