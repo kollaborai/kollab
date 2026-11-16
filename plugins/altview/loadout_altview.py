@@ -445,7 +445,7 @@ class LoadoutListAltView(AltView):
         self._delete_armed = item.name
         self._note = (
             f"press D again to remove the {_provider_display(provider)} provider "
-            f"(profiles {names} and saved keys they exclusively own); "
+            f"(profiles {names}; saved keys are retained because another project may reference them); "
             "any other key or action cancels."
         )
         if loadouts:

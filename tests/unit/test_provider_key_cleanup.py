@@ -99,7 +99,7 @@ def test_local_provider_removal_preserves_legacy_key_used_by_another_project(
     assert other_project_path.exists()
 
 
-def test_local_provider_removal_deletes_its_scoped_saved_key(monkeypatch, tmp_path):
+def test_local_provider_removal_retains_its_scoped_saved_key(monkeypatch, tmp_path):
     global_path = tmp_path / "home" / ".kollab" / "config.json"
     local_path = tmp_path / "project" / ".kollab" / "config.json"
     secret_name = _project_secret_name("anthropic-local", local_path)
@@ -121,7 +121,7 @@ def test_local_provider_removal_deletes_its_scoped_saved_key(monkeypatch, tmp_pa
 
     assert manager.remove_provider_profiles("anthropic") == ["anthropic-local"]
 
-    assert deleted == [secret_name]
+    assert deleted == []
 
 
 def test_global_provider_removal_retains_key_referenced_by_another_project(

@@ -170,7 +170,7 @@ def provider_removal_prompt(
     display = provider_display(provider)
     prompt = (
         f"Press Remove {display} provider again to remove the {display} provider "
-        f"(profiles {names} and saved keys they exclusively own); "
+        f"(profiles {names}; saved keys are retained because another project may reference them); "
         "any other key or action cancels."
     )
     if dependent_loadouts:

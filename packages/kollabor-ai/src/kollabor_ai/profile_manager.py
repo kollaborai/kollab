@@ -2803,7 +2803,6 @@ class ProfileManager:
                 unique_paths.append(path)
 
         removed: set[str] = set()
-        secret_names: set[str] = set()
         updates: List[tuple[Path, dict, set[str]]] = []
         scanned_configs: List[tuple[Path, dict]] = []
         original_config_text: dict[Path, str] = {}
@@ -2831,19 +2830,6 @@ class ProfileManager:
                 if matching:
                     updates.append((path, config_data, matching))
                     removed.update(matching)
-                    for name in matching:
-                        api_key = str(profiles[name].get("api_key") or "")
-                        if api_key.startswith(KEYRING_SENTINEL_PREFIX):
-                            secret_name = api_key[len(KEYRING_SENTINEL_PREFIX) :]
-                            if (
-                                path.resolve() != global_config_path.resolve()
-                                and secret_name == _project_secret_name(name, path)
-                            ):
-                                # Global sentinels may also be referenced by
-                                # local configs outside this manager's scope.
-                                # Delete only keys whose path-scoped name proves
-                                # this local config owns the entry.
-                                secret_names.add(secret_name)
             except Exception as exc:
                 logger.error("Could not read provider config %s: %s", path, exc)
                 return []
@@ -2915,33 +2901,6 @@ class ProfileManager:
                 except OSError:
                     pass
             return []
-
-        still_referenced: set[str] = set()
-        can_check_references = True
-        for path in unique_paths:
-            if not path.exists():
-                continue
-            try:
-                config_data = json.loads(path.read_text(encoding="utf-8"))
-                profiles = (
-                    config_data.get("kollabor", {}).get("llm", {}).get("profiles", {})
-                )
-                if isinstance(profiles, dict):
-                    for value in profiles.values():
-                        if not isinstance(value, dict):
-                            continue
-                        api_key = str(value.get("api_key") or "")
-                        if api_key.startswith(KEYRING_SENTINEL_PREFIX):
-                            still_referenced.add(
-                                api_key[len(KEYRING_SENTINEL_PREFIX) :]
-                            )
-            except Exception as exc:
-                logger.warning("Could not check remaining profile key references: %s", exc)
-                can_check_references = False
-                break
-        if can_check_references:
-            for secret_name in secret_names - still_referenced:
-                _delete_keyring_entry(secret_name)
 
         for name in removed:
             self._profiles.pop(name, None)
