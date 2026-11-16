@@ -10,6 +10,7 @@ Managed by the coordinator (primary writer), readable by all agents
 (filesystem is the IPC channel, same as presence).
 """
 
+import copy
 import logging
 import time
 from typing import Dict, Iterable, List, Optional
@@ -28,12 +29,17 @@ class AgentRegistry:
     def __init__(self, storage: DNSStorage):
         self._storage = storage
         self._records: Dict[str, AgentRecord] = {}
+        self._persisted_records: Dict[str, dict] = {}
         self._loaded = False
 
     def _ensure_loaded(self) -> None:
         """Lazy-load records from storage on first access."""
         if not self._loaded:
             self._records = self._storage.load_registry()
+            self._persisted_records = {
+                key: copy.deepcopy(record.to_dict())
+                for key, record in self._records.items()
+            }
             self._loaded = True
 
     # --- Registration ---
@@ -72,7 +78,7 @@ class AgentRegistry:
             # Update attestation if provided
             if record.attestation:
                 existing.attestation = record.attestation
-            self._save()
+            self._save(updated_keys=[record.designation])
             logger.debug(f"updated DNS record for {record.designation}")
             return existing
         else:
@@ -82,7 +88,10 @@ class AgentRegistry:
             record.endpoint_state = "fresh"
             record.tags["endpoint_state"] = "fresh"
             self._records[record.designation] = record
-            self._save()
+            self._save(
+                created_keys=[record.designation],
+                updated_keys=[record.designation],
+            )
             logger.info(f"registered DNS record for {record.designation}")
             return record
 
@@ -91,7 +100,7 @@ class AgentRegistry:
         self._ensure_loaded()
         if designation in self._records:
             del self._records[designation]
-            self._save()
+            self._save(deleted_keys=[designation])
             logger.info(f"deregistered DNS record for {designation}")
             return True
         return False
@@ -216,7 +225,7 @@ class AgentRegistry:
             record.state = state
             record.current_task = current_task
             record.last_seen = time.time()
-            self._save()
+            self._save(updated_keys=[designation])
             return True
         return False
 
@@ -226,7 +235,7 @@ class AgentRegistry:
         record = self._records.get(designation)
         if record:
             record.trust_score = max(0.0, min(1.0, trust_score))
-            self._save()
+            self._save(updated_keys=[designation])
             return True
         return False
 
@@ -260,6 +269,7 @@ class AgentRegistry:
 
         removed = 0
         stale = []
+        updated = set()
         for designation, record in self._records.items():
             if (
                 record.agent_id in live_ids
@@ -270,9 +280,11 @@ class AgentRegistry:
                 record.last_endpoint_seen = record.last_seen
                 record.endpoint_state = "fresh"
                 record.tags["endpoint_state"] = "fresh"
+                updated.add(designation)
             elif record.is_stale:
                 if record.approval_state in {"approved", "auto_approved", "rejected"}:
                     self._mark_endpoint_stale(record)
+                    updated.add(designation)
                 else:
                     stale.append(designation)
 
@@ -281,7 +293,7 @@ class AgentRegistry:
             removed += 1
 
         # Always persist — last_seen updates and removals
-        self._save(deleted_keys=stale)
+        self._save(deleted_keys=stale, updated_keys=updated)
         if removed > 0:
             logger.info(f"removed {removed} stale DNS records")
 
@@ -289,6 +301,7 @@ class AgentRegistry:
 
     def save(self) -> None:
         """Persist current records to storage (public API)."""
+        self._ensure_loaded()
         self._save()
 
     def reload(self) -> None:
@@ -335,7 +348,7 @@ class AgentRegistry:
             return False
         record.approval_state = "approved"
         record.last_seen = time.time()
-        self._save()
+        self._save(updated_keys=[designation])
         logger.info(f"approved agent {designation} (by {approver})")
         return True
 
@@ -351,7 +364,7 @@ class AgentRegistry:
             return False
         record.approval_state = "rejected"
         record.last_seen = time.time()
-        self._save()
+        self._save(updated_keys=[designation])
         logger.info(f"rejected agent {designation}: {reason}")
         return True
 
@@ -385,7 +398,7 @@ class AgentRegistry:
         if record.runtime in allowed_runtimes:
             record.approval_state = "auto_approved"
             record.last_seen = time.time()
-            self._save()
+            self._save(updated_keys=[designation])
             logger.info(
                 f"auto-approved {designation} (runtime={record.runtime})"
             )
@@ -394,9 +407,61 @@ class AgentRegistry:
 
     # --- Internal ---
 
-    def _save(self, deleted_keys: Optional[List[str]] = None) -> None:
+    def _save(
+        self,
+        deleted_keys: Optional[List[str]] = None,
+        created_keys=(),
+        updated_keys=None,
+    ) -> None:
         """Persist records to storage."""
         if hasattr(self._storage, "merge_save_registry"):
-            self._storage.merge_save_registry(self._records, deleted_keys=deleted_keys)
+            if updated_keys is None:
+                current_records = {
+                    key: copy.deepcopy(record.to_dict())
+                    for key, record in self._records.items()
+                }
+                created_keys = set(created_keys) | (
+                    set(current_records) - set(self._persisted_records)
+                )
+                updated_keys = {
+                    key
+                    for key, record_data in current_records.items()
+                    if self._persisted_records.get(key) != record_data
+                }
+                deleted_keys = list(deleted_keys or []) + list(
+                    set(self._persisted_records) - set(current_records)
+                )
+            keys = set(updated_keys) | set(created_keys)
+            records = {
+                key: self._records[key] for key in keys if key in self._records
+            }
+            base_records = {
+                key: self._persisted_records[key]
+                for key in records
+                if key in self._persisted_records
+            }
+            if created_keys:
+                self._storage.merge_save_registry(
+                    records,
+                    deleted_keys=deleted_keys,
+                    created_keys=created_keys,
+                    base_records=base_records,
+                )
+            else:
+                self._storage.merge_save_registry(
+                    records,
+                    deleted_keys=deleted_keys,
+                    base_records=base_records,
+                )
+            for key in deleted_keys or []:
+                self._persisted_records.pop(key, None)
+            for key in keys:
+                record = self._records.get(key)
+                if record is not None:
+                    self._persisted_records[key] = copy.deepcopy(record.to_dict())
         else:
             self._storage.save_registry(self._records)
+            self._persisted_records = {
+                key: copy.deepcopy(record.to_dict())
+                for key, record in self._records.items()
+            }
