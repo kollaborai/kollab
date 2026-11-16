@@ -134,6 +134,27 @@ class TestCompactOnAcpChat(unittest.IsolatedAsyncioTestCase):
 
 
 class TestAutomaticCompactOnAcpChat(unittest.IsolatedAsyncioTestCase):
+    async def test_new_session_rearms_when_its_first_meter_is_above_threshold(self):
+        plugin, _llm, acp = _plugin()
+        bus = MagicMock()
+        bus.get_service = lambda name: plugin if name == "context_compaction" else None
+        orch = ACPOrchestrator(bus)
+        orch._runner = SimpleNamespace(
+            session_id="session-1", generation=1,
+            available_commands=[{"name": "compact"}],
+        )
+
+        orch._on_runner_update({"kind": "usage_update", "payload": {"used": 300_000, "size": 1_000_000}})
+        await _settle(plugin)
+        self.assertEqual(acp.submit.await_count, 1)
+
+        orch._runner.session_id = "session-2"
+        orch._runner.generation = 2
+        orch._on_runner_update({"kind": "usage_update", "payload": {"used": 300_000, "size": 1_000_000}})
+        await _settle(plugin)
+
+        self.assertEqual(acp.submit.await_count, 2)
+
     async def test_crossing_the_automatic_trigger_sends_once_until_the_meter_drops(self):
         plugin, _llm, acp = _plugin()
         plugin.acp_usage_updated(300_000, 1_000_000)  # automatic: 0.75 of 1M, capped at 272K
