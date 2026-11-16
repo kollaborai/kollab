@@ -2,27 +2,27 @@
   "name": "data-analytics",
   "description": "Data team: analytics lead, data engineer, analyst, data scientist and BI developer. Answers business questions with reproducible queries, models and dashboards; never writes to production data without approval.",
   "roster": "data-crew",
-  "lead": "helen",
+  "lead": "analytics-lead",
   "members": [
     {
-      "persona": "helen",
+      "persona": "analytics-lead",
       "reports_to": null
     },
     {
-      "persona": "victor",
-      "reports_to": "helen"
+      "persona": "data-engineer",
+      "reports_to": "analytics-lead"
     },
     {
-      "persona": "amara",
-      "reports_to": "helen"
+      "persona": "data-analyst",
+      "reports_to": "analytics-lead"
     },
     {
-      "persona": "wei",
-      "reports_to": "helen"
+      "persona": "data-scientist",
+      "reports_to": "analytics-lead"
     },
     {
-      "persona": "paula",
-      "reports_to": "helen"
+      "persona": "bi-developer",
+      "reports_to": "analytics-lead"
     }
   ]
 }
