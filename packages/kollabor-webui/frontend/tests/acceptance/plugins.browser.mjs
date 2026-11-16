@@ -85,6 +85,7 @@ try {
   let brokenDisabled = false;
   let brokenDisableCalls = 0;
   let stopRetryCalls = 0;
+  let partialStopFailure = false;
   let fixtureRemoved = false;
   let folderless = false;
   // Deliberately skew the engine clock to exercise a remote browser with a different clock.
@@ -157,6 +158,12 @@ try {
     }
     if (url.pathname === "/engine/plugins/fixture/disable" && route.request().method() === "POST") {
       entry.enabled = false;
+      if (partialStopFailure) {
+        entry.state = "stop-failed";
+        entry.services[0].state = "stop-failed";
+        entry.services[0].error = "Could not stop this process. Retry stopping it.";
+        return route.fulfill({ status: 409, json: { detail: "Could not stop background processes. The plugin is off; retry stopping them." } });
+      }
       return route.fulfill({ json: { ok: true } });
     }
     if (url.pathname === "/engine/plugins/broken/disable" && route.request().method() === "POST") {
@@ -229,6 +236,20 @@ try {
   await captureReview(page, "stopping-heartbeat");
   assert.equal(await stoppingDetails.getByRole("switch", { name: "Fixture enabled" }).isDisabled(), true, "cannot toggle while stopping");
   entry.services.pop();
+  entry.state = "ok";
+  entry.services[0].state = "running";
+  partialStopFailure = true;
+  await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "Settings", exact: true }).first().click();
+  const partialSettings = page.getByRole("dialog", { name: "Settings" });
+  await partialSettings.getByRole("tab", { name: "Plugins" }).click();
+  await partialSettings.getByRole("switch", { name: "Fixture enabled" }).click();
+  const partialDialog = page.getByRole("dialog", { name: "Turn off Fixture?" });
+  await partialDialog.getByRole("button", { name: "Turn Off", exact: true }).click();
+  await partialDialog.waitFor({ state: "hidden", timeout: 5000 });
+  await partialSettings.getByRole("alert").getByText(/Could not stop background processes/).waitFor();
+  await partialSettings.getByRole("button", { name: "Retry Stop", exact: true }).waitFor();
+  partialStopFailure = false;
   entry.enabled = false;
   entry.state = "stop-failed";
   entry.services[0].state = "stop-failed";
