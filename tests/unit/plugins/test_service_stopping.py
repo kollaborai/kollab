@@ -35,6 +35,44 @@ def test_long_stop_timeout_is_preserved(tmp_path, monkeypatch):
 
 
 
+def test_failed_stop_is_visible_and_disable_reports_partial_failure(tmp_path, monkeypatch):
+    from kollabor_plugins import registry, services, settings
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = tmp_path / ".kollab"
+    root = home / "plugins" / "hello"
+    root.mkdir(parents=True)
+    manifest = {"id": "hello", "services": {"worker": {"command": ["/bin/true"]}}}
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {
+        "enabled": True, "granted": [], "files_sha256": files_sha256(root),
+    }}, "dev": {}}))
+    run = home / "plugin-data" / "hello" / "run"
+    run.mkdir(parents=True)
+    (run / "worker.pid").write_text(json.dumps({"wrapper": {"pid": 4321}}))
+    (run / "worker.state").write_text(json.dumps({"status": "running", "desired": "running"}))
+    monkeypatch.setattr(services, "_verified_wrapper", lambda _: True)
+    monkeypatch.setattr(services, "_identity_alive", lambda *_, **__: True)
+
+    def denied(*_):
+        raise PermissionError("not permitted")
+
+    monkeypatch.setattr(services.os, "kill", denied)
+    with pytest.raises(ValueError, match="Could not stop"):
+        settings.set_enabled("hello", False)
+    assert json.loads((home / "plugins.json").read_text())["plugins"]["hello"]["enabled"] is False
+    entry = registry._service_entries(home, "hello", manifest)[0]
+    assert entry["state"] == "stop-failed"
+    assert entry["stop_deadline"] is None
+    assert "stop" in entry["error"].lower()
+    builtin = tmp_path / "builtin"
+    builtin.mkdir()
+    plugin = next(item for item in registry.plugin_entries(builtin) if item["id"] == "hello")
+    assert plugin["state"] == "stop-failed"
+
+
+
 def test_disable_cannot_miss_a_starting_wrapper(tmp_path, monkeypatch):
     import threading
 
