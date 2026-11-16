@@ -84,6 +84,7 @@ try {
   const brokenImports = [];
   let brokenDisabled = false;
   let brokenDisableCalls = 0;
+  let stopRetryCalls = 0;
   let fixtureRemoved = false;
   let folderless = false;
   // Deliberately skew the engine clock to exercise a remote browser with a different clock.
@@ -141,6 +142,10 @@ try {
     if (url.pathname === "/engine/plugins/jobs/update-fixture/confirm" && route.request().method() === "POST") {
       confirmedUpdate = route.request().postDataJSON();
       return route.fulfill({ json: { ...preview, job_id: "update-fixture", action: "update", status: "complete" } });
+    }
+    if (url.pathname === "/engine/plugins/fixture/services/worker/stop" && route.request().method() === "POST") {
+      stopRetryCalls++;
+      return route.fulfill({ json: { accepted: true } });
     }
     if (url.pathname === "/engine/plugins/fixture/enable" && route.request().method() === "POST") {
       entry.enabled = true;
@@ -224,6 +229,21 @@ try {
   await captureReview(page, "stopping-heartbeat");
   assert.equal(await stoppingDetails.getByRole("switch", { name: "Fixture enabled" }).isDisabled(), true, "cannot toggle while stopping");
   entry.services.pop();
+  entry.enabled = false;
+  entry.state = "stop-failed";
+  entry.services[0].state = "stop-failed";
+  entry.services[0].error = "Could not stop this process. Retry stopping it.";
+  await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "Settings", exact: true }).first().click();
+  const stopFailureSettings = page.getByRole("dialog", { name: "Settings" });
+  await stopFailureSettings.getByRole("tab", { name: "Plugins" }).click();
+  const stopFailure = stopFailureSettings.getByRole("region", { name: "Fixture details" });
+  await stopFailure.getByText("Failed to Stop", { exact: true }).first().waitFor({ timeout: 5000 });
+  await stopFailure.getByText("Could not stop this process. Retry stopping it.", { exact: true }).waitFor();
+  await stopFailure.getByRole("button", { name: "Retry Stop", exact: true }).click();
+  assert.equal(stopRetryCalls, 1, "a failed stop can be retried while the plugin remains off");
+  entry.enabled = true;
+  delete entry.services[0].error;
   entry.state = "ok";
   entry.services[0].state = "crash-stopped";
   delete entry.services[0].stop_deadline;
