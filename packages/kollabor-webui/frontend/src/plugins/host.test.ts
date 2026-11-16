@@ -110,6 +110,20 @@ describe("plugin host lifecycle", () => {
     } finally { host.close(); vi.useRealTimers(); }
   });
 
+  it("does not repeatedly scan the full inventory for a stable running service", async () => {
+    vi.useFakeTimers();
+    const active = { ...entry("hello"), services: [{ name: "worker", state: "running" }] };
+    const { host, json, setInventory } = setup();
+    try {
+      setInventory([active]);
+      await host.start();
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(json).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(json).toHaveBeenCalledTimes(2);
+    } finally { host.close(); vi.useRealTimers(); }
+  });
+
   it("does not overlap service polls when inventory is slow", async () => {
     vi.useFakeTimers();
     const active = { ...entry("hello"), services: [{ name: "worker", state: "running" }] };
