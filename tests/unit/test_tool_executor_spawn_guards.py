@@ -256,3 +256,14 @@ def test_inline_node_launches_remain_blocked(script):
 )
 def test_search_exceptions_do_not_exempt_executable_options(command):
     assert _is_blocked_kollab_spawn(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rg -e 'kollab --agent coder' --pre=cat sample",
+        "git grep -e 'kollab --agent coder' --open-files-in-pager=cat",
+    ],
+)
+def test_safe_search_execution_option_does_not_interpret_pattern_as_command(command):
+    assert not _is_blocked_kollab_spawn(command)

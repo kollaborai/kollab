@@ -372,11 +372,33 @@ def _is_blocked_kollab_spawn(
         if executable in shell_names or python_name.fullmatch(executable):
             return None
 
-        # Search tools treat their patterns as data, not shell commands.  Keep
-        # actual shell substitutions subject to scan_tokens' separate pass.
+        # Search patterns are data, but rg can execute a preprocessor and git
+        # grep can execute a pager. Inspect those executable values separately.
+        # Shell substitutions are also checked by scan_tokens' separate pass.
         if executable in {"grep", "egrep", "fgrep", "rg"} or (
             executable == "git" and args and args[0] == "grep"
         ):
+            for index, argument in enumerate(args):
+                if argument == "--":
+                    break
+                value = None
+                if executable == "rg":
+                    if argument.startswith("--pre="):
+                        value = argument.partition("=")[2]
+                    elif argument == "--pre" and index + 1 < len(args):
+                        value = args[index + 1]
+                elif executable == "git":
+                    if argument.startswith("--open-files-in-pager="):
+                        value = argument.partition("=")[2]
+                    elif argument.startswith("-O") and len(argument) > 2:
+                        value = argument[2:]
+                    elif (
+                        argument in {"--open-files-in-pager", "-O"}
+                        and index + 1 < len(args)
+                    ):
+                        value = args[index + 1]
+                if value and suspicious_launch(value, is_background):
+                    return True
             return None
 
         def inspect_command(command_text: str) -> bool:
