@@ -29,7 +29,9 @@ def test_plugin_list_uses_shared_inventory(tmp_path, monkeypatch):
     with TestClient(create_app()) as client:
         response = client.get("/plugins")
     assert response.status_code == 200
-    assert response.json() == {"schema": 1, "plugins": entries}
+    data = response.json()
+    assert data.pop("server_time") > 0
+    assert data == {"schema": 1, "plugins": entries}
 
 
 def test_plugin_settings_read_installed_development_and_builtin(tmp_path, monkeypatch):
