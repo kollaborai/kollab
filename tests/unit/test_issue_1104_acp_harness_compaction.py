@@ -357,6 +357,11 @@ class TestCompactionThresholdForm(unittest.TestCase):
             _values, errors = self._values(raw)
             self.assertIn("compaction_threshold_k", errors, raw)
 
+    def test_oversized_numeric_threshold_is_refused_without_raising(self):
+        values, errors = self._values("9" * 5000)
+        self.assertIsNone(values["compaction_threshold_k"])
+        self.assertIn("compaction_threshold_k", errors)
+
 
 class TestInternalPromptsStayOutOfTheTranscript(unittest.IsolatedAsyncioTestCase):
     """The ask-first question and the /compact command are kollab's own prompts, not the user's (#1104)."""
