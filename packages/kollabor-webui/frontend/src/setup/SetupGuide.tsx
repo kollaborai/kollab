@@ -134,7 +134,7 @@ export function SetupGuide({
           DialogContent default close so the dialog shows one X, not two. */}
       <DialogContent
         showCloseButton={false}
-        className="flex h-[min(30rem,80dvh)] w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-xl"
+        className="flex max-h-[80dvh] w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-xl"
       >
         <div className="flex shrink-0 items-start justify-between gap-2 px-6 pt-5">
           <div className="min-w-0">
@@ -155,8 +155,8 @@ export function SetupGuide({
             <X />
           </Button>
         </div>
-        <div className="flex min-h-0 flex-1 flex-col justify-between gap-4 px-6 py-4">
-          <ol className="flex min-h-0 flex-col gap-1.5 overflow-y-auto" aria-label="Setup steps">
+        <div className="min-h-0 overflow-y-auto px-6 py-4">
+          <ol className="flex flex-col gap-1.5" aria-label="Setup steps">
             {SETUP_STEPS.filter((item) => item.id !== "done").map((item) => {
               const position = stepIndex(item.id);
               const here = position === stepIndex(step);
@@ -190,16 +190,19 @@ export function SetupGuide({
           })}
           </ol>
         </div>
-        <footer className="flex shrink-0 items-center justify-between gap-2 pt-3">
-          <Button type="button" variant="ghost" onClick={dismiss}>
-            Skip
-          </Button>
+        <footer className="flex shrink-0 items-center justify-between gap-2 px-6 pt-3">
+          {target ? (
+            <Button type="button" variant="ghost" onClick={dismiss}>
+              Skip
+            </Button>
+          ) : null}
           <Button
             type="button"
             data-testid="setup-guide-next"
-            onClick={target ? runTarget : advance}
+            className="ml-auto"
+            onClick={target ? runTarget : step === "done" ? dismiss : advance}
           >
-            {target ? "Open" : "Finish"}
+            {target ? "Open" : step === "done" ? "Finish" : "Get Started"}
           </Button>
         </footer>
       </DialogContent>
