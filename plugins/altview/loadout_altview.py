@@ -475,6 +475,16 @@ class LoadoutListAltView(AltView):
         active_provider = (
             _resolve_provider_type(self._profile_manager, active.name) if active else ""
         )
+        try:
+            removed = self._profile_manager.remove_provider_profiles(provider)
+        except Exception as exc:  # noqa: BLE001 - keep the picker usable
+            logger.error("loadout: remove provider '%s' failed: %s", provider, exc)
+            removed = []
+        self._delete_armed = None
+        self._delete_provider_armed = False
+        if not removed:
+            self._note = f"could not remove the {_provider_display(provider)} provider."
+            return
         switch_warning = ""
         if active_provider.lower() == provider.lower():
             get_service = getattr(self._event_bus, "get_service", None)
@@ -488,21 +498,11 @@ class LoadoutListAltView(AltView):
                     logger.error("loadout: switch away from provider '%s' failed: %s", provider, exc)
             if not switched:
                 switch_warning = " active session may need restart to finish switching."
-        try:
-            removed = self._profile_manager.remove_provider_profiles(provider)
-        except Exception as exc:  # noqa: BLE001 - keep the picker usable
-            logger.error("loadout: remove provider '%s' failed: %s", provider, exc)
-            removed = []
-        self._delete_armed = None
-        self._delete_provider_armed = False
-        if removed:
-            self._note = (
-                f"removed {_provider_display(provider)} provider profiles: {', '.join(removed)}."
-                f"{switch_warning}"
-            )
-            self._refresh()
-        else:
-            self._note = f"could not remove the {_provider_display(provider)} provider."
+        self._note = (
+            f"removed {_provider_display(provider)} provider profiles: {', '.join(removed)}."
+            f"{switch_warning}"
+        )
+        self._refresh()
 
     async def _run_activate(self, loadout: Any) -> None:
         try:

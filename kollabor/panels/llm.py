@@ -661,6 +661,9 @@ class LlmPanel:
             active_provider = (
                 resolve_provider_type(ctx._profile_manager, active.name) if active else ""
             )
+            removed = ctx._profile_manager.remove_provider_profiles(provider)
+            if not removed:
+                return error_result(f"Could not remove the {provider_display(provider)} provider.")
             switch_warning = ""
             if active_provider.lower() == provider.lower():
                 switch_profile = getattr(
@@ -678,9 +681,6 @@ class LlmPanel:
                         )
                 if not switched:
                     switch_warning = " Restart this session to finish switching away from it."
-            removed = ctx._profile_manager.remove_provider_profiles(provider)
-            if not removed:
-                return error_result(f"Could not remove the {provider_display(provider)} provider.")
             return ok_result(
                 f"Removed {provider_display(provider)} provider profiles: {', '.join(removed)}."
                 f"{switch_warning}",
