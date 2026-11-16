@@ -73,6 +73,46 @@ def test_failed_stop_is_visible_and_disable_reports_partial_failure(tmp_path, mo
 
 
 
+@pytest.mark.parametrize("pid_symlink", [False, True])
+def test_unverified_or_symlinked_pid_is_not_signalled_and_reports_failure(tmp_path, monkeypatch, pid_symlink):
+    from unittest.mock import Mock
+
+    from kollabor_plugins import services, settings
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = tmp_path / ".kollab"
+    root = home / "plugins" / "hello"
+    root.mkdir(parents=True)
+    (root / "kollab-plugin.json").write_text(json.dumps({"id": "hello", "services": {
+        "worker": {"command": ["/bin/true"]},
+    }}))
+    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {
+        "enabled": True, "granted": [], "files_sha256": files_sha256(root),
+    }}, "dev": {}}))
+    run = home / "plugin-data" / "hello" / "run"
+    run.mkdir(parents=True)
+    identity = json.dumps({"wrapper": {"pid": 4321}})
+    if pid_symlink:
+        outside = tmp_path / "outside.pid"
+        outside.write_text(identity)
+        (run / "worker.pid").symlink_to(outside)
+    else:
+        (run / "worker.pid").write_text(identity)
+    (run / "worker.state").write_text(json.dumps({"status": "running", "desired": "running"}))
+    monkeypatch.setattr(services, "_verified_wrapper", lambda _: pid_symlink)
+    monkeypatch.setattr(services, "_identity_alive", lambda *_, **__: True)
+    kill = Mock()
+    monkeypatch.setattr(services.os, "kill", kill)
+    with pytest.raises(ValueError, match="Could not stop"):
+        settings.set_enabled("hello", False)
+    kill.assert_not_called()
+    state = json.loads((run / "worker.state").read_text())
+    assert state["status"] == "stop-failed"
+    assert "stop" in state["error"].lower()
+
+
+
 def test_disable_cannot_miss_a_starting_wrapper(tmp_path, monkeypatch):
     import threading
 
