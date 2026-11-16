@@ -34,6 +34,16 @@ describe("stripManagedTokens", () => {
     );
   });
 
+  it("keeps a malformed one-sided escape intact while stripping tokens", () => {
+    // "[[image1]" is not an escape; the managed-token strip must never eat
+    // into a bracket run that is not exactly the token (#1140 review).
+    expect(stripManagedTokens("[[image1] hi", ["[image1]"])).toBe("[[image1] hi");
+  });
+
+  it("keeps a trailing-bracket run intact while stripping tokens", () => {
+    expect(stripManagedTokens("[image1]] hi", ["[image1]"])).toBe("[image1]] hi");
+  });
+
   it("round-trips escapes regardless of count", () => {
     const text = "[[image1]] then [[image2]] then [[image10]]";
     expect(stripManagedTokens(text, ["[image1]", "[image2]", "[image10]"])).toBe(text);

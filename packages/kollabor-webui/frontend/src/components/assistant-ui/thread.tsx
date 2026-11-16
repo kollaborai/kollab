@@ -1301,7 +1301,7 @@ const AssistantActionBar: FC = () => {
  * A live row carries its pictures as image parts, so there the tokens render
  * as nothing instead of duplicating the picture next to them.
  */
-const UserText: FC<{ text?: string }> = ({ text }) => {
+export const UserText: FC<{ text?: string }> = ({ text }) => {
   const media = useAuiState(
     (s) => s.message.metadata?.custom?.media,
   ) as MediaEntry[] | undefined;

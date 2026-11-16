@@ -209,6 +209,7 @@ const mainConfig = defineConfig({
       "tests/field-renderer-textarea.test.tsx",
       "tests/hub-note-recipient.test.tsx",
       "src/components/assistant-ui/tool-fallback.test.tsx",
+      "src/components/assistant-ui/user-text.test.tsx",
       "src/engine-version.test.ts",
       "tests/agent-type-glyph.test.tsx",
       "tests/agent-version-notice.test.tsx",

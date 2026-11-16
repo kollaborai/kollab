@@ -152,6 +152,12 @@ def test_count_image_tokens_shapes() -> None:
     assert count_image_tokens("[image0] is text") == 0
     assert count_image_tokens("[image00] is text") == 0
     assert count_image_tokens("[image01] is a token") == 1
+    # Malformed one-sided bracket runs count the inner token, matching the
+    # frontend splitter (#1140 review): the stray bracket of the run stays
+    # text, the well-formed token inside still binds its slot.
+    assert count_image_tokens("[[image1]") == 1
+    assert count_image_tokens("[image1]]") == 1
+    assert count_image_tokens("[[image1] then [image2]") == 2
 
 
 def test_attach_binds_mirror_part_rows(tmp_path: Path) -> None:
