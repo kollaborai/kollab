@@ -488,8 +488,12 @@ def _loadout_values(
     raw_threshold = str(payload.get("compaction_threshold_k") or "").strip()
     values["compaction_threshold_k"] = None
     if raw_threshold:
-        if raw_threshold.isdigit() and int(raw_threshold) >= 1:
-            values["compaction_threshold_k"] = int(raw_threshold)
+        try:
+            threshold_k = int(raw_threshold)
+        except ValueError:
+            threshold_k = 0
+        if threshold_k >= 1:
+            values["compaction_threshold_k"] = threshold_k
         else:
             errors["compaction_threshold_k"] = "Compaction Threshold must be a whole number of at least 1."
     description = str(payload.get("description") or "").strip()

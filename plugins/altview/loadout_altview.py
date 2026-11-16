@@ -1003,11 +1003,15 @@ class LoadoutFormAltView(AltView):
             compaction_raw = str(self._compaction_widget.get_pending_value() or "").strip()
             compaction_threshold_k = None
             if compaction_raw:
-                if not compaction_raw.isdigit() or int(compaction_raw) < 1:
+                try:
+                    threshold_k = int(compaction_raw)
+                except ValueError:
+                    threshold_k = 0
+                if threshold_k < 1:
                     self._error = "Compaction Threshold must be a whole number of at least 1."
                     self._stage = "edit"
                     return
-                compaction_threshold_k = int(compaction_raw)
+                compaction_threshold_k = threshold_k
 
             description = str(
                 self._description_widget.get_pending_value() or ""
