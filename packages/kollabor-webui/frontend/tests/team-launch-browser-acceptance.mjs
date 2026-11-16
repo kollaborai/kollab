@@ -201,7 +201,7 @@ async function main() {
       throw error;
     }
     await page.setViewportSize({ width: 390, height: 844 });
-    const role = teamCard.locator("li button .truncate.text-sm.font-medium").nth(1);
+    const role = teamCard.locator("li button .text-sm.font-medium").nth(1);
     await role.waitFor({ state: "visible" });
     assert.equal(await role.innerText(), "Cloud & Infrastructure Security Engineer");
     assert.equal(
