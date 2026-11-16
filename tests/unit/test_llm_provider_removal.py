@@ -124,6 +124,28 @@ def test_web_provider_action_calls_shared_removal_function(monkeypatch):
     assert "Removed Anthropic provider profiles" in result["message"]
 
 
+def test_failed_web_provider_removal_does_not_switch_active_profile(monkeypatch):
+    panel, ctx, _, pm = _setup(monkeypatch)
+    ctx._profile_manager.get_active_profile = lambda: ctx._profile_manager.profiles[
+        "anthropic-cloud"
+    ]
+    switches = []
+
+    async def switch_profile(name, persist=False):
+        switches.append(name)
+        return True
+
+    ctx._llm_service = SimpleNamespace(switch_profile=switch_profile)
+    pm.remove_provider_profiles = lambda provider: []
+
+    result = asyncio.run(
+        panel.act(ctx, "remove_provider", {"name": "anthropic-cloud-model"})
+    )
+
+    assert "Could not remove" in result["message"]
+    assert switches == []
+
+
 def test_web_empty_provider_section_still_offers_removal(monkeypatch):
     panel, ctx, _, _ = _setup(monkeypatch, empty_anthropic=True)
 
