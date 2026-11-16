@@ -1897,6 +1897,44 @@ def test_regression_test_rejects_unrelated_added_assertion_that_names_finding(
     assert "regression_test" in pr_gates_dod.evaluate(cfg, data).failed_names()
 
 
+def test_regression_test_does_not_count_helper_assertion_for_finding(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment", comment_id=1, body="F14: bug remains",
+        author_login="reviewer", created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    test_path = "tests/unit/test_f14.py"
+    commits = (
+        SimpleNamespace(
+            sha="a" * 40, message="test: add F14 test", verified=True,
+            files=(test_path,), timeline_order=11,
+            file_patches={
+                test_path: (
+                    "+def test_f14_placeholder(): pass\n"
+                    "+def helper():\n"
+                    "+    assert reproduce_f14()"
+                )
+            },
+        ),
+        SimpleNamespace(
+            sha="b" * 40, message="fix: repair", verified=True,
+            files=("kollabor/core.py",), timeline_order=12,
+        ),
+    )
+    data = make_data(
+        commits=commits, comments=(finding,),
+        changed_files=[test_path, "kollabor/core.py"],
+        changed_file_contents={
+            test_path: "def test_f14_placeholder(): pass\ndef helper():\n    assert reproduce_f14()"
+        },
+    )
+
+    assert "regression_test" in pr_gates_dod.evaluate(cfg, data).failed_names()
+
+
 def test_regression_test_requires_xfail_removal_from_finding_test_file(
     tmp_path: Path,
 ) -> None:
