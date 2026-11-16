@@ -57,13 +57,14 @@ try {
     settings: [], services: [], web: { ...helloManifest.web, hash: "hello" } };
   const crasher = { id: "crasher", name: "Crash Test", kind: "installed", state: "ok", enabled: true, shadowed: false,
     web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: { views: [{ id: "crash-view" }] } };
+  const damaged = { ...entry, id: "damaged", name: "Damaged", state: "changed-on-disk", error: "Plugin files changed since approval", web: null, contributes: {} };
   const broken = { id: "broken", name: "Broken", kind: "installed", state: "ok", enabled: true, shadowed: false,
     web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: { slash: ["broken-command"], views: [{ id: "broken-view" }], menu: [{ id: "broken-row", label: "Broken Board", open: { page: "board" } }], pages: [{ id: "board" }] } };
   await page.route("**/*", async route => {
     const url = new URL(route.request().url());
     if (url.origin !== origin) return route.abort();
     if (url.pathname === "/api/config") return route.fulfill({ json: { engine_url: "/engine" } });
-    if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, plugins: [...(fixtureRemoved ? [] : [entry]), broken, crasher, hello] } }); }
+    if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, plugins: [...(fixtureRemoved ? [] : [entry]), broken, crasher, damaged, hello] } }); }
     if (url.pathname === "/engine/plugins/install" && route.request().method() === "POST") {
       installSource = route.request().postDataJSON();
       if (!installSource?.source) return route.fulfill({ status: 422, json: { detail: "source is required" } });
@@ -276,6 +277,10 @@ try {
   await page.getByRole("button", { name: "Settings", exact: true }).first().click();
   const settings = page.getByRole("dialog", { name: "Settings" });
   await settings.getByRole("tab", { name: "Plugins" }).click({ timeout: 5000 });
+  const damagedListItem = settings.getByRole("button", { name: "Damaged", exact: true });
+  assert.match(await damagedListItem.innerText(), /Changed on Disk/, "inventory changed-on-disk state is distinct from load failure");
+  await damagedListItem.click();
+  await settings.getByRole("region", { name: "Damaged details" }).getByText("Changed on Disk", { exact: true }).waitFor({ timeout: 5000 });
   await settings.getByRole("button", { name: "Hello", exact: true }).click();
   await settings.getByText("Hello plugin settings example.", { exact: true }).waitFor();
   await settings.getByRole("button", { name: "Fixture", exact: true }).click();
