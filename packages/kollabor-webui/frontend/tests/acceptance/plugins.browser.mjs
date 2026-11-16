@@ -471,6 +471,13 @@ try {
   await captureReview(page, "plugin-page");
   await page.getByRole("tab", { name: "Second" }).click();
   await page.getByText("Second tab body", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Open details" }).click();
+  const pageModal = page.getByRole("dialog", { name: "Fixture Details" });
+  await pageModal.getByText("Fixture modal body", { exact: true }).waitFor();
+  assert.equal(await page.getByText("Second tab body", { exact: true }).count(), 1, "opening a modal must not unmount the page underneath");
+  await page.keyboard.press("Escape");
+  await pageModal.waitFor({ state: "hidden" });
+  await page.getByText("Second tab body", { exact: true }).waitFor({ timeout: 5000 });
   await page.getByRole("button", { name: "Back to Chat" }).click();
   await page.getByRole("button", { name: "Open details" }).click();
   const modalBody = page.getByRole("dialog", { name: "Fixture Details" }).getByText("Fixture modal body");
