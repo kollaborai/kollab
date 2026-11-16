@@ -1251,6 +1251,7 @@ def test_collect_pr_data_keeps_comment_identity_and_review_approval_metadata(mon
         "id": 100,
         "body": "F11 was reported by the test suite.",
         "created_at": "2026-11-08T01:00:00Z",
+        "pull_request_review_id": 300,
         "user": {"login": "inline-reviewer"},
     }
     issue_comment = {
@@ -1268,6 +1269,9 @@ def test_collect_pr_data_keeps_comment_identity_and_review_approval_metadata(mon
     }
     pages = {
         "rest": {
+            f"repos/o/r/issues/{PR_NUM}/timeline": {
+                1: [{"event": "reviewed", "id": 300}]
+            },
             f"repos/o/r/pulls/{PR_NUM}/comments": {1: [review_comment]},
             f"repos/o/r/issues/{PR_NUM}/comments": {1: [issue_comment]},
             f"repos/o/r/pulls/{PR_NUM}/reviews": {1: [review]},
@@ -1285,8 +1289,14 @@ def test_collect_pr_data_keeps_comment_identity_and_review_approval_metadata(mon
             review_comment["body"],
             "inline-reviewer",
             "2026-11-08T01:00:00Z",
+            300,
+            "",
+            0,
         ),
-        pr_gates_dod.PRComment("issue_comment", 200, issue_comment["body"], "trusted-reviewer"),
+        pr_gates_dod.PRComment(
+            "issue_comment", 200, issue_comment["body"], "trusted-reviewer", "", 0,
+            "", None
+        ),
     )
     assert data.reviews == (
         pr_gates_dod.PRReview(300, "trusted-reviewer", "APPROVED", HEAD_SHA, "2026-11-08T01:02:03Z"),
@@ -1315,11 +1325,18 @@ def test_collect_pr_data_loads_commit_paths_for_review_findings(monkeypatch):
                         "id": 100,
                         "body": "F14: regression test required",
                         "created_at": "2026-11-01T12:00:00Z",
+                        "pull_request_review_id": 301,
                         "user": {"login": "reviewer"},
                     }
                 ]
             },
             f"repos/o/r/pulls/{PR_NUM}/commits": {1: [_commit(sha)]},
+            f"repos/o/r/issues/{PR_NUM}/timeline": {
+                1: [
+                    {"event": "reviewed", "id": 301},
+                    {"event": "committed", "sha": sha},
+                ]
+            },
             f"repos/o/r/commits/{sha}": {
                 1: {
                     "commit": {
@@ -1338,6 +1355,53 @@ def test_collect_pr_data_loads_commit_paths_for_review_findings(monkeypatch):
     assert data.commits[0].committed_at == "2026-11-01T12:05:00Z"
     assert data.commits[0].files == ("tests/unit/test_security.py",)
     assert any(args[1] == f"repos/o/r/commits/{sha}" for args in calls)
+
+
+def test_collect_pr_data_uses_server_order_for_issue_comment_findings(monkeypatch):
+    calls: list[list] = []
+    sha = "e" * 40
+    comment_url = "https://api.github.com/repos/o/r/issues/comments/88"
+    pull = {
+        "title": "fix: close finding",
+        "body": "Fixes #1",
+        "user": {"login": "pr-author"},
+        "base": {"ref": "main", "sha": BASE_TIP},
+        "head": {"sha": HEAD_SHA},
+    }
+    pages = {
+        "rest": {
+            f"repos/o/r/issues/{PR_NUM}/comments": {
+                1: [
+                    {
+                        "id": 88,
+                        "url": comment_url,
+                        "body": "F14: regression test required",
+                        "created_at": "2026-11-01T12:00:00Z",
+                        "user": {"login": "reviewer"},
+                    }
+                ]
+            },
+            f"repos/o/r/pulls/{PR_NUM}/commits": {1: [_commit(sha)]},
+            f"repos/o/r/issues/{PR_NUM}/timeline": {
+                1: [
+                    {"event": "commented", "id": 88, "url": comment_url},
+                    {"event": "committed", "sha": sha},
+                ]
+            },
+            f"repos/o/r/commits/{sha}": {
+                1: {
+                    "commit": {"committer": {"date": "2026-10-01T00:00:00Z"}},
+                    "files": [{"filename": "scripts/example.py"}],
+                }
+            },
+        }
+    }
+    _install_fake_gh(monkeypatch, calls, pull, BASE_TIP, pages)
+
+    data = pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
+
+    assert data.comments[0].timeline_order == 0
+    assert data.commits[0].timeline_order == 1
 
 
 def test_collect_threads_follow_graphql_pagination(monkeypatch):
