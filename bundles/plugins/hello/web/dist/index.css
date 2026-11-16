@@ -1,2 +1,2 @@
-[data-plugin=hello] .hello-example{gap:.75rem;padding:1rem;display:grid}
+[data-plugin=hello] .hello-example{justify-items:start;gap:.75rem;padding:1rem;display:grid}
 /*$vite$:1*/
