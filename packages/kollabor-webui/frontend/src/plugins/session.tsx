@@ -33,7 +33,7 @@ function SessionControl({ label, Icon, collapsed, disabled, disabledReason, acti
   count?: { context: PluginContext; value: NonNullable<PluginMenu["count"]> }; onClick: () => void;
 }) {
   const tooltip = `${label}${failed ? " · Failed" : disabled ? ` · ${disabledReason ?? "Unavailable"}` : ""}`;
-  if (collapsed) return <TooltipIconButton tooltip={tooltip} side="left" aria-label={label} aria-pressed={active}
+  if (collapsed) return <TooltipIconButton tooltip={tooltip} side="left" aria-label={failed ? `${label} Failed` : label} aria-pressed={active}
     disabled={disabled} title={tooltip} className={cn("size-7 p-1.5", active && "bg-accent text-accent-foreground")} onClick={onClick}>
     <span className="relative"><Icon className="size-4" />{failed ? <span aria-label="Failed" className="bg-destructive absolute -right-1 -top-1 size-1.5 rounded-full" /> : null}
       {count ? <MenuCount context={count.context} count={count.value} compact /> : null}</span>

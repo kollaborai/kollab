@@ -168,7 +168,7 @@ try {
   await collapsedFailed.waitFor({ timeout: 5000 });
   await collapsedFailed.click();
   await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
-  await panel.getByRole("button", { name: "Chat", exact: true }).click();
+  await page.getByRole("button", { name: "Back to Chat" }).click();
   const collapsedView = panel.getByRole("button", { name: "Fixture View", exact: true });
   await collapsedView.waitFor({ timeout: 5000 });
   await collapsedView.hover();

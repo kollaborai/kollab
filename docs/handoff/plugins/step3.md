@@ -137,6 +137,8 @@
 
 - Collapsed session controls: red browser commit `ce87429e` timed out on Fixture View (`~/backups/plugins-step3-work/collapsed-red.log`). The existing unfinished session control refactor is now wired into the collapsed desktop panel, including menu entries, failed controls, counts and folder-disabled states; expanded controls retain their disabled explanations. Isolated fake-engine Chrome acceptance passed (`collapsed-green.log`), plugin Vitest passed 40/40 (`collapsed-vitest.log`), and typecheck passed (`collapsed-typecheck.log`). The browser test explicitly covers the collapsed view and tooltip, not collapsed menu/count/failed/disabled behavior; those need dedicated checks. Next: add red-first browser coverage for those collapsed controls and stopping recovery, then continue the spec audit and remaining gates. No live engine or production CSP was tested here.
 
+- Collapsed failed-menu accessibility: browser red test commit `02e8309b` could not find `Broken Board Failed` (`collapsed-failed-name-red.log`); the icon-only button now exposes its failure in its accessible name. The isolated browser acceptance passes after returning through the page's Back to Chat control (`collapsed-failed-name-green.log`), and typecheck passes (`collapsed-failed-name-typecheck.log`). Next: red-first coverage for collapsed menu counts and disabled states, stopping recovery, then the remaining spec audit and gates.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
