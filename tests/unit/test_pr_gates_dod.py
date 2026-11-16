@@ -460,6 +460,21 @@ def test_regression_test_ignores_quoted_ruff_rule_codes_1024(tmp_path: Path) -> 
         assert "regression_test" not in pr_gates_dod.evaluate(cfg, data).failed_names()
 
 
+def test_regression_test_ignores_shell_quoted_ruff_rule_codes_1024(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    lint = 'ruff check --select="E9,F63,F7,F82" passed'
+    for data in (
+        make_data(review_comment_bodies=[lint]),
+        make_data(comments=(source_comment("issue_comment", 1, lint),)),
+    ):
+        report = pr_gates_dod.evaluate(cfg, data)
+        assert "regression_test" not in report.failed_names(), report.detail_for(
+            "regression_test"
+        )
+
+
 def test_regression_test_counts_a_finding_beside_rule_codes_1024(tmp_path: Path) -> None:
     cfg = regression_cfg(tmp_path)
     body = "ruff check --select E9,F63,F7,F82 is clean.\nF7: the retry loop never stops"
