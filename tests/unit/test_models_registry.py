@@ -185,3 +185,22 @@ def test_exact_prefixed_entry_silence_blocks_stripped_fallback(monkeypatch):
     )
 
     assert supports_vision("openrouter/silent-model", "openrouter") is False
+
+
+def test_exact_prefixed_silence_does_not_inherit_sampling(monkeypatch):
+    monkeypatch.setattr(
+        model_registry,
+        "_REGISTRY",
+        {
+            "models": {
+                "openai/silent-model": {"provider": "openrouter"},
+                "silent-model": {
+                    "provider": "openai",
+                    "supports_sampling": False,
+                },
+            },
+            "provider_defaults": {},
+        },
+    )
+
+    assert supports_sampling("openai/silent-model") is True
