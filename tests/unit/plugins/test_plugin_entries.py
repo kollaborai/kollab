@@ -55,3 +55,26 @@ def test_enabled_plugin_reports_a_manually_stopping_service(tmp_path, monkeypatc
     hello = next(item for item in plugin_entries(builtin) if item["id"] == "hello")
     assert hello["enabled"] is True
     assert hello["state"] == "stopping"
+
+
+def test_partial_stop_failure_keeps_stopping_state_until_other_services_finish(tmp_path, monkeypatch):
+    from kollabor_plugins.packages import files_sha256
+    from kollabor_plugins.registry import plugin_entries
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = tmp_path / ".kollab"
+    builtin = tmp_path / "builtin"
+    builtin.mkdir()
+    root = home / "plugins" / "hello"
+    root.mkdir(parents=True)
+    (root / "kollab-plugin.json").write_text(json.dumps({"id": "hello", "name": "Hello"}))
+    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {
+        "enabled": False, "granted": [], "files_sha256": files_sha256(root),
+    }}, "dev": {}}))
+    services = [{"name": "one", "state": "stop-failed"}, {"name": "two", "state": "stopping"}]
+    monkeypatch.setattr("kollabor_plugins.registry._service_entries", lambda *_: services)
+    hello = next(item for item in plugin_entries(builtin) if item["id"] == "hello")
+    assert hello["state"] == "stopping"
+    services[1]["state"] = "stopped"
+    hello = next(item for item in plugin_entries(builtin) if item["id"] == "hello")
+    assert hello["state"] == "stop-failed"
