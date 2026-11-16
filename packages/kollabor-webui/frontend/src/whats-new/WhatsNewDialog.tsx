@@ -38,9 +38,7 @@ export function WhatsNewDialog({
 }: WhatsNewDialogProps) {
   if (!open || !release) return null;
 
-  const { lines, moreCount } = dialogLines(release);
-  const visibleAdded = lines.slice(0, release.added.length);
-  const visibleChanged = lines.slice(visibleAdded.length);
+  const { sections, moreCount } = dialogLines(release);
   const previous = sublineVersion(
     release,
     loadSeenRecord(readWhatsNewSeenRaw()),
@@ -89,30 +87,18 @@ export function WhatsNewDialog({
           </Button>
         </div>
         <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-6 py-4">
-          {visibleAdded.length > 0 ? (
-            <section>
-              <h4 className="text-xs font-medium text-muted-foreground">Added</h4>
+          {sections.map(({ category, items }) => (
+            <section key={category}>
+              <h4 className="text-xs font-medium text-muted-foreground">{category}</h4>
               <ul className="mt-1.5 list-disc space-y-1.5 pl-4">
-                {visibleAdded.map((item, index) => (
-                  <li key={`added-${index}`} className="break-words text-sm text-foreground/90">
+                {items.map((item, index) => (
+                  <li key={index} className="break-words text-sm text-foreground/90">
                     {item}
                   </li>
                 ))}
               </ul>
             </section>
-          ) : null}
-          {visibleChanged.length > 0 ? (
-            <section>
-              <h4 className="text-xs font-medium text-muted-foreground">Changed</h4>
-              <ul className="mt-1.5 list-disc space-y-1.5 pl-4">
-                {visibleChanged.map((item, index) => (
-                  <li key={`changed-${index}`} className="break-words text-sm text-foreground/90">
-                    {item}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
+          ))}
           {moreCount > 0 ? (
             <p className="text-xs text-muted-foreground">And {moreCount} more.</p>
           ) : null}

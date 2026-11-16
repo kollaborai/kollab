@@ -38,9 +38,9 @@ describe("compareVersions", () => {
     expect(compareVersions("0.10.0", "0.9.0")).toBeGreaterThan(0);
   });
 
-  it("never crashes on a non-version string", () => {
-    expect(compareVersions("Unreleased", "0.22.0")).not.toBeNaN();
-    expect(compareVersions("0.22.0", "Unreleased")).not.toBeNaN();
+  it("leaves non-version strings unordered", () => {
+    expect(compareVersions("Unreleased", "0.22.0")).toBeNull();
+    expect(compareVersions("0.22.0", "Unreleased")).toBeNull();
   });
 });
 
@@ -163,10 +163,11 @@ describe("dialogLines", () => {
       },
     ]))!;
     const capped = dialogLines(built);
-    expect(capped.lines).toHaveLength(MAX_LINES);
-    expect(capped.lines[0]).toBe("Added 1.");
-    expect(capped.lines[3]).toBe("Added 4.");
-    expect(capped.lines[4]).toBe("Changed 1.");
+    const lines = capped.sections.flatMap((section) => section.items);
+    expect(lines).toHaveLength(MAX_LINES);
+    expect(lines[0]).toBe("Added 1.");
+    expect(lines[3]).toBe("Added 4.");
+    expect(lines[4]).toBe("Changed 1.");
     expect(capped.moreCount).toBe(2);
   });
 
@@ -174,7 +175,7 @@ describe("dialogLines", () => {
     const built = buildRelease(release("0.23.0", [
       { version: "0.23.0", groups: [group("Added", ["One."]), group("Fixed", ["F1", "F2"])] },
     ]))!;
-    expect(dialogLines(built)).toEqual({ lines: ["One."], moreCount: 0 });
+    expect(dialogLines(built)).toEqual({ sections: [{ category: "Added", items: ["One."] }], moreCount: 0 });
   });
 });
 

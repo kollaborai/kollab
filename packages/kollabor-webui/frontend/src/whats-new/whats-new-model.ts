@@ -24,20 +24,21 @@ export type SeenRecord = { seenVersion: string };
 
 const VERSION_RE = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
 
-const isSupportedVersion = (version: string): boolean =>
-  VERSION_RE.test(version) &&
-  version.split(".").every((part) => Number.isSafeInteger(Number(part)));
+/** Accept only complete, stable three-part versions with exact numeric values. */
+function versionParts(version: string): number[] | null {
+  // JavaScript's $ also matches before a final newline; require a full match.
+  if (VERSION_RE.exec(version)?.[0] !== version) return null;
+  const parts = version.split(".").map(Number);
+  return parts.every(Number.isSafeInteger) ? parts : null;
+}
 
-/** Numeric segment compare; non-versions fall back to string order, never NaN. */
-export function compareVersions(a: string, b: string): number {
-  if (!VERSION_RE.test(a) || !VERSION_RE.test(b)) {
-    return a < b ? -1 : a > b ? 1 : 0;
-  }
-  const left = a.split(".").map(Number);
-  const right = b.split(".").map(Number);
-  const length = Math.max(left.length, right.length);
-  for (let index = 0; index < length; index += 1) {
-    const diff = (left[index] ?? 0) - (right[index] ?? 0);
+/** Unsupported inputs have no ordering and cannot suppress an announcement. */
+export function compareVersions(a: string, b: string): number | null {
+  const left = versionParts(a);
+  const right = versionParts(b);
+  if (!left || !right) return null;
+  for (let index = 0; index < left.length; index += 1) {
+    const diff = left[index] - right[index];
     if (diff !== 0) return diff;
   }
   return 0;
@@ -56,11 +57,11 @@ const countOf = (sections: ChangeSection[], category: string): number =>
 export function buildRelease(result: WhatsNewResult): DialogRelease | null {
   if (result.status !== "ready") return null;
   const newest = result.sections[0];
-  if (!newest || !isSupportedVersion(newest.version)) {
+  if (!newest || !versionParts(newest.version)) {
     return null;
   }
   const next = result.sections[1];
-  const previous = next && next.version !== "Unreleased" ? next.version : null;
+  const previous = next && versionParts(next.version) ? next.version : null;
   return {
     version: newest.version,
     previous,
@@ -75,7 +76,7 @@ export function loadSeenRecord(raw: string | null): SeenRecord | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as { seenVersion?: unknown };
-    return typeof parsed.seenVersion === "string" && isSupportedVersion(parsed.seenVersion)
+    return typeof parsed.seenVersion === "string" && versionParts(parsed.seenVersion)
       ? { seenVersion: parsed.seenVersion }
       : null;
   } catch {
@@ -84,6 +85,7 @@ export function loadSeenRecord(raw: string | null): SeenRecord | null {
 }
 
 export function saveSeenRecord(record: SeenRecord): string {
+  if (!versionParts(record.seenVersion)) throw new TypeError("Unsupported release version");
   return JSON.stringify({ seenVersion: record.seenVersion });
 }
 
@@ -107,13 +109,20 @@ export function recordWhatsNewSeen(version: string): void {
   }
 }
 
-/** Added then Changed, capped at MAX_LINES with the overflow counted. */
+/** The sole selection boundary: labelled sections and count share one budget. */
 export function dialogLines(release: DialogRelease): {
-  lines: string[];
+  sections: { category: "Added" | "Changed"; items: string[] }[];
   moreCount: number;
 } {
-  const all = [...release.added, ...release.changed];
-  return { lines: all.slice(0, MAX_LINES), moreCount: Math.max(all.length - MAX_LINES, 0) };
+  const added = release.added.slice(0, MAX_LINES);
+  const changed = release.changed.slice(0, MAX_LINES - added.length);
+  const sections: { category: "Added" | "Changed"; items: string[] }[] = [];
+  if (added.length) sections.push({ category: "Added", items: added });
+  if (changed.length) sections.push({ category: "Changed", items: changed });
+  return {
+    sections,
+    moreCount: release.added.length + release.changed.length - added.length - changed.length,
+  };
 }
 
 /** "Updated from" source: what this browser saw, else the changelog's previous release. */
@@ -130,7 +139,8 @@ export function decideWhatsNew(input: {
   const release = buildRelease(input.result);
   if (input.firstRun || !release) return { show: false, release };
   const seen = loadSeenRecord(input.seenRaw);
-  if (seen && compareVersions(seen.seenVersion, release.version) >= 0) {
+  const order = seen ? compareVersions(seen.seenVersion, release.version) : null;
+  if (order !== null && order >= 0) {
     return { show: false, release };
   }
   if (release.added.length + release.changed.length === 0) {

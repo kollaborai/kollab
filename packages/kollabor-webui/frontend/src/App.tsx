@@ -147,7 +147,7 @@ function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current:
 
 const api = new EngineApi();
 
-/** True until this browser recorded a guided-setup dismissal. */
+/** Whether this browser has no setup progress yet. Read before children mount. */
 const noGuideYet = () => {
   try {
     return window.localStorage.getItem("kollab.setup-guide.v1") === null;
@@ -490,6 +490,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [agentLibraryInitialTab, setAgentLibraryInitialTab] = useState<"rosters" | "teams">("rosters");
   const [setupGuideOpen, setSetupGuideOpen] = useState(false);
+  // Own first-run eligibility for this mount; child effects and in-flight
+  // startup work must not turn a pristine browser into a returning one.
+  const [firstRun] = useState(noGuideYet);
   // What's New dialog: the release to announce and whether it is open.
   const [whatsNewRelease, setWhatsNewRelease] = useState<DialogRelease | null>(null);
   const [whatsNewDialogOpen, setWhatsNewDialogOpen] = useState(false);
@@ -1423,16 +1426,17 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         setInitialState(firstState);
         recoverPendingTurn(first.session_id, hasPendingPermission(firstState));
       }
-      if (noGuideYet()) {
-        // First run: nothing to restore and no dismissal on record.
+      if (firstRun) {
+        // First run owns this mount even if setup has since persisted progress.
         setSetupGuideOpen(true);
       } else {
         void (async () => {
           const decision = decideWhatsNew({
             result: await loadCanonicalWhatsNew(),
             seenRaw: readWhatsNewSeenRaw(),
-            firstRun: noGuideYet(),
+            firstRun,
           });
+          if (!mounted || operation !== operationRef.current) return;
           if (decision.show && decision.release) {
             setWhatsNewRelease(decision.release);
             setWhatsNewDialogOpen(true);
@@ -1452,7 +1456,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     return () => {
       mounted = false;
     };
-  }, [guardHistoryOpen, loadSessions, loadState, recoverPendingTurn, refreshAgentPool]);
+  }, [firstRun, guardHistoryOpen, loadSessions, loadState, recoverPendingTurn, refreshAgentPool]);
 
   // A default loadout belongs to the folder a session starts in: that folder's own project and local config can
   // set one. Ask again when the Workspace field changes, unless a model was picked by hand (#957).
