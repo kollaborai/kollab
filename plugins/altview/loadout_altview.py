@@ -861,6 +861,16 @@ class LoadoutFormAltView(AltView):
                 value="backend default (ChatGPT OAuth)",
                 help_text="This endpoint does not accept an output-token override.",
             )
+        self._compaction_widget = TextInputWidget(
+            {
+                "label": "Compaction Threshold (K tokens)",
+                "value": str(getattr(base, "compaction_threshold_k", None) or "")
+                if base else "",
+                "validation": "integer",
+                "placeholder": "automatic",
+            },
+            "",
+        )
         self._description_widget = TextInputWidget(
             {"label": "Description", "value": description, "placeholder": "optional"},
             "",
@@ -874,6 +884,7 @@ class LoadoutFormAltView(AltView):
                 self._temperature_widget,
                 self._effort_widget,
                 self._max_tokens_widget,
+                self._compaction_widget,
                 self._description_widget,
             ]
         )
@@ -989,6 +1000,15 @@ class LoadoutFormAltView(AltView):
                         self._stage = "edit"
                         return
 
+            compaction_raw = str(self._compaction_widget.get_pending_value() or "").strip()
+            compaction_threshold_k = None
+            if compaction_raw:
+                if not compaction_raw.isdigit() or int(compaction_raw) < 1:
+                    self._error = "Compaction Threshold must be a whole number of at least 1."
+                    self._stage = "edit"
+                    return
+                compaction_threshold_k = int(compaction_raw)
+
             description = str(
                 self._description_widget.get_pending_value() or ""
             ).strip()
@@ -1005,6 +1025,7 @@ class LoadoutFormAltView(AltView):
                         effort=effort,
                         max_tokens=max_tokens,
                         description=description,
+                        compaction_threshold_k=compaction_threshold_k,
                     )
                 )
             else:
@@ -1017,6 +1038,7 @@ class LoadoutFormAltView(AltView):
                         effort=effort,
                         max_tokens=max_tokens,
                         description=description,
+                        compaction_threshold_k=compaction_threshold_k,
                     )
                 )
 
@@ -1044,6 +1066,7 @@ class LoadoutFormAltView(AltView):
                     effort=effort,
                     max_tokens=max_tokens,
                     description=description,
+                    compaction_threshold_k=compaction_threshold_k,
                 )
 
             activated = None

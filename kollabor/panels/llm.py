@@ -422,6 +422,11 @@ def _form(ctx: Any, manager: Any, base: Any, mode: str, style: str) -> dict:
                 if codex else f"Empty uses the provider default ({default_max_tokens(base.model):,})."
             ),
         ),
+        make_field(
+            "compaction_threshold_k", "text_input", "Compaction Threshold (K tokens)",
+            value=str(base.compaction_threshold_k) if base.compaction_threshold_k else "",
+            help="Empty compacts automatically.",
+        ),
         make_field("description", "text_input", "Description", value=base.description or ""),
     ]
     return {
@@ -480,6 +485,13 @@ def _loadout_values(
                 values["max_tokens"] = tokens
         except ValueError:
             errors["max_tokens"] = "Max Output Tokens must be a whole number."
+    raw_threshold = str(payload.get("compaction_threshold_k") or "").strip()
+    values["compaction_threshold_k"] = None
+    if raw_threshold:
+        if raw_threshold.isdigit() and int(raw_threshold) >= 1:
+            values["compaction_threshold_k"] = int(raw_threshold)
+        else:
+            errors["compaction_threshold_k"] = "Compaction Threshold must be a whole number of at least 1."
     description = str(payload.get("description") or "").strip()
     if len(description) > 500:
         errors["description"] = "Keep the description under 500 characters."

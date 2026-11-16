@@ -314,7 +314,7 @@ class TestCompactionThresholdForm(unittest.TestCase):
         from kollabor.panels.llm import _loadout_values
 
         return _loadout_values(
-            {"temperature": "1.0", "effort": "default", "description": "",
+            {"temperature": "", "effort": "default", "description": "",
              "compaction_threshold_k": raw},
             False, "opus", is_acp=True, provider="acp",
         )
