@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 import { chromium } from "playwright-core";
@@ -49,6 +50,20 @@ try {
     const reference = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     await reference.goto(process.env.PLUGIN_REFERENCE_URL);
     await reference.screenshot({ path: resolve(process.env.PLUGIN_SCREENSHOTS, `${process.env.PLUGIN_REFERENCE_NAME || "failed-load"}-reference.png`) });
+    await reference.close();
+  }
+  if (process.env.PLUGIN_SCREENSHOTS && process.env.PLUGIN_REFERENCE_DIR) {
+    const reference = await browser.newPage({ viewport: { width: 1440, height: 800 } });
+    for (const name of ["SettingsPlugins-running", "AddPlugin-add", "AddPlugin-update", "StateFailed-load", "StateFailed-render", "StateStopped-noHeartbeat", "StateStopped-crashed", "StateOff-stopping", "StateEmpty-pluginsOff", "ChatTab-default", "Modal-running"]) {
+      await reference.goto(pathToFileURL(resolve(process.env.PLUGIN_REFERENCE_DIR, `${name}.html`)).href);
+      for (const width of [1440, 820, 390]) {
+        await reference.setViewportSize({ width, height: 800 });
+        for (const theme of ["dark", "light"]) {
+          await reference.locator(".kx").evaluate((node, light) => node.classList.toggle("light", light), theme === "light");
+          await reference.screenshot({ path: resolve(process.env.PLUGIN_SCREENSHOTS, `reference-${name}-${width}-${theme}.png`) });
+        }
+      }
+    }
     await reference.close();
   }
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
