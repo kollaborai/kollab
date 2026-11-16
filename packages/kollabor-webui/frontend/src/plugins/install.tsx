@@ -148,8 +148,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
             ...(job.manifest?.engine ? ["Engine routes"] : []),
             ...(job.manifest?.web ? ["Browser code"] : []),
             ...(job.manifest?.agents ? ["Agent definitions"] : []),
-            ...(job.manifest?.hooks ? ["Hooks"] : []),
-            ...(job.manifest?.mcp ? ["MCP servers"] : []),
+            ...(job.manifest ? [job.manifest.hooks ? "Hooks" : "no hooks", job.manifest.mcp ? "MCP servers" : "no MCP servers"] : []),
             ...(services.length ? [`${services.length} background process${services.length === 1 ? "" : "es"}`] : []),
           ]} />
           <DetailsList label="Through Kollab" values={throughKollab} />
