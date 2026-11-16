@@ -10,6 +10,7 @@ import test from "node:test";
 import {
   SETUP_STEPS,
   STORAGE_KEY,
+  advanceFrom,
   emptyFacts,
   initialGuideState,
   loadGuideState,
@@ -118,6 +119,50 @@ test("each actionable step targets a real surface", () => {
   assert.equal(stepTarget("agent"), "session:new");
   assert.equal(stepTarget("welcome"), null);
   assert.equal(stepTarget("done"), null);
+});
+
+test("advanceFrom moves one step past the shown step when nothing is skipped", () => {
+  const state: GuideState = { step: "welcome", dismissed: false };
+  const next = advanceFrom(state, emptyFacts());
+  // welcome never skips and is what the dialog shows, so one click lands on
+  // the provider step.
+  assert.deepEqual(next, { step: "provider", dismissed: false });
+});
+
+test("advanceFrom from a skipped provider lands past the shown network step (#1211)", () => {
+  const state: GuideState = { step: "provider", dismissed: false };
+  const facts: SetupFacts = { ...emptyFacts(), profileCount: 1 };
+  // The dialog shows network (provider resolved away), so one Open must move
+  // the stored step to agent, not network.
+  assert.deepEqual(advanceFrom(state, facts), {
+    step: "agent",
+    dismissed: false,
+  });
+});
+
+test("advanceFrom chains past provider and network when both are satisfied", () => {
+  const state: GuideState = { step: "provider", dismissed: false };
+  const facts: SetupFacts = {
+    ...emptyFacts(),
+    profileCount: 1,
+    networkLive: true,
+  };
+  // Shown step is agent; one advance lands on done.
+  assert.deepEqual(advanceFrom(state, facts), {
+    step: "done",
+    dismissed: false,
+  });
+});
+
+test("advanceFrom keeps done and the dismissed flag untouched", () => {
+  const done: GuideState = { step: "done", dismissed: false };
+  assert.deepEqual(advanceFrom(done, emptyFacts()), done);
+  const dismissed: GuideState = { step: "agent", dismissed: true };
+  // A dismissed guide resolves to done; advancing must not resurrect it.
+  assert.deepEqual(advanceFrom(dismissed, emptyFacts()), {
+    step: "done",
+    dismissed: true,
+  });
 });
 
 test("storage key is namespaced and stable", () => {
