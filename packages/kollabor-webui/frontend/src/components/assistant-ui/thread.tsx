@@ -42,7 +42,10 @@ import {
   type VoiceMode,
 } from "@/voice-mode";
 import { useRoomVoiceMode, useVoiceRoomLive, VoiceRoomBar } from "@/voice/voice-room";
-import { usePendingPermissionCancellation } from "@/runtime";
+import {
+  imageAttachmentAdapter,
+  usePendingPermissionCancellation,
+} from "@/runtime";
 import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
   panelCommandRequest,
@@ -60,6 +63,7 @@ import {
   MessagePrimitive,
   SuggestionPrimitive,
   ThreadPrimitive,
+  type PendingAttachment,
   type ToolCallMessagePartComponent,
   useAui,
   useAssistantTransportSendCommand,
@@ -86,6 +90,7 @@ import {
   useMemo,
   useLayoutEffect,
   useRef,
+  useState,
   type ComponentType,
   type FC,
   type KeyboardEvent,
@@ -528,6 +533,7 @@ const Composer: FC<{
   const composerText = useAuiState((s) => s.composer.text);
   const restoredDraft = useRef<{ key: string | null; text: string } | null>(null);
   const skipEmptyDraftPersist = useRef(false);
+  const [busySubmitError, setBusySubmitError] = useState<string | null>(null);
 
   useLayoutEffect(() => {
     const key = draftKey ?? null;
@@ -557,9 +563,11 @@ const Composer: FC<{
     saveComposerDraft(key, composerText);
   }, [composerText, draftKey]);
 
-  const lastBusySubmit = useRef<{ fingerprint: string; at: number } | null>(
-    null,
-  );
+  const lastBusySubmit = useRef<{
+    fingerprint: string;
+    at: number;
+    inFlight: Set<string>;
+  } | null>(null);
 
   // A bare /config, /llm, /model, /setup or /connect (also /connect code and
   // /connect knocks) opens its Settings tab and posts no text. Any other line is
@@ -577,7 +585,7 @@ const Composer: FC<{
 
   // Picking a panel command in the slash menu (Enter or click) opens its tab
   // instead of leaving "/config" in the box for a second Enter.
-  const sendBusyMessage = (event: {
+  const sendBusyMessage = async (event: {
     preventDefault: () => void;
     defaultPrevented?: boolean;
   }) => {
@@ -588,8 +596,13 @@ const Composer: FC<{
     const fingerprint = `${state.text}\u0000${state.attachments
       .map((attachment) => attachment.id)
       .join(",")}`;
-    const now = Date.now();
     const previous = lastBusySubmit.current;
+    const inFlight = previous?.inFlight ?? new Set();
+    if (inFlight.has(fingerprint)) {
+      event.preventDefault();
+      return;
+    }
+    const now = Date.now();
     if (
       previous &&
       previous.fingerprint === fingerprint &&
@@ -598,29 +611,61 @@ const Composer: FC<{
       event.preventDefault();
       return;
     }
-    lastBusySubmit.current = { fingerprint, at: now };
+    lastBusySubmit.current = { fingerprint, at: now, inFlight };
+    inFlight.add(fingerprint);
     event.preventDefault();
-    const parts: Array<
-      | { type: "text"; text: string }
-      | { type: "image"; image: string }
-    > = [];
-    if (state.text.trim()) parts.push({ type: "text", text: state.text });
-    for (const attachment of state.attachments) {
-      for (const part of attachment.content ?? []) {
-        if (part.type === "text") parts.push({ type: "text", text: part.text });
-        if (part.type === "image") parts.push({ type: "image", image: part.image });
+    setBusySubmitError(null);
+    try {
+      const attachments = await Promise.all(
+        state.attachments.map(async (attachment) => {
+          if (attachment.content) return attachment;
+          if (
+            attachment.type === "image" &&
+            attachment.status.type === "requires-action"
+          ) {
+            return imageAttachmentAdapter.send(attachment as PendingAttachment);
+          }
+          throw new Error("Attachment is not ready to send");
+        }),
+      );
+      const parts: Array<
+        | { type: "text"; text: string }
+        | { type: "image"; image: string }
+      > = [];
+      if (state.text.trim()) parts.push({ type: "text", text: state.text });
+      for (const attachment of attachments) {
+        for (const part of attachment.content ?? []) {
+          if (part.type === "text") parts.push({ type: "text", text: part.text });
+          if (part.type === "image") parts.push({ type: "image", image: part.image });
+        }
       }
+      if (parts.length === 0) throw new Error("Message has no sendable content");
+      queueComposerDraftSubmission(draftKey, state.text);
+      if (state.text.length > 0) skipEmptyDraftPersist.current = true;
+      sendTransportCommand({
+        type: "add-message",
+        message: { role: "user", parts },
+        parentId: null,
+        sourceId: null,
+      });
+      const currentState = aui.composer.getState();
+      const currentFingerprint = `${currentState.text}\u0000${currentState.attachments
+        .map((attachment) => attachment.id)
+        .join(",")}`;
+      if (currentFingerprint === fingerprint) {
+        void aui.composer.reset();
+      }
+    } catch {
+      if (lastBusySubmit.current?.fingerprint === fingerprint) {
+        lastBusySubmit.current = {
+          ...lastBusySubmit.current,
+          at: Number.NEGATIVE_INFINITY,
+        };
+      }
+      setBusySubmitError("Could not send the message. Retry or remove the attachment.");
+    } finally {
+      inFlight.delete(fingerprint);
     }
-    if (parts.length === 0) return;
-    queueComposerDraftSubmission(draftKey, state.text);
-    if (state.text.length > 0) skipEmptyDraftPersist.current = true;
-    sendTransportCommand({
-      type: "add-message",
-      message: { role: "user", parts },
-      parentId: null,
-      sourceId: null,
-    });
-    void aui.composer.reset();
   };
 
   const submitBusyMessage = (event: {
@@ -912,6 +957,11 @@ const Composer: FC<{
           emptyMessage="No online agents"
           emptyHint="Try @broadcast to reach every agent in this project."
         />
+        {busySubmitError ? (
+          <p role="alert" className="text-destructive px-2 text-xs">
+            {busySubmitError}
+          </p>
+        ) : null}
         <ComposerPrimitive.AttachmentDropzone
           asChild
           disabled={!attachmentsEnabled}
