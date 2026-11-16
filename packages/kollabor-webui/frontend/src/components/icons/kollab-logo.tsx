@@ -56,17 +56,26 @@ export function startMist(canvas: HTMLCanvasElement): (() => void) | undefined {
   if (motion?.matches) return undefined;
   const gl = canvas.getContext("webgl", { premultipliedAlpha: false });
   if (!gl) return undefined;
+  // Every failure path must end here: shaders deleted, program deleted, and the
+  // freshly-acquired context released, so the static SVG mark takes over clean.
+  const releaseContext = () => {
+    gl.getExtension("WEBGL_lose_context")?.loseContext();
+  };
   const prog = gl.createProgram();
-  if (!prog) return undefined;
-  const shaders: WebGLShader[] = [];
-  // Full teardown: a valid linker assignment or any setup failure must leave the
-  // static SVG mark in charge, never a blank canvas or leaked GL objects.
+  if (!prog) {
+    releaseContext();
+    return undefined;
+  }
+  const created: WebGLShader[] = [];
+  const attached: WebGLShader[] = [];
   const bail = () => {
-    for (const sh of shaders) {
-      gl.detachShader(prog, sh);
-      gl.deleteShader(sh);
-    }
+    // Only detach what was actually attached (detaching an unattached shader is
+    // a GL error); delete everything that was created, then the program, then
+    // the context itself.
+    for (const sh of attached) gl.detachShader(prog, sh);
+    for (const sh of created) gl.deleteShader(sh);
     gl.deleteProgram(prog);
+    releaseContext();
     return undefined;
   };
   for (const [type, src] of [
@@ -75,11 +84,12 @@ export function startMist(canvas: HTMLCanvasElement): (() => void) | undefined {
   ] as const) {
     const sh = gl.createShader(type);
     if (!sh) return bail();
-    shaders.push(sh);
+    created.push(sh);
     gl.shaderSource(sh, src);
     gl.compileShader(sh);
     if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) return bail();
     gl.attachShader(prog, sh);
+    attached.push(sh);
   }
   // Pin `a` to slot 0 by contract, then honor whatever the linker actually did.
   gl.bindAttribLocation(prog, 0, "a");
@@ -89,6 +99,7 @@ export function startMist(canvas: HTMLCanvasElement): (() => void) | undefined {
   if (attrib < 0) return bail();
   gl.useProgram(prog);
   const buffer = gl.createBuffer();
+  if (!buffer) return bail();
   gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
   gl.enableVertexAttribArray(attrib);
@@ -126,15 +137,18 @@ export function startMist(canvas: HTMLCanvasElement): (() => void) | undefined {
   };
   motion?.addEventListener?.("change", onMotionChange);
   draw();
+  let stopped = false;
   return () => {
+    if (stopped) return;
+    stopped = true;
     disposed = true;
     running = false;
     motion?.removeEventListener?.("change", onMotionChange);
     cancelAnimationFrame(frame);
     gl.deleteBuffer(buffer);
-    for (const sh of shaders) gl.deleteShader(sh);
+    for (const sh of created) gl.deleteShader(sh);
     gl.deleteProgram(prog);
-    gl.getExtension("WEBGL_lose_context")?.loseContext();
+    releaseContext();
   };
 }
 

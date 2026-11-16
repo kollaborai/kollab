@@ -7,18 +7,22 @@ function fakeGl(opts: {
   linked?: boolean;
   compiles?: boolean;
   programAllocFails?: boolean;
-  shaderAllocFails?: boolean;
+  /** Number of createShader calls that succeed before one returns null. */
+  shaderAllocFailsAfter?: number;
+  bufferAllocFails?: boolean;
   attribLocation?: number;
 } = {}) {
   const {
     linked = true,
     compiles = true,
     programAllocFails = false,
-    shaderAllocFails = false,
+    shaderAllocFailsAfter = Infinity,
+    bufferAllocFails = false,
     attribLocation = 0,
   } = opts;
   const calls: string[] = [];
   const args: Array<[string, unknown[]]> = [];
+  let shaderAllocs = 0;
   const gl = new Proxy(
     {
       LINK_STATUS: 1,
@@ -40,7 +44,11 @@ function fakeGl(opts: {
           if (key === "getShaderParameter") return compiles;
           if (key === "getAttribLocation") return attribLocation;
           if (key === "createProgram") return programAllocFails ? null : { id: "prog" };
-          if (key === "createShader") return shaderAllocFails ? null : { id: "sh" };
+          if (key === "createShader") {
+            shaderAllocs += 1;
+            return shaderAllocs > shaderAllocFailsAfter ? null : { id: `sh-${shaderAllocs}` };
+          }
+          if (key === "createBuffer") return bufferAllocFails ? null : { id: "buf" };
           if (key === "getExtension") return { loseContext: () => calls.push("loseContext") };
           return {};
         };
@@ -172,9 +180,9 @@ describe("startMist", () => {
     expect(calls).not.toContain("drawArrays");
   });
 
-  it("falls back cleanly when createShader returns null", () => {
+  it("falls back cleanly when the first createShader returns null", () => {
     stubWindow(false);
-    const { gl, calls } = fakeGl({ shaderAllocFails: true });
+    const { gl, calls } = fakeGl({ shaderAllocFailsAfter: 0 });
     expect(() => startMist(fakeCanvas(gl))).not.toThrow();
     expect(startMist(fakeCanvas(gl))).toBeUndefined();
     expect(calls).not.toContain("drawArrays");
@@ -207,5 +215,79 @@ describe("startMist", () => {
     expect(calls).toContain("deleteShader");
     expect(calls).toContain("loseContext");
     expect(calls.filter((c) => c === "drawArrays").length).toBeGreaterThan(0);
+  });
+
+  // --- koordinator round-2: every failure path must also release the context ---
+
+  it("releases the GL context when createProgram returns null", () => {
+    stubWindow(false);
+    const { gl, calls } = fakeGl({ programAllocFails: true });
+    expect(startMist(fakeCanvas(gl))).toBeUndefined();
+    expect(calls).toContain("loseContext");
+    expect(calls).not.toContain("drawArrays");
+  });
+
+  it("deletes the first shader and releases context when the second createShader returns null", () => {
+    stubWindow(false);
+    const { gl, calls } = fakeGl({ shaderAllocFailsAfter: 1 });
+    expect(startMist(fakeCanvas(gl))).toBeUndefined();
+    // The first shader compiled and was attached before the second alloc failed:
+    // exactly one valid detach, one delete, then program + context release.
+    expect(calls.filter((c) => c === "detachShader")).toHaveLength(1);
+    expect(calls.filter((c) => c === "deleteShader")).toHaveLength(1);
+    expect(calls).toContain("deleteProgram");
+    expect(calls).toContain("loseContext");
+    expect(calls).not.toContain("drawArrays");
+  });
+
+  it("never detaches an unattached shader on compile failure and releases context", () => {
+    stubWindow(false);
+    const { gl, calls } = fakeGl({ compiles: false });
+    expect(startMist(fakeCanvas(gl))).toBeUndefined();
+    expect(calls).not.toContain("detachShader");
+    expect(calls.filter((c) => c === "deleteShader")).toHaveLength(1);
+    expect(calls).toContain("deleteProgram");
+    expect(calls).toContain("loseContext");
+  });
+
+  it("detaches both attached shaders and releases context when linking fails", () => {
+    stubWindow(false);
+    const { gl, calls } = fakeGl({ linked: false });
+    expect(startMist(fakeCanvas(gl))).toBeUndefined();
+    expect(calls.filter((c) => c === "detachShader")).toHaveLength(2);
+    expect(calls.filter((c) => c === "deleteShader")).toHaveLength(2);
+    expect(calls).toContain("deleteProgram");
+    expect(calls).toContain("loseContext");
+  });
+
+  it("releases context and skips drawing when the attribute location is invalid", () => {
+    stubWindow(false);
+    const { gl, calls } = fakeGl({ attribLocation: -1 });
+    expect(startMist(fakeCanvas(gl))).toBeUndefined();
+    expect(calls).not.toContain("drawArrays");
+    expect(calls.filter((c) => c === "detachShader")).toHaveLength(2);
+    expect(calls).toContain("deleteProgram");
+    expect(calls).toContain("loseContext");
+  });
+
+  it("falls back when createBuffer returns null (no upload, no draw, context released)", () => {
+    stubWindow(false);
+    const { gl, calls } = fakeGl({ bufferAllocFails: true });
+    expect(startMist(fakeCanvas(gl))).toBeUndefined();
+    expect(calls).not.toContain("bufferData");
+    expect(calls).not.toContain("drawArrays");
+    expect(calls).toContain("deleteProgram");
+    expect(calls).toContain("loseContext");
+  });
+
+  it("a repeated stop() is harmless (cleanup is idempotent)", () => {
+    stubWindow(false);
+    const { gl, calls } = fakeGl();
+    const stop = startMist(fakeCanvas(gl));
+    stop!();
+    stop!();
+    expect(calls.filter((c) => c === "loseContext")).toHaveLength(1);
+    expect(calls.filter((c) => c === "deleteProgram")).toHaveLength(1);
+    expect(calls.filter((c) => c === "deleteBuffer")).toHaveLength(1);
   });
 });
