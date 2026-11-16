@@ -31,6 +31,7 @@ def test_install_and_rollback_on_registry_failure(tmp_path, monkeypatch):
     registry = state / "plugins.json"
     original = json.loads(registry.read_text())
     assert original["plugins"]["hello"]["enabled"] is True
+    assert original["enable_order"]["hello"] == 1
     assert (state / "plugins" / "hello" / "content.txt").read_text() == "old"
 
     second, second_info = stage("second", "new")

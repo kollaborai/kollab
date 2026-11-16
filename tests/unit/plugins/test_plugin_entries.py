@@ -78,3 +78,26 @@ def test_partial_stop_failure_keeps_stopping_state_until_other_services_finish(t
     services[1]["state"] = "stopped"
     hello = next(item for item in plugin_entries(builtin) if item["id"] == "hello")
     assert hello["state"] == "stop-failed"
+
+
+def test_plugin_entries_expose_durable_enable_order(tmp_path, monkeypatch):
+    from kollabor_plugins.packages import files_sha256
+    from kollabor_plugins.registry import plugin_entries
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = tmp_path / ".kollab"
+    builtin = tmp_path / "builtin"
+    builtin.mkdir()
+    root = home / "plugins" / "hello"
+    root.mkdir(parents=True)
+    (root / "kollab-plugin.json").write_text(json.dumps({"id": "hello", "name": "Hello"}))
+    dev = tmp_path / "dev"
+    dev.mkdir()
+    (dev / "kollab-plugin.json").write_text(json.dumps({"id": "local", "name": "Local"}))
+    (home / "plugins.json").write_text(json.dumps({
+        "plugins": {"hello": {"enabled": True, "granted": [], "files_sha256": files_sha256(root)}},
+        "dev": {"local": str(dev)}, "enable_counter": 9, "enable_order": {"hello": 4, "local@dev": 9},
+    }))
+    entries = {entry["id"]: entry for entry in plugin_entries(builtin)}
+    assert entries["hello"]["enable_order"] == 4
+    assert entries["local@dev"]["enable_order"] == 9
