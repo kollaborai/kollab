@@ -56,7 +56,7 @@ code is 0).
 | `pr_gates.dod.docs_paths` | `{}` | Maps a regex over changed paths to the doc files that must be updated in the same PR. |
 | `pr_gates.dod.spec_or_fix_brief_mode` | `block` | Missing feature specs or fix briefs warn without failing in `warn` mode; `block` fails the check. |
 | `pr_gates.dod.regression_profile.finding_id_pattern` | `\bF\d+\b` | Generic finding-id shape used to identify review finding IDs. |
-| `pr_gates.dod.regression_profile.test_paths` | `["tests/"]` | Where regression tests live; a changed file here must mention the finding id. |
+| `pr_gates.dod.regression_profile.test_paths` | `["tests/"]` | Where regression tests live; the changed test declaration must name the finding id. |
 | `pr_gates.dod.regression_profile.trusted_reviewers` | `[]` | Exact GitHub logins permitted to annotate incidental references; the PR author is never accepted. |
 
 Example:
@@ -110,11 +110,15 @@ trusted_reviewers = ["owner-login"]
   it must land a matching test in a test-only commit before each implementation
   commit. A fix commit cannot modify that regression test except to remove its
   sole `@pytest.mark.xfail(strict=True)` marker. Test-only commits must mention
-  the finding ID in a changed test file. Commits added before the finding event
+  the finding ID in a changed test declaration. A fix may remove the strict
+  xfail only from that finding's test file. The declaration must use a `test_`
+  function name containing the finding ID. Commits added before the finding event
   do not count as fixes for this ordering check. If timeline positions or
   changed-file lists are incomplete, the gate fails closed.
-  A non-testable finding is exempt only when its fix commit body contains a
-  line in the form `No regression test: F14 - documentation wording only.`
+  A non-testable finding is exempt only when every changed file in its fix is a
+  Markdown, reStructuredText, or plain-text documentation file and its commit
+  body contains a line in the form
+  `No regression test: F14 - documentation wording only.`
 
   The collector reads changed test files as immutable GitHub blob data from
   the PR head and reads each commit's changed paths through the GitHub API,

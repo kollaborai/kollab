@@ -721,6 +721,8 @@ def _declared_non_testable_findings(cfg: DodConfig, data: PRData) -> set[str]:
             continue
         if not commit.files or any(
             _is_test_path(path, cfg.regression.test_paths) for path in commit.files
+        ) or not all(
+            path.lower().endswith((".md", ".rst", ".txt")) for path in commit.files
         ):
             continue
         for line in commit.message.splitlines():
@@ -819,6 +821,7 @@ def _check_red_first(cfg: DodConfig, data: PRData, findings: set[str]) -> str:
             latest_finding_order = None
             latest_finding = max(timestamps)
         pending_test = False
+        pending_test_paths: set[str] = set()
         for commit in data.commits:
             if latest_finding_order is not None:
                 commit_order = getattr(commit, "timeline_order", None)
@@ -849,24 +852,25 @@ def _check_red_first(cfg: DodConfig, data: PRData, findings: set[str]) -> str:
                     _mentions_finding(data.changed_file_contents.get(path, ""), finding)
                     for path in test_paths
                 )
-                if any(
-                    _patch_adds_finding(patches.get(path, ""), finding)
-                    or (
-                        _patch_adds_strict_xfail(patches.get(path, ""))
-                        and _mentions_finding(
-                            data.changed_file_contents.get(path, ""), finding
-                        )
-                    )
+                matching_test_paths = tuple(
+                    path
                     for path in test_paths
-                ) or legacy_blob_match:
+                    if _patch_adds_finding(patches.get(path, ""), finding)
+                )
+                if matching_test_paths or legacy_blob_match:
                     pending_test = True
+                    pending_test_paths.update(matching_test_paths or test_paths)
                 continue
             if implementation_paths:
                 if test_paths:
                     patches = getattr(commit, "file_patches", {})
-                    xfail_removal = pending_test and all(
-                        _only_strict_xfail_removal(patches.get(path, ""))
-                        for path in test_paths
+                    xfail_removal = (
+                        pending_test
+                        and set(test_paths).issubset(pending_test_paths)
+                        and all(
+                            _only_strict_xfail_removal(patches.get(path, ""))
+                            for path in test_paths
+                        )
                     )
                     if not xfail_removal:
                         return (
@@ -880,6 +884,7 @@ def _check_red_first(cfg: DodConfig, data: PRData, findings: set[str]) -> str:
                         "commit the regression test before the fix"
                     )
                 pending_test = False
+                pending_test_paths.clear()
         if pending_test:
             return f"regression test for {finding} was not followed by a separate fix commit"
     return ""
@@ -898,16 +903,9 @@ def _patch_adds_finding(patch: str, finding: str) -> bool:
     return any(
         line.startswith("+")
         and not line.startswith("+++")
+        and re.match(r"(?:async\s+)?def\s+test_\w+\s*\(", line[1:].strip())
         and _mentions_finding(line[1:], finding)
         for line in patch.splitlines()
-    )
-
-
-def _patch_adds_strict_xfail(patch: str) -> bool:
-    return any(
-        line[1:].strip() == "@pytest.mark.xfail(strict=True)"
-        for line in patch.splitlines()
-        if line.startswith("+") and not line.startswith("+++")
     )
 
 

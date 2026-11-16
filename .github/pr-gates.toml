@@ -26,9 +26,9 @@ spec_or_fix_brief_mode = "warn"
 # "^packages/" = ["CHANGELOG.md"]
 
 # Generic red-first regression profile (#721): finding ids found in review
-# comments must appear in a changed test file, committed alone before each
-# subsequent implementation commit. A non-testable finding uses an explicit
-# `No regression test: F14 - reason.` line in its fix commit body.
+# comments must name a changed test declaration, committed alone before each
+# subsequent implementation commit. Only documentation-only fixes may use an
+# explicit `No regression test: F14 - reason.` line in the fix commit body.
 [pr_gates.dod.regression_profile]
 finding_id_pattern = "\\bF\\d+\\b"
 test_paths = ["tests/"]

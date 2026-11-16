@@ -369,14 +369,15 @@ test that reproduces it and fails on the current head, land that test alone
 (as its own commit, or as a strict `xfail` marker when the branch must stay
 green), then write the fix against it. The test flips green with no edits to
 the test itself; removing the strict `xfail` marker is the only permitted
-test change, and the gate verifies the removal is the only test diff. The
+test change, and the gate requires that removal in the same test file whose
+test declaration names the finding. The
 independent reviewer runs that test as the concrete repro
 instead of re-deriving one, and a fix commit that modifies its own regression
 test is flagged by the `regression_test` PR gate. The gate checks commits after
 the reviewer posted the finding, requiring a matching test-only commit before
 each implementation commit. A finding no test can reproduce, such as wording
-in a doc, says so in its fix commit with a `No regression test: F14 - reason.`
-line instead.
+in a doc, says so in its documentation-only fix commit with a
+`No regression test: F14 - reason.` line instead.
 
 ## Release process
 
