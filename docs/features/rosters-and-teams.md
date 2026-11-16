@@ -46,6 +46,7 @@ other roster's personas after it (each with its picture and job title); picking 
 fills in its **Type**. The sidebar's **Agents** button shows every roster and team and
 launches a team into a folder (**Launch Team**). Rows, the chat header and the settings
 call a persona by its display name.
+Long names wrap in the Agents list on narrow screens so the full label stays readable.
 
 Web/engine: `GET /rosters`, `GET /teams`, `POST /teams/<name>/launch {"workspace": "..."}`.
 Contract and every field: [docs/specs/rosters-and-teams.md](../specs/rosters-and-teams.md).

@@ -90,7 +90,7 @@ function PersonaRow({
           size={size}
         />
         <span className="flex min-w-0 flex-1 flex-col leading-tight">
-          <span className="truncate text-sm font-medium">
+          <span className="whitespace-normal break-words text-sm font-medium">
             {persona.display_name}
             {lead ? <span className="text-muted-foreground text-xs font-normal"> · Lead</span> : null}
           </span>
