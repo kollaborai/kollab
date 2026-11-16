@@ -253,9 +253,11 @@ def set_enabled(plugin_id: str, enabled: bool, *, config_service=None, save_targ
             record["enabled_path"] = os.environ.get("PATH", os.defpath)
         _write_json(path, registry)
     if not enabled:
-        from .services import stop_services
+        from .services import ServiceStopError, stop_services
 
-        stop_services(plugin_id)
+        failures = stop_services(plugin_id)
+        if failures:
+            raise ServiceStopError("Could not stop background processes. The plugin is off; retry stopping them.")
 
 
 def apply_config_changes(changes: dict) -> dict:

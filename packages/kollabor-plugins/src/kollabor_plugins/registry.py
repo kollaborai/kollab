@@ -493,7 +493,7 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
             heartbeat_s = None
         if status == "running" and identity is None:
             status = "unknown"
-        if status == "stopping" and identity is None:
+        if status in {"stopping", "stop-failed"} and identity is None:
             pid_file = state_file.parent / f"{name}.pid"
             status = "unknown" if pid_file.exists() or pid_file.is_symlink() else "stopped"
         result.append(
@@ -608,8 +608,11 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
         if plugin_id in registry.package_errors and state == "ok":
             state, error = "error", registry.package_errors[plugin_id]
         service_entries = _service_entries(home, plugin_id, manifest)
-        if state in {"ok", "off"} and any(service["state"] == "stopping" for service in service_entries):
-            state = "stopping"
+        if state in {"ok", "off"}:
+            if any(service["state"] == "stop-failed" for service in service_entries):
+                state = "stop-failed"
+            elif any(service["state"] == "stopping" for service in service_entries):
+                state = "stopping"
         entries.append(
             {
                 "id": plugin_id,

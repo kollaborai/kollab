@@ -23,6 +23,14 @@ from kollabor_config.file_lock import locked_file, try_lock, unlock
 from .packages import _ID, _SERVICE, _read_registry, files_sha256
 
 logger = logging.getLogger(__name__)
+
+
+class ServiceStopError(ValueError):
+    """The plugin was disabled, but one or more services could not be stopped."""
+
+
+class ServiceSignalError(OSError):
+    """A verified service wrapper could not be signalled."""
 _LOG_LIMIT = 10 * 1024 * 1024
 _DEFAULT_ENGINE_URL = "http://127.0.0.1:7433"
 
@@ -628,28 +636,41 @@ def control_service(
             if verified else None,
         }
     )
+    state.pop("error", None)
     _write_state(state_path, state)
     if verified:
         try:
             os.kill(wrapper["pid"], signal.SIGTERM)
         except ProcessLookupError:
             state["status"] = "stopped"
+            state["stop_deadline"] = None
             _write_state(state_path, state)
+        except OSError as exc:
+            state.update({"status": "stop-failed", "stop_deadline": None,
+                          "error": "Could not stop this process. Retry stopping it."})
+            _write_state(state_path, state)
+            raise ServiceSignalError("Could not signal verified service wrapper") from exc
 
 
-def stop_services(plugin_id: str) -> None:
+def stop_services(plugin_id: str) -> list[str]:
     """Signal only verified wrappers belonging to the named plugin."""
     if not _ID.fullmatch(plugin_id):
         raise ValueError("Invalid plugin id")
     run_dir = Path.home() / ".kollab" / "plugin-data" / plugin_id / "run"
+    failures = []
     for pid_path in run_dir.glob("*.pid"):
         try:
             # Record the shutdown interval for the inventory before signalling.
             control_service(plugin_id, pid_path.stem, "stop")
             continue
+        except ServiceSignalError as exc:
+            failures.append(pid_path.stem)
+            logger.warning("Could not stop service %s: %s", pid_path.name, exc)
+            continue
         except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
             # Stopping a verified wrapper remains necessary even when its files
             # or state are damaged; never let a display failure orphan it.
+            failures.append(pid_path.stem)
             logger.warning("Could not record stop for service %s: %s", pid_path.name, exc)
         try:
             identity = json.loads(pid_path.read_text(encoding="utf-8"))
@@ -662,6 +683,7 @@ def stop_services(plugin_id: str) -> None:
             continue
         except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
             logger.warning("Could not stop service %s: %s", pid_path.name, exc)
+    return failures
 
 
 async def supervise_services(*, engine_url: str | None = None) -> None:
