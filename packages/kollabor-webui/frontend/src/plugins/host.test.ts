@@ -97,9 +97,9 @@ describe("plugin host lifecycle", () => {
     try {
       setInventory([withState("starting")]);
       await host.start();
-      for (const state of ["running", "backoff", "crash-stopped"]) {
+      for (const [state, delay] of [["running", 5000], ["backoff", 30_000], ["crash-stopped", 5000]] as const) {
         setInventory([withState(state)]);
-        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(delay);
         expect(host.getSnapshot().entries[0].services?.[0]).toMatchObject({ state });
       }
       expect(onServiceCrash).toHaveBeenCalledOnce();
@@ -133,7 +133,7 @@ describe("plugin host lifecycle", () => {
     const { host } = setup({ json });
     try {
       await host.start();
-      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(90_000);
       expect(json).toHaveBeenCalledTimes(2);
       finish({ schema: 1, plugins: [active] });
       await vi.advanceTimersByTimeAsync(0);
@@ -149,7 +149,7 @@ describe("plugin host lifecycle", () => {
       await host.start();
       expect(json).toHaveBeenCalledTimes(1);
       setInventory([{ ...initial, services: [{ ...initial.services[0], heartbeat: 200 }] }]);
-      await vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(30_000);
       expect(json).toHaveBeenCalledTimes(2);
       expect(host.getSnapshot().entries[0].services?.[0]).toMatchObject({ heartbeat: 200 });
       setInventory([entry("hello")]);

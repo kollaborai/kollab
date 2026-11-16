@@ -97,6 +97,7 @@ export class PluginHost {
   private settleInventory: () => void = () => {};
   private markerSequence = 0;
   private serviceTimer: ReturnType<typeof setInterval> | null = null;
+  private serviceInterval: number | null = null;
   private stoppingTimer: ReturnType<typeof setInterval> | null = null;
   private crashNotices = new Set<string>();
   private clockSample: { serverTime: unknown; sampledAt: number } | null = null;
@@ -242,17 +243,18 @@ export class PluginHost {
   }
 
   private syncServicePolling() {
-    // Wrapper state can change without an engine event, including when no heartbeat is declared.
-    const needed = this.entries.some(entry => entry.enabled && entry.state !== "stopping" && entry.services?.some(service =>
-      typeof service === "object" && service !== null && "state" in service &&
-      (["starting", "running", "backoff", "stopping"].includes(String(service.state)) ||
-       ("desired" in service && service.desired === "running"))));
-    if (needed && this.serviceTimer === null) {
-      this.serviceTimer = setInterval(() => { if (!this.loading) void this.refresh(); }, 5000);
-    } else if (!needed && this.serviceTimer !== null) {
-      clearInterval(this.serviceTimer);
-      this.serviceTimer = null;
-    }
+    // Wrapper state changes without engine events. Avoid expensive full scans every
+    // five seconds for steady services, but follow transitional states promptly.
+    const services = this.entries.filter(entry => entry.enabled && entry.state !== "stopping")
+      .flatMap(entry => entry.services ?? [])
+      .filter(service => typeof service === "object" && service !== null && "state" in service);
+    const transitioning = services.some(service => ["starting", "backoff", "stopping"].includes(String(service.state)));
+    const active = services.some(service => service.state === "running" || ("desired" in service && service.desired === "running"));
+    const interval = transitioning ? 5000 : active ? 30_000 : null;
+    if (interval === this.serviceInterval) return;
+    if (this.serviceTimer !== null) clearInterval(this.serviceTimer);
+    this.serviceInterval = interval;
+    this.serviceTimer = interval === null ? null : setInterval(() => { if (!this.loading) void this.refresh(); }, interval);
   }
 
   navigate(id: string, target: PluginOpen) { this.options.navigate(id, target); }
@@ -279,6 +281,7 @@ export class PluginHost {
     this.settleInventory();
     if (this.serviceTimer !== null) clearInterval(this.serviceTimer);
     this.serviceTimer = null;
+    this.serviceInterval = null;
     if (this.stoppingTimer !== null) clearInterval(this.stoppingTimer);
     this.stoppingTimer = null;
     this.globalEvents.close();
