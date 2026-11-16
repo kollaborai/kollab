@@ -223,9 +223,11 @@ def resolve_git_commit(url: str, ref: str | None) -> str:
     return commit
 
 
-def files_sha256(root: Path) -> str:
-    """Hash relative paths, entry types, executable bits, and file contents."""
+def _hash_files(root: Path, capture: Path | None = None) -> tuple[str, bytes | None]:
     root = Path(root).resolve()
+    if capture is not None and not capture.is_relative_to(root):
+        raise ValueError("Asset is outside plugin folder")
+    captured = None
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix()):
         relative = path.relative_to(root).as_posix().encode("utf-8")
@@ -239,6 +241,8 @@ def files_sha256(root: Path) -> str:
         elif path.is_file():
             entry_type = b"x" if path.stat().st_mode & 0o111 else b"f"
             content = path.read_bytes()
+            if path == capture:
+                captured = content
         else:
             raise ValueError("Unsupported file type in plugin")
         digest.update(entry_type)
@@ -246,7 +250,20 @@ def files_sha256(root: Path) -> str:
         digest.update(relative)
         digest.update(len(content).to_bytes(8, "big"))
         digest.update(content)
-    return digest.hexdigest()
+    return digest.hexdigest(), captured
+
+
+def files_sha256(root: Path) -> str:
+    """Hash relative paths, entry types, executable bits, and file contents."""
+    return _hash_files(root)[0]
+
+
+def files_sha256_with_asset(root: Path, asset: Path) -> tuple[str, bytes]:
+    """Return the package hash and the exact asset bytes included in that hash."""
+    digest, captured = _hash_files(root, Path(asset))
+    if captured is None:
+        raise ValueError("Asset is not a regular file in plugin folder")
+    return digest, captured
 
 
 def stage_git_source(source: str, stage: Path, kollab_version: str) -> dict:

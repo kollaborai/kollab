@@ -1,12 +1,13 @@
 """Plugin web assets are isolated to their approved distribution directory."""
 
+import hashlib
 import json
 
 import pytest
 from fastapi.testclient import TestClient
 from kollabor_webui.server import create_app
 
-from kollabor_plugins.packages import files_sha256
+from kollabor_plugins.packages import files_sha256, files_sha256_with_asset
 
 
 def write_registry(home, root):
@@ -38,6 +39,7 @@ def test_plugin_dist_asset_served_with_nosniff(assets):
     response = assets.get("/plugins/hello/web/main.js?v=abc")
     assert response.status_code == 200
     assert response.text == "export default 1"
+    assert "javascript" in response.headers["content-type"]
     assert response.headers["x-content-type-options"] == "nosniff"
 
 
@@ -80,6 +82,20 @@ def test_installed_plugin_asset_is_not_served_after_approved_files_change(tmp_pa
         assert client.get("/plugins/hello/web/lazy.js").status_code == 200
         asset.write_text("modified after approval")
         assert client.get("/plugins/hello/web/lazy.js").status_code == 404
+
+
+def test_asset_snapshot_preserves_hash_contract_and_handles_empty_or_missing(tmp_path):
+    asset = tmp_path / "empty.js"
+    asset.write_bytes(b"")
+    asset.chmod(0o644)
+    name = b"empty.js"
+    expected = hashlib.sha256(b"f" + len(name).to_bytes(8, "big") + name + (0).to_bytes(8, "big")).hexdigest()
+    assert files_sha256_with_asset(tmp_path, asset) == (expected, b"")
+    assert files_sha256(tmp_path) == expected
+    with pytest.raises(ValueError):
+        files_sha256_with_asset(tmp_path, tmp_path / "missing.js")
+    with pytest.raises(ValueError):
+        files_sha256_with_asset(tmp_path, tmp_path.parent / "outside.js")
 
 
 def test_installed_asset_cannot_change_between_hash_and_response_open(tmp_path, monkeypatch):

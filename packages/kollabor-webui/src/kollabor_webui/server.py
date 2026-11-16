@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import mimetypes
 import os
 import posixpath
 from collections.abc import Sequence
@@ -14,7 +15,7 @@ from pathlib import Path
 import anyio
 import httpx
 from fastapi import FastAPI, Request  # type: ignore[import-not-found]
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse  # type: ignore[import-not-found]
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse  # type: ignore[import-not-found]
 
 from .network_security import (
     allowed_hostnames,
@@ -378,7 +379,7 @@ def create_app(
 
     @app.get("/plugins/{plugin_id}/web/{asset_path:path}")
     async def plugin_asset(plugin_id: str, asset_path: str):
-        from kollabor_plugins.packages import _ID, _read_registry, files_sha256
+        from kollabor_plugins.packages import _ID, _read_registry, files_sha256_with_asset
 
         missing = JSONResponse({"detail": "Not found"}, status_code=404)
         is_dev = plugin_id.endswith("@dev")
@@ -413,9 +414,6 @@ def create_app(
                 approved_hash = record.get("files_sha256")
                 if not isinstance(approved_hash, str) or not approved_hash:
                     return missing
-                # Hashing may read the entire package; keep it off the event loop.
-                if await anyio.to_thread.run_sync(files_sha256, root) != approved_hash:
-                    return missing
             web = root / "web"
             dist = web / "dist"
             if web.is_symlink() or dist.is_symlink() or not dist.resolve().is_relative_to(root):
@@ -425,6 +423,13 @@ def create_app(
                 relative = asset.relative_to(dist.resolve())
                 if any(part.startswith(".") for part in relative.parts) or asset.suffix not in extensions:
                     return missing
+                if not is_dev:
+                    # Hash the package and capture the served bytes in one traversal, off the event loop.
+                    digest, contents = await anyio.to_thread.run_sync(files_sha256_with_asset, root, asset)
+                    if digest != approved_hash:
+                        return missing
+                    media_type = mimetypes.guess_type(asset.name)[0] or "application/octet-stream"
+                    return Response(contents, media_type=media_type)
         except (OSError, ValueError, RuntimeError):
             return missing
         return FileResponse(asset) if asset is not None else missing
