@@ -213,6 +213,9 @@ export function PanelHost({
   const [networkSection, setNetworkSection] = useState<"overview" | "access">("overview");
   // Bumped on close: answers that arrive for an older window are dropped.
   const epoch = useRef(0);
+  const setupStartSequence = useRef(0);
+  const pendingSetupStart = useRef<number | null>(null);
+  const canceledSetupStarts = useRef(new Set<number>());
   const inflight = useRef<Partial<Record<PanelTab, Promise<void>>>>({});
   const openingKnocks = useRef<Promise<void> | null>(null);
   const consumed = useRef(0);
@@ -386,9 +389,20 @@ export function PanelHost({
       opts: { reset?: boolean; poll?: boolean; submitted?: PanelControlSubmission } = {},
     ) => {
       const mine = epoch.current;
+      const setupStartId = name === "setup" && action === "oauth_start"
+        ? ++setupStartSequence.current
+        : null;
+      if (setupStartId !== null) pendingSetupStart.current = setupStartId;
       if (!opts.poll) setBusy(true);
       try {
         const result = await api.panelAction(sessionId, name, action, payload);
+        if (setupStartId !== null && canceledSetupStarts.current.delete(setupStartId)) {
+          const flowId = String(result.panel?.context?.oauth_flow_id ?? "");
+          if (flowId) {
+            void api.panelAction(sessionId, "setup", "oauth_cancel", { flow_id: flowId }).catch(() => {});
+          }
+          return;
+        }
         if (mine !== epoch.current) return;
         applyResult(target, name, result, Boolean(opts.reset), opts.submitted);
         if (result.ok && !result.panel && !result.open && !result.poll) {
@@ -409,6 +423,10 @@ export function PanelHost({
         }));
         setPoll(null);
       } finally {
+        if (setupStartId !== null) {
+          canceledSetupStarts.current.delete(setupStartId);
+          if (pendingSetupStart.current === setupStartId) pendingSetupStart.current = null;
+        }
         if (!opts.poll && mine === epoch.current) setBusy(false);
       }
     },
@@ -486,6 +504,22 @@ export function PanelHost({
     ) {
       return;
     }
+    if (!next && top?.panel.panel === "setup" && top.panel.kind === "wizard") {
+      const flowId = String(top.panel.context?.oauth_flow_id ?? "");
+      if (flowId) {
+        void api.panelAction(sessionId, "setup", "oauth_cancel", { flow_id: flowId }).catch(() => {});
+        setPoll(null);
+        patchTop(tab as PanelTab, (view) => ({
+          ...view,
+          step: 0,
+          panel: view.panel.kind === "wizard"
+            ? { ...view.panel, context: {} }
+            : view.panel,
+        }));
+      } else if (pendingSetupStart.current !== null) {
+        canceledSetupStarts.current.add(pendingSetupStart.current);
+      }
+    }
     onOpenChange(next);
   };
   const changeTab = (next: string) => {
@@ -523,6 +557,12 @@ export function PanelHost({
       !window.confirm("Reloading discards your unsaved changes. Continue?")
     ) {
       return;
+    }
+    if (top?.panel.panel === "setup" && top.panel.kind === "wizard") {
+      const flowId = String(top.panel.context?.oauth_flow_id ?? "");
+      if (flowId) {
+        await api.panelAction(sessionId, "setup", "oauth_cancel", { flow_id: flowId }).catch(() => {});
+      }
     }
     patchTab(tab, () => IDLE);
   };
@@ -719,17 +759,58 @@ export function PanelHost({
             step={top.step}
             errors={top.errors}
             busy={busy}
-            onDraftChange={(draft) => patchTop(tab, (view) => ({ ...view, draft }))}
-            onStepChange={(step) => patchTop(tab, (view) => ({ ...view, step }))}
-            onAction={(action, step) =>
-              void runAction(
+            onDraftChange={(draft) => {
+              const providerField = panel.steps.flatMap((item) => item.fields).find((field) => field.path === "provider");
+              const previous = String(top.draft.provider ?? providerField?.value ?? "");
+              const next = String(draft.provider ?? previous);
+              const flowId = String(panel.context?.oauth_flow_id ?? "");
+              if (
+                name === "setup" && flowId &&
+                previous.toLowerCase().includes("sign in with chatgpt") &&
+                !next.toLowerCase().includes("sign in with chatgpt")
+              ) {
+                void runAction(tab, name, "oauth_cancel", { flow_id: flowId });
+              }
+              patchTop(tab, (view) => ({ ...view, draft }));
+            }}
+            onStepChange={(step) => {
+              patchTop(tab, (view) => ({ ...view, step }));
+              const providerField = panel.steps.flatMap((item) => item.fields).find((field) => field.path === "provider");
+              const provider = String(top.draft.provider ?? providerField?.value ?? "");
+              if (
+                name === "setup" && step === 1 &&
+                provider.toLowerCase().includes("sign in with chatgpt") &&
+                !panel.context?.oauth_flow_id
+              ) {
+                void runAction(tab, name, "oauth_start", {
+                  values: wizardValues(panel, top.draft),
+                  step: "oauth_sign_in",
+                });
+              }
+            }}
+            onAction={(action, step) => {
+              const request = runAction(
                 tab,
                 name,
                 action.id,
-                { values: wizardValues(panel, top.draft), step: step.id },
+                {
+                  values: wizardValues(panel, top.draft),
+                  step: step.id,
+                  ...(panel.context?.oauth_flow_id
+                    ? {
+                        oauth_flow_id: panel.context.oauth_flow_id,
+                        flow_id: panel.context.oauth_flow_id,
+                      }
+                    : {}),
+                },
                 { reset: action.id === "finish" },
-              )
-            }
+              );
+              if (action.id === "oauth_cancel") {
+                void request.then(() =>
+                  patchTop(tab, (view) => ({ ...view, step: 0 })),
+                );
+              }
+            }}
           />
         ) : (
           <p className="text-muted-foreground px-4 py-4 text-sm sm:px-6">
