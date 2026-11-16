@@ -38,11 +38,22 @@ def _enumeration_methods() -> set[str]:
                 or (isinstance(node, ast.ImportFrom) and node.module == "psutil")
                 for node in ast.walk(tree)
             )
+            direct_imports = {
+                alias.asname or alias.name: alias.name
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.module == "psutil"
+                for alias in node.names
+            }
             if not imports_psutil:
                 continue
             for node in ast.walk(tree):
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                    method = node.func.attr
+                if isinstance(node, ast.Call):
+                    if isinstance(node.func, ast.Attribute):
+                        method = node.func.attr
+                    elif isinstance(node.func, ast.Name):
+                        method = direct_imports.get(node.func.id, "")
+                    else:
+                        continue
                     if method in ENUMERATION_METHODS:
                         methods.add(method)
                     elif method.startswith("process_") or method.endswith("_pids"):
