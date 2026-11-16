@@ -371,9 +371,11 @@ class TestAutoDetectThreshold(unittest.TestCase):
 
     def test_context_window_longest_prefix_wins(self) -> None:
         plugin = _make_auto_plugin()
-        _wire_profile(plugin, "gemini-3.1-pro-preview", "gemini")
-        # "gemini-3.1-pro" (len 14) wins over "gemini" (len 6)
-        self.assertEqual(plugin._resolve_context_window(), 1_000_000)
+        # Not itself an entry: only prefixes match.
+        _wire_profile(plugin, "gemini-3.1-pro-preview-2026", "gemini")
+        # "gemini-3.1-pro-preview" (len 22, 1,048,576) wins over
+        # "gemini-3.1-pro" (len 14, 1,000,000)
+        self.assertEqual(plugin._resolve_context_window(), 1_048_576)
 
     def test_glm_model(self) -> None:
         plugin = _make_auto_plugin(compaction_ratio=0.75)

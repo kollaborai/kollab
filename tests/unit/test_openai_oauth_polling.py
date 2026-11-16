@@ -87,6 +87,50 @@ async def test_poll_waits_for_approval_without_logging_auth_secrets(
     assert "sensitive-verifier" not in caplog.text
 
 
+class _FailingPost:
+    """A request that drops before any response arrives."""
+
+    async def __aenter__(self):
+        raise openai_oauth.aiohttp.ClientError("connection dropped")
+
+    async def __aexit__(self, *args):
+        return False
+
+
+_APPROVED = {"authorization_code": "auth-code", "code_verifier": "verifier"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_answer", "expected_log"),
+    [
+        (_FakeResponse(403, {"error": "authorization_pending"}), "still pending"),
+        (_FakeResponse(500, {"error": "server_error"}), "poll returned HTTP 500"),
+        (_FailingPost(), "Network error during polling"),
+    ],
+    ids=["pending", "unknown-status", "network-error"],
+)
+async def test_first_status_log_does_not_depend_on_host_uptime(
+    immediate_poll_sleep, monkeypatch, caplog, first_answer, expected_log
+):
+    # time.monotonic() counts from boot on Linux, so a freshly started CI
+    # runner reads under 60 here. The first status log must still fire (#1041).
+    monkeypatch.setattr(openai_oauth, "time", SimpleNamespace(monotonic=lambda: 5.0))
+    client, session = _client_with_responses(
+        first_answer, _FakeResponse(200, _APPROVED)
+    )
+    device = openai_oauth.DeviceCodeResponse(
+        device_auth_id="device-id", user_code="ABCD-EFGH", interval=2
+    )
+
+    caplog.set_level(logging.INFO, logger="kollabor_ai.oauth.openai_oauth")
+    result = await client._poll_for_auth_code(device)
+
+    assert result.authorization_code == "auth-code"
+    assert len(session.calls) == 2
+    assert expected_log in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_expired_403_response_fails_instead_of_polling(
     immediate_poll_sleep,
