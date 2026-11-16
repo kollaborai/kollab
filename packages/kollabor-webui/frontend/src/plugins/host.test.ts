@@ -124,6 +124,20 @@ describe("plugin host lifecycle", () => {
     } finally { host.close(); vi.useRealTimers(); }
   });
 
+  it("does not poll terminal service states even when their desired state remains running", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const state of ["exited", "crash-stopped", "error"]) {
+        const { host, json, setInventory } = setup();
+        setInventory([{ ...entry("hello"), services: [{ name: "worker", state, desired: "running" }] }]);
+        await host.start();
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(json, `${state} is terminal`).toHaveBeenCalledTimes(1);
+        host.close();
+      }
+    } finally { vi.useRealTimers(); }
+  });
+
   it("does not overlap service polls when inventory is slow", async () => {
     vi.useFakeTimers();
     const active = { ...entry("hello"), services: [{ name: "worker", state: "running" }] };
