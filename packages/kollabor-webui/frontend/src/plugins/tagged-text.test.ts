@@ -13,6 +13,13 @@ describe("plugin tagged text", () => {
     const text = "<unknown>x</unknown> \\<todo_write>escaped</todo_write>\n`<todo_write>inline</todo_write>`\n```\n<todo_write>fenced</todo_write>\n```\n<todo_write>partial";
     expect(splitPluginTags(text, ["todo_write"])).toEqual([{ type: "text", text }]);
   });
+  it("does not interpret tags inside indented Markdown code blocks", () => {
+    const text = "Example:\n\n    <todo_write>four spaces</todo_write>\n\t<todo_write>tab</todo_write>\n\nAfter <todo_write>real</todo_write>";
+    expect(splitPluginTags(text, ["todo_write"])).toEqual([
+      { type: "text", text: "Example:\n\n    <todo_write>four spaces</todo_write>\n\t<todo_write>tab</todo_write>\n\nAfter " },
+      { type: "tag", name: "todo_write", content: "real" },
+    ]);
+  });
   it("handles nested matching tags and multiple independent blocks", () => {
     expect(splitPluginTags("<x>a<x>b</x>c</x> + <x>d</x>", ["x"])).toEqual([
       { type: "tag", name: "x", content: "a<x>b</x>c" }, { type: "text", text: " + " }, { type: "tag", name: "x", content: "d" },
