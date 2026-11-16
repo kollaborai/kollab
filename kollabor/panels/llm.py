@@ -170,7 +170,8 @@ def provider_removal_prompt(
     display = provider_display(provider)
     prompt = (
         f"Press Remove {display} provider again to remove the {display} provider "
-        f"(profiles {names} and their saved keys); any other action cancels."
+        f"(profiles {names} and saved keys they exclusively own); "
+        "any other key or action cancels."
     )
     if dependent_loadouts:
         prompt += " Saved loadouts using it: " + ", ".join(dependent_loadouts) + "."

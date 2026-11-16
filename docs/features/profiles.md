@@ -414,7 +414,9 @@ that provider's section, and press `d` twice. The first press names the
 profiles, saved keys, and loadouts that use them; any other key cancels. The
 same provider removal action is available in web Settings → Loadouts. Removal
 deletes only profile definitions in the global or folder config files that
-define them, and clears `active_profile` when it selected one of those profiles.
+define them, clears `active_profile` when it selected one of those profiles,
+and deletes only project-scoped saved keys with provable exclusive ownership.
+Global saved keys are retained because another project's config may still use them.
 
 ```json
 {

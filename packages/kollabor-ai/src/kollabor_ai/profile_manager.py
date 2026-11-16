@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -2805,11 +2806,13 @@ class ProfileManager:
         secret_names: set[str] = set()
         updates: List[tuple[Path, dict, set[str]]] = []
         scanned_configs: List[tuple[Path, dict]] = []
+        original_config_text: dict[Path, str] = {}
         for path in unique_paths:
             if not path.exists():
                 continue
             try:
-                config_data = json.loads(path.read_text(encoding="utf-8"))
+                original_text = path.read_text(encoding="utf-8")
+                config_data = json.loads(original_text)
                 if not isinstance(config_data, dict):
                     continue
                 llm = config_data.get("kollabor", {}).get("llm", {})
@@ -2817,6 +2820,7 @@ class ProfileManager:
                 if not isinstance(profiles, dict):
                     continue
                 scanned_configs.append((path, config_data))
+                original_config_text[path.resolve()] = original_text
                 matching = {
                     name
                     for name, value in profiles.items()
@@ -2832,13 +2836,13 @@ class ProfileManager:
                         if api_key.startswith(KEYRING_SENTINEL_PREFIX):
                             secret_name = api_key[len(KEYRING_SENTINEL_PREFIX) :]
                             if (
-                                path.resolve() == global_config_path.resolve()
-                                or secret_name == _project_secret_name(name, path)
+                                path.resolve() != global_config_path.resolve()
+                                and secret_name == _project_secret_name(name, path)
                             ):
-                                # Older local configs can point at an unscoped
-                                # key shared with another project. Only delete
-                                # local keys whose path-scoped name proves this
-                                # config owns the entry.
+                                # Global sentinels may also be referenced by
+                                # local configs outside this manager's scope.
+                                # Delete only keys whose path-scoped name proves
+                                # this local config owns the entry.
                                 secret_names.add(secret_name)
             except Exception as exc:
                 logger.error("Could not read provider config %s: %s", path, exc)
@@ -2854,20 +2858,63 @@ class ProfileManager:
             if isinstance(llm, dict) and llm.get("active_profile") in removed:
                 updates.append((path, config_data, set()))
 
-        for path, config_data, matching in updates:
-            llm = config_data["kollabor"]["llm"]
-            profiles = llm["profiles"]
-            for name in matching:
-                profiles.pop(name, None)
-            if llm.get("active_profile") in removed:
-                llm.pop("active_profile", None)
-            try:
-                write_text_atomic(
-                    path, json.dumps(config_data, indent=2, ensure_ascii=False)
+        staged_updates: List[tuple[Path, Path]] = []
+        try:
+            for path, config_data, matching in updates:
+                llm = config_data["kollabor"]["llm"]
+                profiles = llm["profiles"]
+                for name in matching:
+                    profiles.pop(name, None)
+                if llm.get("active_profile") in removed:
+                    llm.pop("active_profile", None)
+
+                target_path = Path(os.path.realpath(path))
+                descriptor, staged_name = tempfile.mkstemp(
+                    prefix=f".{target_path.name}.",
+                    suffix=".provider-removal.tmp",
+                    dir=target_path.parent,
                 )
-            except Exception as exc:
-                logger.error("Could not remove provider profiles from %s: %s", path, exc)
-                return []
+                os.close(descriptor)
+                os.unlink(staged_name)
+                staged_path = Path(staged_name)
+                write_text_atomic(
+                    staged_path,
+                    json.dumps(config_data, indent=2, ensure_ascii=False),
+                )
+                staged_updates.append((path, staged_path))
+        except Exception as exc:
+            for _, staged_path in staged_updates:
+                try:
+                    staged_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            logger.error("Could not stage provider profile removal: %s", exc)
+            return []
+
+        committed: List[Path] = []
+        try:
+            for path, staged_path in staged_updates:
+                os.replace(staged_path, os.path.realpath(path))
+                committed.append(path)
+        except Exception as exc:
+            logger.error("Could not commit provider profile removal: %s", exc)
+            for path in reversed(committed):
+                try:
+                    write_text_atomic(
+                        path, original_config_text[path.resolve()]
+                    )
+                except Exception as rollback_exc:
+                    logger.critical(
+                        "Could not restore provider config %s after a failed removal: %s",
+                        path,
+                        rollback_exc,
+                    )
+            for _, staged_path in staged_updates:
+                try:
+                    staged_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return []
 
         still_referenced: set[str] = set()
         can_check_references = True
