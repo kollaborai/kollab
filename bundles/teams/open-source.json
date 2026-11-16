@@ -2,12 +2,12 @@
   "name": "open-source",
   "description": "Open-source project management for kollaborai/kollab: labels, triage, PR flow, release planning and community. Proposes GitHub changes in approval batches; coding work goes to koordinator.",
   "roster": "oss-crew",
-  "lead": "iris",
+  "lead": "head-of-open-source",
   "members": [
-    {"persona": "iris", "reports_to": null},
-    {"persona": "tomas", "reports_to": "iris"},
-    {"persona": "noor", "reports_to": "iris"},
-    {"persona": "kenji", "reports_to": "iris"},
-    {"persona": "bea", "reports_to": "iris", "prompt": "Take reply-drafting requests from Tomas and Noor; send every draft to Iris for the approval batch."}
+    {"persona": "head-of-open-source", "reports_to": null},
+    {"persona": "issue-triager", "reports_to": "head-of-open-source"},
+    {"persona": "pr-shepherd", "reports_to": "head-of-open-source"},
+    {"persona": "release-manager", "reports_to": "head-of-open-source"},
+    {"persona": "community-docs-lead", "reports_to": "head-of-open-source", "prompt": "Take reply-drafting requests from the Issue Triager and the PR Shepherd; send every draft to the Head of Open Source for the approval batch."}
   ]
 }
