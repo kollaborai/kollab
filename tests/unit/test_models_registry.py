@@ -10,11 +10,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+import kollabor_ai.model_registry as model_registry
 from kollabor_ai.model_registry import (
+    get_model_registry,
     list_models_for_provider,
     resolve_context_window,
     resolve_default_model,
     supports_sampling,
+    supports_thinking,
     supports_vision,
 )
 from kollabor_ai.providers.registry import create_config_from_profile
@@ -99,3 +104,127 @@ def test_surfaces_without_own_entries_resolve_through_openai():
         assert {
             name for name, _ in list_models_for_provider(surface)
         } == openai_models, surface
+
+
+def test_vendor_prefixed_model_strings_resolve_the_underlying_entry():
+    # OpenRouter (and similar aggregators) hand out "vendor/model" strings and
+    # free-tier suffixes. The catalog stores the underlying model names, so a
+    # prefixed string that matches nothing must fall back to the stripped
+    # name instead of silently degrading to provider defaults.
+    assert resolve_context_window("openai/gpt-5.6-terra") == 1050000
+    assert supports_vision("openai/gpt-5.6-luna", "openrouter") is True
+    assert supports_vision("anthropic/claude-opus-5", "openrouter") is True
+    assert resolve_context_window("zai/glm-5.2") is not None
+
+    # Free/nitro style suffixes strip too.
+    assert supports_vision("openai/gpt-5.6-luna:free", "openrouter") is True
+
+    # Native-provider scoping is untouched: no prefix, same answer as before.
+    assert supports_vision("gpt-5.6-luna", "custom") is False
+    assert supports_vision("gpt-5.6-luna", "openai") is True
+
+    # A prefixed string whose vendor-stripped name is unknown stays unsupported.
+    assert supports_vision("openrouter/no-such-model", "openrouter") is False
+
+
+def test_exact_entry_silence_blocks_prefix_inheritance():
+    """A catalog entry whose name matches exactly owns its field's silence.
+
+    The refreshed catalog adds short-generation entries (models.dev ships
+    ``gpt-5`` with supports_sampling=false). Longest-prefix inheritance must
+    not leak that into a newer generation whose own entry omits the field:
+    ``gpt-5.6`` accepts sampling per its curated entry's silence.
+    """
+    registry = get_model_registry().get("models", {})
+    assert "gpt-5" in registry and registry["gpt-5"].get("supports_sampling") is False
+    assert registry["gpt-5.6"].get("supports_sampling") is None
+    assert supports_sampling("gpt-5.6") is True
+    assert supports_sampling("gpt-5") is False
+    # Prefix inheritance still applies when no exact entry exists.
+    assert resolve_context_window("gpt-5.6-terra-2026-07-09") == 1050000
+
+
+def test_vendor_prefix_must_match_the_model_provider():
+    assert supports_vision("openai/gpt-6-luna", "openrouter") is True
+    assert supports_vision("anthropic/gpt-6-luna", "openrouter") is False
+    assert supports_vision("unknown-vendor/gpt-6-luna", "openrouter") is False
+
+
+@pytest.mark.parametrize(
+    "catalog",
+    [
+        [],
+        {"models": None, "provider_defaults": {}},
+        {"models": {"gpt-6": 123}, "provider_defaults": {}},
+        {"models": {}, "provider_defaults": None},
+        {"models": {"gpt-6": {"context_window": "invalid"}}, "provider_defaults": {}},
+        {"models": {}, "provider_defaults": {"openai": {"context_window": "invalid"}}},
+    ],
+)
+def test_malformed_catalog_shapes_use_safe_defaults(monkeypatch, catalog):
+    monkeypatch.setattr(model_registry, "_REGISTRY", catalog)
+
+    assert supports_sampling("gpt-6-luna-latest") is True
+    assert supports_vision("gpt-6-luna-latest", "openai") is False
+    assert resolve_context_window("gpt-6-luna-latest", "openai") is None
+
+
+def test_exact_prefixed_entry_silence_blocks_stripped_fallback(monkeypatch):
+    monkeypatch.setattr(
+        model_registry,
+        "_REGISTRY",
+        {
+            "models": {
+                "openrouter/silent-model": {"provider": "openrouter"},
+                "silent-model": {
+                    "provider": "openai",
+                    "supports_vision": True,
+                },
+            },
+            "provider_defaults": {},
+        },
+    )
+
+    assert supports_vision("openrouter/silent-model", "openrouter") is False
+
+
+def test_exact_prefixed_silence_does_not_inherit_sampling(monkeypatch):
+    monkeypatch.setattr(
+        model_registry,
+        "_REGISTRY",
+        {
+            "models": {
+                "openai/silent-model": {"provider": "openrouter"},
+                "silent-model": {
+                    "provider": "openai",
+                    "supports_sampling": False,
+                },
+            },
+            "provider_defaults": {},
+        },
+    )
+
+    assert supports_sampling("openai/silent-model") is True
+
+
+def test_prefixed_fallback_requires_matching_catalog_provider(monkeypatch):
+    monkeypatch.setattr(
+        model_registry,
+        "_REGISTRY",
+        {
+            "models": {
+                "shared-model": {
+                    "provider": "openai",
+                    "context_window": 400000,
+                    "supports_sampling": False,
+                    "supports_thinking": False,
+                }
+            },
+            "provider_defaults": {"openrouter": {"context_window": 32000}},
+        },
+    )
+
+    assert resolve_context_window("openai/shared-model", "openrouter") == 400000
+    assert resolve_context_window("anthropic/shared-model", "openrouter") == 32000
+    assert supports_sampling("anthropic/shared-model") is True
+    assert supports_thinking("anthropic/shared-model") is True
