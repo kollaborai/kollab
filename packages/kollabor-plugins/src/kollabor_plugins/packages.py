@@ -296,6 +296,33 @@ def _read_registry(path: Path) -> dict:
     return data
 
 
+_MAX_ENABLE_ORDER = (1 << 53) - 1  # Exactly representable in the browser's Number type.
+
+
+def _set_enable_order(registry: dict, plugin_id: str, enabled: bool) -> None:
+    """Update durable command priority while holding the plugin registry lock."""
+    current = registry.get("enable_order", {})
+    counter = registry.get("enable_counter", 0)
+    if not isinstance(current, dict) or type(counter) is not int or not 0 <= counter <= _MAX_ENABLE_ORDER:
+        raise ValueError("Invalid plugin enable order")
+    if any(
+        not isinstance(key, str) or type(value) is not int or not 0 < value <= _MAX_ENABLE_ORDER
+        for key, value in current.items()
+    ):
+        raise ValueError("Invalid plugin enable order")
+    order = dict(current)
+    if enabled:
+        counter = max(counter, *order.values(), 0) + 1
+        if counter > _MAX_ENABLE_ORDER:
+            raise ValueError("Plugin enable order exhausted")
+        order[plugin_id] = counter
+    else:
+        order.pop(plugin_id, None)
+    registry["enable_order"] = order
+    registry["enable_counter"] = counter
+
+
+
 def _write_json(path: Path, data: dict) -> None:
     write_text_atomic(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
@@ -395,6 +422,8 @@ def install_stage(stage: Path, staged: dict, commit: str, digest: str, *, expect
                 "updated": now,
             }
             next_registry = {**registry, "plugins": {**registry["plugins"], plugin_id: record}}
+            if record["enabled"] and (not isinstance(prior, dict) or not prior.get("enabled")):
+                _set_enable_order(next_registry, plugin_id, True)
             _write_json(registry_path, next_registry)
             transaction["committed"] = True
             _write_json(journal, transaction)
@@ -434,7 +463,9 @@ def remove_package(plugin_id: str, *, expected_record: dict, purge: bool = False
             os.replace(live, old)
             next_plugins = dict(registry["plugins"])
             del next_plugins[plugin_id]
-            _write_json(registry_path, {**registry, "plugins": next_plugins})
+            next_registry = {**registry, "plugins": next_plugins}
+            _set_enable_order(next_registry, plugin_id, False)
+            _write_json(registry_path, next_registry)
             transaction["committed"] = True
             _write_json(journal, transaction)
             _recover_locked(home)

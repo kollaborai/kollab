@@ -17,7 +17,16 @@ from .base import BasePlugin
 from .collector import PluginStatusCollector
 from .discovery import PluginDiscovery
 from .factory import PluginFactory
-from .packages import _ID, _SYMBOL, _read_registry, _within, files_sha256, recover_installs, validate_manifest
+from .packages import (
+    _ID,
+    _MAX_ENABLE_ORDER,
+    _SYMBOL,
+    _read_registry,
+    _within,
+    files_sha256,
+    recover_installs,
+    validate_manifest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -576,6 +585,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
                 "source": inspect.getfile(cls),
                 "commit": None,
                 "enabled": enabled,
+                "enable_order": None,
                 "shadowed": False,
                 "state": "ok" if enabled else "off",
                 "error": None,
@@ -594,6 +604,14 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
     except ValueError as exc:
         logger.warning("Cannot list installed plugins: %s", exc)
         return entries
+    enable_order = data.get("enable_order", {})
+    if not isinstance(enable_order, dict):
+        enable_order = {}
+
+    def order_for(plugin_id: str) -> int | None:
+        value = enable_order.get(plugin_id)
+        return value if type(value) is int and 0 < value <= _MAX_ENABLE_ORDER else None
+
     for plugin_id, record in data["plugins"].items():
         if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id) or not isinstance(record, dict):
             continue
@@ -631,6 +649,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
                 "source": record.get("source"),
                 "commit": record.get("commit"),
                 "enabled": record.get("enabled", False),
+                "enable_order": order_for(plugin_id),
                 "shadowed": plugin_id in data["dev"],
                 "state": state,
                 "error": error,
@@ -670,6 +689,7 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
         entries.append(
             {
                 "id": f"{plugin_id}@dev",
+                "enable_order": order_for(f"{plugin_id}@dev"),
                 "name": f"{manifest.get('name', plugin_id)}@dev",
                 "version": manifest.get("version"),
                 "kind": "dev",

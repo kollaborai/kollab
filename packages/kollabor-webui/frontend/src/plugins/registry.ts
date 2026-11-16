@@ -60,6 +60,7 @@ export class PluginRegistry {
   private readonly drafts = new Map<string, PluginRecords>();
   private readonly listeners = new Set<() => void>();
   private builtins: Set<string>;
+  private enableOrder = new Map<string, number>();
   private snapshot: RegistrySnapshot = { plugins: [], conflicts: [] };
 
   constructor(builtinCommands: readonly string[] = []) {
@@ -71,6 +72,12 @@ export class PluginRegistry {
     const next = new Set(commands.map(PluginRegistry.commandKey));
     if (next.size === this.builtins.size && [...next].every(name => this.builtins.has(name))) return;
     this.builtins = next;
+    this.publish();
+  }
+  setEnableOrder(ids: readonly string[]) {
+    const next = new Map(ids.map((id, index) => [id, index]));
+    if (next.size === this.enableOrder.size && [...next].every(([id, rank]) => this.enableOrder.get(id) === rank)) return;
+    this.enableOrder = next;
     this.publish();
   }
   stage(id: string, declarations?: Record<string, unknown>) { return new PluginDraft(id, declarations); }
@@ -98,7 +105,9 @@ export class PluginRegistry {
   private publish() {
     const owners = new Map([...this.builtins].map(name => [name, "built-in"]));
     const conflicts: CommandConflict[] = [];
-    const plugins = [...this.drafts.values()].map(plugin => {
+    const plugins = [...this.drafts.values()].sort((a, b) =>
+      (this.enableOrder.get(a.id) ?? Infinity) - (this.enableOrder.get(b.id) ?? Infinity),
+    ).map(plugin => {
       const commands = plugin.commands.filter(command => {
         const key = PluginRegistry.commandKey(command.name);
         const owner = owners.get(key);

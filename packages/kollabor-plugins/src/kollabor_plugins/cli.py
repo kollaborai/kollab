@@ -17,6 +17,7 @@ from .packages import (
     _SERVICE,
     _read_registry,
     _recover_locked,
+    _set_enable_order,
     _write_json,
     install_stage,
     recover_installs,
@@ -265,6 +266,7 @@ def main(argv: list[str]) -> int:
                     raise ValueError("Development approval changed during detach; try again")
                 with locked_file(dev_data / "values.json.lock", private=True):
                     del registry["dev"][args.plugin_id]
+                    _set_enable_order(registry, dev_id, False)
                     _write_json(home / "plugins.json", registry)
                     (dev_data / "values.json").unlink(missing_ok=True)
                     (dev_data / "approval.json").unlink(missing_ok=True)
@@ -287,6 +289,8 @@ def main(argv: list[str]) -> int:
                 _, current_approval = _approved_service_root(home, registry, dev_id, stopping=True)
                 if current_approval != prior_approval:
                     raise ValueError("Development approval changed; try again")
+            if dev_folder is None:
+                _set_enable_order(registry, dev_id, True)
             target = home / "plugin-data" / f"{plugin_id}@dev"
             target.mkdir(parents=True, exist_ok=True)
             with locked_file(target / "values.json.lock", private=True):

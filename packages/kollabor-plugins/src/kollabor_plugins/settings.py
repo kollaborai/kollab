@@ -7,7 +7,7 @@ from pathlib import Path
 from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.file_lock import locked_file
 
-from .packages import _ID, _read_registry, _recover_locked, _within, _write_json
+from .packages import _ID, _read_registry, _recover_locked, _set_enable_order, _within, _write_json
 
 
 def _read_json(path: Path) -> dict:
@@ -248,6 +248,8 @@ def set_enabled(plugin_id: str, enabled: bool, *, config_service=None, save_targ
             run_dir = home / "plugin-data" / plugin_id / "run"
             if any(pid.is_symlink() or _recorded_process_alive(pid) for pid in run_dir.glob("*.pid")):
                 raise ValueError("Plugin is stopping or still has a running service; wait before enabling it")
+        if bool(record.get("enabled")) != enabled:
+            _set_enable_order(registry, plugin_id, enabled)
         record["enabled"] = enabled
         if enabled:
             record["enabled_path"] = os.environ.get("PATH", os.defpath)

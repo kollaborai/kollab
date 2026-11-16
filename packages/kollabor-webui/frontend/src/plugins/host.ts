@@ -10,6 +10,7 @@ export interface PluginEntry extends WebPluginEntry {
   source?: string | null;
   read_only?: boolean;
   required?: boolean;
+  enable_order?: number | null;
   version?: string | null;
   commit?: string | null;
   error?: string | null;
@@ -174,6 +175,8 @@ export class PluginHost {
       if (response.schema !== 1 || !Array.isArray(response.plugins)) throw new Error("Invalid plugin inventory");
       this.clockSample = { serverTime: response.server_time, sampledAt };
       this.entries = response.plugins as PluginEntry[];
+      const priority = (entry: PluginEntry) => Number.isSafeInteger(entry.enable_order) && (entry.enable_order ?? 0) > 0 ? entry.enable_order! : 0;
+      this.registry.setEnableOrder([...this.entries].sort((a, b) => priority(a) - priority(b) || a.id.localeCompare(b.id)).map(entry => entry.id));
       this.syncCrashNotices();
       this.syncHeartbeatPolling();
       this.syncStoppingPolling();
