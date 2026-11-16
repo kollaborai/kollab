@@ -233,6 +233,23 @@ async def test_fallback_restores_the_active_profile_before_the_next_input(monkey
 
 
 @pytest.mark.asyncio
+async def test_resend_uses_fallback_once_before_restoring_the_active_profile(monkeypatch):
+    plugin, _, _, profiles = await _agent(
+        monkeypatch, {"plugins.model_fallback.loadout": "codex"}
+    )
+
+    assert await plugin.fall_back(
+        "Rate limit exceeded. Please try again later.", retry=False
+    ) == "resend"
+
+    await plugin._restore_after_fallback({}, None)
+    assert profiles.active == "codex"
+
+    await plugin._restore_after_fallback({}, None)
+    assert profiles.active == "glm"
+
+
+@pytest.mark.asyncio
 async def test_same_model_fallback_reports_no_switch_once(monkeypatch):
     plugin, bus, tap, profiles = await _agent(
         monkeypatch, {"plugins.model_fallback.loadout": "codex"}
