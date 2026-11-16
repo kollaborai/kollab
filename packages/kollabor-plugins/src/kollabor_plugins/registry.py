@@ -5,6 +5,7 @@ import importlib.util
 import inspect
 import json
 import logging
+import math
 import sys
 import types
 from pathlib import Path
@@ -482,6 +483,14 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
         except (OSError, ValueError):
             pass
         status = state.get("status", "stopped")
+        definition = declared[name]
+        heartbeat_s = definition.get("heartbeat_s") if isinstance(definition, dict) else None
+        if (
+            type(heartbeat_s) not in (int, float)
+            or heartbeat_s <= 0
+            or (isinstance(heartbeat_s, float) and not math.isfinite(heartbeat_s))
+        ):
+            heartbeat_s = None
         if status == "running" and identity is None:
             status = "unknown"
         result.append(
@@ -493,6 +502,7 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
                 "since": identity.get("start_time") if identity else None,
                 "restarts": len(history) if isinstance(history, list) else 0,
                 "heartbeat": None,
+                "heartbeat_s": heartbeat_s,
                 "error": state.get("error"),
             }
         )

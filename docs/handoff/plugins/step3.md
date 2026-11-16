@@ -179,6 +179,8 @@
 
 - Required heartbeat wire change, recorded before editing: `packages/kollabor-plugins/src/kollabor_plugins/registry.py:_service_entries` exposes the last heartbeat but omits the service's declared `heartbeat_s`, so the frontend cannot know when it is overdue. Add that declared interval to each service inventory entry (including the same producer used by PluginContext status), with a focused Python red-first test; then render truthful stale-heartbeat status in Settings and its menu row with browser red-first coverage. Do not infer heartbeat promises from timestamps alone. `since` is a psutil epoch timestamp; clocks and missing first-heartbeat behavior need explicit tests. This is a narrow wire change required for Step 3, not a general Step 2 repair.
 
+- Heartbeat inventory producer: red Python test `e09a30ad` failed with missing `heartbeat_s` (`heartbeat-registry-red.log`). The shared service inventory now includes a validated positive finite declared interval or null; three focused Python tests and Ruff passed (`heartbeat-registry-green.log`, `heartbeat-registry-ruff.log`). Frontend stale-heartbeat rendering and real heartbeat timing still need red-first tests and implementation.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
