@@ -39,6 +39,8 @@ export function WhatsNewDialog({
   if (!open || !release) return null;
 
   const { lines, moreCount } = dialogLines(release);
+  const visibleAdded = lines.slice(0, release.added.length);
+  const visibleChanged = lines.slice(visibleAdded.length);
   const previous = sublineVersion(
     release,
     loadSeenRecord(readWhatsNewSeenRaw()),
@@ -86,11 +88,11 @@ export function WhatsNewDialog({
           </Button>
         </div>
         <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-6 py-4">
-          {release.added.length > 0 ? (
+          {visibleAdded.length > 0 ? (
             <section>
               <h4 className="text-xs font-medium text-muted-foreground">Added</h4>
               <ul className="mt-1.5 list-disc space-y-1.5 pl-4">
-                {release.added.map((item, index) => (
+                {visibleAdded.map((item, index) => (
                   <li key={`added-${index}`} className="break-words text-sm text-foreground/90">
                     {item}
                   </li>
@@ -98,11 +100,11 @@ export function WhatsNewDialog({
               </ul>
             </section>
           ) : null}
-          {release.changed.length > 0 ? (
+          {visibleChanged.length > 0 ? (
             <section>
               <h4 className="text-xs font-medium text-muted-foreground">Changed</h4>
               <ul className="mt-1.5 list-disc space-y-1.5 pl-4">
-                {release.changed.map((item, index) => (
+                {visibleChanged.map((item, index) => (
                   <li key={`changed-${index}`} className="break-words text-sm text-foreground/90">
                     {item}
                   </li>
