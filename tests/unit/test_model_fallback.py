@@ -185,7 +185,8 @@ async def test_a_usage_limit_switches_once_and_runs_the_turn_again(monkeypatch):
 
     # The fallback fails too: no second hop, no loop.
     assert not await _native_turn_fails(plugin, "You've hit your usage limit.")
-    assert _Loadouts.activated == ["codex"]
+    assert _Loadouts.activated == ["codex", "glm"]
+    assert profiles.active == "glm"
 
 
 @pytest.mark.asyncio
