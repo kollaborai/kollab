@@ -10212,13 +10212,14 @@ class HubPlugin(BasePlugin):
                                 metadata=msg_metadata,
                             )
                         )
-                        # The web UI reloads the history on this, so the message
-                        # shows before the reply it wakes (the terminal's box).
-                        from kollabor_tui.display_tap import publish_semantic
+                    # The web UI reloads history after the system record above
+                    # is written. Observed messages need this too: they do not
+                    # add a user turn or wake the model.
+                    from kollabor_tui.display_tap import publish_semantic
 
-                        publish_semantic(
-                            self.event_bus, "hub_message", message_id=message.id
-                        )
+                    publish_semantic(
+                        self.event_bus, "hub_message", message_id=message.id
+                    )
                 # Trigger LLM if this agent is the intended target (or broadcast).
                 # Skip departures to avoid feedback loops.
                 # Skip human-elsewhere (human typing in another agent's window).
