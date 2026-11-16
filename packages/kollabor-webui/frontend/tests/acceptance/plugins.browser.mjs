@@ -271,6 +271,7 @@ try {
   entry.services[0].state = "crash-stopped";
   delete entry.services[0].stop_deadline;
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+  await page.getByText(/Fixture: worker.*stopped after 5 crashes/).waitFor({ timeout: 15000 });
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   await folderlessPanel.getByRole("button", { name: /Fixture Board/ }).getByText("Stopped", { exact: true }).waitFor({ timeout: 5000 });
   assert.equal(await folderlessPanel.getByRole("button", { name: "Fixture View", exact: true }).count(), 0, "folder-required tab is hidden without a folder");
@@ -418,6 +419,7 @@ try {
   entry.services[0].state = "crash-stopped";
   delete entry.services[0].stop_deadline;
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+  await page.getByText(/Fixture: worker.*stopped after 5 crashes/).waitFor({ timeout: 15000 });
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   await page.getByRole("button", { name: "Settings", exact: true }).first().click();
   const settings = page.getByRole("dialog", { name: "Settings" });

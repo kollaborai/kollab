@@ -89,6 +89,7 @@ export class PluginHost {
   private markerSequence = 0;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private stoppingTimer: ReturnType<typeof setInterval> | null = null;
+  private crashNotices = new Set<string>();
   private clockSample: { serverTime: unknown; sampledAt: number } | null = null;
   private snapshot: PluginHostSnapshot;
 
@@ -167,6 +168,7 @@ export class PluginHost {
       if (response.schema !== 1 || !Array.isArray(response.plugins)) throw new Error("Invalid plugin inventory");
       this.clockSample = { serverTime: response.server_time, sampledAt };
       this.entries = response.plugins as PluginEntry[];
+      this.syncCrashNotices();
       this.syncHeartbeatPolling();
       this.syncStoppingPolling();
       this.inventoryError = null;
@@ -185,6 +187,27 @@ export class PluginHost {
       this.publish();
     }
   }
+
+  private syncCrashNotices() {
+    const current = new Set<string>();
+    const newlyStopped: string[] = [];
+    for (const entry of this.entries) {
+      if (!entry.enabled || entry.shadowed || !Array.isArray(entry.services)) continue;
+      for (const value of entry.services) {
+        if (!value || typeof value !== "object") continue;
+        const service = value as Record<string, unknown>;
+        if (service.state !== "crash-stopped" || typeof service.name !== "string") continue;
+        const key = JSON.stringify([entry.id, entry.kind, entry.source, service.name]);
+        current.add(key);
+        if (!this.crashNotices.has(key)) newlyStopped.push(`${entry.name}: ${service.name}`);
+      }
+    }
+    this.crashNotices = current;
+    if (newlyStopped.length) {
+      this.options.toast(`${newlyStopped.join(", ")} stopped after 5 crashes. Open Settings → Plugins to view its log.`);
+    }
+  }
+
 
   private syncStoppingPolling() {
     const needed = this.entries.some(entry => entry.state === "stopping");
