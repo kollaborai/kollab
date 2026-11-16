@@ -10,6 +10,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+import kollabor_ai.model_registry as model_registry
 from kollabor_ai.model_registry import (
     get_model_registry,
     list_models_for_provider,
@@ -138,3 +141,26 @@ def test_exact_entry_silence_blocks_prefix_inheritance():
     assert supports_sampling("gpt-5") is False
     # Prefix inheritance still applies when no exact entry exists.
     assert resolve_context_window("gpt-5.6-terra-2026-07-09") == 1050000
+
+
+def test_vendor_prefix_must_match_the_model_provider():
+    assert supports_vision("openai/gpt-6-luna", "openrouter") is True
+    assert supports_vision("anthropic/gpt-6-luna", "openrouter") is False
+    assert supports_vision("unknown-vendor/gpt-6-luna", "openrouter") is False
+
+
+@pytest.mark.parametrize(
+    "catalog",
+    [
+        [],
+        {"models": None, "provider_defaults": {}},
+        {"models": {"gpt-6": 123}, "provider_defaults": {}},
+        {"models": {}, "provider_defaults": None},
+    ],
+)
+def test_malformed_catalog_shapes_use_safe_defaults(monkeypatch, catalog):
+    monkeypatch.setattr(model_registry, "_REGISTRY", catalog)
+
+    assert supports_sampling("gpt-6-luna-latest") is True
+    assert supports_vision("gpt-6-luna-latest", "openai") is False
+    assert resolve_context_window("gpt-6-luna-latest", "openai") is None
