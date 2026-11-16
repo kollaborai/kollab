@@ -391,6 +391,8 @@ class ContextCompactionPlugin(BasePlugin):
         self._disabled_for_session: bool = False
         self._compaction_task: Optional[asyncio.Task] = None
         self._compaction_tasks: set[asyncio.Task] = set()
+        self._acp_compacting = False
+        self._acp_compact_armed = True
         # "Can't shrink" stop (see _should_compact): the swap sets just_applied, the
         # next reported prompt is the compacted one, shrink_floor holds it when it
         # was still over the threshold, tokens_at_trigger is what fired the round.
@@ -444,6 +446,8 @@ class ContextCompactionPlugin(BasePlugin):
     ) -> None:
         if event_bus:
             self.event_bus = event_bus
+            # The ACP orchestrator reaches this plugin's usage hook through the service registry (#1104).
+            self.event_bus.register_service("context_compaction", self)
         if config:
             self.config = config
         if renderer:
@@ -1359,38 +1363,58 @@ class ContextCompactionPlugin(BasePlugin):
     def _get_token_threshold_details(self) -> tuple[int, str]:
         """Return the effective threshold and the policy source that binds it.
 
-        A manual token threshold can lower the automatic trigger, but cannot
-        override the model safety percentage or 272K ceiling. It is reported as
-        manual only when it is strictly lower than that policy ceiling. Unknown
-        model windows retain the conservative 100K automatic fallback.
+        An explicit threshold (the active loadout's, else the global
+        token_threshold_k) wins over the automatic ratio and the 272K cap, and
+        never exceeds the model's real window. Without one, the trigger is the
+        ratio of the window, capped at 272K (#1104).
         """
-        context_window = self._get_context_window_tokens()
-        raw_ratio = self.config.get(
-            "plugins.context_compaction.compaction_ratio", 0.75
-        )
+        return self._resolve_threshold(self._get_context_window_tokens())
+
+    def _resolve_threshold(self, window: int) -> tuple[int, str]:
+        """(threshold tokens, source) for a window of ``window`` tokens, 0 when unknown."""
+        explicit_k = self._explicit_threshold_k()
+        if explicit_k > 0:
+            threshold = explicit_k * 1000
+            if window > 0:
+                threshold = min(threshold, window)
+            return threshold, "manual"
+        if window <= 0:
+            return 100_000, "fallback"
+        return min(int(window * self._ratio_setting()), AUTO_THRESHOLD_CAP), "automatic"
+
+    def _ratio_setting(self) -> float:
+        """compaction_ratio clamped to 0.50-0.95 (default 0.75)."""
+        raw = self.config.get("plugins.context_compaction.compaction_ratio", 0.75)
         try:
-            ratio = float(raw_ratio)
+            ratio = float(raw)
         except (TypeError, ValueError, OverflowError):
             ratio = 0.75
         if not math.isfinite(ratio):
             ratio = 0.75
-        ratio = max(0.50, min(0.95, ratio))
-        provider_cap = int(context_window * ratio) if context_window > 0 else 100_000
-        safe_cap = min(provider_cap, AUTO_THRESHOLD_CAP)
-        policy_source = "automatic" if context_window > 0 else "fallback"
+        return max(0.50, min(0.95, ratio))
 
-        raw_token_k = self.config.get(
+    def _explicit_threshold_k(self) -> int:
+        """Explicit trigger in thousands of tokens: the active loadout's, else the global one. 0 = automatic."""
+        raw = self._active_loadout_threshold_k() or self.config.get(
             "plugins.context_compaction.token_threshold_k", 0
         )
         try:
-            token_k = int(raw_token_k)
+            return max(0, int(raw or 0))
         except (TypeError, ValueError, OverflowError):
-            token_k = 0
-        if token_k > 0:
-            manual_threshold = token_k * 1000
-            if manual_threshold < safe_cap:
-                return manual_threshold, "manual"
-        return safe_cap, policy_source
+            return 0
+
+    def _active_loadout_threshold_k(self) -> int:
+        """The default (active) loadout's own compaction threshold in thousands of tokens, 0 when unset."""
+        if self._profile_manager is None:
+            return 0
+        try:
+            from kollabor_ai.loadout_manager import LoadoutManager
+
+            manager = LoadoutManager(self._profile_manager, config=self.config)
+            return manager.active_compaction_threshold_k()
+        except Exception:
+            logger.debug("Active loadout threshold unavailable", exc_info=True)
+            return 0
 
     def _get_token_threshold(self) -> int:
         """Return the lower automatic trigger from ratio, manual value, and cap."""
@@ -1767,6 +1791,9 @@ class ContextCompactionPlugin(BasePlugin):
 
     async def _start_manual_compaction(self, ask: bool) -> str:
         """/compact and /compact now, run where the history lives."""
+        if self._acp_owns_chat():
+            # The harness keeps its own context, so kollab never rewrites its copy for an ACP chat (#1104).
+            return self._compact_acp_harness("requested by user", ask=ask)
         if self._disabled_for_session:
             return "compaction is disabled for this session (3 failed runs)"
         if self._compaction_in_progress:
@@ -1797,6 +1824,76 @@ class ContextCompactionPlugin(BasePlugin):
             "asked the model what to keep; it compacts when ready "
             "(or when its turn ends)"
         )
+
+    def _acp_orchestrator(self):
+        """The running ACP orchestrator, or None."""
+        try:
+            acp = self._llm_service._acp_service()
+        except Exception:
+            return None
+        return acp if getattr(acp, "active", False) is True else None
+
+    def acp_usage_updated(self, used: int, size: int) -> None:
+        """Harness context meter (ACP usage_update), called by the ACP orchestrator.
+
+        Fires once when the meter crosses the threshold, then waits for the
+        meter to drop back under it, so a usage update never re-sends (#1104).
+        """
+        if not self.config.get("plugins.context_compaction.enabled", True):
+            return
+        if size <= 0 or not self._acp_owns_chat():
+            return
+        if used < self._resolve_threshold(size)[0]:
+            self._acp_compact_armed = True
+            return
+        if self._acp_compact_armed:
+            self._acp_compact_armed = False
+            self._compact_acp_harness("threshold")
+
+    def _compact_acp_harness(self, reason: str, ask: bool = True) -> str:
+        """Ask the harness to compact its own context with its advertised /compact.
+
+        Kollab's copy of the history is never rewritten for an ACP chat (#1104).
+        """
+        acp = self._acp_orchestrator()
+        lookup = getattr(acp, "advertised_command", None)
+        command = lookup("compact") if callable(lookup) else None
+        if not isinstance(command, str) or not command:
+            message = (
+                "this ACP agent compacts its own context, and the harness advertises no "
+                "compaction command, so kollab cannot ask it to compact. Nothing was changed."
+            )
+            if reason == "threshold":
+                self._set_compaction_status("warning", message)
+            return message
+        if self._acp_compacting:
+            return "the harness is already compacting its own context"
+        self._acp_compacting = True
+        task = asyncio.create_task(self._run_acp_compaction(acp, command, reason, ask))
+        self._compaction_tasks.add(task)
+        task.add_done_callback(self._compaction_task_done)
+        return (
+            f"asked the harness to compact its own context ({command}); "
+            "the meter drops on its next update"
+        )
+
+    async def _run_acp_compaction(self, acp, command: str, reason: str, ask: bool) -> None:
+        """Ask the harness what to keep when ask_model_first is on, then send its command with those notes."""
+        self._set_compaction_status("compacting", "The harness is compacting its own context.")
+        try:
+            if ask and self.config.get("plugins.context_compaction.ask_model_first", True):
+                reply = await acp.submit(self._build_curation_request(reason))
+                text = str((reply or {}).get("text") or "")
+                notes = re.search(r"<compact>(.*?)</compact>", text, re.DOTALL)
+                if notes and notes.group(1).strip():
+                    command = f"{command} {notes.group(1).strip()}"
+            await acp.submit(command)
+            self._set_compaction_status("idle", "")
+        except Exception as exc:
+            logger.warning("ACP harness compaction failed (%s)", type(exc).__name__)
+            self._set_compaction_status("failed", "The harness did not compact its own context.")
+        finally:
+            self._acp_compacting = False
 
     def _acp_owns_chat(self) -> bool:
         """Whether an ACP agent owns this chat (the test the message handler

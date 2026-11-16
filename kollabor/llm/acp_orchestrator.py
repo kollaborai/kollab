@@ -1605,6 +1605,8 @@ class ACPOrchestrator:
                 if cost.get("amount") is not None:
                     label += f" · {cost['amount']} {cost.get('currency', '')}"
                 display.show_loading(label)
+        if kind == "usage_update":
+            self._notify_context_meter(payload)
         if kind == "plan":
             self.event_bus.register_service("acp_plan", dict(payload))
         if kind in {"tool_call", "tool_call_update", "agent_thought_chunk", "plan", "usage_update"}:
@@ -1643,6 +1645,24 @@ class ACPOrchestrator:
             acp_passthrough=kind in {"tool_call", "tool_call_update", "agent_thought_chunk", "plan", "usage_update"},
         )
 
+
+    def advertised_command(self, name: str) -> str | None:
+        """The "/name" spelling when the harness advertises that command, else None."""
+        for command in getattr(self._runner, "available_commands", None) or []:
+            if isinstance(command, dict) and str(command.get("name") or "").lstrip("/") == name:
+                return f"/{name}"
+        return None
+
+    def _notify_context_meter(self, payload: dict[str, Any]) -> None:
+        """Hand the harness's context meter to the compaction plugin (#1104)."""
+        notify = getattr(self.event_bus.get_service("context_compaction"), "acp_usage_updated", None)
+        if not callable(notify):
+            return
+        try:
+            used, size = int(payload.get("used") or 0), int(payload.get("size") or 0)
+        except (TypeError, ValueError):
+            return
+        notify(used, size)
 
     def prepare_cancel(
         self,
