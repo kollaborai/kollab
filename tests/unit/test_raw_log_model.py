@@ -47,7 +47,14 @@ class RawLogShapeTests(unittest.TestCase):
         # Request keys
         self.assertEqual(
             set(d["request"].keys()),
-            {"conversation_local", "wire_request", "wire_provider", "tools"},
+            {
+                "conversation_local",
+                "conversation_local_previous_turn_id",
+                "wire_request",
+                "wire_request_previous_turn_id",
+                "wire_provider",
+                "tools",
+            },
         )
 
         # Response keys
