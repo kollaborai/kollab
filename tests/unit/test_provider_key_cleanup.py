@@ -149,3 +149,26 @@ def test_global_provider_removal_retains_key_referenced_by_another_project(
     assert manager.remove_provider_profiles("anthropic") == ["anthropic"]
 
     assert deleted == []
+
+
+def test_local_scoped_key_is_retained_when_an_unscanned_project_references_it(
+    monkeypatch, tmp_path
+):
+    global_path = tmp_path / "home" / ".kollab" / "config.json"
+    local_path = tmp_path / "project-a" / ".kollab" / "config.json"
+    other_project_path = tmp_path / "project-b" / ".kollab" / "config.json"
+    secret_name = _project_secret_name("anthropic-local", local_path)
+    sentinel = f"{KEYRING_SENTINEL_PREFIX}{secret_name}"
+    _config(global_path, {})
+    _config(local_path, {"anthropic-local": {"provider": "anthropic", "api_key": sentinel}})
+    _config(other_project_path, {"copied": {"provider": "openai", "api_key": sentinel}})
+    manager = _manager(monkeypatch, tmp_path, global_path, local_path)
+    deleted = []
+    monkeypatch.setattr(
+        "kollabor_ai.profile_manager._delete_keyring_entry", deleted.append
+    )
+
+    assert manager.remove_provider_profiles("anthropic") == ["anthropic-local"]
+
+    assert other_project_path.exists()
+    assert deleted == [], f"deleted {deleted[0]!r} while another project still references it"
