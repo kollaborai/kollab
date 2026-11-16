@@ -20,6 +20,15 @@ describe("service heartbeat status", () => {
     expect(heartbeatAge(service, 1040)).toBe(60);
   });
 
+  it("uses an engine clock sample and monotonic elapsed time instead of the browser wall clock", async () => {
+    const { engineClock } = await import("./heartbeat");
+    expect(engineClock(1000, 3000, 4500)).toBe(1001.5);
+    expect(engineClock(null, 3000, 4500)).toBeNull();
+    expect(engineClock(1000, 3000, 2500)).toBeNull();
+    expect(engineClock(Infinity, 3000, 4500)).toBeNull();
+  });
+
+
   it("does not invent a failure for missing, invalid, future or stopped data", () => {
     expect(heartbeatAge({ state: "running", heartbeat: 800 }, 1000)).toBeNull();
     expect(heartbeatAge({ state: "running", heartbeat_s: 60 }, 1000)).toBeNull();
