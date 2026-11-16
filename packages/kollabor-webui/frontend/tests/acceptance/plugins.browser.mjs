@@ -223,7 +223,9 @@ try {
          k.view({id:"fixture-view",label:"Fixture View",needs_folder:true,render:() => React.createElement("p",null,"Fixture view body")});
          k.modal({id:"details",title:"Fixture Details",tabs:[{id:"info",label:"Info",render:modal}]});
          k.settings({render:() => React.createElement("p", {className:"scope-probe"}, "Fixture custom settings")});
-         k.notice({text:"Fixture plugin notice",button:{label:"Open board",open:{page:"board"}}});
+         const postFixtureNotice = () => k.notice({text:"Fixture plugin notice",button:{label:"Open board",open:{page:"board"}}});
+         window.__postFixtureNotice = postFixtureNotice;
+         postFixtureNotice();
          k.notice({text:"Fixture modal notice",button:{label:"Open details",open:{modal:"details"}}});
          k.notice({text:"Fixture view notice",button:{label:"Open folder view",open:{view:"fixture-view"}}});
        });` });
@@ -380,6 +382,13 @@ try {
   delete entry.services[0].since;
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
+  const firstFixtureNotice = page.getByRole("status").filter({ hasText: "Fixture plugin notice" });
+  await firstFixtureNotice.getByRole("button", { name: "Dismiss" }).click();
+  assert.equal(await firstFixtureNotice.count(), 0, "dismissed notice is removed");
+  assert.equal(await page.getByRole("status").filter({ hasText: "Fixture modal notice" }).count(), 1, "other notices remain");
+  await page.evaluate(() => window.__postFixtureNotice());
+  await firstFixtureNotice.waitFor({ timeout: 5000 });
+  assert.equal(await firstFixtureNotice.count(), 1, "reposted notice appears again");
   assert.ok(inventoryReads > 0, "host must fetch inventory");
   await page.getByTestId("plugin-tag").waitFor({ timeout: 5000 });
   await page.getByText("Hello note: Welcome", { exact: true }).waitFor({ timeout: 5000 });

@@ -11,7 +11,7 @@ describe("plugin recovery surfaces", () => {
     const host = { subscribe: () => () => {}, getSnapshot: () => snapshot } as unknown as PluginHost;
     const markup = renderToStaticMarkup(<PluginNotices host={host} />);
     expect(markup).toContain("Hello Plugin");
-    expect(markup).toContain("Hello there");
+    expect(markup).toContain("<span>Hello there</span>");
     expect(markup).toContain('aria-label="Dismiss"');
   });
 
