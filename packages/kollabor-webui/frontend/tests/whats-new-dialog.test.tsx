@@ -1,7 +1,11 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { WhatsNewDialog } from "../src/whats-new/WhatsNewDialog";
-import type { DialogRelease } from "../src/whats-new/whats-new-model";
+import {
+  decideWhatsNew,
+  STORAGE_KEY,
+  type DialogRelease,
+} from "../src/whats-new/whats-new-model";
 
 vi.mock("@/components/ui/dialog", async () => {
   const React = await import("react");
@@ -26,6 +30,51 @@ const release: DialogRelease = {
 };
 
 const noop = () => {};
+
+function findElement(
+  node: unknown,
+  matches: (props: Record<string, unknown>) => boolean,
+): { props: Record<string, unknown> } | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findElement(child, matches);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof node !== "object" || node === null || !("props" in node)) return null;
+  const element = node as { props: Record<string, unknown> };
+  if (matches(element.props)) return element;
+  return findElement(element.props.children, matches);
+}
+
+const storedValues = new Map<string, string>();
+const browserStorage = {
+  getItem: (key: string) => storedValues.get(key) ?? null,
+  setItem: (key: string, value: string) => storedValues.set(key, value),
+};
+
+function dialogTree(onOpenChange = vi.fn(), onSeeAllChanges = vi.fn()) {
+  vi.stubGlobal("window", { localStorage: browserStorage });
+  storedValues.clear();
+  return {
+    tree: WhatsNewDialog({ open: true, release, onOpenChange, onSeeAllChanges }),
+    onOpenChange,
+    onSeeAllChanges,
+  };
+}
+
+function expectAnnouncementSeen() {
+  const decision = decideWhatsNew({
+    result: {
+      status: "ready",
+      sections: [{ version: release.version, groups: [{ category: "Added", items: ["Feature"] }] }],
+    },
+    seenRaw: browserStorage.getItem(STORAGE_KEY),
+    firstRun: false,
+  });
+  expect(decision.show).toBe(false);
+}
 
 describe("WhatsNewDialog", () => {
   it("renders nothing when closed or without a release", () => {
@@ -97,5 +146,51 @@ describe("WhatsNewDialog", () => {
     expect(html).toContain('data-show-close-button="false"');
     expect(html).toContain("Got It");
     expect(html).toContain("See All Changes");
+  });
+
+  it.each([
+    ["Got It", "whats-new-got-it"],
+    ["the header X", "Close What’s New"],
+  ])("records the version when %s is activated and suppresses it after reload", (_name, action) => {
+    const { tree, onOpenChange } = dialogTree();
+    const button = findElement(tree, (props) =>
+      action === "whats-new-got-it"
+        ? props["data-testid"] === action
+        : props["aria-label"] === action,
+    );
+
+    expect(button).not.toBeNull();
+    (button?.props.onClick as (() => void) | undefined)?.();
+
+    expect(browserStorage.getItem(STORAGE_KEY)).toBe('{"seenVersion":"0.22.1"}');
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expectAnnouncementSeen();
+    vi.unstubAllGlobals();
+  });
+
+  it("records the version when the dialog reports Escape or outside dismissal", () => {
+    const { tree, onOpenChange } = dialogTree();
+    const dialog = tree as { props: { onOpenChange: (open: boolean) => void } };
+
+    dialog.props.onOpenChange(false);
+
+    expect(browserStorage.getItem(STORAGE_KEY)).toBe('{"seenVersion":"0.22.1"}');
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expectAnnouncementSeen();
+    vi.unstubAllGlobals();
+  });
+
+  it("records the version and opens the changelog through See All Changes", () => {
+    const { tree, onOpenChange, onSeeAllChanges } = dialogTree();
+    const button = findElement(tree, (props) => props.children === "See All Changes");
+
+    expect(button).not.toBeNull();
+    (button?.props.onClick as (() => void) | undefined)?.();
+
+    expect(browserStorage.getItem(STORAGE_KEY)).toBe('{"seenVersion":"0.22.1"}');
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(onSeeAllChanges).toHaveBeenCalledOnce();
+    expectAnnouncementSeen();
+    vi.unstubAllGlobals();
   });
 });
