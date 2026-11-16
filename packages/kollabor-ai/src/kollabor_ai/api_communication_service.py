@@ -2023,7 +2023,9 @@ class APICommunicationService:
             files = []
             total = 0
             for f in projects_dir.rglob("*_raw.jsonl"):
-                if nested_raw_dir and f.parent.name != "raw":
+                if nested_raw_dir and not (
+                    f.parent.name == "raw" and f.parent.parent.name == "conversations"
+                ):
                     continue
                 try:
                     st = f.stat()
