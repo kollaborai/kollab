@@ -95,7 +95,7 @@ def _setup(monkeypatch, *, empty_anthropic=False):
         manager.loadouts = [
             loadout
             for loadout in manager.loadouts
-            if loadout.provider_profile != "anthropic-cloud" or not loadout.implicit
+            if not loadout.implicit or loadout.provider_profile == "openai"
         ]
     monkeypatch.setattr("kollabor.panels.llm._manager", lambda ctx: manager)
     return LlmPanel(), SimpleNamespace(_profile_manager=pm), manager, pm
