@@ -336,7 +336,7 @@ All sit behind the existing bearer-token middleware.
 
 | Route | Does | Plugin token | Remote page |
 |---|---|---|---|
-| `GET /plugins` | `{schema: 1, plugins: [PluginEntry]}` (below) | no | yes |
+| `GET /plugins` | `{schema: 1, server_time, plugins: [PluginEntry]}` (below); `server_time` is engine Unix time in seconds | no | yes |
 | `GET /plugins/events` | SSE: `plugins-changed` after any install, update, remove, enable or disable | no | yes |
 | `ANY /plugins/{id}/api/{path}` | the plugin's router, through one dispatcher to a per-plugin sub-app, so enable and disable need no engine restart | own id | yes, except routes the plugin marks `@ctx.local_only` (pr-chain marks its config and profile writes, which change the commands its chains run) |
 | `GET`, `POST /plugins/{id}/events` | the plugin's SSE stream of `{topic, data, ts}`; the engine sets `ts`. Topic `heartbeat` with `{service}` feeds the process state; with no engine, heartbeats are dropped and the state reads unknown | own id | yes |
@@ -591,11 +591,25 @@ registry replaces it, and `GET /plugins` serves the same entries:
 
 ```
 PluginEntry = {id, name, version, kind: "built-in" | "installed" | "dev", source, commit, enabled, shadowed,
-               state: "ok" | "error" | "off" | "stopping" | "changed-on-disk" | "skipped", error, settings: [make_field fields],
+               state: "ok" | "error" | "off" | "stopping" | "stop-failed" | "changed-on-disk" | "skipped", error, settings: [make_field fields],
                web: {entry, style, hash} | null, contributes: {menu, views, pages, modals, commands},
-               services: [{name, state: "running" | "stopping" | "exited" | "stopped" | "crash-stopped" | "unknown",
-                           desired, pid, since, restarts, heartbeat}], uses, granted}
+               services: [{name, state: "running" | "stopping" | "stop-failed" | "exited" | "stopped" | "crash-stopped" | "unknown",
+                           desired, pid, since, restarts, heartbeat, heartbeat_s, heartbeat_monitor_since,
+                           stop_deadline, error}], uses, granted}
 ```
+
+`heartbeat`, `heartbeat_monitor_since`, `since`, and `stop_deadline` are engine Unix timestamps in
+seconds; a missing value is `null`. `heartbeat_monitor_since` is the current engine's observation start,
+so an engine restart grants a fresh observation interval. A browser estimates engine time from the
+inventory's `server_time` and its own monotonic elapsed time rather than trusting its wall clock; absent
+or invalid clock data never proves a missed heartbeat. `stop_deadline` is an estimate of the current
+service's graceful-stop deadline, not proof the process has exited. If a stop signal or identity check
+fails, the plugin remains disabled; when its state can be recorded, the affected service and plugin
+report `stop-failed`, with a visible error and Retry Stop action. No unverified process is signalled. A partial failure is reported to
+the caller and subscribers, and enabling is refused while a recorded process remains alive. If another
+service is still stopping, the plugin remains `stopping` until those graceful stops finish before it
+shows `stop-failed`.
+
 
 `kollabor_plugins.registry.plugin_entries()` lists what the loader found: the bundled `plugins/`, loose
 modules in `~/.kollab/plugins`, and every package, on or off. Nothing is matched by file name or class
@@ -618,8 +632,9 @@ with `kollabor.binary.kollab_argv()` in its own session:
   the supervisor starts a wrapper with a fresh nonce, and the wrapper writes the pid file before and
   right after it starts the command. The wrapper holds `run/<process>.lock` for its whole life and exits
   at once if another wrapper holds it, so the supervisor's `try_lock` failing means a wrapper is running.
-  The wrapper is the only writer of the pid and state files and writes them atomically; its nonce is in
-  its command line, so `ps` shows which start it is.
+  The wrapper writes its pid file and observed state atomically; the service-control path also writes
+  desired and stopping state atomically before signalling, and the wrapper republishes stopping when it
+  forwards SIGTERM. The nonce is in its command line, so `ps` shows which start it is.
 - **Desired state.** `run/<process>.state` holds `desired` (`running` or `stopped`) and the exit history.
   The tick starts only processes whose desired state is running and that are not crash-stopped. Start
   sets running; Stop, Turn Off and the crash limit set stopped; an `on-failure` process that exits 0 stays
