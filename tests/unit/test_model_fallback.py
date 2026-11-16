@@ -60,6 +60,10 @@ class _Profiles:
     def get_active_profile(self):
         return self.profiles[self.active]
 
+    def set_active_profile(self, name, persist=True):
+        self.active = name
+        return True
+
     def get_profile(self, name):
         return self.profiles.get(name)
 
@@ -79,7 +83,7 @@ class _Loadouts:
             return None, []
         return SimpleNamespace(name=query, provider_profile=profile.name, model=profile.model), []
 
-    async def activate(self, loadout, event_bus=None, *, persist=True):
+    async def activate(self, loadout, event_bus=None, *, persist=True, for_current_run=False):
         _Loadouts.activated.append(loadout.name)
         self.pm.active = loadout.provider_profile
         return loadout
@@ -195,8 +199,9 @@ async def test_rate_limit_fallback_keeps_saved_global_config_byte_identical(
         monkeypatch, {"plugins.model_fallback.loadout": "codex"}
     )
 
-    async def activate(self, loadout, event_bus=None, *, persist=True):
+    async def activate(self, loadout, event_bus=None, *, persist=True, for_current_run=False):
         _Loadouts.activated.append(loadout.name)
+        assert for_current_run is True
         if persist:
             config_path.write_bytes(
                 b'{"kollabor":{"llm":{"active_profile":"codex"}}}\n'
@@ -209,6 +214,22 @@ async def test_rate_limit_fallback_keeps_saved_global_config_byte_identical(
         "Rate limit exceeded. Please try again later.", retry=True
     ) == "retry"
     assert config_path.read_bytes() == original
+
+
+@pytest.mark.asyncio
+async def test_fallback_restores_the_active_profile_before_the_next_input(monkeypatch):
+    plugin, _, _, profiles = await _agent(
+        monkeypatch, {"plugins.model_fallback.loadout": "codex"}
+    )
+
+    assert await plugin.fall_back(
+        "Rate limit exceeded. Please try again later.", retry=True
+    ) == "retry"
+    assert profiles.active == "codex"
+
+    await plugin._restore_after_fallback({}, None)
+
+    assert profiles.active == "glm"
 
 
 @pytest.mark.asyncio
