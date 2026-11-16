@@ -34,6 +34,24 @@ describe("plugin event stream", () => {
     stream.close();
   });
 
+  it("backs off when an event stream repeatedly closes without delivering data", async () => {
+    vi.useFakeTimers();
+    try {
+      const request = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({ start(c) { c.close(); } })));
+      const stream = new PluginEventStream(request, "/plugins/events");
+      stream.on("plugins-changed", vi.fn());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(request).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(request).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(request).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(request).toHaveBeenCalledTimes(3);
+      stream.close();
+    } finally { vi.useRealTimers(); }
+  });
+
   it("stops all subscriptions when closed", async () => {
     let signal: AbortSignal | null | undefined;
     const request = vi.fn(async (_path: string, init?: RequestInit) => {
