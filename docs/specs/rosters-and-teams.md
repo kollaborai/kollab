@@ -38,7 +38,7 @@ reported in `problems`; the rest of its roster loads.
   "description": "A small marketing team",
   "avatar": {"kind": "initials"},
   "personas": [
-    {"name": "maya", "display_name": "Maya Lindqvist", "avatar": {"kind": "emoji", "value": "..."},
+    {"name": "brand-strategist", "display_name": "Brand Strategist", "avatar": {"kind": "gem"},
      "color": [92, 138, 214], "agent": "research", "role": "Brand Strategist", "prompt": "..."}
   ]
 }
@@ -46,7 +46,7 @@ reported in `problems`; the rest of its roster loads.
 
 `name` defaults to the file name. `avatar` is the default for personas that set none.
 A roster with no valid persona is dropped (reported). Bundled: `gems` (avatar kind
-`gem`, all `agent: coder`) and `marketing-crew` (an example with initials and emoji).
+`gem`, all `agent: coder`) and `marketing-crew` (one of the bundled crews: personas named by role, drawn as gems).
 
 ## Team file
 
@@ -55,12 +55,12 @@ A roster with no valid persona is dropped (reported). Bundled: `gems` (avatar ki
   "name": "marketing",
   "description": "...",
   "roster": "marketing-crew",
-  "lead": "omar",
+  "lead": "campaign-lead",
   "members": [
-    {"persona": "omar", "reports_to": null},
-    {"persona": "maya", "reports_to": "omar"},
-    {"persona": "jonas", "reports_to": "theo", "prompt": "Review Theo's drafts first."},
-    {"persona": {"name": "bot-1", "display_name": "Bot One"}, "role": "Helper", "agent": "coder", "reports_to": "omar"}
+    {"persona": "campaign-lead", "reports_to": null},
+    {"persona": "brand-strategist", "reports_to": "campaign-lead"},
+    {"persona": "content-editor", "reports_to": "copywriter", "prompt": "Review the Copywriter's drafts first."},
+    {"persona": {"name": "bot-1", "display_name": "Bot One"}, "role": "Helper", "agent": "coder", "reports_to": "campaign-lead"}
   ]
 }
 ```
@@ -95,7 +95,7 @@ existed on the maintainer's machines).
 
 `plugins.hub.roster` (config, project `.kollab/config.json` over global; default
 `gems`) names the roster a folder draws from. The hub hands out the next free name
-from it in file order; once all are live it numbers them (`omar-2`).
+from it in file order; once all are live it numbers them (`campaign-lead-2`).
 Pick it in `/config` (Hub, Roster; Ctrl+S then L keeps it in the folder's `.kollab/config.json`).
 
 `kollab --as <name>` takes a persona from **any** roster. A bare name prefers the
@@ -105,7 +105,7 @@ base persona. Every folder has its own hub, so a name only has to be free in its
 
 ## What a persona does when it runs
 
-- `agent` is the bundle (`desired_bundle_for_identity`): a plain `kollab --as maya`
+- `agent` is the bundle (`desired_bundle_for_identity`): a plain `kollab --as brand-strategist`
   becomes `research`; an explicit `--agent` wins. The web `POST /sessions {"identity"}`
   fills `agent` and `profile` from the persona when the request leaves them out; a
   request that names no profile anywhere starts on the active profile.
@@ -146,8 +146,8 @@ roster setting apply; default: the engine's folder; 400 if it is not a folder).
     "name": "marketing-crew", "display_name": "Marketing Crew", "description": "...",
     "avatar": {"kind": "initials"}, "source": "bundled", "path": "/.../marketing-crew.json",
     "personas": [{
-      "name": "maya", "roster": "marketing-crew", "display_name": "Maya Lindqvist",
-      "avatar": {"kind": "emoji", "value": "..."}, "color": [92, 138, 214],
+      "name": "brand-strategist", "roster": "marketing-crew", "display_name": "Brand Strategist",
+      "avatar": {"kind": "gem"}, "color": [92, 138, 214],
       "agent": "research", "role": "Brand Strategist", "personality": "...",
       "skills": [], "profile": "", "prompt": "...", "caste": "", "role_aliases": []
     }]
@@ -172,7 +172,7 @@ selection:
 
 ```json
 {"workspace": "/abs/folder", "profile": "optional",
- "members": ["omar", "maya"], "lead": "maya", "mission": "Review the launch plan"}
+ "members": ["campaign-lead", "brand-strategist"], "lead": "brand-strategist", "mission": "Review the launch plan"}
 ```
 
 `members` is an allowlist; alternatively, `exclude` is a denylist. They are mutually
@@ -192,9 +192,9 @@ starts. If the lead is already live or fails to start, the mission is not sent a
 
 ```json
 {"team": "marketing", "workspace": "/abs/folder",
- "started": ["omar", "maya"], "skipped": [{"persona": "theo", "reason": "live"}],
- "excluded": ["priya"], "failed": [],
- "sessions": [{"session_id": "...", "identity": "marketing-crew/omar", "...": "..."}]}
+ "started": ["campaign-lead", "brand-strategist"], "skipped": [{"persona": "copywriter", "reason": "live"}],
+ "excluded": ["growth-analyst"], "failed": [],
+ "sessions": [{"session_id": "...", "identity": "marketing-crew/campaign-lead", "...": "..."}]}
 ```
 
 `excluded` lists members omitted by selection; `skipped` lists selected members already
@@ -261,6 +261,14 @@ Code: `packages/kollabor-webui/frontend/src/components/agents/` (`Avatar`, `Agen
   gem; `image`, `emoji` and `initials` are a flat tile on the persona's color. Image
   files are fetched with the bearer token into blob URLs; a file that fails keeps the
   initials.
+- **Crew gems.** A persona of any roster but `gems` is a crew gem: born furry, with
+  hair on top in a shade at least 80 luma away from the fur, and no hat. The engine
+  sends the crew names as `crew` on `GET /agents/appearance` and records the coat in
+  `born` (`gem_appearance.crew_coat`); the web UI draws the same fixed draw from the
+  name (`gem-look.ts` `crewCoat`) until then, so the look never changes once born.
+  A crew gem recorded before the rule takes the crew coat once and keeps its eyes.
+  The user's Gem Studio picks still go over it. The bundled crews name personas by
+  role (`chief-of-staff`, `support-lead`), not a person's name.
 - **New Session.** *Agent* is one select grouped by roster: the chosen Workspace's roster
   first (from `GET /agents?workspace=`, koordinator first), then each other roster's
   personas from `GET /rosters`, which start as `roster/name`. Each row shows picture,

@@ -2,27 +2,27 @@
   "name": "security",
   "description": "Security team: security lead, application security, cloud/infra security, detection and response, and governance/risk/compliance. Reviews, scans read-only, drafts fixes and policies; never attacks systems it was not authorised to test.",
   "roster": "security-crew",
-  "lead": "marcus",
+  "lead": "security-lead",
   "members": [
     {
-      "persona": "marcus",
+      "persona": "security-lead",
       "reports_to": null
     },
     {
-      "persona": "anya",
-      "reports_to": "marcus"
+      "persona": "application-security-engineer",
+      "reports_to": "security-lead"
     },
     {
-      "persona": "idris",
-      "reports_to": "marcus"
+      "persona": "cloud-infrastructure-security-engineer",
+      "reports_to": "security-lead"
     },
     {
-      "persona": "keira",
-      "reports_to": "marcus"
+      "persona": "detection-response-analyst",
+      "reports_to": "security-lead"
     },
     {
-      "persona": "soren",
-      "reports_to": "marcus"
+      "persona": "grc-analyst",
+      "reports_to": "security-lead"
     }
   ]
 }
