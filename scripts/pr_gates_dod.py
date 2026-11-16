@@ -107,16 +107,11 @@ LINKED_ISSUE_RE = re.compile(
     re.IGNORECASE,
 )
 TOKEN_RE = re.compile(r"(ghp_|github_pat_)[A-Za-z0-9_]+")
-# Ruff's pyflakes rules share the finding-id shape (F63, F7, F82). A comma-joined
-# code list that names another rule family, like the CI lint selection
-# E9,F63,F7,F82, is a rule list and names no findings (#1024).
-RULE_CODE_LIST_RE = re.compile(r"\b[A-Z]+\d+(?:,[A-Z]+\d+)+\b")
-RUFF_RULE_CODE_RE = re.compile(
-    r"(?:E|F|W|I|N|D|UP|YTT|ANN|ASYNC|B|BLE|A|C4|C90|COM|CPY|DJ|DOC|DTZ|"
-    r"T10|EM|EXE|FA|"
-    r"ISC|ICN|LOG|G|INP|PIE|T20|PYI|Q|RSE|RET|SLF|SIM|TID|TCH|INT|ARG|"
-    r"PTH|TD|FIX|ERA|PGH|PL|TRY|FLY|PERF|FURB|RUF)\d+"
-)
+# Ruff's pyflakes rules share the finding-id shape (F63, F7, F82). The code list a
+# lint flag selects or ignores (ruff check --select E9,F63,F7,F82) names rules,
+# not findings (#1024). Only that flag context counts: the same list in prose can
+# be either, so it stays findings.
+RULE_SELECTION_RE = re.compile(r"--(?:extend-)?(?:select|ignore)(?:=|\s+)([A-Z]+\d*(?:,[A-Z]+\d*)*)")
 
 
 class ConfigError(Exception):
@@ -454,26 +449,12 @@ def _mentions_finding(content: str, finding: str) -> bool:
 
 
 def _finding_matches(pattern: re.Pattern[str], body: str) -> list[re.Match[str]]:
-    """Finding-id matches in body, outside lint rule lists (#1024)."""
-    rule_lists = []
-    for run in RULE_CODE_LIST_RE.finditer(body):
-        codes = run.group(0).split(",")
-        if not all(RUFF_RULE_CODE_RE.fullmatch(code) is not None for code in codes):
-            continue
-        if not any(pattern.fullmatch(code) is None for code in codes):
-            continue
-        line_start = body.rfind("\n", 0, run.start()) + 1
-        line_prefix = body[line_start : run.start()]
-        if re.search(
-            r"\bruff\s+(?:check|lint)\b|\blint\b|--select\b",
-            line_prefix,
-            re.IGNORECASE,
-        ):
-            rule_lists.append(run.span())
+    """Finding-id matches in body, outside lint flag rule selections (#1024)."""
+    selections = [run.span(1) for run in RULE_SELECTION_RE.finditer(body)]
     return [
         match
         for match in pattern.finditer(body)
-        if not any(start <= match.start() < end for start, end in rule_lists)
+        if not any(start <= match.start() < end for start, end in selections)
     ]
 
 
