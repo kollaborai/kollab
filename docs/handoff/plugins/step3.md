@@ -32,3 +32,13 @@
 1. Recover a real image-viewing/comparison capability or obtain a visual reviewer. Inspect the newest captures against the `.dc.html` mock sources and responsive principles at all three widths and both themes; check clipping, dimensions, states, text and the actual Running and failed-page captures. Fix in-scope discrepancies red-first. Do not substitute screenshot counts, OCR or overflow metrics for viewing.
 2. If code changes, freeze the new HEAD, request a supervisor restart, rerun all listed gates and live capture matrix, and record the new SHA. Do not start a separate stack, relay, Docker or dev server; store logs/screenshots in the external backup directory, not `/tmp`.
 3. The branch may be pushed as an explicitly incomplete preservation checkpoint when session context or turns are running out, per the brief; that push is not visual sign-off or permission to open a PR. After review and any fixes, push only `feat/plugins-step3`. PR #1065 was OPEN on the last check, and no step-2 PR was returned; do not open a PR while #1065 is open or step 2 lacks a merged PR. Never merge, mark ready, or touch another branch. Carry the CSS warning and unverified items forward explicitly.
+
+## Visual review follow-up
+
+- Finding 1 needs `packages/kollabor-plugins/src/kollabor_plugins/registry.py`: built-in
+  inventory names must be human-readable at the producer while IDs remain stable; the
+  web Settings and terminal configuration both consume these entries. Test this in
+  `tests/unit/plugins/test_builtin_entry_fields.py` before changing the producer.
+- Next: red-first built-in display-name regression, then address all ten findings in
+  `ui-review-1133969d9.md` in the external backup work directory; rerun all gates,
+  request a stack restart at the final code SHA, and repeat the smoke and capture matrix.
