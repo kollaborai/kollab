@@ -462,7 +462,7 @@ def test_regression_test_ignores_quoted_ruff_rule_codes_1024(tmp_path: Path) -> 
 
 def test_regression_test_counts_a_finding_beside_rule_codes_1024(tmp_path: Path) -> None:
     cfg = regression_cfg(tmp_path)
-    body = "CI lint (E9,F63,F7,F82) is clean.\nF7: the retry loop never stops"
+    body = "ruff check --select E9,F63,F7,F82 is clean.\nF7: the retry loop never stops"
     report = pr_gates_dod.evaluate(
         cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
     )
@@ -472,7 +472,7 @@ def test_regression_test_counts_a_finding_beside_rule_codes_1024(tmp_path: Path)
 
 
 def test_regression_test_counts_a_bare_finding_list_1024(tmp_path: Path) -> None:
-    # Only a list that names another rule family is a lint selection.
+    # A code list outside a lint selection flag is findings.
     cfg = regression_cfg(tmp_path)
     report = pr_gates_dod.evaluate(
         cfg, make_data(comments=(source_comment("issue_comment", 1, "F1,F2: both open"),))
@@ -510,6 +510,30 @@ def test_regression_test_keeps_declared_finding_in_mixed_code_list_1024(
         make_data(
             comments=(source_comment("issue_comment", 1, "Finding IDs: F7,I001"),)
         ),
+    )
+    assert report.detail_for("regression_test") == (
+        "no regression test covers finding id(s): F7 under tests/"
+    )
+
+
+def test_regression_test_ignores_an_all_f_ruff_selection_1024(tmp_path: Path) -> None:
+    # Review finding: a --select list of pyflakes rules alone still names rules.
+    cfg = regression_cfg(tmp_path)
+    body = "ruff check --select F63,F7,F82 passed"
+    report = pr_gates_dod.evaluate(
+        cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
+    )
+    assert "regression_test" not in report.failed_names()
+
+
+def test_regression_test_keeps_a_declared_finding_on_a_lint_line_1024(
+    tmp_path: Path,
+) -> None:
+    # Review finding: the word lint on a line does not turn declared ids into rules.
+    cfg = regression_cfg(tmp_path)
+    body = "lint Finding IDs: E9,F7"
+    report = pr_gates_dod.evaluate(
+        cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
     )
     assert report.detail_for("regression_test") == (
         "no regression test covers finding id(s): F7 under tests/"
