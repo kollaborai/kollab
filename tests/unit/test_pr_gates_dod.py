@@ -14,6 +14,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -418,9 +419,14 @@ def test_regression_test_no_findings_passes(tmp_path: Path) -> None:
     assert "regression_test" not in report.failed_names()
 
 
-def test_regression_test_covered_and_uncovered(tmp_path: Path) -> None:
-    cfg = pr_gates_dod.load_config(make_config(tmp_path, ENABLED))
-    data_kw = dict(review_comment_bodies=["F14: the psutil bypass is open"])
+def test_regression_test_covered_and_uncovered_with_review(tmp_path: Path) -> None:
+    cfg = regression_cfg(tmp_path)
+    data_kw = dict(
+        comments=(pr_gates_dod.PRComment(
+            "review_comment", 1, "F14: the psutil bypass is open", "reviewer", "2026-11-01T12:00:00Z"
+        ),),
+        reviews=(approved_review(),),
+    )
     ok = pr_gates_dod.evaluate(
         cfg,
         make_data(
@@ -447,6 +453,369 @@ def test_regression_test_covered_and_uncovered(tmp_path: Path) -> None:
     )
     assert "regression_test" in bad.failed_names()
     assert "F14" in bad.detail_for("regression_test")
+
+
+def test_regression_test_requires_test_only_commit_before_post_finding_fix(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment",
+        comment_id=1,
+        body="F14: the psutil bypass is open",
+        author_login="reviewer",
+        created_at="2026-11-01T12:00:00Z",
+    )
+    data = make_data(
+        commits=(
+            SimpleNamespace(
+                sha="a" * 40,
+                message="fix(security): close F14 bypass",
+                verified=True,
+                committed_at="2026-11-01T12:05:00Z",
+                files=("kollabor/security.py",),
+            ),
+            SimpleNamespace(
+                sha="b" * 40,
+                message="test(security): reproduce F14 bypass",
+                verified=True,
+                committed_at="2026-11-01T12:10:00Z",
+                files=("tests/unit/test_security.py",),
+            ),
+        ),
+        changed_files=["kollabor/security.py", "tests/unit/test_security.py"],
+        changed_file_contents={
+            "tests/unit/test_security.py": "def test_f14_bypass(): ..."
+        },
+        comments=(finding,),
+    )
+
+    report = pr_gates_dod.evaluate(cfg, data)
+
+    assert "regression_test" in report.failed_names()
+    assert "F14" in report.detail_for("regression_test")
+    assert "independent current-head approval required" in report.detail_for("regression_test")
+
+
+def test_regression_test_commit_order_alone_cannot_pass(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment",
+        comment_id=1,
+        body="F14: the psutil bypass is open",
+        author_login="reviewer",
+        created_at="2026-11-01T12:00:00Z",
+    )
+    data = make_data(
+        commits=(
+            SimpleNamespace(
+                sha="a" * 40,
+                message="test(security): reproduce F14 bypass",
+                verified=True,
+                committed_at="2026-11-01T12:05:00Z",
+                files=("tests/unit/test_security.py",),
+                file_patches={
+                    "tests/unit/test_security.py": (
+                        "+def test_f14_bypass(): ...\n"
+                        "+@pytest.mark.xfail(strict=True)"
+                    )
+                },
+            ),
+            SimpleNamespace(
+                sha="b" * 40,
+                message="fix(security): close F14 bypass",
+                verified=True,
+                committed_at="2026-11-01T12:10:00Z",
+                files=("kollabor/security.py",),
+            ),
+        ),
+        changed_files=["kollabor/security.py", "tests/unit/test_security.py"],
+        changed_file_contents={
+            "tests/unit/test_security.py": "def test_f14_bypass(): ..."
+        },
+        comments=(finding,),
+    )
+
+    report = pr_gates_dod.evaluate(cfg, data)
+
+    assert "regression_test" in report.failed_names()
+
+
+def test_regression_test_rejects_backdated_fix_using_timeline_order(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="issue_comment",
+        comment_id=1,
+        body="F14: the fix still fails",
+        author_login="reviewer",
+        created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+        review_id=0,
+    )
+    commits = (
+        SimpleNamespace(
+            sha="a" * 40,
+            message="fix(core): close F14",
+            verified=True,
+            committed_at="2026-10-01T00:00:00Z",
+            files=("kollabor/core.py",),
+            timeline_order=11,
+        ),
+        SimpleNamespace(
+            sha="b" * 40,
+            message="test(core): reproduce F14",
+            verified=True,
+            committed_at="2026-11-01T12:05:00Z",
+            files=("tests/unit/test_core.py",),
+            timeline_order=12,
+        ),
+        SimpleNamespace(
+            sha="c" * 40,
+            message="fix(core): follow-up F14",
+            verified=True,
+            committed_at="2026-11-01T12:10:00Z",
+            files=("kollabor/core.py",),
+            timeline_order=13,
+        ),
+    )
+    data = make_data(
+        commits=commits,
+        comments=(finding,),
+        changed_files=["kollabor/core.py", "tests/unit/test_core.py"],
+        changed_file_contents={"tests/unit/test_core.py": "def test_f14(): ..."},
+    )
+
+    report = pr_gates_dod.evaluate(cfg, data)
+
+    assert "regression_test" in report.failed_names()
+    assert "independent current-head approval required" in report.detail_for("regression_test")
+
+
+def test_regression_test_rejects_fix_commit_that_also_changes_test(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment",
+        comment_id=1,
+        body="F14: the psutil bypass is open",
+        author_login="reviewer",
+        created_at="2026-11-01T12:00:00Z",
+    )
+    data = make_data(
+        commits=(
+            SimpleNamespace(
+                sha="a" * 40,
+                message="fix(security): close F14 bypass",
+                verified=True,
+                committed_at="2026-11-01T12:05:00Z",
+                files=("kollabor/security.py", "tests/unit/test_security.py"),
+            ),
+        ),
+        changed_files=["kollabor/security.py", "tests/unit/test_security.py"],
+        changed_file_contents={
+            "tests/unit/test_security.py": "def test_f14_bypass(): ..."
+        },
+        comments=(finding,),
+    )
+
+    report = pr_gates_dod.evaluate(cfg, data)
+
+    assert "regression_test" in report.failed_names()
+    assert "independent current-head approval required" in report.detail_for("regression_test")
+
+
+def test_regression_test_contributor_cannot_exempt_non_testable_finding(tmp_path: Path) -> None:
+    cfg = regression_cfg(tmp_path)
+    data = make_data(
+        comments=(
+            SimpleNamespace(
+                kind="review_comment",
+                comment_id=1,
+                body="F14: this wording is misleading",
+                author_login="reviewer",
+                created_at="2026-11-01T12:00:00Z",
+            ),
+        ),
+        changed_files=["docs/guide.md"],
+        commits=(
+            SimpleNamespace(
+                sha="a" * 40,
+                message=(
+                    "fix(docs): clarify the guide\n\n"
+                    "No regression test: F14 - documentation wording only."
+                ),
+                verified=True,
+                committed_at="2026-11-01T12:05:00Z",
+                files=("docs/guide.md",),
+            ),
+        ),
+    )
+
+    report = pr_gates_dod.evaluate(cfg, data)
+
+    assert "regression_test" in report.failed_names()
+
+
+def test_regression_test_requires_test_commit_patch_to_name_finding(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment",
+        comment_id=1,
+        body="F14: the issue remains open",
+        author_login="reviewer",
+        created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    data = make_data(
+        commits=(
+            SimpleNamespace(
+                sha="a" * 40,
+                message="test(core): unrelated cleanup",
+                verified=True,
+                committed_at="2026-11-01T12:01:00Z",
+                files=("tests/unit/test_core.py",),
+                file_patches={"tests/unit/test_core.py": "@@\n+assert True"},
+                timeline_order=11,
+            ),
+            SimpleNamespace(
+                sha="b" * 40,
+                message="fix(core): close F14",
+                verified=True,
+                committed_at="2026-11-01T12:02:00Z",
+                files=("kollabor/core.py",),
+                file_patches={},
+                timeline_order=12,
+            ),
+        ),
+        comments=(finding,),
+        changed_files=["tests/unit/test_core.py", "kollabor/core.py"],
+        changed_file_contents={
+            "tests/unit/test_core.py": "# F14 existed before this commit\ndef test_old(): pass"
+        },
+    )
+
+    report = pr_gates_dod.evaluate(cfg, data)
+
+    assert "regression_test" in report.failed_names()
+    assert "independent current-head approval required" in report.detail_for("regression_test")
+
+
+def test_regression_test_rejects_placeholder_finding_test(tmp_path: Path) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment", comment_id=1, body="F14: behavior remains broken",
+        author_login="reviewer", created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    data = make_data(
+        commits=(
+            SimpleNamespace(
+                sha="a" * 40, message="test: placeholder F14", verified=True,
+                files=("tests/unit/test_f14.py",),
+                file_patches={
+                    "tests/unit/test_f14.py": "+def test_F14_placeholder(): assert True"
+                },
+                timeline_order=11,
+            ),
+            SimpleNamespace(
+                sha="b" * 40, message="fix: repair F14", verified=True,
+                files=("kollabor/core.py",), file_patches={}, timeline_order=12,
+            ),
+        ),
+        comments=(finding,),
+        changed_files=["tests/unit/test_f14.py", "kollabor/core.py"],
+        changed_file_contents={
+            "tests/unit/test_f14.py": "def test_F14_placeholder(): assert True"
+        },
+    )
+
+    report = pr_gates_dod.evaluate(cfg, data)
+
+    assert "regression_test" in report.failed_names()
+
+
+def test_regression_test_requires_reason_for_non_testable_finding(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment",
+        comment_id=1,
+        body="F15: documentation change needs an explanation",
+        author_login="reviewer",
+        created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    data = make_data(
+        commits=(
+            SimpleNamespace(
+                sha="c" * 40,
+                message="fix(docs): update the guide\n\nNo regression test: F15",
+                verified=True,
+                committed_at="2026-11-01T12:01:00Z",
+                files=("docs/guide.md",),
+                timeline_order=11,
+            ),
+        ),
+        comments=(finding,),
+        changed_files=["docs/guide.md"],
+        changed_file_contents={},
+    )
+
+    report = pr_gates_dod.evaluate(cfg, data)
+
+    assert "regression_test" in report.failed_names()
+    assert "F15" in report.detail_for("regression_test")
+
+
+def test_regression_test_xfail_removal_alone_cannot_pass(tmp_path: Path) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment",
+        comment_id=1,
+        body="F14: the psutil bypass is open",
+        author_login="reviewer",
+        created_at="2026-11-01T12:00:00Z",
+    )
+    data = make_data(
+        commits=(
+            SimpleNamespace(
+                sha="a" * 40,
+                message="test(security): reproduce F14 bypass",
+                verified=True,
+                committed_at="2026-11-01T12:05:00Z",
+                files=("tests/unit/test_security.py",),
+            ),
+            SimpleNamespace(
+                sha="b" * 40,
+                message="fix(security): close F14 bypass",
+                verified=True,
+                committed_at="2026-11-01T12:10:00Z",
+                files=("kollabor/security.py", "tests/unit/test_security.py"),
+                file_patches={
+                    "tests/unit/test_security.py": (
+                        "@@ -1,2 +1,1 @@\n-@pytest.mark.xfail(strict=True)"
+                    )
+                },
+            ),
+        ),
+        changed_files=["kollabor/security.py", "tests/unit/test_security.py"],
+        changed_file_contents={
+            "tests/unit/test_security.py": "def test_f14_bypass(): ..."
+        },
+        comments=(finding,),
+    )
+
+    report = pr_gates_dod.evaluate(cfg, data)
+
+    assert "regression_test" in report.failed_names()
 
 
 def test_regression_test_ignores_quoted_ruff_rule_codes_1024(tmp_path: Path) -> None:
@@ -482,7 +851,7 @@ def test_regression_test_counts_a_finding_beside_rule_codes_1024(tmp_path: Path)
         cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
     )
     assert report.detail_for("regression_test") == (
-        "no regression test covers finding id(s): F7 under tests/"
+        "no changed test text references finding id(s): F7 under tests/"
     )
 
 
@@ -493,7 +862,7 @@ def test_regression_test_counts_a_bare_finding_list_1024(tmp_path: Path) -> None
         cfg, make_data(comments=(source_comment("issue_comment", 1, "F1,F2: both open"),))
     )
     assert report.detail_for("regression_test") == (
-        "no regression test covers finding id(s): F1, F2 under tests/"
+        "no changed test text references finding id(s): F1, F2 under tests/"
     )
 
 
@@ -512,7 +881,7 @@ def test_regression_test_keeps_finding_beside_severity_code_1024(tmp_path: Path)
         ),
     )
     assert report.detail_for("regression_test") == (
-        "no regression test covers finding id(s): F14 under tests/"
+        "no changed test text references finding id(s): F14 under tests/"
     )
 
 
@@ -527,7 +896,7 @@ def test_regression_test_keeps_declared_finding_in_mixed_code_list_1024(
         ),
     )
     assert report.detail_for("regression_test") == (
-        "no regression test covers finding id(s): F7 under tests/"
+        "no changed test text references finding id(s): F7 under tests/"
     )
 
 
@@ -551,7 +920,7 @@ def test_regression_test_keeps_a_declared_finding_on_a_lint_line_1024(
         cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
     )
     assert report.detail_for("regression_test") == (
-        "no regression test covers finding id(s): F7 under tests/"
+        "no changed test text references finding id(s): F7 under tests/"
     )
 
 
@@ -565,7 +934,7 @@ def test_regression_test_keeps_findings_in_a_sentence_that_names_ruff_1024(
         cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
     )
     assert report.detail_for("regression_test") == (
-        "no regression test covers finding id(s): F3, F4 under tests/"
+        "no changed test text references finding id(s): F3, F4 under tests/"
     )
 
 
@@ -578,7 +947,7 @@ def test_regression_test_counts_a_rule_list_quoted_in_prose_1024(tmp_path: Path)
         cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
     )
     assert report.detail_for("regression_test") == (
-        "no regression test covers finding id(s): F63, F7, F82 under tests/"
+        "no changed test text references finding id(s): F63, F7, F82 under tests/"
     )
 
 
@@ -681,16 +1050,27 @@ def test_workflow_file_exists_least_privilege() -> None:
 
 def test_workflow_runs_the_base_copy_and_no_pr_code() -> None:
     workflow = yaml.load(WORKFLOW_FILE.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
-    # Only pull_request_target runs the base branch's copy, so a PR cannot rewrite
-    # its own grade or reach the token.
-    assert list(workflow["on"]) == ["pull_request_target"]
+    # Privileged execution uses target/default-branch events, never PR review
+    # events that could load contributor-controlled workflow code.
+    assert set(workflow["on"]) == {
+        "pull_request_target", "issue_comment", "workflow_dispatch"
+    }
+    assert set(workflow["on"]["issue_comment"]["types"]) == {"created", "edited", "deleted"}
+    assert workflow["on"]["workflow_dispatch"]["inputs"]["pr"]["required"] == "true"
+    assert "github.event.issue.pull_request" in workflow["jobs"]["dod"]["if"]
     # The title and body are graded, so an edit has to grade again.
     assert {"opened", "synchronize", "reopened", "ready_for_review", "edited"} <= set(
         workflow["on"]["pull_request_target"]["types"]
     )
     steps = workflow["jobs"]["dod"]["steps"]
     checkout = next(s for s in steps if s.get("uses", "").startswith("actions/checkout@"))
-    assert "ref" not in checkout.get("with", {})
+    assert checkout["with"]["ref"] == (
+        "${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}"
+    )
+    run = steps[-1]
+    assert "PR_NUMBER" in run["env"]
+    assert "EVENT_HEAD_SHA" in run["env"]
+    assert "github.event" not in run["run"]
 
 
 def test_audit_lines_record_actions(tmp_path, capsys) -> None:
@@ -1006,6 +1386,9 @@ def test_collect_pr_data_keeps_comment_identity_and_review_approval_metadata(mon
     review_comment = {
         "id": 100,
         "body": "F11 was reported by the test suite.",
+        "created_at": "2026-11-08T01:00:00Z",
+        "updated_at": "2026-11-08T01:01:00Z",
+        "pull_request_review_id": 300,
         "user": {"login": "inline-reviewer"},
     }
     issue_comment = {
@@ -1023,6 +1406,9 @@ def test_collect_pr_data_keeps_comment_identity_and_review_approval_metadata(mon
     }
     pages = {
         "rest": {
+            f"repos/o/r/issues/{PR_NUM}/timeline": {
+                1: [{"event": "reviewed", "id": 300}]
+            },
             f"repos/o/r/pulls/{PR_NUM}/comments": {1: [review_comment]},
             f"repos/o/r/issues/{PR_NUM}/comments": {1: [issue_comment]},
             f"repos/o/r/pulls/{PR_NUM}/reviews": {1: [review]},
@@ -1034,8 +1420,20 @@ def test_collect_pr_data_keeps_comment_identity_and_review_approval_metadata(mon
     assert data.pull_author_login == "pr-author"
     assert data.head_sha == HEAD_SHA
     assert data.comments == (
-        pr_gates_dod.PRComment("review_comment", 100, review_comment["body"], "inline-reviewer"),
-        pr_gates_dod.PRComment("issue_comment", 200, issue_comment["body"], "trusted-reviewer"),
+        pr_gates_dod.PRComment(
+            "review_comment",
+            100,
+            review_comment["body"],
+            "inline-reviewer",
+            "2026-11-08T01:00:00Z",
+            300,
+            "",
+            updated_at="2026-11-08T01:01:00Z",
+        ),
+        pr_gates_dod.PRComment(
+            "issue_comment", 200, issue_comment["body"], "trusted-reviewer", "", 0,
+            ""
+        ),
     )
     assert data.reviews == (
         pr_gates_dod.PRReview(300, "trusted-reviewer", "APPROVED", HEAD_SHA, "2026-11-08T01:02:03Z"),
@@ -1309,11 +1707,12 @@ def test_main_disabled_never_calls_github(tmp_path, monkeypatch, capsys) -> None
     ],
 )
 def test_regression_test_matches_whole_finding_id(tmp_path, test_content, covered) -> None:
-    cfg = pr_gates_dod.load_config(
-        make_config(tmp_path, '[pr_gates.dod]\nenabled = true\nchecks = ["regression_test"]\n')
-    )
+    cfg = regression_cfg(tmp_path)
     data = make_data(
-        review_comment_bodies=("F1: the base check is wrong",),
+        comments=(pr_gates_dod.PRComment(
+            "review_comment", 1, "F1: the base check is wrong", "reviewer", "2026-11-01T12:00:00Z"
+        ),),
+        reviews=(approved_review(),),
         changed_file_contents={"tests/test_x.py": test_content},
     )
     report = pr_gates_dod.evaluate(cfg, data)
@@ -1358,6 +1757,224 @@ def test_regression_suppressions_require_exact_trusted_annotation(tmp_path):
         note.source_body_sha256 == hashlib.sha256(source.encode()).hexdigest()
         for note in report.audit_notes
     )
+
+
+def test_regression_test_rejects_unrelated_added_assertion_that_names_finding(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment", comment_id=1, body="F16: bug remains",
+        author_login="reviewer", created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    commits = (
+        SimpleNamespace(
+            sha="a" * 40, message="test: unrelated assertion", verified=True,
+            files=("tests/unit/test_core.py",),
+            file_patches={"tests/unit/test_core.py": "+assert True  # F16"},
+            timeline_order=11,
+        ),
+        SimpleNamespace(
+            sha="b" * 40, message="fix: repair", verified=True,
+            files=("kollabor/core.py",), file_patches={}, timeline_order=12,
+        ),
+    )
+    data = make_data(
+        commits=commits, comments=(finding,),
+        changed_file_contents={"tests/unit/test_core.py": "def test_old(): pass\nassert True  # F16"},
+    )
+
+    assert "regression_test" in pr_gates_dod.evaluate(cfg, data).failed_names()
+
+
+def test_regression_test_does_not_count_helper_assertion_for_finding(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment", comment_id=1, body="F14: bug remains",
+        author_login="reviewer", created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    test_path = "tests/unit/test_f14.py"
+    commits = (
+        SimpleNamespace(
+            sha="a" * 40, message="test: add F14 test", verified=True,
+            files=(test_path,), timeline_order=11,
+            file_patches={
+                test_path: (
+                    "+def test_f14_placeholder(): pass\n"
+                    "+def helper():\n"
+                    "+    assert reproduce_f14()"
+                )
+            },
+        ),
+        SimpleNamespace(
+            sha="b" * 40, message="fix: repair", verified=True,
+            files=("kollabor/core.py",), timeline_order=12,
+        ),
+    )
+    data = make_data(
+        commits=commits, comments=(finding,),
+        changed_files=[test_path, "kollabor/core.py"],
+        changed_file_contents={
+            test_path: "def test_f14_placeholder(): pass\ndef helper():\n    assert reproduce_f14()"
+        },
+    )
+
+    assert "regression_test" in pr_gates_dod.evaluate(cfg, data).failed_names()
+
+
+def test_regression_test_rejects_always_truthy_object_assertion(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment", comment_id=1, body="F14: bug remains",
+        author_login="reviewer", created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    test_path = "tests/unit/test_f14.py"
+    commits = (
+        SimpleNamespace(
+            sha="a" * 40, message="test: placeholder F14", verified=True,
+            files=(test_path,),
+            file_patches={test_path: "+def test_f14_placeholder(): assert object()"},
+            timeline_order=11,
+        ),
+        SimpleNamespace(
+            sha="b" * 40, message="fix: repair F14", verified=True,
+            files=("kollabor/core.py",), file_patches={}, timeline_order=12,
+        ),
+    )
+    data = make_data(
+        commits=commits, comments=(finding,),
+        changed_files=[test_path, "kollabor/core.py"],
+        changed_file_contents={
+            test_path: "def test_f14_placeholder(): assert object()"
+        },
+    )
+
+    assert "regression_test" in pr_gates_dod.evaluate(cfg, data).failed_names()
+
+
+def test_regression_test_rejects_always_truthy_call_inside_comparison(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment", comment_id=1, body="F14: bug remains",
+        author_login="reviewer", created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    test_path = "tests/unit/test_f14.py"
+    assertion = "always_true() == True"
+    patch = f"+def test_f14_placeholder(): assert {assertion}"
+    commits = (
+        SimpleNamespace(
+            sha="a" * 40, message="test: placeholder F14", verified=True,
+            files=(test_path,), file_patches={test_path: patch}, timeline_order=11,
+        ),
+        SimpleNamespace(
+            sha="b" * 40, message="fix: repair F14", verified=True,
+            files=("kollabor/core.py",), file_patches={}, timeline_order=12,
+        ),
+    )
+    data = make_data(
+        commits=commits, comments=(finding,),
+        changed_files=[test_path, "kollabor/core.py"],
+        changed_file_contents={test_path: patch[1:]},
+    )
+
+    assert "regression_test" in pr_gates_dod.evaluate(cfg, data).failed_names()
+
+
+def test_regression_test_requires_xfail_removal_from_finding_test_file(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment", comment_id=1, body="F14: bug remains",
+        author_login="reviewer", created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    commits = (
+        SimpleNamespace(
+            sha="a" * 40, message="test: add F14 regression", verified=True,
+            files=("tests/unit/test_f14.py",),
+            file_patches={"tests/unit/test_f14.py": "+def test_f14(): ...\n+@pytest.mark.xfail(strict=True)"},
+            timeline_order=11,
+        ),
+        SimpleNamespace(
+            sha="b" * 40, message="fix: repair", verified=True,
+            files=("kollabor/core.py", "tests/unit/test_other.py"),
+            file_patches={"tests/unit/test_other.py": "-@pytest.mark.xfail(strict=True)"},
+            timeline_order=12,
+        ),
+    )
+    data = make_data(
+        commits=commits, comments=(finding,),
+        changed_file_contents={
+            "tests/unit/test_f14.py": "@pytest.mark.xfail(strict=True)\ndef test_f14(): ..."
+        },
+    )
+
+    assert "regression_test" in pr_gates_dod.evaluate(cfg, data).failed_names()
+
+
+def test_regression_test_rejects_non_testable_exception_for_code_fix(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment", comment_id=1, body="F15: runtime behavior is wrong",
+        author_login="reviewer", created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    fix = SimpleNamespace(
+        sha="c" * 40,
+        message="fix: repair\n\nNo regression test: F15 - documentation wording only.",
+        verified=True, committed_at="2026-11-01T12:01:00Z",
+        files=("kollabor/core.py",), timeline_order=11,
+    )
+    data = make_data(commits=(fix,), comments=(finding,), changed_files=["kollabor/core.py"])
+
+    assert "regression_test" in pr_gates_dod.evaluate(cfg, data).failed_names()
+
+
+def test_later_docs_declaration_cannot_exempt_prior_runtime_change(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment", comment_id=1, body="F15: runtime behavior is wrong",
+        author_login="reviewer", created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    data = make_data(
+        commits=(
+            SimpleNamespace(
+                sha="c" * 40, message="fix: repair runtime behavior", verified=True,
+                committed_at="2026-11-01T12:01:00Z",
+                files=("kollabor/core.py",), timeline_order=11,
+            ),
+            SimpleNamespace(
+                sha="d" * 40,
+                message=(
+                    "fix(docs): clarify the guide\n\n"
+                    "No regression test: F15 - wording only."
+                ),
+                verified=True, committed_at="2026-11-01T12:02:00Z",
+                files=("docs/guide.md",), timeline_order=12,
+            ),
+        ),
+        comments=(finding,),
+        changed_files=["kollabor/core.py", "docs/guide.md"],
+        changed_file_contents={},
+    )
+
+    assert "regression_test" in pr_gates_dod.evaluate(cfg, data).failed_names()
 
 
 def test_regression_code_default_trusts_no_reviewer(tmp_path):
@@ -1500,7 +2117,7 @@ def test_regression_keeps_pr553_f1_f6_and_requires_all_f11_occurrences(tmp_path)
         comments=(*sources, *markers), reviews=(approved_review(),), changed_file_contents={}
     )
     detail = pr_gates_dod.evaluate(cfg, valid).detail_for("regression_test")
-    assert detail == "no regression test covers finding id(s): F1, F2, F3, F4, F5, F6 under tests/"
+    assert detail == "no changed test text references finding id(s): F1, F2, F3, F4, F5, F6 under tests/"
     assert "F11" not in detail
 
     unannotated = make_data(comments=sources, changed_file_contents={})
