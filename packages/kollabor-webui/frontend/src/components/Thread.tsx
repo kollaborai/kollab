@@ -322,6 +322,7 @@ export const Thread: FC<{
   agents?: readonly AgentPoolEntry[];
   commands?: readonly SlashCommand[];
   onOpenPanel?: (request: PanelOpenRequest) => void;
+  onOpenWelcome?: () => void;
   /** False when the session's model cannot read images. */
   attachmentsEnabled?: boolean;
   /** The session's gem, which greets on the empty thread. */
@@ -345,7 +346,7 @@ export const Thread: FC<{
   onLoadOlder?: () => Promise<boolean | void>;
   onRetryHistory?: () => void;
   historyStartIndex?: number;
-}> = ({ agents = [], commands = [], onOpenPanel, attachmentsEnabled = true, identity, sessionId, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", historyStatus, onLoadOlder, onRetryHistory, historyStartIndex = 0 }) => (
+}> = ({ agents = [], commands = [], onOpenPanel, onOpenWelcome, attachmentsEnabled = true, identity, sessionId, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", historyStatus, onLoadOlder, onRetryHistory, historyStartIndex = 0 }) => (
   <PoolContext.Provider value={agents}>
   <WhereContext.Provider value={device || workspace}>
   <ComposerHubContext.Provider value={{ workspace, remote: remoteAgents }}>
@@ -368,6 +369,7 @@ export const Thread: FC<{
             agents={agents}
             commands={commands}
             onOpenPanel={onOpenPanel}
+            onOpenWelcome={onOpenWelcome}
             attachmentsEnabled={attachmentsEnabled}
             draftKey={composerDraftStorageKey(identity, sessionId)}
 

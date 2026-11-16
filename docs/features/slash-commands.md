@@ -56,6 +56,12 @@ Use arrow keys to navigate, Enter to execute.
 | `/matrix` | - | Matrix rain effect |
 | `/widgets` | `showcase`, `widget-showcase`, `storybook` | Interactive widget gallery |
 
+### Web UI Recovery
+
+In a Web UI chat, `/welcome` reopens the welcome guide at the step where it was
+left. The guide's Skip and close controls show this command in a dismissible
+notice; finishing the guide does not show that notice.
+
 ### Subcommands
 
 Many commands support subcommands:

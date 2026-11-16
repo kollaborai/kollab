@@ -137,6 +137,7 @@ export type ThreadProps = {
   commands?: readonly SlashCommand[] | undefined;
   /** Open a Settings tab; called for a bare panel command typed in the composer. */
   onOpenPanel?: ((request: PanelOpenRequest) => void) | undefined;
+  onOpenWelcome?: (() => void) | undefined;
   /** Offer image attachments; false hides the paperclip and refuses drops and pastes. */
   attachmentsEnabled?: boolean | undefined;
   /** Visible status while a bounded history page is being fetched. */
@@ -178,6 +179,7 @@ export const Thread: FC<ThreadProps> = ({
   agents = [],
   commands = [],
   onOpenPanel,
+  onOpenWelcome,
   attachmentsEnabled = true,
   historyStatus,
   onLoadOlder,
@@ -194,6 +196,7 @@ export const Thread: FC<ThreadProps> = ({
         agents={agents}
         commands={commands}
         onOpenPanel={onOpenPanel}
+        onOpenWelcome={onOpenWelcome}
         attachmentsEnabled={attachmentsEnabled}
         historyStatus={historyStatus}
         onLoadOlder={onLoadOlder}
@@ -210,6 +213,7 @@ const ThreadRoot: FC<{
   agents: readonly AgentPoolEntry[];
   commands: readonly SlashCommand[];
   onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
+  onOpenWelcome: (() => void) | undefined;
   attachmentsEnabled: boolean;
   historyStatus: ThreadProps["historyStatus"];
   onLoadOlder: ThreadProps["onLoadOlder"];
@@ -221,6 +225,7 @@ const ThreadRoot: FC<{
   agents,
   commands,
   onOpenPanel,
+  onOpenWelcome,
   attachmentsEnabled,
   historyStatus,
   onLoadOlder,
@@ -424,6 +429,7 @@ const ThreadRoot: FC<{
                 agents={agents}
                 commands={commands}
                 onOpenPanel={onOpenPanel}
+                onOpenWelcome={onOpenWelcome}
                 attachmentsEnabled={attachmentsEnabled}
                 draftKey={draftKey}
               />
@@ -516,9 +522,10 @@ const Composer: FC<{
   agents: readonly AgentPoolEntry[];
   commands: readonly SlashCommand[];
   onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
+  onOpenWelcome: (() => void) | undefined;
   attachmentsEnabled: boolean;
   draftKey: ThreadProps["draftKey"];
-}> = ({ agents, commands, onOpenPanel, attachmentsEnabled, draftKey }) => {
+}> = ({ agents, commands, onOpenPanel, onOpenWelcome, attachmentsEnabled, draftKey }) => {
   const aui = useAui();
   const sendTransportCommand = useAssistantTransportSendCommand();
   // The mic starts the LiveKit room in this browser; /voice (the computer
@@ -644,12 +651,21 @@ const Composer: FC<{
     inFlight: Set<string>;
   } | null>(null);
 
-  // A bare /config, /llm, /model, /setup or /connect (also /connect code and
-  // /connect knocks) opens its Settings tab and posts no text. Any other line is
-  // sent exactly as typed. Runs on form submit (Enter) and on the Send button.
+  // A bare /welcome opens the local guide; panel commands open Settings and post
+  // no text. Any other line is sent exactly as typed. Runs on form submit and Send.
   const openPanelFromComposer = (event: { preventDefault: () => void }) => {
-    if (!onOpenPanel) return;
     const { text, attachments } = aui.composer.getState();
+    if (
+      onOpenWelcome &&
+      attachments.length === 0 &&
+      text.trim().toLowerCase() === "/welcome"
+    ) {
+      event.preventDefault();
+      aui.composer.setText("");
+      onOpenWelcome();
+      return;
+    }
+    if (!onOpenPanel) return;
     const request =
       attachments.length === 0 ? panelCommandRequest(text, commands) : null;
     if (!request) return;
@@ -775,10 +791,20 @@ const Composer: FC<{
     id: string;
     metadata?: Record<string, unknown> | undefined;
   }) => {
-    if (!onOpenPanel || aui.composer.getState().attachments.length > 0) return;
     const insert = item.metadata?.insertText;
+    const commandText = `/${typeof insert === "string" ? insert : item.id}`;
+    if (
+      onOpenWelcome &&
+      aui.composer.getState().attachments.length === 0 &&
+      commandText.trim().toLowerCase() === "/welcome"
+    ) {
+      aui.composer.setText("");
+      onOpenWelcome();
+      return;
+    }
+    if (!onOpenPanel || aui.composer.getState().attachments.length > 0) return;
     const request = panelCommandRequest(
-      `/${typeof insert === "string" ? insert : item.id}`,
+      commandText,
       commands,
     );
     if (!request) return;
