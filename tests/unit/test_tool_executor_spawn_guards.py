@@ -244,3 +244,15 @@ def test_unrelated_programs_with_short_e_are_allowed(command):
 )
 def test_inline_node_launches_remain_blocked(script):
     assert _is_blocked_kollab_spawn(f'node -e "{script}"')
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rg -e pattern --pre='kollab --agent coder' sample",
+        "git grep -e pattern --open-files-in-pager='kollab --agent coder'",
+        "git grep -e pattern -O'kollab --agent coder'",
+    ],
+)
+def test_search_exceptions_do_not_exempt_executable_options(command):
+    assert _is_blocked_kollab_spawn(command)
