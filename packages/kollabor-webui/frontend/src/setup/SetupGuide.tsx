@@ -50,13 +50,15 @@ export function SetupGuide({
     if (typeof window === "undefined") return loadGuideState(null);
     return loadGuideState(window.localStorage.getItem(STORAGE_KEY));
   });
+  const [initialState] = useState(state);
   const [facts, setFacts] = useState<SetupFacts>(emptyFacts);
 
-  // Persist every transition; a reload resumes where the user left off.
+  // Persist progress after a transition. Writing the pristine default on mount
+  // would make a new browser look returning before startup checks first-run.
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (typeof window === "undefined" || state === initialState) return;
     window.localStorage.setItem(STORAGE_KEY, saveGuideState(state));
-  }, [state]);
+  }, [initialState, state]);
 
   // Re-read engine facts while shown so completed steps disappear live.
   useEffect(() => {
