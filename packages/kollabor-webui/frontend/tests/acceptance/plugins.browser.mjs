@@ -36,6 +36,7 @@ try {
   let brokenDisabled = false;
   let brokenDisableCalls = 0;
   let fixtureRemoved = false;
+  let folderless = false;
   const commit = "a".repeat(40);
   const filesHash = "b".repeat(64);
   const previousCommit = "c".repeat(40);
@@ -138,7 +139,7 @@ try {
     if (url.pathname === "/engine/prompts/libraries") return route.fulfill({ json: { libraries: [], roles: [] } });
     if (url.pathname === "/engine/plugins/events") return route.fulfill({ contentType: "text/event-stream", body: ": open\n\n" });
     if (url.pathname === "/engine/plugins/fixture/api/badge") return route.fulfill({ json: { text: "4", hint: "4 items need attention" } });
-    if (url.pathname === "/engine/sessions") return route.fulfill({ json: { sessions: [{ session_id: "fixture-session", name: "Fixture Session", agent: "coder", identity: "local-coder", profile: "default", workspace: "/fixture", external: false }], network: { device: "test", remote: [] }, offline: [], hidden: [] } });
+    if (url.pathname === "/engine/sessions") return route.fulfill({ json: { sessions: [{ session_id: "fixture-session", name: "Fixture Session", agent: "coder", identity: "local-coder", profile: "default", workspace: folderless ? "" : "/fixture", external: false }], network: { device: "test", remote: [] }, offline: [], hidden: [] } });
     if (url.pathname.endsWith("/history")) return route.fulfill({ json: { history: [{ role: "assistant", content: "Before <fixture_tag><b>untrusted</b></fixture_tag> after <hello_note>Welcome</hello_note>", metadata: {} }], start_index: 0, end_index: 1, has_more_older: false, has_more_newer: false, source: "mirror" } });
     if (url.pathname.startsWith("/api/")) return route.fulfill({ json: { available: false } });
     if (url.pathname.startsWith("/engine/")) return route.fulfill({ json: { sessions: [], profiles: [], agents: [], live: [], bundles: [], variants: {}, roles: [], libraries: [], sections: [], identities: [], teams: [], models: [], commands: [], network: {device:"",remote:[]}, offline: [], hidden: [], order: [] } });
@@ -147,6 +148,16 @@ try {
   await page.goto(`${origin}/?plugins=off`, { waitUntil: "domcontentloaded" });
   await page.getByText("Plugins are off for this page", { exact: false }).waitFor({ timeout: 15000 });
   assert.equal(inventoryReads, 0, "page-wide opt-out must not fetch plugin inventory");
+  folderless = true;
+  await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+  await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
+  const folderlessPanel = page.getByRole("complementary", { name: "Session Controls" });
+  await folderlessPanel.waitFor({ timeout: 15000 });
+  assert.equal(await folderlessPanel.getByRole("button", { name: "Fixture View", exact: true }).count(), 0, "folder-required tab is hidden without a folder");
+  await folderlessPanel.getByRole("button", { name: "Hide Session Panel" }).click();
+  assert.equal(await folderlessPanel.getByRole("button", { name: "Fixture View", exact: true }).count(), 0, "folder-required tab stays hidden in collapsed controls");
+  await folderlessPanel.getByRole("button", { name: "Show Session Panel" }).click();
+  folderless = false;
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   assert.ok(inventoryReads > 0, "host must fetch inventory");
