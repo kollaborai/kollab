@@ -1950,6 +1950,40 @@ def test_regression_test_rejects_non_testable_exception_for_code_fix(
     assert "regression_test" in pr_gates_dod.evaluate(cfg, data).failed_names()
 
 
+def test_later_docs_declaration_cannot_exempt_prior_runtime_change(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment", comment_id=1, body="F15: runtime behavior is wrong",
+        author_login="reviewer", created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    data = make_data(
+        commits=(
+            SimpleNamespace(
+                sha="c" * 40, message="fix: repair runtime behavior", verified=True,
+                committed_at="2026-11-01T12:01:00Z",
+                files=("kollabor/core.py",), timeline_order=11,
+            ),
+            SimpleNamespace(
+                sha="d" * 40,
+                message=(
+                    "fix(docs): clarify the guide\n\n"
+                    "No regression test: F15 - wording only."
+                ),
+                verified=True, committed_at="2026-11-01T12:02:00Z",
+                files=("docs/guide.md",), timeline_order=12,
+            ),
+        ),
+        comments=(finding,),
+        changed_files=["kollabor/core.py", "docs/guide.md"],
+        changed_file_contents={},
+    )
+
+    assert "regression_test" in pr_gates_dod.evaluate(cfg, data).failed_names()
+
+
 def test_regression_code_default_trusts_no_reviewer(tmp_path):
     cfg = pr_gates_dod.load_config(make_config(tmp_path, ENABLED + '\nchecks = ["regression_test"]\n'))
     source = "F11 test suite failed."
