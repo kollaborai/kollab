@@ -50,7 +50,6 @@ every exit code is 0. DoD is a hygiene gate, not a correctness verdict.
 from __future__ import annotations
 
 import argparse
-import ast
 import base64
 import binascii
 import hashlib
@@ -252,10 +251,6 @@ class Commit:
     sha: str
     message: str
     verified: bool
-    committed_at: str = ""
-    files: tuple[str, ...] = ()
-    file_patches: dict[str, str] = field(default_factory=dict)
-    timeline_order: int | None = None
 
 
 @dataclass(frozen=True)
@@ -289,7 +284,7 @@ class PRComment:
     created_at: str = ""
     review_id: int = 0
     api_url: str = ""
-    timeline_order: int | None = None
+    updated_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -638,9 +633,11 @@ def _finding_suppressions(
 
 def _check_regression_test(
     cfg: DodConfig, data: PRData
-) -> tuple[str, list[FindingSuppression]]:
+) -> tuple[str, list[FindingSuppression], str]:
     pattern = re.compile(cfg.regression.finding_id_pattern)
     findings: set[str] = set()
+    finding_revisions: list[datetime] = []
+    metadata_complete = bool(data.comments)
     if data.comments:
         metadata_matches = tuple(comment.body for comment in data.comments) == tuple(
             data.review_comment_bodies
@@ -664,8 +661,16 @@ def _check_regression_test(
                     )
                     if suppression_key not in suppressions:
                         findings.add(finding_id)
+                        # These are server comment timestamps, never Git dates.
+                        created = _comment_time(comment.created_at)
+                        updated = _comment_time(getattr(comment, "updated_at", "") or comment.created_at)
+                        if created is None or updated is None or updated < created:
+                            metadata_complete = False
+                        else:
+                            finding_revisions.append(updated)
         else:
             # Incomplete or mismatched metadata cannot authorize any exception.
+            metadata_complete = False
             audit_notes = []
             for body in (*data.review_comment_bodies, *(c.body for c in data.comments)):
                 findings.update(match.group(0) for match in _finding_matches(pattern, body or ""))
@@ -675,9 +680,15 @@ def _check_regression_test(
         audit_notes = []
         for body in data.review_comment_bodies or ():
             findings.update(match.group(0) for match in _finding_matches(pattern, body or ""))
-    findings.difference_update(_declared_non_testable_findings(cfg, data))
     if not findings:
-        return "", audit_notes
+        return "", audit_notes, ""
+    warning = (
+        "red-first execution is not verified by this gate for finding id(s): "
+        f"{', '.join(sorted(findings))}; the independent reviewer must verify "
+        "failing-before/passing-after results, standalone test commit order, "
+        "unchanged assertions, and finding-specific xfail removal. "
+        "Approval records reviewer responsibility, not automated execution proof."
+    )
     test_files = [
         (path, content)
         for path, content in (data.changed_file_contents or {}).items()
@@ -690,351 +701,36 @@ def _check_regression_test(
             uncovered.append(finding)
     if uncovered:
         return (
-            "no regression test covers finding id(s): "
+            "no changed test text references finding id(s): "
             f"{', '.join(uncovered)} under {', '.join(cfg.regression.test_paths)}"
-        ), audit_notes
-    order_failure = _check_red_first(cfg, data, findings)
-    if order_failure:
-        return order_failure, audit_notes
-    return "", audit_notes
+        ), audit_notes, warning
+    if (
+        metadata_complete and finding_revisions and data.pull_author_login
+        and re.fullmatch(r"[0-9a-f]{40}", data.head_sha)
+    ):
+        for reviewer in cfg.regression.trusted_reviewers:
+            if reviewer.casefold() == data.pull_author_login.casefold():
+                continue
+            approval = _latest_current_head_review(data, reviewer)
+            if (
+                approval is not None
+                and datetime.fromisoformat(approval.submitted_at.replace("Z", "+00:00")) > max(finding_revisions)
+            ):
+                return "", audit_notes, warning
+    return (
+        "independent current-head approval required for finding id(s): "
+        f"{', '.join(sorted(findings))}; approval must follow the latest finding revision"
+    ), audit_notes, warning
 
 
-def _declared_non_testable_findings(cfg: DodConfig, data: PRData) -> set[str]:
-    """Read explicit no-test declarations from fix commit messages."""
-    declarations: set[str] = set()
-    pattern = re.compile(cfg.regression.finding_id_pattern)
-    finding_times: dict[str, list[datetime]] = {}
-    finding_orders: dict[str, list[int]] = {}
-    for comment in data.comments:
-        if comment.author_login == data.pull_author_login:
-            continue
-        timestamp = _commit_time(comment.created_at)
-        for match in _finding_matches(pattern, comment.body or ""):
-            finding = match.group(0)
-            order = getattr(comment, "timeline_order", None)
-            if order is not None:
-                finding_orders.setdefault(finding, []).append(order)
-            elif timestamp is not None:
-                finding_times.setdefault(finding, []).append(timestamp)
-    for commit in data.commits:
-        subject = commit.message.splitlines()[0] if commit.message else ""
-        if not re.match(r"^fix(?:\([^)]+\))?!?:\s+", subject):
-            continue
-        if not commit.files or any(
-            _is_test_path(path, cfg.regression.test_paths) for path in commit.files
-        ) or not all(
-            path.lower().endswith((".md", ".rst", ".txt")) for path in commit.files
-        ):
-            continue
-        for line in commit.message.splitlines():
-            marker = re.match(r"\s*no regression test:\s*(.*)", line, re.IGNORECASE)
-            if marker:
-                declaration = marker.group(1)
-                for match in _finding_matches(pattern, declaration):
-                    finding = match.group(0)
-                    reason = declaration[match.end() :].strip()
-                    if not re.match(r"^[-:]\s*\S", reason):
-                        continue
-                    reason = re.sub(r"^[-:]\s*", "", reason).strip(" .!?-")
-                    if not reason:
-                        continue
-                    order = getattr(commit, "timeline_order", None)
-                    orders = finding_orders.get(finding, [])
-                    committed_at = _commit_time(commit.committed_at)
-                    timestamps = finding_times.get(finding, [])
-                    if orders and order is not None and order > max(orders):
-                        post_finding_commits = (
-                            candidate
-                            for candidate in data.commits
-                            if getattr(candidate, "timeline_order", None) is not None
-                            and candidate.timeline_order > max(orders)
-                        )
-                        if any(
-                            not candidate.files
-                            or any(
-                                _is_implementation_path(path, cfg.regression.test_paths)
-                                for path in candidate.files
-                            )
-                            for candidate in post_finding_commits
-                        ):
-                            continue
-                        declarations.add(finding)
-                    elif not orders and timestamps and committed_at and committed_at >= max(timestamps):
-                        post_finding_commits = (
-                            candidate
-                            for candidate in data.commits
-                            if (candidate_time := _commit_time(candidate.committed_at))
-                            is not None
-                            and candidate_time >= max(timestamps)
-                        )
-                        if any(
-                            not candidate.files
-                            or any(
-                                _is_implementation_path(path, cfg.regression.test_paths)
-                                for path in candidate.files
-                            )
-                            for candidate in post_finding_commits
-                        ):
-                            continue
-                        declarations.add(finding)
-    return declarations
 
-
-def _is_test_path(path: str, test_paths: tuple[str, ...] | list[str]) -> bool:
-    return any(path.startswith(prefix) for prefix in test_paths)
-
-
-def _commit_time(value: str) -> datetime | None:
+def _comment_time(value: str) -> datetime | None:
+    """Parse a server-provided comment timestamp, never contributor Git dates."""
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (AttributeError, ValueError):
         return None
     return parsed if parsed.tzinfo is not None else None
-
-
-def _is_implementation_path(path: str, test_paths: tuple[str, ...] | list[str]) -> bool:
-    return not _is_test_path(path, test_paths) and not path.startswith(
-        ("docs/", "changes/")
-    ) and not path.endswith(".md")
-
-
-def _check_red_first(cfg: DodConfig, data: PRData, findings: set[str]) -> str:
-    """Require one standalone test commit before each post-finding code commit."""
-    if not data.comments:
-        return ""
-    pattern = re.compile(cfg.regression.finding_id_pattern)
-    suppressions: set[tuple[str, int, str, int]] = set()
-    marker_comment_ids: set[int] = set()
-    if tuple(comment.body for comment in data.comments) == tuple(data.review_comment_bodies):
-        suppressions, marker_comment_ids, _audit_notes = _finding_suppressions(
-            cfg, data, pattern
-        )
-    finding_times: dict[str, list[datetime]] = {}
-    finding_orders: dict[str, list[int]] = {}
-    for comment in data.comments:
-        if (
-            comment.author_login == data.pull_author_login
-            or comment.comment_id in marker_comment_ids
-            or comment.body.lstrip().startswith(SUPPRESSION_MARKER_PREFIX)
-        ):
-            continue
-        occurrence_counts: dict[str, int] = {}
-        active_findings: set[str] = set()
-        for match in _finding_matches(pattern, comment.body or ""):
-            finding_id = match.group(0)
-            occurrence_counts[finding_id] = occurrence_counts.get(finding_id, 0) + 1
-            key = (comment.kind, comment.comment_id, finding_id, occurrence_counts[finding_id])
-            if key not in suppressions:
-                active_findings.add(finding_id)
-        if not active_findings:
-            continue
-        timestamp = _commit_time(comment.created_at)
-        order = getattr(comment, "timeline_order", None)
-        if order is not None:
-            for finding in active_findings:
-                finding_orders.setdefault(finding, []).append(order)
-            continue
-        if timestamp is None:
-            if comment.created_at:
-                return "cannot verify red-first order: review finding timestamp is invalid"
-            continue
-        for finding in active_findings:
-            finding_times.setdefault(finding, []).append(timestamp)
-
-    for finding in sorted(findings):
-        orders = finding_orders.get(finding)
-        if orders:
-            latest_finding_order = max(orders)
-            latest_finding: datetime | None = None
-        else:
-            timestamps = finding_times.get(finding)
-            if not timestamps:
-                continue
-            latest_finding_order = None
-            latest_finding = max(timestamps)
-        pending_test = False
-        pending_test_paths: set[str] = set()
-        for commit in data.commits:
-            if latest_finding_order is not None:
-                commit_order = getattr(commit, "timeline_order", None)
-                # Commits already present before the PR timeline began have no
-                # `committed` event and necessarily predate every finding.
-                if commit_order is None or commit_order <= latest_finding_order:
-                    continue
-            else:
-                committed_at = _commit_time(commit.committed_at)
-                if committed_at is None:
-                    return f"cannot verify red-first order for {finding}: commit timestamp is missing or invalid"
-                if committed_at < latest_finding:
-                    continue
-            paths = tuple(commit.files)
-            if not paths:
-                return f"cannot verify red-first order for {finding}: commit file list is missing"
-            test_paths = tuple(
-                path for path in paths if _is_test_path(path, cfg.regression.test_paths)
-            )
-            implementation_paths = tuple(
-                path for path in paths if _is_implementation_path(path, cfg.regression.test_paths)
-            )
-            if test_paths and not implementation_paths:
-                if len(test_paths) != len(paths):
-                    return f"regression test for {finding} must be committed alone"
-                patches = getattr(commit, "file_patches", {})
-                legacy_blob_match = not hasattr(commit, "file_patches") and any(
-                    _mentions_finding(data.changed_file_contents.get(path, ""), finding)
-                    for path in test_paths
-                )
-                matching_test_paths = tuple(
-                    path
-                    for path in test_paths
-                    if _patch_adds_finding(patches.get(path, ""), finding)
-                )
-                if matching_test_paths or legacy_blob_match:
-                    pending_test = True
-                    pending_test_paths.update(matching_test_paths or test_paths)
-                continue
-            if implementation_paths:
-                if test_paths:
-                    patches = getattr(commit, "file_patches", {})
-                    xfail_removal = (
-                        pending_test
-                        and set(test_paths).issubset(pending_test_paths)
-                        and all(
-                            _only_strict_xfail_removal(patches.get(path, ""))
-                            for path in test_paths
-                        )
-                    )
-                    if not xfail_removal:
-                        return (
-                            f"fix commit for {finding} modifies its regression test; "
-                            "test must be in a separate commit; only strict xfail "
-                            "removal is allowed"
-                        )
-                if not pending_test:
-                    return (
-                        f"no test-only commit for {finding} landed before the fix; "
-                        "commit the regression test before the fix"
-                    )
-                pending_test = False
-                pending_test_paths.clear()
-        if pending_test:
-            return f"regression test for {finding} was not followed by a separate fix commit"
-    return ""
-
-
-def _only_strict_xfail_removal(patch: str) -> bool:
-    changes = [
-        line
-        for line in patch.splitlines()
-        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
-    ]
-    return changes == ["-@pytest.mark.xfail(strict=True)"]
-
-
-def _patch_adds_finding(patch: str, finding: str) -> bool:
-    in_matching_test = False
-    pending_strict_xfail = False
-    for line in patch.splitlines():
-        if not line.startswith("+") or line.startswith("+++"):
-            continue
-        added = line[1:].strip()
-        if added == "@pytest.mark.xfail(strict=True)":
-            pending_strict_xfail = True
-            continue
-        definition = re.match(r"(?:async\s+)?def\s+(\w+)\s*\(", added)
-        if definition:
-            in_matching_test = definition.group(1).startswith("test_") and _mentions_finding(
-                added, finding
-            )
-            if in_matching_test and pending_strict_xfail:
-                return True
-            pending_strict_xfail = False
-            inline_body = added.split(":", 1)[1] if ":" in added else ""
-            if in_matching_test and _has_nontrivial_test_assertion(inline_body):
-                return True
-            continue
-        if added.startswith("class "):
-            in_matching_test = False
-            pending_strict_xfail = False
-            continue
-        if in_matching_test and _has_nontrivial_test_assertion(added):
-            return True
-    return pending_strict_xfail and in_matching_test
-
-
-def _has_nontrivial_test_assertion(line: str) -> bool:
-    assertion = re.search(r"\bassert\s+(.+)", line)
-    if assertion is None:
-        return False
-    expression = assertion.group(1).split("#", 1)[0].split(",", 1)[0].strip()
-    try:
-        tree = ast.parse(expression, mode="eval")
-    except SyntaxError:
-        return False
-    # A bare call only proves that the expression returned a truthy value.
-    # In particular, `assert object()` is always true and is not evidence that
-    # the regression test distinguishes the broken behavior.
-    if any(isinstance(node, ast.Call) for node in ast.walk(tree.body)):
-        return False
-    if _is_unconditionally_truthy(tree.body):
-        return False
-    if not isinstance(tree.body, (ast.Name, ast.Compare, ast.UnaryOp, ast.BoolOp)):
-        return False
-    return any(_is_runtime_test_value(node) for node in ast.walk(tree.body))
-
-
-def _is_unconditionally_truthy(node: ast.AST) -> bool:
-    if isinstance(node, ast.Constant):
-        return bool(node.value)
-    if isinstance(node, ast.Compare) and all(
-        isinstance(value, ast.Constant) for value in (node.left, *node.comparators)
-    ):
-        values = [value.value for value in (node.left, *node.comparators)]
-        try:
-            comparisons = []
-            for left, operator, right in zip(values, node.ops, values[1:]):
-                if isinstance(operator, ast.Eq):
-                    comparisons.append(left == right)
-                elif isinstance(operator, ast.NotEq):
-                    comparisons.append(left != right)
-                elif isinstance(operator, ast.Is):
-                    comparisons.append(left is right)
-                elif isinstance(operator, ast.IsNot):
-                    comparisons.append(left is not right)
-                elif isinstance(operator, ast.Lt):
-                    comparisons.append(left < right)
-                elif isinstance(operator, ast.LtE):
-                    comparisons.append(left <= right)
-                elif isinstance(operator, ast.Gt):
-                    comparisons.append(left > right)
-                elif isinstance(operator, ast.GtE):
-                    comparisons.append(left >= right)
-                elif isinstance(operator, ast.In):
-                    comparisons.append(left in right)
-                elif isinstance(operator, ast.NotIn):
-                    comparisons.append(left not in right)
-                else:
-                    return False
-            return all(comparisons)
-        except (TypeError, ValueError):
-            return False
-    if isinstance(node, ast.BoolOp):
-        values = [_is_unconditionally_truthy(value) for value in node.values]
-        if isinstance(node.op, ast.Or):
-            return any(values)
-        if isinstance(node.op, ast.And):
-            return all(values)
-    return False
-
-
-def _is_runtime_test_value(node: ast.AST) -> bool:
-    if isinstance(node, ast.Name):
-        return node.id not in {
-            "True", "False", "None", "object", "type", "bool", "int",
-            "str", "bytes", "len", "list", "tuple", "dict", "set",
-            "frozenset", "any", "all", "sum", "min", "max",
-        }
-    return isinstance(node, (ast.Attribute, ast.Subscript))
 
 
 # --- evaluation -----------------------------------------------------------------
@@ -1061,8 +757,10 @@ def evaluate(cfg: DodConfig, data: PRData) -> DoDReport:
         elif name == "linked_issue":
             detail = _check_linked_issue(data)
         elif name == "regression_test":
-            detail, suppression_notes = _check_regression_test(cfg, data)
+            detail, suppression_notes, manual_warning = _check_regression_test(cfg, data)
             audit_notes.extend(suppression_notes)
+            if manual_warning:
+                warnings.append((name, manual_warning))
         elif name == "spec_or_fix_brief":
             detail = _check_spec_or_fix_brief(data)
             if detail and cfg.spec_or_fix_brief_mode == "warn":
@@ -1255,7 +953,6 @@ def collect_pr_data(
     *,
     root: str = ".",
     test_paths: tuple[str, ...] = ("tests/",),
-    finding_id_pattern: str = DEFAULT_FINDING_PATTERN,
     need_spec_or_fix_brief: bool = False,
 ) -> PRData:
     """Collect PR facts without checking out or executing PR-controlled code."""
@@ -1296,6 +993,7 @@ def collect_pr_data(
             body=body,
             author_login=login(entry),
             created_at=str(entry.get("created_at") or ""),
+            updated_at=str(entry.get("updated_at") or entry.get("created_at") or ""),
             review_id=(
                 entry.get("pull_request_review_id")
                 if type(entry.get("pull_request_review_id")) is int
@@ -1384,98 +1082,6 @@ def collect_pr_data(
         cursor = next_cursor
     unresolved = sum(1 for node in thread_nodes if not node.get("isResolved"))
 
-    finding_pattern = re.compile(finding_id_pattern)
-    has_finding = any(
-        _finding_matches(finding_pattern, comment.body or "") for comment in comment_records
-    )
-    commit_details: dict[str, tuple[str, tuple[str, ...], dict[str, str]]] = {}
-    commit_timeline_orders: dict[str, int] = {}
-    if has_finding:
-        timeline = _gh_paginate(f"repos/{repo}/issues/{pr}/timeline")
-        comment_orders: dict[str, int] = {}
-        review_orders: dict[int, int] = {}
-        for order, event in enumerate(timeline):
-            event_type = event.get("event")
-            if event_type == "committed":
-                sha = event.get("sha")
-                if isinstance(sha, str):
-                    commit_timeline_orders[sha] = order
-            elif event_type == "commented":
-                event_url = event.get("url")
-                event_id = event.get("id")
-                if isinstance(event_url, str):
-                    comment_orders[event_url] = order
-                if type(event_id) is int:
-                    comment_orders[str(event_id)] = order
-            elif event_type == "reviewed" and type(event.get("id")) is int:
-                review_orders[event["id"]] = order
-        comment_records = tuple(
-            PRComment(
-                kind=comment.kind,
-                comment_id=comment.comment_id,
-                body=comment.body,
-                author_login=comment.author_login,
-                created_at=comment.created_at,
-                review_id=comment.review_id,
-                api_url=comment.api_url,
-                timeline_order=(
-                    comment_orders.get(
-                        comment.api_url, comment_orders.get(str(comment.comment_id))
-                    )
-                    if comment.kind == "issue_comment"
-                    else review_orders.get(comment.review_id)
-                ),
-            )
-            for comment in comment_records
-        )
-        pull_author = login(pull)
-        for comment in comment_records:
-            if comment.author_login == pull_author or not _finding_matches(
-                finding_pattern, comment.body or ""
-            ) or comment.body.lstrip().startswith(SUPPRESSION_MARKER_PREFIX):
-                continue
-            if comment.timeline_order is None:
-                raise RuntimeError("review finding timeline position is missing; failing closed")
-        seen_timeline_commit = False
-        previous_timeline_order = -1
-        for entry in commits_raw:
-            sha = entry.get("sha")
-            order = commit_timeline_orders.get(sha)
-            if order is None:
-                if seen_timeline_commit:
-                    raise RuntimeError("PR timeline is missing a commit event; failing closed")
-                continue
-            if order <= previous_timeline_order:
-                raise RuntimeError("PR timeline commit order is inconsistent; failing closed")
-            seen_timeline_commit = True
-            previous_timeline_order = order
-        if len(commits_raw) > 256:
-            raise RuntimeError("too many commits to verify red-first order; failing closed")
-        for entry in commits_raw:
-            sha = entry.get("sha")
-            if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
-                raise RuntimeError("invalid commit identity; failing closed")
-            detail = _gh("api", f"repos/{repo}/commits/{sha}")
-            detail_commit = detail.get("commit", {})
-            committer = detail_commit.get("committer") or detail_commit.get("author") or {}
-            committed_at = committer.get("date", "")
-            files = detail.get("files")
-            if not isinstance(committed_at, str) or not committed_at or not isinstance(files, list):
-                raise RuntimeError(f"incomplete commit details for {sha}; failing closed")
-            if len(files) >= 300:
-                raise RuntimeError(f"commit file list may be truncated for {sha}; failing closed")
-            paths = tuple(file.get("filename") for file in files if isinstance(file, dict))
-            if len(paths) != len(files) or not all(isinstance(path, str) for path in paths):
-                raise RuntimeError(f"invalid commit file list for {sha}; failing closed")
-            patches = {
-                file["filename"]: file["patch"]
-                for file in files
-                if isinstance(file, dict)
-                and isinstance(file.get("filename"), str)
-                and isinstance(file.get("patch"), str)
-            }
-            commit_details[sha] = (committed_at, paths, patches)
-
     commits = tuple(
         Commit(
             sha=entry["sha"],
@@ -1483,10 +1089,6 @@ def collect_pr_data(
             verified=bool(
                 (entry.get("commit", {}).get("verification", {}) or {}).get("verified")
             ),
-            committed_at=commit_details.get(entry["sha"], ("", (), {}))[0],
-            files=commit_details.get(entry["sha"], ("", (), {}))[1],
-            file_patches=commit_details.get(entry["sha"], ("", (), {}))[2],
-            timeline_order=commit_timeline_orders.get(entry["sha"]),
         )
         for entry in commits_raw
     )
@@ -1581,7 +1183,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default=".github/pr-gates.toml")
     parser.add_argument("--repo", help="OWNER/REPO, e.g. kollaborai/kollab")
     parser.add_argument("--pr", type=int, help="pull request number")
-    parser.add_argument("--head-sha", help="PR head SHA (required with --post)")
+    parser.add_argument("--head-sha", help="expected PR head SHA (checked when supplied)")
     parser.add_argument(
         "--post", action="store_true", help="post one check run with the verdict"
     )
@@ -1599,10 +1201,9 @@ def main(argv: list[str] | None = None) -> int:
             args.repo,
             args.pr,
             test_paths=tuple(cfg.regression.test_paths),
-            finding_id_pattern=cfg.regression.finding_id_pattern,
             need_spec_or_fix_brief="spec_or_fix_brief" in cfg.checks,
         )
-        if args.post and data.head_sha != args.head_sha:
+        if args.post and args.head_sha and data.head_sha != args.head_sha:
             raise RuntimeError("event head differs from collected PR head; failing closed")
     except (ConfigError, RuntimeError, KeyError, ValueError) as exc:
         print(f"pr-gates DoD: error: {_redact(str(exc))}", file=sys.stderr)
@@ -1624,11 +1225,9 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.post:
-        if not args.head_sha:
-            parser.error("--head-sha is required with --post")
         # The posted check run carries the verdict; the job exits 0 so the
         # workflow's own check does not duplicate the outcome.
-        main_post_if_enabled(cfg, report, repo=args.repo, head_sha=args.head_sha)
+        main_post_if_enabled(cfg, report, repo=args.repo, head_sha=args.head_sha or data.head_sha)
         return 0
 
     return report.exit_code

@@ -25,10 +25,10 @@ spec_or_fix_brief_mode = "warn"
 [pr_gates.dod.docs_paths]
 # "^packages/" = ["CHANGELOG.md"]
 
-# Generic red-first regression profile (#721): finding ids found in review
-# comments must name a changed test declaration, committed alone before each
-# subsequent implementation commit. Only documentation-only fixes may use an
-# explicit `No regression test: F14 - reason.` line in the fix commit body.
+# Regression reference hygiene and independent review (#721). Finding IDs
+# must appear in changed test text unless a trusted reviewer explicitly exempts
+# the exact occurrence. Active findings also require a current-head approval
+# after their latest revision. This gate does not certify red-first execution.
 [pr_gates.dod.regression_profile]
 finding_id_pattern = "\\bF\\d+\\b"
 test_paths = ["tests/"]
