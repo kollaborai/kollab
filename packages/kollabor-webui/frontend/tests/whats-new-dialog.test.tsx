@@ -51,6 +51,23 @@ describe("WhatsNewDialog", () => {
     expect(html).toContain("Changed");
   });
 
+  it("renders at most six Added and Changed entries combined", () => {
+    const html = renderToStaticMarkup(
+      <WhatsNewDialog
+        open
+        release={{
+          ...release,
+          added: ["Added 1", "Added 2", "Added 3", "Added 4"],
+          changed: ["Changed 1", "Changed 2", "Changed 3", "Changed 4"],
+        }}
+        onOpenChange={noop}
+        onSeeAllChanges={noop}
+      />,
+    );
+    expect((html.match(/<li\b/g) ?? [])).toHaveLength(6);
+    expect(html).toContain("And 2 more.");
+  });
+
   it("keeps fixes to a count, never a list", () => {
     const html = renderToStaticMarkup(
       <WhatsNewDialog open release={release} onOpenChange={noop} onSeeAllChanges={noop} />,
