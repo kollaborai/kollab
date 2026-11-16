@@ -110,16 +110,18 @@ trusted_reviewers = ["owner-login"]
   it must land a matching test in a test-only commit before each implementation
   commit. A fix commit cannot modify that regression test except to remove its
   sole `@pytest.mark.xfail(strict=True)` marker. Test-only commits must mention
-  the finding ID in a changed test file. Commits before the finding was posted
-  do not count as fixes for this ordering check. If commit timestamps or
+  the finding ID in a changed test file. Commits added before the finding event
+  do not count as fixes for this ordering check. If timeline positions or
   changed-file lists are incomplete, the gate fails closed.
   A non-testable finding is exempt only when its fix commit body contains a
   line in the form `No regression test: F14 - documentation wording only.`
 
   The collector reads changed test files as immutable GitHub blob data from
-  the PR head and reads each commit's changed paths and committer timestamp
-  through the GitHub API, including file patches needed to verify xfail-marker
-  removal. The workflow executes only the trusted base-branch script and
+  the PR head and reads each commit's changed paths through the GitHub API,
+  including file patches needed to verify xfail-marker removal. Red-first
+  ordering uses the PR timeline's server-ordered commit, issue-comment, and
+  review events; contributor-controlled commit dates are not ordering evidence.
+  The workflow executes only the trusted base-branch script and
   configuration; it never checks out or executes PR code. A changed head or
   unreadable test blob or commit record fails the collection rather than
   grading stale data. To bound API work, red-first verification accepts at most
