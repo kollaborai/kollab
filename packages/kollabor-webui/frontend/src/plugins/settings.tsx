@@ -59,7 +59,7 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate }: { entr
   const plugin = snapshot.registry.plugins.find(item => item.id === entry.id);
   const context = host.getContext(entry.id);
   const custom = plugin?.settings[0];
-  const failure = snapshot.errors[entry.id] ?? entry.error;
+  const failure = snapshot.errors[entry.id] ?? (entry.state === "changed-on-disk" ? null : entry.error);
   const canChange = canManage && !entry.read_only && !entry.required && !entry.shadowed;
   const perform = async (action: "enable" | "disable" | "remove") => {
     setBusy(true); setError(null);
@@ -72,17 +72,18 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate }: { entr
     catch (caught) { setError(message(caught)); } finally { setBusy(false); }
   };
   const status = failure ? (snapshot.renderFailed.includes(entry.id) ? "Failed to Render" : "Failed to Load") :
-    entry.state === "changed_on_disk" ? "Changed on Disk" : entry.state === "stopping" ? "Stopping" : entry.enabled ? "On" : "Off";
+    entry.state === "changed-on-disk" ? "Changed on Disk" : entry.state === "stopping" ? "Stopping" : entry.enabled ? "On" : "Off";
   return <section aria-label={`${entry.name} details`} className="min-w-0 py-1">
     <div className="flex min-w-0 flex-wrap items-center gap-2">
       <h2 className="min-w-0 truncate font-semibold">{entry.name}</h2>
-      <Badge variant={failure || entry.state === "changed_on_disk" ? "destructive" : "secondary"}>{status}</Badge>
+      <Badge variant={failure || entry.state === "changed-on-disk" ? "destructive" : "secondary"}>{status}</Badge>
       {canManage && !entry.read_only ? <Switch aria-label={`${entry.name} enabled`} checked={entry.enabled} disabled={!canChange || busy}
         onCheckedChange={checked => { if (checked) void perform("enable"); else setConfirmation("disable"); }} /> : null}
       {canChange && entry.kind === "installed" ? <div className="ml-auto flex flex-wrap gap-2"><Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => onUpdate(entry.id)}>Update</Button><Button type="button" size="xs" variant="ghost" disabled={busy} onClick={() => setConfirmation("remove")}>Remove</Button></div> : null}
     </div>
     <p className="text-muted-foreground mt-2 break-words text-xs">{entry.kind === "built-in" ? "Built In" : entry.kind === "dev" ? "Development" : "Installed"}{entry.source ? ` · ${entry.source}` : ""}</p>
     {error ? <p role="alert" className="text-destructive mt-2 break-words text-sm">{error}</p> : null}
+    {entry.state === "changed-on-disk" && entry.error ? <p className="text-destructive mt-2 break-words text-sm">{entry.error}. Update or reinstall the plugin to review its files again.</p> : null}
     <div className="flex min-w-0 flex-col gap-4 py-4">
       {failure ? <div className="flex flex-wrap gap-2"><Button type="button" size="xs" onClick={() => { void host.retry(entry.id); }}>Retry</Button><details className="text-sm"><summary>View Error</summary><pre className="whitespace-pre-wrap break-words">{failure}</pre></details></div> : null}
       {entry.kind === "dev" && entry.source ? <p className="text-muted-foreground break-all text-sm">Development folder: {entry.source}</p> : null}
@@ -128,8 +129,8 @@ export function PluginsSettings({ host, api, session, canManage }: { host: Plugi
           </div>
           <div className="flex flex-col gap-1">{group.entries.map(entry => {
             const key = entryKey(entry);
-            const failure = snapshot.errors[entry.id] ?? entry.error;
-            const status = failure ? "Failed" : entry.state === "changed_on_disk" ? "Changed on Disk" : entry.state === "stopping" ? "Stopping" : entry.enabled ? "On" : "Off";
+            const failure = snapshot.errors[entry.id] ?? (entry.state === "changed-on-disk" ? null : entry.error);
+            const status = failure ? "Failed" : entry.state === "changed-on-disk" ? "Changed on Disk" : entry.state === "stopping" ? "Stopping" : entry.enabled ? "On" : "Off";
             return <Button key={key} type="button" variant={selected && entryKey(selected) === key ? "secondary" : "ghost"}
               className="h-auto min-h-12 w-full min-w-0 justify-start gap-2 px-2 py-2 text-left" aria-label={entry.name}
               aria-pressed={Boolean(selected && entryKey(selected) === key)} onClick={() => setSelectedKey(key)}>

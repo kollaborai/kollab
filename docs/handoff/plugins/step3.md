@@ -141,6 +141,8 @@
 
 - Folder-required tabs: red browser commit `78e22f15` demonstrated that a folderless chat still showed Fixture View (`folderless-red.log`); controls now hide those registered views in both desktop states. Isolated browser acceptance passes (`folderless-green.log`) and typecheck passes (`folderless-typecheck.log`). The test's extra reload required comparing the retry URL with the last prior import rather than the first import. Direct navigation to a folder-required view and session changes still need explicit coverage.
 
+- Changed-on-disk inventory: red browser commit `557dc774` found that the actual engine value `changed-on-disk` was labelled Failed (`changed-disk-red.log`). Settings now distinguish it from load errors and give update/reinstall guidance; isolated browser acceptance and typecheck passed (`changed-disk-green.log`, `changed-disk-typecheck.log`). Process states use similarly hyphenated `crash-stopped`; that presentation still needs a red-first check.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
