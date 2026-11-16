@@ -740,6 +740,33 @@ async def test_activate_can_skip_persistence_and_switch_for_current_run():
 
 
 @pytest.mark.asyncio
+async def test_current_run_activation_refuses_shared_state_service_without_mutation():
+    pm = _FakeProfileManager([
+        _FakeProfile("glm", "openai", api_key="key-1"),
+        _FakeProfile("work", "openai", api_key="key-2"),
+    ])
+    pm.set_active_profile("glm", persist=False)
+    pm.get_profile("work").model = "saved-model"
+    manager = LoadoutManager(pm, config=_MemoryConfig())
+    state_service = SimpleNamespace(set_active_profile=AsyncMock())
+    event_bus = SimpleNamespace(
+        get_service=lambda name: state_service if name == "state_service" else None
+    )
+
+    result = await manager.activate(
+        Loadout("temporary", "work", "fallback-model"),
+        event_bus=event_bus,
+        persist=False,
+        for_current_run=True,
+    )
+
+    assert result is None
+    assert pm.active_name == "glm"
+    assert pm.get_profile("work").model == "saved-model"
+    state_service.set_active_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_activate_falls_back_to_llm_service_when_no_state_service():
     pm = _FakeProfileManager([_FakeProfile("work", "openai", api_key="key-1")])
     manager = LoadoutManager(pm, config=_MemoryConfig())
