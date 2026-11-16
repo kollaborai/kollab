@@ -200,6 +200,24 @@ def test_export_carries_the_agent_bundle_as_agent_type(directory, agent_name, ex
         assert "agent_type" not in row
 
 
+@pytest.mark.parametrize(
+    ("version", "exported"),
+    [
+        ("0.22.0", "0.22.0"),
+        # A peer drops a whole directory with a malformed row (#1093), so a
+        # version it would refuse is never published.
+        ("0.22\n0", None),
+        ("x" * 129, "x" * 128),
+        (7, None),
+    ],
+)
+def test_export_carries_only_a_version_a_peer_accepts(directory, version, exported):
+    view, publish = directory
+    _, _, workspace = publish("one", version=version, build="354a155e")
+    [row] = view.publishable_agents(workspace, "b" * 32)
+    assert row.get("version") == exported
+
+
 def test_existing_relay_workspace_identity_used_without_key_read(directory):
     import hashlib
 
