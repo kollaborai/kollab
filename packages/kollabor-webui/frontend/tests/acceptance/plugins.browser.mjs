@@ -152,10 +152,17 @@ try {
   await page.getByText("Plugins are off for this page", { exact: false }).waitFor({ timeout: 15000 });
   assert.equal(inventoryReads, 0, "page-wide opt-out must not fetch plugin inventory");
   folderless = true;
+  entry.state = "stopping";
+  entry.services[0].state = "stopping";
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   const folderlessPanel = page.getByRole("complementary", { name: "Session Controls" });
   await folderlessPanel.waitFor({ timeout: 15000 });
+  await folderlessPanel.getByRole("button", { name: /Fixture Board/ }).getByText("Stopping", { exact: true }).waitFor({ timeout: 5000 });
+  entry.state = "ok";
+  entry.services[0].state = "crash-stopped";
+  await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+  await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   await folderlessPanel.getByRole("button", { name: /Fixture Board/ }).getByText("Stopped", { exact: true }).waitFor({ timeout: 5000 });
   assert.equal(await folderlessPanel.getByRole("button", { name: "Fixture View", exact: true }).count(), 0, "folder-required tab is hidden without a folder");
   await folderlessPanel.getByRole("button", { name: "Hide Session Panel" }).click();
