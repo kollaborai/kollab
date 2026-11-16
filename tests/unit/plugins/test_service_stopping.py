@@ -203,6 +203,83 @@ services.run_service("hello", "worker", "abcd")
 
 
 
+def test_wrapper_cannot_overwrite_stopping_state_during_startup(tmp_path, monkeypatch):
+    from kollabor_config import file_lock
+    from kollabor_plugins import registry, services, settings
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    paths = [Path(module.__file__).resolve().parent.parent for module in (services, file_lock)]
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(map(str, paths)))
+    home = tmp_path / ".kollab"
+    root = home / "plugins" / "hello"
+    root.mkdir(parents=True)
+    paused, proceed, ready, wrote = tmp_path / "paused", tmp_path / "proceed", tmp_path / "ready", tmp_path / "wrote"
+    child_code = (
+        "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"open({str(ready)!r},'w').close(); time.sleep(60)"
+    )
+    manifest = {"id": "hello", "services": {"worker": {
+        "command": [sys.executable, "-c", child_code], "stop_timeout_s": 3,
+    }}}
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {
+        "enabled": True, "enabled_path": "/usr/bin:/bin", "granted": [],
+        "files_sha256": files_sha256(root),
+    }}, "dev": {}}))
+    source = f'''
+import time
+from pathlib import Path
+from kollabor_plugins import services
+write = services._write_state
+def pause(path, value):
+    running = path.suffix == ".state" and value.get("status") == "running"
+    if running:
+        Path({str(paused)!r}).touch()
+        while not Path({str(proceed)!r}).exists():
+            time.sleep(0.01)
+    result = write(path, value)
+    if running:
+        Path({str(wrote)!r}).touch()
+    return result
+services._write_state = pause
+services.run_service("hello", "worker", "abcd")
+'''
+    wrapper = subprocess.Popen([sys.executable, "-c", source, "abcd"])
+    try:
+        deadline = time.monotonic() + 8
+        while not (paused.exists() and ready.exists()) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert paused.exists() and ready.exists(), "wrapper did not reach the state-write race"
+        settings.set_enabled("hello", False)
+        proceed.touch()
+        deadline = time.monotonic() + 2
+        while not wrote.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert wrote.exists(), "wrapper did not finish its queued running-state write"
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            entry = registry._service_entries(home, "hello", manifest)[0]
+            if entry["state"] == "stopping":
+                break
+            time.sleep(0.02)
+        assert entry["state"] == "stopping"
+        assert entry["desired"] == "stopped"
+        assert entry["stop_deadline"] > time.time()
+        wrapper.wait(timeout=7)
+    finally:
+        proceed.touch()
+        if wrapper.poll() is None:
+            wrapper.terminate()
+            try:
+                wrapper.wait(timeout=7)
+            except subprocess.TimeoutExpired:
+                wrapper.kill()
+                wrapper.wait(timeout=3)
+
+
+
 def test_disable_exposes_live_stopping_service_and_rejects_restart(tmp_path, monkeypatch):
     from kollabor_config import file_lock
     from kollabor_plugins import registry, services, settings
