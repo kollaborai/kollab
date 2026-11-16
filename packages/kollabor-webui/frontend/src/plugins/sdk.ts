@@ -90,7 +90,23 @@ export function createPluginContext(options: PluginContextOptions): PluginContex
   const { id, draft, json } = options;
   const prefix = `/plugins/${encodeURIComponent(id)}`;
   const disposers = new Set<() => void>();
+  const pending = new Set<AbortController>();
   let disposed = false;
+  const guardedJson = async (path: string, init?: RequestInit): Promise<unknown> => {
+    if (disposed) throw new Error("Plugin context is disposed");
+    const controller = new AbortController();
+    const upstream = init?.signal;
+    const abort = () => controller.abort(upstream?.reason);
+    if (upstream?.aborted) abort();
+    else upstream?.addEventListener("abort", abort, { once: true });
+    pending.add(controller);
+    try {
+      return await json(path, { ...init, signal: controller.signal });
+    } finally {
+      pending.delete(controller);
+      upstream?.removeEventListener("abort", abort);
+    }
+  };
   const on = (topic: string, callback: (data: unknown) => void) => {
     if (disposed) return () => {};
     const off = options.events.on(topic, callback);
@@ -105,7 +121,7 @@ export function createPluginContext(options: PluginContextOptions): PluginContex
     return unsubscribe;
   };
   const request = async <T,>(path: string, init?: RequestInit): Promise<T> =>
-    await json(scopedApiPath(id, path), init) as T;
+    await guardedJson(scopedApiPath(id, path), init) as T;
   const api: PluginContext["api"] = {
     get: <T,>(path: string) => request<T>(path),
     post: <T,>(path: string, body?: unknown) => request<T>(path, { method: "POST", ...(body === undefined ? {} : { body: JSON.stringify(body) }) }),
@@ -113,8 +129,8 @@ export function createPluginContext(options: PluginContextOptions): PluginContex
     delete: <T,>(path: string) => request<T>(path, { method: "DELETE" }),
   };
   const settings = Object.assign((value: PluginSettings) => draft.settings(value), {
-    get: async () => await json(`${prefix}/settings`, undefined) as Record<string, unknown>,
-    save: async (values: Record<string, unknown>) => await json(`${prefix}/settings`, { method: "PUT", body: JSON.stringify(values) }),
+    get: async () => await guardedJson(`${prefix}/settings`) as Record<string, unknown>,
+    save: async (values: Record<string, unknown>) => await guardedJson(`${prefix}/settings`, { method: "PUT", body: JSON.stringify(values) }),
   });
   function useApi<T>(path: string, config: { refreshOn?: string; everyMs?: number } = {}): PluginApiState<T> {
     const [state, setState] = useState<Omit<PluginApiState<T>, "refresh">>({ data: null, error: null, loading: true });
@@ -141,8 +157,14 @@ export function createPluginContext(options: PluginContextOptions): PluginContex
     menu: draft.menu.bind(draft), view: draft.view.bind(draft), page: draft.page.bind(draft),
     modal: draft.modal.bind(draft), settings, command: draft.command.bind(draft),
     renderer: draft.renderer.bind(draft), notice: draft.notice.bind(draft),
-    api, useApi, events: { on }, agents: { open: options.openAgent },
-    navigate: options.navigate, copy: options.copy, toast: options.toast, ui: options.ui as PluginUi,
-    dispose: () => { disposed = true; for (const dispose of [...disposers]) dispose(); },
+    api, useApi, events: { on }, agents: { open: id => { if (!disposed) options.openAgent(id); } },
+    navigate: target => { if (!disposed) options.navigate(target); },
+    copy: async text => { if (disposed) throw new Error("Plugin context is disposed"); await options.copy(text); },
+    toast: text => { if (!disposed) options.toast(text); }, ui: options.ui as PluginUi,
+    dispose: () => {
+      disposed = true;
+      for (const controller of pending) controller.abort();
+      for (const dispose of [...disposers]) dispose();
+    },
   };
 }

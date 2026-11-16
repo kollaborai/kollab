@@ -36,7 +36,12 @@ describe("plugin SDK", () => {
     await k.api.delete("/items/one");
     await k.settings.get();
     await k.settings.save({ enabled: true });
-    expect(json.mock.calls).toEqual([
+    const calls = json.mock.calls.map(([path, init]) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      const { signal: _signal, ...other } = init ?? {};
+      return [path, Object.keys(other).length ? other : undefined];
+    });
+    expect(calls).toEqual([
       ["/plugins/hello%40dev/api/badge?limit=2", undefined],
       ["/plugins/hello%40dev/api/items", { method: "POST", body: '{"name":"one"}' }],
       ["/plugins/hello%40dev/api/items/one", { method: "PUT", body: '{"enabled":true}' }],
