@@ -871,6 +871,9 @@ export function EngineRuntimeProvider({
   // that runs the turn itself ignores these.
   const liveTurn = useRef<LiveTurn>(emptyLiveTurn());
   const settleTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // Events folded into liveTurn while this page's own run kept the thread busy.
+  const unshownLive = useRef(false);
+  const showPendingLive = useRef<() => void>(() => undefined);
   useEffect(() => {
     if (!liveEvents) return;
     const importLiveState = (messages: ThreadMessageLike[]) => {
@@ -882,26 +885,8 @@ export function EngineRuntimeProvider({
         synced: shown.synced ? { ...shown.synced, messages: messages.length } : undefined,
       });
     };
-    liveEvents.current = (event: SessionEvent) => {
-      const thread = runtime.thread.getState();
-      if (thread.isRunning && goalCancellation.current.isActive()
-          && event.type === "history_updated"
-          && typeof event.conversation_uid === "string"
-          && initialState.conversationUid
-          && event.conversation_uid !== initialState.conversationUid) {
-        // A terminal switched this daemon's conversation while the goal was
-        // in flight. Abort this page's stream now; Stop is still scoped to the
-        // goal handle, and the ensuing history refresh remounts the new one.
-        runtime.thread.cancelRun();
-        return;
-      }
-      if (thread.isRunning) return;
-      const previous = liveTurn.current;
-      const next = applyLiveEvent(previous, event);
-      if (next === previous) return;
-      liveTurn.current = next;
-      if (next.held && next.parts === previous.parts) return;  // held back: nothing new to show
-      const shown = (thread.extras as { state?: EngineState } | undefined)?.state;
+    const showLiveTurn = (next: LiveTurn) => {
+      const shown = (runtime.thread.getState().extras as { state?: EngineState } | undefined)?.state;
       if (!shown) return;
       // Keep this live copy outside synced bookkeeping until history carries
       // the matching reply. App retries after terminal events; replacing by an
@@ -925,8 +910,53 @@ export function EngineRuntimeProvider({
         }, 5000);
       }
     };
+    showPendingLive.current = () => {
+      if (!unshownLive.current) return;
+      unshownLive.current = false;
+      showLiveTurn(liveTurn.current);
+    };
+    liveEvents.current = (event: SessionEvent) => {
+      const thread = runtime.thread.getState();
+      if (thread.isRunning && goalCancellation.current.isActive()
+          && event.type === "history_updated"
+          && typeof event.conversation_uid === "string"
+          && initialState.conversationUid
+          && event.conversation_uid !== initialState.conversationUid) {
+        // A terminal switched this daemon's conversation while the goal was
+        // in flight. Abort this page's stream now; Stop is still scoped to the
+        // goal handle, and the ensuing history refresh remounts the new one.
+        runtime.thread.cancelRun();
+        return;
+      }
+      if (thread.isRunning) {
+        // This page's own submission is pending (a held steering admission, a
+        // queued send), so the thread takes no import now. A turn already on
+        // screen goes on: fold only its own request's events into the live
+        // state and show them when the run ends. Events of any other request
+        // are dropped, as the run's own stream is not ours to mirror.
+        const visible = liveTurn.current;
+        if (!visible.requestId || event.request_id !== visible.requestId) return;
+        const folded = applyLiveEvent(visible, event);
+        if (folded === visible) return;
+        liveTurn.current = folded;
+        unshownLive.current = true;
+        return;
+      }
+      const previous = liveTurn.current;
+      const next = applyLiveEvent(previous, event);
+      if (next === previous) return;
+      liveTurn.current = next;
+      if (next.held && next.parts === previous.parts) return;  // held back: nothing new to show
+      showLiveTurn(next);
+    };
     return () => { liveEvents.current = null; clearTimeout(settleTimer.current); };
   }, [runtime, liveEvents, initialState.conversationUid]);
+
+  // Output folded in while this page's own run was pending shows once it ends.
+  useEffect(() => runtime.thread.subscribe(() => {
+    if (!unshownLive.current || runtime.thread.getState().isRunning) return;
+    showPendingLive.current();
+  }), [runtime]);
 
   // Turns this page did not run (a hub message that woke the agent, a turn
   // typed in the terminal) reach the open thread when App reloads the history
@@ -1033,6 +1063,14 @@ export function EngineRuntimeProvider({
     if (ownsPendingInput(thread)) {
       if (initialState.messages === reloaded.current) return;
       if (initialState.synced?.olderWindow) deferredOlderWindow.current = initialState;
+      // A reconnect can recover a followed reply from canonical history even
+      // when its token events were missed. Do not publish that row beside the
+      // ephemeral live reply; reconcile it after this page's run releases the
+      // thread.
+      if (historyHasAssistantRequestId(initialState.messages, liveTurn.current.requestId)) {
+        deferredHistorySync.current = true;
+        return;
+      }
       const shown = (thread.extras as { state?: EngineState } | undefined)?.state;
       const from = shown?.synced;
       if (shown && from && initialState.synced &&
@@ -1064,8 +1102,8 @@ export function EngineRuntimeProvider({
           });
         }
       }
-      // Keep the deferred marker so the newest snapshot is reconciled after
-      // settlement, preserving this turn if the engine mirror was behind.
+      // Reconcile the newest snapshot after settlement, when the engine
+      // mirror has caught up and this thread no longer has an active owner.
       deferredHistorySync.current = true;
       return;
     }
