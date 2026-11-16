@@ -737,7 +737,8 @@ class FileOperationsExecutor:
 
         # Check if text file
         if not self.is_text_file(filepath):
-            return {"success": False, "error": f"Cannot edit binary file: {filepath}"}
+            file_type = "directory" if os.path.isdir(filepath) else "binary file"
+            return {"success": False, "error": f"Cannot edit {file_type}: {filepath}"}
 
         # Read file
         try:
@@ -1187,9 +1188,10 @@ class FileOperationsExecutor:
 
         # Check if text file
         if not self.is_text_file(filepath):
+            file_type = "directory" if os.path.isdir(filepath) else "binary file"
             return {
                 "success": False,
-                "error": f"Cannot append to binary file: {filepath}",
+                "error": f"Cannot append to {file_type}: {filepath}",
             }
 
         # Create backup
@@ -1240,9 +1242,10 @@ class FileOperationsExecutor:
 
         # Check if text file
         if not self.is_text_file(filepath):
+            file_type = "directory" if os.path.isdir(filepath) else "binary file"
             return {
                 "success": False,
-                "error": f"Cannot insert into binary file: {filepath}",
+                "error": f"Cannot insert into {file_type}: {filepath}",
             }
 
         # Read file
@@ -1318,9 +1321,10 @@ class FileOperationsExecutor:
 
         # Check if text file
         if not self.is_text_file(filepath):
+            file_type = "directory" if os.path.isdir(filepath) else "binary file"
             return {
                 "success": False,
-                "error": f"Cannot insert into binary file: {filepath}",
+                "error": f"Cannot insert into {file_type}: {filepath}",
             }
 
         # Read file
@@ -1585,7 +1589,8 @@ class FileOperationsExecutor:
 
         # Check if text file
         if not self.is_text_file(filepath):
-            return {"success": False, "error": f"Cannot read binary file: {filepath}"}
+            file_type = "directory" if os.path.isdir(filepath) else "binary file"
+            return {"success": False, "error": f"Cannot read {file_type}: {filepath}"}
 
         # Read file as bytes (needed for ContextService hash dedup)
         try:
@@ -1771,7 +1776,8 @@ class FileOperationsExecutor:
 
         # Check if text file
         if not self.is_text_file(filepath):
-            return {"success": False, "error": f"Cannot grep binary file: {filepath}"}
+            file_type = "directory" if os.path.isdir(filepath) else "binary file"
+            return {"success": False, "error": f"Cannot grep {file_type}: {filepath}"}
 
         # Read file and search for pattern
         try:
