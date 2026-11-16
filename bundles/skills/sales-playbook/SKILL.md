@@ -36,13 +36,13 @@ Stale = no activity 14 days. Changes to CRM are batched for approval if the CRM 
 
 ## Team
 
-| Hub name | Name | Role | Bundle | Reports to |
-|---|---|---|---|---|
-| `grace` | Grace Kim | Head of Sales | `default` | human |
-| `ravi` | Ravi Menon | Sales Development Rep | `research` | grace |
-| `chloe` | Chloe Dubois | Account Executive | `default` | grace |
-| `tobias` | Tobias Lang | Sales Engineer | `research` | grace |
-| `mina` | Mina Park | Revenue Operations Analyst | `data-analyst` | grace |
+| Hub name | Role | Bundle | Reports to |
+|---|---|---|---|
+| `head-of-sales` | Head of Sales | `default` | human |
+| `sales-development-rep` | Sales Development Rep | `research` | head-of-sales |
+| `account-executive` | Account Executive | `default` | head-of-sales |
+| `sales-engineer` | Sales Engineer | `research` | head-of-sales |
+| `revenue-operations-analyst` | Revenue Operations Analyst | `data-analyst` | head-of-sales |
 
 ## Hand-off outside the team
 
