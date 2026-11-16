@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { createServer } from "vite";
+import { createServer, preview } from "vite";
 import { chromium } from "playwright-core";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -36,12 +36,19 @@ async function captureReview(page, name) {
   if (viewport) await page.setViewportSize(viewport);
   await page.waitForTimeout(350);
 }
-const vite = await createServer({ root, configFile: path.join(root, "vite.config.ts"), logLevel: "error",
-  cacheDir: path.join(process.env.KOLLAB_PLUGIN_TEST_DIR || process.env.HOME, "plugin-vite-cache"),
-  server: { host: "127.0.0.1", port: 0, hmr: false } });
+const builtDirectory = process.env.PLUGIN_BUILT_DIR;
+const serverSource = builtDirectory ? readFileSync(path.resolve(root, "../src/kollabor_webui/server.py"), "utf8") : "";
+const importMapHash = serverSource.match(/_PLUGIN_IMPORT_MAP_HASH\s*=\s*"(sha256-[^"]+)"/)?.[1];
+if (builtDirectory && !importMapHash) throw new Error("Cannot determine the WebUI import-map CSP hash");
+const vite = builtDirectory
+  ? await preview({ root, configFile: false, logLevel: "error", build: { outDir: builtDirectory },
+    preview: { host: "127.0.0.1", port: 0, headers: { "Content-Security-Policy": `script-src 'self' '${importMapHash}'` } } })
+  : await createServer({ root, configFile: path.join(root, "vite.config.ts"), logLevel: "error",
+    cacheDir: path.join(process.env.KOLLAB_PLUGIN_TEST_DIR || process.env.HOME, "plugin-vite-cache"),
+    server: { host: "127.0.0.1", port: 0, hmr: false } });
 let browser;
 try {
-  await vite.listen();
+  if (!builtDirectory) await vite.listen();
   const address = vite.httpServer?.address();
   assert.ok(address && typeof address !== "string");
   const origin = `http://127.0.0.1:${address.port}`;
@@ -67,6 +74,8 @@ try {
     await reference.close();
   }
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  const cspViolations = [];
+  page.on("console", message => { if (/content security policy/i.test(message.text())) cspViolations.push(message.text()); });
   let inventoryReads = 0;
   let confirmedInstall = null;
   let confirmedUpdate = null;
@@ -188,7 +197,8 @@ try {
     if (url.pathname.startsWith("/engine/")) return route.fulfill({ json: { sessions: [], profiles: [], agents: [], live: [], bundles: [], variants: {}, roles: [], libraries: [], sections: [], identities: [], teams: [], models: [], commands: [], network: {device:"",remote:[]}, offline: [], hidden: [], order: [] } });
     return route.continue();
   });
-  await page.goto(`${origin}/?plugins=off`, { waitUntil: "domcontentloaded" });
+  const initialResponse = await page.goto(`${origin}/?plugins=off`, { waitUntil: "domcontentloaded" });
+  if (builtDirectory) assert.equal(initialResponse?.headers()["content-security-policy"], `script-src 'self' '${importMapHash}'`);
   await page.getByText("Plugins are off for this page", { exact: false }).waitFor({ timeout: 15000 });
   assert.equal(inventoryReads, 0, "page-wide opt-out must not fetch plugin inventory");
   folderless = true;
@@ -520,8 +530,10 @@ try {
   await settings.waitFor({ state: "hidden" });
   await page.getByRole("textbox", { name: "Message input" }).waitFor({ timeout: 5000 });
   assert.equal(await page.getByText("This plugin view is unavailable for this chat.").count(), 0, "removed active view returns to Chat");
-  console.log("plugin browser acceptance: opt-out, view, menu, page, modal and mobile sheet passed");
+  if (builtDirectory) assert.deepEqual(cspViolations, [], "built page must not produce CSP violations");
+  console.log(`plugin browser acceptance (${builtDirectory ? "production CSP" : "development"}): opt-out, view, menu, page, modal and mobile sheet passed`);
 } finally {
   await browser?.close();
-  await vite.close();
+  if (builtDirectory) await new Promise((resolveClose, rejectClose) => vite.httpServer.close(error => error ? rejectClose(error) : resolveClose()));
+  else await vite.close();
 }

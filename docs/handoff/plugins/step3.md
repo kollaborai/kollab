@@ -192,6 +192,8 @@
 
 - Mockup reference correction: direct `project/*.dc.html` screenshots lack the missing design-canvas `support.js` and `/_blob` styles, so the earlier `failed-load-reference.png` is not a valid styled mockup. The existing `canvas/render/*.html` files use the backed-up CSS and state values; the screenshot harness now renders 11 of those reference states at 1440/820/390 in dark/light beside the implementation captures in `~/backups/plugins-step3-work/ui-matrix-with-reference` (127 PNGs plus browser/overflow log). Browser acceptance passed and reported zero horizontal document/body/dialog overflow. These files are review evidence, not a visual verdict: the image comparison tool timed out again. Some states, including real stopping/deadline and sync error, remain uncaptured or mocked.
 
+- Production-CSP browser preflight: the existing browser acceptance harness can now serve a built frontend with the exact import-map CSP hash read from WebUI server source. A fresh isolated build and the full acceptance path passed under that CSP (`production-csp-build.log`, `production-csp-browser.log`); development mode also passed (`production-csp-harness-dev.log`). This exercises built assets and CSP with a mocked engine, not the required isolated live-engine smoke. The existing Python CSP test also verifies the source import map/hash pair.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
