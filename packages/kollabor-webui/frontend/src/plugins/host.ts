@@ -29,6 +29,7 @@ export interface PluginHostSnapshot {
   errors: Record<string, string>;
   skipped: string[];
   renderFailed: string[];
+  failedRenderers: { pluginId: string; tool?: string; tag?: string }[];
 }
 export interface ServiceCrash {
   pluginId: string;
@@ -86,6 +87,7 @@ export class PluginHost {
   private readonly listeners = new Set<() => void>();
   private readonly skipped = new Set<string>();
   private readonly renderFailed = new Set<string>();
+  private readonly failedRendererMap = new Map<string, { pluginId: string; tool?: string; tag?: string }[]>();
   private errors: Record<string, string> = {};
   private entries: PluginEntry[] = [];
   private loading = false;
@@ -135,12 +137,14 @@ export class PluginHost {
         if (this.resources.get(id) !== resource || this.closed) return;
         delete this.errors[id];
         this.renderFailed.delete(id);
+        this.failedRendererMap.delete(id);
         this.registry.commit(resource.draft);
         if (this.resources.get(id) === resource && !this.closed) this.removeStorage(LOADING + id);
       },
       remove: id => { this.release(id); this.registry.remove(id); this.removeStorage(LOADING + id); },
       fail: (id, error) => {
         this.renderFailed.delete(id);
+        this.failedRendererMap.delete(id);
         this.removeStorage(LOADING + id);
         this.release(id);
         this.registry.remove(id);
@@ -188,7 +192,10 @@ export class PluginHost {
       const desired = new Set(included.filter(entry => !entry.shadowed && entry.web &&
         ((entry.enabled && (entry.state === "ok" || entry.state === "stopping")) || (entry.state === "stopping" && this.resources.has(entry.id)))).map(entry => entry.id));
       this.errors = Object.fromEntries(Object.entries(this.errors).filter(([id]) => desired.has(id)));
-      for (const id of this.renderFailed) if (!desired.has(id)) this.renderFailed.delete(id);
+      for (const id of this.renderFailed) if (!desired.has(id)) {
+        this.renderFailed.delete(id);
+        this.failedRendererMap.delete(id);
+      }
       this.loading = false;
       this.publish();
       settle();
@@ -259,6 +266,10 @@ export class PluginHost {
   getContext(id: string) { return this.resources.get(id)?.context; }
   reportRenderError(id: string, error: unknown) {
     if (!this.resources.has(id)) return;
+    const renderers = this.registry.getSnapshot().plugins.find(plugin => plugin.id === id)?.renderers ?? [];
+    this.failedRendererMap.set(id, renderers.map(renderer => ({
+      pluginId: id, ...(renderer.tool ? { tool: renderer.tool } : {}), ...(renderer.tag ? { tag: renderer.tag } : {}),
+    })));
     this.release(id);
     this.errors = { ...this.errors, [id]: error instanceof Error ? error.message : String(error) };
     this.renderFailed.add(id);
@@ -320,7 +331,8 @@ export class PluginHost {
   }
   private makeSnapshot(): PluginHostSnapshot {
     return { disabled: this.options.disabled, loading: this.loading, inventoryError: this.inventoryError,
-      entries: this.entries, registry: this.registry.getSnapshot(), errors: this.errors, skipped: [...this.skipped], renderFailed: [...this.renderFailed] };
+      entries: this.entries, registry: this.registry.getSnapshot(), errors: this.errors, skipped: [...this.skipped], renderFailed: [...this.renderFailed],
+      failedRenderers: [...this.failedRendererMap.values()].flat() };
   }
   private publish() {
     this.snapshot = this.makeSnapshot();

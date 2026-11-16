@@ -14,7 +14,7 @@ export function usePluginSnapshot(host: PluginHost): PluginHostSnapshot {
   return useSyncExternalStore(host.subscribe, host.getSnapshot, host.getSnapshot);
 }
 const EMPTY_SNAPSHOT: PluginHostSnapshot = { disabled: true, loading: false, inventoryError: null, entries: [],
-  registry: { plugins: [], conflicts: [] }, errors: {}, skipped: [], renderFailed: [] };
+  registry: { plugins: [], conflicts: [] }, errors: {}, skipped: [], renderFailed: [], failedRenderers: [] };
 const emptySnapshot = () => EMPTY_SNAPSHOT;
 const emptySubscribe = () => () => {};
 export function useOptionalPluginSnapshot(host: PluginHost | null): PluginHostSnapshot {

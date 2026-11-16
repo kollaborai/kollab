@@ -5,7 +5,7 @@ import remarkGfm from "remark-gfm";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { terminalDialectToMarkdown } from "@/utils/terminal-dialect";
 import { splitPluginTags } from "./tagged-text";
-import { PluginRenderBoundary, PluginSessionContext, PluginTurnOffContext, useOptionalPluginSnapshot, usePluginHost } from "./components";
+import { PluginFailure, PluginRenderBoundary, PluginSessionContext, PluginTurnOffContext, useOptionalPluginSnapshot, usePluginHost } from "./components";
 
 /** Preserve the native tool fallback when no successfully loaded plugin claims it. */
 export function PluginToolPart({ part, fallback }: { part: ToolCallMessagePartProps; fallback: ReactNode }) {
@@ -16,7 +16,13 @@ export function PluginToolPart({ part, fallback }: { part: ToolCallMessagePartPr
   const match = snapshot.registry.plugins.flatMap(plugin => plugin.renderers.map(renderer => ({ pluginId: plugin.id, renderer })))
     .find(candidate => candidate.renderer.tool === part.toolName);
   const context = match && host?.getContext(match.pluginId);
-  if (!match || !host || !context) return fallback;
+  if (!match || !host || !context) {
+    const failed = snapshot.failedRenderers.find(item => item.tool === part.toolName);
+    if (!failed || !host) return fallback;
+    const name = snapshot.entries.find(entry => entry.id === failed.pluginId)?.name ?? failed.pluginId;
+    return <PluginFailure name={name} kind="render" error={snapshot.errors[failed.pluginId] ?? ""}
+      onRetry={() => { void host.retry(failed.pluginId); }} onTurnOff={() => turnOff(failed.pluginId)} />;
+  }
   const Render = match.renderer.render;
   return <div data-plugin={match.pluginId}><PluginRenderBoundary name={match.pluginId} onError={error => host.reportRenderError(match.pluginId, error)}
     onRetry={() => { void host.retry(match.pluginId); }} onTurnOff={() => turnOff(match.pluginId)}>
@@ -33,15 +39,22 @@ export function PluginTaggedText({ text }: { text: string }) {
   const renderers = snapshot.registry.plugins.flatMap(plugin => plugin.renderers
     .filter(renderer => renderer.tag)
     .map(renderer => ({ pluginId: plugin.id, renderer })));
-  if (!host || !renderers.length) return <MarkdownText />;
-  const parts = splitPluginTags(text, renderers.map(item => item.renderer.tag!));
+  const failedRenderers = snapshot.failedRenderers.filter(item => item.tag);
+  if (!host || (!renderers.length && !failedRenderers.length)) return <MarkdownText />;
+  const parts = splitPluginTags(text, [...renderers.map(item => item.renderer.tag!), ...failedRenderers.map(item => item.tag!)]);
   if (!parts.some(part => part.type === "tag")) return <MarkdownText />;
   return <>{parts.map((part, index) => {
     if (part.type === "text") return <MarkdownTextPrimitive key={index} className="aui-md" remarkPlugins={[remarkGfm]}
       preprocess={() => terminalDialectToMarkdown(part.text)} />;
     const match = renderers.find(item => item.renderer.tag === part.name);
     const context = match && host.getContext(match.pluginId);
-    if (!match || !context) return null;
+    if (!match || !context) {
+      const failed = failedRenderers.find(item => item.tag === part.name);
+      if (!failed) return null;
+      const name = snapshot.entries.find(entry => entry.id === failed.pluginId)?.name ?? failed.pluginId;
+      return <PluginFailure key={index} name={name} kind="render" error={snapshot.errors[failed.pluginId] ?? ""}
+        onRetry={() => { void host.retry(failed.pluginId); }} onTurnOff={() => turnOff(failed.pluginId)} />;
+    }
     const Render = match.renderer.render;
     return <div data-plugin={match.pluginId} key={index}><PluginRenderBoundary name={match.pluginId} onError={error => host.reportRenderError(match.pluginId, error)}
       onRetry={() => { void host.retry(match.pluginId); }} onTurnOff={() => turnOff(match.pluginId)}>

@@ -219,7 +219,7 @@ try {
          k.page({id:"board",title:"Fixture Board",tabs:[{id:"first",label:"First",render:body},{id:"second",label:"Second",render:second}]});
          k.menu("board",{count:{path:"/badge",refreshOn:"changed"}});
          k.command({name:"fixture",description:"Run fixture",run:args=>k.toast("Fixture ran: "+args)});
-         k.renderer({tag:"fixture_tag",render:props=>React.createElement("p",{"data-testid":"plugin-tag"},props.tag.content)});
+         k.renderer({tag:"fixture_tag",render:props=>{ if (window.__testPluginRenderCrash) throw new Error("fixture renderer crashed"); return React.createElement("p",{"data-testid":"plugin-tag"},props.tag.content); }});
          k.view({id:"fixture-view",label:"Fixture View",needs_folder:true,render:() => React.createElement("p",null,"Fixture view body")});
          k.modal({id:"details",title:"Fixture Details",tabs:[{id:"info",label:"Info",render:modal}]});
          k.settings({render:() => React.createElement("p", {className:"scope-probe"}, "Fixture custom settings")});
@@ -777,6 +777,18 @@ try {
   await settings.waitFor({ state: "hidden" });
   await page.getByRole("textbox", { name: "Message input" }).waitFor({ timeout: 5000 });
   assert.equal(await page.getByText("This plugin view is unavailable for this chat.").count(), 0, "removed active view returns to Chat");
+  // A throwing chat renderer is quarantined, but its visible failure controls survive.
+  fixtureRemoved = false;
+  entry.enabled = true;
+  entry.state = "ok";
+  sessionless = false;
+  folderless = false;
+  await page.addInitScript(() => { window.__testPluginRenderCrash = true; });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  const failedChatRenderer = page.getByText("Fixture · Failed to Render", { exact: true });
+  await failedChatRenderer.waitFor({ timeout: 10000 });
+  await page.getByRole("button", { name: "Retry", exact: true }).first().waitFor({ timeout: 5000 });
+  await page.getByRole("textbox", { name: "Message input" }).waitFor({ timeout: 5000 });
   if (builtDirectory) assert.deepEqual(cspViolations, [], "built page must not produce CSP violations");
   console.log(`plugin browser acceptance (${builtDirectory ? "production CSP" : "development"}): opt-out, view, menu, page, modal and mobile sheet passed`);
 } finally {
