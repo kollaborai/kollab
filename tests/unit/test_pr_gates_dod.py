@@ -1404,6 +1404,36 @@ def test_collect_pr_data_uses_server_order_for_issue_comment_findings(monkeypatc
     assert data.commits[0].timeline_order == 1
 
 
+def test_collect_pr_data_fails_closed_without_finding_timeline_position(monkeypatch):
+    pull = {
+        "title": "fix: close finding",
+        "body": "Fixes #1",
+        "user": {"login": "pr-author"},
+        "base": {"ref": "main", "sha": BASE_TIP},
+        "head": {"sha": HEAD_SHA},
+    }
+    pages = {
+        "rest": {
+            f"repos/o/r/issues/{PR_NUM}/comments": {
+                1: [
+                    {
+                        "id": 88,
+                        "url": "https://api.github.com/repos/o/r/issues/comments/88",
+                        "body": "F14: regression test required",
+                        "created_at": "2026-11-01T12:00:00Z",
+                        "user": {"login": "reviewer"},
+                    }
+                ]
+            },
+            f"repos/o/r/issues/{PR_NUM}/timeline": {1: []},
+        }
+    }
+    _install_fake_gh(monkeypatch, [], pull, BASE_TIP, pages)
+
+    with pytest.raises(RuntimeError, match="timeline position is missing"):
+        pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
+
+
 def test_collect_threads_follow_graphql_pagination(monkeypatch):
     calls: list[list] = []
     nodes1 = [{"isResolved": True} for _ in range(99)] + [{"isResolved": False}]
