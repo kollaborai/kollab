@@ -528,7 +528,7 @@ export function SessionPanel({
           {todo ? <TodoCard block={todo} /> : null}
         </div>
       ) : (
-        <aside aria-label="Session Controls" className="bg-sidebar text-sidebar-foreground m-2 ml-0 flex max-h-[calc(100%-1rem)] w-10 shrink-0 flex-col items-center gap-1 self-start overflow-y-auto rounded-xl py-2 shadow-lg">
+        <aside aria-label="Session Controls" className="bg-sidebar text-sidebar-foreground m-2 ml-0 flex max-h-[calc(100%-1rem)] w-10 any-pointer-coarse:w-12 shrink-0 flex-col items-center gap-1 self-start overflow-y-auto rounded-xl py-2 shadow-lg">
           <TooltipIconButton tooltip="Show Session Panel" side="left" className="size-7 p-1.5" onClick={() => toggle(true)}>
             {statusError ? <CircleAlert className="text-destructive size-4" /> : <PanelRightOpen className="size-4" />}
           </TooltipIconButton>

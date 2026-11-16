@@ -12,7 +12,7 @@ import { heartbeatAge, stoppingLabel, useHeartbeatClock } from "./heartbeat";
 import type { PluginContext, PluginMenu } from "./sdk";
 
 const ICONS: Record<string, LucideIcon> = { Box, FileCode, GitBranch, LayoutDashboard, ListTodo, Plug, Puzzle, Terminal };
-const ROW = "h-7 w-full justify-start gap-2 px-2 text-xs";
+const ROW = "h-7 w-full justify-start gap-2 px-2 text-xs any-pointer-coarse:min-h-[44px] any-pointer-coarse:min-w-[44px]";
 export function pluginViewKey(pluginId: string, viewId: string): SessionView {
   return `plugin:${encodeURIComponent(pluginId)}:${encodeURIComponent(viewId)}`;
 }
@@ -36,7 +36,7 @@ function SessionControl({ label, Icon, collapsed, disabled, disabledReason, acti
   const status = failed ? `Failed to ${failed === "render" ? "Render" : "Load"}` : stopping ? stopping : stopped ? "Stopped" : noHeartbeat ? "No Heartbeat" : undefined;
   const tooltip = `${label}${status ? ` · ${status}` : disabled ? ` · ${disabledReason ?? "Unavailable"}` : ""}`;
   if (collapsed) return <TooltipIconButton tooltip={tooltip} side="left" aria-label={status ? `${label} ${status}` : label} aria-pressed={active}
-    disabled={disabled} title={tooltip} className={cn("size-7 p-1.5", active && "bg-accent text-accent-foreground")} onClick={onClick}>
+    disabled={disabled} title={tooltip} className={cn("size-7 p-1.5 any-pointer-coarse:min-h-[44px] any-pointer-coarse:min-w-[44px]", active && "bg-accent text-accent-foreground")} onClick={onClick}>
     <span className="relative"><Icon className="size-4" />{status ? <span aria-label={status} className={cn("absolute -right-1 -top-1 size-1.5 rounded-full", noHeartbeat && !failed && !stopping && !stopped ? "bg-amber-500" : "bg-destructive")} /> : null}
       {!status && count ? <MenuCount context={count.context} count={count.value} compact /> : null}</span>
   </TooltipIconButton>;
