@@ -69,7 +69,7 @@ class Pair:
         raise AttachRefused("nothing runs here")
 
     async def _agent_socket(self, peer, agent_id, name):
-        if self.refuse:
+        if self.refuse and peer == MAC:  # the server's rules changed; the mac's did not
             raise AttachRefused(self.refuse)
         return self.agent_path
 
@@ -356,12 +356,21 @@ def test_a_withdrawal_and_the_cap_count_only_the_agents_the_peer_holds_here():
     async def run():
         pair = Pair(mac_runs_agent=True)
         await pair.start_agent()
+        callers = []
         for _ in range(network_attach.MAX_CHANNELS_PER_PEER):
-            await pair.server.open(MAC, AGENT_ID, "lapis")  # the server opens 4 of the mac's agents
+            path = await pair.server.open(MAC, AGENT_ID, "lapis")  # the server opens 4 of the mac's agents
+            # A channel with no caller closes when the agent's greeting arrives (#1076).
+            reader, writer = await asyncio.open_unix_connection(path)
+            assert await reader.readline() == b"hello\n"
+            callers.append(writer)
         await pair.mac.open(SERVER, AGENT_ID, "lapis")  # the mac still opens one of the server's
         pair.refuse = "mac is not a member of server's network"  # the server withdraws the mac's access
+        # Let the mac's hosting channels pass their post-greeting rule check first (#1076).
+        await asyncio.sleep(network_attach.FLUSH_SECONDS * 5)
         await pair.server.recheck()
         assert [ch.requester for ch in pair.server._channels.values()] == [True] * 4
+        for writer in callers:
+            writer.close()
         await pair.stop()
 
     asyncio.run(run())
