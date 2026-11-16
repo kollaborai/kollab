@@ -11,7 +11,7 @@ function storage(): Storage {
 }
 const entry = (id: string, enabled = true) => ({
   id, name: id, kind: "installed", enabled, shadowed: false, state: enabled ? "ok" : "off",
-  web: { entry: "web/dist/index.js", style: null, hash: "a" }, contributes: {},
+  web: { entry: "web/dist/index.js", style: null as string | null, hash: "a" }, contributes: {},
 });
 function setup(options: Partial<PluginHostOptions> = {}) {
   let inventory: (ReturnType<typeof entry> & { services?: unknown[] })[] = [entry("hello")];
@@ -480,7 +480,7 @@ describe("PhoneLink inventory-only capability", () => {
     const { host, importer, setInventory } = setup({ ...phone, request });
     await host.start();
     setInventory([entry("changed")]);
-    stream.enqueue(new TextEncoder().encode('event: plugins-changed\ndata: {}\n\n'));
+    stream.enqueue(new TextEncoder().encode('data: {"topic":"plugins-changed","data":{}}\n\n'));
     await vi.waitFor(() => expect(host.getSnapshot().entries[0]?.id).toBe("changed"));
     expect(importer).not.toHaveBeenCalled();
     expect(host.getContext("changed")).toBeUndefined();

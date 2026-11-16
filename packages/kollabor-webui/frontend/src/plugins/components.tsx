@@ -13,7 +13,7 @@ export function usePluginHost() { return useContext(PluginHostContext); }
 export function usePluginSnapshot(host: PluginHost): PluginHostSnapshot {
   return useSyncExternalStore(host.subscribe, host.getSnapshot, host.getSnapshot);
 }
-const EMPTY_SNAPSHOT: PluginHostSnapshot = { disabled: true, loading: false, inventoryError: null, entries: [],
+const EMPTY_SNAPSHOT: PluginHostSnapshot = { phoneLink: false, disabled: true, loading: false, inventoryError: null, entries: [],
   registry: { plugins: [], conflicts: [] }, errors: {}, skipped: [], renderFailed: [], failedRenderers: [] };
 const emptySnapshot = () => EMPTY_SNAPSHOT;
 const emptySubscribe = () => () => {};

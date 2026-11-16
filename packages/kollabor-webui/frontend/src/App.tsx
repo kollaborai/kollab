@@ -446,7 +446,7 @@ function RuntimeShell({
   );
 }
 
-export default function App({ contained = false }: { contained?: boolean } = {}) {
+export default function App({ contained = false, phoneLink = false }: { contained?: boolean; phoneLink?: boolean } = {}) {
   const [pageRoute, setPageRoute] = useState(() => readMainPageRoute(window.location));
   const [pluginHost, setPluginHost] = useState<PluginHost | null>(null);
   const [pluginPage, setPluginPage] = useState<{ pluginId: string; target: { page: string } } | null>(null);
@@ -1844,6 +1844,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       json: (path, init) => api.json(path, init), request: (path, init) => api.request(path, init),
       importer: url => import(/* @vite-ignore */ url), storage: window.sessionStorage,
       disabled: new URLSearchParams(window.location.search).get("plugins") === "off",
+      phoneLink,
       navigate: (id, target) => pluginActions.current.navigate(id, target),
       openAgent: id => pluginActions.current.openAgent(id),
       copy: text => navigator.clipboard.writeText(text), toast: setPluginToast, ui: pluginUI,
@@ -2002,7 +2003,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             onChanged={() => void loadSessions()}
             onSessionUpdated={handleSessionUpdated}
             onManageProfiles={() => setProfilesOpen(true)}
-            canManagePlugins={!contained && ["localhost", "127.0.0.1", "::1", "[::1]"].includes(window.location.hostname)}
+            canManagePlugins={!contained && !phoneLink && ["localhost", "127.0.0.1", "::1", "[::1]"].includes(window.location.hostname)}
           />
         ) : null}
         {learnRoute ? <LearnDialog route={learnRoute} onNavigate={navigateToLearn} onExit={returnToChat} /> : null}

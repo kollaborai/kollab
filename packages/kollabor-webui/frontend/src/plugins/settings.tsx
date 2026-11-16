@@ -156,7 +156,7 @@ export function PluginsSettings({ host, api, session, canManage }: { host: Plugi
   const entries = groups.flatMap(group => group.entries);
   const selected = entries.find(entry => entryKey(entry) === selectedKey) ?? entries[0];
   return <div data-plugin className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
-    {!canManage ? <p className="text-muted-foreground mb-4 text-sm">Manage plugins on this computer</p> : null}
+    {!canManage ? <p className="text-muted-foreground mb-4 text-sm">{snapshot.phoneLink ? "Open and manage plugins on this computer" : "Manage plugins on this computer"}</p> : null}
     {snapshot.disabled ? <p className="text-muted-foreground mb-4 text-sm">Plugins are off for this page. Remove <code>?plugins=off</code> and reload.</p> : null}
     {snapshot.inventoryError ? <p role="alert" className="text-destructive text-sm">{snapshot.inventoryError}</p> : null}
     {snapshot.loading && !snapshot.entries.length ? <p className="text-muted-foreground text-sm">Loading plugins…</p> : null}

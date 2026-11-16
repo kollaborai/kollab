@@ -21,6 +21,7 @@ export interface PluginEntry extends WebPluginEntry {
   contributes: Record<string, unknown>;
 }
 export interface PluginHostSnapshot {
+  phoneLink: boolean;
   disabled: boolean;
   loading: boolean;
   inventoryError: string | null;
@@ -42,6 +43,7 @@ export interface PluginHostOptions {
   importer: (url: string) => Promise<unknown>;
   storage: Storage;
   disabled: boolean;
+  phoneLink?: boolean;
   navigate: (pluginId: string, target: PluginOpen) => void;
   openAgent: (sessionId: string) => void;
   copy: (text: string) => Promise<void>;
@@ -159,15 +161,15 @@ export class PluginHost {
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener); };
 
   async start() {
-    if (this.started || this.closed || this.options.disabled) return;
+    if (this.started || this.closed || (this.options.disabled && !this.options.phoneLink)) return;
     this.started = true;
-    this.recoverMarkers();
+    if (!this.options.phoneLink) this.recoverMarkers();
     this.globalEvents.on("plugins-changed", () => { void this.refresh(); });
     await this.refresh();
   }
 
   async refresh({ waitForActivation = true }: { waitForActivation?: boolean } = {}) {
-    if (this.closed || this.options.disabled) return;
+    if (this.closed || (this.options.disabled && !this.options.phoneLink)) return;
     const sequence = ++this.sequence;
     let settle!: () => void;
     this.inventorySettled = new Promise<void>(resolve => { settle = resolve; });
@@ -199,6 +201,7 @@ export class PluginHost {
       this.loading = false;
       this.publish();
       settle();
+      if (this.options.phoneLink) return;
       const activation = this.loader.reconcile(included);
       if (waitForActivation) await activation;
       else void activation.catch(error => {
@@ -276,7 +279,10 @@ export class PluginHost {
     this.registry.remove(id);
     this.publish();
   }
-  async retry(id: string) { await this.loader.retry(id); }
+  async retry(id: string) {
+    if (this.options.phoneLink) return;
+    await this.loader.retry(id);
+  }
   async turnOnAgain(id: string) {
     this.skipped.delete(id);
     this.removeStorage(SKIPPED + id);
@@ -330,7 +336,7 @@ export class PluginHost {
     try { this.options.storage.removeItem(key); } catch (error) { console.warn("Plugin recovery storage is unavailable", error); }
   }
   private makeSnapshot(): PluginHostSnapshot {
-    return { disabled: this.options.disabled, loading: this.loading, inventoryError: this.inventoryError,
+    return { phoneLink: this.options.phoneLink === true, disabled: this.options.disabled && !this.options.phoneLink, loading: this.loading, inventoryError: this.inventoryError,
       entries: this.entries, registry: this.registry.getSnapshot(), errors: this.errors, skipped: [...this.skipped], renderFailed: [...this.renderFailed],
       failedRenderers: [...this.failedRendererMap.values()].flat() };
   }

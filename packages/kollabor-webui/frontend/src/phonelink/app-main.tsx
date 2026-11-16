@@ -9,7 +9,7 @@ document.documentElement.classList.add("dark");
 createRoot(document.getElementById("root")!).render(
   <TooltipProvider>
     <div className="h-dvh min-h-0 overflow-hidden">
-      <App contained />
+      <App contained phoneLink />
     </div>
   </TooltipProvider>,
 );
