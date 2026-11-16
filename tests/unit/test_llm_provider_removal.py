@@ -109,6 +109,9 @@ def test_web_loadout_provider_section_offers_named_two_step_removal(monkeypatch)
     anthropic = next(row for row in result["rows"] if row["group"] == "Models — Anthropic")
     assert anthropic["actions"] == ["activate", "edit", "set_default", "remove_provider"]
     assert anthropic["action_labels"]["remove_provider"] == "Remove Anthropic provider"
+    assert anthropic["action_confirmations"]["remove_provider"].startswith(
+        "Press Confirm to remove the Anthropic provider"
+    )
     assert "anthropic-cloud, anthropic-local" in anthropic["action_confirmations"]["remove_provider"]
     assert "saved-anthropic" in anthropic["action_confirmations"]["remove_provider"]
     openai = next(row for row in result["rows"] if row["group"] == "Models — OpenAI")

@@ -23,7 +23,7 @@ const initialRows: PanelRow[] = [
     action_labels: { remove_provider: "Remove Anthropic provider" },
     action_confirmations: {
       remove_provider:
-        "Press Remove Anthropic provider again to remove the Anthropic provider (profiles anthropic-cloud; saved keys are retained because another project may reference them); any other action cancels. Saved loadouts using it: saved-anthropic.",
+        "Press Confirm to remove the Anthropic provider (profiles anthropic-cloud; saved keys are retained because another project may reference them); any other action cancels. Saved loadouts using it: saved-anthropic.",
     },
   },
   {
@@ -35,7 +35,7 @@ const initialRows: PanelRow[] = [
     action_labels: { remove_provider: "Remove OpenAI provider" },
     action_confirmations: {
       remove_provider:
-        "Press Remove OpenAI provider again to remove the OpenAI provider (profiles openai; saved keys are retained because another project may reference them); any other action cancels.",
+        "Press Confirm to remove the OpenAI provider (profiles openai; saved keys are retained because another project may reference them); any other action cancels.",
     },
   },
 ];
@@ -58,7 +58,7 @@ function Fixture() {
       action_labels: { remove_provider: "Remove Gemini provider" },
       action_confirmations: {
         remove_provider:
-          "Press Remove Gemini provider again to remove the Gemini provider (profiles gemini-provider; saved keys are retained because another project may reference them); any other action cancels.",
+          "Press Confirm to remove the Gemini provider (profiles gemini-provider; saved keys are retained because another project may reference them); any other action cancels.",
       },
     },
   ]);
