@@ -372,7 +372,30 @@ try {
     assert.ok(overflow.document <= 0 && overflow.body <= 0, `settings overflow at ${width}px: ${JSON.stringify(overflow)}`);
     const bounds = await settings.boundingBox();
     assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width + 1, `settings dialog fits at ${width}px: ${JSON.stringify(bounds)}`);
-    if (process.env.PLUGIN_SCREENSHOTS) await page.screenshot({ path: resolve(process.env.PLUGIN_SCREENSHOTS, `settings-${width}.png`) });
+    if (process.env.PLUGIN_SCREENSHOTS) {
+      console.log(`settings overflow ${width}px: ${JSON.stringify(overflow)}`);
+      const wasDark = await page.evaluate(() => document.documentElement.classList.contains("dark"));
+      for (const theme of ["dark", "light"]) {
+        await page.evaluate(dark => document.documentElement.classList.toggle("dark", dark), theme === "dark");
+        await page.screenshot({ path: resolve(process.env.PLUGIN_SCREENSHOTS, `settings-${width}-${theme}.png`) });
+      }
+      await page.evaluate(dark => document.documentElement.classList.toggle("dark", dark), wasDark);
+    }
+  }
+  if (process.env.PLUGIN_SCREENSHOTS) {
+    for (const width of [390, 820]) {
+      await page.setViewportSize({ width, height: 800 });
+      await page.waitForTimeout(650);
+      const overflow = await page.evaluate(() => ({ document: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        body: document.body.scrollWidth - document.body.clientWidth }));
+      console.log(`settings overflow ${width}px: ${JSON.stringify(overflow)}`);
+      const wasDark = await page.evaluate(() => document.documentElement.classList.contains("dark"));
+      for (const theme of ["dark", "light"]) {
+        await page.evaluate(dark => document.documentElement.classList.toggle("dark", dark), theme === "dark");
+        await page.screenshot({ path: resolve(process.env.PLUGIN_SCREENSHOTS, `settings-${width}-${theme}.png`) });
+      }
+      await page.evaluate(dark => document.documentElement.classList.toggle("dark", dark), wasDark);
+    }
   }
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.keyboard.press("Escape");

@@ -159,6 +159,8 @@
 - Mock stopping settings: red browser commit `f5e58960` found no waiting message (`stopping-settings-red.log`). Settings now show a waiting status and prevent toggle and management actions while inventory reports stopping; the service row retains its existing Stopping label. Isolated browser acceptance and typecheck passed (`stopping-settings-green.log`, `stopping-settings-typecheck.log`). This uses a mocked inventory and does not solve the real backend lifecycle or provide a deadline/Terminate control.
 - Isolated production-build preflight at `79fe72ea` succeeded to `~/backups/plugins-step3-work/build-gate-79fe72ea` (`build-gate-79fe72ea.log`); Vite/Rolldown emitted import.meta/IIFE warnings. Repeat all fixed-head gates after remaining edits.
 
+- Settings screenshot/overflow capture at source `711cecdf` plus the screenshot harness edit: `~/backups/plugins-step3-work/ui-review-711cecdf` contains 1440/820/390 dark and light captures, plus 320/768, failed-load and install-review captures. Browser acceptance passed and its log reports zero document/body overflow at all five widths. This covers Settings only, not every required state. Both visual-comparison calls and fallback image-analysis calls timed out; no visual verdict is claimed. A working vision reviewer still must compare every required state and both themes against the mockups.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
