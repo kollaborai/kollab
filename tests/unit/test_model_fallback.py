@@ -219,7 +219,7 @@ async def test_rate_limit_fallback_keeps_saved_global_config_byte_identical(
 
 @pytest.mark.asyncio
 async def test_fallback_restores_the_active_profile_before_the_next_input(monkeypatch):
-    plugin, _, _, profiles = await _agent(
+    plugin, bus, _, profiles = await _agent(
         monkeypatch, {"plugins.model_fallback.loadout": "codex"}
     )
 
@@ -228,14 +228,14 @@ async def test_fallback_restores_the_active_profile_before_the_next_input(monkey
     ) == "retry"
     assert profiles.active == "codex"
 
-    await plugin._restore_after_fallback({}, None)
+    await bus.fire(EventType.USER_INPUT_PRE)
 
     assert profiles.active == "glm"
 
 
 @pytest.mark.asyncio
 async def test_resend_uses_fallback_once_before_restoring_the_active_profile(monkeypatch):
-    plugin, _, _, profiles = await _agent(
+    plugin, bus, _, profiles = await _agent(
         monkeypatch, {"plugins.model_fallback.loadout": "codex"}
     )
 
@@ -243,10 +243,10 @@ async def test_resend_uses_fallback_once_before_restoring_the_active_profile(mon
         "Rate limit exceeded. Please try again later.", retry=False
     ) == "resend"
 
-    await plugin._restore_after_fallback({}, None)
+    await bus.fire(EventType.USER_INPUT_PRE)
     assert profiles.active == "codex"
 
-    await plugin._restore_after_fallback({}, None)
+    await bus.fire(EventType.USER_INPUT_PRE)
     assert profiles.active == "glm"
 
 
