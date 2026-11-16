@@ -421,7 +421,7 @@ def test_regression_test_no_findings_passes(tmp_path: Path) -> None:
 
 def test_regression_test_covered_and_uncovered_with_review(tmp_path: Path) -> None:
     cfg = regression_cfg(tmp_path)
-    data_kw = dict(review_comment_bodies=["F14: the psutil bypass is open"], reviews=(approved_review(),))
+    data_kw = dict(comments=(pr_gates_dod.PRComment("review_comment", 1, "F14: the psutil bypass is open", "reviewer", "2026-11-01T12:00:00Z"),), reviews=(approved_review(),))
     ok = pr_gates_dod.evaluate(
         cfg,
         make_data(
@@ -1047,14 +1047,22 @@ def test_workflow_runs_the_base_copy_and_no_pr_code() -> None:
     workflow = yaml.load(WORKFLOW_FILE.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
     # Only pull_request_target runs the base branch's copy, so a PR cannot rewrite
     # its own grade or reach the token.
-    assert list(workflow["on"]) == ["pull_request_target"]
+    assert set(workflow["on"]) == {"pull_request_target", "pull_request_review", "pull_request_review_comment", "issue_comment"}
+    assert {"submitted", "dismissed", "edited"} <= set(workflow["on"]["pull_request_review"]["types"])
+    for event in ("issue_comment", "pull_request_review_comment"):
+        assert set(workflow["on"][event]["types"]) == {"created", "edited", "deleted"}
+    assert "github.event.issue.pull_request" in workflow["jobs"]["dod"]["if"]
     # The title and body are graded, so an edit has to grade again.
     assert {"opened", "synchronize", "reopened", "ready_for_review", "edited"} <= set(
         workflow["on"]["pull_request_target"]["types"]
     )
     steps = workflow["jobs"]["dod"]["steps"]
     checkout = next(s for s in steps if s.get("uses", "").startswith("actions/checkout@"))
-    assert "ref" not in checkout.get("with", {})
+    assert checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}"
+    run = steps[-1]
+    assert "PR_NUMBER" in run["env"]
+    assert "EVENT_HEAD_SHA" in run["env"]
+    assert "github.event" not in run["run"]
 
 
 def test_audit_lines_record_actions(tmp_path, capsys) -> None:
@@ -1371,6 +1379,7 @@ def test_collect_pr_data_keeps_comment_identity_and_review_approval_metadata(mon
         "id": 100,
         "body": "F11 was reported by the test suite.",
         "created_at": "2026-11-08T01:00:00Z",
+        "updated_at": "2026-11-08T01:01:00Z",
         "pull_request_review_id": 300,
         "user": {"login": "inline-reviewer"},
     }
@@ -1411,11 +1420,11 @@ def test_collect_pr_data_keeps_comment_identity_and_review_approval_metadata(mon
             "2026-11-08T01:00:00Z",
             300,
             "",
-            0,
+            updated_at="2026-11-08T01:01:00Z",
         ),
         pr_gates_dod.PRComment(
             "issue_comment", 200, issue_comment["body"], "trusted-reviewer", "", 0,
-            "", None
+            ""
         ),
     )
     assert data.reviews == (
@@ -1692,7 +1701,7 @@ def test_main_disabled_never_calls_github(tmp_path, monkeypatch, capsys) -> None
 def test_regression_test_matches_whole_finding_id(tmp_path, test_content, covered) -> None:
     cfg = regression_cfg(tmp_path)
     data = make_data(
-        review_comment_bodies=("F1: the base check is wrong",),
+        comments=(pr_gates_dod.PRComment("review_comment", 1, "F1: the base check is wrong", "reviewer", "2026-11-01T12:00:00Z"),),
         reviews=(approved_review(),),
         changed_file_contents={"tests/test_x.py": test_content},
     )

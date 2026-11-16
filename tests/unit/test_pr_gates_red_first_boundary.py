@@ -211,3 +211,45 @@ def test_collector_does_not_fetch_execution_proxies(tmp_path, monkeypatch):
     data = pr_gates_dod.collect_pr_data("o/r", PR_NUM, root=str(tmp_path))
     assert data.review_comment_bodies == ("F14: runtime defect",)
     assert not any("/timeline" in str(call) or "/commits/" in str(call) for call in calls)
+
+
+@pytest.mark.parametrize(
+    "created,updated",
+    (
+        ("2026-11-09T00:00:00Z", "2026-11-09T00:00:00Z"),
+        ("2026-11-01T12:00:00Z", "2026-11-09T00:00:00Z"),
+        ("", ""),
+        ("invalid", "invalid"),
+        ("2026-11-01T12:00:00Z", "2026-10-01T12:00:00Z"),
+        ("2026-11-08T00:00:09Z", "2026-11-08T00:00:09Z"),
+    ),
+)
+def test_approval_must_follow_latest_finding_revision(tmp_path, created, updated):
+    data = history("20-unrelated-runtime-value")
+    data.comments[0].created_at = created
+    data.comments[0].updated_at = updated
+    data = replace(data, reviews=(approved_review(),))
+    report = pr_gates_dod.evaluate(regression_cfg(tmp_path), data)
+    assert report.exit_code == 1
+    assert "independent current-head approval required" in report.summary()
+
+
+def test_mismatched_comment_snapshot_cannot_authorize_approval(tmp_path):
+    data = replace(
+        history("20-unrelated-runtime-value"),
+        reviews=(approved_review(),),
+        review_comment_bodies=("F17: different source",),
+    )
+    report = pr_gates_dod.evaluate(regression_cfg(tmp_path), data)
+    assert report.exit_code == 1
+
+
+def test_comment_events_post_to_collected_head(tmp_path, monkeypatch):
+    cfg = tmp_path / "gate.toml"
+    cfg.write_text("[pr_gates.dod]\nenabled = true\nchecks = []\n")
+    data = make_data()
+    posted = []
+    monkeypatch.setattr(pr_gates_dod, "collect_pr_data", lambda *_a, **_kw: data)
+    monkeypatch.setattr(pr_gates_dod, "main_post_if_enabled", lambda *_a, **kw: posted.append(kw))
+    assert pr_gates_dod.main(["--repo", "o/r", "--pr", "1", "--config", str(cfg), "--post"]) == 0
+    assert posted == [{"repo": "o/r", "head_sha": data.head_sha}]
