@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-11-15
+
+### Added
+- Images sent to an agent show as thumbnails instead of [imageN] tokens, click one for a full-size viewer, and each agent's new Gallery lists every image sent to it plus the tool outputs its work spilled to disk (#1088).
+- Optional Developer ID signing and notarization is wired into the macOS desktop
+  packaging job behind a manual `apple_signing_mode` choice; developer-id runs
+  notarize and staple the `.dmg` too (#1086).
+
+### Fixed
+- When the engine or the web UI process behind Kollab stops, Kollab starts it again by itself: `kollab --web-ui` restarts a dead engine on the same port, and Kollab.app restarts a runtime whose web UI stopped answering, instead of leaving the window on "Load failed" until Kollab is reopened. After three restarts in ten minutes the app shows its error page with a Retry button (#1123)
+- Guided setup's primary footer action no longer carries a trailing chevron (#1118).
+- Guided setup completed steps now use the app's highlight accent (#1116).
+- In the setup guide, the Network step's Open action now opens the Settings dialog on the Network tab before any session exists, instead of only advancing the step (#1115).
+- In the setup guide, the Provider step's Open action now actually shows provider Settings: the setup wizard mounts without a session and a saved profile activates from the engine host's config (#1114).
+- Devices on 0.22.0 see and open each other's agents again; each had refused the other's agent list because
+  it carried the new version and build fields (#1093).
+- The guided setup dialog shows one close button again: the header skip control; the dialog frame's second, duplicate X is gone (#1091).
+- The macOS desktop dmg carries an Applications shortcut next to the app, so
+  the standard drag-to-install gesture works (#1083).
+- Voice turns from a LiveKit room to an ACP harness (Claude Code, Codex) now carry the voice tag and queue behind the running turn instead of interrupting it, matching `/voice` mic turns (#1079).
+- MCP calls interrupted by a shared connection close now report when a written request may have an unknown outcome (#919).
+- Oversized MCP stdout frames now fail pending requests with a bounded error and close the unusable reader session (#917).
+- MCP stdio responses now handle UTF-8 characters split across reads and discard malformed or oversized frames safely (#916).
+- Hub work reports an unavailable task ledger and marks partial results instead of implying durable work is empty (#911).
+- A recurring job's refused send to a plain local target is no longer counted
+  as delivered: the refusal is recorded and does not use up the hourly cap
+  (#870).
+- A wake hook skipped by a target's cooldown no longer locks that target out of
+  the event: a repeat wakes it once the cooldown ends (#867).
+- Web UI chats catch up on messages and replies that arrive during a local turn (#849).
+- Auto provider detection matches vendor domains against the endpoint host (#848).
+
 ## [0.22.0] - 2026-11-14
 
 ### Added
