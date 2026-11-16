@@ -188,7 +188,25 @@ def slot_count(conversations_dir: Path, session_id: str) -> int:
     return len(_read_index(conversations_dir, session_id))
 
 
-_IMAGE_TOKEN_RE = re.compile(r"\[image\d+\]")
+# [[imageN]] (double brackets) is the escaped literal form - text, not a
+# token (#1124 P2a) - so it neither consumes a slot nor counts toward the
+# page-offset skip.
+# The token branch's digit run must contain a nonzero digit (value > 0):
+# [image0] and [image00] are text, matching the frontend's near-miss
+# grammar; [image01] is a token (value 1).
+# One alternation mirrors the frontend splitter (#1140 review): a
+# well-formed escape matches whole; a one-sided bracket run such as
+# "[[image1]" or "[image1]]" yields its inner token plus stray-bracket
+# text, so the inner token counts. findall carries only the token group,
+# and escape-only matches come back as "".
+# ASCII digits only (#1140 R3): Python's Unicode \d used to count
+# non-ASCII digit runs (e.g. Arabic-Indic) as tokens while the JS splitter
+# read them as literal text, misbinding stored images to prose rows.
+_IMAGE_TOKEN_RE = re.compile(r"\[\[image[0-9]+\]\]|(\[image[0-9]*[1-9][0-9]*\])")
+
+
+def _count_token_matches(content: str) -> int:
+    return sum(1 for token in _IMAGE_TOKEN_RE.findall(content) if token)
 
 
 def count_image_tokens(content: object) -> int:
@@ -202,17 +220,17 @@ def count_image_tokens(content: object) -> int:
     page-offset skip must count them identically.
     """
     if isinstance(content, str):
-        return len(_IMAGE_TOKEN_RE.findall(content))
+        return _count_token_matches(content)
     if isinstance(content, list):
         tokens = 0
         parts = 0
         for part in content:
             if isinstance(part, str):
-                tokens += len(_IMAGE_TOKEN_RE.findall(part))
+                tokens += _count_token_matches(part)
             elif isinstance(part, dict):
                 text = part.get("text")
                 if isinstance(text, str):
-                    tokens += len(_IMAGE_TOKEN_RE.findall(text))
+                    tokens += _count_token_matches(text)
                 if part.get("type") == "image":
                     parts += 1
         # Image parts are authoritative: _save_sent_media stores exactly one
@@ -260,9 +278,16 @@ def attach_media_to_rows(
         cursor += len(taken)
         if not taken:
             break
-        # Tombstoned slots (a part whose storage failed) hold the row's
-        # place in the count but bind nothing.
-        bound = [e for e in taken if e.get("ref")]
+        # Dense typed slot union (#1124 P2a): every consumed slot emits one
+        # entry, so media[i] is the [image{i+1}] token's image even when the
+        # row mixes stored and failed parts. Tombstones (a part whose
+        # storage failed) emit {ref: "", mime: "", failed: true} - they bind
+        # nothing, are never requested, and list_for still hides them from
+        # the gallery and viewer. Compacting them out would shift every
+        # later token's ordinal within the row.
         row["media"] = [
-            {"ref": e.get("ref"), "mime": e.get("mime")} for e in bound
+            {"ref": "", "mime": "", "failed": True}
+            if not e.get("ref")
+            else {"ref": e.get("ref"), "mime": e.get("mime")}
+            for e in taken
         ]
