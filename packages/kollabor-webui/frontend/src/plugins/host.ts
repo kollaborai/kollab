@@ -29,6 +29,11 @@ export interface PluginHostSnapshot {
   skipped: string[];
   renderFailed: string[];
 }
+export interface ServiceCrash {
+  pluginId: string;
+  pluginName: string;
+  serviceName: string;
+}
 export interface PluginHostOptions {
   json: (path: string, init?: RequestInit) => Promise<unknown>;
   request: (path: string, init?: RequestInit) => Promise<Response>;
@@ -39,6 +44,7 @@ export interface PluginHostOptions {
   openAgent: (sessionId: string) => void;
   copy: (text: string) => Promise<void>;
   toast: (text: string) => void;
+  onServiceCrash?: (events: ServiceCrash[]) => void;
   ui: Record<string, unknown>;
   builtinCommands?: string[];
 }
@@ -190,7 +196,7 @@ export class PluginHost {
 
   private syncCrashNotices() {
     const current = new Set<string>();
-    const newlyStopped: string[] = [];
+    const newlyStopped: ServiceCrash[] = [];
     for (const entry of this.entries) {
       if (!entry.enabled || entry.shadowed || !Array.isArray(entry.services)) continue;
       for (const value of entry.services) {
@@ -199,12 +205,13 @@ export class PluginHost {
         if (service.state !== "crash-stopped" || typeof service.name !== "string") continue;
         const key = JSON.stringify([entry.id, entry.kind, entry.source, service.name]);
         current.add(key);
-        if (!this.crashNotices.has(key)) newlyStopped.push(`${entry.name}: ${service.name}`);
+        if (!this.crashNotices.has(key)) newlyStopped.push({ pluginId: entry.id, pluginName: entry.name, serviceName: service.name });
       }
     }
     this.crashNotices = current;
     if (newlyStopped.length) {
-      this.options.toast(`${newlyStopped.join(", ")} stopped after 5 crashes. Open Settings → Plugins to view its log.`);
+      if (this.options.onServiceCrash) this.options.onServiceCrash(newlyStopped);
+      else this.options.toast(`${newlyStopped.map(item => `${item.pluginName}: ${item.serviceName}`).join(", ")} stopped after 5 crashes. Open Settings → Plugins to view its log.`);
     }
   }
 

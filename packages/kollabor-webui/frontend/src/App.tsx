@@ -65,7 +65,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { PluginHostContext, PluginNotices, PluginSessionContext, PluginTurnOffContext, usePluginHost } from "@/plugins/components";
 import { PluginSessionView, pluginViewKey } from "@/plugins/session";
-import { PluginHost } from "@/plugins/host";
+import { PluginHost, type ServiceCrash } from "@/plugins/host";
 import { pluginUI } from "@/plugins/ui";
 import type { PluginOpen } from "@/plugins/sdk";
 import { PluginModalSurface, PluginPageSurface } from "@/plugins/surfaces";
@@ -451,6 +451,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [pluginHost, setPluginHost] = useState<PluginHost | null>(null);
   const [pluginTarget, setPluginTarget] = useState<{ pluginId: string; target: PluginOpen } | null>(null);
   const [pluginToast, setPluginToast] = useState<string | null>(null);
+  const [serviceCrashes, setServiceCrashes] = useState<ServiceCrash[]>([]);
+  const [serviceLog, setServiceLog] = useState<{ id: number; name: string; text?: string; error?: string } | null>(null);
+  const serviceLogId = useRef(0);
   const [turnOffTarget, setTurnOffTarget] = useState<{ id: string; name: string } | null>(null);
   const [turnOffBusy, setTurnOffBusy] = useState(false);
   const [turnOffError, setTurnOffError] = useState<string | null>(null);
@@ -1773,6 +1776,19 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     }
   };
 
+  const openServiceCrashLog = async (crash: ServiceCrash) => {
+    const id = ++serviceLogId.current;
+    setServiceLog({ id, name: crash.serviceName });
+    try {
+      const response = await api.request(`/plugins/${encodeURIComponent(crash.pluginId)}/services/${encodeURIComponent(crash.serviceName)}/log`);
+      const text = await response.text();
+      setServiceLog(current => current?.id === id ? { ...current, text } : current);
+    } catch (caught) {
+      setServiceLog(current => current?.id === id ? { ...current, error: errorText(caught) } : current);
+    }
+  };
+
+
   const turnOffPlugin = (id: string) => {
     if (contained || !["localhost", "127.0.0.1", "::1", "[::1]"].includes(window.location.hostname)) {
       setPluginToast("Manage plugins on this computer");
@@ -1829,6 +1845,10 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       navigate: (id, target) => pluginActions.current.navigate(id, target),
       openAgent: id => pluginActions.current.openAgent(id),
       copy: text => navigator.clipboard.writeText(text), toast: setPluginToast, ui: pluginUI,
+      onServiceCrash: events => setServiceCrashes(current => [
+        ...current,
+        ...events.filter(event => !current.some(item => item.pluginId === event.pluginId && item.serviceName === event.serviceName)),
+      ]),
       builtinCommands: DEFAULT_SLASH_COMMANDS.flatMap(command => [command.name, ...(command.aliases ?? [])]),
     });
     setPluginHost(host);
@@ -1992,6 +2012,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           className={`${contained ? "h-[calc(100%-1rem)] max-h-[calc(100%-1rem)]" : "h-[calc(100svh-1rem)] max-h-[calc(100svh-1rem)]"} min-h-0 overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`}
         >
           {pluginHost ? <PluginNotices host={pluginHost} /> : null}
+          {serviceCrashes.map(crash => <NoticeBar key={`${crash.pluginId}:${crash.serviceName}`}
+            actions={<NoticeAction onClick={() => { void openServiceCrashLog(crash); }}>View Log</NoticeAction>}
+            onDismiss={() => setServiceCrashes(current => current.filter(item => item.pluginId !== crash.pluginId || item.serviceName !== crash.serviceName))}>
+            {crash.pluginName}: {crash.serviceName} stopped after 5 crashes.
+          </NoticeBar>)}
           {pluginToast ? <NoticeBar onDismiss={() => setPluginToast(null)}>{pluginToast}</NoticeBar> : null}
           {whatsNewActive ? <WhatsNewPage onExit={returnToChat} /> : null}
           {pluginHost && pluginPage && "page" in pluginPage.target ? <PluginPageSurface host={pluginHost} pluginId={pluginPage.pluginId}
@@ -2181,6 +2206,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           )}
           </div>
         </SidebarInset>
+        <Dialog open={serviceLog !== null} onOpenChange={open => { if (!open) setServiceLog(null); }}>
+          <DialogContent>
+            <DialogHeader><DialogTitle>{serviceLog?.name} Log</DialogTitle><DialogDescription>Most recent redacted output.</DialogDescription></DialogHeader>
+            {serviceLog?.error ? <p role="alert" className="text-destructive text-sm">{serviceLog.error}</p> :
+              <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words text-xs">{serviceLog?.text === undefined ? "Loading…" : serviceLog.text || "No log output."}</pre>}
+          </DialogContent>
+        </Dialog>
+
         <Dialog open={Boolean(turnOffTarget)} onOpenChange={open => { if (!open && !turnOffBusy) setTurnOffTarget(null); }}>
           <DialogContent>
             <DialogHeader>

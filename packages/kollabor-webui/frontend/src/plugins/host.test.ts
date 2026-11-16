@@ -149,6 +149,22 @@ describe("plugin host lifecycle", () => {
   });
 
 
+  it("delivers actionable crash identities without also showing a text toast", async () => {
+    const crashed = { ...entry("hello"), services: [{ name: "worker", state: "crash-stopped" }] };
+    const json = vi.fn().mockResolvedValue({ schema: 1, plugins: [crashed] });
+    const toast = vi.fn();
+    const onServiceCrash = vi.fn();
+    const { host } = setup({ json, toast, onServiceCrash });
+    try {
+      await host.start();
+      expect(onServiceCrash).toHaveBeenCalledWith([{ pluginId: "hello", pluginName: "hello", serviceName: "worker" }]);
+      await host.refresh();
+      expect(onServiceCrash).toHaveBeenCalledTimes(1);
+      expect(toast).not.toHaveBeenCalled();
+    } finally { host.close(); }
+  });
+
+
   it("refreshes declared menu labels when the manifest changes without a bundle change", async () => {
     const importer = vi.fn(async () => ({ default: (k: { menu(id: string): void }) => k.menu("board") }));
     const { host, setInventory } = setup({ importer });
