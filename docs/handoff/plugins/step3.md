@@ -82,3 +82,4 @@ The brief says finding 1 changes a Python file, but the review identifies the ta
 
 Red-first browser regression: `review-tabs-red.log` records an 820px clipped Settings tab assertion on the pre-fix build using Node 24.18.0 and built-preview acceptance. Next: fix wrapping, then red-first cover Retry sizing.
 The tab row now wraps at all widths. Built-preview browser acceptance passes with the new 820px regression (`review-tabs-green.log`); build log `review-tabs-build.log`. Next: add a red-first Retry/View Error size check and fix its styling.
+Retry red-first regression in `review-retry-red.log`: Settings Retry measures 21.59375px versus View Error 28.796875px. The 820px browser check now waits for dialog resize animation to settle; the earlier run showed a timing-dependent failure. Next: use the shared sm button size and rerun acceptance.

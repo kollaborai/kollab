@@ -554,6 +554,7 @@ try {
   await page.getByRole("button", { name: "Settings", exact: true }).first().click();
   const settings = page.getByRole("dialog", { name: "Settings" });
   await page.setViewportSize({ width: 820, height: 800 });
+  await page.waitForTimeout(400); // Allow the settings dialog's resize transition to settle.
   const settingsTabList = settings.getByRole("tablist", { name: "Settings sections" });
   const tabListBox = await settingsTabList.boundingBox();
   for (const tab of await settingsTabList.getByRole("tab").all()) {
@@ -563,6 +564,11 @@ try {
   }
   await page.setViewportSize({ width: 1280, height: 800 });
   await settings.getByRole("tab", { name: "Plugins" }).click({ timeout: 5000 });
+  await settings.getByRole("button", { name: "Zulu", exact: true }).click();
+  const brokenDetails = settings.getByRole("region", { name: "Zulu details" });
+  const retryHeight = await brokenDetails.getByRole("button", { name: "Retry", exact: true }).evaluate(node => node.getBoundingClientRect().height);
+  const viewErrorHeight = await brokenDetails.getByRole("button", { name: "View Error", exact: true }).evaluate(node => node.getBoundingClientRect().height);
+  assert.equal(retryHeight, viewErrorHeight, "Retry and View Error have matching heights");
   const damagedListItem = settings.getByRole("button", { name: "Damaged", exact: true });
   assert.match(await damagedListItem.innerText(), /Changed on Disk/, "inventory changed-on-disk state is distinct from load failure");
   await damagedListItem.click();
