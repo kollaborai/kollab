@@ -358,8 +358,8 @@ def _fallback_plugin(ctx: Any) -> Any:
 
 
 def _fallback_controls(ctx: Any, manager: Any) -> list:
-    """The Fallback dropdown: what this agent switches to when its model can't
-    serve a turn (#548). Offers each connection with its own model and every
+    """The Fallback dropdown: what this agent suggests when its model can't
+    serve a turn. Offers each connection with its own model and every
     saved loadout; a catalog model set with /llm fallback is shown as well."""
     plugin = _fallback_plugin(ctx)
     if plugin is None:
@@ -377,8 +377,8 @@ def _fallback_controls(ctx: Any, manager: Any) -> list:
     return [make_field(
         "fallback", "dropdown", "Fallback Model", action="fallback",
         value=choice or "off", options=list(labels), option_labels=labels,
-        help="If this agent hits a usage limit or its login expires, it runs the turn once more"
-        " on this model. Saved for this agent.",
+        help="Loadout suggested after a usage limit or expired login. "
+        "Automatic switching is disabled; select it explicitly before sending again. Saved for this agent.",
     )]
 
 
