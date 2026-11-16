@@ -56,7 +56,8 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
   const monitorHeartbeat = snapshot.entries.some(entry => entry.services?.some(service =>
     typeof service === "object" && service !== null && "state" in service && service.state === "running" &&
     "heartbeat_s" in service && typeof service.heartbeat_s === "number" && service.heartbeat_s > 0));
-  const now = useHeartbeatClock(monitorHeartbeat);
+  useHeartbeatClock(monitorHeartbeat);
+  const now = host.engineTime();
   const plugins = [...snapshot.registry.plugins].sort((a, b) => {
     const name = (id: string) => snapshot.entries.find(entry => entry.id === id)?.name ?? id;
     return name(a.id).localeCompare(name(b.id)) || a.id.localeCompare(b.id);

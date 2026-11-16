@@ -11,8 +11,8 @@ export function engineClock(serverTime: unknown, sampledAt: number, now: number)
 
 
 /** Seconds since the last promised heartbeat (or process start), once overdue. */
-export function heartbeatAge(value: unknown, now = Date.now() / 1000): number | null {
-  if (!value || typeof value !== "object") return null;
+export function heartbeatAge(value: unknown, now: number | null): number | null {
+  if (!value || typeof value !== "object" || now === null) return null;
   const service = value as Record<string, unknown>;
   if (service.state !== "running" || !finitePositive(service.heartbeat_s) || !Number.isFinite(now)) return null;
   const heartbeat = finitePositive(service.heartbeat) ? service.heartbeat : 0;

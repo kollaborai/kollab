@@ -15,13 +15,13 @@ type PluginService = { name: string; state: string; desired?: string; since?: nu
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const pathFor = (id: string) => `/plugins/${encodeURIComponent(id)}`;
 
-function ServiceRow({ service, api, id, canManage, refresh, onError }: {
-  service: PluginService; api: EngineApi; id: string; canManage: boolean; refresh: () => Promise<void>; onError: (message: string) => void;
+function ServiceRow({ service, host, api, id, canManage, refresh, onError }: {
+  service: PluginService; host: PluginHost; api: EngineApi; id: string; canManage: boolean; refresh: () => Promise<void>; onError: (message: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string | null>(null);
-  const now = useHeartbeatClock(service.state === "running" && Boolean(service.heartbeat_s));
-  const staleAge = heartbeatAge(service, now);
+  useHeartbeatClock(service.state === "running" && Boolean(service.heartbeat_s));
+  const staleAge = heartbeatAge(service, host.engineTime());
   const state = service.state === "running" ? (staleAge === null ? "Running" : `Running · ${heartbeatLabel(staleAge)}`) : service.state === "stopping" ? "Stopping" :
     service.state === "exited" ? "Exited" : service.state === "failed" || service.state === "crash-stopped" ? "Stopped After 5 Crashes" :
     service.state === "stopped" ? "Stopped" : service.state;
@@ -92,7 +92,7 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate }: { entr
     <div className="flex min-w-0 flex-col gap-4 py-4">
       {failure ? <div className="flex flex-wrap gap-2"><Button type="button" size="xs" onClick={() => { void host.retry(entry.id); }}>Retry</Button><details className="text-sm"><summary>View Error</summary><pre className="whitespace-pre-wrap break-words">{failure}</pre></details></div> : null}
       {entry.kind === "dev" && entry.source ? <p className="text-muted-foreground break-all text-sm">Development folder: {entry.source}</p> : null}
-      {services.length ? <div><h3 className="text-sm font-semibold">Background Processes</h3>{services.map(service => <ServiceRow key={service.name} service={service} api={api} id={entry.id} canManage={canChange} refresh={() => host.refresh()} onError={setError} />)}</div> : null}
+      {services.length ? <div><h3 className="text-sm font-semibold">Background Processes</h3>{services.map(service => <ServiceRow key={service.name} service={service} host={host} api={api} id={entry.id} canManage={canChange} refresh={() => host.refresh()} onError={setError} />)}</div> : null}
       {entry.uses?.length ? <div><h3 className="text-sm font-semibold">What it uses</h3><ul className="text-muted-foreground list-disc pl-5 text-sm">{entry.uses.map((value, i) => <li key={i}>{typeof value === "string" ? value : JSON.stringify(value)}</li>)}</ul></div> : null}
       {fields.length ? <div className="flex flex-col gap-3"><h3 className="text-sm font-semibold">Settings</h3>{fields.map(field => <FieldRenderer key={field.path} field={field} draft={draft} disabled={!canManage || busy} onChange={setDraft} />)}
         {canManage ? <Button type="button" size="sm" className="self-start" disabled={busy || !Object.keys(draft).length} onClick={() => { void save(); }}>Save Settings</Button> : null}</div> : null}
