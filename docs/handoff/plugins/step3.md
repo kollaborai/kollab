@@ -237,7 +237,7 @@
 
 - Settings version: `92b6e94f` adds the red browser assertion (`settings-version-red.log`) for the spec's required version; `fa8a4526` displays a present version in plugin details. Browser acceptance and typecheck passed (`settings-version-green.log`, `settings-version-typecheck.log`).
 
-- Settings service states: red browser test `7b88f1b2` failed on the missing list-row stopping state (`settings-list-services-red.log`). Fix `9f726eeca` shares the service-state formatter between details and list, including stopping deadlines, missed heartbeat and crash-stop, and updates time-based labels on a clock. Development browser acceptance and typecheck passed (`settings-list-services-green-final.log`, `settings-list-services-typecheck-final.log`). Running duration is still absent and needs its own red test/fix.
+- Settings service states: red browser test `7b88f1b2` failed on the missing list-row stopping state (`settings-list-services-red.log`). Fix `9f726eeca` shares the service-state formatter between details and list, including stopping deadlines, missed heartbeat and crash-stop, and updates time-based labels on a clock. Development browser acceptance and typecheck passed (`settings-list-services-green-final.log`, `settings-list-services-typecheck-final.log`). Running duration is now included when an engine start time is known: red browser `e27d1c49e` and red unit `104520dfe` failed as expected (`settings-runtime-red.log`, `settings-runtime-unit-red.log`); fix `64b7c32b0` passes browser, unit, and typecheck (`settings-runtime-green.log`, `settings-runtime-unit-green.log`, `settings-runtime-typecheck.log`). Unknown/future start times do not invent a duration.
 
 ## Remaining
 
