@@ -52,6 +52,22 @@ describe("plugin event stream", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("accepts a large chunk containing individually bounded event frames", async () => {
+    const payload = "a".repeat(600_000);
+    const frame = `event: p:status\ndata: {"value":"${payload}"}\n\n`;
+    const request = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode(frame + frame)); },
+    })));
+    const onError = vi.fn();
+    const received = vi.fn();
+    const stream = new PluginEventStream(request, "/plugins/events", onError);
+    try {
+      stream.on("p:status", received);
+      await vi.waitFor(() => expect(received).toHaveBeenCalledTimes(2));
+      expect(onError).not.toHaveBeenCalled();
+    } finally { stream.close(); }
+  });
+
   it("cancels an oversized event stream before reconnecting", async () => {
     const cancel = vi.fn();
     const request = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
