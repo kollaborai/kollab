@@ -9,6 +9,7 @@ import { PluginRenderBoundary, usePluginSnapshot } from "./components";
 import type { PluginEntry, PluginHost } from "./host";
 import { PluginInstallDialog } from "./install";
 import { heartbeatAge, heartbeatLabel, runtimeLabel, stoppingLabel, useHeartbeatClock } from "./heartbeat";
+import { describeUses, PLUGIN_TRUST_NOTICE } from "./uses";
 
 type PluginService = { name: string; state: string; desired?: string; since?: number | null; restarts?: number; heartbeat?: number | null; heartbeat_s?: number | null; error?: string | null };
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -80,6 +81,7 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate, detailRe
   const [confirmation, setConfirmation] = useState<"disable" | "remove" | null>(null);
   const fields = (entry.settings ?? []).filter((field): field is PanelField => Boolean(field && typeof field === "object" && typeof (field as PanelField).path === "string"));
   const services = validServices(entry);
+  const uses = describeUses(entry.uses);
   const plugin = snapshot.registry.plugins.find(item => item.id === entry.id);
   const context = host.getContext(entry.id);
   const custom = plugin?.settings[0];
@@ -125,7 +127,10 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate, detailRe
       {failure ? <div className="flex flex-wrap gap-2">{!snapshot.phoneLink ? <Button type="button" size="xs" onClick={() => { void host.retry(entry.id); }}>Retry</Button> : null}<details className="text-sm"><summary>View Error</summary><pre className="whitespace-pre-wrap break-words">{failure}</pre></details></div> : null}
       {entry.kind === "dev" && entry.source ? <p className="text-muted-foreground break-all text-sm">Development folder: {entry.source}</p> : null}
       {services.length ? <div><h3 className="text-sm font-semibold">Background Processes</h3>{services.map(service => <ServiceRow key={service.name} service={service} host={host} api={api} id={entry.id} canManage={canManageServices} canStart={entry.enabled} refresh={() => host.refresh()} onError={setError} />)}</div> : null}
-      {entry.uses?.length ? <div><h3 className="text-sm font-semibold">What it uses</h3><ul className="text-muted-foreground list-disc pl-5 text-sm">{entry.uses.map((value, i) => <li key={i}>{typeof value === "string" ? value : JSON.stringify(value)}</li>)}</ul></div> : null}
+      {entry.uses?.length ? <div><h3 className="text-sm font-semibold">What It Uses</h3>
+        {([['Through Kollab', uses.throughKollab], ['On Its Own', uses.onItsOwn], ['Other Declarations', uses.other]] as const).map(([label, values]) => values.length ? <div key={label} className="mt-2 text-sm"><h4 className="font-medium">{label}</h4><ul className="text-muted-foreground list-disc pl-5">{values.map((value, i) => <li key={i} className="break-words">{value}</li>)}</ul></div> : null)}
+        <p className="text-muted-foreground mt-2 text-xs">{PLUGIN_TRUST_NOTICE}</p>
+      </div> : null}
       {fields.length ? <div className="flex flex-col gap-3"><h3 className="text-sm font-semibold">Settings</h3>{fields.map(field => <FieldRenderer key={field.path} field={field} draft={draft} disabled={!canManage || busy} onChange={setDraft} />)}
         {canManage ? <Button type="button" size="sm" className="self-start" disabled={busy || !Object.keys(draft).length} onClick={() => { void save(); }}>Save Settings</Button> : null}</div> : null}
       {custom && context ? <div data-plugin={entry.id}><PluginRenderBoundary name={entry.name} onError={error => host.reportRenderError(entry.id, error)} onRetry={() => { void host.retry(entry.id); }} onTurnOff={() => setConfirmation("disable")}>
