@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -609,7 +610,7 @@ def control_service(
         raise ValueError("Service is alive without a verified wrapper")
     definition = manifest["services"][service_name]
     timeout = definition.get("stop_timeout_s", 10) if isinstance(definition, dict) else 10
-    if type(timeout) not in (int, float) or not 0 < timeout <= 300:
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
         timeout = 10
     already_stopping = state.get("status") == "stopping" and state.get("desired") == "stopped"
     state.update(
