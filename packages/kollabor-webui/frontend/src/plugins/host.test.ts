@@ -84,6 +84,29 @@ describe("plugin host lifecycle", () => {
   });
 
 
+  it("keeps a disabled plugin mounted while stopping and polls until it is off", async () => {
+    vi.useFakeTimers();
+    const active = entry("hello");
+    const stopping = { ...active, enabled: false, state: "stopping", services: [{ name: "worker", state: "stopping", stop_deadline: 1100 }] };
+    const off = { ...active, enabled: false, state: "off" };
+    const json = vi.fn().mockResolvedValueOnce({ schema: 1, server_time: 1000, plugins: [active] })
+      .mockResolvedValueOnce({ schema: 1, server_time: 1001, plugins: [stopping] })
+      .mockResolvedValue({ schema: 1, server_time: 1003, plugins: [off] });
+    const { host, activation, closeStream } = setup({ json });
+    try {
+      await host.start();
+      expect(host.getSnapshot().registry.plugins).toHaveLength(1);
+      await host.refresh();
+      expect(host.getSnapshot().registry.plugins).toHaveLength(1);
+      expect(activation).toHaveBeenCalledTimes(1);
+      expect(closeStream).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(host.getSnapshot().registry.plugins).toHaveLength(0);
+      expect(closeStream).toHaveBeenCalledTimes(1);
+    } finally { host.close(); vi.useRealTimers(); }
+  });
+
+
   it("refreshes declared menu labels when the manifest changes without a bundle change", async () => {
     const importer = vi.fn(async () => ({ default: (k: { menu(id: string): void }) => k.menu("board") }));
     const { host, setInventory } = setup({ importer });
