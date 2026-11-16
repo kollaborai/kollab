@@ -57,9 +57,14 @@ describe("plugin host lifecycle", () => {
       await vi.advanceTimersByTimeAsync(30_000);
       expect(json).toHaveBeenCalledTimes(2);
       expect(host.getSnapshot().entries[0].services?.[0]).toMatchObject({ heartbeat: 200 });
+      setInventory([entry("hello")]);
+      await host.refresh();
+      expect(json).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(json).toHaveBeenCalledTimes(3);
       host.close();
       await vi.advanceTimersByTimeAsync(60_000);
-      expect(json).toHaveBeenCalledTimes(2);
+      expect(json).toHaveBeenCalledTimes(3);
     } finally { host.close(); vi.useRealTimers(); }
   });
 
