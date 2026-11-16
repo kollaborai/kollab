@@ -164,3 +164,22 @@ def test_malformed_catalog_shapes_use_safe_defaults(monkeypatch, catalog):
     assert supports_sampling("gpt-6-luna-latest") is True
     assert supports_vision("gpt-6-luna-latest", "openai") is False
     assert resolve_context_window("gpt-6-luna-latest", "openai") is None
+
+
+def test_exact_prefixed_entry_silence_blocks_stripped_fallback(monkeypatch):
+    monkeypatch.setattr(
+        model_registry,
+        "_REGISTRY",
+        {
+            "models": {
+                "openrouter/silent-model": {"provider": "openrouter"},
+                "silent-model": {
+                    "provider": "openai",
+                    "supports_vision": True,
+                },
+            },
+            "provider_defaults": {},
+        },
+    )
+
+    assert supports_vision("openrouter/silent-model", "openrouter") is False
