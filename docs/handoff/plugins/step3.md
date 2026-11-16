@@ -172,6 +172,8 @@
 
 - SSE malformed-frame cleanup: red test commit `78ecda30` demonstrated that an oversized frame left its response stream uncancelled (`sse-cancel-red.log`). The reader now cancels on every exit before releasing its lock without waiting indefinitely on source cancellation. Event/host tests passed 15/15 and typecheck passed (`sse-cancel-green.log`, `sse-cancel-typecheck.log`).
 
+- Context-creation isolation test: the first red commit `520ec1b7` was invalid (it referenced a nonexistent test helper, not a product defect; `context-isolation-red.log`). The corrected test passes against the existing loader, confirming context creation failures are already caught per plugin (`context-isolation-corrected-red.log`). No product fix was required. The correction is committed separately to avoid leaving the branch broken.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
