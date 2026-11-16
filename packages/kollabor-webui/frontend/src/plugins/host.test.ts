@@ -68,6 +68,22 @@ describe("plugin host lifecycle", () => {
     } finally { host.close(); vi.useRealTimers(); }
   });
 
+  it("exposes engine time using a monotonic inventory sample and clears invalid samples", async () => {
+    vi.useFakeTimers();
+    const json = vi.fn().mockResolvedValueOnce({ schema: 1, plugins: [entry("hello")], server_time: 1000 })
+      .mockResolvedValueOnce({ schema: 1, plugins: [entry("hello")] });
+    const { host } = setup({ json });
+    try {
+      await host.start();
+      expect(host.engineTime()).toBe(1000);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(host.engineTime()).toBe(1005);
+      await host.refresh();
+      expect(host.engineTime()).toBeNull();
+    } finally { host.close(); vi.useRealTimers(); }
+  });
+
+
   it("refreshes declared menu labels when the manifest changes without a bundle change", async () => {
     const importer = vi.fn(async () => ({ default: (k: { menu(id: string): void }) => k.menu("board") }));
     const { host, setInventory } = setup({ importer });
