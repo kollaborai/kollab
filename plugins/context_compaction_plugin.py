@@ -393,6 +393,7 @@ class ContextCompactionPlugin(BasePlugin):
         self._compaction_tasks: set[asyncio.Task] = set()
         self._acp_compacting = False
         self._acp_compact_armed = True
+        self._acp_meter_session_key: tuple[Any, Any] | None = None
         # "Can't shrink" stop (see _should_compact): the swap sets just_applied, the
         # next reported prompt is the compacted one, shrink_floor holds it when it
         # was still over the threshold, tokens_at_trigger is what fired the round.
@@ -1833,7 +1834,9 @@ class ContextCompactionPlugin(BasePlugin):
             return None
         return acp if getattr(acp, "active", False) is True else None
 
-    def acp_usage_updated(self, used: int, size: int) -> None:
+    def acp_usage_updated(
+        self, used: int, size: int, *, session_key: tuple[Any, Any] | None = None,
+    ) -> None:
         """Harness context meter (ACP usage_update), called by the ACP orchestrator.
 
         Fires once when the meter crosses the threshold, then waits for the
@@ -1843,6 +1846,9 @@ class ContextCompactionPlugin(BasePlugin):
             return
         if size <= 0 or not self._acp_owns_chat():
             return
+        if session_key is not None and session_key != self._acp_meter_session_key:
+            self._acp_meter_session_key = session_key
+            self._acp_compact_armed = True
         if used < self._resolve_threshold(size)[0]:
             self._acp_compact_armed = True
             return

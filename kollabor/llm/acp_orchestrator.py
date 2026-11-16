@@ -1666,7 +1666,11 @@ class ACPOrchestrator:
             used, size = int(payload.get("used") or 0), int(payload.get("size") or 0)
         except (TypeError, ValueError):
             return
-        notify(used, size)
+        runner = self._runner
+        session_id = getattr(runner, "session_id", None)
+        generation = getattr(runner, "generation", None)
+        session_key = (session_id, generation) if session_id is not None or generation is not None else None
+        notify(used, size, session_key=session_key)
 
     def prepare_cancel(
         self,
