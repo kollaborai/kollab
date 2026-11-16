@@ -9,9 +9,9 @@ import { PluginsSettings } from "./settings";
 
 const entry = { id: "hello", name: "Hello", kind: "installed", enabled: true, state: "ok", shadowed: false,
   web: { entry: "web/dist/index.js", style: null, hash: "a" }, contributes: {} };
-function phoneHost() {
+function phoneHost(plugin = entry) {
   const host = new PluginHost({ phoneLink: true, disabled: true, storage: { getItem: () => null, setItem: () => {}, removeItem: () => {}, clear: () => {}, key: () => null, length: 0 },
-    json: async () => ({ schema: 1, plugins: [entry] }), request: async () => new Response(new ReadableStream()),
+    json: async () => ({ schema: 1, plugins: [plugin] }), request: async () => new Response(new ReadableStream()),
     importer: vi.fn(async () => { throw new Error("must not import"); }), navigate: () => {}, openAgent: () => {}, copy: async () => {}, toast: () => {}, ui: {} });
   return host;
 }
@@ -26,6 +26,16 @@ describe("PhoneLink plugin UI", () => {
     expect(html).not.toContain("Failed to Load");
     expect(html).not.toContain("?plugins=off");
     expect(html).not.toContain("Turn Off");
+    host.close();
+  });
+  it("displays a server error without claiming the web part failed to load or offering Retry", async () => {
+    const failed = { ...entry, error: "Server rejected this plugin" };
+    const host = phoneHost(failed);
+    await host.start();
+    const html = renderToStaticMarkup(<PluginsSettings host={host} api={{} as EngineApi} canManage={false} />);
+    expect(html).toContain("Server rejected this plugin");
+    expect(html).not.toContain("Failed to Load");
+    expect(html).not.toContain("Retry");
     host.close();
   });
   it("uses the normal renderer fallback", async () => {

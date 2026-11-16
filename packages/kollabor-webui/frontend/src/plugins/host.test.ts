@@ -445,6 +445,13 @@ describe("plugin host lifecycle", () => {
 
 
 describe("PhoneLink inventory-only capability", () => {
+  it("still imports and activates web parts on a computer page", async () => {
+    const { host, importer } = setup({ phoneLink: false } as Partial<PluginHostOptions>);
+    await host.start();
+    expect(importer).toHaveBeenCalledOnce();
+    expect(host.getContext("hello")).toBeDefined();
+    host.close();
+  });
   const phone = { phoneLink: true } as Partial<PluginHostOptions>;
 
   it("lists plugins at startup without contexts, styles, imports, or failed rows", async () => {
