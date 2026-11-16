@@ -198,6 +198,22 @@ class TestAskThenCompact(unittest.IsolatedAsyncioTestCase):
         acp.submit.assert_awaited_once()
         self.assertEqual(acp.submit.await_args.args, ("/compact",))
 
+    async def test_loadout_threshold_trigger_asks_then_compacts_once(self):
+        plugin, _llm, acp = _plugin({**_loadouts(800), "plugins.context_compaction.ask_model_first": True})
+        plugin._profile_manager = MagicMock()
+        acp.submit = AsyncMock(side_effect=[
+            {"text": "<compact>keep the migration notes</compact>"},
+            {"text": "compacted"},
+        ])
+        plugin.acp_usage_updated(850_000, 1_000_000)  # over the loadout's 800K
+        plugin.acp_usage_updated(900_000, 1_000_000)  # still over: no second round
+        await _settle(plugin)
+        self.assertEqual(acp.submit.await_count, 2)
+        self.assertEqual(
+            acp.submit.await_args_list[1].args,
+            ("/compact keep the migration notes",),
+        )
+
     async def test_loadout_threshold_above_the_automatic_trigger_waits_for_it(self):
         plugin, _llm, acp = _plugin(_loadouts(800))
         plugin._profile_manager = MagicMock()
