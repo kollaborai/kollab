@@ -328,7 +328,7 @@ try {
   const panel = page.getByRole("complementary", { name: "Session Controls" });
   await panel.waitFor({ timeout: 15000 });
   await panel.getByRole("button", { name: "Hide Session Panel" }).click();
-  const collapsedFailed = panel.getByRole("button", { name: "Broken Board Failed", exact: true });
+  const collapsedFailed = panel.getByRole("button", { name: "Broken Board Failed to Load", exact: true });
   await collapsedFailed.waitFor({ timeout: 5000 });
   await collapsedFailed.click();
   await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
@@ -365,6 +365,10 @@ try {
   const crashAlert = page.getByRole("alert");
   await crashAlert.waitFor({ timeout: 5000 });
   assert.match(await crashAlert.innerText(), /Crash Test · Failed to Render/, "render failure names the plugin");
+  await panel.getByRole("button", { name: "Crash Test Failed to Render", exact: true }).waitFor();
+  await panel.getByRole("button", { name: "Hide Session Panel" }).click();
+  await panel.getByRole("button", { name: "Crash Test Failed to Render", exact: true }).waitFor();
+  await panel.getByRole("button", { name: "Show Session Panel" }).click();
   await page.getByRole("alert").getByRole("button", { name: "Retry" }).click();
   await page.getByText("Recovered view", { exact: true }).waitFor({ timeout: 5000 });
   await panel.getByRole("button", { name: "Fixture View" }).click();
@@ -372,7 +376,7 @@ try {
   await viewBody.waitFor();
   assert.equal(await viewBody.locator('xpath=ancestor::*[@data-plugin="fixture"]').count(), 1, "view has plugin-specific CSS scope");
   await panel.getByRole("button", { name: "Chat", exact: true }).click();
-  await panel.getByRole("button", { name: /^Broken Failed$/ }).click({ timeout: 5000 });
+  await panel.getByRole("button", { name: "Broken Failed to Load", exact: true }).click({ timeout: 5000 });
   await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
   await panel.getByRole("button", { name: "Chat", exact: true }).click();
   const chatInput = page.getByRole("textbox", { name: "Message input" });
