@@ -511,6 +511,12 @@ def test_regression_test_passes_when_test_only_commit_precedes_fix(
                 verified=True,
                 committed_at="2026-11-01T12:05:00Z",
                 files=("tests/unit/test_security.py",),
+                file_patches={
+                    "tests/unit/test_security.py": (
+                        "+def test_f14_bypass(): ...\n"
+                        "+@pytest.mark.xfail(strict=True)"
+                    )
+                },
             ),
             SimpleNamespace(
                 sha="b" * 40,
