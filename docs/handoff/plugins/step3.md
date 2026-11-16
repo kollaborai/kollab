@@ -42,3 +42,12 @@
 - Next: red-first built-in display-name regression, then address all ten findings in
   `ui-review-1133969d9.md` in the external backup work directory; rerun all gates,
   request a stack restart at the final code SHA, and repeat the smoke and capture matrix.
+
+- Finding 1: red test `35adf31ac` and fix `edecb5a12` preserve IDs and produce
+  readable built-in names, honoring `display_name` and MCP casing. The terminal config
+  uses the same inventory name; the CLI list is for installed packages. Focused tests:
+  3 passed (`names-green.log`); Ruff and py_compile passed. The red run is
+  `names-red.log`. Its pytest temporary files used the platform default temp directory;
+  later runs set TMPDIR to the external backup work directory. No real HOME was used.
+- Next: findings 2–10 of the visual review, red-first where testable; then full gates,
+  stack restart, live smoke and screenshot matrix at the final code HEAD.
