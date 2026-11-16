@@ -418,6 +418,20 @@ try {
   await captureReview(page, "plugin-tab");
   await panel.getByRole("button", { name: "Show Session Panel" }).click();
   assert.ok(await fixtureMenu.evaluate((element, other) => Boolean(element.compareDocumentPosition(other) & Node.DOCUMENT_POSITION_FOLLOWING), await zuluMenu.elementHandle()), "expanded menu rows remain sorted by plugin name");
+  await fixtureMenu.getByText("4", { exact: true }).waitFor();
+  const menuPlacement = await panel.evaluate(panelElement => {
+    const buttons = [...panelElement.querySelectorAll("button")];
+    const find = label => buttons.find(button => button.textContent?.trim().startsWith(label));
+    const online = find("Who Is Online"), menu = find("Fixture Board"), settings = find("Settings");
+    return {
+      afterOnline: Boolean(online && menu && online.compareDocumentPosition(menu) & Node.DOCUMENT_POSITION_FOLLOWING),
+      beforeSettings: Boolean(menu && settings && menu.compareDocumentPosition(settings) & Node.DOCUMENT_POSITION_FOLLOWING),
+      notInViewGroup: Boolean(menu && !menu.closest('[aria-label="Session view"]')),
+      countHasNoPill: Boolean(menu && !menu.querySelector('[data-slot="badge"]')),
+      failureHasNoPill: !find("Zulu Board")?.querySelector('[data-slot="badge"]'),
+    };
+  });
+  assert.deepEqual(menuPlacement, { afterOnline: true, beforeSettings: true, notInViewGroup: true, countHasNoPill: true, failureHasNoPill: true }, "menu rows belong after Who Is Online, before Settings, with plain status/count text");
   await panel.getByRole("button", { name: "Fixture View" }).click();
   await panel.getByRole("button", { name: "Hello View", exact: true }).click({ timeout: 5000 });
   await page.getByText("Hello from your plugin!", { exact: true }).waitFor();
