@@ -46,18 +46,50 @@ def _enumeration_methods() -> set[str]:
             }
             if not imports_psutil:
                 continue
+            aliases = {name: {method} for name, method in direct_imports.items()}
+            assignments = [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.Assign, ast.AnnAssign))
+            ]
+            changed = True
+            while changed:
+                changed = False
+                for node in assignments:
+                    value = node.value
+                    if isinstance(node, ast.Assign):
+                        targets = node.targets
+                    else:
+                        targets = [node.target]
+                    methods = (
+                        {value.attr}
+                        if isinstance(value, ast.Attribute)
+                        else aliases.get(value.id, set())
+                        if isinstance(value, ast.Name)
+                        else set()
+                    )
+                    if not methods:
+                        continue
+                    for target in targets:
+                        if isinstance(target, ast.Name):
+                            target_methods = aliases.setdefault(target.id, set())
+                            new_methods = methods - target_methods
+                            if new_methods:
+                                target_methods.update(new_methods)
+                                changed = True
             for node in ast.walk(tree):
                 if isinstance(node, ast.Call):
                     if isinstance(node.func, ast.Attribute):
-                        method = node.func.attr
+                        called_methods = {node.func.attr}
                     elif isinstance(node.func, ast.Name):
-                        method = direct_imports.get(node.func.id, "")
+                        called_methods = aliases.get(node.func.id, set())
                     else:
                         continue
-                    if method in ENUMERATION_METHODS:
-                        methods.add(method)
-                    elif method.startswith("process_") or method.endswith("_pids"):
-                        methods.add(method)
+                    for method in called_methods:
+                        if method in ENUMERATION_METHODS:
+                            methods.add(method)
+                        elif method.startswith("process_") or method.endswith("_pids"):
+                            methods.add(method)
     return methods
 
 
