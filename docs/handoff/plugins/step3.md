@@ -84,3 +84,56 @@ Red-first browser regression: `review-tabs-red.log` records an 820px clipped Set
 The tab row now wraps at all widths. Built-preview browser acceptance passes with the new 820px regression (`review-tabs-green.log`); build log `review-tabs-build.log`. Next: add a red-first Retry/View Error size check and fix its styling.
 Retry red-first regression in `review-retry-red.log`: Settings Retry measures 21.59375px versus View Error 28.796875px. The 820px browser check now waits for dialog resize animation to settle; the earlier run showed a timing-dependent failure. Next: use the shared sm button size and rerun acceptance.
 Retry now uses the same sm size as View Error. Built-preview acceptance passes both visual regressions (`review-retry-green.log`), after `review-retry-build.log`. Next: commit, fetch/merge the step-2 base if needed, then run fixed-HEAD gates and request the supervisor stack restart.
+
+
+## Final visual-review follow-up at code head 580ab6fa2 (2026-11-16)
+
+This section supersedes the older verification and next-step instructions above.
+The lead's two findings are fixed: Settings tabs wrap at tablet widths and Retry
+matches View Error. Browser regressions were red first (`review-tabs-red.log`,
+`review-retry-red.log`) and passed in `final-580-browser.log`. The first tab red
+was before the fix; its green test now waits for the dialog resize transition.
+
+Fixed code head: `580ab6fa2082c6f17e822b1afd9177d37d911edf`; subsequent handoff-only
+commits do not change tested code. `origin/feat/plugins-step2` was fetched at
+`82d1b390096aa43e73b3ca40a90fab581c1529ef` and is an ancestor. PR #1065 is OPEN
+as of this verification, so do not open the step-3 PR.
+
+All paths below are under `~/backups/plugins-step3-work/`. Using
+Node 24.18.0, a throwaway HOME and `KOLLAB_NO_KEYRING=1`:
+- `npm run typecheck`, `npm test`, and `npm run build -- --outDir
+  ~/backups/plugins-step3-work/build-final-580` passed. The tests
+  report 57 files and 463 tests. Logs: `final-580-typecheck.log`,
+  `final-580-test.log`, `final-580-build.log` (existing build warnings remain).
+- `PLUGIN_BUILT_DIR=.../build-final-580 CHROME_PATH='/Applications/Google
+  Chrome.app/Contents/MacOS/Google Chrome' node tests/acceptance/plugins.browser.mjs`
+  passed: `final-580-browser.log`.
+- `.venv/bin/python -m pytest -q tests/unit/plugins tests/unit/engine/test_plugin*
+  tests/unit/engine/test_phone_link_plugins.py tests/unit/webui/test_plugin_assets.py
+  tests/unit/test_webui_remote.py tests/integration/test_plugin_stopping_http.py`
+  passed: 350 passed, 1 skipped, `final-580-pytest.log`. Ruff and py_compile
+  passed for the paths in `final-0eb-python-files.txt`; logs `final-580-ruff.log`
+  and `final-580-compile.log`.
+- Supervisor restarted the stack at the fixed code head on 8200/7500. Host
+  Chromium: `node .../chat-probe-113.mjs`, then `node .../live-real-chat-580.mjs`
+  passed (`chat-probe-580.log`, `live-real-chat-580-final.log`). First smoke had
+  no chat (`live-real-chat-580.log`); the next reused an already-saved greeting
+  and timed out awaiting a save response (`live-real-chat-580-retry.log`). The
+  final run used a fresh greeting and verified save, menu, page, tab, modal,
+  off, failed load, and 390px touch controls. The 390px close target was 48x48.
+- `node .../capture-running-580.mjs`, `node .../capture-stopped-580.mjs`, and
+  `node .../capture-empty-580.mjs` passed (`capture-{running,stopped,empty}-580.log`).
+  The stopped capture checked five real service exits and removed its fixture;
+  empty inventory is synthetic. Hello's service was stopped after capture.
+- Lead-review images: `shots/580ab6fa2/`, 102 PNGs, 1440/820/390, light/dark.
+  The three `overflow-<width>.json` files have 30 states each and zero overwide
+  elements; `overflow-running.json` and `overflow-empty-inventory-fixture.json`
+  have six states each and zero overwide elements.
+
+PhoneLink behavior: unit-tested, not checked on a paired phone. No paired phone,
+relay, Docker, or PhoneLink e2e was used. No visual sign-off is claimed; the
+lead must review the new screenshot folder.
+
+Next: commit this handoff, push only `feat/plugins-step3`, and end without
+opening a PR while #1065 is open. Once step 2 is merged, recheck its actual base
+and the authorized PR workflow. The lead reviews `shots/580ab6fa2/`.
