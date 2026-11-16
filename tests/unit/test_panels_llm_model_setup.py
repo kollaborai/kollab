@@ -318,7 +318,6 @@ async def test_setup_describe_never_carries_a_key_and_exposes_oauth_choice():
     "payload,field",
     [
         ({**PAYLOAD, "api_key": ""}, "api_key"),
-        ({**PAYLOAD, "provider": "OpenAI (sign in with ChatGPT)"}, "provider"),
         ({**PAYLOAD, "provider": "nope"}, "provider"),
         ({**PAYLOAD, "base_url": "http://evil.example.com/?localhost"}, "base_url"),
         ({**PAYLOAD, "model": "bad\x00model"}, "model"),
