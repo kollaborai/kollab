@@ -320,6 +320,21 @@ describe("plugin host lifecycle", () => {
     host.close();
   });
 
+  it("keeps the freeze marker while publishing the activated plugin", async () => {
+    const { host, session } = setup();
+    const markersDuringPublication: (string | null)[] = [];
+    host.subscribe(() => {
+      if (host.getSnapshot().registry.plugins.length) {
+        markersDuringPublication.push(session.getItem("kollab:plugin:loading:hello"));
+      }
+    });
+    await host.start();
+    expect(markersDuringPublication.length).toBeGreaterThan(0);
+    expect(markersDuringPublication[0]).not.toBeNull();
+    expect(session.getItem("kollab:plugin:loading:hello")).toBeNull();
+    host.close();
+  });
+
   it("does not clear a newer import's freeze marker when an old import finishes", async () => {
     const completions: ((module: unknown) => void)[] = [];
     const importer = vi.fn(() => new Promise<unknown>(resolve => completions.push(resolve)));

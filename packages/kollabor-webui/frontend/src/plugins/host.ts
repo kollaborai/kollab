@@ -133,10 +133,10 @@ export class PluginHost {
       },
       commit: (id, resource) => {
         if (this.resources.get(id) !== resource || this.closed) return;
-        this.removeStorage(LOADING + id);
         delete this.errors[id];
         this.renderFailed.delete(id);
         this.registry.commit(resource.draft);
+        if (this.resources.get(id) === resource && !this.closed) this.removeStorage(LOADING + id);
       },
       remove: id => { this.release(id); this.registry.remove(id); this.removeStorage(LOADING + id); },
       fail: (id, error) => {
