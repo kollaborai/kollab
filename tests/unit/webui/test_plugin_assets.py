@@ -54,6 +54,20 @@ def test_installed_plugin_root_cannot_be_symlinked_outside_plugin_directory(tmp_
         assert client.get("/plugins/hello/web/main.js").status_code == 404
 
 
+def test_installed_plugin_root_cannot_alias_another_plugin(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    home = tmp_path / ".kollab"
+    plugins = home / "plugins"
+    dist = plugins / "other" / "web" / "dist"
+    dist.mkdir(parents=True)
+    (dist / "main.js").write_text("other plugin code")
+    (plugins / "hello").symlink_to(plugins / "other", target_is_directory=True)
+    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {"enabled": True}}, "dev": {}}))
+    with TestClient(create_app(), base_url="http://localhost", client=("127.0.0.1", 1234)) as client:
+        assert client.get("/plugins/hello/web/main.js").status_code == 404
+
+
 def test_allowed_name_cannot_alias_hidden_or_disallowed_asset(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     home = tmp_path / ".kollab"
