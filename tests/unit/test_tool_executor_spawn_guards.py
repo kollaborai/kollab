@@ -220,3 +220,27 @@ def test_unknown_shell_malformed_encoded_command_stays_blocked(option):
 def test_unknown_shell_encoded_input_remains_conservatively_blocked(option):
     encoded = base64.b64encode("Write-Output hello".encode("utf-16le")).decode("ascii")
     assert _is_blocked_kollab_spawn(f"unknown-shell.exe {option} {encoded}")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "node -e \"console.log('hello')\"",
+        "sed -E 's/foo/bar/' sample.txt",
+        "tar -E archive.tar",
+    ],
+)
+def test_unrelated_programs_with_short_e_are_allowed(command):
+    assert not _is_blocked_kollab_spawn(command)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "require('child_process').exec('kollab --agent coder')",
+        "require('child_process').spawn('kollab', ['--agent', 'coder'])",
+        "require('child_process').exec('kollab --hub stop all')",
+    ],
+)
+def test_inline_node_launches_remain_blocked(script):
+    assert _is_blocked_kollab_spawn(f'node -e "{script}"')
