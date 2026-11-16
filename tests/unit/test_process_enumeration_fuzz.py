@@ -2,6 +2,7 @@
 
 import ast
 import random
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -59,6 +60,20 @@ def test_every_process_enumerator_has_property_fuzz_coverage() -> None:
         f"uncovered source methods={sorted(uncovered_methods)} "
         f"missing test functions={sorted(missing_tests)}"
     )
+
+
+def test_process_enumerator_guard_detects_direct_psutil_imports(tmp_path, monkeypatch) -> None:
+    """A direct import still counts as an enumerator needing property coverage."""
+    source_root = tmp_path / "kollabor"
+    source_root.mkdir()
+    (tmp_path / "plugins").mkdir()
+    (tmp_path / "packages").mkdir()
+    (source_root / "direct_import.py").write_text(
+        "from psutil import process_iter\nrows = process_iter()\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+
+    assert "process_iter" in _enumeration_methods()
 
 
 class _ProcessRow:
