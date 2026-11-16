@@ -71,3 +71,16 @@
   disclosure for Settings and the failed page; `error-control-green.log`: 10 tests pass.
 - Next: findings 2, 5, 6, 7 (remaining add-sheet copy), 9; finish notice re-post
   semantics and click testing, then all gates, supervisor restart, smoke, captures.
+
+- Findings 2, 5, 6 and 9: `1a5e23da1` title-cases group labels, removes row icons,
+  and uses a muted warning icon. `27cbb0515` aligns Hello's buttons to content width
+  and rebuilds the tracked CSS (`hello-build.log`). These are pure visual changes.
+- Finding 7: `1d91b52ab` (red) and `d871f9c01` (fix) list declared additions only;
+  `add-summary-green.log`: 8 focused tests pass. Acceptance expectations were updated.
+- Finding 3 repost semantics: `ae9550778` (red) and `2e04d0d3f` publish new notices
+  after activation with independent identities; replaced/removed drafts and disposed
+  contexts cannot publish. `notice-repost-green.log`: 15 tests pass, and
+  `notice-disposed-green.log`: 5 pass. Browser click and repost testing still needed.
+- Next: add browser coverage for independently dismissing and reposting notices; run all
+  specified gates on one fixed HEAD, request supervisor restart, run the live smoke and
+  screenshot matrix, rewrite this handoff as one current document, then push.
