@@ -28,51 +28,59 @@ const { server, baseUrl } = await openVite();
 const browser = await chromium.launch({ headless: true });
 let view;
 try {
-  const fixtures = makeFixtures({ sessions: [SESSION], history });
-  view = await openPage(browser, baseUrl, fixtures, {
-    viewport: { width: 390, height: 844 },
-    isMobile: true,
-  });
-  await view.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-
-  const viewport = view.page.locator('[data-slot="aui_thread-viewport"]');
-  await viewport.waitFor({ state: "visible" });
-  const finalParagraph = view.page.getByText(finalLine, { exact: true });
-  await finalParagraph.waitFor({ state: "visible" });
-  const control = view.page.getByRole("button", { name: "Scroll to Bottom" });
-
-  await viewport.evaluate((node) => {
-    node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight - 64);
-    node.dispatchEvent(new Event("scroll", { bubbles: true }));
-  });
-  await control.waitFor({ state: "visible" });
-  await view.page.waitForTimeout(100);
-
-  const layout = await view.page.evaluate(({ controlSelector, finalLineText }) => {
-    const button = document.querySelector(controlSelector);
-    const target = [...document.querySelectorAll("p")].find((node) => node.textContent.trim() === finalLineText);
-    const buttonRect = button.getBoundingClientRect();
-    const range = document.createRange();
-    range.selectNodeContents(target);
-    const lineRects = [...range.getClientRects()].filter((rect) => rect.width && rect.height);
-    const finalTextRect = lineRects.at(-1);
-    return {
-      button: { top: buttonRect.top, right: buttonRect.right, bottom: buttonRect.bottom, left: buttonRect.left },
-      finalLine: { top: finalTextRect.top, right: finalTextRect.right, bottom: finalTextRect.bottom, left: finalTextRect.left },
-      overlap: buttonRect.left < finalTextRect.right && buttonRect.right > finalTextRect.left && buttonRect.top < finalTextRect.bottom && buttonRect.bottom > finalTextRect.top,
-      viewport: { width: innerWidth, height: innerHeight },
-    };
-  }, { controlSelector: ".aui-thread-scroll-to-bottom", finalLineText: finalLine });
-
   const screenshotDir = process.env.THREAD_SCROLL_SCREENSHOT_DIR ?? "/tmp/kollab-thread-scroll-screenshots";
-  const screenshotPath = path.join(screenshotDir, "thread-scroll-to-bottom-phone-dark.png");
-  fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
-  await view.page.screenshot({ path: screenshotPath, animations: "disabled" });
-  console.log(`Screenshot 390x844: ${path.basename(screenshotPath)}`);
-  console.log(`Scroll-control geometry: ${JSON.stringify(layout)}`);
-  assert.equal(layout.overlap, false, "scroll-to-bottom control covers the final message line");
-  assert.deepEqual(view.pageErrors, []);
-  assert.deepEqual(view.consoleErrors, []);
+  const sizes = [
+    { width: 390, height: 844, isMobile: true, screenshot: "thread-scroll-to-bottom-phone-dark.png" },
+    { width: 820, height: 1180, isMobile: false, screenshot: "thread-scroll-to-bottom-tablet-dark.png" },
+    { width: 1280, height: 900, isMobile: false, screenshot: "thread-scroll-to-bottom-desktop-dark.png" },
+  ];
+
+  for (const size of sizes) {
+    const fixtures = makeFixtures({ sessions: [SESSION], history });
+    view = await openPage(browser, baseUrl, fixtures, {
+      viewport: { width: size.width, height: size.height },
+      isMobile: size.isMobile,
+    });
+    await view.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+
+    const viewport = view.page.locator('[data-slot="aui_thread-viewport"]');
+    await viewport.waitFor({ state: "visible" });
+    await view.page.getByText(finalLine, { exact: true }).waitFor({ state: "visible" });
+    const control = view.page.getByRole("button", { name: "Scroll to Bottom" });
+    await viewport.evaluate((node) => {
+      node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight - 64);
+      node.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    await control.waitFor({ state: "visible" });
+    await view.page.waitForTimeout(100);
+
+    const layout = await view.page.evaluate(({ controlSelector, finalLineText }) => {
+      const button = document.querySelector(controlSelector);
+      const target = [...document.querySelectorAll("p")].find((node) => node.textContent.trim() === finalLineText);
+      const buttonRect = button.getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(target);
+      const lineRects = [...range.getClientRects()].filter((rect) => rect.width && rect.height);
+      const finalTextRect = lineRects.at(-1);
+      return {
+        button: { top: buttonRect.top, right: buttonRect.right, bottom: buttonRect.bottom, left: buttonRect.left },
+        finalLine: { top: finalTextRect.top, right: finalTextRect.right, bottom: finalTextRect.bottom, left: finalTextRect.left },
+        overlap: buttonRect.left < finalTextRect.right && buttonRect.right > finalTextRect.left && buttonRect.top < finalTextRect.bottom && buttonRect.bottom > finalTextRect.top,
+        viewport: { width: innerWidth, height: innerHeight },
+      };
+    }, { controlSelector: ".aui-thread-scroll-to-bottom", finalLineText: finalLine });
+
+    const screenshotPath = path.join(screenshotDir, size.screenshot);
+    fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
+    await view.page.screenshot({ path: screenshotPath, animations: "disabled" });
+    console.log(`Screenshot ${size.width}x${size.height}: ${path.basename(screenshotPath)}`);
+    console.log(`Scroll-control geometry: ${JSON.stringify(layout)}`);
+    assert.equal(layout.overlap, false, `scroll-to-bottom control covers the final message line at ${size.width}px`);
+    assert.deepEqual(view.pageErrors, []);
+    assert.deepEqual(view.consoleErrors, []);
+    await view.context.close();
+    view = null;
+  }
 } finally {
   if (view) await view.context.close();
   await browser.close();
