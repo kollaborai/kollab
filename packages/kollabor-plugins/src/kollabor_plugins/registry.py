@@ -618,10 +618,10 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
             state, error = "error", registry.package_errors[plugin_id]
         service_entries = _service_entries(home, plugin_id, manifest)
         if state in {"ok", "off"}:
-            if any(service["state"] == "stop-failed" for service in service_entries):
-                state = "stop-failed"
-            elif any(service["state"] == "stopping" for service in service_entries):
+            if any(service["state"] == "stopping" for service in service_entries):
                 state = "stopping"
+            elif any(service["state"] == "stop-failed" for service in service_entries):
+                state = "stop-failed"
         entries.append(
             {
                 "id": plugin_id,
