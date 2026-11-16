@@ -11,6 +11,7 @@ Old reputation fades toward 0.5 (neutral), rewarding consistently
 active agents over dormant ones with stale scores.
 """
 
+import copy
 import logging
 import time
 from typing import Dict, List, Tuple
@@ -35,11 +36,13 @@ class ReputationTracker:
         self._storage = storage
         self._decay_halflife = decay_halflife
         self._scores: Dict[str, ReputationScore] = {}
+        self._persisted_scores: Dict[str, ReputationScore] = {}
         self._loaded = False
 
     def _ensure_loaded(self) -> None:
         if not self._loaded:
             self._scores = self._storage.load_reputation()
+            self._persisted_scores = copy.deepcopy(self._scores)
             self._loaded = True
 
     def _get_or_create(self, designation: str) -> ReputationScore:
@@ -66,7 +69,7 @@ class ReputationTracker:
             else:
                 score.avg_response_time_ms = response_time_ms
         score.last_updated = time.time()
-        self._save()
+        self._save([designation])
         trust = self.get_trust(designation)
         logger.debug(f"task completed by {designation}, trust={trust:.2f}")
         return trust
@@ -76,7 +79,7 @@ class ReputationTracker:
         score = self._get_or_create(designation)
         score.tasks_failed += 1
         score.last_updated = time.time()
-        self._save()
+        self._save([designation])
         trust = self.get_trust(designation)
         logger.debug(f"task failed by {designation}, trust={trust:.2f}")
         return trust
@@ -90,7 +93,7 @@ class ReputationTracker:
         score = self._get_or_create(designation)
         score.tasks_abandoned += 1
         score.last_updated = time.time()
-        self._save()
+        self._save([designation])
         trust = self.get_trust(designation)
         logger.debug(f"task abandoned by {designation}, trust={trust:.2f}")
         return trust
@@ -101,7 +104,7 @@ class ReputationTracker:
         score.uptime_sessions += 1
         score.total_uptime_seconds += uptime_seconds
         score.last_updated = time.time()
-        self._save()
+        self._save([designation])
 
     def add_endorsement(self, endorsement: Endorsement) -> float:
         """Add a peer endorsement. Returns new trust score for target."""
@@ -115,11 +118,11 @@ class ReputationTracker:
                 # Update existing endorsement
                 existing.endorsed_at = endorsement.endorsed_at
                 existing.weight = endorsement.weight
-                self._save()
+                self._save([endorsement.to_designation])
                 return self.get_trust(endorsement.to_designation)
         score.endorsements.append(endorsement)
         score.last_updated = time.time()
-        self._save()
+        self._save([endorsement.to_designation])
         trust = self.get_trust(endorsement.to_designation)
         logger.debug(
             f"endorsement from {endorsement.from_designation} "
@@ -226,6 +229,25 @@ class ReputationTracker:
         # Blend: fully fresh = raw score, fully decayed = 0.5
         return raw * decay_factor + 0.5 * (1 - decay_factor)
 
-    def _save(self) -> None:
+    def _save(self, designations=None) -> None:
         """Persist scores to storage."""
-        self._storage.save_reputation(self._scores)
+        scores = self._scores
+        if designations is not None:
+            scores = {
+                designation: self._scores[designation]
+                for designation in designations
+                if designation in self._scores
+            }
+        base_scores = {
+            designation: self._persisted_scores[designation]
+            for designation in scores
+            if designation in self._persisted_scores
+        }
+        persisted = self._storage.save_reputation(
+            scores,
+            base_scores=base_scores,
+            created_designations=set(scores) - set(self._persisted_scores),
+        )
+        if persisted is not None:
+            self._scores.update(persisted)
+            self._persisted_scores = copy.deepcopy(persisted)
