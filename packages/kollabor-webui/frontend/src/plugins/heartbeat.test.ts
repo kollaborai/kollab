@@ -1,0 +1,24 @@
+import { describe, expect, it } from "vitest";
+import { heartbeatAge, heartbeatLabel } from "./heartbeat";
+
+describe("service heartbeat status", () => {
+  it("only reports a promised heartbeat after its interval", () => {
+    expect(heartbeatAge({ state: "running", heartbeat_s: 60, heartbeat: 950, since: 900 }, 1000)).toBeNull();
+    expect(heartbeatAge({ state: "running", heartbeat_s: 60, heartbeat: 940, since: 900 }, 1000)).toBe(60);
+    expect(heartbeatLabel(370)).toBe("No Heartbeat for 6 min");
+    expect(heartbeatLabel(30)).toBe("No Heartbeat for less than 1 min");
+  });
+
+  it("uses the current process start when there is no heartbeat or the heartbeat predates it", () => {
+    expect(heartbeatAge({ state: "running", heartbeat_s: 60, heartbeat: null, since: 900 }, 1000)).toBe(100);
+    expect(heartbeatAge({ state: "running", heartbeat_s: 60, heartbeat: 800, since: 990 }, 1000)).toBeNull();
+  });
+
+  it("does not invent a failure for missing, invalid, future or stopped data", () => {
+    expect(heartbeatAge({ state: "running", heartbeat: 800 }, 1000)).toBeNull();
+    expect(heartbeatAge({ state: "running", heartbeat_s: 60 }, 1000)).toBeNull();
+    expect(heartbeatAge({ state: "running", heartbeat_s: -1, heartbeat: 800 }, 1000)).toBeNull();
+    expect(heartbeatAge({ state: "running", heartbeat_s: 60, heartbeat: 1200 }, 1000)).toBeNull();
+    expect(heartbeatAge({ state: "stopped", heartbeat_s: 60, heartbeat: 800 }, 1000)).toBeNull();
+  });
+});
