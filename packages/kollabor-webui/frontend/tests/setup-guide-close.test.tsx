@@ -21,7 +21,8 @@ vi.mock("radix-ui", async () => {
     Trigger: passthrough,
     Portal: passthrough,
     Overlay: passthrough,
-    Content: passthrough,
+    Content: ({ children, ...props }: React.ComponentProps<"div">) =>
+      React.createElement("div", props, children),
     Close: passthrough,
     Title: passthrough,
     Description: passthrough,
