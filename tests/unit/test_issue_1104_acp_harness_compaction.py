@@ -3,6 +3,8 @@
 /compact and the automatic trigger ask the harness to compact its own context,
 using the command the harness advertises. Kollab's copy of the history is left
 alone, and a harness that advertises no compaction command gets a plain message.
+An explicit threshold (active loadout, then global) wins over the automatic ratio
+and the 272K cap, and never exceeds the model's real window.
 
 Run: KOLLAB_NO_KEYRING=1 python -m pytest tests/unit/test_issue_1104_acp_harness_compaction.py -v
 """
@@ -15,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from kollabor.llm.acp_bridge import ACPProfile, ACPRunner
 from kollabor.llm.acp_orchestrator import ACPOrchestrator
+from kollabor_ai.loadout_manager import LoadoutManager
 from plugins.context_compaction_plugin import ContextCompactionPlugin
 
 
@@ -36,6 +39,7 @@ def _plugin(settings=None, command="/compact"):
         "plugins.context_compaction.enabled": True,
         "plugins.context_compaction.compaction_ratio": 0.75,
         "plugins.context_compaction.token_threshold_k": 0,
+        "plugins.context_compaction.ask_model_first": False,
     }
     values.update(settings or {})
     config = MagicMock()
@@ -51,6 +55,16 @@ def _plugin(settings=None, command="/compact"):
     llm._acp_service = lambda: acp
     plugin._llm_service = llm
     return plugin, llm, acp
+
+
+def _loadouts(threshold_k=None, default="acp-claude"):
+    entry = {"provider_profile": "claude", "model": "opus"}
+    if threshold_k is not None:
+        entry["compaction_threshold_k"] = threshold_k
+    return {
+        LoadoutManager.CONFIG_KEY: {default: entry},
+        LoadoutManager.DEFAULT_CONFIG_KEY: default,
+    }
 
 
 async def _settle(plugin):
@@ -112,21 +126,30 @@ class TestCompactOnAcpChat(unittest.IsolatedAsyncioTestCase):
 
 
 class TestAutomaticCompactOnAcpChat(unittest.IsolatedAsyncioTestCase):
-    async def test_ratio_crossed_sends_the_command_once_until_the_meter_drops(self):
-        plugin, _llm, acp = _plugin()  # compaction_ratio 0.75
-        plugin.acp_usage_updated(800_000, 1_000_000)
-        plugin.acp_usage_updated(900_000, 1_000_000)
+    async def test_crossing_the_automatic_trigger_sends_once_until_the_meter_drops(self):
+        plugin, _llm, acp = _plugin()
+        plugin.acp_usage_updated(300_000, 1_000_000)  # automatic: 0.75 of 1M, capped at 272K
+        plugin.acp_usage_updated(900_000, 1_000_000)  # still over: no second send
         await _settle(plugin)
         self.assertEqual(acp.submit.await_count, 1)
 
-        plugin.acp_usage_updated(400_000, 1_000_000)  # meter dropped under the ratio
-        plugin.acp_usage_updated(800_000, 1_000_000)
+        plugin.acp_usage_updated(200_000, 1_000_000)  # meter dropped under the trigger
+        plugin.acp_usage_updated(300_000, 1_000_000)
         await _settle(plugin)
         self.assertEqual(acp.submit.await_count, 2)
 
-    async def test_token_threshold_overrides_the_ratio_when_set(self):
+    async def test_automatic_trigger_is_the_ratio_of_a_smaller_harness_window(self):
+        plugin, _llm, acp = _plugin({"plugins.context_compaction.compaction_ratio": 0.5})
+        plugin.acp_usage_updated(140_000, 300_000)  # under 0.5 of 300K
+        await _settle(plugin)
+        acp.submit.assert_not_awaited()
+        plugin.acp_usage_updated(160_000, 300_000)  # over 150K
+        await _settle(plugin)
+        acp.submit.assert_awaited_once()
+
+    async def test_explicit_global_threshold_is_the_trigger_for_acp_too(self):
         plugin, _llm, acp = _plugin({"plugins.context_compaction.token_threshold_k": 500})
-        plugin.acp_usage_updated(600_000, 1_000_000)  # 60% of window: over 500k, under the ratio
+        plugin.acp_usage_updated(600_000, 1_000_000)  # over 500K, under the ratio
         await _settle(plugin)
         acp.submit.assert_awaited_once()
 
@@ -143,12 +166,84 @@ class TestAutomaticCompactOnAcpChat(unittest.IsolatedAsyncioTestCase):
         orch = ACPOrchestrator(bus)
         orch._on_runner_update({
             "kind": "usage_update",
-            "payload": {"used": 800_000, "size": 1_000_000},
+            "payload": {"used": 300_000, "size": 1_000_000},
             "request_id": "request-1",
             "turn_id": 1,
         })
         await _settle(plugin)
         acp.submit.assert_awaited_once()
+
+
+class TestAskThenCompact(unittest.IsolatedAsyncioTestCase):
+    async def test_trigger_asks_the_model_then_compacts_once_with_its_notes(self):
+        plugin, _llm, acp = _plugin({"plugins.context_compaction.ask_model_first": True})
+        acp.submit = AsyncMock(side_effect=[
+            {"text": "<compact>keep the auth refactor and the open PR</compact>"},
+            {"text": "compacted"},
+        ])
+        plugin.acp_usage_updated(300_000, 1_000_000)
+        plugin.acp_usage_updated(900_000, 1_000_000)
+        await _settle(plugin)
+        self.assertEqual(acp.submit.await_count, 2)
+        self.assertIn("<compact>", acp.submit.await_args_list[0].args[0])
+        self.assertEqual(
+            acp.submit.await_args_list[1].args,
+            ("/compact keep the auth refactor and the open PR",),
+        )
+
+    async def test_ask_model_first_off_sends_the_bare_command(self):
+        plugin, _llm, acp = _plugin({"plugins.context_compaction.ask_model_first": False})
+        plugin.acp_usage_updated(300_000, 1_000_000)
+        await _settle(plugin)
+        acp.submit.assert_awaited_once()
+        self.assertEqual(acp.submit.await_args.args, ("/compact",))
+
+    async def test_loadout_threshold_above_the_automatic_trigger_waits_for_it(self):
+        plugin, _llm, acp = _plugin(_loadouts(800))
+        plugin._profile_manager = MagicMock()
+        plugin.acp_usage_updated(600_000, 1_000_000)  # over the 272K automatic trigger, under 800K
+        await _settle(plugin)
+        acp.submit.assert_not_awaited()
+        plugin.acp_usage_updated(850_000, 1_000_000)
+        await _settle(plugin)
+        acp.submit.assert_awaited_once()
+
+
+class TestExplicitThresholdWins(unittest.TestCase):
+    @staticmethod
+    def _native(window, settings=None):
+        plugin, _llm, _acp = _plugin(settings)
+        plugin._get_context_window_tokens = lambda: window
+        return plugin
+
+    def test_explicit_global_threshold_beats_the_272k_cap(self):
+        plugin = self._native(1_000_000, {"plugins.context_compaction.token_threshold_k": 500})
+        self.assertEqual(plugin._get_token_threshold_details(), (500_000, "manual"))
+
+    def test_unset_threshold_is_automatic_and_capped_at_272k(self):
+        plugin = self._native(1_000_000)
+        self.assertEqual(plugin._get_token_threshold_details(), (272_000, "automatic"))
+
+    def test_explicit_threshold_never_exceeds_the_real_window(self):
+        plugin = self._native(300_000, {"plugins.context_compaction.token_threshold_k": 500})
+        self.assertEqual(plugin._get_token_threshold_details(), (300_000, "manual"))
+
+    def test_loadout_threshold_beats_global_and_the_cap(self):
+        settings = {"plugins.context_compaction.token_threshold_k": 150, **_loadouts(500)}
+        plugin = self._native(1_000_000, settings)
+        plugin._profile_manager = MagicMock()
+        self.assertEqual(plugin._get_token_threshold_details(), (500_000, "manual"))
+
+    def test_unset_loadout_threshold_falls_back_to_the_global_one(self):
+        settings = {"plugins.context_compaction.token_threshold_k": 150, **_loadouts(None)}
+        plugin = self._native(1_000_000, settings)
+        plugin._profile_manager = MagicMock()
+        self.assertEqual(plugin._get_token_threshold_details(), (150_000, "manual"))
+
+    def test_loadout_and_global_unset_is_automatic(self):
+        plugin = self._native(1_000_000, _loadouts(None))
+        plugin._profile_manager = MagicMock()
+        self.assertEqual(plugin._get_token_threshold_details(), (272_000, "automatic"))
 
 
 if __name__ == "__main__":
