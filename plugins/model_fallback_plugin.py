@@ -47,6 +47,7 @@ class ModelFallbackPlugin(BasePlugin):
         self._pending: Optional[Tuple[str, Any]] = None
         self._held: Any = None  # the orchestrator keeping peer messages for it
         self._task: Optional[asyncio.Task] = None
+        self._fallback_restore: Optional[Tuple[str, str]] = None
 
     @staticmethod
     def get_default_config() -> Dict[str, Any]:
@@ -80,6 +81,14 @@ class ModelFallbackPlugin(BasePlugin):
             priority=HookPriority.POSTPROCESSING.value,
             callback=self._on_request_error,
             retry_attempts=0,  # a switch never runs twice
+        ))
+        await self.event_bus.register_hook(Hook(
+            name="model_fallback_restore_profile",
+            plugin_name=self.name,
+            event_type=EventType.USER_INPUT_PRE,
+            priority=HookPriority.SYSTEM.value,
+            callback=self._restore_after_fallback,
+            retry_attempts=0,
         ))
         # Plugin files start before plugin packages, so the hub creates its
         # display tap after this plugin's initialize: attach once all started.
@@ -180,6 +189,31 @@ class ModelFallbackPlugin(BasePlugin):
         retry = data.get("streamed") is not True
         if kind and await self.fall_back(message, kind=kind, retry=retry) == "retry":
             data["retry"] = True  # the turn sends the request again, to the new model
+        return data
+
+    async def _restore_after_fallback(self, data: Dict[str, Any], event) -> Dict[str, Any]:
+        pending = getattr(self, "_fallback_restore", None)
+        if pending is None:
+            return data
+        self._fallback_restore = None
+        original_name, fallback_name = pending
+        profile_manager = self.event_bus.get_service("profile_manager")
+        active = profile_manager.get_active_profile() if profile_manager is not None else None
+        if active is None or active.name != fallback_name:
+            return data
+        original = profile_manager.get_profile(original_name)
+        if original is None:
+            return data
+        from kollabor_ai.loadout_manager import Loadout, LoadoutManager
+
+        get_model = getattr(original, "get_model", None)
+        model = get_model() if callable(get_model) else getattr(original, "model", "")
+        await LoadoutManager(profile_manager, config=self.config).activate(
+            Loadout(original_name, original_name, model or ""),
+            self.event_bus,
+            persist=False,
+            for_current_run=True,
+        )
         return data
 
     def _on_tap_event(self, event: Dict[str, Any]) -> None:
@@ -293,6 +327,7 @@ class ModelFallbackPlugin(BasePlugin):
             return ""
         manager = LoadoutManager(profile_manager, config=self.config)
         active = profile_manager.get_active_profile()
+        original_name = active.name if active is not None else None
         failing = active.get_model() if active is not None else "This model"
         target_profile = profile_manager.get_profile(loadout.provider_profile)
         target_model = loadout.model or (
@@ -311,7 +346,9 @@ class ModelFallbackPlugin(BasePlugin):
             # A prompt it took now would fail with "ACP runner closed".
             harness.closing_reason = SWITCH_NOTE.format(loadout.name)
         try:
-            activated = await manager.activate(loadout, self.event_bus, persist=False)
+            activated = await manager.activate(
+                loadout, self.event_bus, persist=False, for_current_run=True
+            )
         except Exception as exc:
             logger.warning("model fallback to %s failed: %s", loadout.name, exc)
             activated = None
@@ -321,6 +358,8 @@ class ModelFallbackPlugin(BasePlugin):
         if not activated:
             self._say(f"{failing} {REASONS[kind]}, and switching to {loadout.name} failed.")
             return ""
+        if original_name is not None:
+            self._fallback_restore = (original_name, loadout.provider_profile)
         harness = profile_manager.get_profile(loadout.provider_profile)
         to_acp = str(getattr(harness, "get_provider", lambda: "")() or "").lower() == "acp"
         outcome = "retry" if retry and not to_acp else "resend"

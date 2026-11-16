@@ -655,6 +655,7 @@ class LoadoutManager:
         event_bus: Optional[Any] = None,
         *,
         persist: Optional[bool] = None,
+        for_current_run: bool = False,
     ) -> Optional[Loadout]:
         """Apply a loadout to its provider profile and activate it.
 
@@ -703,8 +704,12 @@ class LoadoutManager:
 
             if is_acp(current) or is_acp(selected):
                 with transition():
-                    return await self._activate_owned(loadout, event_bus, persist=persist)
-        return await self._activate_owned(loadout, event_bus, persist=persist)
+                    return await self._activate_owned(
+                        loadout, event_bus, persist=persist, for_current_run=for_current_run
+                    )
+        return await self._activate_owned(
+            loadout, event_bus, persist=persist, for_current_run=for_current_run
+        )
 
     async def _activate_owned(
         self,
@@ -712,6 +717,7 @@ class LoadoutManager:
         event_bus: Optional[Any] = None,
         *,
         persist: Optional[bool] = None,
+        for_current_run: bool = False,
     ) -> Optional[Loadout]:
         if isinstance(loadout_or_name, str):
             loadout, _suggestions = self.resolve(loadout_or_name)
@@ -790,7 +796,7 @@ class LoadoutManager:
                     raise ValueError("ACP harness did not apply the loadout model")
                 if loadout.effort and (not effort or effort.get("currentValue") != loadout.effort):
                     raise ValueError("ACP harness did not apply the loadout effort")
-                if persist is None:
+                if persist is None or for_current_run:
                     activated = self.profile_manager.set_active_profile(loadout.provider_profile)
                 else:
                     activated = self.profile_manager.set_active_profile(
@@ -884,7 +890,7 @@ class LoadoutManager:
             state_service = event_bus.get_service("state_service")
 
         synced = False
-        if state_service and hasattr(state_service, "set_active_profile"):
+        if state_service and hasattr(state_service, "set_active_profile") and (persist is not False or for_current_run):
             try:
                 if persist is None:
                     await state_service.set_active_profile(
@@ -903,7 +909,7 @@ class LoadoutManager:
                     type(exc).__name__,
                 )
 
-        if not synced:
+        if not synced and (persist is not False or for_current_run):
             if persist is None:
                 self.profile_manager.set_active_profile(loadout.provider_profile)
             else:
