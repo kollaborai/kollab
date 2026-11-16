@@ -1012,7 +1012,7 @@ def test_remove_partial_stop_failure_publishes_and_revokes(tmp_path, monkeypatch
         app.state.plugin_dispatcher.invalidate = AsyncMock(return_value=False)
         app.state.plugin_service_controls.cancel_plugin = AsyncMock()
         app.state.plugin_events.publish_change = Mock()
-        response = client.delete("/plugins/hello")
+        response = client.post("/plugins/hello/remove")
         assert response.status_code == 409
         assert root.exists(), "partial stop failure must not remove the plugin"
         app.state.plugin_dispatcher.invalidate.assert_awaited_once_with("hello")
