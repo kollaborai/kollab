@@ -666,6 +666,8 @@ class LoadoutManager:
         or without persistence when ``persist=False``. A non-persistent
         activation changes the active profile only when ``for_current_run``
         is true; otherwise it updates the provider profile without selecting it.
+        Run-scoped activation is refused when a shared state service is wired,
+        since that service owns the process-wide active provider.
         Active-profile changes go through ``state_service`` when
         one is wired on ``event_bus`` (attach/daemon mode), otherwise
         directly plus the ``llm_service`` reinitialize/reload-tools
@@ -687,6 +689,13 @@ class LoadoutManager:
                    if isinstance(loadout_or_name, str) else loadout_or_name)
         if loadout is None:
             return None
+        if persist is False and for_current_run and event_bus and hasattr(event_bus, "get_service"):
+            state_service = event_bus.get_service("state_service")
+            if state_service is not None:
+                logger.info(
+                    "Refusing run-scoped loadout activation through shared state service"
+                )
+                return None
         orchestrator = (event_bus.get_service("acp_orchestrator")
                         if event_bus and hasattr(event_bus, "get_service") else None)
         transition = getattr(orchestrator, "transition", None)

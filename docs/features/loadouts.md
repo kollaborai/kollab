@@ -205,12 +205,14 @@ Precedence is explicit flag → loadout field → provider profile value.
 `/llm fallback <name>` picks the loadout this agent switches to when a turn
 fails because its model can't serve it: a usage limit, a quota, a rate limit
 that outlasted the retries, or an expired login. The agent says so in one line
-in the chat, switches once and runs the turn again, in the same reply. Automatic
-fallback applies in the current agent process without saving the provider
-profile or active profile to global config. If the fallback resolves to the
-model that just failed, the agent stays on that model and says why instead of
-retrying it. Three cases are not run again, and the notice asks you to send the
-message again:
+in the chat, switches once and runs the turn again, in the same reply when
+profile state is local to that agent. In a daemon with a shared state service,
+automatic fallback stays on the current model and explains that the profile is
+shared across sessions. When fallback is available, it does not save the
+provider profile or active profile to global config. If the fallback resolves
+to the model that just failed, the agent stays on that model and says why
+instead of retrying it. Three cases are not run again, and the notice asks you
+to send the message again:
 
 - the fallback is an ACP harness, which has its own conversation;
 - the failed turn was an ACP harness's, which has ended before the switch;

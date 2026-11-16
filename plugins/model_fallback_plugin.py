@@ -357,6 +357,15 @@ class ModelFallbackPlugin(BasePlugin):
                 loadout=loadout.name,
             )
             return ""
+        if self.event_bus.get_service("state_service") is not None:
+            self._say(
+                f"{failing} {REASONS[kind]}, but automatic fallback cannot switch a profile "
+                "shared across sessions, staying on this model.",
+                reason=kind,
+                failed_model=failing,
+                loadout=loadout.name,
+            )
+            return ""
         if harness is not None:
             # A prompt it took now would fail with "ACP runner closed".
             harness.closing_reason = SWITCH_NOTE.format(loadout.name)
