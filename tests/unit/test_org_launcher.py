@@ -13,7 +13,7 @@ from plugins.hub import org_launcher, presence, rosters
 from plugins.hub.org_launcher import Launch, OrgLauncher
 from plugins.hub.plugin import HubPlugin
 
-MARKETING = ["omar", "maya", "theo", "priya", "luz", "jonas"]
+MARKETING = ["campaign-lead", "brand-strategist", "copywriter", "growth-analyst", "social-lead", "content-editor"]
 
 
 @pytest.fixture
@@ -70,22 +70,22 @@ def test_the_lead_comes_online_first_and_each_member_is_waited_for(fleet, home):
     assert launch.started == MARKETING and launch.running == [] and launch.failed == ""
     assert [name for name, _ in fleet.launched] == MARKETING
     # only the lead is handed the mission
-    assert [name for name, message in fleet.launched if message] == ["omar"]
+    assert [name for name, message in fleet.launched if message] == ["campaign-lead"]
 
 
 def test_members_already_online_are_left_alone_and_reported(fleet, home):
-    fleet.online = {"omar", "theo"}
+    fleet.online = {"campaign-lead", "copywriter"}
     team = org_launcher.load_organization("marketing", str(home))
 
     launch = OrgLauncher(str(home)).launch_org("marketing", "plan the launch")
 
-    assert launch.started == ["maya", "priya", "luz", "jonas"]
-    assert launch.running == ["omar", "theo"]
+    assert launch.started == ["brand-strategist", "growth-analyst", "social-lead", "content-editor"]
+    assert launch.running == ["campaign-lead", "copywriter"]
     assert launch.notes(team, "plan the launch") == [
-        "already online: omar, theo",
-        "mission not sent, omar is already online: kollab --hub msg omar <mission>",
+        "already online: campaign-lead, copywriter",
+        "mission not sent, campaign-lead is already online: kollab --hub msg campaign-lead <mission>",
     ]
-    assert launch.notes(team) == ["already online: omar, theo"]
+    assert launch.notes(team) == ["already online: campaign-lead, copywriter"]
 
 
 def test_a_second_launch_starts_nothing(fleet, home):
@@ -98,7 +98,7 @@ def test_a_second_launch_starts_nothing(fleet, home):
 
 
 def test_the_launch_stops_at_a_member_that_never_comes_online(fleet, home, monkeypatch):
-    fleet.never = {"theo"}
+    fleet.never = {"copywriter"}
     monkeypatch.setattr(org_launcher, "ONLINE_TIMEOUT", 0.05)
     real_sleep = time.sleep
     monkeypatch.setattr(
@@ -112,13 +112,13 @@ def test_the_launch_stops_at_a_member_that_never_comes_online(fleet, home, monke
 
     launch = OrgLauncher(str(home)).launch_org("marketing")
 
-    assert launch.started == ["omar", "maya"] and launch.failed == "theo"
+    assert launch.started == ["campaign-lead", "brand-strategist"] and launch.failed == "copywriter"
     assert [name for name, _ in fleet.launched] == [
-        "omar",
-        "maya",
-        "theo",
+        "campaign-lead",
+        "brand-strategist",
+        "copywriter",
     ]  # nobody after theo
-    assert "theo did not come online" in launch.notes(team)[0]
+    assert "copywriter did not come online" in launch.notes(team)[0]
 
 
 def test_an_unknown_team_launches_nothing(fleet, home):
@@ -137,16 +137,16 @@ def test_online_means_live_in_this_folders_hub(home, monkeypatch):
     monkeypatch.setattr(
         presence,
         "live_agents_on_machine",
-        lambda: [(mine, {"identity": "omar"}), (other, {"identity": "maya"})],
+        lambda: [(mine, {"identity": "campaign-lead"}), (other, {"identity": "brand-strategist"})],
     )
 
-    assert OrgLauncher(str(home / "mine"))._online() == {"omar"}
-    assert OrgLauncher(str(home / "other"))._online() == {"maya"}
+    assert OrgLauncher(str(home / "mine"))._online() == {"campaign-lead"}
+    assert OrgLauncher(str(home / "other"))._online() == {"brand-strategist"}
 
     # a machine-wide hub is one room for every folder
     monkeypatch.setattr(org_launcher, "is_project_scoped", lambda: False)
     monkeypatch.setattr(org_launcher, "get_config_directory", lambda: home / "mine")
-    assert OrgLauncher(str(home / "other"))._online() == {"omar"}
+    assert OrgLauncher(str(home / "other"))._online() == {"campaign-lead"}
 
 
 class _SelectingOrgPickerStack:
@@ -168,7 +168,7 @@ def _hub_with_org_picker(project):
 def test_the_hub_command_does_not_freeze_the_event_loop(home, monkeypatch):
     def slow_launch(self, org_name, mission="", *, members=None, exclude=None, lead=None):
         time.sleep(0.3)  # waiting for members to come online
-        return Launch(["omar"], ["maya"])
+        return Launch(["campaign-lead"], ["brand-strategist"])
 
     monkeypatch.setattr(OrgLauncher, "launch_org", slow_launch)
     hub = _hub_with_org_picker(home)
@@ -191,7 +191,7 @@ def test_the_hub_command_does_not_freeze_the_event_loop(home, monkeypatch):
 
     assert ticks >= 5, "the loop was blocked while the team launched"
     assert reply.startswith("launched team 'marketing': 1 agents")
-    assert "already online: maya" in reply
+    assert "already online: brand-strategist" in reply
 
 
 def test_the_hub_command_lists_each_member_under_who_they_report_to(home, monkeypatch):
@@ -207,24 +207,28 @@ def test_the_hub_command_lists_each_member_under_who_they_report_to(home, monkey
     reply = asyncio.run(HubPlugin._handle_org_command(hub, "marketing"))
 
     assert reply.splitlines()[1:] == [
-        "omar: Campaign Lead",
-        "  maya: Brand Strategist",
-        "  theo: Copywriter",
-        "    jonas: Content Editor",
-        "  priya: Growth Analyst",
-        "  luz: Social Lead",
+        "campaign-lead: Campaign Lead",
+        "  brand-strategist: Brand Strategist",
+        "  copywriter: Copywriter",
+        "    content-editor: Content Editor",
+        "  growth-analyst: Growth Analyst",
+        "  social-lead: Social Lead",
     ]
 
 
 @pytest.mark.parametrize(
     "launch, exit_code, lines",
     [
-        (Launch(["omar", "maya"], []), None, ["launched 2 agent(s): omar, maya"]),
-        (Launch([], ["omar"]), None, ["launched 0 agent(s)", "already online: omar"]),
         (
-            Launch(["omar"], [], "maya"),
+            Launch(["campaign-lead", "brand-strategist"], []),
+            None,
+            ["launched 2 agent(s): campaign-lead, brand-strategist"],
+        ),
+        (Launch([], ["campaign-lead"]), None, ["launched 0 agent(s)", "already online: campaign-lead"]),
+        (
+            Launch(["campaign-lead"], [], "brand-strategist"),
             1,
-            ["launched 1 agent(s): omar", "maya did not come online"],
+            ["launched 1 agent(s): campaign-lead", "brand-strategist did not come online"],
         ),
     ],
 )
@@ -251,36 +255,39 @@ def test_the_hub_org_cli_prints_what_happened(
 
 def test_allowlist_launches_only_selected_members_and_reports_omissions(fleet, home):
     launch = OrgLauncher(str(home)).launch_org(
-        "marketing", "selected mission", members=["maya", "omar"]
+        "marketing", "selected mission", members=["brand-strategist", "campaign-lead"]
     )
 
-    assert launch.started == ["omar", "maya"]
-    assert launch.excluded == ("theo", "priya", "jonas", "luz")
-    assert fleet.launched == [("omar", "selected mission"), ("maya", "")]
+    assert launch.started == ["campaign-lead", "brand-strategist"]
+    assert launch.excluded == ("copywriter", "growth-analyst", "content-editor", "social-lead")
+    assert fleet.launched == [("campaign-lead", "selected mission"), ("brand-strategist", "")]
 
 
 def test_excluding_manager_reparents_prompt_before_launch(fleet, home):
-    launch = OrgLauncher(str(home)).launch_org("marketing", exclude=["theo"])
+    launch = OrgLauncher(str(home)).launch_org("marketing", exclude=["copywriter"])
 
     prompts = dict(fleet.briefs)
-    assert launch.excluded == ("theo",)
-    assert "you report to: omar" in prompts["jonas"]
-    assert "you report to: theo" not in prompts["jonas"]
-    assert "theo" not in prompts["jonas"]
+    assert launch.excluded == ("copywriter",)
+    assert "you report to: campaign-lead" in prompts["content-editor"]
+    assert "you report to: copywriter" not in prompts["content-editor"]
+    assert "copywriter" not in prompts["content-editor"]
 
 
 def test_replacement_lead_receives_mission_and_launches_first(fleet, home):
     launch = OrgLauncher(str(home)).launch_org(
-        "marketing", "maya's mission", members=["omar", "maya"], lead="maya"
+        "marketing",
+        "brand-strategist's mission",
+        members=["campaign-lead", "brand-strategist"],
+        lead="brand-strategist",
     )
 
-    assert launch.started == ["maya", "omar"]
-    assert fleet.launched == [("maya", "maya's mission"), ("omar", "")]
+    assert launch.started == ["brand-strategist", "campaign-lead"]
+    assert fleet.launched == [("brand-strategist", "brand-strategist's mission"), ("campaign-lead", "")]
 
 
 def test_omitting_authored_lead_without_replacement_is_rejected(fleet, home):
     with pytest.raises(rosters.LibraryError, match="replacement lead"):
-        OrgLauncher(str(home)).launch_org("marketing", exclude=["omar"])
+        OrgLauncher(str(home)).launch_org("marketing", exclude=["campaign-lead"])
 
     assert fleet.launched == []
 
@@ -298,9 +305,9 @@ def test_org_cli_parses_and_forwards_selection_flags():
             "--dir",
             "/tmp/project",
             "--without",
-            "theo,luz",
+            "copywriter,social-lead",
             "--without",
-            "jonas",
+            "content-editor",
         ],
     )
 
@@ -314,23 +321,23 @@ def test_org_cli_parses_and_forwards_selection_flags():
         "--dir",
         "/tmp/project",
         "--without",
-        "theo,luz",
+        "copywriter,social-lead",
         "--without",
-        "jonas",
+        "content-editor",
     ]
 
 
 def test_org_cli_rejects_selection_flags_outside_org_and_mixed_selectors():
     with pytest.raises(SystemExit) as wrong_command:
         cli.parse_arguments(
-            plugin_classes=[], argv=["--hub", "status", "--only", "maya"]
+            plugin_classes=[], argv=["--hub", "status", "--only", "brand-strategist"]
         )
     assert wrong_command.value.code == 2
 
     with pytest.raises(SystemExit) as conflicting_selectors:
         cli.parse_arguments(
             plugin_classes=[],
-            argv=["--hub", "org", "marketing", "--only", "maya", "--without", "theo"],
+            argv=["--hub", "org", "marketing", "--only", "brand-strategist", "--without", "copywriter"],
         )
     assert conflicting_selectors.value.code == 2
 
@@ -354,9 +361,9 @@ def test_org_cli_scopes_team_and_launch_to_folder_with_mission(
         def launch_org(self, name, mission="", *, members=None, exclude=None):
             captured["launch"] = (name, mission, members, exclude)
             return SimpleNamespace(
-                started=["omar"],
+                started=["campaign-lead"],
                 failed="",
-                notes=lambda _team, _mission: ["excluded: theo, luz"],
+                notes=lambda _team, _mission: ["excluded: copywriter, social-lead"],
             )
 
     monkeypatch.setattr(cli, "_apply_hub_project_scope_from_config", lambda: None)
@@ -376,7 +383,7 @@ def test_org_cli_scopes_team_and_launch_to_folder_with_mission(
                 "--dir",
                 str(project_dir),
                 "--without",
-                "theo,luz",
+                "copywriter,social-lead",
             ]
         )
     )
@@ -387,9 +394,9 @@ def test_org_cli_scopes_team_and_launch_to_folder_with_mission(
         "marketing",
         "plan the launch",
         None,
-        ["theo", "luz"],
+        ["copywriter", "social-lead"],
     )
-    assert "excluded: theo, luz" in capsys.readouterr().out
+    assert "excluded: copywriter, social-lead" in capsys.readouterr().out
 
 
 def test_org_cli_reports_missing_replacement_lead(
@@ -402,7 +409,7 @@ def test_org_cli_reports_missing_replacement_lead(
     with pytest.raises(SystemExit) as exit_info:
         asyncio.run(
             cli._handle_cli_hub(
-                ["org", "marketing", "--without", "omar"]
+                ["org", "marketing", "--without", "campaign-lead"]
             )
         )
 

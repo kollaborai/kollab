@@ -16,8 +16,8 @@
     },
     { "action": "assert_contains", "pattern": "^first gem: koordinator available=True$", "description": "New Session offers koordinator first while this folder runs none" },
     { "action": "assert_contains", "pattern": "^sapphire last_ran: yes$", "description": "the gem list knows sapphire ran here" },
-    { "action": "assert_contains", "pattern": "^offline: maya,sapphire$", "description": "the sidebar lists the agents that ran here as offline, the newest first" },
-    { "action": "assert_contains", "pattern": "^offline look: maya=Maya Lindqvist/emoji sapphire=Sapphire/gem$", "description": "an offline persona of another roster keeps its name and picture, a gem its own" },
+    { "action": "assert_contains", "pattern": "^offline: brand-strategist,sapphire$", "description": "the sidebar lists the agents that ran here as offline, the newest first" },
+    { "action": "assert_contains", "pattern": "^offline look: brand-strategist=Brand Strategist/gem sapphire=Sapphire/gem$", "description": "an offline persona of another roster keeps its role and gem, a pool gem its own" },
     { "action": "assert_contains", "pattern": "^network: live=False remote=lapis@prod-box$", "description": "the last roster seen shows with no agent here on the network" },
     { "action": "assert_contains", "pattern": "^workspaces: home=ws browse=alpha$", "description": "the workspace picker gets the engine folder and its subfolders" }
   ]
