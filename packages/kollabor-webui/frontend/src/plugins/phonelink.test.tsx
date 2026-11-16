@@ -38,6 +38,23 @@ describe("PhoneLink plugin UI", () => {
     expect(html).not.toContain("Retry");
     host.close();
   });
+  it("explains declared uses without implying plugin code is sandboxed", async () => {
+    const plugin = { ...entry, uses: ["agents", "agents:unattended", "secret:KEY", "run:python3", "net:example.com", "files:/work", "future:thing"] };
+    const host = phoneHost(plugin);
+    await host.start();
+    const html = renderToStaticMarkup(<PluginsSettings host={host} api={{} as EngineApi} canManage={false} />);
+    expect(html).toContain("Through Kollab");
+    expect(html).toContain("On Its Own");
+    expect(html).toContain("Can start agent runs through Kollab.");
+    expect(html).toContain("Can run agent tools without asking");
+    expect(html).toContain("Can request the secret KEY through Kollab.");
+    expect(html).toContain("Runs: python3.");
+    expect(html).toContain("Talks to: example.com.");
+    expect(html).toContain("Reads or writes: /work.");
+    expect(html).toContain("future:thing");
+    expect(html).toContain("Plugin code runs as you");
+    host.close();
+  });
   it("uses the normal renderer fallback", async () => {
     const host = phoneHost();
     await host.start();
