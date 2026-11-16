@@ -141,3 +141,21 @@ def test_tool_executor_spawn_guard_allows_windows_shell_text_mentions(command):
 )
 def test_tool_executor_spawn_guard_allows_hub_free_text(command):
     assert not _is_blocked_kollab_spawn(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep -E 'passed|failed' test.log",
+        "grep -e passed test.log",
+        "rg -e passed tests",
+        "git grep -e passed",
+        "test -e README.md",
+        "printf x | grep -E x",
+        "git status | grep -E main",
+        "pytest tests/unit | grep -E passed",
+    ],
+)
+def test_spawn_guard_allows_unrelated_short_e_options(command):
+    # These flags belong to their own executables, not to PowerShell.
+    assert not _is_blocked_kollab_spawn(command)
