@@ -75,6 +75,13 @@ export function PluginNotices({ host }: { host: PluginHost }) {
   return <>
     <PluginRecoveryNotices disabled={snapshot.disabled} skipped={snapshot.skipped} names={Object.fromEntries(snapshot.entries.map(entry => [entry.id, entry.name]))} onTurnOnAgain={id => { void host.turnOnAgain(id); }} />
     {snapshot.inventoryError ? <NoticeBar urgent>Plugins could not be loaded: {snapshot.inventoryError}</NoticeBar> : null}
+    {snapshot.registry.conflicts.map(({ pluginId, command, owner }, index) => {
+      const name = snapshot.entries.find(entry => entry.id === pluginId)?.name ?? pluginId;
+      const ownerName = owner === "built-in" ? "a built-in command" : snapshot.entries.find(entry => entry.id === owner)?.name ?? owner;
+      return <NoticeBar key={`command-conflict:${pluginId}:${command}:${owner}:${index}`}>
+        {`${name} could not register /${command}: already used by ${ownerName}.`}
+      </NoticeBar>;
+    })}
     {snapshot.registry.plugins.flatMap(plugin => plugin.notices.map((notice, index) =>
       <NoticeBar key={`${plugin.id}:${index}`} actions={notice.button ? <Button type="button" size="sm" variant="outline"
         onClick={() => { if (notice.button) host.getContext(plugin.id)?.navigate(notice.button.open); }}>{notice.button.label}</Button> : null}>
