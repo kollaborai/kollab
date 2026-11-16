@@ -2397,6 +2397,53 @@ async def test_remote_directory_rejects_a_malformed_version(bridges, bad):
 
 
 @pytest.mark.asyncio
+async def test_remote_directory_ignores_unknown_descriptor_fields(bridges):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    left.secure_transport.request = AsyncMock(
+        return_value=_directory_reply(right, future_field="new peer metadata")
+    )
+
+    await left._rpc_directory({"peer": right.commands.client.public_key})
+
+    (row,) = [r for r in await left.remote_agents() if r["address"] == address(right)]
+    assert row["name"] == "sapphire"
+
+
+@pytest.mark.asyncio
+async def test_remote_directory_skips_a_malformed_row_and_names_the_field(bridges, caplog):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    reply = _directory_reply(right)
+    reply["agents"].append({**reply["agents"][0], "name": 7})
+    left.secure_transport.request = AsyncMock(return_value=reply)
+
+    await left._rpc_directory({"peer": right.commands.client.public_key})
+
+    rows = [r for r in await left.remote_agents() if r["address"] == address(right)]
+    assert [row["name"] for row in rows] == ["sapphire"]
+    assert any("name" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_remote_directory_rate_limits_repeated_descriptor_warnings(bridges, caplog):
+    members, _ = bridges
+    (left, _, _, _), (right, _, _, _) = members
+    reply = _directory_reply(right)
+    reply["agents"][0]["name"] = 7
+    left.secure_transport.request = AsyncMock(return_value=reply)
+
+    for _ in range(3):
+        await left._rpc_directory({"peer": right.commands.client.public_key})
+
+    warnings = [
+        record for record in caplog.records
+        if "remote directory for peer" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+
+
+@pytest.mark.asyncio
 async def test_raw_hub_cannot_forge_relay_identity(bridges):
     members, _ = bridges
     (left, _, _, _), (right, hub, model, _) = members

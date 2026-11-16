@@ -146,6 +146,9 @@ unmarked because their data does not include a bundle type; matching a remote na
 a local roster entry could show the wrong type. The mark does not change identity,
 workspace grouping, or row actions.
 
+Remote directory rows ignore fields a peer does not recognize and skip a malformed
+row without hiding the other agents reported by that device.
+
 ## Hub Rosters and Teams
 
 Hub names and team charts are JSON libraries (see
