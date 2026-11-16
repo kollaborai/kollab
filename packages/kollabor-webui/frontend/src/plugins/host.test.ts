@@ -45,6 +45,24 @@ describe("plugin host lifecycle", () => {
     host.close();
   });
 
+  it("refreshes promised heartbeats and stops polling when closed", async () => {
+    vi.useFakeTimers();
+    const { host, json, setInventory } = setup();
+    try {
+      const initial = { ...entry("hello"), services: [{ name: "worker", state: "running", heartbeat_s: 60, heartbeat: 100 }] };
+      setInventory([initial]);
+      await host.start();
+      expect(json).toHaveBeenCalledTimes(1);
+      setInventory([{ ...initial, services: [{ ...initial.services[0], heartbeat: 200 }] }]);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(json).toHaveBeenCalledTimes(2);
+      expect(host.getSnapshot().entries[0].services?.[0]).toMatchObject({ heartbeat: 200 });
+      host.close();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(json).toHaveBeenCalledTimes(2);
+    } finally { host.close(); vi.useRealTimers(); }
+  });
+
   it("refreshes declared menu labels when the manifest changes without a bundle change", async () => {
     const importer = vi.fn(async () => ({ default: (k: { menu(id: string): void }) => k.menu("board") }));
     const { host, setInventory } = setup({ importer });
