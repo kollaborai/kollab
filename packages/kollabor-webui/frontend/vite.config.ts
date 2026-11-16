@@ -209,6 +209,7 @@ const mainConfig = defineConfig({
       "src/components/assistant-ui/tool-fallback.test.tsx",
       "src/engine-version.test.ts",
       "tests/agent-type-glyph.test.tsx",
+      "tests/kollab-logo.test.tsx",
       "tests/agent-version-notice.test.tsx",
       "tests/mobile-invite.test.mjs",
       "tests/phonelink-app-shell.test.ts",
