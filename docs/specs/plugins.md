@@ -292,7 +292,7 @@ follows the ref recorded at add.
 | Path | Holds | Written by |
 |---|---|---|
 | `~/.kollab/plugins/<id>/` | the installed plugin, a clean copy at the pinned commit | `add`, `update` |
-| `~/.kollab/plugins.json` | `{"plugins": {"<id>": {"source", "ref", "commit", "files_sha256", "enabled", "granted": [...], "added", "updated"}}, "dev": {"<id>": "<folder>"}}`; on update `granted` becomes the confirmed `uses` | kollab, under `kollabor_config.file_lock` |
+| `~/.kollab/plugins.json` | `{"plugins": {"<id>": {"source", "ref", "commit", "files_sha256", "enabled", "granted": [...], "added", "updated"}}, "dev": {"<id>": "<folder>"}, "enable_counter": <integer>, "enable_order": {"<id>": <integer>}}`; on update `granted` becomes the confirmed `uses` | kollab, under `kollabor_config.file_lock` |
 | `~/.kollab/plugin-data/<id>/` | the plugin's own state (`KOLLAB_PLUGIN_DATA`); kept on update and remove | the plugin |
 | `~/.kollab/plugin-data/<id>/values.json` | the plugin's settings values: the only store for them | kollab (see Settings) |
 | `~/.kollab/plugin-data/<id>/run/` | `token` (0600), `<process>.pid`, `<process>.state`, `<process>.log`, `runs.json`, `usage.jsonl`, `usage-<date>.json` | kollab, and `usage.jsonl` appends from the plugin |
@@ -301,6 +301,14 @@ follows the ref recorded at add.
 Install and update are one unit: the old folder moves to `<id>.old`, the clean folder is renamed into
 place, `plugins.json` is written under its sibling `plugins.json.lock`, and `<id>.old` is deleted. A
 failure part-way is rolled back on the next start by restoring `<id>.old`.
+
+`enable_counter` and `enable_order` record web command priority in the same locked registry
+transaction as install, enable, disable, remove, and dev attach/detach. A real off-to-on transition
+or new dev attachment gets the next positive integer; an idempotent enable, reattach, or update
+preserves its position. Disable, remove, and detach remove the current entry. Dev keys use `<id>@dev`.
+Numbers are bounded by JavaScript's largest safe integer. Existing enabled records without an order
+predate recorded transitions; their actual historical order cannot be reconstructed, so they sort
+before recorded enables by plugin id until turned off and on again.
 
 A folder in `~/.kollab/plugins/` with a `kollab-plugin.json` is a package and loads only through its
 manifest; a loose `.py` file there loads as today. A dev run has its own data folder and its own process
@@ -590,13 +598,17 @@ The configuration menu's own scanner goes (`_discover_plugin_modules`, `_find_pl
 registry replaces it, and `GET /plugins` serves the same entries:
 
 ```
-PluginEntry = {id, name, version, kind: "built-in" | "installed" | "dev", source, commit, enabled, shadowed,
+PluginEntry = {id, name, version, kind: "built-in" | "installed" | "dev", source, commit, enabled, enable_order, shadowed,
                state: "ok" | "error" | "off" | "stopping" | "stop-failed" | "changed-on-disk" | "skipped", error, settings: [make_field fields],
                web: {entry, style, hash} | null, contributes: {menu, views, pages, modals, commands},
                services: [{name, state: "running" | "stopping" | "stop-failed" | "exited" | "stopped" | "crash-stopped" | "unknown",
                            desired, pid, since, restarts, heartbeat, heartbeat_s, heartbeat_monitor_since,
                            stop_deadline, error}], uses, granted}
 ```
+
+`enable_order` is the positive integer from the registry for installed and dev entries, or `null`
+when no recorded order exists. Built-ins do not contribute web bundles. The web host resolves slash
+command conflicts using this order rather than import completion order.
 
 `heartbeat`, `heartbeat_monitor_since`, `since`, and `stop_deadline` are engine Unix timestamps in
 seconds; a missing value is `null`. `heartbeat_monitor_since` is the current engine's observation start,
