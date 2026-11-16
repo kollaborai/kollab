@@ -106,7 +106,9 @@ def test_remove_provider_profiles_deletes_folder_profiles_only_from_folder_confi
         "anthropic-local",
     ]
 
-    assert "anthropic-cloud" in _read_config(global_path)["kollabor"]["llm"]["profiles"]
+    global_llm = _read_config(global_path)["kollabor"]["llm"]
+    assert "anthropic-cloud" not in global_llm["profiles"]
+    assert "active_profile" not in global_llm
     local_llm = _read_config(local_path)["kollabor"]["llm"]
     assert local_llm["profiles"] == {
         "openai": {"provider": "openai", "api_key": "keep"}
