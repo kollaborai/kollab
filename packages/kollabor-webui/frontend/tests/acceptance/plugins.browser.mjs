@@ -22,10 +22,10 @@ async function captureReview(page, name) {
     for (const theme of ["dark", "light"]) {
       await page.evaluate(dark => document.documentElement.classList.toggle("dark", dark), theme === "dark");
       const overflow = await page.evaluate(() => {
-        const dialog = document.querySelector('[role="dialog"]');
+        const dialogs = [...document.querySelectorAll('[role="dialog"]')];
         return { document: document.documentElement.scrollWidth - document.documentElement.clientWidth,
           body: document.body.scrollWidth - document.body.clientWidth,
-          dialog: dialog ? dialog.scrollWidth - dialog.clientWidth : null };
+          dialog: dialogs.length ? Math.max(...dialogs.map(dialog => dialog.scrollWidth - dialog.clientWidth)) : null };
       });
       console.log(`${name} overflow ${width}px ${theme}: ${JSON.stringify(overflow)}`);
       await page.screenshot({ path: resolve(directory, `${name}-${width}-${theme}.png`) });
@@ -372,9 +372,14 @@ try {
   assert.equal(await customSettings.evaluate(node => getComputedStyle(node).color), "rgb(12, 34, 56)");
   await settings.getByRole("button", { name: "Add Plugin" }).click();
   const add = page.getByRole("dialog", { name: "Add Plugin" });
+  await captureReview(page, "add-plugin");
   await add.getByLabel("Git URL").fill("https://github.com/example/fixture.git#other");
   await page.setViewportSize({ width: 390, height: 800 });
   await add.getByLabel("Git URL").waitFor({ timeout: 5000 });
+  await page.waitForTimeout(350); // allow the responsive dialog transition to settle
+  const mobileSettingsBox = await page.locator('[data-slot="dialog-content"]').first().boundingBox();
+  assert.ok(mobileSettingsBox && mobileSettingsBox.width >= 389 && mobileSettingsBox.height >= 799,
+    "plugin settings retain their full-screen mobile layout");
   assert.equal(await add.getByLabel("Git URL").inputValue(), "https://github.com/example/fixture.git#other", "open install input survives the mobile breakpoint");
   await page.setViewportSize({ width: 1280, height: 800 });
   await add.getByLabel("Git URL").waitFor({ timeout: 5000 });
@@ -394,7 +399,13 @@ try {
   await add.getByText(/plugin code.*runs as you/i).waitFor();
   await add.getByText(/without asking/i).waitFor();
   await add.getByText(/unreported.*not capped/i).waitFor();
+  await page.setViewportSize({ width: 390, height: 800 });
+  await add.getByText(commit, { exact: false }).waitFor({ timeout: 5000 });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await add.getByText(commit, { exact: false }).waitFor({ timeout: 5000 });
+  assert.equal(confirmedInstall, null, "resizing keeps the staged review without confirming it");
   if (process.env.PLUGIN_SCREENSHOTS) await page.screenshot({ path: resolve(process.env.PLUGIN_SCREENSHOTS, "install-review-actual.png") });
+  await captureReview(page, "install-review");
   assert.deepEqual(installSource, { source: "https://github.com/example/fixture.git#release/demo" });
   assert.equal(confirmedInstall, null, "preview must not install before confirmation");
   await add.getByRole("button", { name: "Cancel", exact: true }).click();
