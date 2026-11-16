@@ -393,7 +393,8 @@ async def test_dead_mic_error_without_any_frames(service, root):
     await claim(client)
     assert (await client.call("status"))["state"] == "starting"
     service.recorder.events.put({"type": "dead_stream", "detail": "permission denied"})
-    await until(lambda: service.recorder is None)
+    # stop_capture() clears service.recorder before the recorder thread has stopped.
+    await until(lambda: service.recorder is None and Recorder.active == 0)
     assert (await client.call("status"))["state"] == "error"
     assert Recorder.active == 0
 
