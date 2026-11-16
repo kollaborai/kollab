@@ -372,6 +372,64 @@ def _is_blocked_kollab_spawn(
         if executable in shell_names or python_name.fullmatch(executable):
             return None
 
+        # Search patterns and Git directory flags are data, but rg can execute
+        # a preprocessor, and Git configuration or a grep pager can execute
+        # commands. Inspect those values separately. Shell substitutions are
+        # also checked by scan_tokens' separate pass.
+        if executable in {"grep", "egrep", "fgrep", "rg", "git"}:
+            git_command_index = 0
+            if executable == "git":
+                global_options_with_values = {
+                    "-C",
+                    "-c",
+                    "--git-dir",
+                    "--work-tree",
+                    "--namespace",
+                    "--super-prefix",
+                    "--config-env",
+                }
+                while git_command_index < len(args):
+                    item = args[git_command_index]
+                    if item in global_options_with_values:
+                        git_command_index += 2
+                    elif item.startswith("-"):
+                        git_command_index += 1
+                    else:
+                        break
+            git_is_grep = (
+                executable == "git"
+                and git_command_index < len(args)
+                and args[git_command_index] == "grep"
+            )
+            for index, argument in enumerate(args):
+                if argument == "--":
+                    break
+                value = None
+                if executable == "rg":
+                    if argument.startswith("--pre="):
+                        value = argument.partition("=")[2]
+                    elif argument == "--pre" and index + 1 < len(args):
+                        value = args[index + 1]
+                elif executable == "git":
+                    if index < git_command_index:
+                        if argument == "-c" and index + 1 < len(args):
+                            value = args[index + 1]
+                        elif argument.startswith("-c") and len(argument) > 2:
+                            value = argument[2:]
+                    elif git_is_grep:
+                        if argument.startswith("--open-files-in-pager="):
+                            value = argument.partition("=")[2]
+                        elif argument.startswith("-O") and len(argument) > 2:
+                            value = argument[2:]
+                        elif argument in {
+                            "--open-files-in-pager",
+                            "-O",
+                        } and index + 1 < len(args):
+                            value = args[index + 1]
+                if value and suspicious_launch(value, is_background):
+                    return True
+            return None
+
         def inspect_command(command_text: str) -> bool:
             return _is_blocked_kollab_spawn(
                 command_text, background=is_background, _depth=depth + 1
@@ -463,12 +521,48 @@ def _is_blocked_kollab_spawn(
             "/k",
         }
         normalized = [argument.lower().split("=", 1)[0] for argument in args]
-        if any(option in wrapper_options for option in normalized):
-            if any(
-                option in {"-e", "-ec", "-enc", "-encodedcommand"}
-                for option in normalized
-            ):
+        # Outside PowerShell, the short -e flag belongs to many ordinary
+        # programs. Inspect its payload instead of rejecting every occurrence;
+        # retain conservative handling for less ambiguous encoded flags.
+        encoded_options = {
+            "-e",
+            "-ec",
+            "-enc",
+            "-encodedcommand",
+            "--ec",
+            "--enc",
+            "--encodedcommand",
+        }
+        for index, option in enumerate(normalized):
+            if option not in encoded_options:
+                continue
+            # Only short -e overlaps broadly with ordinary programs. Keep
+            # other encoded flags and unfamiliar shells conservative.
+            if option != "-e" or executable.endswith("shell"):
                 return True
+            _, has_inline_value, inline_value = args[index].partition("=")
+            if has_inline_value:
+                payload = inline_value
+            elif index + 1 < len(args):
+                payload = args[index + 1]
+            else:
+                continue
+            # Inline runtimes (for example node's eval flag) execute plain
+            # source rather than PowerShell base64; keep their launches gated.
+            if suspicious_launch(payload, is_background):
+                return True
+            try:
+                command_text = (
+                    base64.b64decode(payload, validate=True)
+                    .decode("utf-16le")
+                    .lstrip("\ufeff")
+                )
+            except ValueError:
+                continue
+            if inspect_command(command_text):
+                return True
+        command_options = wrapper_options - encoded_options
+        if any(option in command_options for option in normalized):
             return suspicious_wrapper()
         return None
 
@@ -534,8 +628,19 @@ def _is_blocked_kollab_spawn(
         if depth > 8:
             return suspicious_launch(" ".join(tokens), is_background)
         segment: list[str] = []
-        for token in tokens:
-            if token in separators:
+        for index, token in enumerate(tokens):
+            # shlex separates the ampersand in fd duplication (2>&1), but
+            # that ampersand is a redirection, not a background operator.
+            is_fd_dup = (
+                token == "&"
+                and index > 0
+                and index + 1 < len(tokens)
+                and re.fullmatch(r"\d*[<>]", tokens[index - 1])
+                and re.fullmatch(r"(?:\d+-?|-)", tokens[index + 1])
+            )
+            if is_fd_dup:
+                segment.append(token)
+            elif token in separators:
                 if inspect_segment(segment, is_background or token == "&", depth):
                     return True
                 segment = []
@@ -547,9 +652,7 @@ def _is_blocked_kollab_spawn(
         # Catch shell command substitutions without treating ordinary quoted
         # mentions (e.g. echo 'kollab --agent') as executable commands.
         for token in tokens:
-            nested_commands = re.findall(
-                r"\$\(([^()]*)\)|`([^`]+)`|[<>]\(([^()]*)\)", token
-            )
+            nested_commands = re.findall(r"\$\(([^()]*)\)|[<>]\(([^()]*)\)", token)
             for groups in nested_commands:
                 nested = next((group for group in groups if group), "")
                 if nested and _is_blocked_kollab_spawn(
@@ -560,6 +663,39 @@ def _is_blocked_kollab_spawn(
 
     if _depth > 8:
         return suspicious_launch(command, background)
+
+    # Unlike shlex tokens, the original command preserves quote/escape context.
+    # Scan backticks here so spaces do not split real substitutions and single-
+    # quoted or escaped backticks remain ordinary data.
+    in_single = False
+    in_double = False
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and not in_single:
+            index += 2
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+        elif char == '"' and not in_single:
+            in_double = not in_double
+        elif char == "`" and not in_single:
+            end = index + 1
+            while end < len(command):
+                if command[end] == "\\":
+                    end += 2
+                elif command[end] == "`":
+                    break
+                else:
+                    end += 1
+            if end < len(command):
+                if _is_blocked_kollab_spawn(
+                    command[index + 1 : end], background=background, _depth=_depth + 1
+                ):
+                    return True
+                index = end
+        index += 1
+
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
         lexer.whitespace_split = True

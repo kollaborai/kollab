@@ -228,3 +228,51 @@ async def halt_panel_action(name: str, action: str, request: Request):
         return _failure("network", exc)
     status = 400 if not outcome.get("ok") and outcome.get("errors") else 200
     return JSONResponse(outcome, status_code=status, headers=_NO_STORE)
+
+
+# ------------------------------------------------- session-less setup panels
+# #1114/#1115: the first-run web UI has no session, yet the setup guide's
+# Provider and Network steps must still open Settings. The engine serves the
+# setup wizard and the connect picker itself: a bare context with a
+# ProfileManager over the host's config and no LLM service - the path
+# create_and_activate_profile reserves for first-run setups. No hub runs in
+# the engine, so connect describes as its unavailable notice, exactly like a
+# daemon whose hub is off.
+
+SETUP_PANELS = frozenset({"setup", "connect"})
+setup_router = APIRouter(prefix="/setup/panels", tags=["panels"])
+
+
+def _setup_target(name: str) -> Tuple[Any, Any]:
+    from types import SimpleNamespace
+
+    from kollabor.panels import require_panel
+    from kollabor_ai import ProfileManager
+
+    if name not in SETUP_PANELS:
+        raise PanelError(f"unknown panel '{name}'", status=404)
+    return require_panel(name), SimpleNamespace(
+        _profile_manager=ProfileManager(), _llm_service=None
+    )
+
+
+@setup_router.get("/{name}")
+async def describe_setup_panel(name: str):
+    try:
+        panel, ctx = _setup_target(name)
+        body = await panel.describe(ctx, {})
+    except Exception as exc:
+        return _failure("setup", exc)
+    return JSONResponse(body, headers=_NO_STORE)
+
+
+@setup_router.post("/{name}/actions/{action}")
+async def setup_panel_action(name: str, action: str, request: Request):
+    try:
+        panel, ctx = _setup_target(name)
+        payload = await _json_body(request)
+        outcome = await panel.act(ctx, action, payload)
+    except Exception as exc:
+        return _failure("setup", exc)
+    status = 400 if not outcome.get("ok") and outcome.get("errors") else 200
+    return JSONResponse(outcome, status_code=status, headers=_NO_STORE)

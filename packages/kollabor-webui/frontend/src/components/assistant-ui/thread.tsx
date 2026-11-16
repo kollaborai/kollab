@@ -26,6 +26,8 @@ import {
   ToolGroupTrigger,
 } from "@/components/assistant-ui/tool-group";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
+import { splitMediaSegments } from "@/components/media/media-tokens";
+import { MediaThumb, useMediaViewer, useSessionMedia } from "@/components/media/media-view";
 import { agentStatus, bundleName } from "@/components/panels/panel-model";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -44,7 +46,7 @@ import {
   imageAttachmentAdapter,
   usePendingPermissionCancellation,
 } from "@/runtime";
-import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
+import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
   panelCommandRequest,
   type PanelOpenRequest,
@@ -1342,6 +1344,46 @@ const AssistantActionBar: FC = () => {
   );
 };
 
+/**
+ * A user bubble's text: each [imageN] token becomes the thumbnail of the row's
+ * Nth stored image (#1088) and opens the viewer at it. Without a stored copy
+ * (an older row, or a picture the engine could not keep) the token stays text.
+ * A live row carries its pictures as image parts, so there the tokens render
+ * as nothing instead of duplicating the picture next to them.
+ */
+const UserText: FC<{ text?: string }> = ({ text }) => {
+  const media = useAuiState(
+    (s) => s.message.metadata?.custom?.media,
+  ) as MediaEntry[] | undefined;
+  const imageParts = useAuiState(
+    (s) => s.message.parts.filter((part) => part.type === "image").length,
+  );
+  const openViewer = useMediaViewer();
+  const sessionMedia = useSessionMedia();
+  if (!text) return null;
+  const segments = splitMediaSegments(text);
+  return (
+    <>
+      {segments.map((segment, index) => {
+        if (segment.kind === "text") return <span key={index}>{segment.text}</span>;
+        if (imageParts > 0) return null;
+        const entry = media?.[segment.index];
+        if (!entry) return <span key={index}>[image{segment.index + 1}]</span>;
+        const viewerItems = sessionMedia?.length ? sessionMedia : media;
+        const viewerIndex = viewerItems?.findIndex((item) => item.ref === entry.ref) ?? -1;
+        return (
+          <MediaThumb
+            key={index}
+            ref_={entry.ref}
+            className="my-1 align-middle"
+            onOpen={openViewer ? () => openViewer(viewerItems ?? media, viewerIndex >= 0 ? viewerIndex : segment.index) : undefined}
+          />
+        );
+      })}
+    </>
+  );
+};
+
 const UserMessage: FC = () => {
   return (
     <MessagePrimitive.Root
@@ -1353,7 +1395,7 @@ const UserMessage: FC = () => {
 
       <div className="aui-user-message-content-wrapper relative col-start-2 min-w-0">
         <div className="aui-user-message-content peer bg-muted text-foreground rounded-xl px-4 py-2 whitespace-pre-wrap wrap-break-word empty:hidden pointer-fine:text-sm">
-          <MessagePrimitive.Parts />
+          <MessagePrimitive.Parts components={{ Text: UserText }} />
         </div>
         <div className="aui-user-action-bar-wrapper absolute start-0 top-1/2 -translate-x-full -translate-y-1/2 pe-2 peer-empty:hidden rtl:translate-x-full">
           <UserActionBar />
