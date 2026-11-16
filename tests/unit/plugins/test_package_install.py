@@ -50,3 +50,33 @@ def test_install_and_rollback_on_registry_failure(tmp_path, monkeypatch):
     assert (state / "plugins" / "hello" / "content.txt").read_text() == "old"
     assert json.loads(registry.read_text()) == original
     assert not (state / "plugins" / "hello.old").exists()
+
+
+def test_update_disabled_and_remove_preserve_command_order_invariants(tmp_path, monkeypatch):
+    from kollabor_plugins import packages, services
+    from kollabor_plugins.settings import set_enabled
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    monkeypatch.setattr(services, "stop_services", lambda _plugin_id: [])
+
+    def install(name):
+        folder = tmp_path / name
+        folder.mkdir()
+        (folder / "kollab-plugin.json").write_text(json.dumps({"id": "hello"}))
+        info = {"source": "https://example.invalid/repo", "ref": "main", "commit": "a" * 40,
+                "files_sha256": packages.files_sha256(folder), "manifest": {"id": "hello", "uses": []}}
+        packages.install_stage(folder, info, info["commit"], info["files_sha256"])
+
+    install("first")
+    registry_path = tmp_path / ".kollab" / "plugins.json"
+    set_enabled("hello", False)
+    install("update")
+    registry = json.loads(registry_path.read_text())
+    assert registry["plugins"]["hello"]["enabled"] is False
+    assert "hello" not in registry["enable_order"]
+    set_enabled("hello", True)
+    registry = json.loads(registry_path.read_text())
+    assert registry["enable_order"]["hello"] == 2
+    packages.remove_package("hello", expected_record=registry["plugins"]["hello"])
+    assert "hello" not in json.loads(registry_path.read_text())["enable_order"]
