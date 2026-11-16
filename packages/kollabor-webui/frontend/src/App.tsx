@@ -61,6 +61,7 @@ import type {
 } from "@/components/panels/panel-model";
 import { ProfilesDialog } from "@/components/shell/ProfilesDialog";
 import { SetupGuide } from "@/setup/SetupGuide";
+import { WELCOME_GUIDE_DISMISSED_NOTICE } from "@/setup/guide-model";
 import { SessionPanel, type SessionView } from "@/components/shell/SessionPanel";
 import { latestTodoBlock } from "@/utils/todo-list";
 import { ShellHeader } from "@/components/shell/ShellHeader";
@@ -191,6 +192,7 @@ function RuntimeShell({
   remoteAgents,
   onSessionUpdated,
   onOpenSettings,
+  onOpenWelcome,
   onHistoryCleared,
   onActivity,
   eventActivity,
@@ -214,6 +216,7 @@ function RuntimeShell({
   remoteAgents: NetworkAgent[];
   onSessionUpdated: (session: Session) => void;
   onOpenSettings: (request?: PanelOpenRequest) => void;
+  onOpenWelcome: () => void;
   /** Reloads this session's conversation after the engine cleared it. */
   onHistoryCleared: () => Promise<void>;
   /** Reports what this session's gem should act out in the sidebar. */
@@ -315,9 +318,16 @@ function RuntimeShell({
       .listCommands(session.session_id)
       .then((result) => {
         if (!mounted) return;
-        setCommands(
-          result.commands?.length ? result.commands : DEFAULT_SLASH_COMMANDS,
+        const source = result.commands?.length
+          ? result.commands
+          : DEFAULT_SLASH_COMMANDS;
+        const welcome = DEFAULT_SLASH_COMMANDS.find(
+          (command) => command.name === "welcome",
         );
+        setCommands([
+          ...source.filter((command) => command.name.toLowerCase() !== "welcome"),
+          ...(welcome ? [welcome] : []),
+        ]);
       })
       .catch(() => {
         // Keep the first-paint compatibility catalog when an older daemon does
@@ -372,6 +382,7 @@ function RuntimeShell({
                 agents={targets.agents}
                 commands={commands}
                 onOpenPanel={onOpenSettings}
+                onOpenWelcome={onOpenWelcome}
                 attachmentsEnabled={
                   session.supports_vision ?? profile?.supports_vision ?? true
                 }
@@ -490,12 +501,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [agentLibraryInitialTab, setAgentLibraryInitialTab] = useState<"rosters" | "teams">("rosters");
   const [setupGuideOpen, setSetupGuideOpen] = useState(false);
-  // Own first-run eligibility for this mount; child effects and in-flight
-  // startup work must not turn a pristine browser into a returning one.
-  const [firstRun] = useState(noGuideYet);
-  // What's New dialog: the release to announce and whether it is open.
-  const [whatsNewRelease, setWhatsNewRelease] = useState<DialogRelease | null>(null);
-  const [whatsNewDialogOpen, setWhatsNewDialogOpen] = useState(false);
+  const [welcomeGuideNotice, setWelcomeGuideNotice] = useState(false);
+  const openWelcomeGuide = useCallback(() => {
+    setWelcomeGuideNotice(false);
+    setSetupGuideOpen(true);
+  }, []);
   // Settings (PanelHost): one open state for the sidebar button, the toolbar
   // button and the composer's /config-style commands.
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1882,6 +1892,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           api={api}
           open={setupGuideOpen}
           onOpenChange={setSetupGuideOpen}
+          onDismiss={() => setWelcomeGuideNotice(true)}
           onOpenSettings={(tab) => openSettings({ tab })}
           onStartSession={() => void createSession()}
         />
@@ -1936,6 +1947,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         >
           {whatsNewActive ? <WhatsNewPage onExit={returnToChat} /> : null}
           <div className={whatsNewActive ? "hidden" : "contents"}>
+          {welcomeGuideNotice ? (
+            <NoticeBar onDismiss={() => setWelcomeGuideNotice(false)}>
+              {WELCOME_GUIDE_DISMISSED_NOTICE}
+            </NoticeBar>
+          ) : null}
           {versionMismatch ? (
             <NoticeBar
               detail={`Page v${versionMismatch.page} · engine v${versionMismatch.engine}`}
@@ -2034,6 +2050,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                   supervisorEvents={supervisorEvents}
                   onSessionUpdated={handleSessionUpdated}
                   onOpenSettings={openSettings}
+                  onOpenWelcome={openWelcomeGuide}
                   onHistoryCleared={() => resetThread(activeSession.session_id)}
                   onActivity={setActiveActivity}
                   eventActivity={eventActivity}
@@ -2105,7 +2122,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                     type="button"
                     variant="outline"
                     data-testid="guided-setup-open"
-                    onClick={() => setSetupGuideOpen(true)}
+                    onClick={openWelcomeGuide}
                     disabled={busy}
                   >
                     <Waypoints className="size-4" />
