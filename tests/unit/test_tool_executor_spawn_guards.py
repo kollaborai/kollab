@@ -318,3 +318,39 @@ def test_git_global_directory_does_not_hide_executable_pager():
         "git -C /tmp/project/kollab grep -e pattern "
         "--open-files-in-pager='kollab --agent coder'"
     )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep -e x `kollab --agent coder`",
+        'grep -e x "prefix `kollab --agent coder` suffix"',
+        "printf x `kollab --hub stop all`",
+    ],
+)
+def test_backtick_substitutions_do_not_hide_launches(command):
+    assert _is_blocked_kollab_spawn(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep -e x '`kollab --agent coder`'",
+        r"grep -e x \`kollab --agent coder\`",
+    ],
+)
+def test_literal_backticks_are_not_shell_substitutions(command):
+    assert not _is_blocked_kollab_spawn(command)
+
+
+@pytest.mark.parametrize("option", ["--ec", "--enc", "--encodedcommand"])
+def test_unknown_wrapper_double_dash_encoded_command_stays_blocked(option):
+    encoded = base64.b64encode("kollab --agent coder".encode("utf-16le")).decode(
+        "ascii"
+    )
+    assert _is_blocked_kollab_spawn(f"unknown-shell.exe {option} {encoded}")
+
+
+@pytest.mark.parametrize("option", ["-ec", "-enc"])
+def test_unknown_wrapper_multichar_encoded_flags_stay_conservative(option):
+    assert _is_blocked_kollab_spawn(f"mytool {option} not-base64")
