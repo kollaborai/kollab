@@ -155,11 +155,13 @@ try {
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   const folderlessPanel = page.getByRole("complementary", { name: "Session Controls" });
   await folderlessPanel.waitFor({ timeout: 15000 });
+  await folderlessPanel.getByRole("button", { name: /Fixture Board/ }).getByText("Stopped", { exact: true }).waitFor({ timeout: 5000 });
   assert.equal(await folderlessPanel.getByRole("button", { name: "Fixture View", exact: true }).count(), 0, "folder-required tab is hidden without a folder");
   await folderlessPanel.getByRole("button", { name: "Hide Session Panel" }).click();
   assert.equal(await folderlessPanel.getByRole("button", { name: "Fixture View", exact: true }).count(), 0, "folder-required tab stays hidden in collapsed controls");
   await folderlessPanel.getByRole("button", { name: "Show Session Panel" }).click();
   folderless = false;
+  entry.services[0].state = "running";
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   assert.ok(inventoryReads > 0, "host must fetch inventory");
@@ -275,6 +277,9 @@ try {
   assert.equal(await modalBody.locator('xpath=ancestor::*[@data-plugin="fixture"]').count(), 1, "modal has plugin-specific CSS scope");
   await page.keyboard.press("Escape");
   await page.getByRole("dialog", { name: "Fixture Details" }).waitFor({ state: "hidden" });
+  entry.services[0].state = "crash-stopped";
+  await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+  await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   await page.getByRole("button", { name: "Settings", exact: true }).first().click();
   const settings = page.getByRole("dialog", { name: "Settings" });
   await settings.getByRole("tab", { name: "Plugins" }).click({ timeout: 5000 });
