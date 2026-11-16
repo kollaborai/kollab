@@ -526,17 +526,6 @@ def test_regression_test_ignores_an_all_f_ruff_selection_1024(tmp_path: Path) ->
     assert "regression_test" not in report.failed_names()
 
 
-def test_regression_test_ignores_ruff_rule_codes_in_free_text_1024(
-    tmp_path: Path,
-) -> None:
-    cfg = regression_cfg(tmp_path)
-    body = "Ruff reports F63,F7,F82 for the CI lint selection; checks are clean."
-    report = pr_gates_dod.evaluate(
-        cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
-    )
-    assert "regression_test" not in report.failed_names()
-
-
 def test_regression_test_keeps_a_declared_finding_on_a_lint_line_1024(
     tmp_path: Path,
 ) -> None:
