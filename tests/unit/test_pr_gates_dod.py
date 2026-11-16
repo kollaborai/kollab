@@ -532,6 +532,58 @@ def test_regression_test_passes_when_test_only_commit_precedes_fix(
     assert "regression_test" not in report.failed_names()
 
 
+def test_regression_test_rejects_backdated_fix_using_timeline_order(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="issue_comment",
+        comment_id=1,
+        body="F14: the fix still fails",
+        author_login="reviewer",
+        created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+        review_id=0,
+    )
+    commits = (
+        SimpleNamespace(
+            sha="a" * 40,
+            message="fix(core): close F14",
+            verified=True,
+            committed_at="2026-10-01T00:00:00Z",
+            files=("kollabor/core.py",),
+            timeline_order=11,
+        ),
+        SimpleNamespace(
+            sha="b" * 40,
+            message="test(core): reproduce F14",
+            verified=True,
+            committed_at="2026-11-01T12:05:00Z",
+            files=("tests/unit/test_core.py",),
+            timeline_order=12,
+        ),
+        SimpleNamespace(
+            sha="c" * 40,
+            message="fix(core): follow-up F14",
+            verified=True,
+            committed_at="2026-11-01T12:10:00Z",
+            files=("kollabor/core.py",),
+            timeline_order=13,
+        ),
+    )
+    data = make_data(
+        commits=commits,
+        comments=(finding,),
+        changed_files=["kollabor/core.py", "tests/unit/test_core.py"],
+        changed_file_contents={"tests/unit/test_core.py": "def test_f14(): ..."},
+    )
+
+    report = pr_gates_dod.evaluate(cfg, data)
+
+    assert "regression_test" in report.failed_names()
+    assert "before the fix" in report.detail_for("regression_test")
+
+
 def test_regression_test_rejects_fix_commit_that_also_changes_test(
     tmp_path: Path,
 ) -> None:
