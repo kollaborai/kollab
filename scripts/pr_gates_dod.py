@@ -971,13 +971,105 @@ def _has_nontrivial_test_assertion(line: str) -> bool:
         tree = ast.parse(expression, mode="eval")
     except SyntaxError:
         return False
-    return any(
-        isinstance(node, ast.Name) and node.id not in {"True", "False", "None"}
-        or isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id not in {"bool", "int", "str", "len", "list", "dict", "set"}
-        for node in ast.walk(tree)
-    )
+    # A bare call only proves that the expression returned a truthy value.
+    # In particular, `assert object()` is always true and is not evidence that
+    # the regression test distinguishes the broken behavior.
+    if isinstance(tree.body, ast.Call) or _is_unconditionally_truthy(tree.body):
+        return False
+    if not isinstance(tree.body, (ast.Name, ast.Compare, ast.UnaryOp, ast.BoolOp)):
+        return False
+    return any(_is_runtime_test_value(node) for node in ast.walk(tree.body))
+
+
+def _is_unconditionally_truthy(node: ast.AST) -> bool:
+    if isinstance(node, ast.Constant):
+        return bool(node.value)
+    if isinstance(node, ast.Compare) and all(
+        isinstance(value, ast.Constant) for value in (node.left, *node.comparators)
+    ):
+        values = [value.value for value in (node.left, *node.comparators)]
+        try:
+            comparisons = []
+            for left, operator, right in zip(values, node.ops, values[1:]):
+                if isinstance(operator, ast.Eq):
+                    comparisons.append(left == right)
+                elif isinstance(operator, ast.NotEq):
+                    comparisons.append(left != right)
+                elif isinstance(operator, ast.Is):
+                    comparisons.append(left is right)
+                elif isinstance(operator, ast.IsNot):
+                    comparisons.append(left is not right)
+                elif isinstance(operator, ast.Lt):
+                    comparisons.append(left < right)
+                elif isinstance(operator, ast.LtE):
+                    comparisons.append(left <= right)
+                elif isinstance(operator, ast.Gt):
+                    comparisons.append(left > right)
+                elif isinstance(operator, ast.GtE):
+                    comparisons.append(left >= right)
+                elif isinstance(operator, ast.In):
+                    comparisons.append(left in right)
+                elif isinstance(operator, ast.NotIn):
+                    comparisons.append(left not in right)
+                else:
+                    return False
+            return all(comparisons)
+        except (TypeError, ValueError):
+            return False
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        safe_calls = {
+            "object": object,
+            "type": type,
+            "bool": bool,
+            "int": int,
+            "str": str,
+            "bytes": bytes,
+            "len": len,
+            "list": list,
+            "tuple": tuple,
+            "dict": dict,
+            "set": set,
+            "frozenset": frozenset,
+            "any": any,
+            "all": all,
+            "sum": sum,
+            "min": min,
+            "max": max,
+        }
+        function = safe_calls.get(node.func.id)
+        if function is not None and all(keyword.arg is not None for keyword in node.keywords):
+            try:
+                args = [ast.literal_eval(argument) for argument in node.args]
+                kwargs = {
+                    keyword.arg: ast.literal_eval(keyword.value)
+                    for keyword in node.keywords
+                }
+                return bool(function(*args, **kwargs))
+            except (TypeError, ValueError, SyntaxError):
+                return False
+    if isinstance(node, ast.BoolOp):
+        values = [_is_unconditionally_truthy(value) for value in node.values]
+        if isinstance(node.op, ast.Or):
+            return any(values)
+        if isinstance(node.op, ast.And):
+            return all(values)
+    return False
+
+
+def _is_runtime_test_value(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id not in {
+            "True", "False", "None", "object", "type", "bool", "int",
+            "str", "bytes", "len", "list", "tuple", "dict", "set",
+            "frozenset", "any", "all", "sum", "min", "max",
+        }
+    if isinstance(node, ast.Call):
+        return isinstance(node.func, ast.Name) and node.func.id not in {
+            "object", "type", "bool", "int", "str", "bytes", "len",
+            "list", "tuple", "dict", "set", "frozenset", "any", "all",
+            "sum", "min", "max",
+        }
+    return isinstance(node, (ast.Attribute, ast.Subscript))
 
 
 # --- evaluation -----------------------------------------------------------------
