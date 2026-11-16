@@ -335,5 +335,22 @@ class TestCompactionThresholdForm(unittest.TestCase):
             self.assertIn("compaction_threshold_k", errors, raw)
 
 
+class TestInternalPromptsStayOutOfTheTranscript(unittest.IsolatedAsyncioTestCase):
+    """The ask-first question and the /compact command are kollab's own prompts, not the user's (#1104)."""
+
+    async def test_ask_and_compact_are_not_recorded_as_user_messages(self):
+        plugin, _llm, acp = _plugin({**_loadouts(800), "plugins.context_compaction.ask_model_first": True})
+        plugin._profile_manager = _session_on("acp-claude")
+        acp.submit = AsyncMock(side_effect=[
+            {"text": "<compact>keep the migration notes</compact>"},
+            {"text": "compacted"},
+        ])
+        plugin.acp_usage_updated(850_000, 1_000_000)
+        await _settle(plugin)
+        self.assertEqual(acp.submit.await_count, 2)
+        for call in acp.submit.await_args_list:
+            self.assertIs(call.kwargs.get("record"), False)
+
+
 if __name__ == "__main__":
     unittest.main()
