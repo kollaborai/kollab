@@ -99,7 +99,7 @@ try {
     manifest: { name: "Fixture New", version: "1.2.3", uses: ["agents", "agents:unattended", "secret:API_TOKEN", "run:git", "net:example.com"],
       services: { worker: { command: ["git", "status"], secrets: ["API_TOKEN"] } }, python: "python/plugin.py:Plugin",
       engine: "python/engine.py:make_router", web: { entry: "web/dist/index.js" }, contributes: { views: [{ id: "main" }], slash: ["fixture"] } } };
-  const entry = { id: "fixture", name: "Fixture", version: "1.2.3", commit: "1234567890abcdef1234567890abcdef12345678", kind: "installed", state: "ok", enabled: true, shadowed: false,
+  const entry = { id: "fixture", name: "Fixture", enable_order: 1, version: "1.2.3", commit: "1234567890abcdef1234567890abcdef12345678", kind: "installed", state: "ok", enabled: true, shadowed: false,
     services: [{ name: "worker", state: "crash-stopped", desired: "stopped", restarts: 5 }],
     web: { entry: "web/dist/index.js", style: "web/dist/index.css", hash: "1" }, contributes: {
       menu: [{ id: "board", label: "Fixture Board", open: { page: "board" } }],
@@ -116,11 +116,13 @@ try {
   const broken = { id: "broken", name: "Broken", kind: "installed", state: "ok", enabled: true, shadowed: false,
     web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: { slash: ["broken-command"], views: [{ id: "broken-view" }], menu: [{ id: "broken-row", label: "Broken Board", open: { page: "board" } }], pages: [{ id: "board" }] } };
   const zulu = { ...broken, id: "zulu", name: "Zulu", contributes: { menu: [{ id: "row", label: "Zulu Board", open: { page: "board" } }] } };
+  const contender = { ...entry, id: "contender", name: "Contender", enable_order: 2, services: [],
+    web: { entry: "web/dist/index.js", style: null, hash: "1" }, contributes: { slash: ["fixture"] } };
   await page.route("**/*", async route => {
     const url = new URL(route.request().url());
     if (url.origin !== origin) return route.abort();
     if (url.pathname === "/api/config") return route.fulfill({ json: { engine_url: "/engine" } });
-    if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, server_time: engineNow(), plugins: [...(fixtureRemoved ? [] : [entry]), broken, crasher, damaged, hello, zulu] } }); }
+    if (url.pathname === "/engine/plugins") { inventoryReads++; return route.fulfill({ json: { schema: 1, server_time: engineNow(), plugins: [...(fixtureRemoved ? [] : [entry]), broken, crasher, damaged, hello, zulu, contender] } }); }
     if (url.pathname === "/engine/plugins/install" && route.request().method() === "POST") {
       installSource = route.request().postDataJSON();
       if (!installSource?.source) return route.fulfill({ status: 422, json: { detail: "source is required" } });
@@ -179,6 +181,8 @@ try {
       broken.enabled = false;
       return route.fulfill({ json: { ok: true } });
     }
+    if (url.pathname === "/plugins/contender/web/index.js") return route.fulfill({ contentType: "text/javascript", body:
+      `export default k => k.command({name:"fixture",description:"Contending command",run:()=>{}});` });
     if (url.pathname === "/plugins/zulu/web/index.js") return route.fulfill({ status: 500, contentType: "text/plain", body: "broken" });
     if (url.pathname === "/plugins/broken/web/index.js") {
       brokenImports.push(url.href);
@@ -230,6 +234,7 @@ try {
     heartbeat_s: 60, heartbeat: engineNow() - 370, since: engineNow() - 600 });
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
+  await page.getByText("Contender could not register /fixture: already used by Fixture.", { exact: true }).waitFor({ timeout: 5000 });
   const folderlessPanel = page.getByRole("complementary", { name: "Session Controls" });
   await folderlessPanel.waitFor({ timeout: 15000 });
   await folderlessPanel.getByRole("button", { name: /Fixture Board/ }).getByText("Stopping · 12 min left", { exact: true }).waitFor({ timeout: 5000 });
