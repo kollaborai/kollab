@@ -40,6 +40,13 @@ describe("stripImageTokens", () => {
     expect(result.text).toBe("draft text");
   });
 
+  it("preserves trailing whitespace in the restored user draft", () => {
+    expect(stripImageTokens("[image1]\nhello  \n")).toEqual({
+      text: "hello  \n",
+      tokenCount: 1,
+    });
+  });
+
   it("leaves token-free drafts untouched", () => {
     expect(stripImageTokens("plain draft")).toEqual({
       text: "plain draft",
