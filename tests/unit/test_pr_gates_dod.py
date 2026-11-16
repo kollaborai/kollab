@@ -449,6 +449,139 @@ def test_regression_test_covered_and_uncovered(tmp_path: Path) -> None:
     assert "F14" in bad.detail_for("regression_test")
 
 
+def test_regression_test_ignores_quoted_ruff_rule_codes_1024(tmp_path: Path) -> None:
+    # #1024: a review that quotes the CI lint selection names no findings.
+    cfg = regression_cfg(tmp_path)
+    lint = "- ruff check --select E9,F63,F7,F82 on touched Python files => All checks passed!"
+    for data in (
+        make_data(review_comment_bodies=[lint]),
+        make_data(comments=(source_comment("issue_comment", 1, lint),)),
+    ):
+        assert "regression_test" not in pr_gates_dod.evaluate(cfg, data).failed_names()
+
+
+def test_regression_test_ignores_shell_quoted_ruff_rule_codes_1024(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    lint = 'ruff check --select="E9,F63,F7,F82" passed'
+    for data in (
+        make_data(review_comment_bodies=[lint]),
+        make_data(comments=(source_comment("issue_comment", 1, lint),)),
+    ):
+        report = pr_gates_dod.evaluate(cfg, data)
+        assert "regression_test" not in report.failed_names(), report.detail_for(
+            "regression_test"
+        )
+
+
+def test_regression_test_counts_a_finding_beside_rule_codes_1024(tmp_path: Path) -> None:
+    cfg = regression_cfg(tmp_path)
+    body = "ruff check --select E9,F63,F7,F82 is clean.\nF7: the retry loop never stops"
+    report = pr_gates_dod.evaluate(
+        cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
+    )
+    assert report.detail_for("regression_test") == (
+        "no regression test covers finding id(s): F7 under tests/"
+    )
+
+
+def test_regression_test_counts_a_bare_finding_list_1024(tmp_path: Path) -> None:
+    # A code list outside a lint selection flag is findings.
+    cfg = regression_cfg(tmp_path)
+    report = pr_gates_dod.evaluate(
+        cfg, make_data(comments=(source_comment("issue_comment", 1, "F1,F2: both open"),))
+    )
+    assert report.detail_for("regression_test") == (
+        "no regression test covers finding id(s): F1, F2 under tests/"
+    )
+
+
+def test_regression_test_keeps_finding_beside_severity_code_1024(tmp_path: Path) -> None:
+    cfg = regression_cfg(tmp_path)
+    report = pr_gates_dod.evaluate(
+        cfg,
+        make_data(
+            comments=(
+                source_comment(
+                    "issue_comment",
+                    1,
+                    "F14,P1: regression test required for the open bypass",
+                ),
+            )
+        ),
+    )
+    assert report.detail_for("regression_test") == (
+        "no regression test covers finding id(s): F14 under tests/"
+    )
+
+
+def test_regression_test_keeps_declared_finding_in_mixed_code_list_1024(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    report = pr_gates_dod.evaluate(
+        cfg,
+        make_data(
+            comments=(source_comment("issue_comment", 1, "Finding IDs: F7,I001"),)
+        ),
+    )
+    assert report.detail_for("regression_test") == (
+        "no regression test covers finding id(s): F7 under tests/"
+    )
+
+
+def test_regression_test_ignores_an_all_f_ruff_selection_1024(tmp_path: Path) -> None:
+    # Review finding: a --select list of pyflakes rules alone still names rules.
+    cfg = regression_cfg(tmp_path)
+    body = "ruff check --select F63,F7,F82 passed"
+    report = pr_gates_dod.evaluate(
+        cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
+    )
+    assert "regression_test" not in report.failed_names()
+
+
+def test_regression_test_keeps_a_declared_finding_on_a_lint_line_1024(
+    tmp_path: Path,
+) -> None:
+    # Review finding: the word lint on a line does not turn declared ids into rules.
+    cfg = regression_cfg(tmp_path)
+    body = "lint Finding IDs: E9,F7"
+    report = pr_gates_dod.evaluate(
+        cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
+    )
+    assert report.detail_for("regression_test") == (
+        "no regression test covers finding id(s): F7 under tests/"
+    )
+
+
+def test_regression_test_keeps_findings_in_a_sentence_that_names_ruff_1024(
+    tmp_path: Path,
+) -> None:
+    # A finding list in the same sentence as the word ruff is still findings.
+    cfg = regression_cfg(tmp_path)
+    body = "ruff check passed, F3,F4 remain open"
+    report = pr_gates_dod.evaluate(
+        cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
+    )
+    assert report.detail_for("regression_test") == (
+        "no regression test covers finding id(s): F3, F4 under tests/"
+    )
+
+
+def test_regression_test_counts_a_rule_list_quoted_in_prose_1024(tmp_path: Path) -> None:
+    # Boundary: prose cannot tell a rule list from a finding list (PR #553 names its
+    # findings in prose), so only a lint flag's argument is skipped; this fails closed.
+    cfg = regression_cfg(tmp_path)
+    body = "Ruff reports F63,F7,F82 for the CI lint selection; checks are clean."
+    report = pr_gates_dod.evaluate(
+        cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
+    )
+    assert report.detail_for("regression_test") == (
+        "no regression test covers finding id(s): F63, F7, F82 under tests/"
+    )
+
+
 # --- report shape -----------------------------------------------------------
 
 
