@@ -60,7 +60,8 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate }: { entr
   const context = host.getContext(entry.id);
   const custom = plugin?.settings[0];
   const failure = snapshot.errors[entry.id] ?? (entry.state === "changed-on-disk" ? null : entry.error);
-  const canChange = canManage && !entry.read_only && !entry.required && !entry.shadowed;
+  const stopping = entry.state === "stopping";
+  const canChange = canManage && !entry.read_only && !entry.required && !entry.shadowed && !stopping;
   const perform = async (action: "enable" | "disable" | "remove") => {
     setBusy(true); setError(null);
     try { await api.json(`${pathFor(entry.id)}/${action}`, { method: "POST" }); setConfirmation(null); await host.refresh(); }
@@ -82,6 +83,7 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate }: { entr
       {canChange && entry.kind === "installed" ? <div className="ml-auto flex flex-wrap gap-2"><Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => onUpdate(entry.id)}>Update</Button><Button type="button" size="xs" variant="ghost" disabled={busy} onClick={() => setConfirmation("remove")}>Remove</Button></div> : null}
     </div>
     <p className="text-muted-foreground mt-2 break-words text-xs">{entry.kind === "built-in" ? "Built In" : entry.kind === "dev" ? "Development" : "Installed"}{entry.source ? ` · ${entry.source}` : ""}</p>
+    {stopping ? <p role="status" className="text-muted-foreground mt-2 text-sm">Waiting for the plugin to stop.</p> : null}
     {error ? <p role="alert" className="text-destructive mt-2 break-words text-sm">{error}</p> : null}
     {entry.state === "changed-on-disk" && entry.error ? <p className="text-destructive mt-2 break-words text-sm">{entry.error}. Update or reinstall the plugin to review its files again.</p> : null}
     <div className="flex min-w-0 flex-col gap-4 py-4">

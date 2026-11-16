@@ -164,7 +164,7 @@ try {
   await stoppingSettings.getByRole("tab", { name: "Plugins" }).click();
   const stoppingDetails = stoppingSettings.getByRole("region", { name: "Fixture details" });
   await stoppingDetails.getByText("Waiting for the plugin to stop.", { exact: true }).waitFor({ timeout: 5000 });
-  await stoppingDetails.getByText("worker · Stopping", { exact: true }).waitFor({ timeout: 5000 });
+  await stoppingDetails.getByText("worker", { exact: true }).locator("..").getByText("Stopping", { exact: true }).waitFor({ timeout: 5000 });
   assert.equal(await stoppingDetails.getByRole("switch", { name: "Fixture enabled" }).isDisabled(), true, "cannot toggle while stopping");
   entry.state = "ok";
   entry.services[0].state = "crash-stopped";

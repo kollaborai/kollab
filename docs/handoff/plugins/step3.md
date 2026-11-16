@@ -156,6 +156,9 @@
 - Frontend preflight at `63ad1900`: typecheck passed, but npm test failed 1/411 when the existing Hello watch test read dist/index.js during Vite's rebuild (`preflight-63ad1900-test.log`). Its polling now retries only transient ENOENT; with isolated `KOLLAB_PLUGIN_TEST_DIR`, npm test passed 411/411 (`watch-race-green-test.log`) and typecheck passed (`watch-race-typecheck.log`). These are preflight results, not the final fixed-head gates.
 - Live smoke is blocked for now: at inspection, 127.0.0.1:7434 was occupied by PID 99374 from `~/dev/kollab`, and :8081 by PID 89456 from `~/backups/sapphire-work/scrollbug/kollab-v0220`. Neither process was started by this lane; do not terminate or reuse them. Recheck ports and obtain authorization to free them if still occupied before the required isolated stack smoke.
 
+- Mock stopping settings: red browser commit `f5e58960` found no waiting message (`stopping-settings-red.log`). Settings now show a waiting status and prevent toggle and management actions while inventory reports stopping; the service row retains its existing Stopping label. Isolated browser acceptance and typecheck passed (`stopping-settings-green.log`, `stopping-settings-typecheck.log`). This uses a mocked inventory and does not solve the real backend lifecycle or provide a deadline/Terminate control.
+- Isolated production-build preflight at `79fe72ea` succeeded to `~/backups/plugins-step3-work/build-gate-79fe72ea` (`build-gate-79fe72ea.log`); Vite/Rolldown emitted import.meta/IIFE warnings. Repeat all fixed-head gates after remaining edits.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
