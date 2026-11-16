@@ -89,6 +89,7 @@ try {
   let slowEnabled = false;
   let failCrashLog = true;
   let fixtureRemoved = false;
+  let savedFixtureSettings = null;
   let folderless = false;
   let sessionless = false;
   // Deliberately skew the engine clock to exercise a remote browser with a different clock.
@@ -103,6 +104,7 @@ try {
       engine: "python/engine.py:make_router", web: { entry: "web/dist/index.js" }, contributes: { views: [{ id: "main" }], slash: ["fixture"] } } };
   const entry = { id: "fixture", name: "Fixture", enable_order: 1, version: "1.2.3", commit: "1234567890abcdef1234567890abcdef12345678", kind: "installed", state: "ok", enabled: true, shadowed: false,
     services: [{ name: "worker", state: "crash-stopped", desired: "stopped", restarts: 5 }],
+    settings: [{ path: "plugin-values.fixture.greeting", type: "text_input", label: "Greeting", editable: true, value: "Hello" }],
     web: { entry: "web/dist/index.js", style: "web/dist/index.css", hash: "1" }, contributes: {
       menu: [{ id: "board", label: "Fixture Board", open: { page: "board" } }],
       views: [{ id: "fixture-view" }], pages: [{ id: "board" }], modals: [{ id: "details" }],
@@ -140,6 +142,10 @@ try {
     if (url.pathname === "/engine/plugins/jobs/install-fixture/confirm" && route.request().method() === "POST") {
       confirmedInstall = route.request().postDataJSON();
       return route.fulfill({ json: { ...preview, status: "complete" } });
+    }
+    if (url.pathname === "/engine/plugins/fixture/settings" && route.request().method() === "PUT") {
+      savedFixtureSettings = route.request().postDataJSON();
+      return route.fulfill({ json: savedFixtureSettings });
     }
     if (url.pathname === "/engine/plugins/fixture/update" && route.request().method() === "POST") {
       return route.fulfill({ status: 202, json: { job_id: "update-fixture", status: "staging" } });
@@ -550,6 +556,11 @@ try {
   await settings.getByRole("button", { name: "Fixture", exact: true }).getByText("Stopped After 5 Crashes", { exact: true }).waitFor({ timeout: 3000 });
   const fixtureRow = settings.getByRole("region", { name: "Fixture details" });
   await fixtureRow.waitFor({ timeout: 5000 });
+  await fixtureRow.getByLabel("Greeting").fill("Howdy");
+  const savedResponse = page.waitForResponse(response => response.url().endsWith("/engine/plugins/fixture/settings") && response.request().method() === "PUT");
+  await fixtureRow.getByRole("button", { name: "Save Settings" }).click();
+  await savedResponse;
+  assert.deepEqual(savedFixtureSettings, { greeting: "Howdy" }, "installed settings use plugin-local keys");
   await fixtureRow.getByText("Stopped After 5 Crashes", { exact: true }).waitFor({ timeout: 5000 });
   await captureReview(page, "stopped-service");
   assert.equal(await settings.getByText("Hello plugin settings example.", { exact: true }).count(), 0, "only the selected plugin shows details");

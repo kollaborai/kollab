@@ -1,7 +1,7 @@
 import { useId, useRef, useState, type RefObject } from "react";
 import { Box, Plus } from "lucide-react";
 import type { EngineApi, PanelField, Session } from "@/api";
-import { FieldRenderer, type Draft } from "@/components/panels/FieldRenderer";
+import { FieldRenderer, serializeDraft, type Draft } from "@/components/panels/FieldRenderer";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
@@ -13,6 +13,19 @@ import { heartbeatAge, heartbeatLabel, runtimeLabel, stoppingLabel, useHeartbeat
 type PluginService = { name: string; state: string; desired?: string; since?: number | null; restarts?: number; heartbeat?: number | null; heartbeat_s?: number | null; error?: string | null };
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const pathFor = (id: string) => `/plugins/${encodeURIComponent(id)}`;
+
+/** Convert panel field paths to the keys expected by the plugin settings API. */
+export function settingsValues(entry: Pick<PluginEntry, "id" | "kind">, draft: Draft): Record<string, unknown> {
+  const values = serializeDraft(draft);
+  if (entry.kind === "built-in") return values;
+  const prefix = `plugin-values.${entry.id}.`;
+  return Object.fromEntries(Object.entries(values).map(([path, value]) => {
+    if (!path.startsWith(prefix) || path.length === prefix.length) {
+      throw new Error("Invalid plugin setting path; reload and try again");
+    }
+    return [path.slice(prefix.length), value];
+  }));
+}
 const validServices = (entry: PluginEntry): PluginService[] => (entry.services ?? []).filter((item): item is PluginService =>
   Boolean(item && typeof item === "object" && typeof (item as PluginService).name === "string" && typeof (item as PluginService).state === "string"));
 
@@ -88,7 +101,10 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate, detailRe
   };
   const save = async () => {
     setBusy(true); setError(null);
-    try { await api.json(`${pathFor(entry.id)}/settings`, { method: "PUT", body: JSON.stringify(draft) }); setDraft({}); await host.refresh(); }
+    try {
+      const values = settingsValues(entry, draft);
+      await api.json(`${pathFor(entry.id)}/settings`, { method: "PUT", body: JSON.stringify(values) }); setDraft({}); await host.refresh();
+    }
     catch (caught) { setError(message(caught)); } finally { setBusy(false); }
   };
   const status = failure ? (snapshot.renderFailed.includes(entry.id) ? "Failed to Render" : "Failed to Load") :
