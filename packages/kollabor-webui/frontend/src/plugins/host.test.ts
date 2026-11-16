@@ -108,6 +108,23 @@ describe("plugin host lifecycle", () => {
   });
 
 
+  it("does not overlap stopping polls when inventory is slow", async () => {
+    vi.useFakeTimers();
+    const stopping = { ...entry("hello"), state: "stopping" };
+    let finish!: (value: unknown) => void;
+    const slow = new Promise(resolve => { finish = resolve; });
+    const json = vi.fn().mockResolvedValueOnce({ schema: 1, plugins: [stopping] }).mockReturnValue(slow);
+    const { host } = setup({ json });
+    try {
+      await host.start();
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(json).toHaveBeenCalledTimes(2);
+      finish({ schema: 1, plugins: [stopping] });
+      await vi.advanceTimersByTimeAsync(0);
+    } finally { host.close(); vi.useRealTimers(); }
+  });
+
+
   it("refreshes declared menu labels when the manifest changes without a bundle change", async () => {
     const importer = vi.fn(async () => ({ default: (k: { menu(id: string): void }) => k.menu("board") }));
     const { host, setInventory } = setup({ importer });
