@@ -1935,6 +1935,39 @@ def test_regression_test_does_not_count_helper_assertion_for_finding(
     assert "regression_test" in pr_gates_dod.evaluate(cfg, data).failed_names()
 
 
+def test_regression_test_rejects_always_truthy_object_assertion(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment", comment_id=1, body="F14: bug remains",
+        author_login="reviewer", created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    test_path = "tests/unit/test_f14.py"
+    commits = (
+        SimpleNamespace(
+            sha="a" * 40, message="test: placeholder F14", verified=True,
+            files=(test_path,),
+            file_patches={test_path: "+def test_f14_placeholder(): assert object()"},
+            timeline_order=11,
+        ),
+        SimpleNamespace(
+            sha="b" * 40, message="fix: repair F14", verified=True,
+            files=("kollabor/core.py",), file_patches={}, timeline_order=12,
+        ),
+    )
+    data = make_data(
+        commits=commits, comments=(finding,),
+        changed_files=[test_path, "kollabor/core.py"],
+        changed_file_contents={
+            test_path: "def test_f14_placeholder(): assert object()"
+        },
+    )
+
+    assert "regression_test" in pr_gates_dod.evaluate(cfg, data).failed_names()
+
+
 def test_regression_test_requires_xfail_removal_from_finding_test_file(
     tmp_path: Path,
 ) -> None:
