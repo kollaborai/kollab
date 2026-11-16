@@ -80,8 +80,13 @@ def _seed(profile, models):
 
 
 def test_provider_with_empty_registry_yields_no_loadouts_when_cold():
-    """Baseline: this is the shipped behavior that made OpenRouter invisible."""
-    manager = LoadoutManager(_ProfileManager([_Profile()]))
+    """Baseline: a provider with zero bundled entries contributes nothing cold.
+
+    OpenRouter used to be that provider; the model-directory automation now
+    seeds bundled openrouter entries (they show up as implicit loadouts by
+    design), so the invariant is pinned on a provider that still has none.
+    """
+    manager = LoadoutManager(_ProfileManager([_Profile(name="groq", provider="groq")]))
     assert manager.list_loadouts() == []
 
 
