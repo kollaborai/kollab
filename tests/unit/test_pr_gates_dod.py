@@ -1820,6 +1820,88 @@ def test_regression_suppressions_require_exact_trusted_annotation(tmp_path):
     )
     report = pr_gates_dod.evaluate(cfg, data)
     assert report.detail_for("regression_test") == ""
+
+
+def test_regression_test_rejects_unrelated_added_assertion_that_names_finding(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment", comment_id=1, body="F16: bug remains",
+        author_login="reviewer", created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    commits = (
+        SimpleNamespace(
+            sha="a" * 40, message="test: unrelated assertion", verified=True,
+            files=("tests/unit/test_core.py",),
+            file_patches={"tests/unit/test_core.py": "+assert True  # F16"},
+            timeline_order=11,
+        ),
+        SimpleNamespace(
+            sha="b" * 40, message="fix: repair", verified=True,
+            files=("kollabor/core.py",), file_patches={}, timeline_order=12,
+        ),
+    )
+    data = make_data(
+        commits=commits, comments=(finding,),
+        changed_file_contents={"tests/unit/test_core.py": "def test_old(): pass\nassert True  # F16"},
+    )
+
+    assert "regression_test" in pr_gates_dod.evaluate(cfg, data).failed_names()
+
+
+def test_regression_test_requires_xfail_removal_from_finding_test_file(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment", comment_id=1, body="F14: bug remains",
+        author_login="reviewer", created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    commits = (
+        SimpleNamespace(
+            sha="a" * 40, message="test: add F14 regression", verified=True,
+            files=("tests/unit/test_f14.py",),
+            file_patches={"tests/unit/test_f14.py": "+def test_f14(): ...\n+@pytest.mark.xfail(strict=True)"},
+            timeline_order=11,
+        ),
+        SimpleNamespace(
+            sha="b" * 40, message="fix: repair", verified=True,
+            files=("kollabor/core.py", "tests/unit/test_other.py"),
+            file_patches={"tests/unit/test_other.py": "-@pytest.mark.xfail(strict=True)"},
+            timeline_order=12,
+        ),
+    )
+    data = make_data(
+        commits=commits, comments=(finding,),
+        changed_file_contents={
+            "tests/unit/test_f14.py": "@pytest.mark.xfail(strict=True)\ndef test_f14(): ..."
+        },
+    )
+
+    assert "regression_test" in pr_gates_dod.evaluate(cfg, data).failed_names()
+
+
+def test_regression_test_rejects_non_testable_exception_for_code_fix(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment", comment_id=1, body="F15: runtime behavior is wrong",
+        author_login="reviewer", created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    fix = SimpleNamespace(
+        sha="c" * 40,
+        message="fix: repair\n\nNo regression test: F15 - documentation wording only.",
+        verified=True, committed_at="2026-11-01T12:01:00Z",
+        files=("kollabor/core.py",), timeline_order=11,
+    )
+    data = make_data(commits=(fix,), comments=(finding,), changed_files=["kollabor/core.py"])
+
+    assert "regression_test" in pr_gates_dod.evaluate(cfg, data).failed_names()
     assert len(report.audit_notes) == 2
     assert "F11 occurrence 1 in issue_comment 100" in report.summary()
     assert all(
