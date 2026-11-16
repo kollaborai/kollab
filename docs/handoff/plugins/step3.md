@@ -168,6 +168,8 @@
 
 - Stylesheet declaration update: red loader test commit `e83429c2` showed that changing web.style without changing dist bytes left the old activation (`stylesheet-refresh-red.log`). The reconciliation key now includes the declared style; host/loader tests passed 15/15, typecheck passed and isolated browser acceptance passed (`stylesheet-refresh-green.log`, `stylesheet-refresh-typecheck.log`, `reconcile-browser-green.log`). A browser-level assertion of replacement link cleanup remains useful.
 
+- Event-stream reconnect: red test commit `a6368b52` showed an immediately closing successful SSE response retried every 250 ms forever (`sse-backoff-red.log`). Retry delay now grows until a stream delivers bytes, then resets; event/host tests passed 14/14 and typecheck passed (`sse-backoff-green.log`, `sse-backoff-typecheck.log`). Real-engine event reconnect is not yet covered.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.

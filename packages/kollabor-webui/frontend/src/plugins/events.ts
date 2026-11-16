@@ -47,6 +47,7 @@ export class PluginEventStream {
     let delay = 250;
     let connected = false;
     while (!signal.aborted) {
+      let receivedData = false;
       try {
         const response = await this.request(this.path, { method: "GET", signal });
         if (signal.aborted) { await response.body?.cancel(); break; }
@@ -57,12 +58,12 @@ export class PluginEventStream {
         if (!response.body) throw new Error("Plugin event stream has no body");
         if (connected) this.onReconnect();
         connected = true;
-        delay = 250;
-        await this.read(response.body, signal);
+        await this.read(response.body, signal, () => { receivedData = true; });
       } catch (error) {
         if (!signal.aborted) this.onError(error);
       }
       if (!signal.aborted) {
+        if (receivedData) delay = 250;
         await new Promise<void>(resolve => {
           const timer = setTimeout(done, delay);
           function done() { clearTimeout(timer); signal.removeEventListener("abort", done); resolve(); }
@@ -73,7 +74,7 @@ export class PluginEventStream {
     }
   }
 
-  private async read(body: ReadableStream<Uint8Array>, signal: AbortSignal) {
+  private async read(body: ReadableStream<Uint8Array>, signal: AbortSignal, onData: () => void) {
     const reader = body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -83,6 +84,7 @@ export class PluginEventStream {
       while (!signal.aborted) {
         const { value, done } = await reader.read();
         if (done) break;
+        if (value?.byteLength) onData();
         buffer += decoder.decode(value, { stream: true });
         if (buffer.length > 1_000_000) throw new Error("Plugin event frame is too large");
         const frames = buffer.split(/\r?\n\r?\n/);
