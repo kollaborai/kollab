@@ -79,3 +79,5 @@ the smoke and screenshot matrix.
 
 ## Lead visual review follow-up (2026-11-16)
 The brief says finding 1 changes a Python file, but the review identifies the tab-row layout in `packages/kollabor-webui/frontend/src/components/panels/PanelHost.tsx`. No Python change has been identified as necessary. Next: add a red-first browser regression for the 820px tab row, fix the layout and Retry sizing, then run the final gates and request a stack restart.
+
+Red-first browser regression: `review-tabs-red.log` records an 820px clipped Settings tab assertion on the pre-fix build using Node 24.18.0 and built-preview acceptance. Next: fix wrapping, then red-first cover Retry sizing.

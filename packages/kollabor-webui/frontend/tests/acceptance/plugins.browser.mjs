@@ -553,6 +553,15 @@ try {
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   await page.getByRole("button", { name: "Settings", exact: true }).first().click();
   const settings = page.getByRole("dialog", { name: "Settings" });
+  await page.setViewportSize({ width: 820, height: 800 });
+  const settingsTabList = settings.getByRole("tablist", { name: "Settings sections" });
+  const tabListBox = await settingsTabList.boundingBox();
+  for (const tab of await settingsTabList.getByRole("tab").all()) {
+    const box = await tab.boundingBox();
+    assert.ok(box && tabListBox && box.x >= tabListBox.x - 1 && box.x + box.width <= tabListBox.x + tabListBox.width + 1,
+      `settings tab ${await tab.innerText()} must not be clipped at 820px`);
+  }
+  await page.setViewportSize({ width: 1280, height: 800 });
   await settings.getByRole("tab", { name: "Plugins" }).click({ timeout: 5000 });
   const damagedListItem = settings.getByRole("button", { name: "Damaged", exact: true });
   assert.match(await damagedListItem.innerText(), /Changed on Disk/, "inventory changed-on-disk state is distinct from load failure");
