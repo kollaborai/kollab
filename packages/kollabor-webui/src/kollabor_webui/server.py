@@ -404,7 +404,10 @@ def create_app(
                 if not isinstance(record, dict) or not record.get("enabled") or base_id in registry["dev"]:
                     return missing
                 installed_root = (home / "plugins").resolve()
-                root = (installed_root / base_id).resolve()
+                plugin_root = installed_root / base_id
+                if plugin_root.is_symlink():
+                    return missing
+                root = plugin_root.resolve()
                 if root.parent != installed_root:
                     return missing
             web = root / "web"
