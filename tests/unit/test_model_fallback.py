@@ -185,6 +185,33 @@ async def test_a_usage_limit_switches_once_and_runs_the_turn_again(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_rate_limit_fallback_keeps_saved_global_config_byte_identical(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "config.json"
+    original = b'{"kollabor":{"llm":{"active_profile":"glm"}}}\n'
+    config_path.write_bytes(original)
+    plugin, _, _, _ = await _agent(
+        monkeypatch, {"plugins.model_fallback.loadout": "codex"}
+    )
+
+    async def activate(self, loadout, event_bus=None, persist=True):
+        _Loadouts.activated.append(loadout.name)
+        if persist:
+            config_path.write_bytes(
+                b'{"kollabor":{"llm":{"active_profile":"codex"}}}\n'
+            )
+        return loadout
+
+    monkeypatch.setattr(_Loadouts, "activate", activate)
+
+    assert await plugin.fall_back(
+        "Rate limit exceeded. Please try again later.", retry=True
+    ) == "retry"
+    assert config_path.read_bytes() == original
+
+
+@pytest.mark.asyncio
 async def test_a_reply_streamed_in_part_is_switched_but_never_asked_again(monkeypatch):
     # Morganite on #549 round 2: the retry's answer joined the failed model's
     # streamed part as one reply.
