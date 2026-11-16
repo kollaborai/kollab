@@ -735,8 +735,10 @@ Two loops never run on the same PRs. With the owner's yes:
 
 ### Build order
 
-1. Packages, the wrapper and supervisor, the one plugin list with `/config` reading it, the settings
-   writer and the CLI, with the hello plugin's Python, settings and one background process. Terminal only.
+1. Terminal package lifecycle: Git packages pinned to a commit and staged for confirmation; approved
+   development attachments; one plugin list with `/config` reading it; a registry-backed settings writer
+   and CLI; and a service wrapper/supervisor with explicit secret grants and redacted logs. The hello
+   plugin supplies Python, settings and one background process. Terminal only.
    The hello plugin's web parts land in step 3; until then its tests use a committed `web/dist/` fixture.
 2. Engine routes except agent runs (`/plugins`, events, settings, background processes, install and
    management), the agent file tools' read deny list and the `web/dist/` file route, each with its tests.

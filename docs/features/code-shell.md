@@ -1,13 +1,29 @@
 # Code, Git and Terminal views
 
-The web UI's session panel has three views beside Chat and Trajectory. They show for a chat that has a folder.
+The web UI's session panel has three views beside Chat, Trajectory and Gallery. The first three show for a chat that has a folder; the Gallery shows for every chat.
 
 - **Code Editor**: file tree, Monaco editor with tabs and split panes, quick open, search.
 - **Git**: status, stage, commit, branches, stash, log, diff. It sits beside the same editor panes.
 - **Terminal**: a real shell in the session's folder.
+- **Gallery**: the images sent to this agent and the tool outputs its work spilled to disk. See below.
 
 The daemon of the session serves all three. A session opened from another computer shows that computer's files, its git
 repository and its shell, the same ones its user gets. Design and wire contract: `docs/specs/floating-code-shell.md`.
+
+## Gallery
+
+The Gallery sits under Terminal in the session panel and shows for every chat, with or without a folder.
+
+- **Sent images** lists every image sent to the agent, newest first, as a grid. Click one for a full-size
+  view; the viewer steps through them oldest first (the order they were sent) with the arrow keys, and
+  Escape or a click outside closes it.
+- **Artifacts** lists the tool outputs too long to keep in the conversation (each session's
+  `tool_outputs/` folder under the project data directory). Click one to read its text; a Download button
+  saves it.
+
+In the chat itself, an image you sent shows as a thumbnail in your message instead of a `[imageN]` token;
+clicking it opens the same viewer. The engine keeps a copy of each sent image (up to 10 MB, common web
+formats) under the session's `media/` folder, so thumbnails survive restarts and reloads.
 
 ## Settings
 

@@ -689,6 +689,8 @@ class HubPlugin(BasePlugin):
         self._startup_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._mailbox_task: Optional[asyncio.Task] = None
+        self._mailbox_stop_event = asyncio.Event()
+        self._accepting_messages = True
         self._dreaming_task: Optional[asyncio.Task] = None
         # The insight write of the dream in progress, which a cancelled dream
         # leaves running in its thread (#562); shutdown waits for it.
@@ -5458,12 +5460,13 @@ class HubPlugin(BasePlugin):
         """Execute a hub_work tool."""
         from kollabor_agent.tool_executor import ToolExecutionResult
 
-        result = self._format_work()
+        result, ledger_available = self._format_work_report()
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="hub_work",
-            success=True,
+            success=ledger_available,
             output=result,
+            error="" if ledger_available else "TaskLedger unavailable",
         )
 
     async def _handle_hub_vault_tool(self, tool_data: dict):
@@ -6528,6 +6531,8 @@ class HubPlugin(BasePlugin):
             self._heartbeat_task = asyncio.create_task(
                 self._heartbeat_loop(hb_interval)
             )
+            self._mailbox_stop_event = asyncio.Event()
+            self._accepting_messages = True
             self._mailbox_task = asyncio.create_task(self._mailbox_loop())
 
             # Start dreaming loop if enabled and vault is active
@@ -6920,9 +6925,18 @@ class HubPlugin(BasePlugin):
             poll_interval = self.config.get("plugins.hub.mailbox_poll_interval", 5)
         from .messenger import INBOX_MAX_REPLAY
 
-        while True:
+        stop_event = self._mailbox_stop_event
+        while not stop_event.is_set():
             try:
-                await asyncio.sleep(poll_interval)
+                try:
+                    await asyncio.wait_for(
+                        stop_event.wait(), timeout=poll_interval
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    pass
+                if stop_event.is_set():
+                    break
                 if self._identity:
                     messages = AgentMessenger.read_mailboxes(
                         [self._identity.agent_id, self._identity.identity],
@@ -6934,6 +6948,29 @@ class HubPlugin(BasePlugin):
                 break
             except Exception as e:
                 logger.debug(f"Mailbox check error: {e}")
+
+    async def stop_message_intake(self) -> None:
+        """Stop new Hub deliveries and finish the current mailbox batch."""
+        self._accepting_messages = False
+        stop_event = getattr(self, "_mailbox_stop_event", None)
+        if stop_event is not None:
+            stop_event.set()
+
+        # Stop accepting socket connections first. A message racing shutdown
+        # is persisted by _on_message_received, and failed peer connections
+        # use the same on-disk mailbox path.
+        socket_server = getattr(self, "_socket_server", None)
+        if socket_server is not None:
+            await socket_server.stop()
+
+        mailbox_task = getattr(self, "_mailbox_task", None)
+        current_task = asyncio.current_task()
+        if (
+            isinstance(mailbox_task, asyncio.Task)
+            and mailbox_task is not current_task
+            and not mailbox_task.done()
+        ):
+            await mailbox_task
 
     def _mailbox_replay_cap(self, cap: int) -> int:
         """Return the per-poll cap on ordinary mailbox replay (0 = no cap).
@@ -7981,7 +8018,9 @@ class HubPlugin(BasePlugin):
         hub_msg uses: handle resolution, trust and relay. The router reports a
         refusal instead of raising, so it is read here, logged with its reason
         and kept for hub_cron_list; a job whose device is not on the network is
-        dropped rather than failing on every interval.
+        dropped rather than failing on every interval. A plain local target's
+        refusal is recorded the same way, so a recurring job does not count it
+        as delivered (#870).
         """
         target = job.target
         scope = self._resolve_scope(target)
@@ -8009,10 +8048,10 @@ class HubPlugin(BasePlugin):
             # unexpected, so only its class is kept.
             rejections = [(target, f"send failed ({type(exc).__name__})")]
 
-        if handle and rejections:
+        if rejections and to != "*":
             reason = rejections[0][1]
             job.last_error = reason
-            if await self._cron_device_gone(handle[1]):
+            if handle and await self._cron_device_gone(handle[1]):
                 logger.warning(
                     "hub cron %s dropped: device %s is not on this network (%s)",
                     job.id,
@@ -8032,9 +8071,9 @@ class HubPlugin(BasePlugin):
             await self._on_message_received(msg)
 
         if handle:
-            job.last_error = ""
             # One dim line per fire: a 30 s job must not draw a message box every 30 s.
             self.show_network_notice(f"cron {job.id} -> {target}")
+        job.last_error = ""
         logger.info(f"hub cron fired: {job.id}" f" -> {job.target}")
         return False
 
@@ -9425,6 +9464,11 @@ class HubPlugin(BasePlugin):
 
         Returns False when the message was refused and must not be acknowledged.
         """
+        if not getattr(self, "_accepting_messages", True):
+            if self._identity is None:
+                return False
+            await AgentMessenger.send_to_file(self._identity.identity, message)
+            return True
         if self._solo:
             # Peers cannot discover a solo agent; this covers direct sends by
             # name (`kollab --hub send`) so nothing reaches its conversation.
@@ -10168,13 +10212,14 @@ class HubPlugin(BasePlugin):
                                 metadata=msg_metadata,
                             )
                         )
-                        # The web UI reloads the history on this, so the message
-                        # shows before the reply it wakes (the terminal's box).
-                        from kollabor_tui.display_tap import publish_semantic
+                    # The web UI reloads history after the system record above
+                    # is written. Observed messages need this too: they do not
+                    # add a user turn or wake the model.
+                    from kollabor_tui.display_tap import publish_semantic
 
-                        publish_semantic(
-                            self.event_bus, "hub_message", message_id=message.id
-                        )
+                    publish_semantic(
+                        self.event_bus, "hub_message", message_id=message.id
+                    )
                 # Trigger LLM if this agent is the intended target (or broadcast).
                 # Skip departures to avoid feedback loops.
                 # Skip human-elsewhere (human typing in another agent's window).
@@ -16829,26 +16874,49 @@ class HubPlugin(BasePlugin):
         return sum(await asyncio.gather(*sends))
 
     def _format_work(self) -> str:
+        return self._format_work_report()[0]
+
+    def _format_work_report(self) -> Tuple[str, bool]:
         lines: List[str] = []
-        if self._work_queue:
-            slots = self._work_queue.get_all()
-            if slots:
-                lines.append(f"work queue: {len(slots)} slot(s)")
-                for s in slots:
-                    assigned = f" -> {s.assigned_to}" if s.assigned_to else ""
-                    lines.append(f"  [{s.id}] {s.status}{assigned}: {s.task[:60]}")
-        if self._task_ledger:
+        slots = self._work_queue.get_all() if self._work_queue else []
+        ledger_available = self._task_ledger is not None
+
+        if self._task_ledger is not None:
             try:
                 open_cards = self._task_ledger.get_open()
-                if open_cards:
-                    lines.append(f"open ledger cards: {len(open_cards)}")
-                    for c in open_cards:
-                        lines.append(f"  [{c.id}] open (p{c.priority}): {c.directive[:60]}")
-            except Exception as e:
-                logger.debug(f"open card listing failed: {e}")
+            except Exception:
+                logger.warning("TaskLedger read failed while formatting hub work")
+                open_cards = None
+                ledger_available = False
+        else:
+            open_cards = None
+
+        if slots:
+            queue_status = "work queue: {} slot(s)".format(len(slots))
+            if not ledger_available:
+                queue_status += " (partial; TaskLedger unavailable)"
+            lines.append(queue_status)
+            for s in slots:
+                assigned = f" -> {s.assigned_to}" if s.assigned_to else ""
+                lines.append(f"  [{s.id}] {s.status}{assigned}: {s.task[:60]}")
+        elif not ledger_available:
+            lines.append("in-memory queue: empty (partial; TaskLedger unavailable)")
+
+        if ledger_available and open_cards:
+            lines.append(f"open ledger cards: {len(open_cards)}")
+            for c in open_cards:
+                lines.append(f"  [{c.id}] open (p{c.priority}): {c.directive[:60]}")
+
+        if not ledger_available:
+            reason = "read failed" if self._task_ledger is not None else "not configured"
+            lines.append(
+                f"TaskLedger: unavailable ({reason}; do not assume empty)"
+            )
+            return "\n".join(lines), False
+
         if not lines:
-            return "work queue: empty"
-        return "\n".join(lines)
+            return "work queue: empty", True
+        return "\n".join(lines), True
 
     def _handle_queue_command(
         self, task: str, upstream_refs: Optional[List[str]] = None
@@ -17995,6 +18063,7 @@ class HubPlugin(BasePlugin):
         if getattr(self, "_shutdown_in_progress", False):
             return
         self._shutdown_in_progress = True
+        await self.stop_message_intake()
         runtime = getattr(self, "_acp_hub_tools", None)
         if runtime is not None:
             runtime.stop()

@@ -32,7 +32,13 @@ def fixture(tmp_path, monkeypatch):
     def stage(source, path, version):
         assert source == "https://example.invalid/repo#main"
         path.mkdir()
-        manifest = {"id": "hello", "name": "Hello", "version": "2.0.0", "uses": [], "services": {}}
+        manifest = {
+            "id": "hello",
+            "name": "Hello",
+            "version": "2.0.0",
+            "uses": [],
+            "services": {"worker": {"command": ["python3", "run.py"], "secrets": ["UPDATE_TOKEN"]}},
+        }
         (path / "kollab-plugin.json").write_text(json.dumps(manifest))
         (path / "new.txt").write_text("new")
         return {
@@ -58,6 +64,8 @@ def test_update_confirms_commit_and_preserves_data(tmp_path, monkeypatch, capsys
     assert json.loads((home / "plugin-data" / "hello" / "values.json").read_text())["message"] == "keep"
     output = capsys.readouterr().out
     assert "a" * 40 in output and "b" * 40 in output
+    assert "Secrets: configured" in output
+    assert "Secrets: UPDATE_TOKEN" not in output
 
 
 def test_update_rejects_registry_changed_during_confirmation(tmp_path, monkeypatch):

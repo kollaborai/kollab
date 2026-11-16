@@ -30,7 +30,8 @@ def test_add_requires_confirmation_and_keeps_declined_state(tmp_path, monkeypatc
     assert not (tmp_path / ".kollab" / "plugins.json").exists()
     output = capsys.readouterr().out
     assert "a" * 40 in output
-    assert "secret:KEY" in output
+    assert "secret: configured" in output
+    assert "secret:KEY" not in output
     monkeypatch.setattr("builtins.input", lambda _: "yes")
     assert cli.main(["add", "https://example.invalid/repo"]) == 0
     record = json.loads((tmp_path / ".kollab" / "plugins.json").read_text())["plugins"]["hello"]

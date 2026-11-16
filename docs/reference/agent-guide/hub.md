@@ -116,6 +116,9 @@ kollab service install                           # this folder's agent under sys
 3. Agent receives via socket/mailbox -> display + inject + trigger LLM
 4. Event pipeline: PRE -> MAIN -> POST phase data propagation
 
+The web UI reloads stored Hub notes when they arrive, including observed notes
+that do not wake the receiving agent.
+
 **Hub message attributes:**
 - `<hub_msg to="lapis">msg</hub_msg>` -- send, continue working (default)
 - `<hub_msg to="lapis" wait="true">msg</hub_msg>` -- send, then STOP: the sender's turn ends once the send succeeds (the result's `metadata["end_turn"]`, read by `_tool_results_requiring_followup` in `queue_processor.py`, for XML tags and native calls alike). Other tools in the reply still run; a rejected send, a "not online" warning or any failed tool keeps the turn going so the model sees the error

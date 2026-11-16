@@ -1,4 +1,4 @@
-"""The install sheet exposes processes and their requested secrets."""
+"""The install sheet exposes processes without disclosing secret names."""
 
 from unittest.mock import Mock
 
@@ -26,6 +26,7 @@ def test_add_sheet_lists_processes_and_secrets(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "worker" in out
     assert "python3" in out
-    assert "MY_TOKEN" in out
+    assert "Secrets: configured" in out
+    assert "Secrets: MY_TOKEN" not in out
     assert "a" * 40 in out
     assert "b" * 64 in out

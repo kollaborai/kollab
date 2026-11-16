@@ -32,13 +32,13 @@ schedule.
 
 ## Team
 
-| Hub name | Name | Role | Bundle | Reports to |
-|---|---|---|---|---|
-| `helen` | Helen Brooks | Analytics Lead | `data-analyst` | human |
-| `victor` | Victor Hale | Data Engineer | `coder` | helen |
-| `amara` | Amara Obi | Data Analyst | `data-analyst` | helen |
-| `wei` | Wei Zhang | Data Scientist | `data-analyst` | helen |
-| `paula` | Paula Mendes | BI Developer | `data-analyst` | helen |
+| Hub name | Role | Bundle | Reports to |
+|---|---|---|---|
+| `analytics-lead` | Analytics Lead | `data-analyst` | human |
+| `data-engineer` | Data Engineer | `coder` | analytics-lead |
+| `data-analyst` | Data Analyst | `data-analyst` | analytics-lead |
+| `data-scientist` | Data Scientist | `data-analyst` | analytics-lead |
+| `bi-developer` | BI Developer | `data-analyst` | analytics-lead |
 
 ## Hand-off outside the team
 

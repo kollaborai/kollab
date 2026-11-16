@@ -25,6 +25,14 @@ from .packages import (
 )
 
 
+def _format_uses(uses: list[str]) -> str:
+    """Summarize secret grants without exposing their identifiers."""
+    visible = [use for use in uses if not use.startswith("secret:")]
+    if len(visible) != len(uses):
+        visible.append("secret: configured")
+    return ", ".join(visible) or "none"
+
+
 def _stop_for_change(home: Path, plugin_id: str, services: dict) -> None:
     """Stop verified wrappers after approval and wait for their process groups."""
     import time
@@ -213,10 +221,10 @@ def main(argv: list[str]) -> int:
             manifest_digest = hashlib.sha256((folder / "kollab-plugin.json").read_bytes()).hexdigest()
             print(f"Plugin: {manifest['name']} ({manifest['id']}@dev)")
             print(f"Local folder: {folder}")
-            print("Uses: " + (", ".join(manifest.get("uses", [])) or "none"))
+            print("Uses: " + _format_uses(manifest.get("uses", [])))
             for name, service in manifest.get("services", {}).items():
                 print(f"Process {name}: {shlex.join(service['command'])}")
-                print("  Secrets: " + (", ".join(service.get("secrets", [])) or "none"))
+                print("  Secrets: " + ("configured" if service.get("secrets") else "none"))
         print("Development code is unpinned and runs as your user with your computer's permissions.")
         if input("Continue? [yes/no] ").strip().lower() != "yes":
             return 1
@@ -416,10 +424,10 @@ def main(argv: list[str]) -> int:
             print(f"Commit: {prior.get('commit', 'unknown')}..{staged['commit']}")
             print(f"Files SHA-256: {staged['files_sha256']}")
             print("Changed folders: " + (", ".join(changed) or "none"))
-            print("Uses: " + (", ".join(manifest.get("uses", [])) or "none"))
+            print("Uses: " + _format_uses(manifest.get("uses", [])))
             for name, service in manifest.get("services", {}).items():
                 print(f"Process {name}: {shlex.join(service['command'])}")
-                print("  Secrets: " + (", ".join(service.get("secrets", [])) or "none"))
+                print("  Secrets: " + ("configured" if service.get("secrets") else "none"))
             print("Plugin code runs as your user and can use your computer outside Kollab.")
             if input("Update this plugin? [yes/no] ").strip().lower() != "yes":
                 return 1
@@ -469,7 +477,7 @@ def main(argv: list[str]) -> int:
             print(f"Source: {staged['source']}")
             print(f"Commit: {staged['commit']}")
             print(f"Files SHA-256: {staged['files_sha256']}")
-            print("Uses: " + (", ".join(manifest.get("uses", [])) or "none"))
+            print("Uses: " + _format_uses(manifest.get("uses", [])))
             print(
                 "Parts: "
                 + (", ".join(key for key in ("python", "settings", "web", "services") if manifest.get(key)) or "none")
@@ -478,7 +486,7 @@ def main(argv: list[str]) -> int:
                 import shlex
 
                 print(f"Process {name}: {shlex.join(service['command'])}")
-                print("  Secrets: " + (", ".join(service.get("secrets", [])) or "none"))
+                print("  Secrets: " + ("configured" if service.get("secrets") else "none"))
             print("Plugin code runs as your user and can use your computer outside Kollab.")
             if input("Install this exact version? [yes/no] ").strip().lower() != "yes":
                 return 1

@@ -280,7 +280,7 @@ def apply_config_changes(changes: dict) -> dict:
             parts = path.split(".")
             if (
                 len(parts) != 3
-                or not _ID.fullmatch(parts[1])
+                or not _valid_data_id(parts[1])
                 or not _SERVICE.fullmatch(parts[2])
                 or not isinstance(value, bool)
             ):

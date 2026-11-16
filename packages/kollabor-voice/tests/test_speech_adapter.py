@@ -52,8 +52,9 @@ def test_kva_round_trip_and_limits():
         run(read(b"XXXX" + frame[4:]))
     with pytest.raises(kva.FrameError):
         kva.pcm_to_bytes(np.array([2.0], dtype=np.float32))
-    with pytest.raises(kva.FrameError):
-        kva.pcm_to_bytes(np.array([np.nan], dtype=np.float32))
+    for invalid in (np.nan, np.inf, -np.inf):
+        with pytest.raises(kva.FrameError):
+            kva.pcm_to_bytes(np.array([invalid], dtype=np.float32))
     assert all(
         len(p) <= 100 * 24 * 4
         for p in kva.split_pcm(np.zeros(24000, np.float32), 24000)
@@ -263,6 +264,45 @@ def test_speech_streams_back_and_cancel_drains_the_generator(service):
     frames = run(with_room(service, scenario))
     assert frames[0].sample_rate_hz == 24000 and len(frames) < 100
     assert service.speech.closed  # worker drain semantics preserved
+
+
+def test_synthesized_audio_above_full_scale_is_clipped_before_framing(service):
+    samples = np.array([-1.5, -0.25, 0.5, 1.25], dtype=np.float32)
+
+    def overfull_scale(_text):
+        yield samples, 24000
+
+    service.speech.stream = overfull_scale
+
+    async def scenario(adapter):
+        return [
+            frame.samples
+            async for frame in adapter.synthesize(BINDING, "hello", asyncio.Event())
+        ]
+
+    frames = run(with_room(service, scenario))
+    assert len(frames) == 1
+    assert np.array_equal(
+        frames[0], np.array([-1.0, -0.25, 0.5, 1.0], dtype=np.float32)
+    )
+
+
+@pytest.mark.parametrize("invalid", [np.nan, np.inf, -np.inf])
+def test_non_finite_synthesized_audio_is_rejected_before_framing(service, invalid):
+    def non_finite(_text):
+        yield np.array([0.25, invalid], dtype=np.float32), 24000
+
+    service.speech.stream = non_finite
+
+    async def scenario(adapter):
+        return [
+            frame
+            async for frame in adapter.synthesize(BINDING, "hello", asyncio.Event())
+        ]
+
+    with pytest.raises(AdapterError, match="finite") as err:
+        run(with_room(service, scenario))
+    assert err.value.code == "invalid_audio"
 
 
 def test_room_lease_does_not_open_the_local_microphone(service):
