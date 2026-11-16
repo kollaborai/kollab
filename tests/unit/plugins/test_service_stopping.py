@@ -110,6 +110,18 @@ def test_unverified_or_symlinked_pid_is_not_signalled_and_reports_failure(tmp_pa
     state = json.loads((run / "worker.state").read_text())
     assert state["status"] == "stop-failed"
     assert "stop" in state["error"].lower()
+    from kollabor_plugins import registry
+
+    original_read = Path.read_text
+
+    def safe_read(path, *args, **kwargs):
+        assert not (pid_symlink and path == run / "worker.pid"), "inventory followed a PID symlink"
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", safe_read)
+    manifest = json.loads((root / "kollab-plugin.json").read_text())
+    entry = registry._service_entries(home, "hello", manifest)[0]
+    assert entry["state"] == "stop-failed"
 
 
 
