@@ -48,7 +48,8 @@ describe("PhoneLink plugin UI", () => {
     expect(html).toContain("Can start agent runs through Kollab.");
     expect(html).toContain("Can run agent tools without asking");
     expect(html).toContain("Can request the secret KEY through Kollab.");
-    expect(html).toContain("Runs: python3.");
+    expect(html).toContain("Runs: python3");
+    expect(html).not.toContain("Runs: python3.");
     expect(html).toContain("Talks to: example.com.");
     expect(html).toContain("Reads or writes: /work.");
     expect(html).toContain("future:thing");
@@ -70,12 +71,13 @@ describe("PhoneLink plugin UI", () => {
 describe("empty plugin inventory", () => {
   it("tells managers how to add a plugin, without calling built-ins installed", () => {
     const snapshot = { phoneLink: false, disabled: false, loading: false, inventoryError: null,
-      entries: [{ id: "mcp", name: "MCP", kind: "built-in", enabled: true, state: "ok", shadowed: false }],
+      entries: [{ id: "mcp", name: "MCP", kind: "built-in", enabled: true, state: "ok", shadowed: false, source: "/Users/example/plugins/mcp.py" }],
       registry: { plugins: [], conflicts: [] }, errors: {}, skipped: [], renderFailed: [], failedRenderers: [] };
     const host = { subscribe: () => () => {}, getSnapshot: () => snapshot, getContext: () => undefined, engineTime: () => null } as unknown as PluginHost;
     const html = renderToStaticMarkup(<PluginsSettings host={host} api={{} as EngineApi} canManage />);
-    expect(html).toContain("No plugins installed");
+    expect(html).toContain("No plugins yet.");
     expect(html).toContain("Add Plugin");
+    expect(html).not.toContain("/Users/example/plugins/mcp.py");
   });
   it("does not claim the inventory is empty when loading it failed", () => {
     const snapshot = { phoneLink: false, disabled: false, loading: false, inventoryError: "Inventory unavailable",
@@ -83,6 +85,6 @@ describe("empty plugin inventory", () => {
     const host = { subscribe: () => () => {}, getSnapshot: () => snapshot } as unknown as PluginHost;
     const html = renderToStaticMarkup(<PluginsSettings host={host} api={{} as EngineApi} canManage />);
     expect(html).toContain("Inventory unavailable");
-    expect(html).not.toContain("No plugins installed");
+    expect(html).not.toContain("No plugins yet.");
   });
 });
