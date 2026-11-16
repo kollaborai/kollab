@@ -155,6 +155,17 @@ class TestAutomaticCompactOnAcpChat(unittest.IsolatedAsyncioTestCase):
         await _settle(plugin)
         acp.submit.assert_awaited_once()
 
+    async def test_automatic_trigger_retries_if_command_arrives_after_threshold(self):
+        plugin, _llm, acp = _plugin(command=None)
+        plugin.acp_usage_updated(300_000, 1_000_000)
+        await _settle(plugin)
+
+        acp._command = "/compact"
+        plugin.acp_usage_updated(300_000, 1_000_000)
+        await _settle(plugin)
+
+        acp.submit.assert_awaited_once()
+
     async def test_explicit_global_threshold_is_the_trigger_for_acp_too(self):
         plugin, _llm, acp = _plugin({"plugins.context_compaction.token_threshold_k": 500})
         plugin.acp_usage_updated(600_000, 1_000_000)  # over 500K, under the ratio
