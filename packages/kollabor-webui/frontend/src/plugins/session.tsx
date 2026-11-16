@@ -122,7 +122,7 @@ export function PluginSessionView({ host, view, session, onBack, onTurnOff }: {
   const key = parsePluginView(view);
   const entry = snapshot.entries.find(item => item.id === key?.pluginId);
   useEffect(() => {
-    if (key && !snapshot.loading && !snapshot.inventoryError && (!entry || !entry.enabled)) onBack();
+    if (key && !snapshot.loading && !snapshot.inventoryError && (!entry || (!entry.enabled && entry.state !== "stopping"))) onBack();
   }, [key?.pluginId, entry, snapshot.loading, snapshot.inventoryError, onBack]);
   if (!key) return null;
   const plugin = snapshot.registry.plugins.find(item => item.id === key.pluginId);

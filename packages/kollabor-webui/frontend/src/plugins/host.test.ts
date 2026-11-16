@@ -92,17 +92,18 @@ describe("plugin host lifecycle", () => {
     const json = vi.fn().mockResolvedValueOnce({ schema: 1, server_time: 1000, plugins: [active] })
       .mockResolvedValueOnce({ schema: 1, server_time: 1001, plugins: [stopping] })
       .mockResolvedValue({ schema: 1, server_time: 1003, plugins: [off] });
-    const { host, activation, closeStream } = setup({ json });
+    const { host, importer } = setup({ json });
     try {
       await host.start();
       expect(host.getSnapshot().registry.plugins).toHaveLength(1);
+      const context = host.getContext("hello");
       await host.refresh();
       expect(host.getSnapshot().registry.plugins).toHaveLength(1);
-      expect(activation).toHaveBeenCalledTimes(1);
-      expect(closeStream).not.toHaveBeenCalled();
+      expect(importer).toHaveBeenCalledTimes(1);
+      expect(host.getContext("hello")).toBe(context);
       await vi.advanceTimersByTimeAsync(2000);
       expect(host.getSnapshot().registry.plugins).toHaveLength(0);
-      expect(closeStream).toHaveBeenCalledTimes(1);
+      expect(host.getContext("hello")).toBeUndefined();
     } finally { host.close(); vi.useRealTimers(); }
   });
 

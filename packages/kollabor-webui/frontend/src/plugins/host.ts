@@ -88,6 +88,7 @@ export class PluginHost {
   private sequence = 0;
   private markerSequence = 0;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private stoppingTimer: ReturnType<typeof setInterval> | null = null;
   private clockSample: { serverTime: unknown; sampledAt: number } | null = null;
   private snapshot: PluginHostSnapshot;
 
@@ -167,9 +168,11 @@ export class PluginHost {
       this.clockSample = { serverTime: response.server_time, sampledAt };
       this.entries = response.plugins as PluginEntry[];
       this.syncHeartbeatPolling();
+      this.syncStoppingPolling();
       this.inventoryError = null;
       const included = this.entries.filter(entry => !this.skipped.has(entry.id));
-      const desired = new Set(included.filter(entry => entry.enabled && !entry.shadowed && (entry.state === "ok" || entry.state === "stopping") && entry.web).map(entry => entry.id));
+      const desired = new Set(included.filter(entry => !entry.shadowed && entry.web &&
+        ((entry.enabled && (entry.state === "ok" || entry.state === "stopping")) || (entry.state === "stopping" && this.resources.has(entry.id)))).map(entry => entry.id));
       this.errors = Object.fromEntries(Object.entries(this.errors).filter(([id]) => desired.has(id)));
       for (const id of this.renderFailed) if (!desired.has(id)) this.renderFailed.delete(id);
       this.loading = false;
@@ -181,6 +184,12 @@ export class PluginHost {
       this.inventoryError = error instanceof Error ? error.message : String(error);
       this.publish();
     }
+  }
+
+  private syncStoppingPolling() {
+    const needed = this.entries.some(entry => entry.state === "stopping");
+    if (needed && this.stoppingTimer === null) this.stoppingTimer = setInterval(() => { void this.refresh(); }, 2000);
+    if (!needed && this.stoppingTimer !== null) { clearInterval(this.stoppingTimer); this.stoppingTimer = null; }
   }
 
   private syncHeartbeatPolling() {
@@ -218,6 +227,8 @@ export class PluginHost {
     this.sequence++;
     if (this.heartbeatTimer !== null) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = null;
+    if (this.stoppingTimer !== null) clearInterval(this.stoppingTimer);
+    this.stoppingTimer = null;
     this.globalEvents.close();
     for (const id of [...this.resources.keys()]) {
       this.release(id);

@@ -25,8 +25,9 @@ interface Attempt {
   pending: Promise<void>;
 }
 
-function eligible(entry: WebPluginEntry): boolean {
-  return entry.enabled && !entry.shadowed && (entry.state === "ok" || entry.state === "stopping") && entry.web !== null;
+function eligible(entry: WebPluginEntry, alreadyActive: boolean): boolean {
+  return !entry.shadowed && entry.web !== null &&
+    ((entry.enabled && (entry.state === "ok" || entry.state === "stopping")) || (alreadyActive && entry.state === "stopping"));
 }
 
 function entryUrl(entry: WebPluginEntry, retry: number): string {
@@ -54,7 +55,7 @@ export class PluginLoader<Api, Value> {
   constructor(options: LoaderOptions<Api, Value>) { this.options = options; }
 
   async reconcile(entries: WebPluginEntry[]): Promise<void> {
-    const desired = new Map(entries.filter(eligible).map(entry => [entry.id, entry]));
+    const desired = new Map(entries.filter(entry => eligible(entry, this.attempts.has(entry.id))).map(entry => [entry.id, entry]));
     this.entries.clear();
     for (const [id, entry] of desired) this.entries.set(id, entry);
     for (const [id, attempt] of this.attempts) {
