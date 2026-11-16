@@ -2,7 +2,6 @@ import { useId, useRef, useState, type RefObject } from "react";
 import { Box, Plus } from "lucide-react";
 import type { EngineApi, PanelField, Session } from "@/api";
 import { FieldRenderer, type Draft } from "@/components/panels/FieldRenderer";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
@@ -97,7 +96,7 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate, detailRe
   return <section ref={detailRef} tabIndex={-1} aria-label={`${entry.name} details`} className="min-w-0 py-1">
     <div className="flex min-w-0 flex-wrap items-center gap-2">
       <h2 className="min-w-0 truncate font-semibold">{entry.name}</h2>
-      <Badge variant={failure || entry.state === "changed-on-disk" || stopFailed ? "destructive" : "secondary"}>{status}</Badge>
+      <span className={`text-xs font-medium ${failure || entry.state === "changed-on-disk" || stopFailed ? "text-destructive" : "text-muted-foreground"}`}>{status}</span>
       {canManage && !entry.read_only ? <Switch className="relative max-sm:before:absolute max-sm:before:left-1/2 max-sm:before:top-1/2 max-sm:before:h-[44px] max-sm:before:w-[44px] max-sm:before:-translate-x-1/2 max-sm:before:-translate-y-1/2 max-sm:before:content-['']" aria-label={`${entry.name} enabled`} checked={entry.enabled} disabled={!canChange || busy}
         onCheckedChange={checked => { if (checked) void perform("enable"); else setConfirmation("disable"); }} /> : null}
       {canChange && entry.kind === "installed" ? <div className="ml-auto flex flex-wrap gap-2"><Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => onUpdate(entry.id)}>Update</Button><Button type="button" size="xs" variant="ghost" disabled={busy} onClick={() => setConfirmation("remove")}>Remove</Button></div> : null}
