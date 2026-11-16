@@ -4,6 +4,17 @@ import { PluginFailure, PluginNotices, PluginRecoveryNotices } from "./component
 import type { PluginHost } from "./host";
 
 describe("plugin recovery surfaces", () => {
+  it("shows a dismiss control and identifies the source of plugin notices", () => {
+    const snapshot = { disabled: false, loading: false, inventoryError: null, skipped: [], errors: {}, renderFailed: [],
+      entries: [{ id: "hello", name: "Hello Plugin" }],
+      registry: { plugins: [{ id: "hello", notices: [{ text: "Hello there" }] }], conflicts: [] } };
+    const host = { subscribe: () => () => {}, getSnapshot: () => snapshot } as unknown as PluginHost;
+    const markup = renderToStaticMarkup(<PluginNotices host={host} />);
+    expect(markup).toContain("Hello Plugin");
+    expect(markup).toContain("Hello there");
+    expect(markup).toContain('aria-label="Dismiss"');
+  });
+
 
   it("shows which command was skipped and which plugin or built-in owns it", () => {
     const snapshot = { disabled: false, loading: false, inventoryError: null, skipped: [], errors: {}, renderFailed: [],
