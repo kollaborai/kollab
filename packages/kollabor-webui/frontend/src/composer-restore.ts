@@ -57,8 +57,7 @@ export function stripImageTokens(text: string): {
   const cleaned = text
     .slice(prefix.length)
     .replace(/^[ \t\n]+/, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/\s+$/, "");
+    .replace(/\n{3,}/g, "\n\n");
   return { text: cleaned, tokenCount };
 }
 
