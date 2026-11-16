@@ -148,6 +148,8 @@ def test_tool_executor_spawn_guard_allows_hub_free_text(command):
     [
         "grep -E 'passed|failed' test.log",
         "grep -e passed test.log",
+        "grep -ec passed test.log",
+        "grep -enc passed test.log",
         "rg -e passed tests",
         "git grep -e passed",
         "test -e README.md",
@@ -159,3 +161,33 @@ def test_tool_executor_spawn_guard_allows_hub_free_text(command):
 def test_spawn_guard_allows_unrelated_short_e_options(command):
     # These flags belong to their own executables, not to PowerShell.
     assert not _is_blocked_kollab_spawn(command)
+
+
+@pytest.mark.asyncio
+async def test_terminal_executor_allows_benign_filtered_command():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    executor = ToolExecutor(MagicMock(), MagicMock())
+    executor.shell_executor.run = AsyncMock(
+        return_value=SimpleNamespace(
+            error="", success=True, stdout="ready\n", stderr="", exit_code=0
+        )
+    )
+    command = "printf ready | grep -E ready"
+
+    result = await executor._execute_terminal_command(
+        {"type": "terminal", "id": "benign-filter", "command": command}
+    )
+
+    assert result.success
+    assert result.output == "ready\n"
+    executor.shell_executor.run.assert_awaited_once()
+
+
+def test_generic_encoded_short_alias_blocks_actual_launch():
+    encoded = base64.b64encode("kollab --agent coder".encode("utf-16le")).decode(
+        "ascii"
+    )
+    for option in ("-e", "-ec", "-enc"):
+        assert _is_blocked_kollab_spawn(f"unknown-shell.exe {option} {encoded}")
