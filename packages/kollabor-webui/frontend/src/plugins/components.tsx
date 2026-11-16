@@ -22,10 +22,17 @@ export function useOptionalPluginSnapshot(host: PluginHost | null): PluginHostSn
   return useSyncExternalStore(host?.subscribe ?? emptySubscribe, host?.getSnapshot ?? emptySnapshot, host?.getSnapshot ?? emptySnapshot);
 }
 
+export function PluginErrorDisclosure({ error }: { error: string }) {
+  const [showError, setShowError] = useState(false);
+  return <div>
+    <Button type="button" size="sm" variant="secondary" aria-expanded={showError} onClick={() => setShowError(value => !value)}>View Error</Button>
+    {showError ? <pre className="max-w-full overflow-auto whitespace-pre-wrap break-words">{error}</pre> : null}
+  </div>;
+}
+
 export function PluginFailure({ name, kind, error, onRetry, onTurnOff }: {
   name: string; kind: "load" | "render"; error: string; onRetry: () => void; onTurnOff: () => void;
 }) {
-  const [showError, setShowError] = useState(false);
   return (
     <div className="min-w-0 p-4" role="alert">
       <section className="bg-card flex w-full max-w-[460px] min-w-0 flex-col items-start gap-3 rounded-xl p-4 text-sm">
@@ -33,10 +40,9 @@ export function PluginFailure({ name, kind, error, onRetry, onTurnOff }: {
         <p>{name} {kind === "load" ? "could not load." : "could not draw this page."}</p>
         <div className="flex flex-wrap gap-2">
           <Button type="button" size="sm" onClick={onRetry}>Retry</Button>
-          <Button type="button" size="sm" variant="secondary" aria-expanded={showError} onClick={() => setShowError(value => !value)}>View Error</Button>
+          <PluginErrorDisclosure error={error} />
           <Button type="button" size="sm" variant="ghost" onClick={onTurnOff}>Turn Off</Button>
         </div>
-        {showError ? <pre className="max-w-full overflow-auto whitespace-pre-wrap break-words">{error}</pre> : null}
       </section>
     </div>
   );
