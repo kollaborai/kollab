@@ -65,3 +65,24 @@ describe("PhoneLink plugin UI", () => {
     host.close();
   });
 });
+
+
+describe("empty plugin inventory", () => {
+  it("tells managers how to add a plugin, without calling built-ins installed", () => {
+    const snapshot = { phoneLink: false, disabled: false, loading: false, inventoryError: null,
+      entries: [{ id: "mcp", name: "MCP", kind: "built-in", enabled: true, state: "ok", shadowed: false }],
+      registry: { plugins: [], conflicts: [] }, errors: {}, skipped: [], renderFailed: [], failedRenderers: [] };
+    const host = { subscribe: () => () => {}, getSnapshot: () => snapshot, getContext: () => undefined, engineTime: () => null } as unknown as PluginHost;
+    const html = renderToStaticMarkup(<PluginsSettings host={host} api={{} as EngineApi} canManage />);
+    expect(html).toContain("No plugins installed");
+    expect(html).toContain("Add Plugin");
+  });
+  it("does not claim the inventory is empty when loading it failed", () => {
+    const snapshot = { phoneLink: false, disabled: false, loading: false, inventoryError: "Inventory unavailable",
+      entries: [], registry: { plugins: [], conflicts: [] }, errors: {}, skipped: [], renderFailed: [], failedRenderers: [] };
+    const host = { subscribe: () => () => {}, getSnapshot: () => snapshot } as unknown as PluginHost;
+    const html = renderToStaticMarkup(<PluginsSettings host={host} api={{} as EngineApi} canManage />);
+    expect(html).toContain("Inventory unavailable");
+    expect(html).not.toContain("No plugins installed");
+  });
+});
