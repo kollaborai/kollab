@@ -719,7 +719,7 @@ async def test_activate_can_skip_persistence_through_state_service():
 
 
 @pytest.mark.asyncio
-async def test_activate_can_skip_persistence_and_switch_for_current_run():
+async def test_activate_refuses_run_scope_through_shared_state_service():
     pm = _FakeProfileManager([_FakeProfile("work", "openai", api_key="key-1")])
     manager = LoadoutManager(pm, config=_MemoryConfig())
     state_service = SimpleNamespace(set_active_profile=AsyncMock())
@@ -727,16 +727,16 @@ async def test_activate_can_skip_persistence_and_switch_for_current_run():
         get_service=lambda name: state_service if name == "state_service" else None
     )
 
-    await manager.activate(
+    result = await manager.activate(
         Loadout("temporary", "work", "gpt-5.6"),
         event_bus=event_bus,
         persist=False,
         for_current_run=True,
     )
 
-    state_service.set_active_profile.assert_awaited_once_with(
-        "work", persist=False, reload_profile=True
-    )
+    assert result is None
+    state_service.set_active_profile.assert_not_awaited()
+    assert pm.update_calls == []
 
 
 @pytest.mark.asyncio
