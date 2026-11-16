@@ -1,5 +1,6 @@
 """A full raw log rotates to a new file instead of dropping entries."""
 
+import os
 from unittest.mock import MagicMock
 
 from kollabor_ai.api_communication_service import APICommunicationService
@@ -61,3 +62,29 @@ def test_rotation_still_honours_the_total_cap(tmp_path):
     assert sum(f.stat().st_size for f in files) <= entry * 3.5
     assert "turn-6" in active.read_text()
     assert not any("turn-0" in f.read_text() for f in files)
+
+
+def test_total_cap_prunes_oldest_logs_across_project_folders(tmp_path):
+    projects = tmp_path / "projects"
+    old_raw = projects / "removed-worktree" / "conversations" / "raw"
+    current_raw = projects / "current-worktree" / "conversations" / "raw"
+    old_raw.mkdir(parents=True)
+    current_raw.mkdir(parents=True)
+    old_log = old_raw / "old_raw.jsonl"
+    current_log = current_raw / "current_raw.jsonl"
+    old_log.write_bytes(b"old\n")
+    current_log.write_bytes(b"new\n")
+    old_log.touch()
+    current_log.touch()
+    old_log_mtime = 1_000_000_000
+    current_log_mtime = old_log_mtime + 1
+    os.utime(old_log, (old_log_mtime, old_log_mtime))
+    os.utime(current_log, (current_log_mtime, current_log_mtime))
+
+    service = _service(current_raw)
+    service._raw_max_total_bytes = current_log.stat().st_size
+    service._prune_raw_logs()
+
+    assert not old_log.exists()
+    assert current_log.read_bytes() == b"new\n"
+    assert sum(path.stat().st_size for path in projects.rglob("*_raw.jsonl")) <= 4
