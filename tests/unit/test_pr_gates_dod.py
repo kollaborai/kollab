@@ -851,7 +851,7 @@ def test_regression_test_counts_a_finding_beside_rule_codes_1024(tmp_path: Path)
         cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
     )
     assert report.detail_for("regression_test") == (
-        "no regression test covers finding id(s): F7 under tests/"
+        "no changed test text references finding id(s): F7 under tests/"
     )
 
 
@@ -862,7 +862,7 @@ def test_regression_test_counts_a_bare_finding_list_1024(tmp_path: Path) -> None
         cfg, make_data(comments=(source_comment("issue_comment", 1, "F1,F2: both open"),))
     )
     assert report.detail_for("regression_test") == (
-        "no regression test covers finding id(s): F1, F2 under tests/"
+        "no changed test text references finding id(s): F1, F2 under tests/"
     )
 
 
@@ -881,7 +881,7 @@ def test_regression_test_keeps_finding_beside_severity_code_1024(tmp_path: Path)
         ),
     )
     assert report.detail_for("regression_test") == (
-        "no regression test covers finding id(s): F14 under tests/"
+        "no changed test text references finding id(s): F14 under tests/"
     )
 
 
@@ -896,7 +896,7 @@ def test_regression_test_keeps_declared_finding_in_mixed_code_list_1024(
         ),
     )
     assert report.detail_for("regression_test") == (
-        "no regression test covers finding id(s): F7 under tests/"
+        "no changed test text references finding id(s): F7 under tests/"
     )
 
 
@@ -920,7 +920,7 @@ def test_regression_test_keeps_a_declared_finding_on_a_lint_line_1024(
         cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
     )
     assert report.detail_for("regression_test") == (
-        "no regression test covers finding id(s): F7 under tests/"
+        "no changed test text references finding id(s): F7 under tests/"
     )
 
 
@@ -934,7 +934,7 @@ def test_regression_test_keeps_findings_in_a_sentence_that_names_ruff_1024(
         cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
     )
     assert report.detail_for("regression_test") == (
-        "no regression test covers finding id(s): F3, F4 under tests/"
+        "no changed test text references finding id(s): F3, F4 under tests/"
     )
 
 
@@ -947,7 +947,7 @@ def test_regression_test_counts_a_rule_list_quoted_in_prose_1024(tmp_path: Path)
         cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
     )
     assert report.detail_for("regression_test") == (
-        "no regression test covers finding id(s): F63, F7, F82 under tests/"
+        "no changed test text references finding id(s): F63, F7, F82 under tests/"
     )
 
 
@@ -2117,7 +2117,7 @@ def test_regression_keeps_pr553_f1_f6_and_requires_all_f11_occurrences(tmp_path)
         comments=(*sources, *markers), reviews=(approved_review(),), changed_file_contents={}
     )
     detail = pr_gates_dod.evaluate(cfg, valid).detail_for("regression_test")
-    assert detail == "no regression test covers finding id(s): F1, F2, F3, F4, F5, F6 under tests/"
+    assert detail == "no changed test text references finding id(s): F1, F2, F3, F4, F5, F6 under tests/"
     assert "F11" not in detail
 
     unannotated = make_data(comments=sources, changed_file_contents={})
