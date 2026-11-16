@@ -291,6 +291,22 @@ describe("PromptsView role (rendered)", () => {
     expect(html).toContain("Per-Turn Context");
     expect(html).toContain("Session Context");
   });
+
+  it("shows library load errors in the visible pane without empty-library counts", () => {
+    const error = "Prompt library could not be loaded";
+    const html = renderView({
+      libraries: null,
+      loadError: error,
+      target: { kind: "library", name: "defaults" },
+      groups: [],
+      composition: null,
+    });
+    const sectionsPane = html.split('data-testid="prompts-sections"')[1];
+
+    expect(sectionsPane).toContain(`role="alert"`);
+    expect(sectionsPane).toContain(error);
+    expect(html).not.toContain('data-testid="target-total"');
+  });
 });
 
 describe("PromptsView editor (rendered)", () => {
