@@ -235,6 +235,8 @@
 
 - Changelog: appended the step 3 web plugin entry to `changes/1028.added.md`; the file is a release fragment, not `CHANGELOG.md`. Next audit remaining spec and browser gaps; live smoke is still blocked by the unrelated listeners on ports 7434 and 8081.
 
+- Settings version: `92b6e94f` adds the red browser assertion (`settings-version-red.log`) for the spec's required version; `fa8a4526` displays a present version in plugin details. Browser acceptance and typecheck passed (`settings-version-green.log`, `settings-version-typecheck.log`).
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
