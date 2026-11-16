@@ -1882,12 +1882,12 @@ class ContextCompactionPlugin(BasePlugin):
         self._set_compaction_status("compacting", "The harness is compacting its own context.")
         try:
             if ask and self.config.get("plugins.context_compaction.ask_model_first", True):
-                reply = await acp.submit(self._build_curation_request(reason))
+                reply = await acp.submit(self._build_curation_request(reason), record=False)
                 text = str((reply or {}).get("text") or "")
                 notes = re.search(r"<compact>(.*?)</compact>", text, re.DOTALL)
                 if notes and notes.group(1).strip():
                     command = f"{command} {notes.group(1).strip()}"
-            await acp.submit(command)
+            await acp.submit(command, record=False)
             self._set_compaction_status("idle", "")
         except Exception as exc:
             logger.warning("ACP harness compaction failed (%s)", type(exc).__name__)

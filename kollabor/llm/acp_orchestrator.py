@@ -1486,9 +1486,13 @@ class ACPOrchestrator:
                 if display is not None:
                     display.display_system_message("Conversation history not saved for this reply.")
 
-    async def submit(self, text: str, *, source: str = "rpc", thread_id: str | None = None) -> dict[str, Any]:
+    async def submit(
+        self, text: str, *, source: str = "rpc", thread_id: str | None = None, record: bool = True,
+    ) -> dict[str, Any]:
         request_id = f"request-{uuid.uuid4().hex}"
-        admission = self.admit(text, request_id=request_id, source=source, thread_id=thread_id)
+        admission = self.admit(
+            text, request_id=request_id, source=source, thread_id=thread_id, record=record,
+        )
         result: ACPResult = await admission.future
         return {"text": result.text, "session_id": result.session_id,
                 "generation": result.generation, "turn_id": result.turn_id,
