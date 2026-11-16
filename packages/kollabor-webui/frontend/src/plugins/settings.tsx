@@ -28,7 +28,7 @@ function ServiceRow({ service, host, api, id, canManage, canStart, refresh, onEr
   const control = async (action: string) => {
     setBusy(true);
     try { await api.json(`${pathFor(id)}/services/${encodeURIComponent(service.name)}/${action}`, { method: "POST" }); await refresh(); }
-    catch (error) { onError(message(error)); } finally { setBusy(false); }
+    catch (error) { onError(message(error)); await refresh(); } finally { setBusy(false); }
   };
   const showLog = async () => {
     setBusy(true);
@@ -71,7 +71,13 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate }: { entr
   const perform = async (action: "enable" | "disable" | "remove") => {
     setBusy(true); setError(null);
     try { await api.json(`${pathFor(entry.id)}/${action}`, { method: "POST" }); setConfirmation(null); await host.refresh(); }
-    catch (caught) { setError(message(caught)); } finally { setBusy(false); }
+    catch (caught) {
+      setError(message(caught));
+      await host.refresh();
+      const latest = host.getSnapshot();
+      const current = latest.entries.find(item => item.id === entry.id && item.kind === entry.kind && item.source === entry.source);
+      if (action !== "enable" && !latest.inventoryError && (!current || !current.enabled)) setConfirmation(null);
+    } finally { setBusy(false); }
   };
   const save = async () => {
     setBusy(true); setError(null);
@@ -105,6 +111,7 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate }: { entr
     </div>
     <Dialog open={confirmation !== null} onOpenChange={open => { if (!open && !busy) setConfirmation(null); }}><DialogContent>
       <DialogHeader><DialogTitle>{confirmation === "remove" ? "Remove" : "Turn off"} {entry.name}?</DialogTitle><DialogDescription>Its background processes will stop. Any working plugin runs must finish before this action can continue.</DialogDescription></DialogHeader>
+      {error ? <p role="alert" className="text-destructive break-words text-sm">{error}</p> : null}
       <DialogFooter><Button type="button" variant="outline" disabled={busy} onClick={() => setConfirmation(null)}>Cancel</Button><Button type="button" disabled={busy || !confirmation} onClick={() => { if (confirmation) void perform(confirmation); }}>{confirmation === "remove" ? "Remove" : "Turn Off"}</Button></DialogFooter>
     </DialogContent></Dialog>
   </section>;

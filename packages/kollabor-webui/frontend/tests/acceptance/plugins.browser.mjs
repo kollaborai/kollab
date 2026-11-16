@@ -240,6 +240,7 @@ try {
   entry.services[0].state = "running";
   partialStopFailure = true;
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+  await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   await page.getByRole("button", { name: "Settings", exact: true }).first().click();
   const partialSettings = page.getByRole("dialog", { name: "Settings" });
   await partialSettings.getByRole("tab", { name: "Plugins" }).click();
@@ -263,6 +264,7 @@ try {
   await stopFailure.getByText("Could not stop this process. Retry stopping it.", { exact: true }).waitFor();
   await stopFailure.getByRole("button", { name: "Retry Stop", exact: true }).click();
   assert.equal(stopRetryCalls, 1, "a failed stop can be retried while the plugin remains off");
+  await page.waitForFunction(() => [...document.querySelectorAll("button")].some(button => button.textContent?.trim() === "Retry Stop" && !button.disabled));
   entry.enabled = true;
   delete entry.services[0].error;
   entry.state = "ok";
