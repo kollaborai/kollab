@@ -89,6 +89,43 @@ describe("plugin host lifecycle", () => {
     host.close();
   });
 
+  it("observes service starts, crashes and backoff without an inventory event", async () => {
+    vi.useFakeTimers();
+    const onServiceCrash = vi.fn();
+    const { host, json, setInventory } = setup({ onServiceCrash });
+    const withState = (state: string) => ({ ...entry("hello"), services: [{ name: "worker", state }] });
+    try {
+      setInventory([withState("starting")]);
+      await host.start();
+      for (const state of ["running", "backoff", "crash-stopped"]) {
+        setInventory([withState(state)]);
+        await vi.advanceTimersByTimeAsync(5000);
+        expect(host.getSnapshot().entries[0].services?.[0]).toMatchObject({ state });
+      }
+      expect(onServiceCrash).toHaveBeenCalledOnce();
+      expect(onServiceCrash).toHaveBeenCalledWith([{ pluginId: "hello", pluginName: "hello", serviceName: "worker" }]);
+      const calls = json.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(json).toHaveBeenCalledTimes(calls);
+    } finally { host.close(); vi.useRealTimers(); }
+  });
+
+  it("does not overlap service polls when inventory is slow", async () => {
+    vi.useFakeTimers();
+    const active = { ...entry("hello"), services: [{ name: "worker", state: "running" }] };
+    let finish!: (value: unknown) => void;
+    const slow = new Promise(resolve => { finish = resolve; });
+    const json = vi.fn().mockResolvedValueOnce({ schema: 1, plugins: [active] }).mockReturnValue(slow);
+    const { host } = setup({ json });
+    try {
+      await host.start();
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(json).toHaveBeenCalledTimes(2);
+      finish({ schema: 1, plugins: [active] });
+      await vi.advanceTimersByTimeAsync(0);
+    } finally { host.close(); vi.useRealTimers(); }
+  });
+
   it("refreshes promised heartbeats and stops polling when closed", async () => {
     vi.useFakeTimers();
     const { host, json, setInventory } = setup();
