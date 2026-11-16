@@ -102,7 +102,7 @@ and Trajectory show its work live. Run states read Working, Done, Timed Out, Tok
 Cancelled.
 
 **Settings → Plugins.** A new Settings tab lists every plugin in two groups, Built In (Hub, Voice, MCP
-and the rest of the bundled `plugins/`) and Installed: name, version, source, an on/off switch, its
+and the rest of the bundled `plugins/`) and Installed: name, source, an on/off switch, its
 Background Processes with their state, what the plugin uses, and its settings form. Buttons: Add Plugin,
 and Update and Remove for installed plugins. Add Plugin takes a git URL. Plugin settings move here from
 Settings → Configuration, which keeps only kollab's own settings, so each field shows in one place.
