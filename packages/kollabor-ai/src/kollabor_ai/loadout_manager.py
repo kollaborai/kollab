@@ -663,8 +663,10 @@ class LoadoutManager:
         effort/max_tokens only when the loadout overrides them) to its
         provider profile via
         ``profile_manager.update_profile(..., save_to_config=True)`` by default,
-        or without persistence when ``persist=False``, then
-        activates that provider profile -- through ``state_service`` when
+        or without persistence when ``persist=False``. A non-persistent
+        activation changes the active profile only when ``for_current_run``
+        is true; otherwise it updates the provider profile without selecting it.
+        Active-profile changes go through ``state_service`` when
         one is wired on ``event_bus`` (attach/daemon mode), otherwise
         directly plus the ``llm_service`` reinitialize/reload-tools
         fallback (mirrors
@@ -796,7 +798,7 @@ class LoadoutManager:
                     raise ValueError("ACP harness did not apply the loadout model")
                 if loadout.effort and (not effort or effort.get("currentValue") != loadout.effort):
                     raise ValueError("ACP harness did not apply the loadout effort")
-                if persist is None or for_current_run:
+                if persist is None:
                     activated = self.profile_manager.set_active_profile(loadout.provider_profile)
                 else:
                     activated = self.profile_manager.set_active_profile(

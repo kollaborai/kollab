@@ -48,6 +48,7 @@ class ModelFallbackPlugin(BasePlugin):
         self._held: Any = None  # the orchestrator keeping peer messages for it
         self._task: Optional[asyncio.Task] = None
         self._fallback_restore: Optional[Tuple[str, str]] = None
+        self._fallback_waiting_for_resend = False
 
     @staticmethod
     def get_default_config() -> Dict[str, Any]:
@@ -180,6 +181,9 @@ class ModelFallbackPlugin(BasePlugin):
         switch after the turn's completion reached no one who asked (#548).
         """
         self._attach()
+        if self._fallback_restore is not None:
+            await self._restore_after_fallback(data, event)
+            return data
         message = str(data.get("message") or "")
         kind = None if data.get("context_window_exceeded") else failure_kind(
             message, error_type=data.get("error_type"), error_code=data.get("error_code")
@@ -194,6 +198,9 @@ class ModelFallbackPlugin(BasePlugin):
     async def _restore_after_fallback(self, data: Dict[str, Any], event) -> Dict[str, Any]:
         pending = getattr(self, "_fallback_restore", None)
         if pending is None:
+            return data
+        if self._fallback_waiting_for_resend:
+            self._fallback_waiting_for_resend = False
             return data
         self._fallback_restore = None
         original_name, fallback_name = pending
@@ -227,6 +234,14 @@ class ModelFallbackPlugin(BasePlugin):
                 self._failed_message = str(event.get("message") or "")
                 self._failed_runner = self._harness_runner()
         elif kind == "turn_complete":
+            if self._fallback_restore is not None and self._loop is not None:
+                self._fallback_waiting_for_resend = False
+                self._failed_message = None
+                self._failed_runner = None
+                self._loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(self._restore_after_fallback({}, None))
+                )
+                return
             message, self._failed_message = self._failed_message, None
             runner, self._failed_runner = self._failed_runner, None
             if message is not None and failure_kind(message) and self.choice():
@@ -358,11 +373,12 @@ class ModelFallbackPlugin(BasePlugin):
         if not activated:
             self._say(f"{failing} {REASONS[kind]}, and switching to {loadout.name} failed.")
             return ""
-        if original_name is not None:
-            self._fallback_restore = (original_name, loadout.provider_profile)
         harness = profile_manager.get_profile(loadout.provider_profile)
         to_acp = str(getattr(harness, "get_provider", lambda: "")() or "").lower() == "acp"
         outcome = "retry" if retry and not to_acp else "resend"
+        if original_name is not None:
+            self._fallback_restore = (original_name, loadout.provider_profile)
+            self._fallback_waiting_for_resend = outcome == "resend"
         self._say(
             f"{failing} {REASONS[kind]}. Switched to {loadout.name}"
             + (" and resent your message." if outcome == "retry" else ". Send your message again."),
