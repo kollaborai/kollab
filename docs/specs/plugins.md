@@ -82,7 +82,7 @@ only when something needs you, and both parts use the singular for 1. When kolla
 plugin is unwell, kollab sets the count: `Stopped` after the crash limit, `Failed to Load` when its code
 failed. Plugin rows sort by plugin name. The row text itself reads `4 · 1 needs you` whenever something needs you, on every device. On a
 touch screen (`pointer: coarse`) every plugin row, tab and button is at least 44 px tall; the plugin host
-sets that size for everything inside `[data-plugin]`. On a phone the menu is the existing right-hand sheet and the rows are there too.
+sets that size for everything inside `[data-plugin]`. On a phone the menu is the existing right-hand sheet and the rows are there too, except in the PhoneLink phone app until #1203. A remote browser page that is not PhoneLink is unaffected.
 
 **What a row opens.** The plugin picks one of three per row, or an external link:
 
@@ -94,7 +94,7 @@ sets that size for everything inside `[data-plugin]`. On a phone the menu is the
 - **Page**: the whole main area with the plugin's own tab bar. PR Chain opens a page with Board, Pull
   Requests, Issues, Spend and Config. Picking an agent in the left sidebar leaves the page.
 
-On a phone a page or modal fills the screen and its tab bar scrolls sideways.
+On a phone a page or modal fills the screen and its tab bar scrolls sideways. This does not apply to the PhoneLink phone app until #1203; other remote browser pages are unaffected.
 
 **Plugin agents.** An agent a plugin starts is a normal kollab session. While it runs it shows in the
 left sidebar under a group named after the plugin (`PR Chain  2 Agent Runs`, or `1 Agent Run`), and Chat
@@ -107,7 +107,7 @@ Background Processes with their state, what the plugin uses, and its settings fo
 and Update and Remove for installed plugins. Add Plugin takes a git URL. Plugin settings move here from
 Settings → Configuration, which keeps only kollab's own settings, so each field shows in one place.
 Installing, updating, removing and turning plugins on or off work only from a page opened on this
-computer; over PhoneLink the tab is read-only and says `Manage plugins on this computer`.
+computer; over PhoneLink the tab is read-only and says `Open and manage plugins on this computer` until #1203 lands, then `Manage plugins on this computer`.
 
 Background process states: `Running · 2 h`; `Stopping · 12 min left`; `Running · No Heartbeat for 6 min` (a process that
 promised a heartbeat and went quiet); `Exited`; `Stopped` (stopped by you); `Stopped After 5 Crashes ·
@@ -362,8 +362,8 @@ All sit behind the existing bearer-token middleware.
 "Plugin token: no" means only the user's engine token works. "Remote page: no" means the web UI's
 `/engine` proxy and the PhoneLink bridge refuse the route for any client that is not on this computer (the proxy sees the real
 client address; the engine behind it only ever sees the proxy), and the engine refuses it on requests the
-proxy marks as forwarded. A page opened over PhoneLink or the relay can use plugins but never install or
-manage them.
+proxy marks as forwarded. A remote browser page that is not PhoneLink can use plugins but never install or
+manage them. The PhoneLink phone app cannot load plugin web parts until #1203; its Plugins settings remain read-only.
 
 ### Tokens and what plugin code can reach
 
@@ -537,7 +537,8 @@ streamed output sits in an `aria-live="polite"` region. Each plugin view mounts 
 `kollab plugin add` warns when `index.css` has rules outside it.
 
 Loading: at boot the app reads `GET /plugins`, `import()`s every enabled entry in parallel and awaits
-each plugin function. A 5 s limit covers the import and that await; it cannot stop a synchronous loop
+each plugin function, except in the PhoneLink phone app until #1203. PhoneLink reads the inventory but does not
+load or activate plugin web parts; remote browser pages that are not PhoneLink are unaffected. A 5 s limit covers the import and that await; it cannot stop a synchronous loop
 in plugin code, which freezes the tab, and `?plugins=off` is the way back in. Retry imports
 `index.js?v=<hash>&retry=<n>` so the browser does not hand back the failed module, and a timed-out
 import that resolves later is ignored. On `plugins-changed` the page reads `GET /plugins` again and
@@ -773,6 +774,7 @@ Two loops never run on the same PRs. With the owner's yes:
    `kollab plugin dev`.
 4. Agent runs, once #889 to #897 are closed, and pr-chain's option to run a stage on a kollab loadout.
 5. Cutover, then removal of the #1008 reader and dialog.
+6. Plugins in the PhoneLink phone app (#1203): a separate design note, security review and red-first paired regression restore loading plugin web parts there.
 
 Steps 2 and 3 share no files and can run at the same time once step 1 lands. Every step lands as its own
 PR, goes through the design review swarm when it changes a surface, and gets an independent code review.
@@ -801,8 +803,10 @@ PR, goes through the design review swarm when it changes a surface, and gets an 
    meanwhile.
 8. If two plugins register the same slash command, then the one enabled first keeps it and the other's
    Settings row says `/deploy is taken by Deploy Bot`. Turning off the first frees it for the second.
-9. If the page is open on a phone through PhoneLink, then plugins load and work, `k.api` goes through
-   `/engine`, and Settings → Plugins is read-only with `Manage plugins on this computer`.
+9. Until #1203, the PhoneLink phone app lists plugins without loading their web parts, and Settings → Plugins
+   is read-only with `Open and manage plugins on this computer`. After #1203, plugins load and work, `k.api`
+   goes through `/engine`, and the read-only message becomes `Manage plugins on this computer`. A remote browser
+   page that is not PhoneLink is unaffected.
 10. If a plugin needs a newer kollab than the one running, then `add` refuses with `PR Chain needs kollab
     0.23.0 or newer; this is 0.22.1`.
 11. If the page URL has `?plugins=off` or kollab starts with `--no-plugins`, then no plugin code runs in
