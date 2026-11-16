@@ -18,7 +18,10 @@ export function splitPluginTags(text: string, names: readonly string[]): TaggedT
         index = lineEnd < 0 ? text.length : lineEnd + 1;
         continue;
       }
-      if (fence) { index = lineEnd < 0 ? text.length : lineEnd + 1; continue; }
+      if (fence || /^(?: {4}| {0,3}\t)/.test(line)) {
+        index = lineEnd < 0 ? text.length : lineEnd + 1;
+        continue;
+      }
     }
     if (text[index] === "\\") { index += 2; continue; }
     if (text[index] === "`") {
