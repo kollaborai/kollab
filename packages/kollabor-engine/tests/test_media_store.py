@@ -147,6 +147,11 @@ def test_count_image_tokens_shapes() -> None:
     # drift from what the frontend renders.
     assert count_image_tokens("see [[image1]] below") == 0
     assert count_image_tokens("[[image1]] and [image1]") == 1
+    # Zero-valued and all-zero-padded tokens are text, matching the
+    # frontend's near-miss grammar (value semantics, not leading digit).
+    assert count_image_tokens("[image0] is text") == 0
+    assert count_image_tokens("[image00] is text") == 0
+    assert count_image_tokens("[image01] is a token") == 1
 
 
 def test_attach_binds_mirror_part_rows(tmp_path: Path) -> None:

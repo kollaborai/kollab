@@ -187,6 +187,7 @@ const mainConfig = defineConfig({
     include: [
       "tests/media-tokens.test.ts",
       "tests/media-thumb.test.tsx",
+      "tests/attachment-token-strip.test.ts",
       "tests/prompts-page.test.ts",
       "tests/terminal-ws-protocol.test.ts",
       "tests/lazy-file-list.test.ts",

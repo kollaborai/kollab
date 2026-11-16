@@ -191,7 +191,10 @@ def slot_count(conversations_dir: Path, session_id: str) -> int:
 # [[imageN]] (double brackets) is the escaped literal form - text, not a
 # token (#1124 P2a) - so it neither consumes a slot nor counts toward the
 # page-offset skip.
-_IMAGE_TOKEN_RE = re.compile(r"(?<!\[)\[image\d+\](?!\])")
+# The digit run must contain a nonzero digit (value > 0): [image0] and
+# [image00] are text, matching the frontend's near-miss grammar; [image01]
+# is a token (value 1).
+_IMAGE_TOKEN_RE = re.compile(r"(?<!\[)\[image\d*[1-9]\d*\](?!\])")
 
 
 def count_image_tokens(content: object) -> int:
