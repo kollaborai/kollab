@@ -1,7 +1,7 @@
 ---
 title: "MCP (Model Context Protocol)"
 created: 2026-02-24
-modified: 2026-09-20
+modified: 2026-11-15
 status: active
 ---
 # MCP (Model Context Protocol)
@@ -221,6 +221,13 @@ Inside the `/mcp` manager:
 The manager's add, delete, and enable/disable actions write the global
 `~/.kollab/mcp/mcp_settings.json`. Edit `.kollab/mcp/mcp_settings.json`
 directly for project-specific configuration, then run `/mcp reload`.
+
+## Session-Requested Servers
+
+An engine session can request configured MCP servers for its daemon. Those
+servers are enabled in that daemon's memory and reloaded for the session;
+their saved `enabled` settings do not change. Use `/mcp enable` or the Settings
+panel to change a saved preference for later sessions.
 
 ## Tool Execution
 
