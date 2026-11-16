@@ -71,7 +71,7 @@ export function loadSeenRecord(raw: string | null): SeenRecord | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as { seenVersion?: unknown };
-    return typeof parsed.seenVersion === "string" && parsed.seenVersion.trim()
+    return typeof parsed.seenVersion === "string" && VERSION_RE.test(parsed.seenVersion)
       ? { seenVersion: parsed.seenVersion }
       : null;
   } catch {
