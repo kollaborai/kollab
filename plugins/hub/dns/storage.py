@@ -316,18 +316,85 @@ class DNSStorage:
         with _file_lock(self._registry_path):
             existing, tombstones = self._read_registry_state_unlocked()
             tombstones.difference_update(created_keys)
+            deleted = set(deleted_keys or ())
+            missing = object()
             for key, record in records.items():
+                if key in deleted:
+                    continue
                 if key in tombstones and key not in created_keys:
                     continue
                 base = (base_records or {}).get(key)
                 current = existing.get(key)
-                if base is None or current is None or key in created_keys:
+                if current is None:
                     existing[key] = record
                     continue
-                current_data = current.to_dict()
+
                 incoming_data = record.to_dict()
+                current_data = current.to_dict()
+                if key in created_keys:
+                    # Two registries can both observe an absent designation.
+                    # Treat the later create like register(existing): preserve
+                    # accumulated approval/trust and merge previously unseen tags.
+                    protected = {
+                        "approval_state",
+                        "trust_score",
+                        "registered_at",
+                    }
+                    if not incoming_data.get("attestation"):
+                        protected.add("attestation")
+                    if not incoming_data.get("capabilities"):
+                        protected.add("capabilities")
+                    if not incoming_data.get("public_key"):
+                        protected.add("public_key")
+                    current_tags = current_data.get("tags")
+                    for field, value in incoming_data.items():
+                        if field in protected:
+                            continue
+                        if (
+                            field == "tags"
+                            and isinstance(value, dict)
+                            and isinstance(current_tags, dict)
+                        ):
+                            merged_tags = dict(value)
+                            merged_tags.update(current_tags)
+                            current_data[field] = merged_tags
+                        else:
+                            current_data[field] = value
+                    existing[key] = AgentRecord.from_dict(current_data)
+                    continue
+
+                if base is None:
+                    if current_data != incoming_data:
+                        raise ValueError(
+                            "base_records is required to update an existing "
+                            "registry record safely"
+                        )
+                    continue
+
+                current_data = current.to_dict()
                 for field, value in incoming_data.items():
-                    if base.get(field) != value:
+                    base_value = base.get(field, missing)
+                    if base_value == value:
+                        continue
+                    current_value = current_data.get(field)
+                    if (
+                        field == "tags"
+                        and isinstance(base_value, dict)
+                        and isinstance(value, dict)
+                        and isinstance(current_value, dict)
+                    ):
+                        merged_value = dict(current_value)
+                        for nested_key in set(base_value) | set(value):
+                            previous = base_value.get(nested_key, missing)
+                            incoming = value.get(nested_key, missing)
+                            if previous == incoming:
+                                continue
+                            if nested_key in value:
+                                merged_value[nested_key] = value[nested_key]
+                            else:
+                                merged_value.pop(nested_key, None)
+                        current_data[field] = merged_value
+                    else:
                         current_data[field] = value
                 existing[key] = AgentRecord.from_dict(current_data)
             for key in deleted_keys or []:
