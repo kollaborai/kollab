@@ -1883,6 +1883,7 @@ class ContextCompactionPlugin(BasePlugin):
     async def _run_acp_compaction(self, acp, command: str, reason: str, ask: bool) -> None:
         """Ask the harness what to keep when ask_model_first is on, then send its command with those notes."""
         self._set_compaction_status("compacting", "The harness is compacting its own context.")
+        succeeded = False
         try:
             if ask and self.config.get("plugins.context_compaction.ask_model_first", True):
                 reply = await acp.submit(self._build_curation_request(reason), record=False)
@@ -1891,12 +1892,15 @@ class ContextCompactionPlugin(BasePlugin):
                 if notes and notes.group(1).strip():
                     command = f"{command} {notes.group(1).strip()}"
             await acp.submit(command, record=False)
+            succeeded = True
             self._set_compaction_status("idle", "")
         except Exception as exc:
             logger.warning("ACP harness compaction failed (%s)", type(exc).__name__)
             self._set_compaction_status("failed", "The harness did not compact its own context.")
         finally:
             self._acp_compacting = False
+            if reason == "threshold" and not succeeded:
+                self._acp_compact_armed = True
 
     def _acp_owns_chat(self) -> bool:
         """Whether an ACP agent owns this chat (the test the message handler
