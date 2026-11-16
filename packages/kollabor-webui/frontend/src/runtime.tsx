@@ -99,7 +99,7 @@ export type EngineState = {
 const messageConverter = createMessageConverter<ThreadMessageLike>((message) => message);
 // The converter reads convertConfig off a message: "none" ends its join group.
 type JoinableMessage = ThreadMessageLike & { convertConfig?: { joinStrategy?: "concat-content" | "none" } };
-const imageAttachmentAdapter = new SimpleImageAttachmentAdapter();
+export const imageAttachmentAdapter = new SimpleImageAttachmentAdapter();
 
 const PermissionCancellationContext = createContext<{
   cancel: (expected: readonly PendingPermission[]) => Promise<void>;

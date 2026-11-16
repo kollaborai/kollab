@@ -50,14 +50,14 @@ two conflicts with proposals; Finance flags a renewal; CoS sends one message:
 
 ## Team
 
-| Hub name | Name | Role | Bundle | Reports to |
-|---|---|---|---|---|
-| `evelyn` | Evelyn Hart | Chief of Staff | `default` | human |
-| `ivy` | Ivy Nakamura | Inbox Monitor | `default` | evelyn |
-| `felix` | Felix Moreau | Communications Lead | `creative-writer` | evelyn |
-| `sam` | Sam Whitaker | Calendar & Scheduling Manager | `default` | evelyn |
-| `ruth` | Ruth Adeyemi | Personal Finance Manager | `data-analyst` | evelyn |
-| `mateo` | Mateo Silva | Travel Planner | `research` | evelyn |
+| Hub name | Role | Bundle | Reports to |
+|---|---|---|---|
+| `chief-of-staff` | Chief of Staff | `default` | human |
+| `inbox-monitor` | Inbox Monitor | `default` | chief-of-staff |
+| `communications-lead` | Communications Lead | `creative-writer` | chief-of-staff |
+| `calendar-scheduling-manager` | Calendar & Scheduling Manager | `default` | chief-of-staff |
+| `personal-finance-manager` | Personal Finance Manager | `data-analyst` | chief-of-staff |
+| `travel-planner` | Travel Planner | `research` | chief-of-staff |
 
 ## Hand-off outside the team
 

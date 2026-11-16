@@ -186,6 +186,8 @@ const mainConfig = defineConfig({
     // Vitest suites; Node's built-in test runner remains for older tests.
     include: [
       "tests/media-tokens.test.ts",
+      "tests/media-thumb.test.tsx",
+      "tests/attachment-token-strip.test.ts",
       "tests/prompts-page.test.ts",
       "tests/terminal-ws-protocol.test.ts",
       "tests/lazy-file-list.test.ts",
@@ -206,7 +208,9 @@ const mainConfig = defineConfig({
       "tests/gem-headshot.test.ts",
       "tests/field-renderer-textarea.test.tsx",
       "tests/hub-note-recipient.test.tsx",
+      "tests/thread-pending-images.test.ts",
       "src/components/assistant-ui/tool-fallback.test.tsx",
+      "src/components/assistant-ui/user-text.test.tsx",
       "src/engine-version.test.ts",
       "tests/agent-type-glyph.test.tsx",
       "tests/kollab-logo.test.tsx",
@@ -227,6 +231,7 @@ const mainConfig = defineConfig({
       "tests/team-launch-api.test.ts",
       "tests/model-choices.test.ts",
       "tests/panel-dialog-surface.test.tsx",
+      "tests/setup-guide-footer.test.tsx",
       "tests/setup-guide-close.test.tsx",
       "tests/setup-guide-followups.test.tsx",
     ],

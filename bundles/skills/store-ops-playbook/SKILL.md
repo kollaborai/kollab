@@ -53,15 +53,15 @@ carrier claim window; Lead bundles both into one approval: "approve R1".
 
 ## Team
 
-| Hub name | Name | Role | Bundle | Reports to |
-|---|---|---|---|---|
-| `nadia` | Nadia Okafor | Store Operations Lead | `default` | human |
-| `matteo` | Matteo Bianchi | Merchandising Manager | `creative-writer` | nadia |
-| `lena` | Lena Petrova | Product Listings Specialist | `technical-writer` | matteo |
-| `sofia` | Sofia Reyes | Customer Support Lead | `default` | nadia |
-| `kwame` | Kwame Mensah | Fulfillment & Inventory Manager | `data-analyst` | nadia |
-| `diego` | Diego Alvarez | Growth & Ads Manager | `creative-writer` | nadia |
-| `hana` | Hana Sato | Store Analyst | `data-analyst` | diego |
+| Hub name | Role | Bundle | Reports to |
+|---|---|---|---|
+| `store-operations-lead` | Store Operations Lead | `default` | human |
+| `merchandising-manager` | Merchandising Manager | `creative-writer` | store-operations-lead |
+| `product-listings-specialist` | Product Listings Specialist | `technical-writer` | merchandising-manager |
+| `customer-support-lead` | Customer Support Lead | `default` | store-operations-lead |
+| `fulfillment-inventory-manager` | Fulfillment & Inventory Manager | `data-analyst` | store-operations-lead |
+| `growth-ads-manager` | Growth & Ads Manager | `creative-writer` | store-operations-lead |
+| `store-analyst` | Store Analyst | `data-analyst` | growth-ads-manager |
 
 ## Hand-off outside the team
 

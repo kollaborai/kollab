@@ -89,6 +89,8 @@ export type GemAppearance = {
   gems?: Record<string, GemLook>;
   /** The engine's own folder: a bare gem name is the agent there. */
   home?: string;
+  /** Persona names of every roster but the gem pool: born furry, with contrasting hair and no hat. */
+  crew?: string[];
 };
 
 export type UpdateRelease = { version: string; tag_name: string; name: string; url: string; is_prerelease: boolean };
@@ -112,7 +114,12 @@ export type HistoryMessage = {
 };
 
 /** The engine's stored copy of one image a session sent (#1088). */
-export type MediaEntry = { ref: string; mime: string };
+export type MediaEntry = {
+  ref: string;
+  mime: string;
+  /** A slot whose storage failed: binds nothing, renders as literal text. */
+  failed?: boolean;
+};
 
 /** Why the session's last turn failed; it goes after `history_length` messages. */
 export type TurnError = { message: string; history_length: number };
