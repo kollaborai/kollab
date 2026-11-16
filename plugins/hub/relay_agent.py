@@ -672,6 +672,9 @@ class RelayAgentBridge:
                         "agent_type": row.get("agent_type") or "",
                         # {name, type} while it runs a tool, else None (the gem acts it out).
                         "current_tool": row.get("current_tool") or None,
+                        # The kollab it runs ("" from a peer that does not say, #968).
+                        "version": row.get("version") or "",
+                        "build": row.get("build") or "",
                     }
                 )
             except (KeyError, TypeError):
@@ -2964,8 +2967,12 @@ class RelayAgentBridge:
                         # A peer on this version always sends "device" too; an
                         # older peer has none, and its agents fall back to a
                         # stable per-peer stand-in below.
+                        # Keep in step with LocalAgentDirectory.publishable_agents:
+                        # a field it sends that is missing here drops the peer's
+                        # whole directory (#1093).
                         optional_fields = {
-                            "device", "harness", "acp_waiting", "current_tool", "agent_type"
+                            "device", "harness", "acp_waiting", "current_tool", "agent_type",
+                            "version", "build",
                         }
                         if (
                             not isinstance(row, dict)
@@ -2999,6 +3006,15 @@ class RelayAgentBridge:
                             or not row["agent_type"].isprintable()
                         ):
                             raise RelayError("invalid remote agent type")
+                        if any(
+                            key in row and (
+                                not isinstance(row[key], str)
+                                or len(row[key]) > 128
+                                or not row[key].isprintable()
+                            )
+                            for key in ("version", "build")
+                        ):
+                            raise RelayError("invalid remote agent version")
                         tool = row.get("current_tool")
                         if "current_tool" in row and (
                             not isinstance(tool, dict)

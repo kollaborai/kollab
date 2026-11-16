@@ -441,6 +441,45 @@ def _assistant_message_content(command: Dict[str, Any]) -> MessageContent:
     return ""
 
 
+def _save_sent_media(content: MessageContent, session_id: str) -> List[Dict[str, str]]:
+    """Store a sent message's image parts; return their refs in part order.
+
+    Empty for a text-only message or when this engine keeps no local
+    conversation storage (a remote daemon writes its history elsewhere).
+    A decode failure drops that image with a log line rather than failing
+    the send: the turn itself is unaffected (#1088).
+    """
+    if not isinstance(content, list) or not contains_image_content(content):
+        return []
+    from kollabor_config.config_utils import get_project_data_dir
+
+    from .. import media_store
+
+    conversations_dir = get_project_data_dir() / "conversations"
+    saved: List[Dict[str, str]] = []
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") != "image":
+            continue
+        image = part.get("image")
+        if not isinstance(image, str):
+            continue
+        try:
+            record = media_store.save(conversations_dir, session_id, image)
+        except media_store.MediaError as error:
+            # Keep one index slot per attempted part: the history overlay
+            # counts every image part, and a dropped slot would shift every
+            # later row's refs. The tombstone binds nothing and stays out
+            # of listings (#1124 review P2).
+            mime = image.split(";", 1)[0].removeprefix("data:")
+            media_store.record_failed(
+                conversations_dir, session_id, mime or "application/octet-stream"
+            )
+            logger.warning("sent image not stored: %s", error)
+            continue
+        saved.append({"ref": record.ref, "mime": record.mime})
+    return saved
+
+
 def _assistant_message_text(command: Dict[str, Any]) -> str:
     """Render an assistant-ui add-message command for validation/display."""
     return content_to_text(_assistant_message_content(command))
@@ -580,6 +619,7 @@ def _assistant_update_message_state(
     submitted_contents: List[MessageContent],
     parts: List[Dict[str, Any]],
     status: Optional[Dict[str, str]],
+    submitted_media: Optional[List[List[Dict[str, str]]]] = None,
 ) -> List[Dict[str, Any]]:
     """Persist the completed or interrupted turn in assistant-ui state.
 
@@ -625,16 +665,19 @@ def _assistant_update_message_state(
             return messages
 
     for index, submitted_content in enumerate(submitted_contents):
-        messages.append(
-            {
-                "id": f"user-{session_id}-{len(messages) + index}",
-                "role": "user",
-                # Keep data URLs out of assistant-ui state/history. The image
-                # was already handed to the daemon; the visible token is the
-                # durable client-side representation for this slice.
-                "content": content_to_text(submitted_content),
-            }
-        )
+        row: Dict[str, Any] = {
+            "id": f"user-{session_id}-{len(messages) + index}",
+            "role": "user",
+            # Keep data URLs out of assistant-ui state/history. The image
+            # was already handed to the daemon; the visible token is the
+            # durable client-side representation for this slice.
+            "content": content_to_text(submitted_content),
+        }
+        # The stored copies of this turn's sent images (#1088): the browser
+        # renders thumbnails from these refs instead of the raw tokens.
+        if submitted_media and index < len(submitted_media) and submitted_media[index]:
+            row["media"] = submitted_media[index]
+        messages.append(row)
 
     assistant_message: Dict[str, Any] = {
         "id": f"assistant-{session_id}-{len(messages)}",
@@ -1240,6 +1283,9 @@ async def assistant_transport(
             body.state.get("messages"), list
         )
         submitted_contents: List[MessageContent] = []
+        # Per-submission stored-image refs (#1088), parallel to
+        # submitted_contents: saved at send time so the bytes outlive the turn.
+        submitted_media: List[List[Dict[str, str]]] = []
         request_ids: set[str] = set()
         untagged = False  # an admission that echoed no id: its turn carries none (#551)
         answered_prompts: set[str] = set()  # daemon tool ids this request answered
@@ -1276,6 +1322,7 @@ async def assistant_transport(
                 submitted_contents,
                 copy.deepcopy(assistant_parts),
                 None,
+                copy.deepcopy(submitted_media),
             )
             published = controller.state["messages"]
             for index, message in enumerate(progress):
@@ -1377,6 +1424,7 @@ async def assistant_transport(
                     else:
                         untagged = True
                     submitted_contents.append(message_content)
+                    submitted_media.append(_save_sent_media(message_content, session_id))
                 elif command_type == "add-tool-result":
                     call_id, result, decision, scope = _assistant_tool_result(command)
                     if not call_id:
@@ -1556,6 +1604,7 @@ async def assistant_transport(
                         submitted_contents,
                         assistant_parts,
                         {"type": "requires-action", "reason": "tool-calls"},
+                        submitted_media,
                     )
                     if persist_message_state:
                         _assistant_set_messages(controller, state_messages)
@@ -1639,6 +1688,7 @@ async def assistant_transport(
                             submitted_contents,
                             assistant_parts,
                             {"type": "complete", "reason": "stop"},
+                            submitted_media,
                         )
                         if persist_message_state:
                             _assistant_set_messages(controller, state_messages)
@@ -1687,6 +1737,7 @@ async def assistant_transport(
                             if turn_error
                             else {"type": "complete", "reason": "stop"}
                         ),
+                        submitted_media,
                     )
                     if persist_message_state:
                         if goal_pump is not None:

@@ -9,6 +9,7 @@ artifact.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -62,6 +63,14 @@ def _safe_name(value: Any, fallback: str) -> str:
     text = str(value or fallback)
     text = re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-.")
     return (text or fallback)[:80]
+
+
+def session_output_dirname(value: Any, fallback: str = "session") -> str:
+    """Return a filesystem-safe, collision-resistant session directory name."""
+    raw = str(value or fallback)
+    text = re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip("-.") or fallback
+    suffix = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+    return f"{text[:47]}-{suffix}"
 
 
 def _result_text_attribute(result: Any) -> str:
@@ -550,7 +559,7 @@ def build_tool_output_store(
     conversations_dir = getattr(conversation_logger, "conversations_dir", None)
     session_id = getattr(conversation_logger, "session_id", None)
     if isinstance(session_id, str) and session_id:
-        session_name = _safe_name(session_id, "session")
+        session_name = session_output_dirname(session_id)
     else:
         session_name = "session"
 

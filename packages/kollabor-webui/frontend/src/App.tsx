@@ -31,6 +31,8 @@ import { SupervisorAlertBanner } from "@/components/SupervisorAlertBanner";
 import type { StreamEvent } from "@/supervisor-alerts";
 import { liveActivity, nextLiveActivity, NO_LIVE_ACTIVITY, useThreadActivity } from "@/components/gems/activity";
 import { Avatar, AvatarImageProvider } from "@/components/agents/Avatar";
+import { GalleryView } from "@/components/media/gallery-view";
+import { MediaImageProvider, MediaSessionProvider, MediaViewerProvider } from "@/components/media/media-view";
 import { AgentLibrary } from "@/components/agents/AgentLibrary";
 import { buildLaunchChoices, keepPick } from "@/components/agents/launch-choices";
 import { GemAppearanceProvider } from "@/components/gems/gem-appearance";
@@ -51,6 +53,7 @@ import { AgentVersionNotice, agentVersionNotice } from "@/components/shell/Agent
 import { liveAgentOf, poolSeenBy } from "@/components/shell/live-agent";
 import { PanelHost } from "@/components/panels/PanelHost";
 import { WaiterChat } from "@/components/shell/WaiterChat";
+import { panelHostMount } from "@/components/panels/panel-model";
 import type {
   PanelIntent,
   PanelOpenRequest,
@@ -326,6 +329,7 @@ function RuntimeShell({
   }, [session.session_id]);
 
   return (
+    <MediaSessionProvider api={api} sessionId={session.session_id}>
     <>
       <ComposerKeeper sessionId={session.session_id} />
       {/* Below the shared sidebar breakpoint the sidebar and the session panel are sheets. */}
@@ -387,6 +391,8 @@ function RuntimeShell({
               />
             ) : shown === "trajectory" ? (
               <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
+            ) : shown === "gallery" ? (
+              <GalleryView api={api} sessionId={session.session_id} />
             ) : null}
             {/* Opened once, then kept mounted and hidden, so open files and shells survive a switch to Chat. */}
             {workspace && visited.editor ? (
@@ -435,6 +441,7 @@ function RuntimeShell({
         />
       </div>
     </>
+    </MediaSessionProvider>
   );
 }
 
@@ -623,6 +630,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     () => sessions.find((session) => session.session_id === activeId),
     [activeId, sessions],
   );
+  // Where the Settings host lives: a live session, the halt waiter, or sessionless setup.
+  const host = panelHostMount(activeSession, settingsOpen, api.haltFolder);
   const operationRef = useRef(0);
   // True once a chat is open or being opened, by the person or by the restore on load: the
   // restore never switches away from it, even when startup runs again (a saved edit's Fast Refresh).
@@ -1773,6 +1782,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   return (
     <GemAppearanceProvider api={api} refreshKey={aliveKey}>
       <AvatarImageProvider api={api}>
+      <MediaImageProvider api={api}>
+      <MediaViewerProvider>
       <SidebarProvider className={`bg-muted/40 dark:bg-black ${contained ? "h-full min-h-0" : ""}`}>
         <AppSidebar
           learnActive={learnRoute !== null}
@@ -1895,12 +1906,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             await loadSessions();
           }}
         />
-        {(activeSession && !activeSession.halted) || (settingsOpen && api.haltFolder) ? (
+        {host.mount ? (
           <PanelHost
-            key={activeSession && !activeSession.halted ? activeSession.session_id : "halt"}
+            key={host.key}
             api={api}
-            // No chat open, or a halt waiter's: the session-less Halt and Resume screen for that folder.
-            session={activeSession && !activeSession.halted ? activeSession : { session_id: "", workspace: api.haltFolder }}
+            // A live session, a halt waiter, or sessionless setup (#1114/#1115).
+            session={host.session ?? { session_id: "", workspace: "" }}
             displayName={agents.find((agent) => agent.name === activeSession?.identity)?.display_name}
             profiles={profiles}
             open={settingsOpen}
@@ -2103,6 +2114,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           </div>
         </SidebarInset>
       </SidebarProvider>
+      </MediaViewerProvider>
+      </MediaImageProvider>
       </AvatarImageProvider>
     </GemAppearanceProvider>
   );
