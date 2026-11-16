@@ -300,14 +300,17 @@ PAYLOAD = {"provider": "Anthropic (Claude)", "api_key": KEY, "base_url": "", "mo
 
 
 @pytest.mark.asyncio
-async def test_setup_describe_never_carries_a_key_and_hides_oauth_choice():
+async def test_setup_describe_never_carries_a_key_and_exposes_oauth_choice():
     panel = await SETUP.describe(FakeDaemon(FakeProfiles()), {})
     options = panel["steps"][0]["fields"][0]["options"]
-    assert "Anthropic (Claude)" in options and not any("ChatGPT" in o for o in options)
+    assert "Anthropic (Claude)" in options
+    assert "OpenAI (sign in with ChatGPT)" in options
     key = panel["steps"][1]["fields"][0]
     assert key["secret"] and key["value"] is None and key["is_set"] is False
     assert KEY not in json.dumps(panel)
-    assert [a["id"] for a in panel["actions"]] == ["test", "finish"]
+    assert {"test", "finish", "oauth_start", "oauth_poll", "oauth_cancel"}.issubset(
+        {action["id"] for action in panel["actions"]}
+    )
 
 
 @pytest.mark.asyncio
