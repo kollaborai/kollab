@@ -329,6 +329,7 @@ async def test_a_long_outage_poll_offers_every_refused_message_again(
     # queued.
     refusals, injected = [], []
     plugin = _mailbox_plugin(refusals, injected if with_inject else None)
+    assert plugin._mailbox_stop_event is not None
     with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
         sent = await _fill_mailbox(messenger_module.INBOX_MAX_REPLAY + 5)
 
