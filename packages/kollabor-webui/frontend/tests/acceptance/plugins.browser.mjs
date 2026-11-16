@@ -254,6 +254,18 @@ try {
   entry.services.push({ name: "runner", state: "running", desired: "running", restarts: 0, since: engineNow() - 7500 });
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
+  // Notice actions must stay readable, not inherit the muted notice text color.
+  await page.mouse.move(0, 0);
+  const originalDark = await page.evaluate(() => document.documentElement.classList.contains("dark"));
+  for (const dark of [false, true]) {
+    await page.evaluate(value => document.documentElement.classList.toggle("dark", value), dark);
+    await page.waitForTimeout(300); // Wait for the button's theme-color transition.
+    const noticeColors = await page.getByRole("button", { name: "Open board" }).evaluate(button => ({
+      actual: getComputedStyle(button).color, expected: getComputedStyle(document.body).color,
+    }));
+    assert.equal(noticeColors.actual, noticeColors.expected, `notice action uses foreground in ${dark ? "dark" : "light"} theme`);
+  }
+  await page.evaluate(value => document.documentElement.classList.toggle("dark", value), originalDark);
   await page.getByText("Contender could not register /fixture: already used by Fixture.", { exact: true }).waitFor({ timeout: 5000 });
   const folderlessPanel = page.getByRole("complementary", { name: "Session Controls" });
   await folderlessPanel.waitFor({ timeout: 15000 });
