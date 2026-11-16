@@ -27,7 +27,9 @@ async function main() {
     await view.page.getByRole("button", { name: "Guided setup", exact: true }).click();
     await view.page.getByRole("heading", { name: "Join a network", exact: true }).waitFor({ state: "visible" });
     await view.page.getByTestId("setup-guide-next").click();
-    await view.page.getByRole("heading", { name: "Start your first agent", exact: true }).waitFor({ state: "visible" });
+    await view.page.getByTestId("setup-step-agent").waitFor({ state: "visible" });
+    assert.equal(await view.page.getByTestId("setup-step-agent").getAttribute("aria-current"), "step");
+    await view.page.keyboard.press("Escape");
     await fs.mkdir(screenshotDir, { recursive: true });
     await view.page.screenshot({ path: path.join(screenshotDir, "setup-guide-resolved-step.png"), fullPage: true });
     assert.deepEqual(view.pageErrors, [], "the setup guide should not throw while advancing");
