@@ -336,7 +336,7 @@ class FileOperationsExecutor:
             with open(filepath, "r", encoding="utf-8") as f:
                 f.read(1024)  # Try reading first 1KB as text
             return True
-        except (UnicodeDecodeError, FileNotFoundError):
+        except (UnicodeDecodeError, OSError):
             return False
 
     def check_file_size(self, filepath: str, max_size_mb: float) -> Tuple[bool, str]:
@@ -1760,6 +1760,9 @@ class FileOperationsExecutor:
 
         if not os.path.exists(filepath):
             return {"success": False, "error": f"File not found: {filepath}"}
+
+        if os.path.isdir(filepath):
+            return {"success": False, "error": f"Cannot grep directory: {filepath}"}
 
         # Check file size
         is_valid, error = self.check_file_size(filepath, self.max_read_size_mb)

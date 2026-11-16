@@ -114,6 +114,9 @@ the FileOperationsExecutor with safety features:
 - Binary file detection
 - Size limits
 
+`file_grep` searches a single file. Passing a directory returns a clear tool
+error instead of raising while checking whether the path is text.
+
 XML tag syntax:
 
 Read file:
