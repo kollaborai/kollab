@@ -35,6 +35,71 @@ def test_long_stop_timeout_is_preserved(tmp_path, monkeypatch):
 
 
 
+def test_disable_cannot_miss_a_starting_wrapper(tmp_path, monkeypatch):
+    import threading
+
+    from kollabor_config import file_lock
+    from kollabor_plugins import services, settings
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    paths = [Path(module.__file__).resolve().parent.parent for module in (services, file_lock)]
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(map(str, paths)))
+    home = tmp_path / ".kollab"
+    root = home / "plugins" / "hello"
+    root.mkdir(parents=True)
+    manifest = {"id": "hello", "services": {"worker": {
+        "command": [sys.executable, "-c", "import time; time.sleep(30)"], "stop_timeout_s": 1,
+    }}}
+    (root / "kollab-plugin.json").write_text(json.dumps(manifest))
+    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {
+        "enabled": True, "enabled_path": "/usr/bin:/bin", "granted": [],
+        "files_sha256": files_sha256(root),
+    }}, "dev": {}}))
+    paused, proceed = tmp_path / "paused", tmp_path / "proceed"
+    source = f'''\nimport time\nfrom pathlib import Path\nfrom kollabor_plugins import services\nwrite = services._write_state\ndef pause(path, value):\n    if path.suffix == ".pid":\n        Path({str(paused)!r}).touch()\n        while not Path({str(proceed)!r}).exists():\n            time.sleep(0.01)\n    return write(path, value)\nservices._write_state = pause\nservices.run_service("hello", "worker", "abcd")\n'''
+    wrapper = subprocess.Popen([sys.executable, "-c", source, "abcd"])
+    errors = []
+
+    def disable():
+        try:
+            settings.set_enabled("hello", False)
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = None
+    try:
+        until = time.monotonic() + 8
+        while not paused.exists() and time.monotonic() < until:
+            time.sleep(0.01)
+        assert paused.exists(), "wrapper did not reach the startup race"
+        thread = threading.Thread(target=disable)
+        thread.start()
+        time.sleep(0.2)
+        proceed.touch()
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "disable deadlocked with service startup"
+        assert not errors
+        try:
+            wrapper.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            pytest.fail("disable returned but missed a starting service wrapper")
+        assert wrapper.returncode == 0
+    finally:
+        proceed.touch()
+        if thread is not None:
+            thread.join(timeout=5)
+        if wrapper.poll() is None:
+            wrapper.terminate()
+            try:
+                wrapper.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                wrapper.kill()
+                wrapper.wait(timeout=3)
+
+
+
 def test_disable_exposes_live_stopping_service_and_rejects_restart(tmp_path, monkeypatch):
     from kollabor_config import file_lock
     from kollabor_plugins import registry, services, settings
