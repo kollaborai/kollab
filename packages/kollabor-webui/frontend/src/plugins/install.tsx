@@ -15,6 +15,20 @@ type Job = {
 };
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 
+const contributionLabels: Record<string, [string, string]> = {
+  views: ["view", "views"],
+  pages: ["page", "pages"],
+  menu: ["right-menu row", "right-menu rows"],
+  modals: ["modal", "modals"],
+  slash: ["slash command", "slash commands"],
+  renderers: ["chat renderer", "chat renderers"],
+};
+
+function contributionSummary(kind: string, count: number): string {
+  const labels = contributionLabels[kind];
+  return `${count} ${labels ? labels[count === 1 ? 0 : 1] : kind.replaceAll("_", " ")}`;
+}
+
 function DetailsList({ label, values }: { label: string; values: unknown }) {
   if (!values || (Array.isArray(values) && !values.length) || (typeof values === "object" && !Object.keys(values).length)) return null;
   const lines = Array.isArray(values) ? values : typeof values === "object" ? Object.entries(values).map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`) : [values];
@@ -90,7 +104,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
   const services = job?.manifest?.services && typeof job.manifest.services === "object" && !Array.isArray(job.manifest.services)
     ? Object.entries(job.manifest.services) : [];
   const contributions = job?.manifest?.contributes && typeof job.manifest.contributes === "object" && !Array.isArray(job.manifest.contributes)
-    ? Object.entries(job.manifest.contributes).flatMap(([kind, entries]) => Array.isArray(entries) && entries.length ? [`${entries.length} ${kind}`] : []) : [];
+    ? Object.entries(job.manifest.contributes).flatMap(([kind, entries]) => Array.isArray(entries) && entries.length ? [contributionSummary(kind, entries.length)] : []) : [];
   const throughKollab = [
     ...(uses.includes("agents") ? ["Can start agent runs through Kollab."] : []),
     ...(uses.includes("agents:unattended") ? ["Can run agent tools without asking; those agents can do anything you can."] : []),
