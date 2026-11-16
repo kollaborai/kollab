@@ -302,6 +302,24 @@ describe("plugin host lifecycle", () => {
     host.close();
   });
 
+  it("keeps the freeze marker until asynchronous activation finishes", async () => {
+    let finish!: () => void;
+    const activation = new Promise<void>(resolve => { finish = resolve; });
+    const { host, session } = setup({ importer: async () => ({ default: () => activation }) });
+    const starting = host.start();
+    await vi.waitFor(() => expect(session.getItem("kollab:plugin:loading:hello")).not.toBeNull());
+    // A new page sees the unfinished boot and skips it instead of activating it again.
+    const recovered = setup({ storage: session });
+    await recovered.host.start();
+    expect(recovered.host.getSnapshot().skipped).toEqual(["hello"]);
+    expect(recovered.importer).not.toHaveBeenCalled();
+    recovered.host.close();
+    finish();
+    await starting;
+    expect(session.getItem("kollab:plugin:loading:hello")).toBeNull();
+    host.close();
+  });
+
   it("does not clear a newer import's freeze marker when an old import finishes", async () => {
     const completions: ((module: unknown) => void)[] = [];
     const importer = vi.fn(() => new Promise<unknown>(resolve => completions.push(resolve)));

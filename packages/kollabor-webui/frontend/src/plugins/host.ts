@@ -95,7 +95,6 @@ export class PluginHost {
   private sequence = 0;
   private inventorySettled: Promise<void> = Promise.resolve();
   private settleInventory: () => void = () => {};
-  private markerSequence = 0;
   private serviceTimer: ReturnType<typeof setInterval> | null = null;
   private serviceInterval: number | null = null;
   private stoppingTimer: ReturnType<typeof setInterval> | null = null;
@@ -114,14 +113,10 @@ export class PluginHost {
         const resource = this.resources.get(id);
         await resource?.style?.ready;
         if (!resource || this.closed || this.resources.get(id) !== resource) throw new Error("Plugin load was cancelled");
-        const marker = String(++this.markerSequence);
-        this.putStorage(LOADING + id, marker);
-        try { return await options.importer(url); }
-        finally {
-          try {
-            if (this.options.storage.getItem(LOADING + id) === marker) this.removeStorage(LOADING + id);
-          } catch (error) { console.warn("Plugin recovery storage is unavailable", error); }
-        }
+        // Keep the marker until the complete activation succeeds or fails. A synchronous
+        // hang in the activation function freezes the page just like a hung import.
+        this.putStorage(LOADING + id, "1");
+        return await options.importer(url);
       },
       createContext: entry => {
         this.release(entry.id);
@@ -138,6 +133,7 @@ export class PluginHost {
       },
       commit: (id, resource) => {
         if (this.resources.get(id) !== resource || this.closed) return;
+        this.removeStorage(LOADING + id);
         delete this.errors[id];
         this.renderFailed.delete(id);
         this.registry.commit(resource.draft);
