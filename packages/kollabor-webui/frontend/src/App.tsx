@@ -1810,6 +1810,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         } catch { setPluginToast("This plugin link is not a valid web address."); }
       } else if ("view" in target) {
         if (!activeId) { setPluginToast("Open a chat to use this view."); return; }
+        const requested = pluginHost?.getSnapshot().registry.plugins.find(plugin => plugin.id === pluginId)?.views.find(view => view.id === target.view);
+        if (requested?.needs_folder && !activeSession?.workspace) { setPluginToast("Open a chat with a folder to use this view."); return; }
         returnToChat();
         setSessionView(pluginViewKey(pluginId, target.view));
       } else {
