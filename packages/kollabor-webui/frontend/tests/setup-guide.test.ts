@@ -202,3 +202,26 @@ test("SetupGuide gates its storage write through the persistence policy", async 
     /window\.localStorage\.setItem\(STORAGE_KEY, saveGuideState\(state\)\)/,
   );
 });
+
+test("App startup applies the first-run policy only when no session restores", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(
+    new URL("../src/App.tsx", import.meta.url),
+    "utf8",
+  );
+  const firstRunPolicy = source.slice(
+    source.indexOf("const noGuideYet"),
+    source.indexOf("const RESTART_COMMAND"),
+  );
+  const startup = source.slice(
+    source.indexOf("const first = chatToRestore"),
+    source.indexOf("setError(null)", source.indexOf("const first = chatToRestore")),
+  );
+
+  assert.match(
+    firstRunPolicy,
+    /shouldAutoOpenGuide\(window\.localStorage\.getItem\(STORAGE_KEY\)\)/,
+  );
+  assert.match(startup, /if \(first\) \{/);
+  assert.match(startup, /else if \(noGuideYet\(\)\)/);
+});
