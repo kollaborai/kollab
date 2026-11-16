@@ -4,6 +4,7 @@ import time
 from types import SimpleNamespace
 
 from kollabor_engine.routes.plugins import PluginEventHub, list_plugins
+
 from kollabor_plugins import registry
 
 

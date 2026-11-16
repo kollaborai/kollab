@@ -196,6 +196,8 @@
 
 - Heartbeat clock/restart correction, recorded before editing: heartbeat timestamps are engine wall-clock seconds, but the current UI compares them with browser wall-clock time; a remote client with a skewed clock can misreport. The event hub also loses heartbeat history on engine restart, while a service may predate that restart, making `since` alone an unsafe first-heartbeat baseline. The narrow Step 3 wire fix is to publish engine `server_time` on inventory and each service's hub observation start time; the UI should compute elapsed time using the engine/client offset and the later of process start and observation start, with red-first route and clock/restart tests. Preserve actual heartbeat timestamps and never treat missing/invalid clock data as proof of failure.
 
+- Heartbeat engine clock: red route tests `6180013a` and `577cc6e6` required `server_time` and the event hub's observation start (`heartbeat-clock-engine-red.log`, `heartbeat-route-red.log`). The engine now publishes both; 22 engine route/clock tests and Ruff passed (`heartbeat-clock-engine-green.log`, `heartbeat-clock-engine-ruff.log`). The frontend still needs the clock-offset and restart-grace implementation; do not claim remote heartbeat status is accurate until those tests pass.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.

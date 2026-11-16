@@ -76,6 +76,7 @@ class PluginEventHub:
         self._lock = threading.Lock()
         self._subscribers: dict[str | None, dict[asyncio.Queue, asyncio.AbstractEventLoop]] = {}
         self._heartbeats: dict[tuple[str, str], float] = {}
+        self.heartbeat_monitor_since = time.time()
 
     def subscribe(self, plugin_id: str | None) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue(maxsize=256)
@@ -150,7 +151,8 @@ def list_plugins(request: Request):
         for service in entry.get("services", []):
             if isinstance(service, dict) and isinstance(service.get("name"), str):
                 service["heartbeat"] = request.app.state.plugin_events.heartbeat(plugin_id, service["name"])
-    return {"schema": 1, "plugins": entries}
+                service["heartbeat_monitor_since"] = request.app.state.plugin_events.heartbeat_monitor_since
+    return {"schema": 1, "plugins": entries, "server_time": time.time()}
 
 
 @router.get("/events")
