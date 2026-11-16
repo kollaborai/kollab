@@ -13,8 +13,8 @@ import importlib.util
 import json
 import re
 import sys
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -490,6 +490,155 @@ def test_regression_test_requires_test_only_commit_before_post_finding_fix(
     assert "regression_test" in report.failed_names()
     assert "F14" in report.detail_for("regression_test")
     assert "before the fix" in report.detail_for("regression_test")
+
+
+def test_regression_test_passes_when_test_only_commit_precedes_fix(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment",
+        comment_id=1,
+        body="F14: the psutil bypass is open",
+        author_login="reviewer",
+        created_at="2026-11-01T12:00:00Z",
+    )
+    data = make_data(
+        commits=(
+            SimpleNamespace(
+                sha="a" * 40,
+                message="test(security): reproduce F14 bypass",
+                verified=True,
+                committed_at="2026-11-01T12:05:00Z",
+                files=("tests/unit/test_security.py",),
+            ),
+            SimpleNamespace(
+                sha="b" * 40,
+                message="fix(security): close F14 bypass",
+                verified=True,
+                committed_at="2026-11-01T12:10:00Z",
+                files=("kollabor/security.py",),
+            ),
+        ),
+        changed_files=["kollabor/security.py", "tests/unit/test_security.py"],
+        changed_file_contents={
+            "tests/unit/test_security.py": "def test_f14_bypass(): ..."
+        },
+        comments=(finding,),
+    )
+
+    report = pr_gates_dod.evaluate(cfg, data)
+
+    assert "regression_test" not in report.failed_names()
+
+
+def test_regression_test_rejects_fix_commit_that_also_changes_test(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment",
+        comment_id=1,
+        body="F14: the psutil bypass is open",
+        author_login="reviewer",
+        created_at="2026-11-01T12:00:00Z",
+    )
+    data = make_data(
+        commits=(
+            SimpleNamespace(
+                sha="a" * 40,
+                message="fix(security): close F14 bypass",
+                verified=True,
+                committed_at="2026-11-01T12:05:00Z",
+                files=("kollabor/security.py", "tests/unit/test_security.py"),
+            ),
+        ),
+        changed_files=["kollabor/security.py", "tests/unit/test_security.py"],
+        changed_file_contents={
+            "tests/unit/test_security.py": "def test_f14_bypass(): ..."
+        },
+        comments=(finding,),
+    )
+
+    report = pr_gates_dod.evaluate(cfg, data)
+
+    assert "regression_test" in report.failed_names()
+    assert "separate commit" in report.detail_for("regression_test")
+
+
+def test_regression_test_allows_explicit_non_testable_finding(tmp_path: Path) -> None:
+    cfg = regression_cfg(tmp_path)
+    data = make_data(
+        comments=(
+            SimpleNamespace(
+                kind="review_comment",
+                comment_id=1,
+                body="F14: this wording is misleading",
+                author_login="reviewer",
+                created_at="2026-11-01T12:00:00Z",
+            ),
+        ),
+        changed_files=["docs/guide.md"],
+        commits=(
+            SimpleNamespace(
+                sha="a" * 40,
+                message=(
+                    "fix(docs): clarify the guide\n\n"
+                    "No regression test: F14 - documentation wording only."
+                ),
+                verified=True,
+                committed_at="2026-11-01T12:05:00Z",
+                files=("docs/guide.md",),
+            ),
+        ),
+    )
+
+    report = pr_gates_dod.evaluate(cfg, data)
+
+    assert "regression_test" not in report.failed_names()
+
+
+def test_regression_test_allows_strict_xfail_removal_with_fix(tmp_path: Path) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment",
+        comment_id=1,
+        body="F14: the psutil bypass is open",
+        author_login="reviewer",
+        created_at="2026-11-01T12:00:00Z",
+    )
+    data = make_data(
+        commits=(
+            SimpleNamespace(
+                sha="a" * 40,
+                message="test(security): reproduce F14 bypass",
+                verified=True,
+                committed_at="2026-11-01T12:05:00Z",
+                files=("tests/unit/test_security.py",),
+            ),
+            SimpleNamespace(
+                sha="b" * 40,
+                message="fix(security): close F14 bypass",
+                verified=True,
+                committed_at="2026-11-01T12:10:00Z",
+                files=("kollabor/security.py", "tests/unit/test_security.py"),
+                file_patches={
+                    "tests/unit/test_security.py": (
+                        "@@ -1,2 +1,1 @@\n-@pytest.mark.xfail(strict=True)"
+                    )
+                },
+            ),
+        ),
+        changed_files=["kollabor/security.py", "tests/unit/test_security.py"],
+        changed_file_contents={
+            "tests/unit/test_security.py": "def test_f14_bypass(): ..."
+        },
+        comments=(finding,),
+    )
+
+    report = pr_gates_dod.evaluate(cfg, data)
+
+    assert "regression_test" not in report.failed_names()
 
 
 def test_regression_test_ignores_quoted_ruff_rule_codes_1024(tmp_path: Path) -> None:
@@ -1049,6 +1198,7 @@ def test_collect_pr_data_keeps_comment_identity_and_review_approval_metadata(mon
     review_comment = {
         "id": 100,
         "body": "F11 was reported by the test suite.",
+        "created_at": "2026-11-08T01:00:00Z",
         "user": {"login": "inline-reviewer"},
     }
     issue_comment = {
@@ -1077,7 +1227,13 @@ def test_collect_pr_data_keeps_comment_identity_and_review_approval_metadata(mon
     assert data.pull_author_login == "pr-author"
     assert data.head_sha == HEAD_SHA
     assert data.comments == (
-        pr_gates_dod.PRComment("review_comment", 100, review_comment["body"], "inline-reviewer"),
+        pr_gates_dod.PRComment(
+            "review_comment",
+            100,
+            review_comment["body"],
+            "inline-reviewer",
+            "2026-11-08T01:00:00Z",
+        ),
         pr_gates_dod.PRComment("issue_comment", 200, issue_comment["body"], "trusted-reviewer"),
     )
     assert data.reviews == (
@@ -1087,6 +1243,49 @@ def test_collect_pr_data_keeps_comment_identity_and_review_approval_metadata(mon
         args[0] == "api" and args[1].startswith(f"repos/o/r/pulls/{PR_NUM}/reviews?")
         for args in calls
     )
+
+
+def test_collect_pr_data_loads_commit_paths_for_review_findings(monkeypatch):
+    calls: list[list] = []
+    sha = "e" * 40
+    pull = {
+        "title": "fix: close finding",
+        "body": "Fixes #1",
+        "user": {"login": "pr-author"},
+        "base": {"ref": "main", "sha": BASE_TIP},
+        "head": {"sha": HEAD_SHA},
+    }
+    pages = {
+        "rest": {
+            f"repos/o/r/pulls/{PR_NUM}/comments": {
+                1: [
+                    {
+                        "id": 100,
+                        "body": "F14: regression test required",
+                        "created_at": "2026-11-01T12:00:00Z",
+                        "user": {"login": "reviewer"},
+                    }
+                ]
+            },
+            f"repos/o/r/pulls/{PR_NUM}/commits": {1: [_commit(sha)]},
+            f"repos/o/r/commits/{sha}": {
+                1: {
+                    "commit": {
+                        "committer": {"date": "2026-11-01T12:05:00Z"}
+                    },
+                    "files": [{"filename": "tests/unit/test_security.py"}],
+                }
+            },
+        }
+    }
+    _install_fake_gh(monkeypatch, calls, pull, BASE_TIP, pages)
+
+    data = pr_gates_dod.collect_pr_data("o/r", PR_NUM, root="/nonexistent")
+
+    assert data.comments[0].created_at == "2026-11-01T12:00:00Z"
+    assert data.commits[0].committed_at == "2026-11-01T12:05:00Z"
+    assert data.commits[0].files == ("tests/unit/test_security.py",)
+    assert any(args[1] == f"repos/o/r/commits/{sha}" for args in calls)
 
 
 def test_collect_threads_follow_graphql_pagination(monkeypatch):
