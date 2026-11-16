@@ -140,6 +140,37 @@ def test_remove_folder_profile_clears_global_active_profile_reference(
     assert "active_profile" not in global_llm
 
 
+def test_remove_provider_preserves_same_name_profile_from_other_provider(
+    monkeypatch, tmp_path
+):
+    global_path = tmp_path / "home" / ".kollab" / "config.json"
+    local_path = tmp_path / "project" / ".kollab" / "config.json"
+    _write_config(
+        global_path,
+        {"shared": {"provider": "anthropic", "api_key": "global"}},
+        "openai",
+    )
+    _write_config(
+        local_path,
+        {"shared": {"provider": "openai", "api_key": "folder"}},
+        "shared",
+    )
+    manager = _manager(monkeypatch, tmp_path, global_path, local_path)
+    manager._profiles["shared"] = LLMProfile(
+        name="shared", provider="openai", model="gpt"
+    )
+    manager._active_profile_name = "shared"
+
+    assert manager.remove_provider_profiles("anthropic") == ["shared"]
+
+    global_llm = _read_config(global_path)["kollabor"]["llm"]
+    assert "shared" not in global_llm["profiles"]
+    local_llm = _read_config(local_path)["kollabor"]["llm"]
+    assert local_llm["profiles"]["shared"]["provider"] == "openai"
+    assert local_llm["active_profile"] == "shared"
+    assert manager.get_profile("shared").provider == "openai"
+
+
 def test_remove_provider_profiles_preserves_all_configs_when_a_write_fails(
     monkeypatch, tmp_path
 ):
