@@ -547,15 +547,23 @@ const Composer: FC<{
     null,
   );
   const restoredDraft = useRef<{ key: string | null; text: string } | null>(null);
+  const lastRestoredDraftKey = useRef<string | null | undefined>(undefined);
   const skipEmptyDraftPersist = useRef(false);
   const [busySubmitError, setBusySubmitError] = useState<string | null>(null);
 
   useLayoutEffect(() => {
     const key = draftKey ?? null;
+    // Capability changes can rerun this effect after the attachment adapter
+    // has already rewritten the image tokens. Restore each key once so a
+    // single retained image cannot be attached twice.
+    if (lastRestoredDraftKey.current === key) return;
     // Token lines belong to attachments, and attachments do not live in the
     // text draft. Strip them first, then restore what the same tab kept.
     const restored = stripImageTokens(loadComposerDraft(key) ?? "");
     const keptImages = loadComposerAttachments(key);
+    if (attachmentsEnabled || keptImages.length === 0) {
+      lastRestoredDraftKey.current = key;
+    }
     restoredDraft.current = { key, text: restored.text };
     skipEmptyDraftPersist.current = false;
     setOrphanTokenNotice(orphanImageNotice(restored.tokenCount, attachmentsEnabled ? keptImages.length : 0));

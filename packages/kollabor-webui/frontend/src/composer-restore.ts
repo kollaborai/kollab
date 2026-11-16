@@ -107,7 +107,7 @@ export function orphanImageNotice(
   const orphans = tokenCount - restoredCount;
   if (orphans <= 0) return null;
   if (orphans === 1) {
-    return "1 pasted image was not kept across the session switch; paste it again.";
+    return "1 pasted image was not kept; paste it again.";
   }
-  return `${orphans} pasted images were not kept across the session switch; paste them again.`;
+  return `${orphans} pasted images were not kept; paste them again.`;
 }
