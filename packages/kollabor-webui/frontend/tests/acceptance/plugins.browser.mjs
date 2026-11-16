@@ -239,6 +239,7 @@ try {
   entry.services[0].stop_deadline = engineNow() + 719;
   entry.services.push({ name: "pulse", state: "running", desired: "running", restarts: 0,
     heartbeat_s: 60, heartbeat: engineNow() - 370, since: engineNow() - 600 });
+  entry.services.push({ name: "runner", state: "running", desired: "running", restarts: 0, since: engineNow() - 7500 });
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   await page.getByText("Contender could not register /fixture: already used by Fixture.", { exact: true }).waitFor({ timeout: 5000 });
@@ -251,12 +252,15 @@ try {
   const stoppingListRow = stoppingSettings.getByRole("button", { name: "Fixture", exact: true });
   await stoppingListRow.getByText("Stopping · 12 min left", { exact: true }).waitFor({ timeout: 3000 });
   await stoppingListRow.getByText("Running · No Heartbeat for 6 min", { exact: true }).waitFor({ timeout: 3000 });
+  await stoppingListRow.getByText("Running · 2 h", { exact: true }).waitFor({ timeout: 3000 });
   const stoppingDetails = stoppingSettings.getByRole("region", { name: "Fixture details" });
   await stoppingDetails.getByText("Waiting for the plugin to stop.", { exact: true }).waitFor({ timeout: 5000 });
   await stoppingDetails.getByText("worker", { exact: true }).locator("..").getByText("Stopping · 12 min left", { exact: true }).waitFor({ timeout: 5000 });
   await stoppingDetails.getByText("pulse", { exact: true }).locator("..").getByText("Running · No Heartbeat for 6 min", { exact: true }).waitFor({ timeout: 5000 });
+  await stoppingDetails.getByText("runner", { exact: true }).locator("..").getByText("Running · 2 h", { exact: true }).waitFor({ timeout: 3000 });
   await captureReview(page, "stopping-heartbeat");
   assert.equal(await stoppingDetails.getByRole("switch", { name: "Fixture enabled" }).isDisabled(), true, "cannot toggle while stopping");
+  entry.services.pop();
   entry.services.pop();
   entry.state = "ok";
   entry.services[0].state = "running";
