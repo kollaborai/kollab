@@ -14,6 +14,12 @@ describe("service heartbeat status", () => {
     expect(heartbeatAge({ state: "running", heartbeat_s: 60, heartbeat: 800, since: 990 }, 1000)).toBeNull();
   });
 
+  it("gives a restarted engine a fresh observation interval", () => {
+    const service = { state: "running", heartbeat_s: 60, heartbeat: null, since: 100, heartbeat_monitor_since: 980 };
+    expect(heartbeatAge(service, 1000)).toBeNull();
+    expect(heartbeatAge(service, 1040)).toBe(60);
+  });
+
   it("does not invent a failure for missing, invalid, future or stopped data", () => {
     expect(heartbeatAge({ state: "running", heartbeat: 800 }, 1000)).toBeNull();
     expect(heartbeatAge({ state: "running", heartbeat_s: 60 }, 1000)).toBeNull();
