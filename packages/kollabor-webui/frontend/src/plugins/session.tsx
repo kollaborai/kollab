@@ -28,20 +28,21 @@ function MenuCount({ context, count, compact = false }: { context: PluginContext
   return <Badge variant="secondary" className={compact ? "absolute -right-2 -top-1 h-3 min-w-3 px-0.5 text-[8px]" : "ml-auto"} title={data.hint}>{data.text}</Badge>;
 }
 
-function SessionControl({ label, Icon, collapsed, disabled, disabledReason, active, failed, count, onClick }: {
-  label: string; Icon: LucideIcon; collapsed: boolean; disabled?: boolean; disabledReason?: string; active?: boolean; failed?: boolean;
+function SessionControl({ label, Icon, collapsed, disabled, disabledReason, active, failed, stopped, count, onClick }: {
+  label: string; Icon: LucideIcon; collapsed: boolean; disabled?: boolean; disabledReason?: string; active?: boolean; failed?: boolean; stopped?: boolean;
   count?: { context: PluginContext; value: NonNullable<PluginMenu["count"]> }; onClick: () => void;
 }) {
-  const tooltip = `${label}${failed ? " · Failed" : disabled ? ` · ${disabledReason ?? "Unavailable"}` : ""}`;
-  if (collapsed) return <TooltipIconButton tooltip={tooltip} side="left" aria-label={failed ? `${label} Failed` : label} aria-pressed={active}
+  const status = failed ? "Failed" : stopped ? "Stopped" : undefined;
+  const tooltip = `${label}${status ? ` · ${status}` : disabled ? ` · ${disabledReason ?? "Unavailable"}` : ""}`;
+  if (collapsed) return <TooltipIconButton tooltip={tooltip} side="left" aria-label={status ? `${label} ${status}` : label} aria-pressed={active}
     disabled={disabled} title={tooltip} className={cn("size-7 p-1.5", active && "bg-accent text-accent-foreground")} onClick={onClick}>
-    <span className="relative"><Icon className="size-4" />{failed ? <span aria-label="Failed" className="bg-destructive absolute -right-1 -top-1 size-1.5 rounded-full" /> : null}
-      {count ? <MenuCount context={count.context} count={count.value} compact /> : null}</span>
+    <span className="relative"><Icon className="size-4" />{status ? <span aria-label={status} className="bg-destructive absolute -right-1 -top-1 size-1.5 rounded-full" /> : null}
+      {!status && count ? <MenuCount context={count.context} count={count.value} compact /> : null}</span>
   </TooltipIconButton>;
   return <Button type="button" variant="ghost" size="sm" disabled={disabled} aria-pressed={active}
     title={disabled ? tooltip : undefined} onClick={onClick} className={cn(ROW, active && "bg-accent text-accent-foreground font-medium")}>
     <Icon className="size-3.5" /><span className="min-w-0 truncate">{label}</span>
-    {failed ? <Badge variant="destructive" className="ml-auto">Failed</Badge> : count ? <MenuCount context={count.context} count={count.value} /> : null}
+    {status ? <Badge variant="destructive" className="ml-auto">{status}</Badge> : count ? <MenuCount context={count.context} count={count.value} /> : null}
   </Button>;
 }
 
@@ -90,7 +91,9 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
       const label = menu.label ?? linkedView?.label ?? page?.title ?? modal?.title ?? menu.id;
       const Icon = ICONS[menu.icon ?? linkedView?.icon ?? ""] ?? Puzzle;
       const disabled = !context || Boolean(linkedView?.needs_folder && !session.workspace) || (!menu.open && !linkedView && !page && !modal);
-      return <SessionControl key={`menu:${plugin.id}:${menu.id}`} label={label} Icon={Icon} collapsed={collapsed} disabled={disabled}
+      const stopped = snapshot.entries.find(entry => entry.id === plugin.id)?.services?.some(service =>
+        typeof service === "object" && service !== null && "state" in service && service.state === "crash-stopped");
+      return <SessionControl key={`menu:${plugin.id}:${menu.id}`} label={label} Icon={Icon} collapsed={collapsed} disabled={disabled} stopped={stopped}
         disabledReason="This plugin action is unavailable" count={context && menu.count ? { context, value: menu.count } : undefined}
         onClick={() => {
           onNavigate();

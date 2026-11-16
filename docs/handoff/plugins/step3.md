@@ -145,6 +145,8 @@
 
 - Crash-stopped service label: red browser commit `847a1e28` showed that the engine's `crash-stopped` value did not render as `Stopped After 5 Crashes` (`crash-stopped-red.log`). The corrected wire spelling passes isolated browser acceptance and typecheck (`crash-stopped-green.log`, `crash-stopped-typecheck.log`).
 
+- Crash-stopped menu: red browser commit `db9a27a1` showed that a crash-stopped service left the plugin-provided count visible instead of `Stopped` (`stopped-row-red.log`). Menu controls now show Stopped in expanded and compact accessible labels, overriding the plugin count; isolated browser acceptance and typecheck passed (`stopped-row-green.log`, `stopped-row-typecheck.log`). The new browser assertion covers expanded state; add explicit compact coverage.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
