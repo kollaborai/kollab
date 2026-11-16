@@ -158,14 +158,14 @@ def test_remove_provider_profiles_preserves_all_configs_when_a_write_fails(
     manager = _manager(monkeypatch, tmp_path, global_path, local_path)
     import kollabor_ai.profile_manager as profile_manager
 
-    original_write = profile_manager.write_text_atomic
+    original_replace = profile_manager.os.replace
 
-    def fail_local_write(path, text):
-        if path == local_path:
+    def fail_local_replace(source, destination):
+        if str(destination) == str(local_path):
             raise PermissionError("denied local write")
-        return original_write(path, text)
+        return original_replace(source, destination)
 
-    monkeypatch.setattr(profile_manager, "write_text_atomic", fail_local_write)
+    monkeypatch.setattr(profile_manager.os, "replace", fail_local_replace)
 
     assert manager.remove_provider_profiles("anthropic") == []
     assert "anthropic-cloud" in _read_config(global_path)["kollabor"]["llm"]["profiles"]
