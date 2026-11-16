@@ -940,11 +940,12 @@ def _patch_adds_finding(patch: str, finding: str) -> bool:
         added = line[1:].strip()
         if added == "@pytest.mark.xfail(strict=True)":
             pending_strict_xfail = True
-            if in_matching_test:
-                return True
             continue
-        if re.match(r"(?:async\s+)?def\s+test_\w+\s*\(", added):
-            in_matching_test = _mentions_finding(added, finding)
+        definition = re.match(r"(?:async\s+)?def\s+(\w+)\s*\(", added)
+        if definition:
+            in_matching_test = definition.group(1).startswith("test_") and _mentions_finding(
+                added, finding
+            )
             if in_matching_test and pending_strict_xfail:
                 return True
             pending_strict_xfail = False
@@ -952,9 +953,13 @@ def _patch_adds_finding(patch: str, finding: str) -> bool:
             if in_matching_test and _has_nontrivial_test_assertion(inline_body):
                 return True
             continue
+        if added.startswith("class "):
+            in_matching_test = False
+            pending_strict_xfail = False
+            continue
         if in_matching_test and _has_nontrivial_test_assertion(added):
             return True
-    return False
+    return pending_strict_xfail and in_matching_test
 
 
 def _has_nontrivial_test_assertion(line: str) -> bool:
