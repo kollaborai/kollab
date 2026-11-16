@@ -1050,14 +1050,13 @@ def test_workflow_file_exists_least_privilege() -> None:
 
 def test_workflow_runs_the_base_copy_and_no_pr_code() -> None:
     workflow = yaml.load(WORKFLOW_FILE.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
-    # Only pull_request_target runs the base branch's copy, so a PR cannot rewrite
-    # its own grade or reach the token.
+    # Privileged execution uses target/default-branch events, never PR review
+    # events that could load contributor-controlled workflow code.
     assert set(workflow["on"]) == {
-        "pull_request_target", "pull_request_review", "pull_request_review_comment", "issue_comment"
+        "pull_request_target", "issue_comment", "workflow_dispatch"
     }
-    assert {"submitted", "dismissed", "edited"} <= set(workflow["on"]["pull_request_review"]["types"])
-    for event in ("issue_comment", "pull_request_review_comment"):
-        assert set(workflow["on"][event]["types"]) == {"created", "edited", "deleted"}
+    assert set(workflow["on"]["issue_comment"]["types"]) == {"created", "edited", "deleted"}
+    assert workflow["on"]["workflow_dispatch"]["inputs"]["pr"]["required"] == "true"
     assert "github.event.issue.pull_request" in workflow["jobs"]["dod"]["if"]
     # The title and body are graded, so an edit has to grade again.
     assert {"opened", "synchronize", "reopened", "ready_for_review", "edited"} <= set(
