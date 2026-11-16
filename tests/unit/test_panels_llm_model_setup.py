@@ -616,6 +616,7 @@ async def test_llm_fallback_dropdown_offers_connections_and_saved_loadouts(llm_c
     assert control["path"] == "fallback" and control["value"] == "off"
     assert control["options"] == ["off", "anthropic", "openai", "openrouter", "mine"]
     assert control["label"] == "Fallback Model"
+    assert "Automatic switching is disabled" in control["help"]
     assert control["option_labels"]["off"] == "None" and control["option_labels"]["mine"] == "mine · anthropic"
 
     done = await LLM.act(llm_ctx, "fallback", {"fallback": "openai"})
