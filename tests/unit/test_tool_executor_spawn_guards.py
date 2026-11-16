@@ -295,3 +295,15 @@ def test_fd_redirects_and_background_git_are_not_agent_launches(command):
 )
 def test_redirects_preserve_real_agent_guard(command):
     assert _is_blocked_kollab_spawn(command)
+
+
+def test_background_git_config_does_not_treat_repository_path_as_a_launch():
+    assert not _is_blocked_kollab_spawn(
+        "git -c safe.setting=1 -C /tmp/project/kollab status &"
+    )
+
+
+def test_git_config_command_launch_is_still_blocked():
+    assert _is_blocked_kollab_spawn(
+        "git -c 'core.pager=kollab --agent coder' status"
+    )
