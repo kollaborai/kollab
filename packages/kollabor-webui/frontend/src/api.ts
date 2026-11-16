@@ -594,6 +594,7 @@ export const DEFAULT_SLASH_COMMANDS: SlashCommand[] = [
   { name: "skills", description: "List available agent skills" },
   { name: "config", description: "Open system configuration" },
   { name: "setup", description: "Run first-time setup" },
+  { name: "welcome", description: "Show the welcome guide again" },
   { name: "doctor", description: "Run a readiness check" },
   { name: "login", description: "Sign in to a provider" },
   { name: "connect", description: "Open this device's agent network" },

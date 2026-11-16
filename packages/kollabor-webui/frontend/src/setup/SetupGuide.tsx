@@ -28,6 +28,7 @@ export type SetupGuideProps = {
   api: EngineApi;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onDismiss?: () => void;
   /** Open the Settings dialog on a tab (setup adds a profile, network joins). */
   onOpenSettings: (tab: "setup" | "network") => void;
   /** Start a new session (the first-agent step). */
@@ -43,6 +44,7 @@ export function SetupGuide({
   api,
   open,
   onOpenChange,
+  onDismiss,
   onOpenSettings,
   onStartSession,
 }: SetupGuideProps) {
@@ -103,8 +105,9 @@ export function SetupGuide({
 
   const dismiss = useCallback(() => {
     setState((prev) => ({ ...prev, dismissed: true }));
+    onDismiss?.();
     onOpenChange(false);
-  }, [onOpenChange]);
+  }, [onDismiss, onOpenChange]);
 
   const runTarget = useCallback(() => {
     if (!target) return;
@@ -198,7 +201,7 @@ export function SetupGuide({
             type="button"
             data-testid="setup-guide-next"
             className="ml-auto"
-            onClick={target ? runTarget : step === "done" ? dismiss : advance}
+            onClick={target ? runTarget : step === "done" ? () => onOpenChange(false) : advance}
           >
             {target ? "Open" : step === "done" ? "Finish" : "Get Started"}
           </Button>
