@@ -1505,7 +1505,25 @@ class TerminalLLMChat:
             try:
                 await orchestrator.close()
             except BaseException as cleanup_exc:
-                logger.warning("ACP startup cleanup failed: %s", cleanup_exc)
+                if isinstance(
+                    cleanup_exc,
+                    (
+                        asyncio.CancelledError,
+                        GeneratorExit,
+                        KeyboardInterrupt,
+                        SystemExit,
+                    ),
+                ):
+                    logger.info(
+                        "ACP startup cleanup interrupted (%s)",
+                        type(cleanup_exc).__name__,
+                    )
+                else:
+                    logger.warning(
+                        "ACP startup cleanup failed (%s): %s",
+                        type(cleanup_exc).__name__,
+                        cleanup_exc,
+                    )
             self.acp_orchestrator = None
             raise
         self.acp_orchestrator = orchestrator
@@ -3979,7 +3997,20 @@ class TerminalLLMChat:
                 else:
                     await acp_orchestrator.close()
             except BaseException as exc:
-                logger.warning("ACP runner cleanup failed: %s", exc)
+                if isinstance(
+                    exc,
+                    (asyncio.CancelledError, GeneratorExit, KeyboardInterrupt, SystemExit),
+                ):
+                    logger.info(
+                        "ACP runner cleanup interrupted during shutdown (%s)",
+                        type(exc).__name__,
+                    )
+                else:
+                    logger.warning(
+                        "ACP runner cleanup failed (%s): %s",
+                        type(exc).__name__,
+                        exc,
+                    )
             self.acp_orchestrator = None
         self.running = False
         if hasattr(self, "input_handler"):
@@ -4306,6 +4337,15 @@ class TerminalLLMChat:
 
         # Stop input handler
         await self.input_handler.stop()
+
+        # Close hub intake before providers shut down. Late peer messages are
+        # put back in the mailbox by HubPlugin for the next process start.
+        hub_plugin = (
+            self.event_bus.get_service("hub_plugin") if self.event_bus else None
+        )
+        stop_message_intake = getattr(hub_plugin, "stop_message_intake", None)
+        if callable(stop_message_intake):
+            await stop_message_intake()
 
         # Shutdown LLM core service
         await self.llm_service.shutdown()

@@ -58,7 +58,7 @@ for f in tracked:
         want.append(f)
     elif f.startswith("bundles/") and not f.endswith((".bak", "~", ".tmp")):
         want.append(f)
-    elif f.startswith("packages/") and "/src/" in f and f.endswith(".py") and "kollabor-webui" not in f:
+    elif f.startswith("packages/") and "/src/" in f and "kollabor-webui" not in f:
         want.append(f.split("/src/", 1)[1])
 missing = sorted(set(want) - names)
 print(f"  {len(set(want))} expected files, {len(missing)} missing from the root wheel")

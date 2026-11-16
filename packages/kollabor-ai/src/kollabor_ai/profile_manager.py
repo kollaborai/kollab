@@ -195,6 +195,33 @@ def effort_unsupported_reason(provider: Optional[str], effort: Optional[str]) ->
     return ""
 
 
+def model_effort_refusal(
+    provider: Optional[str], model: Optional[str], effort: Optional[str]
+) -> str:
+    """Why ``model`` never carries ``effort``; empty when it does or the registry does not say.
+
+    The model half of ``effort_unsupported_reason``: the registry knows some
+    models take no reasoning effort at all (``supports_thinking: false``) and
+    others only specific levels (``effort_levels``). A level the request would
+    drop is refused at every write boundary, mirroring the provider rule above.
+    """
+    level = (effort or "").strip().lower()
+    if not level:
+        return ""
+    levels = accepted_efforts((provider or "").strip().lower(), model or "")
+    if levels is None or level in levels:
+        return ""
+    if not levels:
+        return (
+            f"Model {model!r} takes no reasoning effort; leave effort empty "
+            "(or empty for model default)"
+        )
+    return (
+        f"Model {model!r} takes reasoning effort levels: {', '.join(levels)} "
+        "(or empty for model default)"
+    )
+
+
 def sendable_effort(provider: Optional[str], effort: Optional[str]) -> str:
     """``effort`` when ``provider`` sends it, else empty.
 
@@ -2617,11 +2644,15 @@ class ProfileManager:
                     "(or empty for model default)"
                 )
             profile.effort = normalized_effort
-            reason = effort_unsupported_reason(
-                profile.get_effort_provider(), normalized_effort
-            )
+            effort_provider = profile.get_effort_provider()
+            reason = effort_unsupported_reason(effort_provider, normalized_effort)
             if reason:
                 raise ValueError(f"Profile {source_name!r}: {reason}")
+            refusal = model_effort_refusal(
+                effort_provider, profile.model, normalized_effort
+            )
+            if refusal:
+                raise ValueError(f"Profile {source_name!r}: {refusal}")
 
         if profile.provider == "acp" and not profile.command:
             raise ValueError(
@@ -2792,16 +2823,21 @@ class ProfileManager:
         # changes, so a launch flag or API write cannot store it.
         if effort:
             target = provider if provider is not None else profile.provider
-            reason = effort_unsupported_reason(
-                resolve_effort_provider(
-                    target,
-                    api_key if api_key is not None else profile.get_api_key(),
-                    base_url if base_url is not None else profile.get_endpoint(),
-                ),
-                effort,
+            effort_provider = resolve_effort_provider(
+                target,
+                api_key if api_key is not None else profile.get_api_key(),
+                base_url if base_url is not None else profile.get_endpoint(),
             )
+            reason = effort_unsupported_reason(effort_provider, effort)
             if reason:
                 raise ValueError(reason)
+            refusal = model_effort_refusal(
+                effort_provider,
+                model if model is not None else profile.model,
+                effort,
+            )
+            if refusal:
+                raise ValueError(refusal)
 
         # Update fields if provided
         if base_url is not None:
