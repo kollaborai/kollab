@@ -216,7 +216,7 @@ def main(argv: list[str]) -> int:
             print("Uses: " + (", ".join(manifest.get("uses", [])) or "none"))
             for name, service in manifest.get("services", {}).items():
                 print(f"Process {name}: {shlex.join(service['command'])}")
-                print("  Secrets: " + (", ".join(service.get("secrets", [])) or "none"))
+                print("  Secrets: " + ("configured" if service.get("secrets") else "none"))
         print("Development code is unpinned and runs as your user with your computer's permissions.")
         if input("Continue? [yes/no] ").strip().lower() != "yes":
             return 1
@@ -419,7 +419,7 @@ def main(argv: list[str]) -> int:
             print("Uses: " + (", ".join(manifest.get("uses", [])) or "none"))
             for name, service in manifest.get("services", {}).items():
                 print(f"Process {name}: {shlex.join(service['command'])}")
-                print("  Secrets: " + (", ".join(service.get("secrets", [])) or "none"))
+                print("  Secrets: " + ("configured" if service.get("secrets") else "none"))
             print("Plugin code runs as your user and can use your computer outside Kollab.")
             if input("Update this plugin? [yes/no] ").strip().lower() != "yes":
                 return 1
@@ -478,7 +478,7 @@ def main(argv: list[str]) -> int:
                 import shlex
 
                 print(f"Process {name}: {shlex.join(service['command'])}")
-                print("  Secrets: " + (", ".join(service.get("secrets", [])) or "none"))
+                print("  Secrets: " + ("configured" if service.get("secrets") else "none"))
             print("Plugin code runs as your user and can use your computer outside Kollab.")
             if input("Install this exact version? [yes/no] ").strip().lower() != "yes":
                 return 1
