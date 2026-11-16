@@ -82,6 +82,30 @@ def test_installed_plugin_asset_is_not_served_after_approved_files_change(tmp_pa
         assert client.get("/plugins/hello/web/lazy.js").status_code == 404
 
 
+def test_installed_asset_cannot_change_between_hash_and_response_open(tmp_path, monkeypatch):
+    from kollabor_webui import server
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = tmp_path / ".kollab"
+    root = home / "plugins/hello"
+    dist = root / "web/dist"
+    dist.mkdir(parents=True)
+    asset = dist / "main.js"
+    asset.write_text("approved")
+    write_registry(home, root)
+    original = server.FileResponse
+
+    def swap_before_open(path, *args, **kwargs):
+        if path == asset:
+            asset.write_text("unapproved after hash")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(server, "FileResponse", swap_before_open)
+    with TestClient(create_app(), base_url="http://localhost", client=("127.0.0.1", 1234)) as client:
+        response = client.get("/plugins/hello/web/main.js")
+        assert response.status_code == 404 or response.text == "approved"
+
+
 def test_missing_approval_hash_fails_closed_and_dev_remains_unpinned(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     home = tmp_path / ".kollab"
