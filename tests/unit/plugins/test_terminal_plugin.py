@@ -117,6 +117,22 @@ async def test_background_session_duplicate_explains_recovery_tools():
     assert "terminal_send" in result["message"]
 
 
+@pytest.mark.asyncio
+async def test_background_shell_command_runs_and_captures_output():
+    plugin = TmuxPlugin()
+    result = await plugin.execute_background(
+        "VALUE=$(printf background-shell-ok); printf '%s\\n' \"$VALUE\"",
+        name="shell-command",
+    )
+
+    assert result["success"] is True
+    session = plugin.sessions["shell-command"]
+    await asyncio.wait_for(asyncio.to_thread(session.proc.wait), timeout=5)
+    captured = await plugin.capture_session_output("shell-command")
+
+    assert captured["output"] == ["background-shell-ok"]
+
+
 def test_send_to_session_writes_one_line_to_live_session():
     plugin = TmuxPlugin()
     process = Mock()
