@@ -640,7 +640,7 @@ class EngineSession:
         )
         for server_name in requested_servers:
             try:
-                await self.state.enable_mcp_server(server_name)
+                await self.state.enable_mcp_server(server_name, persist=False)
             except ValueError as e:
                 logger.warning(
                     "session %s: requested MCP server %r unavailable: %s",
