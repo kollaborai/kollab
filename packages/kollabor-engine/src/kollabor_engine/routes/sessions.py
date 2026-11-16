@@ -30,10 +30,12 @@ from ..history_paging import (
     resolve_history_output,
 )
 from ..hub_bridge import HubBridge, network_daemons
+from ..media_store import attach_media_to_rows, count_image_tokens, slot_count
 from ..network_aggregate import merge_view_and_memberships
 from ..server import get_session_registry, open_named_session
 from ..session import INLINE_PROFILE, EngineSession
 from ..workspace_folder import folder_or_400
+from .media import _conversations_dir
 from .rosters import apply_persona
 from .workspaces import remember_workspace
 
@@ -1320,6 +1322,32 @@ async def get_history(
         raise HTTPException(status_code=400, detail=str(error)) from error
     except HistoryPageTooLarge as error:
         raise HTTPException(status_code=413, detail=str(error)) from error
+
+    # Durable copies of the images this session sent (#1088): bind the
+    # stored refs onto the page's user rows. Older pages skip the images
+    # bound to rows before start_index so each page binds its own sends.
+    page_rows = page.get("history")
+    if isinstance(page_rows, list) and page_rows:
+        start = page.get("start_index")
+        history_image_count = sum(
+            count_image_tokens(row.get("content"))
+            for row in history
+            if isinstance(row, dict) and row.get("role") == "user"
+        )
+        # A compaction can drop old sender rows while the durable media index
+        # still contains their refs. Align the surviving history with the
+        # matching suffix; otherwise its first image would inherit a dropped
+        # message's ref.
+        # Count the raw slots, tombstones included: attach walks the raw
+        # index, so skip and walk must read the same sequence (#1124 review).
+        skip = max(0, slot_count(_conversations_dir(), session_id) - history_image_count)
+        if isinstance(start, int) and not isinstance(start, bool) and start > 0:
+            skip += sum(
+                count_image_tokens(row.get("content"))
+                for row in history[:start]
+                if isinstance(row, dict) and row.get("role") == "user"
+            )
+        attach_media_to_rows(_conversations_dir(), session_id, page_rows, skip=skip)
 
     # Preserve the existing turn-error offset semantics, now relative to the
     # bounded page. An error outside an older page is not duplicated there.
