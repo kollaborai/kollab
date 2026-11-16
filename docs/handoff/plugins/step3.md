@@ -170,6 +170,8 @@
 
 - Event-stream reconnect: red test commit `a6368b52` showed an immediately closing successful SSE response retried every 250 ms forever (`sse-backoff-red.log`). Retry delay now grows until a stream delivers bytes, then resets; event/host tests passed 14/14 and typecheck passed (`sse-backoff-green.log`, `sse-backoff-typecheck.log`). Real-engine event reconnect is not yet covered.
 
+- SSE malformed-frame cleanup: red test commit `78ecda30` demonstrated that an oversized frame left its response stream uncancelled (`sse-cancel-red.log`). The reader now cancels on every exit before releasing its lock without waiting indefinitely on source cancellation. Event/host tests passed 15/15 and typecheck passed (`sse-cancel-green.log`, `sse-cancel-typecheck.log`).
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.

@@ -93,6 +93,9 @@ export class PluginEventStream {
       }
     } finally {
       signal.removeEventListener("abort", cancel);
+      // Close the response body on parser errors as well as normal disconnects.
+      // Do not wait for an underlying source's cancellation promise to settle.
+      void reader.cancel().catch(() => {});
       reader.releaseLock();
     }
   }
