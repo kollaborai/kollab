@@ -12,9 +12,9 @@ import { cn } from "@/lib/utils";
 import {
   SETUP_STEPS,
   STORAGE_KEY,
+  advanceFrom,
   emptyFacts,
   loadGuideState,
-  nextStep,
   resolveStep,
   saveGuideState,
   stepIndex,
@@ -98,7 +98,7 @@ export function SetupGuide({
   const target = stepTarget(step);
 
   const advance = useCallback(() => {
-    setState((prev) => ({ ...prev, step: nextStep(resolveStep(prev, facts).step) }));
+    setState((prev) => advanceFrom(prev, facts));
   }, [facts]);
 
   const dismiss = useCallback(() => {

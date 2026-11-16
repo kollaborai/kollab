@@ -153,6 +153,15 @@ export function resolveStep(state: GuideState, facts: SetupFacts): {
   return { step, skipped };
 }
 
+/**
+ * Advance the guide from the step the dialog shows, not the stored step: a
+ * stored step that resolveStep already skipped costs the user nothing, so one
+ * Open moves past the displayed step (#1211). Done and dismissal stay put.
+ */
+export function advanceFrom(state: GuideState, facts: SetupFacts): GuideState {
+  return { ...state, step: nextStep(resolveStep(state, facts).step) };
+}
+
 /** Which concrete panel/route each step's action should open. */
 export function stepTarget(
   step: SetupStepId,
