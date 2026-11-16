@@ -348,6 +348,7 @@ try {
   await page.getByText("Fixture view body", { exact: true }).waitFor();
   await captureReview(page, "plugin-tab");
   await panel.getByRole("button", { name: "Show Session Panel" }).click();
+  assert.ok(await fixtureMenu.evaluate((element, other) => Boolean(element.compareDocumentPosition(other) & Node.DOCUMENT_POSITION_FOLLOWING), await zuluMenu.elementHandle()), "expanded menu rows remain sorted by plugin name");
   await panel.getByRole("button", { name: "Fixture View" }).click();
   await panel.getByRole("button", { name: "Hello View", exact: true }).click({ timeout: 5000 });
   await page.getByText("Hello from your plugin!", { exact: true }).waitFor();

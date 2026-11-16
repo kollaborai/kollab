@@ -80,17 +80,16 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
           active={view === key} onClick={() => onViewChange(key)} />];
       });
     })}
-    {snapshot.entries.filter(entry => entry.enabled && !entry.shadowed && snapshot.errors[entry.id]).flatMap(entry => {
+    {[...snapshot.entries.filter(entry => entry.enabled && !entry.shadowed && snapshot.errors[entry.id]).map(entry => {
       const declared = Array.isArray(entry.contributes?.menu) ? entry.contributes.menu : [];
-      return declared.flatMap((raw: unknown) => {
+      return { id: entry.id, name: entry.name, rows: declared.flatMap((raw: unknown) => {
         if (!raw || typeof raw !== "object") return [];
         const menu = raw as PluginMenu;
         if (typeof menu.id !== "string") return [];
         return [<SessionControl key={`failed:${entry.id}:${menu.id}`} label={menu.label ?? entry.name} Icon={Puzzle} collapsed={collapsed} failed={snapshot.renderFailed.includes(entry.id) ? "render" : "load"}
           onClick={() => { onNavigate(); host.navigate(entry.id, menu.open ?? { page: menu.id }); }} />];
-      });
-    })}
-    {plugins.flatMap(plugin => plugin.menus.map(menu => {
+      }) };
+    }), ...plugins.map(plugin => ({ id: plugin.id, name: snapshot.entries.find(entry => entry.id === plugin.id)?.name ?? plugin.id, rows: plugin.menus.map(menu => {
       const context = host.getContext(plugin.id);
       const linkedView = plugin.views.find(item => item.id === menu.id);
       const page = plugin.pages.find(item => item.id === menu.id);
@@ -111,7 +110,7 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
           else if (page) context?.navigate({ page: page.id });
           else if (modal) context?.navigate({ modal: modal.id });
         }} />;
-    }))}
+    }) }))].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)).flatMap(group => group.rows)}
   </>;
 }
 
