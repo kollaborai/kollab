@@ -692,6 +692,16 @@ try {
   assert.equal(await page.evaluate(() => matchMedia("(any-pointer: coarse)").matches), true);
   await page.getByRole("button", { name: "Session Controls" }).click();
   const sheet = page.getByRole("dialog", { name: "Session Controls" });
+  const phoneOrder = await sheet.evaluate(panelElement => {
+    const buttons = [...panelElement.querySelectorAll("button")];
+    const find = label => buttons.find(button => button.textContent?.trim().startsWith(label));
+    const online = find("Who Is Online"), menu = find("Fixture Board"), settings = find("Settings"), view = find("Fixture View");
+    return Boolean(online && menu && settings && view && view.closest('[aria-label="Session view"]') &&
+      !menu.closest('[aria-label="Session view"]') &&
+      (online.compareDocumentPosition(menu) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+      (menu.compareDocumentPosition(settings) & Node.DOCUMENT_POSITION_FOLLOWING));
+  });
+  assert.equal(phoneOrder, true, "phone menu rows follow Who Is Online and precede Settings, separately from views");
   await sheet.getByRole("button", { name: /Fixture Board/ }).click();
   await page.getByRole("heading", { name: "Fixture Board" }).waitFor();
   await sheet.waitFor({ state: "hidden", timeout: 3000 });
