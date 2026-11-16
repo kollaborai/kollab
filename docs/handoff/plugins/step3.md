@@ -61,3 +61,13 @@
   browser click: live dismissal and independent notices still need browser verification.
 - Next: complete findings 3 and 5–10, including red-first behavior tests; exercise notice
   dismissal in the browser, then all gates, restart, smoke and captures at final code HEAD.
+
+- Correction to the finding numbers above: notice dismissal is finding 3, and the empty
+  installed list is finding 8. The first version's empty copy was not the mockup copy;
+  tests `f2595e27b` and fix `816da6152` correct it to “No plugins yet.”, remove the
+  built-in source path (finding 10), and remove the Runs trailing period (part of 7).
+  `copy-path-red.log` and `copy-path-green.log` record the focused red/green run.
+- Finding 4: `c88f343ab` (red) and `e4c9eadbf` (fix) use the same accessible button
+  disclosure for Settings and the failed page; `error-control-green.log`: 10 tests pass.
+- Next: findings 2, 5, 6, 7 (remaining add-sheet copy), 9; finish notice re-post
+  semantics and click testing, then all gates, supervisor restart, smoke, captures.
