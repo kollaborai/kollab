@@ -621,8 +621,8 @@ try {
   await add.getByText("Fixture New", { exact: true }).waitFor();
   await add.getByText("1 view", { exact: true }).waitFor({ timeout: 5000 });
   await add.getByText("1 slash command", { exact: true }).waitFor({ timeout: 5000 });
-  await add.getByText("no hooks", { exact: true }).waitFor({ timeout: 5000 });
-  await add.getByText("no MCP servers", { exact: true }).waitFor({ timeout: 5000 });
+  assert.equal(await add.getByText("no hooks", { exact: true }).count(), 0);
+  assert.equal(await add.getByText("no MCP servers", { exact: true }).count(), 0);
   await add.getByText(commit, { exact: false }).waitFor();
   await add.getByText("https://github.com/example/fixture.git", { exact: false }).waitFor();
   await add.getByText("main", { exact: false }).first().waitFor();

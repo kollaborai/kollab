@@ -30,6 +30,23 @@ function contributionSummary(kind: string, count: number): string {
   return `${count} ${labels ? labels[count === 1 ? 0 : 1] : kind.replaceAll("_", " ")}`;
 }
 
+export function describePluginAdds(manifest: NonNullable<Job["manifest"]>): string[] {
+  const contributions = manifest.contributes && typeof manifest.contributes === "object" && !Array.isArray(manifest.contributes)
+    ? Object.entries(manifest.contributes).flatMap(([kind, entries]) => Array.isArray(entries) && entries.length ? [contributionSummary(kind, entries.length)] : []) : [];
+  const services = manifest.services && typeof manifest.services === "object" && !Array.isArray(manifest.services)
+    ? Object.keys(manifest.services) : [];
+  return [
+    ...contributions,
+    ...(manifest.python ? ["code that runs in every agent"] : []),
+    ...(manifest.engine ? ["engine routes"] : []),
+    ...(manifest.web ? ["browser code"] : []),
+    ...(manifest.agents ? ["agent definitions"] : []),
+    ...(manifest.hooks ? ["hooks"] : []),
+    ...(manifest.mcp ? ["MCP servers"] : []),
+    ...(services.length ? [`${services.length} background process${services.length === 1 ? "" : "es"}`] : []),
+  ];
+}
+
 function DetailsList({ label, values }: { label: string; values: unknown }) {
   if (!values || (Array.isArray(values) && !values.length) || (typeof values === "object" && !Object.keys(values).length)) return null;
   const lines = Array.isArray(values) ? values : typeof values === "object" ? Object.entries(values).map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`) : [values];
@@ -105,8 +122,6 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
   const { throughKollab: declaredThroughKollab, onItsOwn, other } = describeUses(uses);
   const services = job?.manifest?.services && typeof job.manifest.services === "object" && !Array.isArray(job.manifest.services)
     ? Object.entries(job.manifest.services) : [];
-  const contributions = job?.manifest?.contributes && typeof job.manifest.contributes === "object" && !Array.isArray(job.manifest.contributes)
-    ? Object.entries(job.manifest.contributes).flatMap(([kind, entries]) => Array.isArray(entries) && entries.length ? [contributionSummary(kind, entries.length)] : []) : [];
   const throughKollab = [
     ...declaredThroughKollab,
     ...services.flatMap(([name, value]) => {
@@ -133,15 +148,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
           {job.previous_commit ? <p className="break-all text-xs">Previous commit: {job.previous_commit}</p> : null}
           <p className="break-all text-xs">Commit: {job.commit}</p><p className="break-all text-xs">Files SHA-256: {job.files_sha256}</p>
           <DetailsList label="Changed folders" values={job.changed_folders} />
-          <DetailsList label="Adds" values={[
-            ...contributions,
-            ...(job.manifest?.python ? ["Code that runs in every agent"] : []),
-            ...(job.manifest?.engine ? ["Engine routes"] : []),
-            ...(job.manifest?.web ? ["Browser code"] : []),
-            ...(job.manifest?.agents ? ["Agent definitions"] : []),
-            ...(job.manifest ? [job.manifest.hooks ? "Hooks" : "no hooks", job.manifest.mcp ? "MCP servers" : "no MCP servers"] : []),
-            ...(services.length ? [`${services.length} background process${services.length === 1 ? "" : "es"}`] : []),
-          ]} />
+          <DetailsList label="Adds" values={job.manifest ? describePluginAdds(job.manifest) : []} />
           <DetailsList label="Through Kollab" values={throughKollab} />
           <DetailsList label="On Its Own" values={onItsOwn} />
           <DetailsList label="Other Declarations" values={other} />
