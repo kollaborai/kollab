@@ -518,15 +518,21 @@ class LoadoutManager:
         return data
 
     def active_compaction_threshold_k(self) -> int:
-        """The default loadout's explicit compaction threshold in thousands of tokens, 0 when unset.
+        """The session's loadout explicit compaction threshold in thousands of tokens, 0 when unset.
 
-        Reads only the stored default name and the explicit loadouts, so a
+        The session's loadout is the one recorded on the profile manager when
+        the session started on it or switched to it. It counts only while its
+        provider profile is the active one. Reads only stored config, so a
         usage-update check never resolves the model catalog (#1104).
         """
-        raw = self.config.get(self.DEFAULT_CONFIG_KEY) if self.config is not None else None
-        name = raw.get("name") if isinstance(raw, dict) else raw
-        loadout = self._explicit_loadouts().get(str(name).strip()) if name else None
-        return int(loadout.compaction_threshold_k or 0) if loadout is not None else 0
+        profiles = self.profile_manager
+        name = getattr(profiles, "active_loadout_name", None)
+        if not isinstance(name, str) or not name:
+            return 0
+        loadout = self._explicit_loadouts().get(name)
+        if loadout is None or loadout.provider_profile != profiles.active_profile_name:
+            return 0
+        return int(loadout.compaction_threshold_k or 0)
 
     def create(
         self,
@@ -836,6 +842,7 @@ class LoadoutManager:
                 if not isinstance(exc, Exception):
                     raise
                 return None
+            self.profile_manager.active_loadout_name = loadout.name
             await self._announce_model_switch(event_bus, loadout, None)
             return loadout
 
@@ -923,5 +930,6 @@ class LoadoutManager:
                         type(exc).__name__,
                     )
 
+        self.profile_manager.active_loadout_name = loadout.name
         await self._announce_model_switch(event_bus, loadout, previous_model)
         return loadout

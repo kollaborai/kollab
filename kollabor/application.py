@@ -374,6 +374,7 @@ class TerminalLLMChat:
                         self.profile_manager.set_active_profile(
                             loadout.provider_profile, persist=False
                         )
+                        self.profile_manager.active_loadout_name = loadout.name
                         logger.info("Applied default loadout '%s'", loadout.name)
                     elif not loadout:
                         # Exact-name miss (a deleted or re-cased default): the
@@ -448,6 +449,7 @@ class TerminalLLMChat:
                                 loadout.provider_profile,
                                 acp_loadout_model(loadout, loadout_profile), loadout.effort,
                             )
+                        self.profile_manager.active_loadout_name = loadout.name
                         activated_via_loadout = True
                         logger.info(
                             f"Resolved '{profile_name}' as loadout -> "

@@ -1404,7 +1404,7 @@ class ContextCompactionPlugin(BasePlugin):
             return 0
 
     def _active_loadout_threshold_k(self) -> int:
-        """The default (active) loadout's own compaction threshold in thousands of tokens, 0 when unset."""
+        """The session's loadout compaction threshold in thousands of tokens, 0 when unset."""
         if self._profile_manager is None:
             return 0
         try:

@@ -67,6 +67,14 @@ def _loadouts(threshold_k=None, default="acp-claude"):
     }
 
 
+def _session_on(loadout_name, profile="claude"):
+    """Profile manager for a session on ``loadout_name`` whose active provider profile is ``profile``."""
+    profiles = MagicMock()
+    profiles.active_profile_name = profile
+    profiles.active_loadout_name = loadout_name
+    return profiles
+
+
 async def _settle(plugin):
     """Wait for every background task the plugin started."""
     await asyncio.gather(*list(plugin._compaction_tasks), return_exceptions=True)
@@ -200,7 +208,7 @@ class TestAskThenCompact(unittest.IsolatedAsyncioTestCase):
 
     async def test_loadout_threshold_trigger_asks_then_compacts_once(self):
         plugin, _llm, acp = _plugin({**_loadouts(800), "plugins.context_compaction.ask_model_first": True})
-        plugin._profile_manager = MagicMock()
+        plugin._profile_manager = _session_on("acp-claude")
         acp.submit = AsyncMock(side_effect=[
             {"text": "<compact>keep the migration notes</compact>"},
             {"text": "compacted"},
@@ -216,7 +224,7 @@ class TestAskThenCompact(unittest.IsolatedAsyncioTestCase):
 
     async def test_loadout_threshold_above_the_automatic_trigger_waits_for_it(self):
         plugin, _llm, acp = _plugin(_loadouts(800))
-        plugin._profile_manager = MagicMock()
+        plugin._profile_manager = _session_on("acp-claude")
         plugin.acp_usage_updated(600_000, 1_000_000)  # over the 272K automatic trigger, under 800K
         await _settle(plugin)
         acp.submit.assert_not_awaited()
@@ -247,30 +255,23 @@ class TestExplicitThresholdWins(unittest.TestCase):
     def test_loadout_threshold_beats_global_and_the_cap(self):
         settings = {"plugins.context_compaction.token_threshold_k": 150, **_loadouts(500)}
         plugin = self._native(1_000_000, settings)
-        plugin._profile_manager = MagicMock()
+        plugin._profile_manager = _session_on("acp-claude")
         self.assertEqual(plugin._get_token_threshold_details(), (500_000, "manual"))
 
     def test_unset_loadout_threshold_falls_back_to_the_global_one(self):
         settings = {"plugins.context_compaction.token_threshold_k": 150, **_loadouts(None)}
         plugin = self._native(1_000_000, settings)
-        plugin._profile_manager = MagicMock()
+        plugin._profile_manager = _session_on("acp-claude")
         self.assertEqual(plugin._get_token_threshold_details(), (150_000, "manual"))
 
     def test_loadout_and_global_unset_is_automatic(self):
         plugin = self._native(1_000_000, _loadouts(None))
-        plugin._profile_manager = MagicMock()
+        plugin._profile_manager = _session_on("acp-claude")
         self.assertEqual(plugin._get_token_threshold_details(), (272_000, "automatic"))
 
 
 class TestSessionLoadoutThreshold(unittest.TestCase):
     """The threshold comes from the loadout the session runs on, not the default one (#1104)."""
-
-    @staticmethod
-    def _session_on(loadout_name, profile="claude"):
-        profiles = MagicMock()
-        profiles.active_profile_name = profile
-        profiles.active_loadout_name = loadout_name
-        return profiles
 
     def test_session_on_a_non_default_loadout_uses_its_own_threshold(self):
         settings = {
@@ -286,8 +287,23 @@ class TestSessionLoadoutThreshold(unittest.TestCase):
         }
         plugin, _llm, _acp = _plugin(settings)
         plugin._get_context_window_tokens = lambda: 1_000_000
-        plugin._profile_manager = self._session_on("acp-claude-500k")
+        plugin._profile_manager = _session_on("acp-claude-500k")
         self.assertEqual(plugin._get_token_threshold_details(), (500_000, "manual"))
+
+    def test_a_loadout_threshold_does_not_follow_the_session_to_another_profile(self):
+        settings = {
+            LoadoutManager.CONFIG_KEY: {
+                "acp-claude-500k": {
+                    "provider_profile": "claude",
+                    "model": "opus",
+                    "compaction_threshold_k": 500,
+                },
+            },
+        }
+        plugin, _llm, _acp = _plugin(settings)
+        plugin._get_context_window_tokens = lambda: 1_000_000
+        plugin._profile_manager = _session_on("acp-claude-500k", profile="other")
+        self.assertEqual(plugin._get_token_threshold_details(), (272_000, "automatic"))
 
 
 if __name__ == "__main__":
