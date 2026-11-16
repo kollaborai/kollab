@@ -166,6 +166,18 @@ class TestAutomaticCompactOnAcpChat(unittest.IsolatedAsyncioTestCase):
 
         acp.submit.assert_awaited_once()
 
+    async def test_automatic_trigger_retries_after_compaction_submission_fails(self):
+        plugin, _llm, acp = _plugin()
+        acp.submit = AsyncMock(side_effect=[RuntimeError("temporary disconnect"), {"text": "compacted"}])
+
+        plugin.acp_usage_updated(300_000, 1_000_000)
+        await _settle(plugin)
+        self.assertTrue(plugin._acp_compact_armed)
+
+        plugin.acp_usage_updated(300_000, 1_000_000)
+        await _settle(plugin)
+        self.assertEqual(acp.submit.await_count, 2)
+
     async def test_explicit_global_threshold_is_the_trigger_for_acp_too(self):
         plugin, _llm, acp = _plugin({"plugins.context_compaction.token_threshold_k": 500})
         plugin.acp_usage_updated(600_000, 1_000_000)  # over 500K, under the ratio
