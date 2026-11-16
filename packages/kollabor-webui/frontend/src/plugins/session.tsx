@@ -30,10 +30,10 @@ function MenuCount({ context, count, compact = false }: { context: PluginContext
 }
 
 function SessionControl({ label, Icon, collapsed, disabled, disabledReason, active, failed, stopping, stopped, noHeartbeat, count, onClick }: {
-  label: string; Icon: LucideIcon; collapsed: boolean; disabled?: boolean; disabledReason?: string; active?: boolean; failed?: boolean; stopping?: string; stopped?: boolean; noHeartbeat?: boolean;
+  label: string; Icon: LucideIcon; collapsed: boolean; disabled?: boolean; disabledReason?: string; active?: boolean; failed?: "load" | "render"; stopping?: string; stopped?: boolean; noHeartbeat?: boolean;
   count?: { context: PluginContext; value: NonNullable<PluginMenu["count"]> }; onClick: () => void;
 }) {
-  const status = failed ? "Failed" : stopping ? stopping : stopped ? "Stopped" : noHeartbeat ? "No Heartbeat" : undefined;
+  const status = failed ? `Failed to ${failed === "render" ? "Render" : "Load"}` : stopping ? stopping : stopped ? "Stopped" : noHeartbeat ? "No Heartbeat" : undefined;
   const tooltip = `${label}${status ? ` · ${status}` : disabled ? ` · ${disabledReason ?? "Unavailable"}` : ""}`;
   if (collapsed) return <TooltipIconButton tooltip={tooltip} side="left" aria-label={status ? `${label} ${status}` : label} aria-pressed={active}
     disabled={disabled} title={tooltip} className={cn("size-7 p-1.5", active && "bg-accent text-accent-foreground")} onClick={onClick}>
@@ -76,7 +76,7 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
         if (!item || typeof item.id !== "string") return [];
         const label = typeof item.label === "string" && item.label ? item.label : `${entry.name}${index ? ` View ${index + 1}` : ""}`;
         const key = pluginViewKey(entry.id, item.id);
-        return [<SessionControl key={`failed-view:${key}`} label={label} Icon={Puzzle} collapsed={collapsed} failed
+        return [<SessionControl key={`failed-view:${key}`} label={label} Icon={Puzzle} collapsed={collapsed} failed={snapshot.renderFailed.includes(entry.id) ? "render" : "load"}
           active={view === key} onClick={() => onViewChange(key)} />];
       });
     })}
@@ -86,7 +86,7 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
         if (!raw || typeof raw !== "object") return [];
         const menu = raw as PluginMenu;
         if (typeof menu.id !== "string") return [];
-        return [<SessionControl key={`failed:${entry.id}:${menu.id}`} label={menu.label ?? entry.name} Icon={Puzzle} collapsed={collapsed} failed
+        return [<SessionControl key={`failed:${entry.id}:${menu.id}`} label={menu.label ?? entry.name} Icon={Puzzle} collapsed={collapsed} failed={snapshot.renderFailed.includes(entry.id) ? "render" : "load"}
           onClick={() => { onNavigate(); host.navigate(entry.id, menu.open ?? { page: menu.id }); }} />];
       });
     })}

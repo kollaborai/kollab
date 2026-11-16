@@ -331,7 +331,7 @@ try {
   const collapsedFailed = panel.getByRole("button", { name: "Broken Board Failed to Load", exact: true });
   await collapsedFailed.waitFor({ timeout: 5000 });
   await collapsedFailed.click();
-  await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
+  await page.getByRole("alert").getByText("Broken · Failed to Load", { exact: true }).waitFor();
   await captureReview(page, "failed-load");
   await page.getByRole("button", { name: "Back to Chat" }).click();
   const collapsedView = panel.getByRole("button", { name: "Fixture View", exact: true });
@@ -377,22 +377,22 @@ try {
   assert.equal(await viewBody.locator('xpath=ancestor::*[@data-plugin="fixture"]').count(), 1, "view has plugin-specific CSS scope");
   await panel.getByRole("button", { name: "Chat", exact: true }).click();
   await panel.getByRole("button", { name: "Broken Failed to Load", exact: true }).click({ timeout: 5000 });
-  await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
+  await page.getByRole("alert").getByText("Broken · Failed to Load", { exact: true }).waitFor();
   await panel.getByRole("button", { name: "Chat", exact: true }).click();
   const chatInput = page.getByRole("textbox", { name: "Message input" });
   await chatInput.fill("/broken-command");
   const failedCommand = page.getByText("Broken Command", { exact: true });
   await failedCommand.waitFor({ timeout: 5000 });
   await failedCommand.click();
-  await page.getByText("Broken · Failed to Load", { exact: true }).waitFor({ timeout: 5000 });
+  await page.getByRole("alert").getByText("Broken · Failed to Load", { exact: true }).waitFor({ timeout: 5000 });
   await page.getByRole("button", { name: "Back to Chat" }).click();
   await chatInput.fill("/broken-command args");
   await chatInput.press("Escape");
   await chatInput.press("Enter");
-  await page.getByText("Broken · Failed to Load", { exact: true }).waitFor({ timeout: 5000 });
+  await page.getByRole("alert").getByText("Broken · Failed to Load", { exact: true }).waitFor({ timeout: 5000 });
   await page.getByRole("button", { name: "Back to Chat" }).click();
   await panel.getByRole("button", { name: /Broken Board/ }).click({ timeout: 5000 });
-  await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
+  await page.getByRole("alert").getByText("Broken · Failed to Load", { exact: true }).waitFor();
   if (process.env.PLUGIN_SCREENSHOTS) await page.screenshot({ path: resolve(process.env.PLUGIN_SCREENSHOTS, "failed-load-actual.png") });
   await page.getByText("View Error", { exact: true }).click();
   await page.getByRole("alert").locator("pre").waitFor();
@@ -401,7 +401,7 @@ try {
     page.waitForRequest(request => request.url().includes("/plugins/broken/web/index.js") && request.url().includes("retry="), { timeout: 5000 }),
     page.getByRole("alert").getByRole("button", { name: "Retry" }).click(),
   ]);
-  await page.getByText("Broken · Failed to Load", { exact: true }).waitFor();
+  await page.getByRole("alert").getByText("Broken · Failed to Load", { exact: true }).waitFor();
   assert.ok(brokenImports.length >= 2, "retry imports the broken bundle again");
   assert.notEqual(brokenImports.at(-1), brokenImportBeforeRetry, "retry uses a new bundle URL");
   await page.getByRole("alert").getByRole("button", { name: "Turn Off" }).click();
