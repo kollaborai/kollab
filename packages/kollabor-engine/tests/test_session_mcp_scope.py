@@ -98,9 +98,5 @@ async def _snapshot(_session):
     return object()
 
 
-async def _noop():
-    return {}
-
-
 async def _noop(*_args, **_kwargs):
     return None
