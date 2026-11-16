@@ -9,7 +9,7 @@ import {
   type FC,
   type ReactNode,
 } from "react";
-import { ChevronLeftIcon, ChevronRightIcon, ImageIcon, XIcon } from "lucide-react";
+import { ChevronLeftIcon, ChevronRightIcon, ImageOff, ImageIcon, XIcon } from "lucide-react";
 
 import type { EngineApi, MediaEntry } from "@/api";
 import { cn } from "@/lib/utils";
@@ -113,7 +113,25 @@ export const MediaThumb: FC<{
   className?: string;
   onOpen?: () => void;
 }> = ({ ref_, className, onOpen }) => {
+  // Hook stays unconditional; useMediaImage itself null-guards empty refs.
   const url = useMediaImage(ref_);
+  // A slot with no stored ref (failed storage) renders a muted, inert
+  // placeholder: no image request, no click, no viewer (#1124 P2a).
+  if (!ref_) {
+    return (
+      <span
+        className={cn(
+          "bg-muted/40 text-muted-foreground/50 relative block size-20 shrink-0 overflow-hidden rounded-lg border border-dashed",
+          className,
+        )}
+        aria-label="image unavailable"
+      >
+        <span className="flex size-full items-center justify-center">
+          <ImageOff className="size-4" />
+        </span>
+      </span>
+    );
+  }
   const body =
     url === undefined ? (
       <span className="bg-muted/60 animate-pulse block size-full" />
