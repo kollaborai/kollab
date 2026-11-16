@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Box, Plus } from "lucide-react";
 import type { EngineApi, PanelField, Session } from "@/api";
 import { FieldRenderer, type Draft } from "@/components/panels/FieldRenderer";
@@ -128,6 +128,7 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate }: { entr
 
 export function PluginsSettings({ host, api, session, canManage }: { host: PluginHost; api: EngineApi; session?: Session; canManage: boolean }) {
   const snapshot = usePluginSnapshot(host);
+  const listId = useId();
   useHeartbeatClock(snapshot.entries.some(entry => validServices(entry).some(service => service.state === "running" || service.state === "stopping")));
   const [operation, setOperation] = useState<{ action: "install" | "update"; pluginId?: string } | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -155,16 +156,19 @@ export function PluginsSettings({ host, api, session, canManage }: { host: Plugi
           <div className="flex flex-col gap-1">{group.entries.map(entry => {
             const key = entryKey(entry);
             const services = validServices(entry);
+            const descriptionId = `${listId}-${entry.kind}-${entry.id}`;
             const failure = snapshot.errors[entry.id] ?? (entry.state === "changed-on-disk" ? null : entry.error);
             const status = failure ? "Failed" : entry.state === "changed-on-disk" ? "Changed on Disk" : entry.state === "stopping" ? "Stopping" : entry.state === "stop-failed" ? "Failed to Stop" : entry.enabled ? "On" : "Off";
             return <Button key={key} type="button" variant={selected && entryKey(selected) === key ? "secondary" : "ghost"}
-              className="h-auto min-h-12 w-full min-w-0 justify-start gap-2 px-2 py-2 text-left" aria-label={entry.name}
+              className="h-auto min-h-12 w-full min-w-0 justify-start gap-2 px-2 py-2 text-left" aria-label={entry.name} aria-describedby={descriptionId}
               aria-pressed={Boolean(selected && entryKey(selected) === key)} onClick={() => setSelectedKey(key)}>
               <Box className="size-4 shrink-0" /><span className="flex min-w-0 flex-col items-start"><span className="max-w-full truncate font-medium">{entry.name}</span>
-                <span className="text-muted-foreground text-xs">{status}</span>
-                {services.map(service => <span key={service.name} className="text-muted-foreground max-w-full break-words text-xs">
-                  {services.length > 1 ? <span>{service.name}: </span> : null}<span>{serviceStatus(service, host.engineTime())}</span>
-                </span>)}</span>
+                <span id={descriptionId} className="text-muted-foreground flex max-w-full flex-col items-start text-xs">
+                  <span>{status}</span>
+                  {services.map(service => <span key={service.name} className="max-w-full break-words">
+                    {services.length > 1 ? <span>{service.name}: </span> : null}<span>{serviceStatus(service, host.engineTime())}</span>
+                  </span>)}
+                </span></span>
             </Button>;
           })}</div>
         </section>)}
