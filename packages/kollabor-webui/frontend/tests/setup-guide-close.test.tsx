@@ -64,4 +64,11 @@ describe("guided setup dialog close controls", () => {
   it("renders nothing when closed", () => {
     expect(guideMarkup(false)).toBe("");
   });
+
+  it("sizes the panel to its content and caps it to the viewport", () => {
+    const markup = guideMarkup(true);
+
+    expect(markup).toContain("max-h-[80dvh]");
+    expect(markup).not.toContain("h-[min(30rem,80dvh)]");
+  });
 });
