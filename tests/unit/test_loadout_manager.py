@@ -629,7 +629,11 @@ async def test_activate_passes_only_set_fields_to_update_profile():
 
 @pytest.mark.asyncio
 async def test_activate_can_apply_a_loadout_without_persisting_profile_changes():
-    pm = _FakeProfileManager([_FakeProfile("work", "openai", api_key="key-1")])
+    pm = _FakeProfileManager([
+        _FakeProfile("glm", "openai", api_key="key-1"),
+        _FakeProfile("work", "openai", api_key="key-2"),
+    ])
+    pm.set_active_profile("glm", persist=False)
     manager = LoadoutManager(pm, config=_MemoryConfig())
     loadout = Loadout("temporary", "work", "gpt-5.6")
 
@@ -637,7 +641,8 @@ async def test_activate_can_apply_a_loadout_without_persisting_profile_changes()
 
     assert result is loadout
     assert pm.update_calls == [("work", {"model": "gpt-5.6", "save_to_config": False})]
-    assert pm.activate_calls == ["work"]
+    assert pm.active_name == "glm"
+    assert pm.activate_calls == ["glm"]
 
 
 @pytest.mark.asyncio
