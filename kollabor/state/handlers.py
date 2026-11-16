@@ -389,8 +389,11 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         name = params.get("name", "")
         if not isinstance(name, str) or not name.strip():
             return {"error": "server name is required"}
+        persist = params.get("persist", True)
+        if not isinstance(persist, bool):
+            return {"error": "persist must be true or false"}
         try:
-            snapshot = await state_service.enable_mcp_server(name.strip())
+            snapshot = await state_service.enable_mcp_server(name.strip(), persist=persist)
         except ValueError as e:
             return {"error": str(e)}
         return snapshot.to_dict()
