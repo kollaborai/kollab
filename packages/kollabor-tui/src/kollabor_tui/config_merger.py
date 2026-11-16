@@ -10,9 +10,7 @@ class ConfigMerger:
     """Handles saving widget changes to config.json using existing config system."""
 
     @staticmethod
-    def apply_widget_changes(
-        config_service, widget_changes: Dict[str, Any], save_target: str = "local"
-    ) -> bool:
+    def apply_widget_changes(config_service, widget_changes: Dict[str, Any], save_target: str = "local") -> bool:
         """Apply widget changes to config.json using existing config system.
 
         Args:
@@ -25,6 +23,12 @@ class ConfigMerger:
         """
         try:
             logger.info(f"Applying {len(widget_changes)} widget changes to config")
+
+            from kollabor_plugins.settings import apply_config_changes
+
+            widget_changes = apply_config_changes(widget_changes)
+            if not widget_changes:
+                return True
 
             # Create backup before making changes
             backup_path = config_service.backup_config(".pre-modal-changes")
@@ -59,17 +63,13 @@ class ConfigMerger:
 
             # Report results
             if failed_changes:
-                logger.error(
-                    f"Failed to apply {len(failed_changes)} changes: {failed_changes}"
-                )
+                logger.error(f"Failed to apply {len(failed_changes)} changes: {failed_changes}")
                 return False
 
             logger.info(f"Successfully applied all {success_count} config changes")
 
             # Notify plugins using existing event system
-            ConfigMerger.notify_plugins_config_changed(
-                config_service, list(widget_changes.keys())
-            )
+            ConfigMerger.notify_plugins_config_changed(config_service, list(widget_changes.keys()))
 
             return True
 
@@ -108,26 +108,20 @@ class ConfigMerger:
             # Check if widget has a pending value that differs from current
             if hasattr(widget, "_pending_value") and hasattr(widget, "config_path"):
                 # Use get_value() method instead of current_value attribute
-                current_value = (
-                    widget.get_value() if hasattr(widget, "get_value") else None
-                )
+                current_value = widget.get_value() if hasattr(widget, "get_value") else None
                 pending_value = widget._pending_value
 
                 # Only include changes where value actually changed
                 # Note: pending_value being None means no change was made
                 if pending_value is not None and pending_value != current_value:
                     changes[widget.config_path] = pending_value
-                    logger.debug(
-                        f"Collected change: {widget.config_path} = {pending_value} (was {current_value})"
-                    )
+                    logger.debug(f"Collected change: {widget.config_path} = {pending_value} (was {current_value})")
 
         logger.info(f"Collected {len(changes)} widget changes")
         return changes
 
     @staticmethod
-    def validate_config_changes(
-        config_service, changes: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    def validate_config_changes(config_service, changes: Dict[str, Any]) -> Dict[str, Any]:
         """Validate config changes before applying them.
 
         Args:
@@ -149,6 +143,8 @@ class ConfigMerger:
 
             # Apply changes temporarily
             for path, value in changes.items():
+                if path.startswith(("plugin-values.", "plugin-registry.", "plugin-service.")):
+                    continue
                 try:
                     from kollabor_events.dict_utils import safe_set
 
@@ -163,9 +159,7 @@ class ConfigMerger:
                 if not system_validation["valid"]:
                     validation_result["valid"] = False
                     validation_result["errors"].extend(system_validation["errors"])
-                validation_result["warnings"].extend(
-                    system_validation.get("warnings", [])
-                )
+                validation_result["warnings"].extend(system_validation.get("warnings", []))
 
             # Restore original config
             config_service.config_manager.config = original_config

@@ -220,10 +220,7 @@ def discover_plugin_args() -> tuple:
     # Determine plugins directory (same logic as application.py)
     package_dir = Path(__file__).parent.parent
     plugins_dir = package_dir / "plugins"
-    if not plugins_dir.exists():
-        plugins_dir = Path.cwd() / "plugins"
-
-    plugin_registry = PluginRegistry(plugins_dir)
+    plugin_registry = PluginRegistry(plugins_dir, no_plugins="--no-plugins" in sys.argv[1:])
     plugin_classes = plugin_registry.discover_classes_only()
 
     return plugin_classes, plugin_registry.discovery
@@ -369,6 +366,8 @@ Telegram bridge setup (run inside interactive mode):
 {cli_help}
         """,
     )
+
+    parser.add_argument("--no-plugins", action="store_true", help="Start without plugin code")
 
     # Manual help argument (we handle it after plugins are initialized)
     parser.add_argument(
@@ -1352,7 +1351,10 @@ async def async_main() -> None:
         # Reuse the discovery object from CLI arg parsing
         from kollabor_plugins import PluginRegistry
 
-        plugin_registry = PluginRegistry(discovery.plugins_dir)
+        if getattr(args, "no_plugins", False):
+            plugin_registry = PluginRegistry(discovery.plugins_dir, no_plugins=True)
+        else:
+            plugin_registry = PluginRegistry(discovery.plugins_dir)
         plugin_registry.discovery = discovery  # Reuse discovery from CLI args
 
         # Resolve attach identity (set earlier if --attach was used)
@@ -3467,6 +3469,17 @@ def _is_tool_shell_agent_launch(argv: list[str]) -> bool:
 
 def cli_main() -> None:
     """Synchronous entry point for pip-installed CLI command."""
+    if sys.argv[1:2] == ["plugin"]:
+        from kollabor_plugins.cli import main as plugin_main
+
+        try:
+            result = plugin_main(sys.argv[2:])
+        except (ValueError, OSError) as exc:
+            sys.stderr.write(f"plugin: {exc}\n")
+            raise SystemExit(1) from None
+        if result:
+            raise SystemExit(result)
+        return
     if _is_tool_shell_agent_launch(sys.argv):
         sys.stderr.write(
             "error: nested --agent launches are blocked in tool/agent contexts; "
