@@ -65,6 +65,7 @@ export function WhatsNewDialog({
       <DialogContent
         className="flex h-[min(36rem,85dvh)] w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-xl"
         aria-label={`What’s New in ${release.version}`}
+        showCloseButton={false}
       >
         <div className="flex shrink-0 items-start justify-between gap-2 px-6 pt-5">
           <div className="min-w-0">
