@@ -19,6 +19,7 @@ from kollabor_ai.model_registry import (
     resolve_context_window,
     resolve_default_model,
     supports_sampling,
+    supports_thinking,
     supports_vision,
 )
 from kollabor_ai.providers.registry import create_config_from_profile
