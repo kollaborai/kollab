@@ -551,6 +551,33 @@ def test_regression_test_keeps_a_declared_finding_on_a_lint_line_1024(
     )
 
 
+def test_regression_test_keeps_findings_in_a_sentence_that_names_ruff_1024(
+    tmp_path: Path,
+) -> None:
+    # A finding list in the same sentence as the word ruff is still findings.
+    cfg = regression_cfg(tmp_path)
+    body = "ruff check passed, F3,F4 remain open"
+    report = pr_gates_dod.evaluate(
+        cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
+    )
+    assert report.detail_for("regression_test") == (
+        "no regression test covers finding id(s): F3, F4 under tests/"
+    )
+
+
+def test_regression_test_counts_a_rule_list_quoted_in_prose_1024(tmp_path: Path) -> None:
+    # Boundary: prose cannot tell a rule list from a finding list (PR #553 names its
+    # findings in prose), so only a lint flag's argument is skipped; this fails closed.
+    cfg = regression_cfg(tmp_path)
+    body = "Ruff reports F63,F7,F82 for the CI lint selection; checks are clean."
+    report = pr_gates_dod.evaluate(
+        cfg, make_data(comments=(source_comment("issue_comment", 1, body),))
+    )
+    assert report.detail_for("regression_test") == (
+        "no regression test covers finding id(s): F63, F7, F82 under tests/"
+    )
+
+
 # --- report shape -----------------------------------------------------------
 
 
