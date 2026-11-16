@@ -702,6 +702,40 @@ def test_regression_test_requires_test_commit_patch_to_name_finding(
     assert "no test-only commit" in report.detail_for("regression_test")
 
 
+def test_regression_test_rejects_placeholder_finding_test(tmp_path: Path) -> None:
+    cfg = regression_cfg(tmp_path)
+    finding = SimpleNamespace(
+        kind="review_comment", comment_id=1, body="F14: behavior remains broken",
+        author_login="reviewer", created_at="2026-11-01T12:00:00Z",
+        timeline_order=10,
+    )
+    data = make_data(
+        commits=(
+            SimpleNamespace(
+                sha="a" * 40, message="test: placeholder F14", verified=True,
+                files=("tests/unit/test_f14.py",),
+                file_patches={
+                    "tests/unit/test_f14.py": "+def test_F14_placeholder(): assert True"
+                },
+                timeline_order=11,
+            ),
+            SimpleNamespace(
+                sha="b" * 40, message="fix: repair F14", verified=True,
+                files=("kollabor/core.py",), file_patches={}, timeline_order=12,
+            ),
+        ),
+        comments=(finding,),
+        changed_files=["tests/unit/test_f14.py", "kollabor/core.py"],
+        changed_file_contents={
+            "tests/unit/test_f14.py": "def test_F14_placeholder(): assert True"
+        },
+    )
+
+    report = pr_gates_dod.evaluate(cfg, data)
+
+    assert "regression_test" in report.failed_names()
+
+
 def test_regression_test_requires_reason_for_non_testable_finding(
     tmp_path: Path,
 ) -> None:
