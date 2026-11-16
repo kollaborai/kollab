@@ -165,7 +165,6 @@ export function PluginsSettings({ host, api, session, canManage }: { host: Plugi
     {snapshot.disabled ? <p className="text-muted-foreground mb-4 text-sm">Plugins are off for this page. Remove <code>?plugins=off</code> and reload.</p> : null}
     {snapshot.inventoryError ? <p role="alert" className="text-destructive text-sm">{snapshot.inventoryError}</p> : null}
     {snapshot.loading && !snapshot.entries.length ? <p className="text-muted-foreground text-sm">Loading plugins…</p> : null}
-    {!snapshot.loading && !snapshot.entries.length && !snapshot.disabled ? <p className="text-muted-foreground mb-4 text-sm">No plugins installed.</p> : null}
     <div className="grid min-w-0 gap-5 md:grid-cols-[minmax(10rem,15rem)_minmax(0,1fr)] md:gap-6">
       <nav aria-label="Plugin list" className="min-w-0">
         {groups.filter(group => group.entries.length || group.title === "Installed").map(group => <section key={group.title} className="mb-5">
@@ -173,6 +172,8 @@ export function PluginsSettings({ host, api, session, canManage }: { host: Plugi
             <h2 className="text-muted-foreground text-xs font-semibold uppercase">{group.title}</h2>
             {group.title === "Installed" && canManage && !snapshot.disabled ? <Button type="button" size="xs" variant="outline" onClick={() => setOperation({ action: "install" })}><Plus className="size-3" /> Add Plugin</Button> : null}
           </div>
+          {group.title === "Installed" && !group.entries.length && !snapshot.loading && !snapshot.inventoryError && !snapshot.disabled ?
+            <p className="text-muted-foreground mb-2 text-sm">No plugins installed.{canManage ? " Use Add Plugin to install one." : ""}</p> : null}
           <div className="flex flex-col gap-1">{group.entries.map(entry => {
             const key = entryKey(entry);
             const services = validServices(entry);
