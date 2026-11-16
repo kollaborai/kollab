@@ -200,3 +200,30 @@ def test_remove_provider_profiles_preserves_all_configs_when_a_write_fails(
 
     assert manager.remove_provider_profiles("anthropic") == []
     assert "anthropic-cloud" in _read_config(global_path)["kollabor"]["llm"]["profiles"]
+
+
+def test_remove_provider_clears_active_profile_only_in_matching_config(
+    monkeypatch, tmp_path
+):
+    global_path = tmp_path / "home" / ".kollab" / "config.json"
+    local_path = tmp_path / "project" / ".kollab" / "config.json"
+    _write_config(
+        global_path,
+        {"shared": {"provider": "anthropic", "api_key": "global"}},
+        "shared",
+    )
+    _write_config(
+        local_path,
+        {"shared": {"provider": "openai", "api_key": "folder"}},
+        "shared",
+    )
+    manager = _manager(monkeypatch, tmp_path, global_path, local_path)
+
+    assert manager.remove_provider_profiles("anthropic") == ["shared"]
+
+    global_llm = _read_config(global_path)["kollabor"]["llm"]
+    local_llm = _read_config(local_path)["kollabor"]["llm"]
+    assert "shared" not in global_llm["profiles"]
+    assert "active_profile" not in global_llm
+    assert local_llm["profiles"]["shared"]["provider"] == "openai"
+    assert local_llm["active_profile"] == "shared"
