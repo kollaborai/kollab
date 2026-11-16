@@ -9,7 +9,7 @@ import { Switch } from "@/components/ui/switch";
 import { PluginRenderBoundary, usePluginSnapshot } from "./components";
 import type { PluginEntry, PluginHost } from "./host";
 import { PluginInstallDialog } from "./install";
-import { heartbeatAge, heartbeatLabel, useHeartbeatClock } from "./heartbeat";
+import { heartbeatAge, heartbeatLabel, stoppingLabel, useHeartbeatClock } from "./heartbeat";
 
 type PluginService = { name: string; state: string; desired?: string; since?: number | null; restarts?: number; heartbeat?: number | null; heartbeat_s?: number | null; error?: string | null };
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -22,7 +22,7 @@ function ServiceRow({ service, host, api, id, canManage, refresh, onError }: {
   const [log, setLog] = useState<string | null>(null);
   useHeartbeatClock(service.state === "running" && Boolean(service.heartbeat_s));
   const staleAge = heartbeatAge(service, host.engineTime());
-  const state = service.state === "running" ? (staleAge === null ? "Running" : `Running · ${heartbeatLabel(staleAge)}`) : service.state === "stopping" ? "Stopping" :
+  const state = service.state === "running" ? (staleAge === null ? "Running" : `Running · ${heartbeatLabel(staleAge)}`) : service.state === "stopping" ? stoppingLabel([service], host.engineTime()) :
     service.state === "exited" ? "Exited" : service.state === "failed" || service.state === "crash-stopped" ? "Stopped After 5 Crashes" :
     service.state === "stopped" ? "Stopped" : service.state;
   const control = async (action: string) => {

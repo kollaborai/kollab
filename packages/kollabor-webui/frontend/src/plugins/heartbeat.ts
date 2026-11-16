@@ -29,6 +29,20 @@ export function heartbeatLabel(age: number): string {
   return `No Heartbeat for ${minutes < 1 ? "less than 1" : minutes} min`;
 }
 
+/** Show only a known engine deadline; an overdue deadline is not proof of exit. */
+export function stoppingLabel(services: unknown[], now: number | null): string {
+  const deadlines = services.flatMap(value => {
+    if (!value || typeof value !== "object") return [];
+    const service = value as Record<string, unknown>;
+    return service.state === "stopping" && finitePositive(service.stop_deadline) ? [service.stop_deadline] : [];
+  });
+  if (now === null || !Number.isFinite(now) || deadlines.length === 0) return "Stopping";
+  const seconds = Math.max(...deadlines) - now;
+  if (seconds <= 0) return "Stopping · Waiting for exit";
+  return `Stopping · ${Math.ceil(seconds / 60)} min left`;
+}
+
+
 /** Re-evaluate time-based status without requiring another inventory event. */
 export function useHeartbeatClock(enabled: boolean): number {
   const [now, setNow] = useState(() => Date.now() / 1000);
