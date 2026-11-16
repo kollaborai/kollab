@@ -1,0 +1,20 @@
+{
+ "composer-empty-desktop-dark": false,
+ "composer-reload-desktop-dark": false,
+ "composer-long-desktop-dark": false,
+ "composer-empty-desktop-light": false,
+ "composer-reload-desktop-light": false,
+ "composer-long-desktop-light": false,
+ "composer-empty-tablet-dark": false,
+ "composer-reload-tablet-dark": false,
+ "composer-long-tablet-dark": false,
+ "composer-empty-tablet-light": false,
+ "composer-reload-tablet-light": false,
+ "composer-long-tablet-light": false,
+ "composer-empty-phone-dark": false,
+ "composer-reload-phone-dark": false,
+ "composer-long-phone-dark": false,
+ "composer-empty-phone-light": false,
+ "composer-reload-phone-light": false,
+ "composer-long-phone-light": false
+}
