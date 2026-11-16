@@ -9,7 +9,7 @@ import { Switch } from "@/components/ui/switch";
 import { PluginRenderBoundary, usePluginSnapshot } from "./components";
 import type { PluginEntry, PluginHost } from "./host";
 import { PluginInstallDialog } from "./install";
-import { heartbeatAge, heartbeatLabel, stoppingLabel, useHeartbeatClock } from "./heartbeat";
+import { heartbeatAge, heartbeatLabel, runtimeLabel, stoppingLabel, useHeartbeatClock } from "./heartbeat";
 
 type PluginService = { name: string; state: string; desired?: string; since?: number | null; restarts?: number; heartbeat?: number | null; heartbeat_s?: number | null; error?: string | null };
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -20,7 +20,8 @@ const validServices = (entry: PluginEntry): PluginService[] => (entry.services ?
 
 function serviceStatus(service: PluginService, now: number | null): string {
   const staleAge = heartbeatAge(service, now);
-  return service.state === "running" ? (staleAge === null ? "Running" : `Running · ${heartbeatLabel(staleAge)}`) : service.state === "stopping" ? stoppingLabel([service], now) :
+  const runtime = runtimeLabel(service.since, now);
+  return service.state === "running" ? (staleAge === null ? (runtime ? `Running · ${runtime}` : "Running") : `Running · ${heartbeatLabel(staleAge)}`) : service.state === "stopping" ? stoppingLabel([service], now) :
     service.state === "exited" ? "Exited" : service.state === "failed" || service.state === "crash-stopped" ? "Stopped After 5 Crashes" :
     service.state === "stopped" ? "Stopped" : service.state === "stop-failed" ? "Failed to Stop" : service.state;
 }

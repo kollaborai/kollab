@@ -29,6 +29,16 @@ export function heartbeatLabel(age: number): string {
   return `No Heartbeat for ${minutes < 1 ? "less than 1" : minutes} min`;
 }
 
+/** Format only a known process start against the sampled engine clock. */
+export function runtimeLabel(since: unknown, now: number | null): string | null {
+  if (!finitePositive(since) || now === null || !Number.isFinite(now) || since > now) return null;
+  const minutes = Math.floor((now - since) / 60);
+  if (minutes < 1) return "less than 1 min";
+  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h`;
+}
+
+
+
 /** Show only a known engine deadline; an overdue deadline is not proof of exit. */
 export function stoppingLabel(services: unknown[], now: number | null): string {
   const deadlines = services.flatMap(value => {
