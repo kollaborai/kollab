@@ -5,6 +5,7 @@ import json
 import os
 import re
 from pathlib import Path
+from unittest.mock import ANY
 
 import kollabor_engine.gem_appearance as gem_appearance  # type: ignore[import-not-found]
 import pytest
@@ -14,7 +15,7 @@ from kollabor_engine.server import create_app  # type: ignore[import-not-found]
 
 EMPTY = {"season": "auto", "born": {}, "gems": {}}
 # The routes also say which folder a bare gem name means: this engine's.
-HOME = {"home": os.path.realpath(os.getcwd())}
+HOME = {"home": os.path.realpath(os.getcwd()), "crew": ANY}
 GEM_FACE_TS = (
     Path(__file__).resolve().parents[3]
     / "packages/kollabor-webui/frontend/src/components/gems/gem-face.ts"
@@ -348,6 +349,65 @@ class TestBirths:
         gem_appearance.record_births(["lapis"])
 
         assert appearance_store.read_text() == "{not json"
+
+    def test_a_crew_gem_is_born_furry_with_contrasting_hair_and_no_hat(self, appearance_store):
+        gem_appearance.record_births(["chief-of-staff", "lapis"], crew=["chief-of-staff"])
+        born = gem_appearance.load_appearance()["born"]
+        crew = born["chief-of-staff"]
+        assert crew["hat"] == "none" and crew["fur"] in gem_appearance.BIRTH_FURS
+        assert crew["hair"] in gem_appearance.CREW_HAIRS
+        assert abs(gem_appearance._luma(crew["hairColor"]) - gem_appearance._luma(crew["furColor"])) >= 80
+        assert born["lapis"] == json.loads(json.dumps({
+            "face": born["lapis"]["face"],
+            "hat": gem_appearance._drawn("lapis", "hat", gem_appearance.BIRTH_HATS),
+            **gem_appearance._birth_coat("lapis"),
+        }))
+
+    def test_a_crew_gem_born_with_a_hat_takes_the_crew_coat_once_and_keeps_its_eyes(self, appearance_store):
+        appearance_store.parent.mkdir(parents=True)
+        appearance_store.write_text(json.dumps({"born": {"support-lead": {"face": "bean", "hat": "cowboy"}}}))
+        gem_appearance.record_births(["support-lead"], crew=["support-lead"])
+        first = gem_appearance.load_appearance()["born"]["support-lead"]
+        assert first == {"face": "bean", **gem_appearance.crew_coat("support-lead")}
+        gem_appearance.record_births(["support-lead"], crew=["support-lead"])
+        assert gem_appearance.load_appearance()["born"]["support-lead"] == first
+
+    def test_a_hatless_furry_crew_gem_without_contrasting_hair_takes_the_crew_coat(self, appearance_store):
+        appearance_store.parent.mkdir(parents=True)
+        appearance_store.write_text(json.dumps({"born": {"support-lead": {
+            "face": "bean", "hat": "none", "fur": "short", "furColor": [20, 20, 20],
+            "hair": "short", "hairColor": [30, 26, 24],
+        }}}))
+        gem_appearance.record_births(["support-lead"], crew=["support-lead"])
+        first = gem_appearance.load_appearance()["born"]["support-lead"]
+        assert first["face"] == "bean"
+        contrast = abs(
+            gem_appearance._luma(first["hairColor"])
+            - gem_appearance._luma(first["furColor"])
+        )
+        assert contrast >= gem_appearance.CREW_CONTRAST
+        gem_appearance.record_births(["support-lead"], crew=["support-lead"])
+        assert gem_appearance.load_appearance()["born"]["support-lead"] == first
+
+    def test_every_bundled_crew_gem_gets_contrasting_hair(self):
+        from kollabor_engine.routes.agents import crew_names  # type: ignore[import-not-found]
+
+        names = crew_names()
+        assert "chief-of-staff" in names and "lapis" not in names
+        assert {"director", "cto"} <= names  # team members written inline (engineering, startup)
+        for name in names:
+            coat = gem_appearance.crew_coat(name)
+            assert abs(gem_appearance._luma(coat["hairColor"]) - gem_appearance._luma(coat["furColor"])) >= 80, name
+
+    @pytest.mark.skipif(
+        not GEM_FACE_TS.exists(), reason="web UI source not in this checkout"
+    )
+    def test_crew_rule_matches_the_web_ui(self):
+        look_ts = GEM_FACE_TS.with_name("gem-look.ts").read_text(encoding="utf-8")
+        hairs = re.search(r"export const CREW_HAIRS = \[(.*?)\]", look_ts)
+        assert hairs is not None
+        assert re.findall(r'"([a-z]+)"', hairs.group(1)) == list(gem_appearance.CREW_HAIRS)
+        assert f"export const CREW_CONTRAST = {gem_appearance.CREW_CONTRAST};" in look_ts
 
     @pytest.mark.skipif(
         not GEM_FACE_TS.exists(), reason="web UI source not in this checkout"

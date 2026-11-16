@@ -37,6 +37,9 @@ what exists; no editing or deletion of sent images in v1; no image generation.
 
 - Bubble: thumbnail (max ~160px tall, rounded, click = viewer) exactly where the
   `[imageN]` token sat; the token text disappears.
+- A failed or missing media slot leaves its `[imageN]` token as literal text;
+  it does not request an empty ref or open the viewer. `[[imageN]]` displays as
+  literal `[imageN]` text and consumes no media slot.
 - Viewer: dark overlay, the image fit to screen, left/right arrows and
   left/right keys, "i / N" position label, Esc or click-outside closes.
 - Sidebar: under Terminal, "Gallery" opens the active agent's gallery panel:
@@ -52,9 +55,13 @@ what exists; no editing or deletion of sent images in v1; no image generation.
   `list_for(conversation_id) -> [refs oldest first]`. Refs are opaque ids; the
   path never leaves the engine.
 - History row: user content stays text for the LLM seam, but the stored row gains
-  a parallel `media` list: `[{"index": 1, "ref": "<id>", "mime": "image/png"}]`.
-  The `[imageN]` text stays (agents and tools match on it); the row carries the
-  ref so any history read can resolve thumbnails.
+  a parallel dense `media` list with one entry per consumed image token, in
+  token order. A valid slot is `{"ref": "<id>", "mime": "image/png"}`; a
+  failed storage slot is `{"ref": "", "mime": "", "failed": true}`. The
+  `[imageN]` text stays (agents and tools match on it); keeping failed slots
+  preserves the ordinal of every later token in the row. Rows without a local
+  media index keep `media` absent. Gallery and viewer listings remain
+  valid-reference-only.
 - Route `routes/media.py`: `GET /media/{ref}` -> bytes, correct mime,
   `Cache-Control: immutable` (ids are unique); 404 on unknown; ref scoped by
   conversation membership check; same bearer-token auth as every engine route.
@@ -77,6 +84,12 @@ what exists; no editing or deletion of sent images in v1; no image generation.
   placeholder text instead of a broken image.
 - If the composer sends a non-image attachment or an over-limit image, the send
   fails the way it does today (no silent store), and the placeholder stays.
+- If a row contains a failed image part before a stored image, then the later
+  token still resolves to its own image; the failed slot remains literal text.
+- If a message contains `[[image1]]` before `[image1]`, then the first displays
+  as literal `[image1]` and only the second consumes the stored image slot.
+- If the text contains `[image0]` or `[image00]`, then it remains literal text;
+  only positive image-token values consume slots.
 
 ## Failure modes
 
@@ -89,6 +102,10 @@ what exists; no editing or deletion of sent images in v1; no image generation.
 5. Gallery opened for an agent with no media: empty-state text, no broken grid.
 6. Viewer open while history refresh replaces rows: viewer holds its ref list;
    closing returns to the bubble, no stale DOM writes.
+7. Storage failure for one sent part: its row slot becomes a tombstone, later
+   slots keep their ordinals, and gallery/viewer listings omit the tombstone.
+8. Escaped image token: double brackets display as the single-bracket literal
+   and do not affect row binding or page-offset counting.
 
 ## Decisions
 
@@ -96,6 +113,10 @@ what exists; no editing or deletion of sent images in v1; no image generation.
   history payloads small and matches the existing "no data URLs in state" rule).
 - Keep the `[imageN]` token in the LLM-visible text (engine seam unchanged;
   agents already reason about the token).
+- Keep row media slots dense, including tombstones for failed parts, so each
+  token's ordinal maps to its own slot. Double-bracket escapes are display-only:
+  the LLM sees `[[imageN]]`, while the UI displays literal `[imageN]` text.
+  Token counting uses the same positive-value grammar as the UI.
 - Images live under the existing conversations dir (same workspace scoping,
   same backup story); no new config key for v1.
 - koordinator assigned the lane to sapphire (11-14, thread 956c4daa); Marco
@@ -106,8 +127,11 @@ what exists; no editing or deletion of sent images in v1; no image generation.
 Red-first: send a data-url image through the messages route and assert the row
 carries a resolvable ref and `/media/{ref}` serves identical bytes (fails today:
 no ref, no route). Media store unit tests: validation, caps, id uniqueness,
-list ordering, 404s. Frontend: bubble renders thumbnail from a row with `media`
-refs and falls back to placeholder text; viewer stepping order oldest-first.
+list ordering, 404s, `test_failure_matrix_binds_exactly_stored_refs`, and
+`test_count_image_tokens_shapes`. Frontend: bubble renders thumbnail from a row
+with `media` refs and falls back to placeholder text; `resolveMediaSegment`
+escape/failure cases and the `MediaThumb empty-ref guard`; viewer stepping order
+oldest-first.
 Live proof: send a real paste in the running web UI, click through viewer and
 gallery, reload, restart engine, reload again; screenshots at 390/820/1280.
 Sibling sweep: ACP sessions (images to Claude Code), voice sessions, phone link.
