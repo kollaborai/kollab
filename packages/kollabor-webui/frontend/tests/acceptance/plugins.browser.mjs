@@ -46,6 +46,7 @@ try {
       services: { worker: { command: ["git", "status"], secrets: ["API_TOKEN"] } }, python: "python/plugin.py:Plugin",
       engine: "python/engine.py:make_router", web: { entry: "web/dist/index.js" }, contributes: { views: [{ id: "main" }], slash: ["fixture"] } } };
   const entry = { id: "fixture", name: "Fixture", version: "1.2.3", commit: "1234567890abcdef1234567890abcdef12345678", kind: "installed", state: "ok", enabled: true, shadowed: false,
+    services: [{ name: "worker", state: "crash-stopped", desired: "stopped", restarts: 5 }],
     web: { entry: "web/dist/index.js", style: "web/dist/index.css", hash: "1" }, contributes: {
       menu: [{ id: "board", label: "Fixture Board", open: { page: "board" } }],
       views: [{ id: "fixture-view" }], pages: [{ id: "board" }], modals: [{ id: "details" }],
@@ -287,6 +288,7 @@ try {
   if (process.env.PLUGIN_SCREENSHOTS) await page.screenshot({ path: resolve(process.env.PLUGIN_SCREENSHOTS, "settings-actual.png") });
   const fixtureRow = settings.getByRole("region", { name: "Fixture details" });
   await fixtureRow.waitFor({ timeout: 5000 });
+  await fixtureRow.getByText("Stopped After 5 Crashes", { exact: true }).waitFor({ timeout: 5000 });
   assert.equal(await settings.getByText("Hello plugin settings example.", { exact: true }).count(), 0, "only the selected plugin shows details");
   const listBox = await settings.getByRole("navigation", { name: "Plugin list" }).boundingBox();
   const detailBox = await fixtureRow.boundingBox();
