@@ -8,8 +8,8 @@ vi.mock("@/components/ui/dialog", async () => {
   return {
     Dialog: ({ children }: { children: React.ReactNode }) =>
       React.createElement("div", null, children),
-    DialogContent: ({ className, children }: { className?: string; children: React.ReactNode }) =>
-      React.createElement("div", { className, "data-testid": "dialog-content" }, children),
+    DialogContent: ({ className, children, showCloseButton = true }: { className?: string; children: React.ReactNode; showCloseButton?: boolean }) =>
+      React.createElement("div", { className, "data-testid": "dialog-content", "data-show-close-button": showCloseButton }, children),
     DialogTitle: ({ children }: { children: React.ReactNode }) =>
       React.createElement("h3", null, children),
     DialogDescription: ({ children }: { children: React.ReactNode }) =>
@@ -94,6 +94,7 @@ describe("WhatsNewDialog", () => {
       <WhatsNewDialog open release={release} onOpenChange={noop} onSeeAllChanges={noop} />,
     );
     expect(html).toContain('aria-label="Close What’s New"');
+    expect(html).toContain('data-show-close-button="false"');
     expect(html).toContain("Got It");
     expect(html).toContain("See All Changes");
   });
