@@ -188,7 +188,7 @@ export class PluginHost {
 
   private syncStoppingPolling() {
     const needed = this.entries.some(entry => entry.state === "stopping");
-    if (needed && this.stoppingTimer === null) this.stoppingTimer = setInterval(() => { void this.refresh(); }, 2000);
+    if (needed && this.stoppingTimer === null) this.stoppingTimer = setInterval(() => { if (!this.loading) void this.refresh(); }, 2000);
     if (!needed && this.stoppingTimer !== null) { clearInterval(this.stoppingTimer); this.stoppingTimer = null; }
   }
 
