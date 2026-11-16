@@ -65,6 +65,10 @@ Background execution:
 <terminal background="true" name="dev-server">npm run dev</terminal>
 ```
 
+On POSIX, background terminal commands run through the configured user shell,
+so assignments, command substitutions, pipes, and redirections work as they do
+for foreground terminal commands.
+
 With working directory:
 ```
 <terminal cwd="/tmp">pwd</terminal>
