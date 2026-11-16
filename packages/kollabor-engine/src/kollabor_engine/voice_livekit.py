@@ -462,10 +462,10 @@ class LiveKitRuntime:
         """Stop a voice service that runs other code than this Kollab's, unless a chat is using it.
 
         The service keeps the code of the Kollab that started it until it exits.
-        Without this Kollab's runtime prepared it must go before setup can install
-        that runtime, so a chat using it keeps voice off here. With the runtime
-        prepared, a chat using it keeps it: its worker and ours speak through it
-        as it is, and it is replaced at a start that finds it idle.
+        An idle service from another install is replaced. A chat using a service
+        from another or unknown install keeps voice off here until that chat
+        turns voice off; having this Kollab's runtime prepared cannot update the
+        running worker's code.
         """
         from kollabor_voice.control import install_identity
 
@@ -479,12 +479,10 @@ class LiveKitRuntime:
         ):
             return
         if status.get("owner"):
-            if runtime_ready:
-                return
             raise RuntimeHostError(
                 "voice_service_busy",
                 409,
-                "Voice is on in another chat, on a voice service from an older Kollab. "
+                "Voice is on in another chat, on a voice service from an older Kollab or an unknown install. "
                 "Turn voice off there, then try again.",
                 retryable=True,
             )
