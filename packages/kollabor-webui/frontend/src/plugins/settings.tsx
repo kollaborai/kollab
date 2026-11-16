@@ -15,8 +15,8 @@ type PluginService = { name: string; state: string; desired?: string; since?: nu
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const pathFor = (id: string) => `/plugins/${encodeURIComponent(id)}`;
 
-function ServiceRow({ service, host, api, id, canManage, refresh, onError }: {
-  service: PluginService; host: PluginHost; api: EngineApi; id: string; canManage: boolean; refresh: () => Promise<void>; onError: (message: string) => void;
+function ServiceRow({ service, host, api, id, canManage, canStart, refresh, onError }: {
+  service: PluginService; host: PluginHost; api: EngineApi; id: string; canManage: boolean; canStart: boolean; refresh: () => Promise<void>; onError: (message: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string | null>(null);
@@ -24,7 +24,7 @@ function ServiceRow({ service, host, api, id, canManage, refresh, onError }: {
   const staleAge = heartbeatAge(service, host.engineTime());
   const state = service.state === "running" ? (staleAge === null ? "Running" : `Running · ${heartbeatLabel(staleAge)}`) : service.state === "stopping" ? stoppingLabel([service], host.engineTime()) :
     service.state === "exited" ? "Exited" : service.state === "failed" || service.state === "crash-stopped" ? "Stopped After 5 Crashes" :
-    service.state === "stopped" ? "Stopped" : service.state;
+    service.state === "stopped" ? "Stopped" : service.state === "stop-failed" ? "Failed to Stop" : service.state;
   const control = async (action: string) => {
     setBusy(true);
     try { await api.json(`${pathFor(id)}/services/${encodeURIComponent(service.name)}/${action}`, { method: "POST" }); await refresh(); }
@@ -40,9 +40,10 @@ function ServiceRow({ service, host, api, id, canManage, refresh, onError }: {
     {service.error ? <span className="text-destructive break-words">{service.error}</span> : null}
     <div className="ml-auto flex flex-wrap gap-1">
       <Button type="button" variant="ghost" size="xs" disabled={busy} onClick={() => { void showLog(); }}>View Log</Button>
-      {canManage && service.state === "running" ? <><Button type="button" variant="outline" size="xs" disabled={busy} onClick={() => { void control("restart"); }}>Restart</Button>
+      {canManage && service.state === "running" ? <>{canStart ? <Button type="button" variant="outline" size="xs" disabled={busy} onClick={() => { void control("restart"); }}>Restart</Button> : null}
         <Button type="button" variant="outline" size="xs" disabled={busy} onClick={() => { void control("stop"); }}>Stop</Button></> : null}
-      {canManage && service.state !== "running" && service.state !== "stopping" ? <Button type="button" variant="outline" size="xs" disabled={busy} onClick={() => { void control("start"); }}>Start</Button> : null}
+      {canManage && service.state === "stop-failed" ? <Button type="button" variant="outline" size="xs" disabled={busy} onClick={() => { void control("stop"); }}>Retry Stop</Button> : null}
+      {canManage && canStart && service.state !== "running" && service.state !== "stopping" && service.state !== "stop-failed" ? <Button type="button" variant="outline" size="xs" disabled={busy} onClick={() => { void control("start"); }}>Start</Button> : null}
     </div>
     <Dialog open={log !== null} onOpenChange={open => { if (!open) setLog(null); }}><DialogContent>
       <DialogHeader><DialogTitle>{service.name} Log</DialogTitle><DialogDescription>Most recent redacted output.</DialogDescription></DialogHeader>
@@ -64,7 +65,9 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate }: { entr
   const custom = plugin?.settings[0];
   const failure = snapshot.errors[entry.id] ?? (entry.state === "changed-on-disk" ? null : entry.error);
   const stopping = entry.state === "stopping";
-  const canChange = canManage && !entry.read_only && !entry.required && !entry.shadowed && !stopping;
+  const stopFailed = entry.state === "stop-failed";
+  const canManageServices = canManage && !entry.read_only && !entry.required && !entry.shadowed && !stopping;
+  const canChange = canManageServices && !stopFailed;
   const perform = async (action: "enable" | "disable" | "remove") => {
     setBusy(true); setError(null);
     try { await api.json(`${pathFor(entry.id)}/${action}`, { method: "POST" }); setConfirmation(null); await host.refresh(); }
@@ -76,11 +79,11 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate }: { entr
     catch (caught) { setError(message(caught)); } finally { setBusy(false); }
   };
   const status = failure ? (snapshot.renderFailed.includes(entry.id) ? "Failed to Render" : "Failed to Load") :
-    entry.state === "changed-on-disk" ? "Changed on Disk" : entry.state === "stopping" ? "Stopping" : entry.enabled ? "On" : "Off";
+    entry.state === "changed-on-disk" ? "Changed on Disk" : entry.state === "stopping" ? "Stopping" : entry.state === "stop-failed" ? "Failed to Stop" : entry.enabled ? "On" : "Off";
   return <section aria-label={`${entry.name} details`} className="min-w-0 py-1">
     <div className="flex min-w-0 flex-wrap items-center gap-2">
       <h2 className="min-w-0 truncate font-semibold">{entry.name}</h2>
-      <Badge variant={failure || entry.state === "changed-on-disk" ? "destructive" : "secondary"}>{status}</Badge>
+      <Badge variant={failure || entry.state === "changed-on-disk" || stopFailed ? "destructive" : "secondary"}>{status}</Badge>
       {canManage && !entry.read_only ? <Switch aria-label={`${entry.name} enabled`} checked={entry.enabled} disabled={!canChange || busy}
         onCheckedChange={checked => { if (checked) void perform("enable"); else setConfirmation("disable"); }} /> : null}
       {canChange && entry.kind === "installed" ? <div className="ml-auto flex flex-wrap gap-2"><Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => onUpdate(entry.id)}>Update</Button><Button type="button" size="xs" variant="ghost" disabled={busy} onClick={() => setConfirmation("remove")}>Remove</Button></div> : null}
@@ -92,7 +95,7 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate }: { entr
     <div className="flex min-w-0 flex-col gap-4 py-4">
       {failure ? <div className="flex flex-wrap gap-2"><Button type="button" size="xs" onClick={() => { void host.retry(entry.id); }}>Retry</Button><details className="text-sm"><summary>View Error</summary><pre className="whitespace-pre-wrap break-words">{failure}</pre></details></div> : null}
       {entry.kind === "dev" && entry.source ? <p className="text-muted-foreground break-all text-sm">Development folder: {entry.source}</p> : null}
-      {services.length ? <div><h3 className="text-sm font-semibold">Background Processes</h3>{services.map(service => <ServiceRow key={service.name} service={service} host={host} api={api} id={entry.id} canManage={canChange} refresh={() => host.refresh()} onError={setError} />)}</div> : null}
+      {services.length ? <div><h3 className="text-sm font-semibold">Background Processes</h3>{services.map(service => <ServiceRow key={service.name} service={service} host={host} api={api} id={entry.id} canManage={canManageServices} canStart={entry.enabled} refresh={() => host.refresh()} onError={setError} />)}</div> : null}
       {entry.uses?.length ? <div><h3 className="text-sm font-semibold">What it uses</h3><ul className="text-muted-foreground list-disc pl-5 text-sm">{entry.uses.map((value, i) => <li key={i}>{typeof value === "string" ? value : JSON.stringify(value)}</li>)}</ul></div> : null}
       {fields.length ? <div className="flex flex-col gap-3"><h3 className="text-sm font-semibold">Settings</h3>{fields.map(field => <FieldRenderer key={field.path} field={field} draft={draft} disabled={!canManage || busy} onChange={setDraft} />)}
         {canManage ? <Button type="button" size="sm" className="self-start" disabled={busy || !Object.keys(draft).length} onClick={() => { void save(); }}>Save Settings</Button> : null}</div> : null}
@@ -135,7 +138,7 @@ export function PluginsSettings({ host, api, session, canManage }: { host: Plugi
           <div className="flex flex-col gap-1">{group.entries.map(entry => {
             const key = entryKey(entry);
             const failure = snapshot.errors[entry.id] ?? (entry.state === "changed-on-disk" ? null : entry.error);
-            const status = failure ? "Failed" : entry.state === "changed-on-disk" ? "Changed on Disk" : entry.state === "stopping" ? "Stopping" : entry.enabled ? "On" : "Off";
+            const status = failure ? "Failed" : entry.state === "changed-on-disk" ? "Changed on Disk" : entry.state === "stopping" ? "Stopping" : entry.state === "stop-failed" ? "Failed to Stop" : entry.enabled ? "On" : "Off";
             return <Button key={key} type="button" variant={selected && entryKey(selected) === key ? "secondary" : "ghost"}
               className="h-auto min-h-12 w-full min-w-0 justify-start gap-2 px-2 py-2 text-left" aria-label={entry.name}
               aria-pressed={Boolean(selected && entryKey(selected) === key)} onClick={() => setSelectedKey(key)}>
