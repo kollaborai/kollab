@@ -398,6 +398,8 @@ def _service_context(plugin_id: str, service_name: str):
 
 @router.post("/{plugin_id}/services/{service_name}/{action}")
 async def plugin_service_action(request: Request, plugin_id: str, service_name: str, action: str):
+    from kollabor_plugins.services import ServiceSignalError
+
     if action not in {"start", "stop", "restart"}:
         raise HTTPException(status_code=404, detail="Plugin service action not found")
     context = _service_context(plugin_id, service_name)
@@ -405,6 +407,10 @@ async def plugin_service_action(request: Request, plugin_id: str, service_name: 
         pending = await request.app.state.plugin_service_controls.control(context, service_name, action)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail="Cannot change plugin service state") from exc
+    except ServiceSignalError as exc:
+        request.app.state.plugin_events.publish_change()
+        logger.warning("Cannot signal plugin service %s/%s: %s", plugin_id, service_name, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Cannot stop plugin service; check its status and retry") from exc
     except OSError as exc:
         logger.warning("Cannot control plugin service %s/%s: %s", plugin_id, service_name, type(exc).__name__)
         raise HTTPException(status_code=503, detail="Cannot control plugin service") from exc
@@ -570,6 +576,18 @@ class RemovePluginOptions(BaseModel):
     confirm_purge: bool = False
 
 
+async def _publish_partial_disable(request: Request, plugin_id: str) -> None:
+    """Revoke live resources and notify clients after the registry was disabled."""
+    try:
+        await request.app.state.plugin_service_controls.cancel_plugin(plugin_id)
+    finally:
+        try:
+            await request.app.state.plugin_dispatcher.invalidate(plugin_id)
+        finally:
+            request.app.state.plugin_events.publish_change()
+
+
+
 @router.post("/{plugin_id}/enable")
 @router.post("/{plugin_id}/disable")
 async def set_plugin_enabled(request: Request, plugin_id: str):
@@ -601,13 +619,7 @@ async def set_plugin_enabled(request: Request, plugin_id: str):
             await request.app.state.plugin_service_controls.cancel_plugin(plugin_id)
             await request.app.state.plugin_dispatcher.invalidate(plugin_id)
     except ServiceStopError as exc:
-        try:
-            await request.app.state.plugin_service_controls.cancel_plugin(plugin_id)
-        finally:
-            try:
-                await request.app.state.plugin_dispatcher.invalidate(plugin_id)
-            finally:
-                request.app.state.plugin_events.publish_change()
+        await _publish_partial_disable(request, plugin_id)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -620,6 +632,8 @@ async def set_plugin_enabled(request: Request, plugin_id: str):
 
 @router.post("/{plugin_id}/remove")
 async def remove_plugin(request: Request, plugin_id: str, options: RemovePluginOptions = RemovePluginOptions()):
+    from kollabor_plugins.services import ServiceStopError
+
     context = _package_context(plugin_id)
     if context is None:
         raise HTTPException(status_code=404, detail="Plugin not found")
@@ -631,6 +645,9 @@ async def remove_plugin(request: Request, plugin_id: str, options: RemovePluginO
         if await request.app.state.plugin_dispatcher.invalidate(plugin_id):
             raise ValueError("Plugin requests are still running; retry removal when they finish")
         await asyncio.to_thread(_remove_package_checked, context, options.purge)
+    except ServiceStopError as exc:
+        await _publish_partial_disable(request, plugin_id)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         await request.app.state.plugin_dispatcher.invalidate(plugin_id)
         request.app.state.plugin_events.publish_change()
