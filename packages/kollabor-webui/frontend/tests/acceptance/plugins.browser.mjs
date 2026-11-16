@@ -206,25 +206,27 @@ try {
   folderless = true;
   entry.state = "stopping";
   entry.services[0].state = "stopping";
+  entry.services[0].stop_deadline = engineNow() + 719;
   entry.services.push({ name: "pulse", state: "running", desired: "running", restarts: 0,
     heartbeat_s: 60, heartbeat: engineNow() - 370, since: engineNow() - 600 });
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   const folderlessPanel = page.getByRole("complementary", { name: "Session Controls" });
   await folderlessPanel.waitFor({ timeout: 15000 });
-  await folderlessPanel.getByRole("button", { name: /Fixture Board/ }).getByText("Stopping", { exact: true }).waitFor({ timeout: 5000 });
+  await folderlessPanel.getByRole("button", { name: /Fixture Board/ }).getByText("Stopping · 12 min left", { exact: true }).waitFor({ timeout: 5000 });
   await page.getByRole("button", { name: "Settings", exact: true }).first().click();
   const stoppingSettings = page.getByRole("dialog", { name: "Settings" });
   await stoppingSettings.getByRole("tab", { name: "Plugins" }).click();
   const stoppingDetails = stoppingSettings.getByRole("region", { name: "Fixture details" });
   await stoppingDetails.getByText("Waiting for the plugin to stop.", { exact: true }).waitFor({ timeout: 5000 });
-  await stoppingDetails.getByText("worker", { exact: true }).locator("..").getByText("Stopping", { exact: true }).waitFor({ timeout: 5000 });
+  await stoppingDetails.getByText("worker", { exact: true }).locator("..").getByText("Stopping · 12 min left", { exact: true }).waitFor({ timeout: 5000 });
   await stoppingDetails.getByText("pulse", { exact: true }).locator("..").getByText("Running · No Heartbeat for 6 min", { exact: true }).waitFor({ timeout: 5000 });
   await captureReview(page, "stopping-heartbeat");
   assert.equal(await stoppingDetails.getByRole("switch", { name: "Fixture enabled" }).isDisabled(), true, "cannot toggle while stopping");
   entry.services.pop();
   entry.state = "ok";
   entry.services[0].state = "crash-stopped";
+  delete entry.services[0].stop_deadline;
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   await folderlessPanel.getByRole("button", { name: /Fixture Board/ }).getByText("Stopped", { exact: true }).waitFor({ timeout: 5000 });
@@ -371,6 +373,7 @@ try {
   await page.keyboard.press("Escape");
   await page.getByRole("dialog", { name: "Fixture Details" }).waitFor({ state: "hidden" });
   entry.services[0].state = "crash-stopped";
+  delete entry.services[0].stop_deadline;
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
   await page.getByRole("button", { name: "Settings", exact: true }).first().click();
