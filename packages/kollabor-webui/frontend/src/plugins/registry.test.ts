@@ -26,6 +26,27 @@ describe("plugin contribution registry", () => {
     expect(notify).toHaveBeenCalledTimes(2);
   });
 
+  it("publishes a new notice after activation, but not from a replaced or removed draft", () => {
+    const registry = new PluginRegistry();
+    const first = registry.stage("example");
+    const sameNotice = { text: "Hello" };
+    first.notice(sameNotice);
+    registry.commit(first);
+    const before = registry.getSnapshot();
+    first.notice(sameNotice);
+    const after = registry.getSnapshot();
+    expect(before.plugins[0].notices).toHaveLength(1);
+    expect(after.plugins[0].notices).toHaveLength(2);
+    expect(after.plugins[0].notices[0]).not.toBe(after.plugins[0].notices[1]);
+    const replacement = registry.stage("example");
+    registry.commit(replacement);
+    first.notice({ text: "stale" });
+    expect(registry.getSnapshot().plugins[0].notices).toEqual([]);
+    registry.remove("example");
+    replacement.notice({ text: "removed" });
+    expect(registry.getSnapshot().plugins).toEqual([]);
+  });
+
   it("binds only declared contributions and uses the manifest menu target", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
