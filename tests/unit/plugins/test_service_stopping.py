@@ -51,6 +51,13 @@ def test_disable_exposes_live_stopping_service_and_rejects_restart(tmp_path, mon
         assert entry["state"] == "stopping"
         assert entry["desired"] == "stopped"
         assert time.time() < entry["stop_deadline"] <= time.time() + 3.5
+        builtin = tmp_path / "builtin"
+        builtin.mkdir()
+        plugin = next(item for item in registry.plugin_entries(builtin) if item["id"] == "hello")
+        assert plugin["state"] == "stopping"
+        assert plugin["enabled"] is False
+        with pytest.raises(ValueError, match="stopping"):
+            settings.set_enabled("hello", True)
         with pytest.raises(ValueError, match="stopping"):
             services.control_service("hello", "worker", "start")
         wrapper.wait(timeout=7)
