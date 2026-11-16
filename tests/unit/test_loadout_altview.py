@@ -111,3 +111,23 @@ def test_loadout_form_saves_the_compaction_threshold(monkeypatch):
     view._build_widgets()
     asyncio.run(view._run_save("gpt-5.6-luna"))
     assert manager.updates[0][1]["compaction_threshold_k"] == 500
+
+
+def test_loadout_form_refuses_oversized_compaction_threshold(monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(loadout_altview, "_model_registry_info", lambda model: {})
+    view = loadout_altview.LoadoutFormAltView()
+    view.set_context(
+        manager=_Manager(),
+        profile_manager=_ProfileManager("https://api.openai.com/v1"),
+        base=_base_loadout(),
+        mode="edit",
+    )
+    view._build_widgets()
+    view._compaction_widget.set_value("9" * 5000)
+
+    asyncio.run(view._run_save("gpt-5.6-luna"))
+
+    assert view._stage == "edit"
+    assert view._error == "Compaction Threshold must be a whole number of at least 1."
