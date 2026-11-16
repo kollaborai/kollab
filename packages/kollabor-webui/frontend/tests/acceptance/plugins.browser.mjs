@@ -137,6 +137,7 @@ try {
          k.settings({render:() => React.createElement("p", {className:"scope-probe"}, "Fixture custom settings")});
          k.notice({text:"Fixture plugin notice",button:{label:"Open board",open:{page:"board"}}});
          k.notice({text:"Fixture modal notice",button:{label:"Open details",open:{modal:"details"}}});
+         k.notice({text:"Fixture view notice",button:{label:"Open folder view",open:{view:"fixture-view"}}});
        });` });
     if (url.pathname === "/engine/prompts/libraries") return route.fulfill({ json: { libraries: [], roles: [] } });
     if (url.pathname === "/engine/plugins/events") return route.fulfill({ contentType: "text/event-stream", body: ": open\n\n" });
@@ -160,6 +161,10 @@ try {
   await folderlessPanel.getByRole("button", { name: "Hide Session Panel" }).click();
   assert.equal(await folderlessPanel.getByRole("button", { name: "Fixture View", exact: true }).count(), 0, "folder-required tab stays hidden in collapsed controls");
   await folderlessPanel.getByRole("button", { name: "Show Session Panel" }).click();
+  await page.getByRole("button", { name: "Open folder view" }).click();
+  await page.getByText("Open a chat with a folder to use this view.", { exact: true }).waitFor({ timeout: 5000 });
+  await page.getByRole("textbox", { name: "Message input" }).waitFor({ timeout: 5000 });
+  assert.equal(await page.getByText("This plugin view is unavailable for this chat.").count(), 0, "folderless direct navigation stays on Chat");
   folderless = false;
   entry.services[0].state = "running";
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
