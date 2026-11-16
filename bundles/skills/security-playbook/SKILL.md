@@ -34,13 +34,13 @@ Fix code goes to engineering through koordinator with the finding attached.
 
 ## Team
 
-| Hub name | Name | Role | Bundle | Reports to |
-|---|---|---|---|---|
-| `marcus` | Marcus Reid | Security Lead | `default` | human |
-| `anya` | Anya Volkova | Application Security Engineer | `research` | marcus |
-| `idris` | Idris Khan | Cloud & Infrastructure Security Engineer | `research` | marcus |
-| `keira` | Keira Walsh | Detection & Response Analyst | `research` | marcus |
-| `soren` | Soren Holm | GRC Analyst | `technical-writer` | marcus |
+| Hub name | Role | Bundle | Reports to |
+|---|---|---|---|
+| `security-lead` | Security Lead | `default` | human |
+| `application-security-engineer` | Application Security Engineer | `research` | security-lead |
+| `cloud-infrastructure-security-engineer` | Cloud & Infrastructure Security Engineer | `research` | security-lead |
+| `detection-response-analyst` | Detection & Response Analyst | `research` | security-lead |
+| `grc-analyst` | GRC Analyst | `technical-writer` | security-lead |
 
 ## Hand-off outside the team
 

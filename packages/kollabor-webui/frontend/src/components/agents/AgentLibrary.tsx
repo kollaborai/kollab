@@ -157,8 +157,8 @@ function RosterSection({ roster, folderRoster, folder }: { roster: Roster; folde
 function TeamSection({ team, folder, onConfigure }: { team: Team; folder: string; onConfigure: () => void }) {
   return (
     <section aria-label={titleCase(team.name)}>
-      <div className="flex items-start justify-between gap-3 px-2">
-        <div className="min-w-0">
+      <div className="flex flex-col items-start gap-3 px-2 sm:flex-row sm:justify-between">
+        <div className="w-full min-w-0 sm:w-auto">
           <h3 className="flex flex-wrap items-baseline gap-x-2 text-sm font-semibold">
             {titleCase(team.name)}
             <span className="text-muted-foreground text-xs font-normal">
@@ -167,7 +167,7 @@ function TeamSection({ team, folder, onConfigure }: { team: Team; folder: string
           </h3>
           {team.description ? <p className="text-muted-foreground mt-0.5 text-xs">{team.description}</p> : null}
         </div>
-        <Button type="button" size="sm" variant="outline" onClick={onConfigure} className="shrink-0">
+        <Button type="button" size="sm" variant="outline" onClick={onConfigure} className="shrink-0 self-start">
           <Rocket className="size-4" />
           Configure &amp; Launch
         </Button>
