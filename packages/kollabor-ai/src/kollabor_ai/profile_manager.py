@@ -434,6 +434,23 @@ def _keyring_set(key_name: str, value: str) -> bool:
     return _vault_call(key_name, value) is not None
 
 
+def _delete_keyring_entry(key_name: str) -> None:
+    """Delete a profile's stored key from the keyring and encrypted vault."""
+    _vault_call(key_name, delete=True)
+    try:
+        import keyring
+
+        from kollabor_ai.providers.security import APIKeyManager, keyring_enabled
+
+        if keyring_enabled():
+            try:
+                keyring.delete_password(APIKeyManager.SERVICE_NAME, key_name)
+            except keyring.errors.PasswordDeleteError:
+                pass
+    except Exception as exc:
+        logger.debug("Could not remove keyring entry for a removed profile: %s", exc)
+
+
 @dataclass
 class EnvVarHint:
     """Information about a profile's env var."""
@@ -2761,6 +2778,120 @@ class ProfileManager:
         del self._profiles[name]
         logger.info(f"Removed profile: {name}")
         return True
+
+    def remove_provider_profiles(self, provider: str) -> List[str]:
+        """Remove configured profiles for one provider from their source files.
+
+        Global and folder profiles are stored in separate config files. Remove
+        only definitions whose configured provider matches, then clear a
+        persisted active profile when that config selected a removed profile.
+        """
+        provider_name = str(provider or "").strip().lower()
+        if not provider_name:
+            return []
+
+        paths = [get_existing_global_config_path()]
+        paths.extend(get_local_config_path_candidates(self._local_folder))
+        unique_paths: List[Path] = []
+        seen_paths: set[Path] = set()
+        for path in paths:
+            resolved = path.resolve()
+            if resolved not in seen_paths:
+                seen_paths.add(resolved)
+                unique_paths.append(path)
+
+        removed: set[str] = set()
+        secret_names: set[str] = set()
+        updates: List[tuple[Path, dict, set[str]]] = []
+        scanned_configs: List[tuple[Path, dict]] = []
+        for path in unique_paths:
+            if not path.exists():
+                continue
+            try:
+                config_data = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(config_data, dict):
+                    continue
+                llm = config_data.get("kollabor", {}).get("llm", {})
+                profiles = llm.get("profiles", {}) if isinstance(llm, dict) else {}
+                if not isinstance(profiles, dict):
+                    continue
+                scanned_configs.append((path, config_data))
+                matching = {
+                    name
+                    for name, value in profiles.items()
+                    if isinstance(value, dict)
+                    and str(value.get("provider") or "").strip().lower() == provider_name
+                    and name not in self.DEFAULT_PROFILES
+                }
+                if matching:
+                    updates.append((path, config_data, matching))
+                    removed.update(matching)
+                    for name in matching:
+                        api_key = str(profiles[name].get("api_key") or "")
+                        if api_key.startswith(KEYRING_SENTINEL_PREFIX):
+                            secret_names.add(api_key[len(KEYRING_SENTINEL_PREFIX) :])
+            except Exception as exc:
+                logger.error("Could not read provider config %s: %s", path, exc)
+                return []
+        if not removed:
+            return []
+
+        updated_paths = {path.resolve() for path, _, _ in updates}
+        for path, config_data in scanned_configs:
+            if path.resolve() in updated_paths:
+                continue
+            llm = config_data.get("kollabor", {}).get("llm", {})
+            if isinstance(llm, dict) and llm.get("active_profile") in removed:
+                updates.append((path, config_data, set()))
+
+        for path, config_data, matching in updates:
+            llm = config_data["kollabor"]["llm"]
+            profiles = llm["profiles"]
+            for name in matching:
+                profiles.pop(name, None)
+            if llm.get("active_profile") in removed:
+                llm.pop("active_profile", None)
+            try:
+                write_text_atomic(
+                    path, json.dumps(config_data, indent=2, ensure_ascii=False)
+                )
+            except Exception as exc:
+                logger.error("Could not remove provider profiles from %s: %s", path, exc)
+                return []
+
+        still_referenced: set[str] = set()
+        can_check_references = True
+        for path in unique_paths:
+            if not path.exists():
+                continue
+            try:
+                config_data = json.loads(path.read_text(encoding="utf-8"))
+                profiles = (
+                    config_data.get("kollabor", {}).get("llm", {}).get("profiles", {})
+                )
+                if isinstance(profiles, dict):
+                    for value in profiles.values():
+                        if not isinstance(value, dict):
+                            continue
+                        api_key = str(value.get("api_key") or "")
+                        if api_key.startswith(KEYRING_SENTINEL_PREFIX):
+                            still_referenced.add(
+                                api_key[len(KEYRING_SENTINEL_PREFIX) :]
+                            )
+            except Exception as exc:
+                logger.warning("Could not check remaining profile key references: %s", exc)
+                can_check_references = False
+                break
+        if can_check_references:
+            for secret_name in secret_names - still_referenced:
+                _delete_keyring_entry(secret_name)
+
+        for name in removed:
+            self._profiles.pop(name, None)
+        if self._active_profile_name in removed:
+            self._active_profile_name = "default"
+        self._pending_active_profile = None
+        return sorted(removed)
 
     def update_profile(
         self,
