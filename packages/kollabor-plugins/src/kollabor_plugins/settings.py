@@ -242,6 +242,12 @@ def set_enabled(plugin_id: str, enabled: bool, *, config_service=None, save_targ
             raise ValueError("Invalid plugin id")
         if not isinstance(record, dict):
             raise ValueError("Plugin is not installed")
+        if enabled and not record.get("enabled"):
+            from .services import _recorded_process_alive
+
+            run_dir = home / "plugin-data" / plugin_id / "run"
+            if any(pid.is_symlink() or _recorded_process_alive(pid) for pid in run_dir.glob("*.pid")):
+                raise ValueError("Plugin is stopping or still has a running service; wait before enabling it")
         record["enabled"] = enabled
         if enabled:
             record["enabled_path"] = os.environ.get("PATH", os.defpath)
