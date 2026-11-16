@@ -75,3 +75,7 @@ step 3a. Do not merge or mark ready without the required separate authorization 
 gates. If the lead requests changes, follow red-first tests, update this handoff,
 rerun the gates at a fixed code head, request the supervisor restart, and repeat
 the smoke and screenshot matrix.
+
+
+## Lead visual review follow-up (2026-11-16)
+The brief says finding 1 changes a Python file, but the review identifies the tab-row layout in `packages/kollabor-webui/frontend/src/components/panels/PanelHost.tsx`. No Python change has been identified as necessary. Next: add a red-first browser regression for the 820px tab row, fix the layout and Retry sizing, then run the final gates and request a stack restart.
