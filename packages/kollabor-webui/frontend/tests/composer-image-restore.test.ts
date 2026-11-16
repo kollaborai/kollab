@@ -176,7 +176,7 @@ describe("composer restore wiring", () => {
     expect(threadSource).toContain("const keptImages = loadComposerAttachments(key)");
     expect(threadSource).toContain("aui.composer.addAttachment(image.file)");
     expect(threadSource).toContain("role=\"status\"");
-    expect(threadSource).toContain("for (const attachment of state.attachments)");
+    expect(threadSource).toContain("state.attachments.map(async (attachment) => {");
   });
 
   it("reports only images that failed to reattach", () => {
