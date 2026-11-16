@@ -71,6 +71,26 @@ describe("web plugin loader", () => {
     expect(active.get("a")).toEqual(["ready"]);
   });
 
+  it("contains context creation failures and still loads other plugins", async () => {
+    const registry = new PluginRegistry<{ add(value: string): void }>();
+    const active = new Map<string, string[]>();
+    const fail = vi.fn();
+    const loader = new PluginLoader({
+      registry,
+      importer: vi.fn(async () => ({ default: (k: { add(value: string): void }) => k.add("ready") })),
+      createContext: (item, draft) => {
+        if (item.id === "bad") throw new Error("invalid stylesheet");
+        return { context: draft.context };
+      },
+      commit: (id, records) => { active.set(id, records); },
+      remove: id => { active.delete(id); },
+      fail,
+    });
+    await expect(loader.reconcile([entry("bad"), entry("good")])).resolves.toBeUndefined();
+    expect(fail).toHaveBeenCalledWith("bad", expect.objectContaining({ message: "invalid stylesheet" }));
+    expect(active.get("good")).toEqual(["ready"]);
+  });
+
   it("contains activation errors and leaves other plugins working", async () => {
     const { loader, active, errors } = setup(async url => ({ default: (k: { add(s: string): void }) => {
       if (url.includes("/bad/")) throw new Error("broken");
