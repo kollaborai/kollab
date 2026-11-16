@@ -114,7 +114,12 @@ def test_actions_are_immutable_and_root_upload_follows_dependency_verification()
 def test_direct_binary_dispatch_cannot_select_alternate_source_or_share_build_caches():
     binaries = workflow("binaries.yml")
     events = binaries.get("on", binaries.get(True))
-    assert events["workflow_dispatch"] is None
+    # A dispatch build checks out its own selected revision and accepts no
+    # alternate source input; #1086's apple_signing_mode picks a signing mode,
+    # never a source. The checkout assertion below still pins every build's
+    # source to inputs.source_ref || github.sha.
+    dispatch_inputs = (events.get("workflow_dispatch") or {}).get("inputs") or {}
+    assert not any("ref" in name for name in dispatch_inputs)
     assert events["workflow_call"]["inputs"]["source_ref"]["required"] is True
     for document in (binaries, workflow("publish.yml")):
         for job in document["jobs"].values():
