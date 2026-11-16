@@ -462,17 +462,25 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
     for name in declared:
         if not isinstance(name, str) or not _SERVICE.fullmatch(name):
             continue
-        state_file = home / "plugin-data" / plugin_id / "run" / f"{name}.state"
+        data_dir = home / "plugin-data"
+        run_dir = data_dir / plugin_id / "run"
+        state_file = run_dir / f"{name}.state"
+        pid_file = run_dir / f"{name}.pid"
+        unsafe_run = any(path.is_symlink() for path in (data_dir, data_dir / plugin_id, run_dir))
         try:
+            if unsafe_run or state_file.is_symlink():
+                raise ValueError("Unsafe service state path")
             state = json.loads(state_file.read_text(encoding="utf-8"))
             if not isinstance(state, dict):
                 state = {}
         except OSError, ValueError:
-            state = {}
+            state = {"status": "unknown"} if unsafe_run or state_file.is_symlink() else {}
         history = state.get("exit_history", [])
         identity = None
         try:
-            recorded = json.loads((state_file.parent / f"{name}.pid").read_text(encoding="utf-8"))
+            if unsafe_run or pid_file.is_symlink():
+                raise ValueError("Unsafe service pid path")
+            recorded = json.loads(pid_file.read_text(encoding="utf-8"))
             if isinstance(recorded, dict):
                 child = recorded.get("child")
                 wrapper = recorded.get("wrapper")
@@ -493,9 +501,10 @@ def _service_entries(home: Path, plugin_id: str, manifest: dict) -> list[dict]:
             heartbeat_s = None
         if status == "running" and identity is None:
             status = "unknown"
-        if status in {"stopping", "stop-failed"} and identity is None:
-            pid_file = state_file.parent / f"{name}.pid"
+        if status == "stopping" and identity is None:
             status = "unknown" if pid_file.exists() or pid_file.is_symlink() else "stopped"
+        if status == "stop-failed" and identity is None and not (pid_file.exists() or pid_file.is_symlink()):
+            status = "stopped"
         result.append(
             {
                 "name": name,
