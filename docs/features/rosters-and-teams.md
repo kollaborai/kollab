@@ -4,8 +4,8 @@ Agent names do not have to be gems. A **roster** is a set of personas (a name, a
 look, a bundle, a prompt); a **team** puts personas in a reporting chain. Both are JSON.
 
 ```bash
-kollab --as maya                    # a persona from any roster
-kollab --as marketing-crew/maya     # when two rosters share a name
+kollab --as brand-strategist                    # a persona from any roster
+kollab --as marketing-crew/brand-strategist     # when two rosters share a name
 kollab --hub org marketing          # launch a team (also: /hub org marketing "launch the beta")
 ```
 

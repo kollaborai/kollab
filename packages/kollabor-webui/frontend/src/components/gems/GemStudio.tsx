@@ -194,7 +194,7 @@ function StudioBody({
   // What it shows now: the user's pick over the roster's. Eyes and hat dress a gem only.
   const rosterAvatar = pinned?.avatar;
   const dressGem = isGemAvatar(target.avatar ?? rosterAvatar);
-  const born = resolveGemLook({ born: draft.born }, key, GEM_LOOK_VOCABULARY);
+  const born = resolveGemLook({ born: draft.born, crew: draft.crew }, key, GEM_LOOK_VOCABULARY);
   const bornHat = HAT_STYLES.find((hat) => hat.id === born.bornHat)?.label;
   const baseColor = current?.color ?? (isPoolGem(current?.name) ? undefined : born.bornColor);
   const set = (patch: Partial<GemLook>) => {
