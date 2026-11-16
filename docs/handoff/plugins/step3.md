@@ -194,6 +194,8 @@
 
 - Production-CSP browser preflight: the existing browser acceptance harness can now serve a built frontend with the exact import-map CSP hash read from WebUI server source. A fresh isolated build and the full acceptance path passed under that CSP (`production-csp-build.log`, `production-csp-browser.log`); development mode also passed (`production-csp-harness-dev.log`). This exercises built assets and CSP with a mocked engine, not the required isolated live-engine smoke. The existing Python CSP test also verifies the source import map/hash pair.
 
+- Heartbeat clock/restart correction, recorded before editing: heartbeat timestamps are engine wall-clock seconds, but the current UI compares them with browser wall-clock time; a remote client with a skewed clock can misreport. The event hub also loses heartbeat history on engine restart, while a service may predate that restart, making `since` alone an unsafe first-heartbeat baseline. The narrow Step 3 wire fix is to publish engine `server_time` on inventory and each service's hub observation start time; the UI should compute elapsed time using the engine/client offset and the later of process start and observation start, with red-first route and clock/restart tests. Preserve actual heartbeat timestamps and never treat missing/invalid clock data as proof of failure.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
