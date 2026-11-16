@@ -1,8 +1,8 @@
 # Model directory automation and provider-prefixed lookup
 
-Issue: #1107  
-Status: Implemented  
-Owner: Kollab maintainers
+- Issue: #1107
+- Status: Implemented
+- Owner: Kollab maintainers
 
 ## Problem
 
