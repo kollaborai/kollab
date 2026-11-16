@@ -1,4 +1,4 @@
-"""Model fallback: a turn the model can't serve moves the agent to its fallback once."""
+"""Model fallback: configured fallbacks advise explicit selection without changing routing."""
 
 import asyncio
 from types import SimpleNamespace
@@ -156,7 +156,7 @@ async def _native_turn_fails(plugin, message, **fields):
 async def _settle(plugin):
     for _ in range(5):
         await asyncio.sleep(0)
-    if plugin._task is not None:
+    if getattr(plugin, "_task", None) is not None:
         await plugin._task
 
 
@@ -168,102 +168,6 @@ async def _acp_turn_fails(plugin, tap, message):
 
 def _continues(bus):
     return [e for e, _ in bus.emitted if e == EventType.TRIGGER_LLM_CONTINUE]
-
-
-@pytest.mark.asyncio
-async def test_a_usage_limit_switches_once_and_runs_the_turn_again(monkeypatch):
-    plugin, bus, tap, profiles = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
-
-    # Inside the failed turn, so its request's stream gets the new model's answer.
-    assert await _native_turn_fails(plugin, "Usage limit reached for 5 hour.")
-    assert _Loadouts.activated == ["codex"] and profiles.active == "codex"
-    assert _continues(bus) == []  # no second turn: this one asks again
-    notice = [e for e in tap.get_snapshot() if e["type"] == "model_fallback"]
-    assert notice[0]["message"] == (
-        "glm-5.3-flash hit its usage limit. Switched to codex and resent your message."
-    )
-
-    # The fallback fails too: no second hop, no loop.
-    assert not await _native_turn_fails(plugin, "You've hit your usage limit.")
-    assert _Loadouts.activated == ["codex", "glm"]
-    assert profiles.active == "glm"
-
-
-@pytest.mark.asyncio
-async def test_rate_limit_fallback_keeps_saved_global_config_byte_identical(
-    monkeypatch, tmp_path
-):
-    config_path = tmp_path / "config.json"
-    original = b'{"kollabor":{"llm":{"active_profile":"glm"}}}\n'
-    config_path.write_bytes(original)
-    plugin, _, _, _ = await _agent(
-        monkeypatch, {"plugins.model_fallback.loadout": "codex"}
-    )
-
-    async def activate(self, loadout, event_bus=None, *, persist=True, for_current_run=False):
-        _Loadouts.activated.append(loadout.name)
-        assert for_current_run is True
-        if persist:
-            config_path.write_bytes(
-                b'{"kollabor":{"llm":{"active_profile":"codex"}}}\n'
-            )
-        return loadout
-
-    monkeypatch.setattr(_Loadouts, "activate", activate)
-
-    assert await plugin.fall_back(
-        "Rate limit exceeded. Please try again later.", retry=True
-    ) == "retry"
-    assert config_path.read_bytes() == original
-
-
-@pytest.mark.asyncio
-async def test_fallback_fails_closed_when_profile_state_is_shared(monkeypatch):
-    plugin, bus, tap, profiles = await _agent(
-        monkeypatch, {"plugins.model_fallback.loadout": "codex"}
-    )
-    bus.register_service("state_service", SimpleNamespace(set_active_profile=lambda *_a, **_k: None))
-
-    assert not await _native_turn_fails(plugin, "Rate limit exceeded.")
-    assert _Loadouts.activated == []
-    assert profiles.active == "glm"
-    notices = [event for event in tap.get_snapshot() if event["type"] == "model_fallback"]
-    assert len(notices) == 1
-    assert "shared across sessions" in notices[0]["message"]
-    assert "staying on this model" in notices[0]["message"]
-
-
-@pytest.mark.asyncio
-async def test_fallback_restores_the_active_profile_before_the_next_input(monkeypatch):
-    plugin, bus, _, profiles = await _agent(
-        monkeypatch, {"plugins.model_fallback.loadout": "codex"}
-    )
-
-    assert await plugin.fall_back(
-        "Rate limit exceeded. Please try again later.", retry=True
-    ) == "retry"
-    assert profiles.active == "codex"
-
-    await bus.fire(EventType.USER_INPUT_PRE)
-
-    assert profiles.active == "glm"
-
-
-@pytest.mark.asyncio
-async def test_resend_uses_fallback_once_before_restoring_the_active_profile(monkeypatch):
-    plugin, bus, _, profiles = await _agent(
-        monkeypatch, {"plugins.model_fallback.loadout": "codex"}
-    )
-
-    assert await plugin.fall_back(
-        "Rate limit exceeded. Please try again later.", retry=False
-    ) == "resend"
-
-    await bus.fire(EventType.USER_INPUT_PRE)
-    assert profiles.active == "codex"
-
-    await bus.fire(EventType.USER_INPUT_PRE)
-    assert profiles.active == "glm"
 
 
 @pytest.mark.asyncio
@@ -280,269 +184,6 @@ async def test_same_model_fallback_reports_no_switch_once(monkeypatch):
     assert "same model" in notices[0]["message"]
     assert profiles.active == "glm"
 
-
-@pytest.mark.asyncio
-async def test_a_reply_streamed_in_part_is_switched_but_never_asked_again(monkeypatch):
-    # Morganite on #549 round 2: the retry's answer joined the failed model's
-    # streamed part as one reply.
-    plugin, bus, tap, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
-    assert not await _native_turn_fails(plugin, "Usage limit reached for 5 hour.", streamed=True)
-    assert _Loadouts.activated == ["codex"]
-    notice = [e for e in tap.get_snapshot() if e["type"] == "model_fallback"]
-    assert notice[0]["message"] == (
-        "glm-5.3-flash hit its usage limit. Switched to codex. Send your message again."
-    )
-
-
-class _Harness:
-    """The ACP orchestrator as a switch sees it: its fence on new prompts, over
-    a runner busy while a prompt runs or waits."""
-
-    def __init__(self, *prompts, kept=0, bus=None):
-        self.closing_reason, self.prompts, self.runner = "", list(prompts), self
-        self.held, self.released, self.active, self.kept, self.handed = False, [], True, kept, 0
-        self.bus = bus
-
-    @property
-    def busy(self):
-        return bool(self.prompts)
-
-    def hold_observations(self):
-        self.held = True
-
-    def release_observations(self, flush=True):
-        self.held = False
-        self.released.append((self.closing_reason, flush))  # the fence as the release saw it
-
-    def hand_over_observations(self):
-        self.held, self.handed = False, self.handed + 1
-        return self.kept
-
-    async def hand_over_to_native(self):
-        self.held, self.handed = False, self.handed + 1
-        if self.kept > 0:
-            # The real orchestrator starts the answering turn itself (#560).
-            if self.bus is not None:
-                await self.bus.emit_with_hooks(
-                    EventType.TRIGGER_LLM_CONTINUE,
-                    {"source": "acp_handover", "content": ""},
-                    "acp_orchestrator",
-                )
-            return True
-        return False
-
-    def admit(self, text):
-        if self.closing_reason:
-            raise RuntimeError(self.closing_reason)
-        self.prompts.append(text)
-
-
-@pytest.mark.asyncio
-async def test_a_switch_the_harness_was_busy_for_runs_once_its_last_prompt_ends(monkeypatch):
-    # Morganite on #549 round 2: switching closed the harness, so a prompt it
-    # had already taken failed with "ACP runner closed". Labradorite on round
-    # 3: the failure was then dropped, and once that prompt succeeded nothing
-    # switched.
-    plugin, bus, tap, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
-    harness = _Harness("running", "waiting")
-    bus.register_service("acp_orchestrator", harness)
-    await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
-    assert _Loadouts.activated == []
-    harness.prompts.pop(0)
-    tap.publish({"type": "turn_complete"})  # one ended, one still waits
-    await _settle(plugin)
-    assert _Loadouts.activated == []
-    harness.prompts.pop(0)
-    tap.publish({"type": "turn_complete"})  # the last one ended, and it succeeded
-    await _settle(plugin)
-    assert _Loadouts.activated == ["codex"]
-
-
-@pytest.mark.asyncio
-async def test_a_switch_keeps_peer_messages_for_the_harness_it_starts(monkeypatch):
-    # Tanzanite on #549 round 5: the queued prompt's completion handed a peer
-    # message to the failing harness, and the new harness's start tried to send
-    # it behind the switch's fence; nothing sent it once the fence came down.
-    plugin, bus, tap, _ = await _agent(
-        monkeypatch, {"plugins.model_fallback.loadout": "codex"}, fallback_provider="acp"
-    )
-    harness = _Harness("running")
-    bus.register_service("acp_orchestrator", harness)
-    await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
-    assert harness.held and _Loadouts.activated == []  # busy: the switch waits, and keeps them
-    harness.prompts.pop(0)
-    tap.publish({"type": "turn_complete"})  # the queued prompt succeeded
-    await _settle(plugin)
-    assert _Loadouts.activated == ["codex"]
-    assert not harness.held and harness.released == [("", True)]  # once, after the fence came down
-
-
-@pytest.mark.asyncio
-async def test_a_native_fallback_answers_the_peer_messages_kept_for_it(monkeypatch):
-    # Selenite on #549 round 6: activating a native profile closed the harness,
-    # and nothing answered the messages it had kept for the switch.
-    plugin, bus, tap, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
-    harness = _Harness(kept=2, bus=bus)
-    bus.register_service("acp_orchestrator", harness)
-    activate = _Loadouts.activate
-
-    async def native(self, loadout, event_bus=None, *, persist=True, for_current_run=False):
-        harness.active = False  # a native profile closes the harness
-        return await activate(
-            self, loadout, event_bus, persist=persist, for_current_run=for_current_run
-        )
-
-    monkeypatch.setattr(_Loadouts, "activate", native)
-    await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
-    assert _Loadouts.activated == ["codex"] and harness.handed == 1 and harness.released == []
-    assert len(_continues(bus)) == 1  # one native turn answers them
-
-
-@pytest.mark.asyncio
-async def test_a_failed_switch_after_closing_acp_keeps_its_observations(monkeypatch):
-    # Round 7: closing ACP is not proof that native profile activation worked.
-    plugin, bus, tap, profiles = await _agent(
-        monkeypatch, {"plugins.model_fallback.loadout": "codex"}
-    )
-    harness = _Harness(kept=1)
-    bus.register_service("acp_orchestrator", harness)
-
-    async def closes_then_fails(self, loadout, event_bus=None, *, persist=True, for_current_run=False):
-        harness.active = False
-        return None
-
-    monkeypatch.setattr(_Loadouts, "activate", closes_then_fails)
-    await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
-
-    assert profiles.active == "glm"
-    assert harness.handed == 0 and harness.released == [("", False)]
-    assert not _continues(bus)
-
-
-@pytest.mark.asyncio
-async def test_native_handover_does_not_wake_after_history_write_failure(monkeypatch):
-    # Round 7: only the orchestrator can tell whether its history is ready.
-    plugin, bus, _, _ = await _agent(
-        monkeypatch, {"plugins.model_fallback.loadout": "codex"}
-    )
-    harness = _Harness(kept=1)
-    harness.active = False
-
-    async def no_history(self):
-        self.held = False
-        return False
-
-    harness.hand_over_to_native = no_history.__get__(harness)
-    await plugin._hand_over(harness, moved=True)
-
-    assert harness.handed == 0
-    assert not _continues(bus)
-
-
-@pytest.mark.asyncio
-async def test_shutdown_settles_an_inflight_fallback_before_returning(monkeypatch):
-    # Round 7: shutdown must not let a gated activation change profiles later.
-    plugin, bus, tap, profiles = await _agent(
-        monkeypatch, {"plugins.model_fallback.loadout": "codex"}
-    )
-    harness = _Harness(kept=1)
-    bus.register_service("acp_orchestrator", harness)
-    entered, release = asyncio.Event(), asyncio.Event()
-    activate = _Loadouts.activate
-
-    async def gated(self, loadout, event_bus=None, *, persist=True, for_current_run=False):
-        entered.set()
-        await release.wait()
-        return await activate(
-            self, loadout, event_bus, persist=persist, for_current_run=for_current_run
-        )
-
-    monkeypatch.setattr(_Loadouts, "activate", gated)
-    try:
-        tap.publish({
-            "type": "error",
-            "message": "claude-code: Claude AI usage limit reached",
-            "generation": 1,
-        })
-        tap.publish({"type": "turn_complete"})
-        await asyncio.wait_for(entered.wait(), timeout=1)
-        task = plugin._task
-
-        await plugin.shutdown()
-
-        assert task.done()
-        assert profiles.active == "glm"
-        assert harness.handed == 0 and harness.released == [("", False)]
-        assert not _continues(bus)
-    finally:
-        release.set()
-        if plugin._task is not None:
-            await asyncio.gather(plugin._task, return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_a_switch_that_moves_nothing_sends_the_kept_messages_nowhere(monkeypatch):
-    # Selenite on #549 round 6: the fallback was out of usage too, so nothing
-    # switched, and the kept messages went straight back to the harness that
-    # had just failed them, to fail again in a loop.
-    plugin, bus, tap, profiles = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
-    profiles.active = "codex"  # it already runs the fallback
-    harness = _Harness(kept=1)
-    bus.register_service("acp_orchestrator", harness)
-    await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
-    assert _Loadouts.activated == [] and harness.released == [("", False)] and not _continues(bus)
-
-
-@pytest.mark.asyncio
-async def test_a_switch_waits_only_for_the_harness_that_failed(monkeypatch):
-    # Prehnite on #549 round 4: a profile picked by hand while a switch waited
-    # was switched away at its next good turn, under the old harness's error.
-    plugin, bus, tap, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
-    bus.register_service("acp_orchestrator", _Harness("running"))
-    await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
-    assert _Loadouts.activated == []  # busy: the switch waits
-    failed = bus.services["acp_orchestrator"]
-    bus.register_service("acp_orchestrator", _Harness())  # the operator's pick, a new harness
-    tap.publish({"type": "turn_complete"})  # its turn succeeded
-    await _settle(plugin)
-    assert _Loadouts.activated == [] and plugin._pending is None
-    assert not failed.held and failed.released == [("", True)]  # the operator's pick takes them
-
-
-@pytest.mark.asyncio
-async def test_no_prompt_is_taken_between_the_idle_check_and_the_switch(monkeypatch):
-    # Labradorite on #549 round 3: the idle check was a snapshot, so a prompt
-    # taken after it failed with "ACP runner closed" when the switch closed
-    # the harness.
-    plugin, bus, tap, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
-    harness, refused = _Harness(), []
-    bus.register_service("acp_orchestrator", harness)
-    activate = _Loadouts.activate
-
-    async def activating(self, loadout, event_bus=None, *, persist=True, for_current_run=False):
-        try:  # a prompt that arrives while the harness closes and the new one starts
-            harness.admit("during the switch")
-        except RuntimeError as exc:
-            refused.append(str(exc))
-        return await activate(
-            self, loadout, event_bus, persist=persist, for_current_run=for_current_run
-        )
-
-    monkeypatch.setattr(_Loadouts, "activate", activating)
-    tap.publish({"type": "error", "message": "claude-code: Claude AI usage limit reached", "generation": 1})
-    tap.publish({"type": "turn_complete"})
-    # Already on its way: it lands after the failed turn ended, before the switch's step.
-    asyncio.get_running_loop().call_soon(harness.admit, "on its way")
-    await _settle(plugin)
-    assert _Loadouts.activated == [] and harness.prompts == ["on its way"]  # the switch waits for it
-    harness.prompts.clear()
-    tap.publish({"type": "turn_complete"})
-    await _settle(plugin)
-    assert _Loadouts.activated == ["codex"] and harness.prompts == []
-    assert refused == ["Switching to codex. Send your message again once it has switched."]
-    assert harness.closing_reason == ""  # the new harness takes prompts again
-
-
 def test_the_orchestrator_refuses_prompts_while_a_switch_closes_it():
     from kollabor.llm.acp_orchestrator import ACPError, ACPOrchestrator
     from kollabor.llm.llm_coordinator import _acp_unavailable_result
@@ -557,7 +198,6 @@ def test_the_orchestrator_refuses_prompts_while_a_switch_closes_it():
     acp.closing_reason = ""
     assert "message" not in _acp_unavailable_result(acp)
 
-
 @pytest.mark.asyncio
 async def test_a_runner_is_busy_while_a_prompt_runs_or_waits():
     from kollabor.llm.acp_bridge import ACPRunner
@@ -571,7 +211,6 @@ async def test_a_runner_is_busy_while_a_prompt_runs_or_waits():
     assert runner.busy is False
     runner._queue.put_nowait(object())  # admitted, waiting its turn
     assert runner.busy is True
-
 
 @pytest.mark.asyncio
 async def test_other_errors_and_unset_fallbacks_never_switch(monkeypatch):
@@ -591,85 +230,12 @@ async def test_other_errors_and_unset_fallbacks_never_switch(monkeypatch):
     assert not await _native_turn_fails(plugin, "Usage limit reached for 5 hour.")
     assert _Loadouts.activated == [] and plugin.choice() == ""
 
-
-@pytest.mark.asyncio
-async def test_a_native_turn_moved_to_an_acp_harness_asks_for_the_message(monkeypatch):
-    # The review of 01b359ed: the provider's own text, "Invalid openai API
-    # key", never matched "invalid api key", so no fallback ran.
-    plugin, bus, tap, _ = await _agent(
-        monkeypatch, {"plugins.model_fallback.loadout": "codex"}, fallback_provider="acp"
-    )
-    assert not await _native_turn_fails(
-        plugin, "Invalid openai API key. Please check your API key.", error_type="AuthenticationError"
-    )
-    assert _Loadouts.activated == ["codex"] and _continues(bus) == []
-    notice = [e for e in tap.get_snapshot() if e["type"] == "model_fallback"]
-    assert notice[0]["message"] == (
-        "glm-5.3-flash needs a new login. Switched to codex. Send your message again."
-    )
-
-
-@pytest.mark.asyncio
-async def test_an_acp_turn_is_never_run_again_on_its_fallback(monkeypatch):
-    # The review of 01b359ed: the switch came after the turn's completion, so
-    # the turn it ran again answered no stream that was still listening.
-    plugin, bus, tap, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
-    await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
-    assert _Loadouts.activated == ["codex"] and _continues(bus) == []
-    notice = [e for e in tap.get_snapshot() if e["type"] == "model_fallback"]
-    assert notice[0]["message"].endswith("Switched to codex. Send your message again.")
-
-
-@pytest.mark.asyncio
-async def test_an_acp_turn_moved_to_an_acp_harness_asks_for_the_message(monkeypatch):
-    plugin, bus, tap, _ = await _agent(
-        monkeypatch, {"plugins.model_fallback.agents.lapis": "codex"}, fallback_provider="acp"
-    )
-    tap.publish({"type": "error", "message": "claude-code: Claude AI usage limit reached", "generation": 2})
-    tap.publish({"type": "turn_complete"})
-    for _ in range(5):
-        await asyncio.sleep(0)
-    await plugin._task
-    assert _Loadouts.activated == ["codex"] and _continues(bus) == []
-    notice = [e for e in tap.get_snapshot() if e["type"] == "model_fallback"]
-    assert notice[0]["message"].endswith("Switched to codex. Send your message again.")
-
-
 @pytest.mark.asyncio
 async def test_set_choice_saves_this_agents_setting(monkeypatch):
     plugin, _, _, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
     assert plugin.set_choice("glm")
     assert plugin.config.values["plugins.model_fallback.agents.lapis"] == "glm"
     assert plugin.choice() == "glm"
-
-
-@pytest.mark.asyncio
-async def test_a_tap_the_hub_creates_after_this_plugin_is_watched_from_startup(monkeypatch):
-    # Discovery starts *_plugin.py files before plugin packages like hub/, so
-    # the tap is not there at initialize. An ACP turn has no request-error hook.
-    plugin, bus, tap, _ = await _agent(
-        monkeypatch, {"plugins.model_fallback.loadout": "codex"}, tap_at_init=False
-    )
-    await bus.fire(EventType.SYSTEM_STARTUP)
-    tap.publish({"type": "error", "message": "Usage limit reached for 5 hour.", "generation": 1})
-    tap.publish({"type": "turn_complete"})
-    for _ in range(5):
-        await asyncio.sleep(0)
-    if plugin._task is not None:
-        await plugin._task
-    assert _Loadouts.activated == ["codex"]
-
-
-@pytest.mark.asyncio
-async def test_a_tap_the_hub_replaces_is_followed(monkeypatch):
-    # The hub can initialize twice; turns then publish to its second tap.
-    plugin, bus, first, _ = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex"})
-    second = DisplayTap()
-    bus.register_service("display_tap", second)
-    await bus.fire(EventType.SYSTEM_STARTUP)
-    await _acp_turn_fails(plugin, second, "Usage limit reached for 5 hour.")
-    assert _Loadouts.activated == ["codex"]
-
 
 @pytest.mark.asyncio
 async def test_a_replaced_tap_and_a_shut_down_plugin_switch_nothing(monkeypatch):
@@ -685,15 +251,3 @@ async def test_a_replaced_tap_and_a_shut_down_plugin_switch_nothing(monkeypatch)
     await plugin.shutdown()
     await _acp_turn_fails(plugin, second, "Usage limit reached for 5 hour.")
     assert _Loadouts.activated == []
-
-
-
-@pytest.mark.asyncio
-async def test_a_fallback_names_a_loadout_or_a_profile(monkeypatch):
-    # `openai-oauth` is a provider profile, not a loadout: it failed live with
-    # "not found" until profiles resolved the way `kollab --llm` reads them.
-    plugin, bus, tap, profiles = await _agent(monkeypatch, {"plugins.model_fallback.loadout": "codex-loadout"})
-    assert await _native_turn_fails(plugin, "Usage limit reached for 5 hour.")
-    assert _Loadouts.activated == ["codex-loadout"] and profiles.active == "codex"
-    assert plugin.resolve("codex").provider_profile == "codex"  # a bare profile name
-    assert plugin.resolve("nonesuch") is None
