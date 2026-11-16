@@ -40,6 +40,7 @@ import {
 } from "@/components/ui/avatar";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
+import { stripManagedTokens } from "./managed-tokens";
 
 const useFileSrc = (file: File | undefined) => {
   const [src, setSrc] = useState<string | undefined>(undefined);
@@ -288,11 +289,9 @@ const ComposerImageTokenSynchronizer: FC = () => {
     const imageIds = imageAttachmentKey ? imageAttachmentKey.split("\u0000") : [];
     const nextTokens = imageIds.map((_, index) => `[image${index + 1}]`);
     const text = aui.composer.getState().text;
-    let textWithoutManagedTokens = text;
-    for (const token of managedTokens.current) {
-      textWithoutManagedTokens = textWithoutManagedTokens.split(token).join("");
-    }
-    textWithoutManagedTokens = textWithoutManagedTokens
+    // Escape-aware (#1124 P2a): managed-token stripping must not eat the
+    // inside of a typed [[imageN]] literal.
+    const textWithoutManagedTokens = stripManagedTokens(text, managedTokens.current)
       .replace(/^\s+/, "")
       .replace(/\n{3,}/g, "\n\n");
 
