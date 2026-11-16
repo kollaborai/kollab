@@ -218,6 +218,22 @@ async def test_rate_limit_fallback_keeps_saved_global_config_byte_identical(
 
 
 @pytest.mark.asyncio
+async def test_fallback_fails_closed_when_profile_state_is_shared(monkeypatch):
+    plugin, bus, tap, profiles = await _agent(
+        monkeypatch, {"plugins.model_fallback.loadout": "codex"}
+    )
+    bus.register_service("state_service", SimpleNamespace(set_active_profile=lambda *_a, **_k: None))
+
+    assert not await _native_turn_fails(plugin, "Rate limit exceeded.")
+    assert _Loadouts.activated == []
+    assert profiles.active == "glm"
+    notices = [event for event in tap.get_snapshot() if event["type"] == "model_fallback"]
+    assert len(notices) == 1
+    assert "shared across sessions" in notices[0]["message"]
+    assert "staying on this model" in notices[0]["message"]
+
+
+@pytest.mark.asyncio
 async def test_fallback_restores_the_active_profile_before_the_next_input(monkeypatch):
     plugin, bus, _, profiles = await _agent(
         monkeypatch, {"plugins.model_fallback.loadout": "codex"}
