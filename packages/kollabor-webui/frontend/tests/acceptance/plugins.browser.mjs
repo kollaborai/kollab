@@ -266,6 +266,12 @@ try {
     assert.equal(noticeColors.actual, noticeColors.expected, `notice action uses foreground in ${dark ? "dark" : "light"} theme`);
   }
   await page.evaluate(value => document.documentElement.classList.toggle("dark", value), originalDark);
+  const touchCdp = await page.context().newCDPSession(page);
+  await touchCdp.send("Emulation.setTouchEmulationEnabled", { enabled: true });
+  assert.equal(await page.evaluate(() => matchMedia("(any-pointer: coarse)").matches), true, "touch emulation enabled");
+  assert.ok(await page.getByRole("button", { name: "Open board" }).evaluate(button => button.getBoundingClientRect().height) >= 44, "notice action has a 44px touch target");
+  await touchCdp.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+  await touchCdp.detach();
   await page.getByText("Contender could not register /fixture: already used by Fixture.", { exact: true }).waitFor({ timeout: 5000 });
   const folderlessPanel = page.getByRole("complementary", { name: "Session Controls" });
   await folderlessPanel.waitFor({ timeout: 15000 });

@@ -1,6 +1,6 @@
 import { Component, createContext, useContext, useState, useSyncExternalStore, type ErrorInfo, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
-import { NoticeBar } from "@/components/shell/NoticeBar";
+import { NoticeAction, NoticeBar } from "@/components/shell/NoticeBar";
 import type { PluginHost, PluginHostSnapshot } from "./host";
 import type { Session } from "@/api";
 
@@ -46,7 +46,7 @@ export function PluginRecoveryNotices({ disabled, skipped, names, onTurnOnAgain 
 }) {
   return <>
     {disabled ? <NoticeBar>Plugins are off for this page. Remove <code>?plugins=off</code> from the URL and reload.</NoticeBar> : null}
-    {skipped.map(id => <NoticeBar key={id} actions={<Button type="button" size="sm" variant="outline" onClick={() => onTurnOnAgain(id)}>Turn On Again</Button>}>
+    {skipped.map(id => <NoticeBar key={id} actions={<NoticeAction className="text-foreground any-pointer-coarse:min-h-[44px] any-pointer-coarse:min-w-[44px]" onClick={() => onTurnOnAgain(id)}>Turn On Again</NoticeAction>}>
       {names[id] ?? "A plugin"} was skipped: it froze the page last time.
     </NoticeBar>)}
   </>;
@@ -83,8 +83,8 @@ export function PluginNotices({ host }: { host: PluginHost }) {
       </NoticeBar>;
     })}
     {snapshot.registry.plugins.flatMap(plugin => plugin.notices.map((notice, index) =>
-      <NoticeBar key={`${plugin.id}:${index}`} actions={notice.button ? <Button type="button" size="sm" variant="outline"
-        onClick={() => { if (notice.button) host.getContext(plugin.id)?.navigate(notice.button.open); }}>{notice.button.label}</Button> : null}>
+      <NoticeBar key={`${plugin.id}:${index}`} actions={notice.button ? <NoticeAction className="text-foreground any-pointer-coarse:min-h-[44px] any-pointer-coarse:min-w-[44px]"
+        onClick={() => { if (notice.button) host.getContext(plugin.id)?.navigate(notice.button.open); }}>{notice.button.label}</NoticeAction> : null}>
         {notice.text}
       </NoticeBar>,
     ))}
