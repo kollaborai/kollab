@@ -93,6 +93,8 @@ export class PluginHost {
   private started = false;
   private closed = false;
   private sequence = 0;
+  private inventorySettled: Promise<void> = Promise.resolve();
+  private settleInventory: () => void = () => {};
   private markerSequence = 0;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private stoppingTimer: ReturnType<typeof setInterval> | null = null;
@@ -163,15 +165,19 @@ export class PluginHost {
     await this.refresh();
   }
 
-  async refresh() {
+  async refresh({ waitForActivation = true }: { waitForActivation?: boolean } = {}) {
     if (this.closed || this.options.disabled) return;
     const sequence = ++this.sequence;
+    let settle!: () => void;
+    this.inventorySettled = new Promise<void>(resolve => { settle = resolve; });
+    this.settleInventory = settle;
     this.loading = true;
     this.publish();
     try {
       const response = await this.options.json("/plugins") as { schema?: unknown; plugins?: unknown; server_time?: unknown };
       const sampledAt = performance.now();
-      if (sequence !== this.sequence || this.closed) return;
+      if (this.closed) return;
+      if (sequence !== this.sequence) { await this.inventorySettled; return; }
       if (response.schema !== 1 || !Array.isArray(response.plugins)) throw new Error("Invalid plugin inventory");
       this.clockSample = { serverTime: response.server_time, sampledAt };
       this.entries = response.plugins as PluginEntry[];
@@ -188,12 +194,22 @@ export class PluginHost {
       for (const id of this.renderFailed) if (!desired.has(id)) this.renderFailed.delete(id);
       this.loading = false;
       this.publish();
-      await this.loader.reconcile(included);
+      settle();
+      const activation = this.loader.reconcile(included);
+      if (waitForActivation) await activation;
+      else void activation.catch(error => {
+        if (sequence !== this.sequence || this.closed) return;
+        this.inventoryError = error instanceof Error ? error.message : String(error);
+        this.publish();
+      });
     } catch (error) {
-      if (sequence !== this.sequence || this.closed) return;
+      if (this.closed) return;
+      if (sequence !== this.sequence) { await this.inventorySettled; return; }
       this.loading = false;
       this.inventoryError = error instanceof Error ? error.message : String(error);
       this.publish();
+    } finally {
+      settle();
     }
   }
 
@@ -258,6 +274,7 @@ export class PluginHost {
     if (this.closed) return;
     this.closed = true;
     this.sequence++;
+    this.settleInventory();
     if (this.heartbeatTimer !== null) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = null;
     if (this.stoppingTimer !== null) clearInterval(this.stoppingTimer);

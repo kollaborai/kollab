@@ -73,7 +73,7 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate }: { entr
     try { await api.json(`${pathFor(entry.id)}/${action}`, { method: "POST" }); setConfirmation(null); await host.refresh(); }
     catch (caught) {
       setError(message(caught));
-      await host.refresh();
+      await host.refresh({ waitForActivation: false });
       const latest = host.getSnapshot();
       const current = latest.entries.find(item => item.id === entry.id && item.kind === entry.kind && item.source === entry.source);
       if (action !== "enable" && !latest.inventoryError && (!current || !current.enabled)) setConfirmation(null);

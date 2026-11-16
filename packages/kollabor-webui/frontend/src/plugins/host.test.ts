@@ -27,10 +27,11 @@ function setup(options: Partial<PluginHostOptions> = {}) {
 describe("plugin host lifecycle", () => {
 
   it("waits for the winning inventory when a refresh is superseded", async () => {
-    let resolveFirst!: (value: unknown) => void;
-    let resolveSecond!: (value: unknown) => void;
-    const first = new Promise<unknown>(resolve => { resolveFirst = resolve; });
-    const second = new Promise<unknown>(resolve => { resolveSecond = resolve; });
+    type Inventory = { schema: number; plugins: ReturnType<typeof entry>[] };
+    let resolveFirst!: (value: Inventory) => void;
+    let resolveSecond!: (value: Inventory) => void;
+    const first = new Promise<Inventory>(resolve => { resolveFirst = resolve; });
+    const second = new Promise<Inventory>(resolve => { resolveSecond = resolve; });
     const { host, json } = setup();
     json.mockImplementationOnce(() => first).mockImplementationOnce(() => second);
     let firstDone = false;
