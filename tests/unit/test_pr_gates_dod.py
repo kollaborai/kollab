@@ -501,6 +501,21 @@ def test_regression_test_keeps_finding_beside_severity_code_1024(tmp_path: Path)
     )
 
 
+def test_regression_test_keeps_declared_finding_in_mixed_code_list_1024(
+    tmp_path: Path,
+) -> None:
+    cfg = regression_cfg(tmp_path)
+    report = pr_gates_dod.evaluate(
+        cfg,
+        make_data(
+            comments=(source_comment("issue_comment", 1, "Finding IDs: F7,I001"),)
+        ),
+    )
+    assert report.detail_for("regression_test") == (
+        "no regression test covers finding id(s): F7 under tests/"
+    )
+
+
 # --- report shape -----------------------------------------------------------
 
 
