@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { Box, FileCode, GitBranch, LayoutDashboard, ListTodo, Plug, Puzzle, Terminal, type LucideIcon } from "lucide-react";
+import { Box, FileCode, GitBranch, GitPullRequest, LayoutDashboard, ListTodo, Plug, Puzzle, Terminal, type LucideIcon } from "lucide-react";
 import type { Session } from "@/api";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -10,7 +10,11 @@ import type { PluginHost } from "./host";
 import { heartbeatAge, stoppingLabel, useHeartbeatClock } from "./heartbeat";
 import type { PluginContext, PluginMenu } from "./sdk";
 
-const ICONS: Record<string, LucideIcon> = { Box, FileCode, GitBranch, LayoutDashboard, ListTodo, Plug, Puzzle, Terminal };
+const ICONS: Record<string, LucideIcon> = { Box, FileCode, GitBranch, GitPullRequest, LayoutDashboard, ListTodo, Plug, Puzzle, Terminal };
+function pluginIcon(name?: string): LucideIcon {
+  const key = (name ?? "").replace(/(^|[-_ ])([a-z])/g, (_, _separator, letter: string) => letter.toUpperCase());
+  return Object.hasOwn(ICONS, key) ? ICONS[key] : Puzzle;
+}
 const ROW = "h-7 w-full justify-start gap-2 px-2 text-xs any-pointer-coarse:min-h-[44px] any-pointer-coarse:min-w-[44px]";
 export function pluginViewKey(pluginId: string, viewId: string): SessionView {
   return `plugin:${encodeURIComponent(pluginId)}:${encodeURIComponent(viewId)}`;
@@ -63,7 +67,7 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
   return <>
     {section !== "menus" && <>{plugins.flatMap(plugin => plugin.views.filter(item => !item.needs_folder || session.workspace).map(item => {
       const key = pluginViewKey(plugin.id, item.id);
-      const Icon = ICONS[item.icon ?? ""] ?? Puzzle;
+      const Icon = pluginIcon(item.icon);
       return <SessionControl key={`view:${key}`} label={item.label} Icon={Icon} collapsed={collapsed}
         active={view === key} onClick={() => onViewChange(key)} />;
     }))}
@@ -93,7 +97,7 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
       const page = plugin.pages.find(item => item.id === menu.id);
       const modal = plugin.modals.find(item => item.id === menu.id);
       const label = menu.label ?? linkedView?.label ?? page?.title ?? modal?.title ?? menu.id;
-      const Icon = ICONS[menu.icon ?? linkedView?.icon ?? ""] ?? Puzzle;
+      const Icon = pluginIcon(menu.icon ?? linkedView?.icon);
       const disabled = !context || Boolean(linkedView?.needs_folder && !session.workspace) || (!menu.open && !linkedView && !page && !modal);
       const entry = snapshot.entries.find(item => item.id === plugin.id);
       const stopped = entry?.services?.some(service =>
