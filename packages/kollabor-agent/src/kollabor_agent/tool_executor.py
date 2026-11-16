@@ -372,12 +372,35 @@ def _is_blocked_kollab_spawn(
         if executable in shell_names or python_name.fullmatch(executable):
             return None
 
-        # Search patterns are data, but rg can execute a preprocessor and git
-        # grep can execute a pager. Inspect those executable values separately.
-        # Shell substitutions are also checked by scan_tokens' separate pass.
-        if executable in {"grep", "egrep", "fgrep", "rg"} or (
-            executable == "git" and args and args[0] == "grep"
-        ):
+        # Search patterns and Git directory flags are data, but rg can execute
+        # a preprocessor, and Git configuration or a grep pager can execute
+        # commands. Inspect those values separately. Shell substitutions are
+        # also checked by scan_tokens' separate pass.
+        if executable in {"grep", "egrep", "fgrep", "rg", "git"}:
+            git_command_index = 0
+            if executable == "git":
+                global_options_with_values = {
+                    "-C",
+                    "-c",
+                    "--git-dir",
+                    "--work-tree",
+                    "--namespace",
+                    "--super-prefix",
+                    "--config-env",
+                }
+                while git_command_index < len(args):
+                    item = args[git_command_index]
+                    if item in global_options_with_values:
+                        git_command_index += 2
+                    elif item.startswith("-"):
+                        git_command_index += 1
+                    else:
+                        break
+            git_is_grep = (
+                executable == "git"
+                and git_command_index < len(args)
+                and args[git_command_index] == "grep"
+            )
             for index, argument in enumerate(args):
                 if argument == "--":
                     break
@@ -388,15 +411,21 @@ def _is_blocked_kollab_spawn(
                     elif argument == "--pre" and index + 1 < len(args):
                         value = args[index + 1]
                 elif executable == "git":
-                    if argument.startswith("--open-files-in-pager="):
-                        value = argument.partition("=")[2]
-                    elif argument.startswith("-O") and len(argument) > 2:
-                        value = argument[2:]
-                    elif (
-                        argument in {"--open-files-in-pager", "-O"}
-                        and index + 1 < len(args)
-                    ):
-                        value = args[index + 1]
+                    if index < git_command_index:
+                        if argument == "-c" and index + 1 < len(args):
+                            value = args[index + 1]
+                        elif argument.startswith("-c") and len(argument) > 2:
+                            value = argument[2:]
+                    elif git_is_grep:
+                        if argument.startswith("--open-files-in-pager="):
+                            value = argument.partition("=")[2]
+                        elif argument.startswith("-O") and len(argument) > 2:
+                            value = argument[2:]
+                        elif argument in {
+                            "--open-files-in-pager",
+                            "-O",
+                        } and index + 1 < len(args):
+                            value = args[index + 1]
                 if value and suspicious_launch(value, is_background):
                     return True
             return None
@@ -592,8 +621,19 @@ def _is_blocked_kollab_spawn(
         if depth > 8:
             return suspicious_launch(" ".join(tokens), is_background)
         segment: list[str] = []
-        for token in tokens:
-            if token in separators:
+        for index, token in enumerate(tokens):
+            # shlex separates the ampersand in fd duplication (2>&1), but
+            # that ampersand is a redirection, not a background operator.
+            is_fd_dup = (
+                token == "&"
+                and index > 0
+                and index + 1 < len(tokens)
+                and re.fullmatch(r"\d*[<>]", tokens[index - 1])
+                and re.fullmatch(r"(?:\d+-?|-)", tokens[index + 1])
+            )
+            if is_fd_dup:
+                segment.append(token)
+            elif token in separators:
                 if inspect_segment(segment, is_background or token == "&", depth):
                     return True
                 segment = []

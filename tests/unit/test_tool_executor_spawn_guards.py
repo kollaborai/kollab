@@ -304,12 +304,17 @@ def test_background_git_config_does_not_treat_repository_path_as_a_launch():
 
 
 def test_git_config_command_launch_is_still_blocked():
-    assert _is_blocked_kollab_spawn(
-        "git -c 'core.pager=kollab --agent coder' status"
-    )
+    assert _is_blocked_kollab_spawn("git -c 'core.pager=kollab --agent coder' status")
 
 
 def test_git_grep_count_after_global_directory_flag_is_data():
     assert not _is_blocked_kollab_spawn(
         "git -C /tmp/project/kollab grep -c 'kollab --agent coder'"
+    )
+
+
+def test_git_global_directory_does_not_hide_executable_pager():
+    assert _is_blocked_kollab_spawn(
+        "git -C /tmp/project/kollab grep -e pattern "
+        "--open-files-in-pager='kollab --agent coder'"
     )
