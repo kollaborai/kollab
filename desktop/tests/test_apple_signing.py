@@ -13,6 +13,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "desktop/scripts/sign-macos.sh"
 WORKFLOW = ROOT / ".github/workflows/desktop-macos-signing.yml"
+PACKAGING_WORKFLOW = ROOT / ".github/workflows/binaries.yml"
 TARGET = "aarch64-apple-darwin"
 
 
@@ -69,6 +70,8 @@ elif tool == "codesign" and "--display" in args:
         print("flags=0x10000(runtime)", file=sys.stderr)
     if not os.environ.get("MOCK_NO_TIMESTAMP"):
         print("Timestamp=fixture", file=sys.stderr)
+    if os.environ.get("MOCK_LARGE_SIGNATURE_DETAILS"):
+        print("Details=" + "x" * 131072, file=sys.stderr)
 elif tool == "ditto":
     pathlib.Path(args[-1]).write_text("stapled" if (app / "stapled").exists() else "unstapled")
 elif tool == "xcrun":
@@ -294,6 +297,20 @@ class SigningContractTests(unittest.TestCase):
                 self.assertEqual(result.returncode == 0, mask in (0b00011, 0b11100), result.stderr)
         self.assertEqual(self.calls(), [])
 
+    def test_empty_api_secret_strings_fall_back_to_apple_id_auth(self):
+        # The workflow step passes all nine env entries; the API ones are
+        # empty strings when only Apple ID secrets exist, and the helper
+        # must treat them exactly like unset variables.
+        self.signed()
+        self.env.update(APPLE_API_KEY="", APPLE_API_ISSUER="", APPLE_API_PRIVATE_KEY="")
+        self.assertEqual(self.run_script("preflight").returncode, 0)
+        result = self.run_build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        submit = next(args for tool, args in self.calls() if tool == "xcrun" and args[:2] == ["notarytool", "submit"])
+        self.assertIn("--apple-id", submit)
+        self.assertNotIn("--key", submit)
+        self.assertFalse(self.state.exists())
+
     def test_development_certificate_is_rejected(self):
         self.signed()
         self.env["APPLE_SIGNING_IDENTITY"] = "Apple Development: Fixture"
@@ -345,6 +362,7 @@ class SigningContractTests(unittest.TestCase):
             with self.subTest(api=api):
                 self.env = original.copy()
                 self.signed(api=api)
+                self.env["MOCK_LARGE_SIGNATURE_DETAILS"] = "1"
                 self.configure_documented_run()
                 self.assertEqual(self.run_documented_step(self.doc_guard).returncode, 0)
                 result = self.run_documented_step(self.doc_signed)
@@ -383,6 +401,89 @@ class SigningContractTests(unittest.TestCase):
         self.assertNotIn("--apple-id", submit)
         self.assertFalse(self.state.exists())
         self.assertNotIn("fixture-private-key", result.stdout + result.stderr)
+
+    def make_dmg(self):
+        # stapler's fixture executable touches a marker beside MOCK_APP.
+        mock_app = self.scratch / "staple-fixture" / "Kollab.app"
+        mock_app.mkdir(parents=True, exist_ok=True)
+        self.env["MOCK_APP"] = str(mock_app)
+        dmg = self.scratch / "dist" / "kollab-desktop-macos-aarch64-1.2.3.dmg"
+        dmg.parent.mkdir(exist_ok=True)
+        dmg.write_bytes(b"fixture disk image")
+        return dmg
+
+    def test_notarize_dmg_staples_the_image_with_apple_id_auth(self):
+        self.signed()
+        dmg = self.make_dmg()
+        result = self.run_script("notarize-dmg", str(dmg))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Notarized and stapled", result.stdout)
+        submit = next(args for tool, args in self.calls() if tool == "xcrun" and args[:2] == ["notarytool", "submit"])
+        self.assertEqual(submit[2], str(dmg))
+        self.assertIn("--apple-id", submit)
+        stapled = [args for tool, args in self.calls() if tool == "xcrun" and args[:2] == ["stapler", "staple"]]
+        self.assertEqual([args[-1] for args in stapled], [str(dmg)])
+        self.assertFalse(self.state.exists(), "the dmg state directory must be cleaned after success")
+        self.assertNotIn("fixture-app-specific-password", result.stdout + result.stderr)
+
+    def test_packaging_workflow_passes_absolute_dmg_path(self):
+        workflow = PACKAGING_WORKFLOW.read_text()
+        command = re.search(
+            r'^\s*bash desktop/scripts/sign-macos\.sh notarize-dmg "([^"]+)"$',
+            workflow,
+            re.M,
+        )
+        self.assertIsNotNone(command, "the packaging workflow must invoke dmg notarization")
+        self.assertTrue(
+            command.group(1).startswith("$GITHUB_WORKSPACE/"),
+            "the signing helper requires an absolute dmg path",
+        )
+
+    def test_notarize_dmg_api_auth_uses_an_ephemeral_key_file(self):
+        self.signed(api=True)
+        dmg = self.make_dmg()
+        result = self.run_script("notarize-dmg", str(dmg))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        submit = next(args for tool, args in self.calls() if tool == "xcrun" and args[:2] == ["notarytool", "submit"])
+        self.assertIn(str(self.state / "notary-key.p8"), submit)
+        self.assertNotIn("--apple-id", submit)
+        self.assertFalse(self.state.exists())
+        self.assertNotIn("fixture-private-key", result.stdout + result.stderr)
+
+    def test_notarize_dmg_rejects_bad_paths_and_incomplete_auth(self):
+        self.signed()
+        for args in (("notarize-dmg",), ("notarize-dmg", "relative/image.dmg"),
+                     ("notarize-dmg", str(self.scratch / "missing.dmg")),
+                     ("notarize-dmg", str(self.scratch / "image.zip"))):
+            with self.subTest(args=args):
+                self.assertNotEqual(self.run_script(*args).returncode, 0)
+        self.assertNotIn("xcrun", {call[0] for call in self.calls()})
+        self.signed()
+        self.env.pop("APPLE_PASSWORD")
+        result = self.run_script("notarize-dmg", str(self.make_dmg()))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("APPLE_PASSWORD", result.stderr)
+        self.assertNotIn("xcrun", {call[0] for call in self.calls()})
+
+    def test_notarize_dmg_unsigned_mode_fails(self):
+        dmg = self.make_dmg()
+        result = self.run_script("notarize-dmg", str(dmg))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("developer-id", result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_notarize_dmg_notary_or_staple_failure_cleans_and_fails(self):
+        for flag, expected in (("MOCK_NOTARY_FAIL", ("xcrun", "notarytool")),
+                               ("MOCK_STAPLE_FAIL", ("xcrun", "stapler"))):
+            with self.subTest(flag=flag):
+                self.signed()
+                self.env[flag] = "1"
+                result = self.run_script("notarize-dmg", str(self.make_dmg()))
+                self.assertEqual(result.returncode != 0, True, result.stdout)
+                self.assertNotIn("Notarized and stapled", result.stdout)
+                self.assertIn(expected, [(tool, args[0]) for tool, args in self.calls()])
+                self.assertFalse((self.state / "notary-key.p8").exists())
+                self.env.pop(flag)
 
     def test_import_build_notary_stapler_and_gatekeeper_failures_stop_publication(self):
         stages = {"MOCK_IMPORT_FAIL": ("security", "import"), "MOCK_CARGO_FAIL": ("cargo", "tauri"),
@@ -555,6 +656,16 @@ class WorkflowContractTests(unittest.TestCase):
                 result = subprocess.run(["/bin/bash", "-e", "-c", guard], capture_output=True,
                                         env={"APPLE_SIGNING_MODE": mode, "GITHUB_REF": ref})
                 self.assertEqual(result.returncode == 0, succeeds)
+
+    def test_dmg_cleanup_retry_uses_the_dmg_signing_state(self):
+        workflow = load_yaml(PACKAGING_WORKFLOW.read_text())
+        steps = workflow["jobs"]["desktop"]["steps"]
+        dmg_step = next(step for step in steps if step.get("name") == "Notarize and staple the dmg")
+        cleanup = next(step for step in steps if step.get("name") == "Retry the signing-state cleanup once, always")
+        env_append = 'printf \'APPLE_SIGNING_STATE_DIR=%s\\n\' "$APPLE_SIGNING_STATE_DIR" >> "$GITHUB_ENV"'
+        self.assertIn(env_append, dmg_step["run"])
+        self.assertIn("-dmg", dmg_step["run"])
+        self.assertEqual(cleanup["run"], "bash desktop/scripts/sign-macos.sh cleanup")
 
     def test_workflow_and_example_run_blocks_have_valid_shell_syntax(self):
         steps = self.workflow["jobs"]["validate"]["steps"] + self.job_example["steps"]
