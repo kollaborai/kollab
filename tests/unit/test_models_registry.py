@@ -204,3 +204,26 @@ def test_exact_prefixed_silence_does_not_inherit_sampling(monkeypatch):
     )
 
     assert supports_sampling("openai/silent-model") is True
+
+
+def test_prefixed_fallback_requires_matching_catalog_provider(monkeypatch):
+    monkeypatch.setattr(
+        model_registry,
+        "_REGISTRY",
+        {
+            "models": {
+                "shared-model": {
+                    "provider": "openai",
+                    "context_window": 400000,
+                    "supports_sampling": False,
+                    "supports_thinking": False,
+                }
+            },
+            "provider_defaults": {"openrouter": {"context_window": 32000}},
+        },
+    )
+
+    assert resolve_context_window("openai/shared-model", "openrouter") == 400000
+    assert resolve_context_window("anthropic/shared-model", "openrouter") == 32000
+    assert supports_sampling("anthropic/shared-model") is True
+    assert supports_thinking("anthropic/shared-model") is True
