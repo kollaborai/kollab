@@ -438,15 +438,20 @@ class RemoteStateService(StateService):
             _raise_for_error(result)
         return ProfileSnapshot.from_dict(result)
 
-    async def set_approval_mode(self, mode: str) -> PermissionSnapshot:
+    async def set_approval_mode(
+        self, mode: str, persist: bool = True
+    ) -> PermissionSnapshot:
         """Ask the daemon to change the approval mode and return the new snapshot.
 
         Accepts the same mode aliases as LocalStateService.set_approval_mode
         ("strict", "trust", etc.) -- the daemon handler does the mapping.
+        With persist=False the daemon applies the mode to the session only.
         """
-        logger.debug("state rpc: set_approval_mode mode=%s", mode)
+        logger.debug("state rpc: set_approval_mode mode=%s persist=%s", mode, persist)
         result = await self._rpc.call(
-            "state.set_approval_mode", {"mode": mode}, timeout=self._timeout
+            "state.set_approval_mode",
+            {"mode": mode, "persist": persist},
+            timeout=self._timeout,
         )
         if not isinstance(result, dict):
             raise TypeError(
@@ -721,11 +726,11 @@ class RemoteStateService(StateService):
 
     # === MCP writes (phase 4.5 step 7) ===
 
-    async def enable_mcp_server(self, name: str) -> McpSnapshot:
+    async def enable_mcp_server(self, name: str, *, persist: bool = True) -> McpSnapshot:
         """Ask the daemon to enable an MCP server."""
         logger.debug("state rpc: enable_mcp_server name=%r", name)
         result = await self._rpc.call(
-            "state.enable_mcp_server", {"name": name}, timeout=self._timeout
+            "state.enable_mcp_server", {"name": name, "persist": persist}, timeout=self._timeout
         )
         if not isinstance(result, dict):
             raise TypeError(

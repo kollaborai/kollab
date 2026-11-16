@@ -331,7 +331,7 @@ async def test_session_mcp_connect_endpoint_connects(app):
         assert data["status"] == "connected"
         assert data["tool_count"] == 1
         assert data["tools"] == ["memory_query"]
-        mock_state.enable_mcp_server.assert_awaited_once_with("memory")
+        mock_state.enable_mcp_server.assert_awaited_once_with("memory", persist=False)
         mock_state.reload_mcp_servers.assert_awaited_once_with()
         assert mock_session.mcp_server_names == ["memory"]
     finally:
