@@ -3,6 +3,13 @@ import { useEffect, useState } from "react";
 const finitePositive = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value) && value > 0;
 
+/** Estimate engine time from a response sample and monotonic elapsed milliseconds. */
+export function engineClock(serverTime: unknown, sampledAt: number, now: number): number | null {
+  if (!finitePositive(serverTime) || !Number.isFinite(sampledAt) || !Number.isFinite(now) || now < sampledAt) return null;
+  return serverTime + (now - sampledAt) / 1000;
+}
+
+
 /** Seconds since the last promised heartbeat (or process start), once overdue. */
 export function heartbeatAge(value: unknown, now = Date.now() / 1000): number | null {
   if (!value || typeof value !== "object") return null;
