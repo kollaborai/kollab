@@ -294,16 +294,24 @@ class ModelFallbackPlugin(BasePlugin):
         manager = LoadoutManager(profile_manager, config=self.config)
         active = profile_manager.get_active_profile()
         failing = active.get_model() if active is not None else "This model"
-        if active is not None and active.name == loadout.provider_profile and (
-            not loadout.model or failing == loadout.model
-        ):
-            logger.info("model fallback: already on %s, not switching again", loadout.name)
+        target_profile = profile_manager.get_profile(loadout.provider_profile)
+        target_model = loadout.model or (
+            target_profile.get_model() if target_profile is not None else ""
+        )
+        if target_model and failing == target_model:
+            logger.info("model fallback: %s resolves to failed model %s; not switching", loadout.name, failing)
+            self._say(
+                f"{failing} {REASONS[kind]}, and fallback {loadout.name} uses the same model. Staying on this model.",
+                reason=kind,
+                failed_model=failing,
+                loadout=loadout.name,
+            )
             return ""
         if harness is not None:
             # A prompt it took now would fail with "ACP runner closed".
             harness.closing_reason = SWITCH_NOTE.format(loadout.name)
         try:
-            activated = await manager.activate(loadout, self.event_bus)
+            activated = await manager.activate(loadout, self.event_bus, persist=False)
         except Exception as exc:
             logger.warning("model fallback to %s failed: %s", loadout.name, exc)
             activated = None

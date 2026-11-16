@@ -79,7 +79,7 @@ class _Loadouts:
             return None, []
         return SimpleNamespace(name=query, provider_profile=profile.name, model=profile.model), []
 
-    async def activate(self, loadout, event_bus=None):
+    async def activate(self, loadout, event_bus=None, *, persist=True):
         _Loadouts.activated.append(loadout.name)
         self.pm.active = loadout.provider_profile
         return loadout
@@ -195,7 +195,7 @@ async def test_rate_limit_fallback_keeps_saved_global_config_byte_identical(
         monkeypatch, {"plugins.model_fallback.loadout": "codex"}
     )
 
-    async def activate(self, loadout, event_bus=None, persist=True):
+    async def activate(self, loadout, event_bus=None, *, persist=True):
         _Loadouts.activated.append(loadout.name)
         if persist:
             config_path.write_bytes(
@@ -209,6 +209,21 @@ async def test_rate_limit_fallback_keeps_saved_global_config_byte_identical(
         "Rate limit exceeded. Please try again later.", retry=True
     ) == "retry"
     assert config_path.read_bytes() == original
+
+
+@pytest.mark.asyncio
+async def test_same_model_fallback_reports_no_switch_once(monkeypatch):
+    plugin, bus, tap, profiles = await _agent(
+        monkeypatch, {"plugins.model_fallback.loadout": "codex"}
+    )
+    profiles.profiles["codex"].model = "glm-5.3-flash"
+
+    assert not await _native_turn_fails(plugin, "Rate limit exceeded.")
+    assert _Loadouts.activated == []
+    notices = [e for e in tap.get_snapshot() if e["type"] == "model_fallback"]
+    assert len(notices) == 1
+    assert "same model" in notices[0]["message"]
+    assert profiles.active == "glm"
 
 
 @pytest.mark.asyncio
@@ -316,9 +331,9 @@ async def test_a_native_fallback_answers_the_peer_messages_kept_for_it(monkeypat
     bus.register_service("acp_orchestrator", harness)
     activate = _Loadouts.activate
 
-    async def native(self, loadout, event_bus=None):
+    async def native(self, loadout, event_bus=None, *, persist=True):
         harness.active = False  # a native profile closes the harness
-        return await activate(self, loadout, event_bus)
+        return await activate(self, loadout, event_bus, persist=persist)
 
     monkeypatch.setattr(_Loadouts, "activate", native)
     await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
@@ -335,7 +350,7 @@ async def test_a_failed_switch_after_closing_acp_keeps_its_observations(monkeypa
     harness = _Harness(kept=1)
     bus.register_service("acp_orchestrator", harness)
 
-    async def closes_then_fails(self, loadout, event_bus=None):
+    async def closes_then_fails(self, loadout, event_bus=None, *, persist=True):
         harness.active = False
         return None
 
@@ -378,10 +393,10 @@ async def test_shutdown_settles_an_inflight_fallback_before_returning(monkeypatc
     entered, release = asyncio.Event(), asyncio.Event()
     activate = _Loadouts.activate
 
-    async def gated(self, loadout, event_bus=None):
+    async def gated(self, loadout, event_bus=None, *, persist=True):
         entered.set()
         await release.wait()
-        return await activate(self, loadout, event_bus)
+        return await activate(self, loadout, event_bus, persist=persist)
 
     monkeypatch.setattr(_Loadouts, "activate", gated)
     try:
@@ -445,12 +460,12 @@ async def test_no_prompt_is_taken_between_the_idle_check_and_the_switch(monkeypa
     bus.register_service("acp_orchestrator", harness)
     activate = _Loadouts.activate
 
-    async def activating(self, loadout, event_bus=None):
+    async def activating(self, loadout, event_bus=None, *, persist=True):
         try:  # a prompt that arrives while the harness closes and the new one starts
             harness.admit("during the switch")
         except RuntimeError as exc:
             refused.append(str(exc))
-        return await activate(self, loadout, event_bus)
+        return await activate(self, loadout, event_bus, persist=persist)
 
     monkeypatch.setattr(_Loadouts, "activate", activating)
     tap.publish({"type": "error", "message": "claude-code: Claude AI usage limit reached", "generation": 1})

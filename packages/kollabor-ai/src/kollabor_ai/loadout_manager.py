@@ -650,14 +650,19 @@ class LoadoutManager:
         return loadout_sendable_effort(self.profile_manager, loadout)
 
     async def activate(
-        self, loadout_or_name: Any, event_bus: Optional[Any] = None
+        self,
+        loadout_or_name: Any,
+        event_bus: Optional[Any] = None,
+        *,
+        persist: Optional[bool] = None,
     ) -> Optional[Loadout]:
         """Apply a loadout to its provider profile and activate it.
 
         Applies the loadout's set fields (model always; temperature/
         effort/max_tokens only when the loadout overrides them) to its
         provider profile via
-        ``profile_manager.update_profile(..., save_to_config=True)``, then
+        ``profile_manager.update_profile(..., save_to_config=True)`` by default,
+        or without persistence when ``persist=False``, then
         activates that provider profile -- through ``state_service`` when
         one is wired on ``event_bus`` (attach/daemon mode), otherwise
         directly plus the ``llm_service`` reinitialize/reload-tools
@@ -698,11 +703,15 @@ class LoadoutManager:
 
             if is_acp(current) or is_acp(selected):
                 with transition():
-                    return await self._activate_owned(loadout, event_bus)
-        return await self._activate_owned(loadout, event_bus)
+                    return await self._activate_owned(loadout, event_bus, persist=persist)
+        return await self._activate_owned(loadout, event_bus, persist=persist)
 
     async def _activate_owned(
-        self, loadout_or_name: Any, event_bus: Optional[Any] = None
+        self,
+        loadout_or_name: Any,
+        event_bus: Optional[Any] = None,
+        *,
+        persist: Optional[bool] = None,
     ) -> Optional[Loadout]:
         if isinstance(loadout_or_name, str):
             loadout, _suggestions = self.resolve(loadout_or_name)
@@ -781,7 +790,13 @@ class LoadoutManager:
                     raise ValueError("ACP harness did not apply the loadout model")
                 if loadout.effort and (not effort or effort.get("currentValue") != loadout.effort):
                     raise ValueError("ACP harness did not apply the loadout effort")
-                if not self.profile_manager.set_active_profile(loadout.provider_profile):
+                if persist is None:
+                    activated = self.profile_manager.set_active_profile(loadout.provider_profile)
+                else:
+                    activated = self.profile_manager.set_active_profile(
+                        loadout.provider_profile, persist=persist
+                    )
+                if not activated:
                     raise ValueError("ACP profile is no longer available")
                 # Save only after the harness confirmed the complete loadout,
                 # so a rejected effort cannot leave a half-saved model.
@@ -790,7 +805,7 @@ class LoadoutManager:
                     picks["model"] = model_value
                 if loadout.effort:
                     picks["effort"] = loadout.effort
-                if picks:
+                if picks and persist is not False:
                     orchestrator._save_confirmed_options(picks)
             except BaseException as exc:
                 logger.error("ACP loadout %r failed (%s)", loadout.name, type(exc).__name__)
@@ -845,7 +860,7 @@ class LoadoutManager:
 
         update_kwargs: Dict[str, Any] = {
             "model": loadout.model,
-            "save_to_config": True,
+            "save_to_config": persist is not False,
         }
         if loadout.temperature is not None:
             update_kwargs["temperature"] = loadout.temperature
@@ -871,9 +886,16 @@ class LoadoutManager:
         synced = False
         if state_service and hasattr(state_service, "set_active_profile"):
             try:
-                await state_service.set_active_profile(
-                    loadout.provider_profile, reload_profile=True
-                )
+                if persist is None:
+                    await state_service.set_active_profile(
+                        loadout.provider_profile, reload_profile=True
+                    )
+                else:
+                    await state_service.set_active_profile(
+                        loadout.provider_profile,
+                        persist=persist,
+                        reload_profile=True,
+                    )
                 synced = True
             except Exception as exc:  # noqa: BLE001 -- fall back to direct activation
                 logger.warning(
@@ -882,7 +904,12 @@ class LoadoutManager:
                 )
 
         if not synced:
-            self.profile_manager.set_active_profile(loadout.provider_profile)
+            if persist is None:
+                self.profile_manager.set_active_profile(loadout.provider_profile)
+            else:
+                self.profile_manager.set_active_profile(
+                    loadout.provider_profile, persist=persist
+                )
             llm_service = None
             if event_bus and hasattr(event_bus, "get_service"):
                 llm_service = event_bus.get_service("llm_service")

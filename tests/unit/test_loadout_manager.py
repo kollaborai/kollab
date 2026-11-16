@@ -628,6 +628,19 @@ async def test_activate_passes_only_set_fields_to_update_profile():
 
 
 @pytest.mark.asyncio
+async def test_activate_can_apply_a_loadout_without_persisting_profile_changes():
+    pm = _FakeProfileManager([_FakeProfile("work", "openai", api_key="key-1")])
+    manager = LoadoutManager(pm, config=_MemoryConfig())
+    loadout = Loadout("temporary", "work", "gpt-5.6")
+
+    result = await manager.activate(loadout, persist=False)
+
+    assert result is loadout
+    assert pm.update_calls == [("work", {"model": "gpt-5.6", "save_to_config": False})]
+    assert pm.activate_calls == ["work"]
+
+
+@pytest.mark.asyncio
 async def test_activate_passes_all_overrides_when_set():
     pm = _FakeProfileManager([_FakeProfile("work", "openai", api_key="key-1")])
     manager = LoadoutManager(pm, config=_MemoryConfig())
@@ -680,6 +693,26 @@ async def test_activate_uses_state_service_when_present_and_skips_fallback():
     assert pm.activate_calls == []
     llm_service.api_service.reinitialize_provider.assert_not_awaited()
     llm_service._load_native_tools.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_activate_can_skip_persistence_through_state_service():
+    pm = _FakeProfileManager([_FakeProfile("work", "openai", api_key="key-1")])
+    manager = LoadoutManager(pm, config=_MemoryConfig())
+    state_service = SimpleNamespace(set_active_profile=AsyncMock())
+    event_bus = SimpleNamespace(
+        get_service=lambda name: state_service if name == "state_service" else None
+    )
+
+    await manager.activate(
+        Loadout("temporary", "work", "gpt-5.6"),
+        event_bus=event_bus,
+        persist=False,
+    )
+
+    state_service.set_active_profile.assert_awaited_once_with(
+        "work", persist=False, reload_profile=True
+    )
 
 
 @pytest.mark.asyncio
