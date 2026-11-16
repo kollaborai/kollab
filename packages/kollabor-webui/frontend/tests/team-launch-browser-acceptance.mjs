@@ -218,16 +218,17 @@ async function main() {
     await teamCard.getByRole("button", { name: "Configure & Launch", exact: true }).click();
     await page.getByRole("heading", { name: "Launch Test Team", exact: true }).waitFor({ state: "visible" });
 
-    await page.getByRole("checkbox", { name: "Include Bob", exact: true }).uncheck();
+    const longLabel = "Cloud & Infrastructure Security Engineer";
+    await page.getByRole("checkbox", { name: `Include ${longLabel}`, exact: true }).uncheck();
     const treePreview = page.locator('section[aria-labelledby="team-launch-preview-heading"]');
-    await treePreview.getByText("Not selected: Bob", { exact: true }).waitFor({ state: "visible" });
+    await treePreview.getByText(`Not selected: ${longLabel}`, { exact: true }).waitFor({ state: "visible" });
     const carolRow = treePreview.locator("li").filter({ hasText: "Carol" });
     assert.equal(await carolRow.evaluate((node) => node.style.paddingLeft), "1.25rem");
 
     await page.locator("#team-launch-folder").click();
     await page.getByRole("button", { name: /Other demo/ }).click();
     await page.getByRole("checkbox", { name: "Include Dana", exact: true }).waitFor({ state: "visible" });
-    assert.equal(await page.getByRole("checkbox", { name: "Include Bob", exact: true }).count(), 0);
+    assert.equal(await page.getByRole("checkbox", { name: `Include ${longLabel}`, exact: true }).count(), 0);
 
     const mission = "Ship the team-launch browser smoke";
     await page.getByLabel("Mission", { exact: true }).fill(mission);
