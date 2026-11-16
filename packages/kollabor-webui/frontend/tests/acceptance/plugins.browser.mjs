@@ -308,6 +308,7 @@ try {
   const partialDetails = partialSettings.getByRole("region", { name: "Fixture details" });
   await partialDetails.waitFor({ timeout: 3000 });
   assert.doesNotMatch(await partialDetails.innerText(), /1\.2\.3/, "plugin details do not expose version numbers");
+  assert.equal(await partialDetails.locator('[data-slot="badge"]').count(), 0, "plugin details use plain status text, not pill chips");
   await partialSettings.getByRole("switch", { name: "Fixture enabled" }).click();
   const partialDialog = page.getByRole("dialog", { name: "Turn off Fixture?" });
   await partialDialog.getByRole("button", { name: "Turn Off", exact: true }).click();
