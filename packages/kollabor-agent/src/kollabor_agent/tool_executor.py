@@ -372,6 +372,13 @@ def _is_blocked_kollab_spawn(
         if executable in shell_names or python_name.fullmatch(executable):
             return None
 
+        # Search tools treat their patterns as data, not shell commands.  Keep
+        # actual shell substitutions subject to scan_tokens' separate pass.
+        if executable in {"grep", "egrep", "fgrep", "rg"} or (
+            executable == "git" and args and args[0] == "grep"
+        ):
+            return None
+
         def inspect_command(command_text: str) -> bool:
             return _is_blocked_kollab_spawn(
                 command_text, background=is_background, _depth=depth + 1
@@ -463,12 +470,37 @@ def _is_blocked_kollab_spawn(
             "/k",
         }
         normalized = [argument.lower().split("=", 1)[0] for argument in args]
-        if any(option in wrapper_options for option in normalized):
-            if any(
-                option in {"-e", "-ec", "-enc", "-encodedcommand"}
-                for option in normalized
-            ):
+        # Outside a known PowerShell executable, short flags such as -e and
+        # -enc belong to many ordinary programs (grep, git, test, ...).
+        # Recognize a real encoded launch by inspecting the payload instead of
+        # rejecting every command which happens to use the same short option.
+        encoded_options = {"-e", "-ec", "-enc", "-encodedcommand"}
+        for index, option in enumerate(normalized):
+            if option not in encoded_options:
+                continue
+            # Keep unfamiliar shell-like programs and the unmistakable long
+            # PowerShell flag conservative, including malformed payloads.
+            if executable.endswith("shell") or option == "-encodedcommand":
                 return True
+            _, has_inline_value, inline_value = args[index].partition("=")
+            if has_inline_value:
+                payload = inline_value
+            elif index + 1 < len(args):
+                payload = args[index + 1]
+            else:
+                continue
+            try:
+                command_text = (
+                    base64.b64decode(payload, validate=True)
+                    .decode("utf-16le")
+                    .lstrip("\ufeff")
+                )
+            except ValueError:
+                continue
+            if inspect_command(command_text):
+                return True
+        command_options = wrapper_options - encoded_options
+        if any(option in command_options for option in normalized):
             return suspicious_wrapper()
         return None
 
