@@ -398,6 +398,16 @@ try {
   await page.getByRole("button", { name: "Back to Chat" }).click();
   const collapsedView = panel.getByRole("button", { name: "Fixture View", exact: true });
   await collapsedView.waitFor({ timeout: 5000 });
+  const collapsedCdp = await page.context().newCDPSession(page);
+  await collapsedCdp.send("Emulation.setTouchEmulationEnabled", { enabled: true });
+  const collapsedHitArea = await collapsedView.evaluate(button => {
+    const rect = button.getBoundingClientRect();
+    const aside = button.closest("aside")?.getBoundingClientRect();
+    return { width: aside ? Math.min(rect.right, aside.right) - Math.max(rect.left, aside.left) : 0, height: rect.height };
+  });
+  assert.ok(collapsedHitArea.width >= 44 && collapsedHitArea.height >= 44, `collapsed plugin control has an unclipped 44x44 hit area: ${JSON.stringify(collapsedHitArea)}`);
+  await collapsedCdp.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+  await collapsedCdp.detach();
   await collapsedView.hover();
   await page.getByRole("tooltip").getByText("Fixture View", { exact: true }).waitFor();
   await collapsedView.click();
