@@ -52,6 +52,22 @@ describe("plugin event stream", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("cancels an oversized event stream before reconnecting", async () => {
+    const cancel = vi.fn();
+    const request = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array(1_000_001).fill(97)); },
+      cancel,
+    })));
+    const onError = vi.fn();
+    const stream = new PluginEventStream(request, "/plugins/events", onError);
+    try {
+      stream.on("plugins-changed", vi.fn());
+      await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+      expect(String(onError.mock.calls[0][0])).toContain("too large");
+      expect(cancel).toHaveBeenCalledOnce();
+    } finally { stream.close(); }
+  });
+
   it("stops all subscriptions when closed", async () => {
     let signal: AbortSignal | null | undefined;
     const request = vi.fn(async (_path: string, init?: RequestInit) => {
