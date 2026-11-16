@@ -7,7 +7,7 @@
 export type MediaSegment =
   | { kind: "text"; text: string }
   | { kind: "literal"; text: string }
-  | { kind: "token"; index: number };
+  | { kind: "token"; index: number; raw: string };
 
 // [[imageN]] is the escaped literal form (#1124 P2a): it renders as plain
 // [imageN] text, consumes no media slot, and the engine's counter ignores it.
@@ -40,7 +40,9 @@ export function splitMediaSegments(text: string): MediaSegment[] {
       if (last && last.kind === "text") last.text += segment;
       else segments.push({ kind: "text", text: segment });
     } else {
-      segments.push({ kind: "token", index });
+      // raw keeps the token's exact source spelling (padded [image01]
+      // included) so an unresolved render can restore it verbatim (#1140 R4).
+      segments.push({ kind: "token", index, raw: segment });
     }
   }
   return segments;
@@ -66,7 +68,9 @@ export function resolveMediaSegment(
     if (entry && !entry.failed && entry.ref) {
       return { kind: "thumb", entry, index: segment.index };
     }
-    return { kind: "literal", text: `[image${segment.index + 1}]` };
+    // Unresolved/failed tokens render their EXACT original spelling —
+    // never a reconstructed [imageN] (#1140 R4).
+    return { kind: "literal", text: segment.raw };
   }
   if (segment.kind === "literal") return { kind: "literal", text: segment.text };
   return { kind: "text", text: segment.text };

@@ -63,3 +63,26 @@ describe("UserText render", () => {
     expect(markup).not.toContain("media-thumb");
   });
 });
+
+describe("UserText padded-token spelling (#1140 R4)", () => {
+  it("renders an unresolved padded token with its exact original spelling", () => {
+    stateWith(["text"], undefined);
+    const markup = renderToStaticMarkup(<UserText text="look [image01] now" />);
+    expect(markup).toContain("[image01]");
+    expect(markup).not.toContain("media-thumb");
+  });
+
+  it("resolves a resolvable padded token to its stored slot (control)", () => {
+    stateWith(["text"], [{ ref: "stored-pad", mime: "image/png" }]);
+    const markup = renderToStaticMarkup(<UserText text="look [image01] now" />);
+    expect(markup).toContain("media-thumb");
+    expect(markup).toContain("stored-pad");
+    expect(markup).not.toContain("[image01]");
+  });
+
+  it("keeps a typed padded escape literal exact", () => {
+    stateWith(["text"], undefined);
+    const markup = renderToStaticMarkup(<UserText text="typed [[image01]] here" />);
+    expect(markup).toContain("[image01]");
+  });
+});

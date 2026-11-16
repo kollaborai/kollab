@@ -53,3 +53,19 @@ describe("stripManagedTokens", () => {
     expect(stripManagedTokens("plain [[image3]] text", [])).toBe("plain [[image3]] text");
   });
 });
+
+/*
+ * #1140 R1 (no-JS-lookbehind contract): the strip matcher must not rely on
+ * lookbehind/lookahead — the PR explicitly promises a Safari-safe grammar.
+ * Pinned at the source level because the strip BEHAVIOR is already covered
+ * above; this contract test fails while the matcher still compiles a
+ * lookaround pattern, regardless of runtime support.
+ */
+import source from "@/components/assistant-ui/managed-tokens.ts?raw";
+
+describe("stripManagedTokens matcher contract", () => {
+  it("compiles no lookbehind/lookahead patterns (match-first only)", () => {
+    expect(source).not.toContain("(?<");
+    expect(source).not.toMatch(/new RegExp\(`[^`]*\(\?/);
+  });
+});

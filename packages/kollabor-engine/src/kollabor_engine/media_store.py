@@ -199,7 +199,10 @@ def slot_count(conversations_dir: Path, session_id: str) -> int:
 # "[[image1]" or "[image1]]" yields its inner token plus stray-bracket
 # text, so the inner token counts. findall carries only the token group,
 # and escape-only matches come back as "".
-_IMAGE_TOKEN_RE = re.compile(r"\[\[image\d+\]\]|(\[image\d*[1-9]\d*\])")
+# ASCII digits only (#1140 R3): Python's Unicode \d used to count
+# non-ASCII digit runs (e.g. Arabic-Indic) as tokens while the JS splitter
+# read them as literal text, misbinding stored images to prose rows.
+_IMAGE_TOKEN_RE = re.compile(r"\[\[image[0-9]+\]\]|(\[image[0-9]*[1-9][0-9]*\])")
 
 
 def _count_token_matches(content: str) -> int:

@@ -11,6 +11,10 @@
  * user's draft and must never consume a bracket run's pieces, while the
  * engine counter aligns with the splitter (which treats the inner token of
  * "[[image1]" as one). Two grammars, two jobs.
+ *
+ * Match-first, no lookbehind/lookahead (#1140 R1 contract): occurrences are
+ * found with a plain pattern and the bracket-run check happens in the
+ * replace callback against the surrounding characters.
  */
 
 const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -18,7 +22,12 @@ const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/
 export function stripManagedTokens(text: string, tokens: readonly string[]): string {
   let stripped = text;
   for (const token of tokens) {
-    stripped = stripped.replace(new RegExp(`(?<!\\[)${escapeRegExp(token)}(?!\\])`, "g"), "");
+    stripped = stripped.replace(new RegExp(escapeRegExp(token), "g"), (match, offset: number, whole: string) => {
+      const before = whole[offset - 1];
+      const after = whole[offset + match.length];
+      if (before === "[" || after === "]") return match;
+      return "";
+    });
   }
   return stripped;
 }

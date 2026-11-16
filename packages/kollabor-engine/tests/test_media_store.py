@@ -89,6 +89,28 @@ def test_open_media_roundtrip_and_rejects_bad_refs(tmp_path: Path) -> None:
             open_media(tmp_path, bad)
 
 
+def test_non_ascii_digit_tokens_are_not_tokens_and_bind_nothing(tmp_path: Path) -> None:
+    r"""#1140 R3: the image-token grammar is ASCII digits only.
+
+    Python's Unicode \d used to count [image1\u0661] (Arabic-Indic one) as a
+    token while the JS splitter treated it as literal text — the mismatch
+    made attach_media_to_rows bind a stored image to a row whose text was
+    plain prose and starve the real sender.
+    """
+    assert count_image_tokens("[image1\u0661]") == 0
+    assert count_image_tokens("[[image1\u0661]]") == 0
+    assert count_image_tokens("[image\u0661]") == 0
+
+    refs = [save(tmp_path, "s1", PNG).ref]
+    rows = [
+        {"role": "user", "content": "plain prose [image1\u0661] tail"},
+        {"role": "user", "content": "the real sender [image1]"},
+    ]
+    attach_media_to_rows(tmp_path, "s1", rows)
+    assert "media" not in rows[0]
+    assert [m["ref"] for m in rows[1]["media"]] == refs
+
+
 def test_attach_binds_rows_in_order(tmp_path: Path) -> None:
     refs = [save(tmp_path, "s1", url).ref for url in (PNG, JPEG, WEBP)]
     rows = [
