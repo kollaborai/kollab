@@ -191,10 +191,19 @@ def slot_count(conversations_dir: Path, session_id: str) -> int:
 # [[imageN]] (double brackets) is the escaped literal form - text, not a
 # token (#1124 P2a) - so it neither consumes a slot nor counts toward the
 # page-offset skip.
-# The digit run must contain a nonzero digit (value > 0): [image0] and
-# [image00] are text, matching the frontend's near-miss grammar; [image01]
-# is a token (value 1).
-_IMAGE_TOKEN_RE = re.compile(r"(?<!\[)\[image\d*[1-9]\d*\](?!\])")
+# The token branch's digit run must contain a nonzero digit (value > 0):
+# [image0] and [image00] are text, matching the frontend's near-miss
+# grammar; [image01] is a token (value 1).
+# One alternation mirrors the frontend splitter (#1140 review): a
+# well-formed escape matches whole; a one-sided bracket run such as
+# "[[image1]" or "[image1]]" yields its inner token plus stray-bracket
+# text, so the inner token counts. findall carries only the token group,
+# and escape-only matches come back as "".
+_IMAGE_TOKEN_RE = re.compile(r"\[\[image\d+\]\]|(\[image\d*[1-9]\d*\])")
+
+
+def _count_token_matches(content: str) -> int:
+    return sum(1 for token in _IMAGE_TOKEN_RE.findall(content) if token)
 
 
 def count_image_tokens(content: object) -> int:
@@ -208,17 +217,17 @@ def count_image_tokens(content: object) -> int:
     page-offset skip must count them identically.
     """
     if isinstance(content, str):
-        return len(_IMAGE_TOKEN_RE.findall(content))
+        return _count_token_matches(content)
     if isinstance(content, list):
         tokens = 0
         parts = 0
         for part in content:
             if isinstance(part, str):
-                tokens += len(_IMAGE_TOKEN_RE.findall(part))
+                tokens += _count_token_matches(part)
             elif isinstance(part, dict):
                 text = part.get("text")
                 if isinstance(text, str):
-                    tokens += len(_IMAGE_TOKEN_RE.findall(text))
+                    tokens += _count_token_matches(text)
                 if part.get("type") == "image":
                     parts += 1
         # Image parts are authoritative: _save_sent_media stores exactly one

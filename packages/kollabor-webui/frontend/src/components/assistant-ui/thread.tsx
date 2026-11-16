@@ -1315,17 +1315,27 @@ export const UserText: FC<{ text?: string }> = ({ text }) => {
   return (
     <>
       {segments.map((segment, index) => {
+        // A live row shows its pictures as image parts, so its token
+        // segments render as nothing instead of duplicating the attached
+        // picture next to them (#1140 review). Typed [[imageN]] escapes
+        // keep their literal text. The check runs before resolving: a live
+        // row carries no media list, so resolving would misclassify.
+        if (imageParts > 0 && segment.kind === "token") return null;
         const resolved = resolveMediaSegment(segment, media);
         if (resolved.kind === "text") return <span key={index}>{resolved.text}</span>;
         // Literal [imageN] text: the escaped form, or a slot whose picture
         // is missing or failed - it never requests a ref and never opens
         // the viewer (#1124 P2a).
         if (resolved.kind === "literal") return <span key={index}>{resolved.text}</span>;
-        if (imageParts > 0) return null;
         const { entry, index: slot } = resolved;
         // A resolved thumb implies the row has a media list; an empty list
         // just yields a -1 viewer index, falling back to the slot position.
-        const viewerItems = sessionMedia?.length ? sessionMedia : (media ?? []);
+        // Placeholder slots (failed or empty refs) carry no picture for the
+        // viewer to show, so they are filtered out of the fallback list
+        // (#1140 review).
+        const viewerItems = (sessionMedia?.length ? sessionMedia : (media ?? [])).filter(
+          (item) => item.ref && !item.failed,
+        );
         const viewerIndex = viewerItems.findIndex((item) => item.ref === entry.ref);
         return (
           <MediaThumb

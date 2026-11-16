@@ -2,27 +2,23 @@
  * The composer's managed [imageN] tokens and the user's typed [[imageN]]
  * literals must survive attachment edits independently (#1124 P2a).
  *
- * `stripManagedTokens` removes exactly the managed single-bracket tokens.
- * An escaped literal [[image1]] contains the substring [image1], so a bare
- * split/join strip would corrupt it to []; escapes are held out behind
- * sentinels (which contain no brackets, so a token strip can never touch
- * them) and restored verbatim afterwards.
+ * `stripManagedTokens` removes exactly the managed single-bracket tokens,
+ * matched by the token grammar rather than by substring (#1140 review): a
+ * candidate must not open a bracket run, so an escaped [[image1]] and a
+ * one-sided run like "[[image1]" keep every bracket.
+ *
+ * Deliberately stricter than the splitter's grammar: the strip edits the
+ * user's draft and must never consume a bracket run's pieces, while the
+ * engine counter aligns with the splitter (which treats the inner token of
+ * "[[image1]" as one). Two grammars, two jobs.
  */
 
-const ESCAPE_SENTINEL = "\u0002";
-
-const ESCAPED_TOKEN = /\[\[image\d+\]\]/g;
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 export function stripManagedTokens(text: string, tokens: readonly string[]): string {
-  const escapes: string[] = [];
-  let stripped = text.replace(ESCAPED_TOKEN, (match) => {
-    escapes.push(match);
-    return `${ESCAPE_SENTINEL}${escapes.length - 1}${ESCAPE_SENTINEL}`;
-  });
+  let stripped = text;
   for (const token of tokens) {
-    stripped = stripped.split(token).join("");
+    stripped = stripped.replace(new RegExp(`(?<!\\[)${escapeRegExp(token)}(?!\\])`, "g"), "");
   }
-  return stripped.replace(new RegExp(`${ESCAPE_SENTINEL}(\\d+)${ESCAPE_SENTINEL}`, "g"), (_, index) => {
-    return escapes[Number(index)] ?? "";
-  });
+  return stripped;
 }
