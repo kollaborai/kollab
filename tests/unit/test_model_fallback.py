@@ -352,9 +352,11 @@ async def test_a_native_fallback_answers_the_peer_messages_kept_for_it(monkeypat
     bus.register_service("acp_orchestrator", harness)
     activate = _Loadouts.activate
 
-    async def native(self, loadout, event_bus=None, *, persist=True):
+    async def native(self, loadout, event_bus=None, *, persist=True, for_current_run=False):
         harness.active = False  # a native profile closes the harness
-        return await activate(self, loadout, event_bus, persist=persist)
+        return await activate(
+            self, loadout, event_bus, persist=persist, for_current_run=for_current_run
+        )
 
     monkeypatch.setattr(_Loadouts, "activate", native)
     await _acp_turn_fails(plugin, tap, "claude-code: Claude AI usage limit reached")
@@ -371,7 +373,7 @@ async def test_a_failed_switch_after_closing_acp_keeps_its_observations(monkeypa
     harness = _Harness(kept=1)
     bus.register_service("acp_orchestrator", harness)
 
-    async def closes_then_fails(self, loadout, event_bus=None, *, persist=True):
+    async def closes_then_fails(self, loadout, event_bus=None, *, persist=True, for_current_run=False):
         harness.active = False
         return None
 
@@ -414,10 +416,12 @@ async def test_shutdown_settles_an_inflight_fallback_before_returning(monkeypatc
     entered, release = asyncio.Event(), asyncio.Event()
     activate = _Loadouts.activate
 
-    async def gated(self, loadout, event_bus=None, *, persist=True):
+    async def gated(self, loadout, event_bus=None, *, persist=True, for_current_run=False):
         entered.set()
         await release.wait()
-        return await activate(self, loadout, event_bus, persist=persist)
+        return await activate(
+            self, loadout, event_bus, persist=persist, for_current_run=for_current_run
+        )
 
     monkeypatch.setattr(_Loadouts, "activate", gated)
     try:
@@ -481,12 +485,14 @@ async def test_no_prompt_is_taken_between_the_idle_check_and_the_switch(monkeypa
     bus.register_service("acp_orchestrator", harness)
     activate = _Loadouts.activate
 
-    async def activating(self, loadout, event_bus=None, *, persist=True):
+    async def activating(self, loadout, event_bus=None, *, persist=True, for_current_run=False):
         try:  # a prompt that arrives while the harness closes and the new one starts
             harness.admit("during the switch")
         except RuntimeError as exc:
             refused.append(str(exc))
-        return await activate(self, loadout, event_bus, persist=persist)
+        return await activate(
+            self, loadout, event_bus, persist=persist, for_current_run=for_current_run
+        )
 
     monkeypatch.setattr(_Loadouts, "activate", activating)
     tap.publish({"type": "error", "message": "claude-code: Claude AI usage limit reached", "generation": 1})
