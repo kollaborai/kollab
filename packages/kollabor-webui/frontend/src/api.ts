@@ -89,6 +89,8 @@ export type GemAppearance = {
   gems?: Record<string, GemLook>;
   /** The engine's own folder: a bare gem name is the agent there. */
   home?: string;
+  /** Persona names of every roster but the gem pool: born furry, with contrasting hair and no hat. */
+  crew?: string[];
 };
 
 export type UpdateRelease = { version: string; tag_name: string; name: string; url: string; is_prerelease: boolean };
