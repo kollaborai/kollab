@@ -130,6 +130,14 @@ async def test_prefixed_openrouter_model_passes_image_gate_and_builds_request(
         "data:image/png;base64,iVBORw0KGgo="
     )
 
+    mismatched_provider = OpenRouterProvider(
+        OpenRouterConfig(
+            api_key="sk-test", model="anthropic/gpt-6-luna", max_tokens=512
+        )
+    )
+    service._provider = mismatched_provider
+    assert service.supports_image_input() is False
+
 
 @pytest.mark.asyncio
 async def test_streamed_generated_image_is_persisted_and_raw_log_is_redacted(
