@@ -111,7 +111,7 @@ trusted_reviewers = ["owner-login"]
   commit. A fix commit cannot modify that regression test except to remove its
   sole `@pytest.mark.xfail(strict=True)` marker. Test-only commits must mention
   the finding ID in a changed test declaration and add a non-constant test
-  condition; bare calls and statically always-true assertions do not count.
+  condition without function calls; statically always-true assertions do not count.
   Alternatively, the test may use a strict `xfail` marker. A fix may remove
   the strict xfail only from that finding's test file. The declaration must use
   a `test_` function name containing the finding ID. Commits added before the finding event

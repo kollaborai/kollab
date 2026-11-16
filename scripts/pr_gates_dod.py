@@ -974,7 +974,9 @@ def _has_nontrivial_test_assertion(line: str) -> bool:
     # A bare call only proves that the expression returned a truthy value.
     # In particular, `assert object()` is always true and is not evidence that
     # the regression test distinguishes the broken behavior.
-    if isinstance(tree.body, ast.Call) or _is_unconditionally_truthy(tree.body):
+    if any(isinstance(node, ast.Call) for node in ast.walk(tree.body)):
+        return False
+    if _is_unconditionally_truthy(tree.body):
         return False
     if not isinstance(tree.body, (ast.Name, ast.Compare, ast.UnaryOp, ast.BoolOp)):
         return False
@@ -1016,37 +1018,6 @@ def _is_unconditionally_truthy(node: ast.AST) -> bool:
             return all(comparisons)
         except (TypeError, ValueError):
             return False
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-        safe_calls = {
-            "object": object,
-            "type": type,
-            "bool": bool,
-            "int": int,
-            "str": str,
-            "bytes": bytes,
-            "len": len,
-            "list": list,
-            "tuple": tuple,
-            "dict": dict,
-            "set": set,
-            "frozenset": frozenset,
-            "any": any,
-            "all": all,
-            "sum": sum,
-            "min": min,
-            "max": max,
-        }
-        function = safe_calls.get(node.func.id)
-        if function is not None and all(keyword.arg is not None for keyword in node.keywords):
-            try:
-                args = [ast.literal_eval(argument) for argument in node.args]
-                kwargs = {
-                    keyword.arg: ast.literal_eval(keyword.value)
-                    for keyword in node.keywords
-                }
-                return bool(function(*args, **kwargs))
-            except (TypeError, ValueError, SyntaxError):
-                return False
     if isinstance(node, ast.BoolOp):
         values = [_is_unconditionally_truthy(value) for value in node.values]
         if isinstance(node.op, ast.Or):
@@ -1062,12 +1033,6 @@ def _is_runtime_test_value(node: ast.AST) -> bool:
             "True", "False", "None", "object", "type", "bool", "int",
             "str", "bytes", "len", "list", "tuple", "dict", "set",
             "frozenset", "any", "all", "sum", "min", "max",
-        }
-    if isinstance(node, ast.Call):
-        return isinstance(node.func, ast.Name) and node.func.id not in {
-            "object", "type", "bool", "int", "str", "bytes", "len",
-            "list", "tuple", "dict", "set", "frozenset", "any", "all",
-            "sum", "min", "max",
         }
     return isinstance(node, (ast.Attribute, ast.Subscript))
 
