@@ -306,5 +306,34 @@ class TestSessionLoadoutThreshold(unittest.TestCase):
         self.assertEqual(plugin._get_token_threshold_details(), (272_000, "automatic"))
 
 
+class TestCompactionThresholdForm(unittest.TestCase):
+    """The loadout form's Compaction Threshold field, shared by /llm and the web UI (#1104)."""
+
+    @staticmethod
+    def _values(raw):
+        from kollabor.panels.llm import _loadout_values
+
+        return _loadout_values(
+            {"temperature": "1.0", "effort": "default", "description": "",
+             "compaction_threshold_k": raw},
+            False, "opus", is_acp=True, provider="acp",
+        )
+
+    def test_a_number_is_saved_in_thousands_of_tokens(self):
+        values, errors = self._values("500")
+        self.assertEqual(values["compaction_threshold_k"], 500)
+        self.assertEqual(errors, {})
+
+    def test_blank_means_automatic(self):
+        values, errors = self._values("")
+        self.assertIsNone(values["compaction_threshold_k"])
+        self.assertEqual(errors, {})
+
+    def test_zero_and_non_numbers_are_refused(self):
+        for raw in ("0", "lots", "1.5"):
+            _values, errors = self._values(raw)
+            self.assertIn("compaction_threshold_k", errors, raw)
+
+
 if __name__ == "__main__":
     unittest.main()

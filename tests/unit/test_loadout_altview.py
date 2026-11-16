@@ -81,3 +81,33 @@ def test_loadout_form_keeps_editable_budget_for_public_responses(monkeypatch):
     assert view._max_tokens_supported is True
     assert type(view._max_tokens_widget).__name__ == "TextInputWidget"
     assert view._max_tokens_widget.get_pending_value() == "16384"
+
+
+def test_loadout_form_saves_the_compaction_threshold(monkeypatch):
+    import asyncio
+
+    class _RecordingManager(_Manager):
+        def __init__(self):
+            self.updates = []
+
+        def update(self, name, **fields):
+            self.updates.append((name, fields))
+            return True
+
+        def get(self, name):
+            return None
+
+    monkeypatch.setattr(loadout_altview, "_model_registry_info", lambda model: {})
+    manager = _RecordingManager()
+    base = _base_loadout()
+    base.compaction_threshold_k = 500
+    view = loadout_altview.LoadoutFormAltView()
+    view.set_context(
+        manager=manager,
+        profile_manager=_ProfileManager("https://api.openai.com/v1"),
+        base=base,
+        mode="edit",
+    )
+    view._build_widgets()
+    asyncio.run(view._run_save("gpt-5.6-luna"))
+    assert manager.updates[0][1]["compaction_threshold_k"] == 500
