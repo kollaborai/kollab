@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { SessionView } from "@/components/shell/SessionPanel";
+import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { PluginFailure, PluginRenderBoundary, usePluginSnapshot } from "./components";
 import type { PluginHost } from "./host";
 import type { PluginContext, PluginMenu } from "./sdk";
@@ -21,15 +22,32 @@ export function parsePluginView(view: SessionView): { pluginId: string; viewId: 
   try { return { pluginId: decodeURIComponent(parts[0]), viewId: decodeURIComponent(parts[1]) }; }
   catch { return null; }
 }
-function MenuCount({ context, count }: { context: PluginContext; count: NonNullable<PluginMenu["count"]> }) {
+function MenuCount({ context, count, compact = false }: { context: PluginContext; count: NonNullable<PluginMenu["count"]>; compact?: boolean }) {
   const { data } = context.useApi<{ text?: string; hint?: string }>(count.path, { refreshOn: count.refreshOn });
   if (!data?.text) return null;
-  return <Badge variant="secondary" className="ml-auto" title={data.hint}>{data.text}</Badge>;
+  return <Badge variant="secondary" className={compact ? "absolute -right-2 -top-1 h-3 min-w-3 px-0.5 text-[8px]" : "ml-auto"} title={data.hint}>{data.text}</Badge>;
+}
+
+function SessionControl({ label, Icon, collapsed, disabled, disabledReason, active, failed, count, onClick }: {
+  label: string; Icon: LucideIcon; collapsed: boolean; disabled?: boolean; disabledReason?: string; active?: boolean; failed?: boolean;
+  count?: { context: PluginContext; value: NonNullable<PluginMenu["count"]> }; onClick: () => void;
+}) {
+  const tooltip = `${label}${failed ? " · Failed" : disabled ? ` · ${disabledReason ?? "Unavailable"}` : ""}`;
+  if (collapsed) return <TooltipIconButton tooltip={tooltip} side="left" aria-label={label} aria-pressed={active}
+    disabled={disabled} title={tooltip} className={cn("size-7 p-1.5", active && "bg-accent text-accent-foreground")} onClick={onClick}>
+    <span className="relative"><Icon className="size-4" />{failed ? <span aria-label="Failed" className="bg-destructive absolute -right-1 -top-1 size-1.5 rounded-full" /> : null}
+      {count ? <MenuCount context={count.context} count={count.value} compact /> : null}</span>
+  </TooltipIconButton>;
+  return <Button type="button" variant="ghost" size="sm" disabled={disabled} aria-pressed={active}
+    title={disabled ? tooltip : undefined} onClick={onClick} className={cn(ROW, active && "bg-accent text-accent-foreground font-medium")}>
+    <Icon className="size-3.5" /><span className="min-w-0 truncate">{label}</span>
+    {failed ? <Badge variant="destructive" className="ml-auto">Failed</Badge> : count ? <MenuCount context={count.context} count={count.value} /> : null}
+  </Button>;
 }
 
 /** Appends plugin entries to the existing session controls, not a separate sidebar. */
-export function PluginSessionControls({ host, session, view, onViewChange, onNavigate }: {
-  host: PluginHost; session: Session; view: SessionView; onViewChange: (view: SessionView) => void; onNavigate: () => void;
+export function PluginSessionControls({ host, session, view, onViewChange, onNavigate, collapsed = false }: {
+  host: PluginHost; session: Session; view: SessionView; onViewChange: (view: SessionView) => void; onNavigate: () => void; collapsed?: boolean;
 }) {
   const snapshot = usePluginSnapshot(host);
   const plugins = [...snapshot.registry.plugins].sort((a, b) => {
@@ -41,11 +59,8 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
       const key = pluginViewKey(plugin.id, item.id);
       const Icon = ICONS[item.icon ?? ""] ?? Puzzle;
       const disabled = item.needs_folder && !session.workspace;
-      return <Button key={`view:${key}`} type="button" variant="ghost" size="sm" disabled={disabled}
-        title={disabled ? "Open a chat with a folder to use this view" : undefined} onClick={() => onViewChange(key)}
-        className={cn(ROW, view === key && "bg-accent text-accent-foreground font-medium")}>
-        <Icon className="size-3.5" /><span className="min-w-0 truncate">{item.label}</span>
-      </Button>;
+      return <SessionControl key={`view:${key}`} label={item.label} Icon={Icon} collapsed={collapsed} disabled={disabled}
+        disabledReason="Open a chat with a folder to use this view" active={view === key} onClick={() => onViewChange(key)} />;
     }))}
     {snapshot.entries.filter(entry => entry.enabled && !entry.shadowed && snapshot.errors[entry.id]).flatMap(entry => {
       const declared = Array.isArray(entry.contributes?.views) ? entry.contributes.views : [];
@@ -54,11 +69,8 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
         if (!item || typeof item.id !== "string") return [];
         const label = typeof item.label === "string" && item.label ? item.label : `${entry.name}${index ? ` View ${index + 1}` : ""}`;
         const key = pluginViewKey(entry.id, item.id);
-        return [<Button key={`failed-view:${key}`} type="button" variant="ghost" size="sm" className={ROW}
-          onClick={() => onViewChange(key)}>
-          <Puzzle className="size-3.5" /><span className="min-w-0 truncate">{label}</span>
-          <Badge variant="destructive" className="ml-auto">Failed</Badge>
-        </Button>];
+        return [<SessionControl key={`failed-view:${key}`} label={label} Icon={Puzzle} collapsed={collapsed} failed
+          active={view === key} onClick={() => onViewChange(key)} />];
       });
     })}
     {snapshot.entries.filter(entry => entry.enabled && !entry.shadowed && snapshot.errors[entry.id]).flatMap(entry => {
@@ -67,11 +79,8 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
         if (!raw || typeof raw !== "object") return [];
         const menu = raw as PluginMenu;
         if (typeof menu.id !== "string") return [];
-        return [<Button key={`failed:${entry.id}:${menu.id}`} type="button" variant="ghost" size="sm" className={ROW}
-          onClick={() => { onNavigate(); host.navigate(entry.id, menu.open ?? { page: menu.id }); }}>
-          <Puzzle className="size-3.5" /><span className="min-w-0 truncate">{menu.label ?? entry.name}</span>
-          <Badge variant="destructive" className="ml-auto">Failed</Badge>
-        </Button>];
+        return [<SessionControl key={`failed:${entry.id}:${menu.id}`} label={menu.label ?? entry.name} Icon={Puzzle} collapsed={collapsed} failed
+          onClick={() => { onNavigate(); host.navigate(entry.id, menu.open ?? { page: menu.id }); }} />];
       });
     })}
     {plugins.flatMap(plugin => plugin.menus.map(menu => {
@@ -82,18 +91,15 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
       const label = menu.label ?? linkedView?.label ?? page?.title ?? modal?.title ?? menu.id;
       const Icon = ICONS[menu.icon ?? linkedView?.icon ?? ""] ?? Puzzle;
       const disabled = !context || Boolean(linkedView?.needs_folder && !session.workspace) || (!menu.open && !linkedView && !page && !modal);
-      return <Button key={`menu:${plugin.id}:${menu.id}`} type="button" variant="ghost" size="sm" disabled={disabled} className={ROW}
-        title={disabled ? "This plugin action is unavailable" : undefined}
+      return <SessionControl key={`menu:${plugin.id}:${menu.id}`} label={label} Icon={Icon} collapsed={collapsed} disabled={disabled}
+        disabledReason="This plugin action is unavailable" count={context && menu.count ? { context, value: menu.count } : undefined}
         onClick={() => {
           onNavigate();
           if (menu.open) context?.navigate(menu.open);
           else if (linkedView) onViewChange(pluginViewKey(plugin.id, linkedView.id));
           else if (page) context?.navigate({ page: page.id });
           else if (modal) context?.navigate({ modal: modal.id });
-        }}>
-        <Icon className="size-3.5" /><span className="min-w-0 truncate">{label}</span>
-        {context && menu.count ? <MenuCount context={context} count={menu.count} /> : null}
-      </Button>;
+        }} />;
     }))}
   </>;
 }

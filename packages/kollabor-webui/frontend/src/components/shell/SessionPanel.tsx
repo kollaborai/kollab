@@ -545,6 +545,8 @@ export function SessionPanel({
               <Icon className="size-4" />
             </TooltipIconButton>
           ))}
+          {pluginHost ? <PluginSessionControls host={pluginHost} session={session} view={view} collapsed
+            onNavigate={() => onSheetOpenChange(false)} onViewChange={onViewChange} /> : null}
         </aside>
       )}
 
