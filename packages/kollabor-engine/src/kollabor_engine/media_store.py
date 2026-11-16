@@ -188,7 +188,10 @@ def slot_count(conversations_dir: Path, session_id: str) -> int:
     return len(_read_index(conversations_dir, session_id))
 
 
-_IMAGE_TOKEN_RE = re.compile(r"\[image\d+\]")
+# [[imageN]] (double brackets) is the escaped literal form - text, not a
+# token (#1124 P2a) - so it neither consumes a slot nor counts toward the
+# page-offset skip.
+_IMAGE_TOKEN_RE = re.compile(r"(?<!\[)\[image\d+\](?!\])")
 
 
 def count_image_tokens(content: object) -> int:
@@ -260,9 +263,16 @@ def attach_media_to_rows(
         cursor += len(taken)
         if not taken:
             break
-        # Tombstoned slots (a part whose storage failed) hold the row's
-        # place in the count but bind nothing.
-        bound = [e for e in taken if e.get("ref")]
+        # Dense typed slot union (#1124 P2a): every consumed slot emits one
+        # entry, so media[i] is the [image{i+1}] token's image even when the
+        # row mixes stored and failed parts. Tombstones (a part whose
+        # storage failed) emit {ref: "", mime: "", failed: true} - they bind
+        # nothing, are never requested, and list_for still hides them from
+        # the gallery and viewer. Compacting them out would shift every
+        # later token's ordinal within the row.
         row["media"] = [
-            {"ref": e.get("ref"), "mime": e.get("mime")} for e in bound
+            {"ref": "", "mime": "", "failed": True}
+            if not e.get("ref")
+            else {"ref": e.get("ref"), "mime": e.get("mime")}
+            for e in taken
         ]

@@ -26,7 +26,7 @@ import {
   ToolGroupTrigger,
 } from "@/components/assistant-ui/tool-group";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
-import { splitMediaSegments } from "@/components/media/media-tokens";
+import { resolveMediaSegment, splitMediaSegments } from "@/components/media/media-tokens";
 import { MediaThumb, useMediaViewer, useSessionMedia } from "@/components/media/media-view";
 import { agentStatus, bundleName } from "@/components/panels/panel-model";
 import { Button } from "@/components/ui/button";
@@ -1315,18 +1315,24 @@ const UserText: FC<{ text?: string }> = ({ text }) => {
   return (
     <>
       {segments.map((segment, index) => {
-        if (segment.kind === "text") return <span key={index}>{segment.text}</span>;
+        const resolved = resolveMediaSegment(segment, media);
+        if (resolved.kind === "text") return <span key={index}>{resolved.text}</span>;
+        // Literal [imageN] text: the escaped form, or a slot whose picture
+        // is missing or failed - it never requests a ref and never opens
+        // the viewer (#1124 P2a).
+        if (resolved.kind === "literal") return <span key={index}>{resolved.text}</span>;
         if (imageParts > 0) return null;
-        const entry = media?.[segment.index];
-        if (!entry) return <span key={index}>[image{segment.index + 1}]</span>;
-        const viewerItems = sessionMedia?.length ? sessionMedia : media;
-        const viewerIndex = viewerItems?.findIndex((item) => item.ref === entry.ref) ?? -1;
+        const { entry, index: slot } = resolved;
+        // A resolved thumb implies the row has a media list; an empty list
+        // just yields a -1 viewer index, falling back to the slot position.
+        const viewerItems = sessionMedia?.length ? sessionMedia : (media ?? []);
+        const viewerIndex = viewerItems.findIndex((item) => item.ref === entry.ref);
         return (
           <MediaThumb
             key={index}
             ref_={entry.ref}
             className="my-1 align-middle"
-            onOpen={openViewer ? () => openViewer(viewerItems ?? media, viewerIndex >= 0 ? viewerIndex : segment.index) : undefined}
+            onOpen={openViewer ? () => openViewer(viewerItems, viewerIndex >= 0 ? viewerIndex : slot) : undefined}
           />
         );
       })}
