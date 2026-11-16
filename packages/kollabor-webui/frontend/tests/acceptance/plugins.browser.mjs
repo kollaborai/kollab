@@ -686,6 +686,9 @@ try {
   await page.getByRole("button", { name: "Open Hello Dialog" }).click();
   const phoneHelloModal = page.getByRole("dialog", { name: "Hello Dialog" });
   await phoneHelloModal.getByText("Hello from the dialog.", { exact: true }).waitFor();
+  const phoneClose = phoneHelloModal.getByRole("button", { name: "Close", exact: true });
+  const closeSize = await phoneClose.evaluate(element => ({ width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height }));
+  assert.ok(closeSize.width >= 44 && closeSize.height >= 44, `plugin modal close is at least 44x44 on touch: ${JSON.stringify(closeSize)}`);
   await page.keyboard.press("Escape");
   await phoneHelloModal.waitFor({ state: "hidden" });
   await page.getByText("Hello from your plugin!", { exact: true }).waitFor();
