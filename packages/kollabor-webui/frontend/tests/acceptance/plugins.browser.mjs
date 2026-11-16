@@ -557,10 +557,16 @@ try {
   await page.waitForTimeout(400); // Allow the settings dialog's resize transition to settle.
   const settingsTabList = settings.getByRole("tablist", { name: "Settings sections" });
   const tabListBox = await settingsTabList.boundingBox();
+  const panelBox = await settings.getByRole("tabpanel").boundingBox();
+  assert.ok(tabListBox && panelBox && tabListBox.y + tabListBox.height <= panelBox.y + 1,
+    `settings tab list must end above the visible panel at 820px: ${JSON.stringify({ tabListBox, panelBox })}`);
   for (const tab of await settingsTabList.getByRole("tab").all()) {
     const box = await tab.boundingBox();
     assert.ok(box && tabListBox && box.x >= tabListBox.x - 1 && box.x + box.width <= tabListBox.x + tabListBox.width + 1,
       `settings tab ${await tab.innerText()} must not be clipped at 820px`);
+    assert.ok(box && panelBox && (box.y + box.height <= panelBox.y + 1 || box.y >= panelBox.y + panelBox.height ||
+      box.x + box.width <= panelBox.x || box.x >= panelBox.x + panelBox.width),
+      `settings tab ${await tab.innerText()} must not intersect the visible panel at 820px`);
   }
   await page.setViewportSize({ width: 1280, height: 800 });
   await settings.getByRole("tab", { name: "Plugins" }).click({ timeout: 5000 });
