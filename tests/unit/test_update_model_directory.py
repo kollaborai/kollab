@@ -190,3 +190,61 @@ def test_no_changes_leaves_meta_and_reports_clean():
     assert changed is False
     assert report == ["no changes; model directory already matches the sources"]
     assert data["_meta"]["updated"] != "2026-11-15"
+
+
+def test_models_dev_true_temperature_refreshes_sampling_support():
+    data = {"models": {"model": {"provider": "openai", "supports_sampling": False}}}
+    source = {
+        "openai": {
+            "models": {
+                "model": {
+                    "temperature": True,
+                    "limit": {"context": 10},
+                }
+            }
+        }
+    }
+
+    upd.apply_merge(data, source, {"data": []}, today="2026-11-16")
+
+    assert data["models"]["model"]["supports_sampling"] is True
+
+
+def test_malformed_models_dev_nested_sections_do_not_abort_refresh():
+    source = {
+        "openai": {
+            "models": {
+                "bad-limit": {"limit": ["unexpected"]},
+                "bad-modalities": {
+                    "limit": {"context": 10},
+                    "modalities": ["unexpected"],
+                    "pricing": ["unexpected"],
+                },
+            }
+        }
+    }
+    data = {"models": {}}
+
+    upd.apply_merge(data, source, {"data": []}, today="2026-11-16")
+
+    assert "bad-limit" not in data["models"]
+    assert data["models"]["bad-modalities"]["supports_vision"] is False
+
+
+def test_malformed_openrouter_nested_sections_do_not_abort_refresh():
+    source = {
+        "data": [
+            {
+                "id": "vendor/model",
+                "context_length": 10,
+                "top_provider": ["unexpected"],
+                "architecture": ["unexpected"],
+                "pricing": ["unexpected"],
+            }
+        ]
+    }
+    data = {"models": {}}
+
+    upd.apply_merge(data, {}, source, today="2026-11-16")
+
+    assert data["models"]["vendor/model"]["supports_vision"] is False
