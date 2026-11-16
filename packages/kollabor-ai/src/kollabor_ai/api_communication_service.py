@@ -76,6 +76,34 @@ RETRY_JITTER_MAX = 1.0
 logger = logging.getLogger(__name__)
 
 
+def _compact_wire_request_history(
+    request: Dict[str, Any], previous: Dict[str, Any]
+) -> tuple[Dict[str, Any], bool]:
+    """Replace matching provider history prefixes with the new suffix."""
+    compacted_request = copy.deepcopy(request)
+    compacted = False
+    history_keys = {"messages", "contents", "input"}
+
+    def compact(current: Dict[str, Any], prior: Dict[str, Any]) -> None:
+        nonlocal compacted
+        for key, value in list(current.items()):
+            previous_value = prior.get(key)
+            if (
+                key in history_keys
+                and isinstance(value, list)
+                and isinstance(previous_value, list)
+                and len(value) >= len(previous_value)
+                and value[: len(previous_value)] == previous_value
+            ):
+                current[key] = value[len(previous_value) :]
+                compacted = True
+            elif isinstance(value, dict) and isinstance(previous_value, dict):
+                compact(value, previous_value)
+
+    compact(compacted_request, previous)
+    return compacted_request, compacted
+
+
 class APICommunicationService:
     """Pure API communication service for LLM requests.
 
@@ -96,21 +124,18 @@ class APICommunicationService:
             Path(raw_conversations_dir) if raw_conversations_dir else None
         )
 
-        # Disk safety for raw interaction logs. These append the FULL request
-        # (whole conversation history) per call, so a single long session grows
-        # O(n^2) — observed 290MB files, 6.2GB total dir (2026-07-03). Two
-        # bounds, both tunable, both 0 = disabled:
+        # Disk safety for raw interaction logs. Matching request history is
+        # stored as deltas, but responses and other payloads can still grow a
+        # session file. Two bounds, both tunable, both 0 = disabled:
         #   - per-file cap: rotate to a new file once one session's log is huge
-        #   - total-dir cap: prune oldest sessions so weeks of runs stay bounded
+        #   - global cap: prune the oldest raw files across all project folders
         self._raw_max_file_bytes = int(
             config.get("kollabor.llm.raw_log_max_file_mb", 100) * 1024 * 1024
         )
         self._raw_max_total_bytes = int(
             config.get("kollabor.llm.raw_log_max_total_mb", 1024) * 1024 * 1024
         )
-        # Enforce the total-dir ceiling once at session start (prunes oldest
-        # *_raw.jsonl). The current session's file does not exist yet, so it
-        # is never a prune target here.
+        # Enforce the global projects-data ceiling once at service start.
         self._prune_raw_logs()
 
         # Initialize from profile (resolves env vars through profile's getter methods)
@@ -183,6 +208,11 @@ class APICommunicationService:
         # follow-up call.
         self.last_turn_id: Optional[str] = None
         self._current_parent_turn_id: Optional[str] = None
+        self._last_raw_log_session_id: Optional[str] = None
+        self._last_raw_log_turn_id: Optional[str] = None
+        self._last_raw_local_messages: List[LocalMessage] = []
+        self._last_raw_wire_provider = ""
+        self._last_raw_wire_request: Optional[Dict[str, Any]] = None
 
         # Tool accumulator mode (LEGACY vs EXPLICIT)
         self._use_explicit_accumulation = config.get(
@@ -1784,9 +1814,8 @@ class APICommunicationService:
     ) -> None:
         """Log a raw API request/response round-trip.
 
-        Builds a typed ``RawInteraction`` so every provider's log entry
-        has the same shape: ``conversation_local`` for what Kollab held,
-        ``wire_request`` for the provider-native request with image data redacted.
+        Builds a typed ``RawInteraction`` with conversation and provider
+        request history compacted against the preceding turn when possible.
 
         Args:
             messages: ``_prepare_messages`` output (conversation_local view)
@@ -1799,6 +1828,19 @@ class APICommunicationService:
         try:
             if not self.raw_conversations_dir:
                 return
+            raw_file = (
+                Path(self.raw_conversations_dir)
+                / f"{self.current_session_id}_raw.jsonl"
+            )
+            will_rotate = False
+            if self._raw_max_file_bytes > 0:
+                try:
+                    will_rotate = (
+                        raw_file.exists()
+                        and raw_file.stat().st_size >= self._raw_max_file_bytes
+                    )
+                except OSError:
+                    pass
 
             local_messages = [
                 LocalMessage(
@@ -1810,6 +1852,18 @@ class APICommunicationService:
                 )
                 for m in messages
             ]
+            full_local_messages = copy.deepcopy(local_messages)
+            conversation_local_previous_turn_id: Optional[str] = None
+            if (
+                self._last_raw_log_session_id == self.current_session_id
+                and not will_rotate
+                and self._last_raw_log_turn_id
+                and len(local_messages) >= len(self._last_raw_local_messages)
+                and local_messages[: len(self._last_raw_local_messages)]
+                == self._last_raw_local_messages
+            ):
+                conversation_local_previous_turn_id = self._last_raw_log_turn_id
+                local_messages = local_messages[len(self._last_raw_local_messages) :]
 
             # Snapshot the provider's redacted request so later calls cannot
             # rewrite history.
@@ -1825,6 +1879,21 @@ class APICommunicationService:
                 wire_provider = getattr(self._provider, "_provider_name", "") or str(
                     getattr(self._provider, "provider_type", "")
                 )
+            full_wire_request = copy.deepcopy(wire_request)
+            wire_request_previous_turn_id: Optional[str] = None
+            if (
+                wire_request is not None
+                and isinstance(self._last_raw_wire_request, dict)
+                and self._last_raw_log_session_id == self.current_session_id
+                and not will_rotate
+                and self._last_raw_log_turn_id
+                and wire_provider == self._last_raw_wire_provider
+            ):
+                wire_request, compacted = _compact_wire_request_history(
+                    wire_request, self._last_raw_wire_request
+                )
+                if compacted:
+                    wire_request_previous_turn_id = self._last_raw_log_turn_id
 
             interaction = RawInteraction(
                 turn_id=self.last_turn_id or str(uuid.uuid4()),
@@ -1844,7 +1913,11 @@ class APICommunicationService:
                 ),
                 request=RawRequest(
                     conversation_local=local_messages,
+                    conversation_local_previous_turn_id=(
+                        conversation_local_previous_turn_id
+                    ),
                     wire_request=wire_request,
+                    wire_request_previous_turn_id=wire_request_previous_turn_id,
                     wire_provider=wire_provider,
                     tools=tools,
                 ),
@@ -1872,15 +1945,9 @@ class APICommunicationService:
                 )
 
             # Write to session-specific raw log file
-            raw_file = (
-                Path(self.raw_conversations_dir)
-                / f"{self.current_session_id}_raw.jsonl"
-            )
-
-            # Per-file cap: a single long session appends the full history per
-            # call (O(n^2)). Past the cap, move the full file aside and start a
-            # fresh one so recent wire data is never dropped, then re-apply the
-            # total-dir ceiling (oldest files go first).
+            # Past the per-file cap, move the full file aside and start a fresh
+            # chunk. The first record in the new chunk is a full snapshot so it
+            # does not depend on a record in the previous chunk.
             if self._raw_max_file_bytes > 0:
                 try:
                     if (
@@ -1898,6 +1965,20 @@ class APICommunicationService:
 
             with open(raw_file, "a") as f:
                 f.write(json.dumps(interaction.to_dict(), default=str) + "\n")
+
+            self._prune_raw_logs()
+            if raw_file.exists():
+                self._last_raw_log_session_id = self.current_session_id
+                self._last_raw_log_turn_id = interaction.turn_id
+                self._last_raw_local_messages = full_local_messages
+                self._last_raw_wire_provider = wire_provider
+                self._last_raw_wire_request = full_wire_request
+            else:
+                self._last_raw_log_session_id = None
+                self._last_raw_log_turn_id = None
+                self._last_raw_local_messages = []
+                self._last_raw_wire_provider = ""
+                self._last_raw_wire_request = None
 
         except Exception as e:
             logger.warning(f"Failed to log raw interaction: {e}")
@@ -1924,21 +2005,26 @@ class APICommunicationService:
         )
 
     def _prune_raw_logs(self) -> None:
-        """Keep the raw-conversations dir under the total-size ceiling.
+        """Keep raw-conversations across all project folders under the cap.
 
-        Deletes oldest ``*_raw.jsonl`` files (by mtime) until the directory
-        total is under ``self._raw_max_total_bytes``. No-op when the cap is 0
-        or the dir is unset/missing. Best-effort: never raises into callers.
+        Deletes oldest ``*_raw.jsonl`` files (by mtime) across the projects
+        data directory until the total is under ``self._raw_max_total_bytes``.
+        No-op when the cap is 0 or the data directory is unset/missing.
+        Best-effort: never raises into callers.
         """
         try:
             if not self.raw_conversations_dir or self._raw_max_total_bytes <= 0:
                 return
             d = Path(self.raw_conversations_dir)
-            if not d.is_dir():
+            nested_raw_dir = d.name == "raw" and d.parent.name == "conversations"
+            projects_dir = d.parents[2] if nested_raw_dir else d
+            if not projects_dir.is_dir():
                 return
             files = []
             total = 0
-            for f in d.glob("*_raw.jsonl"):
+            for f in projects_dir.rglob("*_raw.jsonl"):
+                if nested_raw_dir and f.parent.name != "raw":
+                    continue
                 try:
                     st = f.stat()
                 except OSError:
@@ -1961,7 +2047,8 @@ class APICommunicationService:
                     continue
             if removed:
                 logger.info(
-                    "Raw log retention: pruned %d oldest session file(s) to stay under %d MB total",
+                    "Raw log retention: pruned %d oldest session file(s) "
+                    "across project folders to stay under %d MB total",
                     removed,
                     self._raw_max_total_bytes // (1024 * 1024),
                 )
