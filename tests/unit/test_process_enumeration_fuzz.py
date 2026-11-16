@@ -169,26 +169,35 @@ def test_pid_and_environment_generated_rows_do_not_expand_sweep(monkeypatch) -> 
 
     for _ in range(200):
         pids = rng.sample(range(10000, 90000), rng.randint(1, 20))
+        agent_pid = pids[0]
         envs = {}
-        for pid in pids:
+        for index, pid in enumerate(pids):
             env = {}
-            if rng.choice([True, False]):
-                env["KOLLAB_AGENT_PID"] = str(rng.choice(pids))
-            if rng.choice([True, False]):
-                env["KOLLAB_OWNER_PID"] = str(rng.choice(pids))
-            envs[pid] = _EnvironmentProcess(pid, env, rng.choice(errors))
+            error = None
+            if index:
+                unrelated_pids = pids[1:]
+                if rng.choice([True, False]):
+                    env["KOLLAB_AGENT_PID"] = str(rng.choice(unrelated_pids))
+                if rng.choice([True, False]):
+                    env["KOLLAB_OWNER_PID"] = str(rng.choice(unrelated_pids))
+                error = rng.choice(errors)
+            envs[pid] = _EnvironmentProcess(pid, env, error)
         monkeypatch.setattr(psutil, "pids", lambda pids=pids: pids)
         monkeypatch.setattr(psutil, "Process", lambda pid: envs[pid])
 
         rows = [nh._win_read_process(pid) for pid in psutil.pids()]
         rows = [row for row in rows if row is not None]
+        tree = {pid: (1, pid, pid) for pid in pids}
+        info = {pid: (100.0 + index, "worker", "") for index, pid in enumerate(pids)}
         selected = nh.select_sweep(
             rows,
             install=install,
             scopes=["/tmp/untrusted-worker"],
-            tree=None,
+            agent_pids=[agent_pid],
+            tree=tree,
+            info=info,
         )
-        assert selected == []
+        assert {process.pid for process in selected} == {agent_pid}
 
 
 def test_recursive_children_generated_trees_survive_races_safely(monkeypatch) -> None:
