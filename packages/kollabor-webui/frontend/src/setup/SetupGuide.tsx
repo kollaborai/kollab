@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CheckCircle2, ChevronRight, X } from "lucide-react";
+import { CheckCircle2, X } from "lucide-react";
 import type { EngineApi } from "@/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -128,7 +128,12 @@ export function SetupGuide({
         if (!next) dismiss();
       }}
     >
-      <DialogContent className="flex h-[min(30rem,80dvh)] w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-xl">
+      {/* The guide draws its own header skip button; suppress the
+          DialogContent default close so the dialog shows one X, not two. */}
+      <DialogContent
+        showCloseButton={false}
+        className="flex h-[min(30rem,80dvh)] w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-xl"
+      >
         <div className="flex shrink-0 items-start justify-between gap-2 px-6 pt-5">
           <div className="min-w-0">
             <DialogTitle className="text-lg leading-none font-semibold">
@@ -167,7 +172,7 @@ export function SetupGuide({
                   data-testid={`setup-step-${item.id}`}
                 >
                 {complete ? (
-                  <CheckCircle2 className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                  <CheckCircle2 className="size-4 shrink-0 text-highlight" />
                 ) : (
                   <span
                     aria-hidden="true"
@@ -193,7 +198,6 @@ export function SetupGuide({
             onClick={target ? runTarget : advance}
           >
             {target ? "Open" : "Finish"}
-            <ChevronRight />
           </Button>
         </footer>
       </DialogContent>

@@ -7,7 +7,7 @@ export type HubNote = {
   /** Empty for a broadcast (the hub's `*` target). */
   to: string;
   text: string;
-  /** Sent to another agent; this one only saw it go by. */
+  /** Sent to another agent, or typed in another agent's window; this one only saw it go by. */
   observed: boolean;
   /** Optional routing metadata, retained for presentation only. */
   threadId?: string;
@@ -196,7 +196,11 @@ function hubNote(label: string, lines: string[]): HubNote | null {
     if (reply) route.replyTo = reply[1];
     body = newline < 0 ? "" : body.slice(newline + 1);
   }
-  const observed = body.includes("\n(this message was sent to ") || body.startsWith("(this message was sent to ");
+  // Hints the hub adds to a message this agent only saw go by (#659).
+  const observed =
+    body.includes("\n(this message was sent to ") ||
+    body.includes("\n(the human is typing in ") ||
+    body.startsWith("(this message was sent to ");
   const cuts = TRAILERS.map((marker) => body.indexOf(marker)).filter((index) => index >= 0);
   if (cuts.length) body = body.slice(0, Math.min(...cuts));
   const text = stripReplyInstructions(body);

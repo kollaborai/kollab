@@ -107,7 +107,12 @@ export type HistoryMessage = {
   timestamp?: string | null;
   metadata?: Record<string, unknown>;
   thinking?: string | null;
+  /** Stored copies of the images this row sent (#1088), in [imageN] order. */
+  media?: Array<{ ref: string; mime: string }>;
 };
+
+/** The engine's stored copy of one image a session sent (#1088). */
+export type MediaEntry = { ref: string; mime: string };
 
 /** Why the session's last turn failed; it goes after `history_length` messages. */
 export type TurnError = { message: string; history_length: number };
@@ -215,6 +220,8 @@ export type Effort = (typeof EFFORT_LEVELS)[number];
 export type Profile = {
   name: string;
   provider?: string;
+  /** Opaque hash of the ACP launch inputs that decide model discovery. */
+  choices_fingerprint?: string;
   model?: string;
   description?: string;
   base_url?: string;
@@ -399,6 +406,10 @@ export type LiveAgent = {
   solo: boolean;
   /** The folder it runs in. */
   project: string;
+  /** The Kollab version it runs; empty from an agent that started before agents published one. */
+  version?: string;
+  /** The commit of that build. */
+  build?: string;
 };
 
 /** GET /agents: the pool, as one folder (or the whole computer) sees it. */
@@ -409,6 +420,8 @@ export type AgentPoolResponse = {
   active?: string[];
   /** Every running agent in that scope, one per process (`agents` has one per name). */
   live?: LiveAgent[];
+  /** kollabor.updates.restart_agents: a chat whose agent is older offers Restart Agent (else it points at /restart). */
+  restart_agents?: boolean;
 };
 
 export type AgentBundleEntry = {
@@ -426,6 +439,8 @@ export type NetworkAgent = {
   handle?: string;
   state?: string;
   is_coordinator?: boolean;
+  /** The agent bundle it runs, as its device reports it; absent from a device that does not say. */
+  agent_type?: string;
   harness?: string;
   acp_waiting?: boolean;
   /** The tool it runs now (bare name and type, no arguments), from its device's directory; null between tools. */
@@ -589,7 +604,8 @@ export const DEFAULT_SLASH_COMMANDS: SlashCommand[] = [
   { name: "cd", description: "Change the working directory" },
   { name: "compact", description: "Compact the current context" },
   { name: "version", description: "Show the Kollab version" },
-  { name: "restart", description: "Clear conversation and start fresh session" },
+  { name: "new", description: "Clear conversation and start fresh session" },
+  { name: "restart", description: "Restart this agent on the installed version" },
   { name: "upgrade", description: "Update Kollab to the latest release" },
 ];
 
@@ -787,6 +803,35 @@ export type AppsPicker = Omit<PanelPicker, "rows"> & {
   sections?: AppsSection[] | null;
 };
 
+export type PrChainItem = {
+  kind: "pr" | "issue";
+  number: number;
+  status?: string;
+  started?: string;
+  updated?: string;
+  round?: number;
+  head?: string;
+  last_verdict?: string;
+  why?: string;
+  branch?: string;
+  pr?: number;
+  claimed: boolean;
+};
+
+export type PrChainEvent = {
+  ts?: string;
+  pr?: number | string;
+  issue?: number;
+  stage?: string;
+  status?: string;
+  verdict?: string;
+  why?: string;
+  round?: number;
+  n?: number;
+};
+
+export type PrChainSnapshot = { root_found: boolean; items: PrChainItem[]; events: PrChainEvent[]; truncated?: boolean };
+
 export type AppsRegistryResult = AppsPicker & {
   query?: string | null;
   note?: string | null;
@@ -866,6 +911,11 @@ export class ApiError extends Error {
   }
 }
 
+/** The engine's 409 for an agent that cannot restart itself: it started before Restart Agent existed (#968). */
+export function isAgentTooOld(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409 && error.message.includes("too old to restart itself");
+}
+
 /** A failure as a sentence for the page: no HTTP status, capitalized. */
 export function errorText(reason: unknown): string {
   const text = (reason instanceof Error ? reason.message : String(reason)).replace(/^\d{3}: /, "");
@@ -877,6 +927,9 @@ export function errorText(reason: unknown): string {
  * machine runs no daemon, so these go to `/network/halt/{name}?folder=`.
  */
 export const SESSIONLESS_PANELS = new Set(["connect-halt", "connect-halt-new"]);
+
+/** The panels the engine serves with no session at all: first-run setup (#1114/#1115). */
+export const SETUP_PANELS = new Set(["setup", "connect"]);
 
 export class EngineApi {
   /** The folder the session-less halt panels ask about (the open chat's, else the sidebar's). */
@@ -900,6 +953,12 @@ export class EngineApi {
 
   getToken() {
     return this.token;
+  }
+
+  /** A ws:// or wss:// URL on the engine for `path` (e.g. "/code/terminal"), after the engine URL/token are known. */
+  async websocketUrl(path: string) {
+    await this.loadConfig();
+    return `${this.baseUrl.replace(/^http/, "ws")}${path}`;
   }
 
   assistantUrl(sessionId: string) {
@@ -1075,6 +1134,11 @@ export class EngineApi {
     return this.json<{ hidden: HiddenAgent[] }>("/sidebar/hide", { method: "POST", body: JSON.stringify(entry) });
   }
 
+  /** Read the pr-chain workflow's state: every PR and issue it tracks, plus its latest ledger events. */
+  getPrChain(signal?: AbortSignal) {
+    return this.json<PrChainSnapshot>("/pr-chain", { cache: "no-store", signal });
+  }
+
   /** Read the engine-owned sidebar order and any recovery warning. */
   getSidebarOrder() {
     return this.json<{ order: string[]; revision: number; warning: string | null }>("/sidebar/order");
@@ -1136,20 +1200,28 @@ export class EngineApi {
     const query = new URLSearchParams(
       Object.entries(params).filter(([, value]) => value !== ""),
     ).toString();
+    const queryless = SESSIONLESS_PANELS.has(name) || (sessionId === "" && SETUP_PANELS.has(name));
     return this.json<PanelDescription>(
-      SESSIONLESS_PANELS.has(name)
-        ? this.panelPath(sessionId, name) // the halt panels take no filters
+      queryless
+        ? this.panelPath(sessionId, name) // the halt and setup panels take no filters
         : `${this.panelPath(sessionId, name)}${query ? `?${query}` : ""}`,
       { signal },
     );
   }
 
-  /** `/network/halt/{name}?folder=` for SESSIONLESS_PANELS, `/sessions/{id}/panels/{name}` for the rest. */
+  /**
+   * `/network/halt/{name}?folder=` for SESSIONLESS_PANELS, `/setup/panels/{name}`
+   * for the setup family with no session (#1114/#1115), and
+   * `/sessions/{id}/panels/{name}` for the rest.
+   */
   panelPath(sessionId: string, name: string, suffix = ""): string {
-    if (!SESSIONLESS_PANELS.has(name)) {
-      return `/sessions/${encodeURIComponent(sessionId)}/panels/${encodeURIComponent(name)}${suffix}`;
+    if (SESSIONLESS_PANELS.has(name)) {
+      return `/network/halt/${encodeURIComponent(name)}${suffix}?folder=${encodeURIComponent(this.haltFolder)}`;
     }
-    return `/network/halt/${encodeURIComponent(name)}${suffix}?folder=${encodeURIComponent(this.haltFolder)}`;
+    if (sessionId === "" && SETUP_PANELS.has(name)) {
+      return `/setup/panels/${encodeURIComponent(name)}${suffix}`;
+    }
+    return `/sessions/${encodeURIComponent(sessionId)}/panels/${encodeURIComponent(name)}${suffix}`;
   }
 
   /** The halt screen for one folder with no chat open (the sidebar's halted line). */
@@ -1213,6 +1285,32 @@ export class EngineApi {
     return this.json<{ ok: boolean }>(`/sessions/${encodeURIComponent(sessionId)}`, {
       method: "DELETE",
     });
+  }
+
+  /** The session's stored sent images, oldest first (#1088). */
+  listMedia(sessionId: string) {
+    return this.json<{ session_id: string; media: MediaEntry[] }>(
+      `/media?session_id=${encodeURIComponent(sessionId)}`,
+    );
+  }
+
+  /** The engine path that serves one stored image; the request adds the bearer token. */
+  mediaPath(ref: string) {
+    return `/media/${encodeURIComponent(ref)}`;
+  }
+
+  /** The session's spilled tool outputs (its Gallery artifacts), newest first. */
+  listArtifacts(sessionId: string) {
+    return this.json<{ session_id: string; artifacts: Array<{ ref: string; name: string; bytes: number; modified: string }> }>(
+      `/sessions/${encodeURIComponent(sessionId)}/artifacts`,
+    );
+  }
+
+  /** One spilled tool output's text (capped by the engine). */
+  readArtifact(sessionId: string, ref: string) {
+    return this.json<{ session_id: string; ref: string; truncated: boolean; content: string }>(
+      `/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(ref)}`,
+    );
   }
 
   getHistoryPage(sessionId: string, options: HistoryPageOptions = {}) {
@@ -1291,6 +1389,14 @@ export class EngineApi {
       source: first.source,
       stale: first.stale,
     };
+  }
+
+  /** Restart one chat's detached agent on the installed code, keeping its conversation. */
+  restartAgent(sessionId: string) {
+    return this.json<{ ok: boolean; session_id: string; restarting: boolean; waiting_for_turn: boolean }>(
+      `/sessions/${encodeURIComponent(sessionId)}/restart-agent`,
+      { method: "POST" },
+    );
   }
 
   clearHistory(sessionId: string) {
@@ -1417,11 +1523,18 @@ export class EngineApi {
     );
   }
 
-  listModelChoices() {
+  /**
+   * Choices for `workspace`'s own profiles and loadouts (empty: the engine's folder). `refresh` is the picker's
+   * Retry: the engine probes the harnesses whose list is incomplete again.
+   */
+  listModelChoices(workspace = "", refresh = false) {
+    const query = [workspace ? `workspace=${encodeURIComponent(workspace)}` : "", refresh ? "refresh=true" : ""]
+      .filter(Boolean)
+      .join("&");
     return this.json<{
       choices: ModelChoice[];
       discovery?: Record<string, { status: "ready" | "partial" | "unavailable"; message?: string; more?: boolean }>;
-    }>("/profiles/choices");
+    }>(query ? `/profiles/choices?${query}` : "/profiles/choices");
   }
 
   /** The profiles, and the default loadout of `workspace` (empty: the engine's own folder). */

@@ -14,7 +14,7 @@ registerHooks({
     }
   },
 });
-const { formatSessionName } = await import("../src/utils/session-display.ts");
+const { agentName, formatSessionName, sessionHeading } = await import("../src/utils/session-display.ts");
 
 test("a generated id shows its two words", () => {
   assert.equal(formatSessionName(null, "2610180756-quantum-spark-7k2x"), "quantum-spark");
@@ -26,4 +26,16 @@ test("a name people gave keeps every part", () => {
   assert.equal(formatSessionName("fix-2day"), "fix-2day");
   assert.equal(formatSessionName("2610180756-release-notes-v2"), "release-notes-v2");
   assert.equal(formatSessionName(null, null), "session");
+});
+
+test("a chat heading names the resolved identity, not its bundle role", () => {
+  assert.equal(
+    sessionHeading({ name: "task", session_id: "task", identity: "jasper", agent: "coder" }),
+    "Jasper",
+  );
+  assert.equal(
+    sessionHeading({ name: "task", session_id: "task", identity: "pr-shepherd", agent: "coder" }),
+    "Pr Shepherd",
+  );
+  assert.equal(agentName("jasper", "Jasper Vale"), "Jasper Vale");
 });

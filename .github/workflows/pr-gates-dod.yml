@@ -7,7 +7,8 @@ name: PR Gates DoD
 
 # pull_request_target runs the base branch's copy of this workflow and script, so a
 # PR cannot change its own grade or reach the token. The script reads the PR only
-# through the API; this workflow never checks out or runs PR code.
+# through the API; linked issue bodies are read-only too. This workflow never
+# checks out or runs PR code.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, edited]
@@ -15,6 +16,7 @@ on:
 
 permissions:
   contents: read
+  issues: read
   pull-requests: read
   checks: write
 

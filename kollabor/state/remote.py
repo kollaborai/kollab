@@ -14,6 +14,7 @@ holding.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -74,12 +75,25 @@ def _screen_text(value: str) -> str:
     return "".join(char for char in value if char.isprintable())[:200]
 
 
+_UNREADABLE_PANEL_ANSWER = (
+    "This session's agent sent an answer this engine cannot read. "
+    "It may be running an older version; restart the session."
+)
+
+
 def _panel_answer(result: Any, key: str) -> dict[str, Any]:
-    """The daemon's panel answer, or the PanelError it reported."""
+    """The daemon's panel answer, or the PanelError it reported.
+
+    An answer in a shape this engine does not know is the daemon's code and the
+    engine's disagreeing (a daemon that outlived an update): a 502 that says so, not
+    a TypeError the route would show as "daemon unreachable" (#955).
+    """
     from kollabor.panels import PanelError
 
     if not isinstance(result, dict):
-        raise TypeError(f"panel rpc expected dict, got {type(result).__name__}")
+        # type name only: the daemon's words can carry a payload value
+        logger.warning("panel rpc answer unreadable: it is a %s", type(result).__name__)
+        raise PanelError(_UNREADABLE_PANEL_ANSWER, status=502)
     if result.get("error"):
         status = result.get("status")
         errors = result.get("errors")
@@ -92,7 +106,8 @@ def _panel_answer(result: Any, key: str) -> dict[str, Any]:
         )
     value = result.get(key)
     if not isinstance(value, dict):
-        raise TypeError(f"panel rpc result missing {key!r}")
+        logger.warning("panel rpc answer has no %r dict: it is a %s", key, type(value).__name__)
+        raise PanelError(_UNREADABLE_PANEL_ANSWER, status=502)
     return value
 
 
@@ -688,6 +703,22 @@ class RemoteStateService(StateService):
             _raise_for_error(result)
         return ConversationSnapshot.from_dict(result)
 
+    async def restart_agent(self) -> dict[str, Any]:
+        """Ask the daemon to restart itself in place, keeping its conversation."""
+        from kollabor_rpc import RpcMethodNotFound
+
+        logger.debug("state rpc: restart_agent")
+        try:
+            result = await self._rpc.call("state.restart_agent", {}, timeout=self._timeout)
+        except RpcMethodNotFound as e:
+            # An agent started before this call existed cannot restart itself (#968).
+            raise ValueError("this agent is too old to restart itself: quit it and start it again") from e
+        if not isinstance(result, dict):
+            raise TypeError(f"state.restart_agent expected dict, got {type(result).__name__}")
+        if "error" in result and result.get("error"):
+            _raise_for_error(result)
+        return result
+
     # === MCP writes (phase 4.5 step 7) ===
 
     async def enable_mcp_server(self, name: str) -> McpSnapshot:
@@ -1000,6 +1031,28 @@ class RemoteStateService(StateService):
             timeout=max(self._timeout, self.PANEL_ACTION_TIMEOUTS.get(name, self.PANEL_ACTION_TIMEOUT)),
         )
         return _panel_answer(result, "result")
+
+    # Terminal polls need short deadlines. Other Code responses can approach the 16 MiB RPC frame limit and
+    # traverse a base64-encoded, rate-limited device tunnel; allow time for the full frame plus contention.
+    CODE_CALL_TIMEOUT: float = 40.0
+    BULK_CODE_CALL_TIMEOUT: float = 1200.0
+
+    async def code_call(self, op: str, params: dict[str, Any]) -> dict[str, Any]:
+        timeout = max(
+            self._timeout, self.CODE_CALL_TIMEOUT if op.startswith("terminal.") else self.BULK_CODE_CALL_TIMEOUT
+        )
+        # RpcClient's own reply deadline starts after its writer lock and drain; bound those waits too.
+        async with asyncio.timeout(timeout):
+            result = await self._rpc.call("state.code_call", {"op": op, "params": params}, timeout=timeout)
+        answer = result.get("answer") if isinstance(result, dict) else None
+        if (
+            not isinstance(answer, dict)
+            or not isinstance(answer.get("status"), int)
+            or not isinstance(answer.get("body"), dict)
+        ):
+            # A daemon that outlived an update answers in a shape this engine does not know (compare #955).
+            raise ValueError("daemon code call failed")
+        return answer
 
     async def hub_connect(self, command: str) -> str:
         result = await self._rpc.call(

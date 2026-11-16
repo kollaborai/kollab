@@ -1,0 +1,73 @@
+{
+  "id": "context-compaction",
+  "title": "Context compaction",
+  "summary": "Long conversations compact automatically near the model’s context limit. Check the status and resend a rejected message when ready.",
+  "workflows": [
+    {
+      "id": "preview-and-compact",
+      "label": "Check and compact",
+      "summary": "Inspect the state, preview the size of a reduction, or compact the current conversation now.",
+      "entry": {
+        "prerequisite": "Use the conversation whose history needs to be reduced.",
+        "command": "/compact preview"
+      },
+      "steps": [
+        {
+          "action": "Run /compact status, or read the status banner in the Web UI.",
+          "expect": "It distinguishes compacting, paused, failed and ready to retry."
+        },
+        {
+          "action": "Use /compact preview for a non-mutating estimate.",
+          "expect": "It reports recent and pinned messages kept, summarizable message counts and an estimated token reduction; it does not show a proposed summary."
+        },
+        {
+          "action": "Let automatic compaction finish, or use /compact now to start immediately. Use /compact to ask the model what to keep first."
+        },
+        {
+          "action": "If a request was rejected for context size, wait for ready to retry and send your message again.",
+          "expect": "Kollab does not automatically replay the failed request."
+        }
+      ],
+      "commands": [
+        {
+          "syntax": "/compact status",
+          "example": "/compact status",
+          "description": "Show the current compaction state."
+        },
+        {
+          "syntax": "/compact preview",
+          "example": "/compact preview",
+          "description": "Preview a possible compaction before changing conversation history."
+        },
+        {
+          "syntax": "/compact now",
+          "example": "/compact now",
+          "description": "Compact immediately without asking what to keep.",
+          "expect": "Older history is summarized to make room for later turns."
+        }
+      ],
+      "media": {
+        "kind": "image",
+        "src": "/learn/context-compaction/overview.webp",
+        "alt": "Kollab chat showing Context reduction ready and the instruction to resend the last message",
+        "caption": "When the banner says context reduction is ready, resend the message yourself."
+      },
+      "success": "Kollab reduces the current conversation history and leaves a summary for continued work.",
+      "recovery": [
+        {
+          "symptom": "Compaction is paused or failed",
+          "action": "Read the next action in the banner or /compact status. Resolve that issue before retrying; keep important decisions in a concise note."
+        },
+        {
+          "symptom": "A provider rejects the request because its context is too large",
+          "action": "The failed request is not resent automatically. Run /compact now or start a smaller conversation, then explicitly send the request again."
+        },
+        {
+          "symptom": "Compaction cannot run while another turn is active",
+          "action": "Wait for or stop that turn, inspect /compact status, then retry /compact now."
+        }
+      ],
+      "note": "Compaction changes conversation history. Review the summary and resend your original request yourself; Kollab does not automatically replay the failed request."
+    }
+  ]
+}

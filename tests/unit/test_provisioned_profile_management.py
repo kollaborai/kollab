@@ -99,7 +99,8 @@ def _manager_for_state(monkeypatch, tmp_path, state_file):
     monkeypatch.setattr(
         profile_manager_module,
         "get_local_config_path_candidates",
-        lambda: [],
+        # the manager reads another folder's local layer by passing its path (#972)
+        lambda project_path=None: [],
     )
     monkeypatch.setattr(
         provisioned_state_module,

@@ -1,0 +1,97 @@
+{
+  "id": "phone-access",
+  "title": "PhoneLink",
+  "summary": "Pair a phone with this computer's Kollab app using a short-lived invitation and local approval.",
+  "workflows": [
+    {
+      "id": "link-a-phone",
+      "label": "Link a phone browser",
+      "summary": "Create a one-phone invitation on the computer and approve the pairing code there.",
+      "entry": {
+        "prerequisite": "Keep the computer online with Kollab running. The selected Connect directory must serve the PhoneLink portal.",
+        "ui": [
+          "Settings",
+          "PhoneLink",
+          "Link a Phone"
+        ]
+      },
+      "steps": [
+        {
+          "action": "On the computer, open Settings → PhoneLink and select Link a Phone. Confirm that the portal is available before sharing an invitation."
+        },
+        {
+          "action": "On the phone you are linking, scan the QR code with its camera, or use Open on This Phone in the same browser."
+        },
+        {
+          "action": "Compare the pairing code and host fingerprint shown on both screens; approve only on the computer if they match."
+        },
+        {
+          "action": "On the phone, let the app load, then bookmark it or add it to the Home Screen. Revoke a lost phone from Settings → PhoneLink on the computer."
+        }
+      ],
+      "media": {
+        "kind": "image",
+        "src": "/learn/phone-access/overview.webp",
+        "alt": "Kollab PhoneLink settings with Link a Phone and the three pairing steps",
+        "caption": "Start Link a Phone on the computer. Compare the code and fingerprint before approving."
+      },
+      "success": "The approved phone opens this computer's app in its browser; agents, provider calls and tools still run on the computer.",
+      "recovery": [
+        {
+          "symptom": "The computer does not offer a QR code",
+          "action": "Check the portal capability shown in PhoneLink settings and configure the selected Connect directory to serve the PhoneLink portal before retrying."
+        },
+        {
+          "symptom": "The invitation expired or was already used",
+          "action": "On the computer, start Link a Phone again and scan the fresh invitation."
+        },
+        {
+          "symptom": "The pairing code or fingerprint does not match",
+          "action": "Do not approve. Cancel the request and create a new invitation on the computer."
+        },
+        {
+          "symptom": "Phone history does not load or an older link is stale",
+          "action": "Use the history retry control. If the session cursor is stale, reopen the conversation to load the latest page and continue scrolling for older history."
+        }
+      ],
+      "note": "The QR invitation expires after five minutes and links one phone. It does not enroll the phone in your agent network or transfer provider credentials. Approving a phone grants trusted app control until you revoke it."
+    },
+    {
+      "id": "read-phone-history",
+      "label": "Browse conversation history on the phone",
+      "summary": "PhoneLink opens the latest messages and loads older pages as you scroll back.",
+      "entry": {
+        "prerequisite": "Use a phone browser already paired with the computer running Kollab.",
+        "ui": [
+          "Sidebar",
+          "Select a conversation"
+        ]
+      },
+      "steps": [
+        {
+          "action": "Open the paired app and select a conversation.",
+          "expect": "PhoneLink shows the newest messages first."
+        },
+        {
+          "action": "Scroll to the top to load older history on demand.",
+          "expect": "Progress is shown, with a retry action if a load fails."
+        },
+        {
+          "action": "Expand a tool when you need its full output.",
+          "expect": "Details load when you expand a tool, so long chats open fast."
+        }
+      ],
+      "success": "The phone displays recent history and loads earlier messages as needed without requesting the entire conversation at once.",
+      "recovery": [
+        {
+          "symptom": "History shows a retryable loading error",
+          "action": "Use the visible retry action while the computer remains online."
+        },
+        {
+          "symptom": "A page cursor is stale after history changed",
+          "action": "Reopen or refresh the conversation; PhoneLink requests the latest page and avoids silently skipping older messages."
+        }
+      ]
+    }
+  ]
+}

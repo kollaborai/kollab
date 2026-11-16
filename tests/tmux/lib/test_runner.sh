@@ -138,7 +138,7 @@ FIRST_RUN = CONFIG.get("first_run") is True
 HOME_ENV = re.compile(r"(?<![A-Za-z0-9_])HOME=")
 SOCKET_DIR_ROOT = "/tmp/kollabor-hub/"
 TEST_HOME: Path | None = None
-RUN_ENV: dict[str, str] = {"KOLLAB_NO_KEYRING": "1"}
+RUN_ENV: dict[str, str] = {"KOLLAB_NO_KEYRING": "1", "KOLLAB_PICKER_WARM": "0"}
 # Variables of the developer's shell a spec must not inherit: the web UI would
 # also listen on that address (their VPN) and hand out the engine token there.
 UNSET_ENV = ("KOLLAB_WEBUI_HOSTS",)

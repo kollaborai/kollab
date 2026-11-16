@@ -26,9 +26,16 @@ import {
   ToolGroupTrigger,
 } from "@/components/assistant-ui/tool-group";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
+import { splitMediaSegments } from "@/components/media/media-tokens";
+import { MediaThumb, useMediaViewer, useSessionMedia } from "@/components/media/media-view";
 import { agentStatus, bundleName } from "@/components/panels/panel-model";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import {
+  loadComposerDraft,
+  queueComposerDraftSubmission,
+  saveComposerDraft,
+} from "@/composer-draft";
 import {
   useVoiceMode,
   type VoiceActivity,
@@ -36,7 +43,7 @@ import {
 } from "@/voice-mode";
 import { useRoomVoiceMode, useVoiceRoomLive, VoiceRoomBar } from "@/voice/voice-room";
 import { usePendingPermissionCancellation } from "@/runtime";
-import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
+import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
   panelCommandRequest,
   type PanelOpenRequest,
@@ -124,6 +131,8 @@ export type ThreadProps = {
   onLoadOlder?: (() => Promise<boolean | void>) | undefined;
   onRetryHistory?: (() => void) | undefined;
   historyStartIndex?: number | undefined;
+  /** Per-agent/conversation localStorage key for the unsent composer text. */
+  draftKey?: string | null | undefined;
 };
 
 
@@ -160,6 +169,7 @@ export const Thread: FC<ThreadProps> = ({
   onLoadOlder,
   onRetryHistory,
   historyStartIndex = 0,
+  draftKey,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
@@ -175,6 +185,7 @@ export const Thread: FC<ThreadProps> = ({
         onLoadOlder={onLoadOlder}
         onRetryHistory={onRetryHistory}
         historyStartIndex={historyStartIndex}
+        draftKey={draftKey}
       />
     </ThreadComponentsContext.Provider>
   );
@@ -190,6 +201,7 @@ const ThreadRoot: FC<{
   onLoadOlder: ThreadProps["onLoadOlder"];
   onRetryHistory: ThreadProps["onRetryHistory"];
   historyStartIndex: number;
+  draftKey: ThreadProps["draftKey"];
 }> = ({
   isEmpty,
   agents,
@@ -200,6 +212,7 @@ const ThreadRoot: FC<{
   onLoadOlder,
   onRetryHistory,
   historyStartIndex,
+  draftKey,
 }) => {
   const { Welcome = ThreadWelcome, ComposerLeading } = useContext(ThreadComponentsContext);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -398,6 +411,7 @@ const ThreadRoot: FC<{
                 commands={commands}
                 onOpenPanel={onOpenPanel}
                 attachmentsEnabled={attachmentsEnabled}
+                draftKey={draftKey}
               />
             </div>
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
@@ -489,7 +503,8 @@ const Composer: FC<{
   commands: readonly SlashCommand[];
   onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
   attachmentsEnabled: boolean;
-}> = ({ agents, commands, onOpenPanel, attachmentsEnabled }) => {
+  draftKey: ThreadProps["draftKey"];
+}> = ({ agents, commands, onOpenPanel, attachmentsEnabled, draftKey }) => {
   const aui = useAui();
   const sendTransportCommand = useAssistantTransportSendCommand();
   // The mic starts the LiveKit room in this browser; /voice (the computer
@@ -510,6 +525,38 @@ const Composer: FC<{
     composerSlotMode(s, voiceAvailable ? voice : null, Boolean(permissionStop)),
   );
   const isRunning = useAuiState((s) => s.thread.isRunning);
+  const composerText = useAuiState((s) => s.composer.text);
+  const restoredDraft = useRef<{ key: string | null; text: string } | null>(null);
+  const skipEmptyDraftPersist = useRef(false);
+
+  useLayoutEffect(() => {
+    const key = draftKey ?? null;
+    const text = loadComposerDraft(key) ?? "";
+    restoredDraft.current = { key, text };
+    skipEmptyDraftPersist.current = false;
+    if (aui.composer.getState().text !== text) aui.composer.setText(text);
+  }, [aui, draftKey]);
+
+  useEffect(() => {
+    const key = draftKey ?? null;
+    const restore = restoredDraft.current;
+    if (restore?.key === key) {
+      // setText publishes through the external store; don't let this effect's
+      // stale render write an empty value over a draft being restored.
+      if (composerText !== restore.text) return;
+      restoredDraft.current = null;
+    }
+    if (!key) return;
+    if (composerText.length === 0 && skipEmptyDraftPersist.current) {
+      // assistant-ui clears the input as soon as submit starts. Keep the
+      // durable copy until the transport confirms that add-message succeeded.
+      skipEmptyDraftPersist.current = false;
+      return;
+    }
+    if (composerText.length > 0) skipEmptyDraftPersist.current = false;
+    saveComposerDraft(key, composerText);
+  }, [composerText, draftKey]);
+
   const lastBusySubmit = useRef<{ fingerprint: string; at: number } | null>(
     null,
   );
@@ -565,6 +612,8 @@ const Composer: FC<{
       }
     }
     if (parts.length === 0) return;
+    queueComposerDraftSubmission(draftKey, state.text);
+    if (state.text.length > 0) skipEmptyDraftPersist.current = true;
     sendTransportCommand({
       type: "add-message",
       message: { role: "user", parts },
@@ -590,7 +639,16 @@ const Composer: FC<{
     // disabled-send predicate while a turn is running. The transport already
     // queues this append message behind the active run.
     openPanelFromComposer(event);
-    sendBusyMessage(event);
+    if (event.defaultPrevented) return;
+    if (isRunning) {
+      sendBusyMessage(event);
+      return;
+    }
+    const text = aui.composer.getState().text;
+    if (text.length > 0) {
+      queueComposerDraftSubmission(draftKey, text);
+      skipEmptyDraftPersist.current = true;
+    }
   };
 
   const openPanelForItem = (item: {
@@ -1236,6 +1294,46 @@ const AssistantActionBar: FC = () => {
   );
 };
 
+/**
+ * A user bubble's text: each [imageN] token becomes the thumbnail of the row's
+ * Nth stored image (#1088) and opens the viewer at it. Without a stored copy
+ * (an older row, or a picture the engine could not keep) the token stays text.
+ * A live row carries its pictures as image parts, so there the tokens render
+ * as nothing instead of duplicating the picture next to them.
+ */
+const UserText: FC<{ text?: string }> = ({ text }) => {
+  const media = useAuiState(
+    (s) => s.message.metadata?.custom?.media,
+  ) as MediaEntry[] | undefined;
+  const imageParts = useAuiState(
+    (s) => s.message.parts.filter((part) => part.type === "image").length,
+  );
+  const openViewer = useMediaViewer();
+  const sessionMedia = useSessionMedia();
+  if (!text) return null;
+  const segments = splitMediaSegments(text);
+  return (
+    <>
+      {segments.map((segment, index) => {
+        if (segment.kind === "text") return <span key={index}>{segment.text}</span>;
+        if (imageParts > 0) return null;
+        const entry = media?.[segment.index];
+        if (!entry) return <span key={index}>[image{segment.index + 1}]</span>;
+        const viewerItems = sessionMedia?.length ? sessionMedia : media;
+        const viewerIndex = viewerItems?.findIndex((item) => item.ref === entry.ref) ?? -1;
+        return (
+          <MediaThumb
+            key={index}
+            ref_={entry.ref}
+            className="my-1 align-middle"
+            onOpen={openViewer ? () => openViewer(viewerItems ?? media, viewerIndex >= 0 ? viewerIndex : segment.index) : undefined}
+          />
+        );
+      })}
+    </>
+  );
+};
+
 const UserMessage: FC = () => {
   return (
     <MessagePrimitive.Root
@@ -1247,7 +1345,7 @@ const UserMessage: FC = () => {
 
       <div className="aui-user-message-content-wrapper relative col-start-2 min-w-0">
         <div className="aui-user-message-content peer bg-muted text-foreground rounded-xl px-4 py-2 whitespace-pre-wrap wrap-break-word empty:hidden pointer-fine:text-sm">
-          <MessagePrimitive.Parts />
+          <MessagePrimitive.Parts components={{ Text: UserText }} />
         </div>
         <div className="aui-user-action-bar-wrapper absolute start-0 top-1/2 -translate-x-full -translate-y-1/2 pe-2 peer-empty:hidden rtl:translate-x-full">
           <UserActionBar />

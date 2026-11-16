@@ -20,9 +20,9 @@ still gates merge.
   check carries the verdict; the workflow job itself stays green so the
   outcome is reported in one place only.
 - Trust: CI runs the base branch's copy of the workflow and script
-  (`pull_request_target`) and reads the PR only through the API, so a PR cannot
-  change its own grade or reach the token. A change to the script or the config
-  takes effect once it is on the base branch.
+  (`pull_request_target`) and reads PR and linked-issue data only through the
+  API, so a PR cannot change its own grade or reach the token. A change to the
+  script or the config takes effect once it is on the base branch.
 - Freshness: it grades again when a PR is opened, pushed, edited, reopened or
   marked ready. A grade is a snapshot: a later review comment or a new commit on
   `main` does not rerun it, and the `main` ruleset still enforces both at merge.
@@ -52,8 +52,9 @@ code is 0).
 | --- | --- | --- |
 | `pr_gates.dod.enabled` | `false` | Master toggle. Off means no checks run and nothing is posted. |
 | `pr_gates.dod.check_name` | `dod/ready-for-review` | Name of the posted check run. |
-| `pr_gates.dod.checks` | all seven checks | Which checks run. Remove an entry to toggle that check off. |
+| `pr_gates.dod.checks` | all configured checks | Which checks run. Remove an entry to toggle that check off. |
 | `pr_gates.dod.docs_paths` | `{}` | Maps a regex over changed paths to the doc files that must be updated in the same PR. |
+| `pr_gates.dod.spec_or_fix_brief_mode` | `block` | Missing feature specs or fix briefs warn without failing in `warn` mode; `block` fails the check. |
 | `pr_gates.dod.regression_profile.finding_id_pattern` | `\bF\d+\b` | Generic finding-id shape used to identify review finding IDs. |
 | `pr_gates.dod.regression_profile.test_paths` | `["tests/"]` | Where regression tests live; a changed file here must mention the finding id. |
 | `pr_gates.dod.regression_profile.trusted_reviewers` | `[]` | Exact GitHub logins permitted to annotate incidental references; the PR author is never accepted. |
@@ -64,7 +65,8 @@ Example:
 [pr_gates.dod]
 enabled = true
 check_name = "dod/ready-for-review"
-checks = ["signed_commits", "conventional_title", "linked_issue"]
+checks = ["signed_commits", "conventional_title", "linked_issue", "spec_or_fix_brief"]
+spec_or_fix_brief_mode = "warn"
 
 [pr_gates.dod.docs_paths]
 "^packages/" = ["CHANGELOG.md"]
@@ -87,6 +89,13 @@ trusted_reviewers = ["owner-login"]
   (`fix(scope): ...`).
 - `linked_issue`: the body contains `Fixes #N` / `Closes #N` /
   `References #N`.
+- `spec_or_fix_brief`: `feat` PRs need a changed `docs/specs/*.md` file or a
+  linked issue that links one. `fix` PRs need a `Fix brief` section in the PR
+  body or linked issue that names `Root cause` and `Regression test`. Other
+  title types are exempt. In `warn` mode, missing documentation appears in the
+  check summary and the check succeeds; set
+  `pr_gates.dod.spec_or_fix_brief_mode = "block"` to make it fail. This repo
+  starts in `warn` mode so existing open PRs are reported without being held.
 - `regression_test`: every finding id (per
   `regression_profile.finding_id_pattern`) mentioned in review comments must
   appear in a changed test file under `test_paths` (#721). Every occurrence is
@@ -141,7 +150,8 @@ This repository has finished this rollout. To turn the check on in another one:
 Rollback is setting `enabled = false`; the feature then has no effect
 anywhere. Out of scope by design: changing required check names,
 bypassing rulesets, and anything running with admin rights. The workflow
-holds only `contents: read`, `pull-requests: read`, and `checks: write`.
+holds only `contents: read`, `issues: read`, `pull-requests: read`, and
+`checks: write`.
 
 ## Auditing and safety
 

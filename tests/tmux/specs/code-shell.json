@@ -1,0 +1,41 @@
+{
+  "name": "code-shell",
+  "description": "The /config modal's Code And Terminal section lists the Code, Git and Terminal switches (#987). Plain kollab (--no-daemon) in a throwaway HOME, no keyring, no model call, no network.",
+  "config": {
+    "command": "python main.py --no-daemon",
+    "show_captures": false,
+    "app_init_sleep": 4,
+    "term_width": 120,
+    "term_height": 40,
+    "key_delay": 0.3,
+    "menu_delay": 0.5
+  },
+  "steps": [
+    { "action": "start_app" },
+    { "action": "capture" },
+
+    { "action": "section", "title": "Test 1: open /config and reach the Code And Terminal section" },
+    { "action": "slash_command", "command": "config" },
+    { "action": "wait_for", "pattern": "System Configuration", "timeout": 10, "description": "Config modal opened" },
+    { "action": "send_keys", "keys": "Tab" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "send_keys", "keys": "Tab" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "send_keys", "keys": "Tab" },
+    { "action": "sleep", "seconds": 0.5 },
+    { "action": "wait_for", "pattern": "Code And Terminal", "timeout": 10, "description": "Code And Terminal section shown" },
+    { "action": "capture", "show": true },
+
+    { "action": "section", "title": "Test 2: the Code, Git and Terminal switches are listed" },
+    { "action": "assert_contains", "pattern": "Read Only", "description": "Read only switch (kollabor.code.read_only)" },
+    { "action": "assert_contains", "pattern": "Code, Git And Terminal Views", "description": "Code, Git and Terminal enabled switch (kollabor.code.enabled)" },
+    { "action": "assert_contains", "pattern": "Pass Secrets To Terminal", "description": "Terminal secret-variable switch (kollabor.code.terminal.pass_secret_env)" },
+    { "action": "assert_contains", "pattern": "Pass Kollab Variables To Terminal", "description": "Terminal KOLLAB-variable switch (kollabor.code.terminal.pass_kollab_env)" },
+
+    { "action": "section", "title": "Test 3: Esc closes the modal" },
+    { "action": "escape" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "Code And Terminal", "description": "Config modal closed" }
+  ]
+}

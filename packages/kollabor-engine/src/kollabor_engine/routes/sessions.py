@@ -30,10 +30,12 @@ from ..history_paging import (
     resolve_history_output,
 )
 from ..hub_bridge import HubBridge, network_daemons
+from ..media_store import attach_media_to_rows, count_image_tokens, slot_count
 from ..network_aggregate import merge_view_and_memberships
 from ..server import get_session_registry, open_named_session
 from ..session import INLINE_PROFILE, EngineSession
 from ..workspace_folder import folder_or_400
+from .media import _conversations_dir
 from .rosters import apply_persona
 from .workspaces import remember_workspace
 
@@ -450,7 +452,10 @@ async def create_session(body: CreateSessionRequest, request: Request):
     else:
         from kollabor_ai import ProfileManager
 
-        pm = ProfileManager()
+        # A named workspace starts on its own folder's profiles, the same
+        # folder-scoped read GET /profiles uses; the engine's own folder only
+        # when none was named (#972).
+        pm = ProfileManager(local_folder=Path(workspace)) if workspace else ProfileManager()
         effective_profile = effective_profile or pm.active_profile_name
         profile = pm.get_profile(effective_profile)
         if not profile:
@@ -1022,7 +1027,12 @@ def apply_profile_mirror(
         from kollabor_ai import ProfileManager
 
         selected = ProfileManager().get_profile(name)
-        if selected is None and getattr(snapshot, "name", None):
+        # ACP capabilities come from the daemon handshake, not the local
+        # redacted profile mirror. Keep its snapshot so serialization and
+        # later capability events retain the authoritative value.
+        if getattr(snapshot, "provider", None) == "acp":
+            selected = snapshot
+        elif selected is None and getattr(snapshot, "name", None):
             selected = snapshot
         if selected is not None:
             session.profile = selected
@@ -1313,6 +1323,32 @@ async def get_history(
     except HistoryPageTooLarge as error:
         raise HTTPException(status_code=413, detail=str(error)) from error
 
+    # Durable copies of the images this session sent (#1088): bind the
+    # stored refs onto the page's user rows. Older pages skip the images
+    # bound to rows before start_index so each page binds its own sends.
+    page_rows = page.get("history")
+    if isinstance(page_rows, list) and page_rows:
+        start = page.get("start_index")
+        history_image_count = sum(
+            count_image_tokens(row.get("content"))
+            for row in history
+            if isinstance(row, dict) and row.get("role") == "user"
+        )
+        # A compaction can drop old sender rows while the durable media index
+        # still contains their refs. Align the surviving history with the
+        # matching suffix; otherwise its first image would inherit a dropped
+        # message's ref.
+        # Count the raw slots, tombstones included: attach walks the raw
+        # index, so skip and walk must read the same sequence (#1124 review).
+        skip = max(0, slot_count(_conversations_dir(), session_id) - history_image_count)
+        if isinstance(start, int) and not isinstance(start, bool) and start > 0:
+            skip += sum(
+                count_image_tokens(row.get("content"))
+                for row in history[:start]
+                if isinstance(row, dict) and row.get("role") == "user"
+            )
+        attach_media_to_rows(_conversations_dir(), session_id, page_rows, skip=skip)
+
     # Preserve the existing turn-error offset semantics, now relative to the
     # bounded page. An error outside an older page is not duplicated there.
     turn_error = page.get("last_turn_error")
@@ -1382,6 +1418,25 @@ async def clear_history(session_id: str):
     await session.refresh_history()
     session.last_turn_error = None
     return {"ok": True, "session_id": session_id}
+
+
+@router.post("/{session_id}/restart-agent")
+async def restart_agent(session_id: str):
+    """Restart this chat's detached agent on the installed code, keeping its conversation (#968).
+
+    Answers at once: the agent lets the turn in progress end, saves its state and
+    replaces its process image. The chat's socket path stays the same, so the
+    engine reattaches on its own and the open page needs no reload.
+    """
+    registry = get_session_registry()
+    session = registry.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        outcome = await session.state.restart_agent()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"ok": True, "session_id": session_id, **outcome}
 
 
 @router.get("/{session_id}/system-prompt")

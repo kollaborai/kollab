@@ -1291,6 +1291,12 @@ class ACPRunner:
         return bool((self.initialize_metadata.get("steering") or {}).get("supported"))
 
     @property
+    def busy(self) -> bool:
+        """Whether a prompt runs or waits in the queue."""
+        active = self._active_future
+        return (active is not None and not active.done()) or not self._queue.empty()
+
+    @property
     def supports_image_input(self) -> bool:
         prompt_capabilities = self.capabilities.get("promptCapabilities")
         return isinstance(prompt_capabilities, dict) and prompt_capabilities.get("image") is True

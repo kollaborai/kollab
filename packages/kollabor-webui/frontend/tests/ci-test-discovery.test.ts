@@ -11,6 +11,7 @@ const files = [
   "tests/new.test.ts",
   "tests/nested/other.test.ts",
   "src/component.test.tsx",
+  "tests/runner.test.mjs",
 ];
 mkdirSync(path.join(root, "tests/nested"), { recursive: true });
 mkdirSync(path.join(root, "src"));
@@ -28,7 +29,7 @@ test("accepts collected Vitest files and top-level Node test files", () => {
     uncollectedTests(root, [
       path.join(root, "tests/nested/other.test.ts"),
       path.join(root, "src/component.test.tsx"),
-    ]),
+    ], ["tests/runner.test.mjs"]),
     [],
   );
 });
@@ -42,5 +43,6 @@ test("reports an unlisted Vitest file even when the Node command would skip it",
     "src/component.test.tsx",
     "tests/nested/other.test.ts",
     "tests/new.test.ts",
+    "tests/runner.test.mjs",
   ]);
 });

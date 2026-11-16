@@ -1,0 +1,138 @@
+{
+  "id": "workspaces",
+  "title": "Workspaces",
+  "summary": "Keep each project folder's sessions, local agents and context together.",
+  "workflows": [
+    {
+      "id": "start-in-a-workspace",
+      "label": "Start a project session",
+      "summary": "Choose the project folder before choosing an agent and beginning a session.",
+      "entry": {
+        "prerequisite": "Session Options is the sliders button beside + at the top of the sidebar.",
+        "ui": [
+          "Session Options",
+          "Workspace"
+        ],
+        "command": "cd <workspace> && kollab"
+      },
+      "steps": [
+        {
+          "action": "In the Web UI, select the workspace folder from the sidebar workspace picker or New Session."
+        },
+        {
+          "action": "Choose an available agent for that workspace."
+        },
+        {
+          "action": "Start the session and check that its workspace label matches the project you selected."
+        },
+        {
+          "action": "From a terminal instead, change into the project folder and launch Kollab with cd ./project && kollab."
+        }
+      ],
+      "commands": [
+        {
+          "syntax": "cd <workspace> && kollab",
+          "example": "cd ./project && kollab",
+          "description": "Start Kollab from the selected project directory; its current folder is the workspace.",
+          "expect": "The session uses that folder for project-local context and agents."
+        }
+      ],
+      "media": {
+        "kind": "image",
+        "src": "/learn/workspaces/overview.webp",
+        "alt": "Kollab workspace picker showing project folders",
+        "caption": "Select the project folder before opening a session so its context stays together."
+      },
+      "success": "The session runs in the chosen project workspace, keeping local agents and conversation history separate from other folders.",
+      "recovery": [
+        {
+          "symptom": "The wrong project is open",
+          "action": "End or leave that session and choose the correct folder in the workspace picker before starting again."
+        },
+        {
+          "symptom": "A workspace's local agent is not listed",
+          "action": "Check that the agent definition is in that workspace's .kollab/agents/ directory and refresh the agent list."
+        }
+      ],
+      "note": "Reordering an agent row changes its position within its workspace, not its identity. Hiding a row does not delete or stop the agent."
+    },
+    {
+      "id": "launch-team-workspace",
+      "label": "Launch a team in a workspace",
+      "summary": "Set the folder before launching a team so its members share the intended project context.",
+      "entry": {
+        "ui": [
+          "Agents",
+          "Teams",
+          "Configure & Launch"
+        ],
+        "command": "kollab --hub org <team> --dir <workspace>"
+      },
+      "steps": [
+        {
+          "action": "In Agents → Teams, choose Configure & Launch for the team."
+        },
+        {
+          "action": "Set the workspace, profile, members, lead and mission, then review the reporting tree."
+        },
+        {
+          "action": "Launch after confirming the team and workspace are correct."
+        }
+      ],
+      "commands": [
+        {
+          "syntax": "kollab --hub org <team> --dir <workspace>",
+          "example": "kollab --hub org engineering --dir ./project",
+          "description": "Launch a team from a terminal in the chosen workspace.",
+          "expect": "The selected team's agents start with the workspace as their project directory."
+        }
+      ],
+      "success": "The selected team's members start against the configured workspace and reporting structure.",
+      "recovery": [
+        {
+          "symptom": "A team member is missing or the wrong lead is selected",
+          "action": "Reopen Configure & Launch, correct the member and lead selection, and review the effective reporting tree before launching."
+        }
+      ]
+    },
+    {
+      "id": "reorder-or-hide-an-agent",
+      "label": "Organize sidebar agents",
+      "summary": "Reorder an agent within its workspace or hide it without stopping or deleting it.",
+      "entry": {
+        "ui": [
+          "Sidebar",
+          "Agent row"
+        ]
+      },
+      "steps": [
+        {
+          "action": "To reorder with a keyboard, focus the agent row, press Space to pick it up, use the arrow keys, then press Space to drop; press Escape to cancel."
+        },
+        {
+          "action": "To hide an agent, drag its row outside the sidebar and release when Release to hide appears, or choose Hide Agent from its actions menu."
+        },
+        {
+          "action": "Restore a hidden agent from Hidden Agents in the sidebar."
+        }
+      ],
+      "media": {
+        "kind": "image",
+        "src": "/learn/workspaces/overview.webp",
+        "alt": "Kollab sidebar showing workspace agent ordering and hidden agents",
+        "caption": "Reorder within a workspace or hide a row; neither action stops the agent."
+      },
+      "success": "The agent appears in the new order or under Hidden Agents; it remains available and running as before.",
+      "recovery": [
+        {
+          "symptom": "A keyboard reorder did not take effect",
+          "action": "Press Escape to cancel any active drag, then repeat Space, arrow keys and Space to drop."
+        },
+        {
+          "symptom": "You hid the wrong agent",
+          "action": "Open Hidden Agents and restore the row; hiding never deletes or stops the agent."
+        }
+      ]
+    }
+  ]
+}

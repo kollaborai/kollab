@@ -287,18 +287,33 @@ class TaskLedger:
             os.close(fd)
 
     @staticmethod
-    def _load_json_object(path: Path) -> Any:
-        """Load one JSON value, recovering a valid prefix after old corruption."""
+    def _load_json_object(path: Path, *, for_mutation: bool = False) -> Any:
+        """Load a JSON value, optionally refusing lossy prefix recovery."""
         raw = path.read_text()
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
             decoder = json.JSONDecoder()
-            value, end = decoder.raw_decode(raw.lstrip())
+            stripped = raw.lstrip()
+            value, end = decoder.raw_decode(stripped)
             if not isinstance(value, dict):
                 raise
+            trailing = stripped[end:]
+            if trailing.strip():
+                message = (
+                    f"Ledger file {path.name} has non-whitespace data after its JSON "
+                    "object; the original bytes were left untouched. Inspect "
+                    "and repair the file before retrying this mutation."
+                )
+                if for_mutation:
+                    raise ValueError(message)
+                logger.warning(
+                    "%s Returning the valid JSON prefix for reading.", message
+                )
+                return value
             logger.warning(
-                "Recovered valid JSON prefix from corrupted ledger file %s", path
+                "Recovered valid JSON object with trailing whitespace from ledger file %s",
+                path.name,
             )
             return value
 
@@ -319,15 +334,37 @@ class TaskLedger:
             Path(tmp_path).unlink(missing_ok=True)
             raise
 
-    def _read_pending_replies_unlocked(self) -> List[Dict[str, Any]]:
+    def _read_pending_replies_unlocked(
+        self, *, for_mutation: bool = False
+    ) -> List[Dict[str, Any]]:
         path = self._pending_replies_path()
         if not path.exists():
             return []
         try:
-            data = self._load_json_object(path)
-            replies = data.get("expected_replies", [])
-            return replies if isinstance(replies, list) else []
+            data = self._load_json_object(path, for_mutation=for_mutation)
+            if isinstance(data, list):
+                # Legacy pending-reply files store the reply entries at root.
+                replies = data
+            elif isinstance(data, dict):
+                replies = data.get("expected_replies", [])
+            else:
+                replies = None
+            if not isinstance(replies, list):
+                if for_mutation:
+                    raise ValueError(
+                        "pending reply envelope must contain an expected_replies list"
+                    )
+                return []
+            return replies
         except Exception as e:
+            if for_mutation:
+                logger.warning(
+                    "Cannot safely update pending replies in %s: %s", path.name, e
+                )
+                raise RuntimeError(
+                    "pending reply ledger is unreadable; original bytes were left "
+                    "untouched"
+                ) from e
             logger.debug(f"Failed to load pending replies: {e}")
             return []
 
@@ -358,12 +395,14 @@ class TaskLedger:
     def _dispatches_path(self) -> Path:
         return self._tasks_dir / "_dispatches.json"
 
-    def _read_dispatches_unlocked(self) -> List[Dict[str, Any]]:
+    def _read_dispatches_unlocked(
+        self, *, for_mutation: bool = False
+    ) -> List[Dict[str, Any]]:
         path = self._dispatches_path()
         if not path.exists():
             return []
         try:
-            data = self._load_json_object(path)
+            data = self._load_json_object(path, for_mutation=for_mutation)
             dispatches = data.get("dispatches", [])
             if not isinstance(dispatches, list):
                 raise ValueError("dispatch envelope must contain a list")
@@ -426,7 +465,7 @@ class TaskLedger:
         }
         path = self._dispatches_path()
         with self._file_lock(path):
-            dispatches = self._read_dispatches_unlocked()
+            dispatches = self._read_dispatches_unlocked(for_mutation=True)
             immutable_fields = (
                 "dispatch_id",
                 "task_id",
@@ -475,6 +514,14 @@ class TaskLedger:
             ]
         return sorted(dispatches, key=lambda item: item.get("created_at", 0))
 
+    def get_in_flight_dispatches_for_assignee(self, assignee: str) -> List[Dict[str, Any]]:
+        """Return delivered assignments for an identity; failed or completed deliveries do not identify its work."""
+        if not assignee:
+            return []
+        with self._file_lock(self._dispatches_path()):
+            return [dict(item) for item in self._read_dispatches_unlocked()
+                    if item.get("assignee") == assignee and item.get("status") == "in_flight"]
+
     def get_dispatches_page(
         self, assigned_by: str, *, page: int = 1, per_page: int = 10
     ) -> tuple[List[Dict[str, Any]], int]:
@@ -499,7 +546,7 @@ class TaskLedger:
             raise ValueError(f"unsupported dispatch delivery status: {status}")
         path = self._dispatches_path()
         with self._file_lock(path):
-            dispatches = self._read_dispatches_unlocked()
+            dispatches = self._read_dispatches_unlocked(for_mutation=True)
             for item in dispatches:
                 if item.get("dispatch_id", item.get("message_id")) != dispatch_id:
                     continue
@@ -545,7 +592,7 @@ class TaskLedger:
 
         path = self._dispatches_path()
         with self._file_lock(path):
-            dispatches = self._read_dispatches_unlocked()
+            dispatches = self._read_dispatches_unlocked(for_mutation=True)
             matches = []
             for item in dispatches:
                 if item.get("assignee") != assignee:
@@ -595,7 +642,7 @@ class TaskLedger:
             return False
         path = self._dispatches_path()
         with self._file_lock(path):
-            dispatches = self._read_dispatches_unlocked()
+            dispatches = self._read_dispatches_unlocked(for_mutation=True)
             for item in dispatches:
                 if item.get("dispatch_id", item.get("message_id")) != dispatch_id:
                     continue
@@ -633,14 +680,26 @@ class TaskLedger:
         with self._file_lock(path):
             self._write_json_atomic(path, card.to_dict())
 
-    def _load(self, task_id: str) -> Optional[TaskCard]:
+    def _load(
+        self, task_id: str, *, for_mutation: bool = False
+    ) -> Optional[TaskCard]:
         path = self._task_path(task_id)
         if not path.exists():
             return None
         try:
-            return TaskCard.from_dict(self._load_json_object(path))
+            return TaskCard.from_dict(
+                self._load_json_object(path, for_mutation=for_mutation)
+            )
         except Exception as e:
-            logger.warning("Failed to load task %s from %s: %s", task_id, path, e)
+            logger.warning(
+                "Failed to load task %s from %s%s: %s",
+                task_id,
+                path,
+                " for mutation; original bytes were left untouched"
+                if for_mutation
+                else "",
+                e,
+            )
             return None
 
     def _load_mutable(self, task_id: str, operation: str) -> Optional[TaskCard]:
@@ -650,7 +709,7 @@ class TaskLedger:
         work. Once a card is terminal, progress, completion, QA, and snooze
         directives must not reopen it or change its audit record.
         """
-        card = self._load(task_id)
+        card = self._load(task_id, for_mutation=True)
         if card is None:
             return None
         if card.status in self.TERMINAL_STATUSES:
@@ -717,7 +776,7 @@ class TaskLedger:
         deadline_seconds: int,
     ) -> None:
         with self._file_lock(self._pending_replies_path()):
-            replies = self._read_pending_replies_unlocked()
+            replies = self._read_pending_replies_unlocked(for_mutation=True)
             # Outbound delivery can be replayed after a retry or reconnect.
             # Treat the message id as an idempotency key: a pending entry must
             # be recorded at most once, and a resolved entry must never be
@@ -750,7 +809,7 @@ class TaskLedger:
         growing unbounded when agents go offline without resolving.
         """
         with self._file_lock(self._pending_replies_path()):
-            replies = self._read_pending_replies_unlocked()
+            replies = self._read_pending_replies_unlocked(for_mutation=True)
             now = time.time()
             changed = False
             kept = []
@@ -789,7 +848,7 @@ class TaskLedger:
             return False
 
         with self._file_lock(self._pending_replies_path()):
-            replies = self._read_pending_replies_unlocked()
+            replies = self._read_pending_replies_unlocked(for_mutation=True)
             for item in replies:
                 if (
                     item.get("assignee") == assignee
@@ -816,7 +875,7 @@ class TaskLedger:
         if not message_id or not reason:
             return False
         with self._file_lock(self._pending_replies_path()):
-            replies = self._read_pending_replies_unlocked()
+            replies = self._read_pending_replies_unlocked(for_mutation=True)
             for item in replies:
                 if (
                     item.get("message_id") == message_id
@@ -887,9 +946,17 @@ class TaskLedger:
             return None
         with self._file_lock(path):
             try:
-                card = TaskCard.from_dict(self._load_json_object(path))
+                card = TaskCard.from_dict(
+                    self._load_json_object(path, for_mutation=True)
+                )
             except Exception as e:
-                logger.debug(f"Failed to load task {task_id} for mutation: {e}")
+                logger.warning(
+                    "Cannot safely mutate task %s at %s; original bytes were left "
+                    "untouched: %s",
+                    task_id,
+                    path.name,
+                    e,
+                )
                 return None
             if mutator(card) is True:
                 card.updated_at = time.time()
@@ -1122,7 +1189,7 @@ class TaskLedger:
         message_id: str = "",
     ) -> int:
         with self._file_lock(self._pending_replies_path()):
-            replies = self._read_pending_replies_unlocked()
+            replies = self._read_pending_replies_unlocked(for_mutation=True)
             now = time.time()
             resolved = 0
             for item in replies:
@@ -1199,7 +1266,7 @@ class TaskLedger:
             if card is None or not terminalized:
                 return card
         else:
-            card = self._load(task_id)
+            card = self._load(task_id, for_mutation=True)
             if not card:
                 return None
             if card.status in self.TERMINAL_STATUSES:

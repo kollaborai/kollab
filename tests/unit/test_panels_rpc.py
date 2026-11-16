@@ -122,6 +122,31 @@ def test_registry_describes_outlast_a_slow_registry(wire, monkeypatch):
 
 
 
+def test_a_daemon_answer_the_engine_cannot_read_is_a_502_that_says_so(wire):
+    # #955: a daemon on older code answered {"result": "<text>"} for an action it did not
+    # have; the engine raised TypeError and the route reported "daemon unreachable".
+    remote, _, handlers = wire
+    for answer in ({"result": "unknown action 'pick' for panel 'model'"}, {}, None):
+
+        async def stale(params, answer=answer):
+            return answer
+
+        handlers["state.panel_action"] = stale
+        handlers["state.get_panel"] = stale
+        for call in (
+            lambda: remote.panel_action("model", "pick", {}),
+            lambda: remote.get_panel("model", {}),
+        ):
+            with pytest.raises(PanelError) as err:
+                run(call())
+            assert err.value.status == 502
+            assert "older version" in err.value.message
+            assert "restart" in err.value.message.lower()
+            # the daemon's own words can carry a payload value: never echoed
+            assert "unknown action" not in err.value.message
+            assert "TypeError" not in err.value.message
+
+
 def test_handlers_reject_malformed_requests(wire):
     _, _, handlers = wire
     bad = run(handlers["state.get_panel"]({"name": 5}))

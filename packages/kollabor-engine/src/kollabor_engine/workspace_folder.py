@@ -17,7 +17,8 @@ Two details keep the rule honest. A remembered folder (3 and 4) counts only whil
 itself: it was recorded as a real path, so a symlink put in its place, or in one of its parents, makes it grant
 nothing, not even what it leads to now. And on a volume that ignores case (macOS and Windows by default)
 ``/Users/me/Dev`` and ``/users/me/dev`` are one folder, so a request meets the same roots in either spelling; a
-volume that tells them apart keeps them apart.
+volume that tells them apart keeps them apart. The folder comes back spelled the way that volume stores it, because
+a daemon started there reports that spelling and the engine finds the agent it launched by comparing folder strings.
 """
 
 import os
@@ -84,6 +85,47 @@ def _respelled(probe: str, root: str) -> str:
     return probe
 
 
+def _stored_name(folder: str, name: str) -> str:
+    """``name`` as ``folder`` stores it.
+
+    ``name`` itself when it is an entry, else the entry the volume calls the same one. Only a name that is no entry
+    is looked up by case, and only an entry that ``samefile`` says is that name is taken.
+    """
+    try:
+        entries = os.listdir(folder)
+    except OSError:
+        return name
+    if name in entries:
+        return name
+    wanted = name.casefold()
+    for entry in entries:
+        if entry.casefold() != wanted:
+            continue
+        try:
+            if os.path.samefile(os.path.join(folder, entry), os.path.join(folder, name)):
+                return entry
+        except OSError:  # the volume knows no such name: it tells the cases apart, so this is another name
+            return name
+    return name
+
+
+def _on_disk(checked: str, root: str) -> str:
+    """``checked`` with every part below ``root`` spelled the way its folder stores it.
+
+    A volume that ignores case opens ``cASEpROJECT`` for ``CaseProject``, but a daemon started there reports the stored
+    spelling, and the engine finds the agent it launched by comparing folder strings
+    (``HubBridge.get_agent_by_identity``): with the typed spelling New Session waited 45 s for a daemon it could not
+    find. A part is replaced only by the entry the volume itself calls the same one, so a mount below the root that
+    tells the cases apart is left as typed.
+    """
+    if not checked.startswith(root):
+        return checked
+    built = root
+    for name in filter(None, checked[len(root) :].split(os.sep)):
+        built = os.path.join(built, _stored_name(built, name))
+    return os.path.normpath(built)
+
+
 def _known_folders() -> Iterator[str]:
     """Folders kollab already runs in, or ran a web session in. A lookup that fails adds none."""
     try:
@@ -144,7 +186,7 @@ def checked_folder(path: Optional[str]) -> str:
                 raise FolderError(f"Folder does not exist: {_shown(text)}")
             if not os.path.isdir(checked):
                 raise FolderError(f"Not a folder: {_shown(text)}")
-            return checked
+            return _on_disk(checked, root) if _ignores_case(root) else checked
     raise FolderError(f"Can't use {_shown(text)}: it is outside your home folder and no kollab agent runs there.")
 
 

@@ -5,6 +5,12 @@ directory. It never prompts the harness, passes MCP servers, changes a user's
 active session, or writes the learned option set to the name-keyed disk cache.
 Context-keyed option progress is retained in process memory briefly; raw
 credentials and launch environments are never retained in the cache.
+
+The picker does not wait for any of this. The engine learns each profile's
+choices once in the background (``warm_in_background``), keeps the last good
+list in process memory (``known_outcomes``) and refreshes it behind that list
+when it is old (#953). Like the rest of this module it keeps the list in memory
+only: a restart warms again, so another login's options are never left behind.
 """
 
 from __future__ import annotations
@@ -12,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import tempfile
 import time
@@ -21,6 +28,9 @@ from typing import Any, Iterable
 from kollabor.llm.acp_bridge import ACPProfile, ACPRunner
 from kollabor_ai.acp_options import find_option, option_values
 
+logger = logging.getLogger(__name__)
+
+_now = time.monotonic  # one clock for every timer here, so a test can move it
 _CACHE_TTL_SECONDS = 30.0
 _RESOLVE_TIMEOUT_SECONDS = 4.0
 _PROBE_TIMEOUT_SECONDS = 20.0
@@ -31,6 +41,14 @@ _MODELS_PER_REQUEST = 6
 _MAX_AUTOMATIC_ROUNDS = 11  # ceil(MAX_MODELS / MODELS_PER_REQUEST)
 _MAX_MODEL_NAME_LENGTH = 256
 _MAX_CONCURRENT_PROFILES = 2
+_STALE_AFTER_SECONDS = 600.0  # a complete list is probed again, behind itself, once this old
+_RETRY_BACKOFF_SECONDS = (15.0, 60.0, 300.0)  # wait after 1, 2, 3+ failed attempts in a row
+_MAX_FAILING_VISIBLE_SECONDS = 1800.0  # a good list stays up this long while its refreshes fail
+_WARM_MAX_ROUNDS = 40  # per probe cycle; discovery stops reporting "more" long before
+_AUTH_FAILED_MESSAGE = "ACP authentication failed; the existing CLI login was left unchanged."
+_INCOMPLETE_MESSAGE = "Some model effort choices could not be confirmed; retry to try again."
+
+
 @dataclass(frozen=True)
 class ACPDiscoveryOutcome:
     """Fresh picker options and an honest discovery state for one profile."""
@@ -127,7 +145,7 @@ def _failure_message(exc: BaseException) -> str:
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
         return "ACP model discovery timed out; try opening the picker again."
     if getattr(exc, "error_class", None) == "authentication":
-        return "ACP authentication failed; the existing CLI login was left unchanged."
+        return _AUTH_FAILED_MESSAGE
     return "ACP model discovery could not start; check the configured harness and its login."
 
 
@@ -167,6 +185,7 @@ async def _close_runner(runner: ACPRunner | None) -> None:
 
 
 async def _start_runner(profile: ACPProfile) -> ACPRunner:
+    logger.debug("acp discovery: starting a probe harness for %s", profile.name)
     runner = ACPRunner(
         profile,
         remember_options=False,
@@ -368,8 +387,7 @@ async def _discover_resolved(
             "partial", models=models, efforts_by_model=efforts_by_model,
             unknown_effort_models=unknown,
             message=message or (
-                "Loading more model options." if more
-                else "Some model effort choices could not be confirmed; retry to try again."
+                "Loading more model options." if more else _INCOMPLETE_MESSAGE
             ),
             next_index=next_index,
             attempted_models=attempted_models,
@@ -395,7 +413,7 @@ def _cache_result(key: str, flight: _InFlight) -> None:
     except BaseException:
         return
     if result.status in {"ready", "partial"} and result.options.get("models"):
-        now = time.monotonic()
+        now = _now()
         for old_key, old_result in tuple(_cache.items()):
             if old_result.expires_at <= now:
                 _cache.pop(old_key, None)
@@ -405,8 +423,18 @@ def _cache_result(key: str, flight: _InFlight) -> None:
         _cache[key] = _CachedOutcome(now + _CACHE_TTL_SECONDS, result)
 
 
-async def discover_profile(profile_value: Any) -> ACPDiscoveryOutcome:
-    """Discover one ACP profile's actual choices, with short in-process caching."""
+async def discover_profile(
+    profile_value: Any,
+    *,
+    fresh: bool = False,
+    seed: ACPDiscoveryOutcome | None = None,
+) -> ACPDiscoveryOutcome:
+    """Discover one ACP profile's actual choices, with short in-process caching.
+
+    ``fresh`` probes even when a complete result is cached (a partial one still
+    seeds the next round). ``seed`` is where a probe starts when no partial
+    result is cached: a retry then asks only for the models that failed.
+    """
     try:
         profile = _configured_profile(profile_value)
         resolved = await asyncio.wait_for(
@@ -421,19 +449,20 @@ async def discover_profile(profile_value: Any) -> ACPDiscoveryOutcome:
         return _outcome("unavailable", message=_failure_message(exc))
 
     cached = _cache.get(key)
-    now = time.monotonic()
-    seed: ACPDiscoveryOutcome | None = None
+    now = _now()
+    start_from = seed
     if cached is not None:
         if cached.expires_at > now:
-            if cached.outcome.status == "ready":
+            if cached.outcome.status != "ready":
+                start_from = cached.outcome
+            elif not fresh:
                 return cached.outcome
-            seed = cached.outcome
         _cache.pop(key, None)
 
     flight = _inflight.get(key)
     if flight is None:
         task = asyncio.create_task(
-            _discover_resolved(profile, command, seed),
+            _discover_resolved(profile, command, start_from),
             name="acp-model-discovery",
         )
         flight = _InFlight(task)
@@ -479,3 +508,299 @@ async def discover_profiles(profiles: Iterable[Any]) -> dict[str, ACPDiscoveryOu
         else:
             result[name] = outcome
     return result
+
+
+# --- Background warm cache (#953) -------------------------------------------
+#
+# The picker used to wait for every harness on every open and forgot the answer
+# 30 s later. Now each ACP profile is probed in the background, one task per
+# profile (a slow harness never holds back a fast one), and its last good list
+# is kept here in memory. ``known_outcomes`` answers from it at once; a list is
+# never hidden by age, only replaced by a newer one of equal or better quality.
+
+
+@dataclass
+class _Warm:
+    """What the picker shows for one profile, and when it may be probed again."""
+
+    fingerprint: str
+    outcome: ACPDiscoveryOutcome  # what known_outcomes answers
+    tried: float  # when the last attempt ended
+    ok: bool = False  # the last finished attempt gave a complete list
+    progress: bool = False  # the outcome is an unfinished round
+    failures: int = 0  # failed attempts in a row
+    failing_since: float | None = None  # when the first of them ended
+
+
+@dataclass
+class _WarmTask:
+    task: asyncio.Task[None]
+    fingerprint: str
+
+
+_warm: dict[object, _Warm] = {}
+_warm_tasks: dict[object, _WarmTask] = {}
+_PENDING = _outcome("partial", message="Loading more model options.", more=True)
+
+
+def _warm_key(scope: str, name: str) -> str | tuple[str, str]:
+    """Keep the engine folder's existing keys while isolating named workspaces."""
+    return name if not scope else (scope, name)
+
+
+def _in_warm_scope(key: object, scope: str) -> bool:
+    """Only reconcile profiles belonging to the workspace being refreshed."""
+    return isinstance(key, str) if not scope else isinstance(key, tuple) and key[0] == scope
+
+
+def warming_enabled() -> bool:
+    """False when KOLLAB_PICKER_WARM is 0, false, no or off.
+
+    The picker then discovers on request, as it did before #953: the rollback
+    lever, and what test and end-to-end launchers set so they start no harness.
+    """
+    return os.environ.get("KOLLAB_PICKER_WARM", "1").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+
+
+def _is_acp(profile: Any) -> bool:
+    return str(getattr(profile, "provider", "")).lower() == "acp"
+
+
+def _name(profile: Any) -> str:
+    return str(getattr(profile, "name", "") or "")
+
+
+def launch_fingerprint(profile: Any) -> str:
+    """Hash of everything that decides whose choices a profile lists.
+
+    The launch inputs ``_configured_profile`` reads, plus the values of the
+    variables a profile passes through from the engine's environment (a login
+    often lives there). Only the hash is kept; sync and cheap, so it needs no
+    ``profile.resolve``.
+    """
+    try:
+        command = getattr(profile, "command", None) or ()
+        if isinstance(command, str):
+            command = (command,)
+        pass_env = sorted(str(item) for item in (getattr(profile, "pass_env", None) or ()))
+        payload = {
+            "name": _name(profile),
+            "command": [str(part) for part in command],
+            "cwd": str(getattr(profile, "cwd", None) or ""),
+            "workspace": str(getattr(profile, "workspace", None) or ""),
+            "env": {
+                str(key): str(value)
+                for key, value in dict(getattr(profile, "env", None) or {}).items()
+            },
+            "passed": {item: os.environ.get(item) for item in pass_env},
+        }
+    except Exception:  # noqa: BLE001 -- an odd profile still gets a stable key
+        payload = {"name": _name(profile)}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def known_outcomes(
+    profiles: Iterable[Any], *, scope: str = ""
+) -> dict[str, ACPDiscoveryOutcome]:
+    """What the picker shows for each ACP profile right now. Never waits, never
+    launches anything: a profile not learned yet reads as "loading"."""
+    shown: dict[str, ACPDiscoveryOutcome] = {}
+    for profile in profiles:
+        if not _is_acp(profile):
+            continue
+        name = _name(profile)
+        key = _warm_key(scope, name)
+        record = _warm.get(key)
+        fingerprint = launch_fingerprint(profile)
+        current = record is not None and record.fingerprint == fingerprint
+        running = _warm_tasks.get(key)
+        refreshing = (
+            current
+            and running is not None
+            and not running.task.done()
+            and running.fingerprint == fingerprint
+            and record is not None
+            and record.outcome.status != "ready"
+        )
+        if current and record is not None and refreshing:
+            shown[name] = replace(
+                record.outcome,
+                status="partial",
+                message="Loading more model options.",
+                more=True,
+            )
+        else:
+            shown[name] = record.outcome if current and record is not None else _PENDING
+    return shown
+
+
+def _backoff(failures: int) -> float:
+    return _RETRY_BACKOFF_SECONDS[min(max(failures, 1), len(_RETRY_BACKOFF_SECONDS)) - 1]
+
+
+def _due(record: _Warm | None, fingerprint: str, now: float, force: bool) -> bool:
+    if record is None or record.fingerprint != fingerprint:
+        return True
+    if record.progress:  # a probe that stopped half way: pick it up again
+        return force or now - record.tried >= _RETRY_BACKOFF_SECONDS[0]
+    if record.ok:  # a complete list is refreshed behind itself once it is old
+        return now - record.tried >= _STALE_AFTER_SECONDS
+    return force or now - record.tried >= _backoff(record.failures)
+
+
+def _cancel(entry: _WarmTask) -> None:
+    try:
+        entry.task.cancel()
+    except RuntimeError:  # its event loop is gone; nothing left to stop
+        pass
+
+
+def warm_in_background(
+    profiles: Iterable[Any], *, force: bool = False, scope: str = ""
+) -> None:
+    """Make sure every ACP profile's choices are learned, or being learned.
+
+    Starts one background probe per profile that has none yet, whose list is
+    old (``_STALE_AFTER_SECONDS``) or whose last attempt failed and waited out
+    its backoff. ``force`` (the picker's Retry) skips that wait, but only for
+    profiles whose list is not complete: a ready one is left alone. Profiles
+    gone from this workspace's list are forgotten. Never waits; call it from a running loop.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    wanted = {
+        _warm_key(scope, _name(profile)): (_name(profile), profile)
+        for profile in profiles
+        if _is_acp(profile) and _name(profile)
+    }
+    for key in [key for key in _warm if _in_warm_scope(key, scope) and key not in wanted]:
+        del _warm[key]
+    for key in [key for key in _warm_tasks if _in_warm_scope(key, scope) and key not in wanted]:
+        _cancel(_warm_tasks.pop(key))
+    now = _now()
+    for key, (name, profile) in wanted.items():
+        fingerprint = launch_fingerprint(profile)
+        running = _warm_tasks.get(key)
+        if running is not None and not running.task.done() and running.task.get_loop() is loop:
+            if running.fingerprint == fingerprint:
+                continue
+            _cancel(_warm_tasks.pop(key))  # edited while it was being probed
+        if not _due(_warm.get(key), fingerprint, now, force):
+            continue
+        task = loop.create_task(
+            _warm_profile(profile, name, fingerprint, key), name=f"acp-warm-{name}"
+        )
+        _warm_tasks[key] = _WarmTask(task, fingerprint)
+
+
+def _retry_seed(key: object, fingerprint: str) -> ACPDiscoveryOutcome | None:
+    """A retry asks only for the models that failed: it starts from the last
+    incomplete list. A complete one is never a seed, or a refresh would probe nothing."""
+    record = _warm.get(key)
+    if record is None or record.fingerprint != fingerprint or record.ok or record.progress:
+        return None
+    outcome = record.outcome
+    if outcome.status == "partial" and not outcome.more and outcome.options.get("models"):
+        return outcome
+    return None
+
+
+async def _warm_profile(profile: Any, name: str, fingerprint: str, key: object) -> None:
+    """One probe cycle for one profile: its rounds in a row, each stored as it ends."""
+    started = _now()
+    seed = _retry_seed(key, fingerprint)
+    outcome = _PENDING
+    logger.info("model picker warm: probing %s", name)
+    try:
+        for _round in range(_WARM_MAX_ROUNDS):
+            outcome = await discover_profile(profile, fresh=True, seed=seed)
+            seed = None  # the next round continues from discovery's own partial result
+            _store(key, fingerprint, outcome)
+            if not outcome.more:
+                break
+        else:  # discovery stops reporting "more" long before this; end the cycle honestly
+            outcome = replace(outcome, status="partial", more=False, message=_INCOMPLETE_MESSAGE)
+            _store(key, fingerprint, outcome)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- a broken probe never takes the engine down
+        logger.warning("model picker warm: %s failed", name, exc_info=True)
+        _store(key, fingerprint, _outcome("unavailable", message=_failure_message(exc)))
+    else:
+        logger.info(
+            "model picker warm: %s %s, %d models, %.1f s",
+            name, outcome.status, len(outcome.options.get("models", [])), _now() - started,
+        )
+    finally:
+        entry = _warm_tasks.get(key)
+        if entry is not None and entry.task is asyncio.current_task():
+            del _warm_tasks[key]
+
+
+def _rank(outcome: ACPDiscoveryOutcome) -> int:
+    """Quality of a list: a complete one, then one with models, then nothing."""
+    if outcome.status == "ready":
+        return 3
+    return 2 if outcome.options.get("models") else 1
+
+
+def _store(key: object, fingerprint: str, outcome: ACPDiscoveryOutcome) -> None:
+    """Keep a probe result, never trading a better visible list for a worse one."""
+    now = _now()
+    record = _warm.get(key)
+    good = outcome.more or outcome.status == "ready"
+    if record is None or record.fingerprint != fingerprint:
+        _warm[key] = _Warm(
+            fingerprint, outcome, tried=now,
+            ok=not outcome.more and outcome.status == "ready", progress=outcome.more,
+            failures=0 if good else 1, failing_since=None if good else now,
+        )
+        return
+    record.tried = now
+    if outcome.more:
+        record.progress = True
+        # An unfinished round shows where nothing better is up: the first warm builds
+        # its list round by round, and a refresh never downgrades the list it replaces.
+        if record.outcome.more or _rank(record.outcome) == 1:
+            record.outcome = outcome
+        return
+    record.progress = False
+    if outcome.status == "ready":
+        record.outcome, record.ok = outcome, True
+        record.failures, record.failing_since = 0, None
+        return
+    record.ok = False
+    record.failures += 1
+    if record.failing_since is None:
+        record.failing_since = now
+    if record.outcome.more:  # an unfinished list: end it honestly and keep its rows
+        record.outcome = outcome if _rank(outcome) >= _rank(record.outcome) else replace(
+            record.outcome, status="partial", more=False,
+            message=outcome.message or _INCOMPLETE_MESSAGE,
+        )
+    elif (
+        now - record.failing_since >= _MAX_FAILING_VISIBLE_SECONDS
+        or outcome.message == _AUTH_FAILED_MESSAGE
+        or _rank(outcome) >= _rank(record.outcome)
+    ):
+        record.outcome = outcome
+
+
+async def stop_warming() -> None:
+    """Stop every background probe (engine shutdown) and wait until their
+    harnesses are closed."""
+    entries = list(_warm_tasks.values())
+    _warm_tasks.clear()
+    loop = asyncio.get_running_loop()
+    stopping = []
+    for entry in entries:
+        if entry.task.get_loop() is loop and not entry.task.done():
+            entry.task.cancel()
+            stopping.append(entry.task)
+    if stopping:
+        await asyncio.gather(*stopping, return_exceptions=True)

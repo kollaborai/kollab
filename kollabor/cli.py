@@ -1389,12 +1389,43 @@ async def async_main() -> None:
             await app.start_pipe_mode(piped_input, timeout=timeout_seconds)
         else:
             # Interactive mode (with optional initial message)
-            await app.start(initial_message=initial_message)
+            ready_event = getattr(app, "_startup_ready", None)
+            from kollabor.daemon import DETACHED_READY_FD_ENV
+
+            if os.environ.get(DETACHED_READY_FD_ENV) and ready_event is not None:
+                app_start = asyncio.create_task(
+                    app.start(initial_message=initial_message)
+                )
+                ready_wait = asyncio.create_task(ready_event.wait())
+                done, _ = await asyncio.wait(
+                    (app_start, ready_wait), return_when=asyncio.FIRST_COMPLETED
+                )
+                if ready_wait in done:
+                    from kollabor.daemon import report_detached_startup
+
+                    startup_complete = getattr(app, "_startup_complete", False)
+                    report_detached_startup(
+                        ready=startup_complete,
+                        reason=(
+                            ""
+                            if startup_complete
+                            else getattr(app, "_startup_error", "")
+                            or "Application startup failed"
+                        ),
+                    )
+                if not ready_wait.done():
+                    ready_wait.cancel()
+                await app_start
+            else:
+                await app.start(initial_message=initial_message)
     except KeyboardInterrupt:
         # print("\n\nApplication interrupted by user")
         logger.info("Application interrupted by user")
     except (UnknownLLMError, InvalidACPLoadoutError) as e:
         print(f"Error: {e}", file=sys.stderr)
+        from kollabor.daemon import report_detached_startup
+
+        report_detached_startup(ready=False, reason=str(e))
         sys.exit(2)
     except Exception as e:
         print(f"\n\nApplication failed to start: {e}")
@@ -2872,6 +2903,64 @@ def _engine_is_ours(port: int) -> bool:
     return False
 
 
+ENGINE_DOWN_GRACE = 3.0  # seconds nothing answers on the engine port before --web-ui starts it again
+WEBUI_WATCH_INTERVAL = 1.0  # how often --web-ui looks at its web UI and engine
+
+
+class _EngineKeeper:
+    """Keeps an engine answering on the port the web UI was started against (#1123).
+
+    The web UI talks to one engine URL for its whole life. When that engine died
+    (another program's dev script sent SIGTERM to everything on 7433), the web UI
+    kept running against an empty port and every panel showed "Load failed" until
+    Kollab was restarted by hand. ``check()`` runs once per watch interval:
+
+    - our engine process still running: never touched, even when it is slow;
+    - any engine answering on the port (ours reused, or one another program put
+      there): left alone;
+    - otherwise, after ``grace`` seconds of silence, ``start()`` runs again on the
+      same port, at most ``limit`` times per ``window`` seconds.
+
+    Returns a line for the log when it acts, else None.
+    """
+
+    def __init__(self, start, healthy, proc=None, *, grace=3.0, limit=5, window=600.0, clock=None):
+        import time
+
+        self.start, self.healthy, self.proc = start, healthy, proc
+        self.grace, self.limit, self.window = grace, limit, window
+        self.clock = clock or time.monotonic
+        self.down_since = None
+        self.restarts: list[float] = []
+        self.warned = False
+
+    def check(self):
+        if self.proc is not None and self.proc.poll() is None:
+            self.down_since = None
+            return None
+        if self.healthy():
+            self.down_since = None
+            return None
+        now = self.clock()
+        if self.down_since is None:
+            self.down_since = now
+        if now - self.down_since < self.grace:
+            return None
+        self.restarts = [t for t in self.restarts if now - t < self.window]
+        if len(self.restarts) >= self.limit:
+            if self.warned:
+                return None
+            self.warned = True
+            return (f"engine is down; it was started {self.limit} times in {int(self.window)} s, "
+                    "not restarting it for now")
+        self.warned = False
+        self.restarts.append(now)
+        self.down_since = None
+        self.proc = self.start()
+        return (f"engine stopped answering; started it again "
+                f"({len(self.restarts)} of {self.limit} in {int(self.window)} s)")
+
+
 def _pick_engine_port(
     version: str, engine_version, ours, port: int = 7433, tries: int = 10
 ) -> tuple[int, bool]:
@@ -3028,14 +3117,17 @@ async def _handle_cli_web_ui(restart: bool = False, hosts: Optional[str] = None)
         if os.name == "nt"
         else {}
     )
+    def start_engine():
+        return subprocess.Popen(
+            [*py, "-m", "kollabor_engine", "serve", "--port", str(engine_port)],
+            **group_flags,
+        )
+
     engine_proc = None
     if reuse:
         print(f"  (reusing engine already running on {engine_port})")
     else:
-        engine_proc = subprocess.Popen(
-            [*py, "-m", "kollabor_engine", "serve", "--port", str(engine_port)],
-            **group_flags,
-        )
+        engine_proc = start_engine()
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline and not engine_healthy():
             if engine_proc.poll() is not None:
@@ -3076,22 +3168,24 @@ async def _handle_cli_web_ui(restart: bool = False, hosts: Optional[str] = None)
     stop = threading.Event()
     if os.name == "nt" and os.environ.get("KOLLAB_STOP_ON_STDIN_EOF") == "1":
         threading.Thread(target=_stop_on_stdin_eof, args=(stop,), daemon=True).start()
+    # Poll rather than wait: Windows' Popen.wait() ignores Ctrl+C, and the engine
+    # needs watching too, so a dead one is started again (#1123).
+    keeper = _EngineKeeper(start_engine, engine_healthy, engine_proc, grace=ENGINE_DOWN_GRACE)
     try:
-        if os.name == "nt":
-            # Windows: Popen.wait() ignores Ctrl+C; poll instead.
-            while webui_proc.poll() is None and not stop.wait(0.5):
-                pass
-        else:
-            webui_proc.wait()
+        while webui_proc.poll() is None and not stop.wait(WEBUI_WATCH_INTERVAL):
+            note = keeper.check()
+            if note:
+                print(f"  {note}", flush=True)
+                logging.getLogger(__name__).warning("web ui launcher: %s", note)
     except KeyboardInterrupt:
         pass
     finally:
         signal_module.signal(signal_module.SIGTERM, previous_sigterm)
         if os.name == "nt":
-            _stop_children_nt({"web ui": webui_proc, "engine": engine_proc})
+            _stop_children_nt({"web ui": webui_proc, "engine": keeper.proc})
         else:
             _terminate_child(webui_proc)
-            _terminate_child(engine_proc)
+            _terminate_child(keeper.proc)
 
 
 def _kill_owned_daemon() -> None:
@@ -3343,6 +3437,13 @@ def _run_async_main_with_sigterm_cleanup(detached_runtime: bool) -> None:
             signal_module.signal(signal_module.SIGTERM, previous_sigterm)
 
 
+def _wait_for_detached_child_startup(read_fd: int, child_pid: int) -> str | None:
+    """Wait for the forked child to report successful startup or its refusal."""
+    from kollabor.daemon import wait_for_detached_startup
+
+    return wait_for_detached_startup(read_fd, child_pid)
+
+
 def _is_tool_shell_agent_launch(argv: list[str]) -> bool:
     """Return whether a marked tool child is trying to launch an agent."""
     if not any(
@@ -3410,18 +3511,80 @@ def cli_main() -> None:
         elif os.name == "nt":
             # Windows has no fork: a detached copy starts with DETACHED_CHILD_ENV set
             # and takes the first branch above (#268).
-            sys.stdout.write(f"[detached] pid {spawn_detached_child(sys.argv)}\n")
+            from kollabor.daemon import (
+                DaemonExited,
+                wait_for_detached_startup,
+            )
+
+            child = spawn_detached_child(sys.argv, wait_for_startup=True)
+            try:
+                startup_error = wait_for_detached_startup(
+                    child.stderr.fileno(), child.pid, child_process=child
+                )
+            except DaemonExited as exc:
+                if exc.exit_code == 0:
+                    print(
+                        f"[detached] child {child.pid} exited before reporting ready (status 0)",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                print(
+                    f"detached child {child.pid} exited before startup (status {exc.exit_code})",
+                    file=sys.stderr,
+                )
+                sys.exit(exc.exit_code or 1)
+            except TimeoutError as exc:
+                print(f"detached startup failed: {exc}", file=sys.stderr)
+                sys.exit(1)
+            finally:
+                child.stderr.close()
+            if startup_error:
+                print(f"detached startup failed: {startup_error}", file=sys.stderr)
+                sys.exit(1)
+            sys.stdout.write(f"[detached] pid {child.pid}\n")
             sys.stdout.flush()
             sys.exit(0)
         else:
+            from kollabor.daemon import (
+                DETACHED_READY_FD_ENV,
+                DaemonExited,
+            )
+
+            read_fd, write_fd = os.pipe()
+            os.set_inheritable(write_fd, True)
             pid = os.fork()
             if pid > 0:
-                # Parent: print child PID and exit cleanly
+                # Parent waits until startup succeeds or the child refuses/exits.
+                os.close(write_fd)
+                try:
+                    startup_error = _wait_for_detached_child_startup(read_fd, pid)
+                except DaemonExited as exc:
+                    if exc.exit_code == 0:
+                        print(
+                            f"[detached] child {pid} exited before reporting ready (status 0)",
+                            file=sys.stderr,
+                        )
+                        sys.exit(1)
+                    print(
+                        f"detached child {pid} exited before startup (status {exc.exit_code})",
+                        file=sys.stderr,
+                    )
+                    sys.exit(exc.exit_code)
+                except TimeoutError as exc:
+                    print(f"detached startup failed: {exc}", file=sys.stderr)
+                    sys.exit(1)
+                finally:
+                    os.close(read_fd)
+                if startup_error:
+                    print(f"detached startup failed: {startup_error}", file=sys.stderr)
+                    sys.exit(1)
                 sys.stdout.write(f"[detached] pid {pid}\n")
                 sys.stdout.flush()
                 sys.exit(0)
 
             # Child: new session, detach from terminal
+            os.close(read_fd)
+            os.environ[DETACHED_READY_FD_ENV] = str(write_fd)
             os.setsid()
             detached_runtime = True
             devnull = os.open(os.devnull, os.O_RDWR)
@@ -3486,7 +3649,17 @@ def cli_main() -> None:
 
     try:
         _run_async_main_with_sigterm_cleanup(detached_runtime)
+    except SystemExit as exc:
+        from kollabor.daemon import report_detached_startup
+
+        report_detached_startup(
+            ready=False, reason=f"child exited with status {exc.code} before startup"
+        )
+        raise
     except Exception as e:
+        from kollabor.daemon import report_detached_startup
+
+        report_detached_startup(ready=False, reason=str(e) or type(e).__name__)
         # Some detached launches redirect stdout; try the current stream anyway.
         try:
             print(f"\n\nFatal error: {e}")

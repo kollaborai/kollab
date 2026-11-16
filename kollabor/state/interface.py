@@ -253,6 +253,15 @@ class StateService(Protocol):
         """
         ...
 
+    async def code_call(self, op: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Run one code-editor operation (files, git or terminal) in this daemon's folder (#987).
+
+        ``op`` is one of ``kollabor.code_service.OPS``. Returns ``{"status": int, "body": dict}``, the HTTP answer the
+        engine passes on. A remote service asks the daemon it is connected to, so the folder, git and shell are the
+        remote computer's. Params can hold file contents and terminal input: never log them.
+        """
+        ...
+
     async def open_generated_artifact(self, media_id: str) -> bool:
         """Open a session-private generated image by opaque media ID.
 
@@ -524,6 +533,16 @@ class StateService(Protocol):
         prompt from the active agent/profile. The newly-restarted
         conversation snapshot is returned so the caller can display
         the post-restart state.
+        """
+        ...
+
+    async def restart_agent(self) -> dict[str, Any]:
+        """Restart this detached agent in place on the installed code, keeping its conversation (#968).
+
+        Returns at once with ``{"restarting": True, "waiting_for_turn": bool}``:
+        the daemon lets the turn in progress end, saves its state, then replaces
+        its process image. Raises ``ValueError`` when this agent cannot restart
+        itself (no daemon, not on a hub).
         """
         ...
 

@@ -1,17 +1,38 @@
+import { sameVersionBase } from "./engine-version";
 import { refreshesOnEvent, tracksStreamedRequest } from "./live-follow";
 import type { SessionEvent } from "./api";
 import { createHistoryReconciliation } from "./history-reconciliation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
 import { Thread } from "./components/Thread";
 import { ComposerKeeper } from "./components/assistant-ui/composer-keeper";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
+
+// Monaco and xterm are large: each view loads the first time it is opened, not with the main bundle.
+const CodeEditorView = lazy(() =>
+  import("./components/code/CodeEditorView").then((m) => ({ default: m.CodeEditorView })),
+);
+const TerminalView = lazy(() =>
+  import("./components/terminal/TerminalView").then((m) => ({ default: m.TerminalView })),
+);
+
+function ViewLoading() {
+  return (
+    <div className="text-muted-foreground flex flex-1 items-center justify-center gap-2 text-xs">
+      <Loader2 className="size-4 animate-spin" />
+      Loading
+    </div>
+  );
+}
 import { AppsDialog } from "@/components/apps/AppsDialog";
+import { PrChainDialog } from "@/components/pr-chain/PrChainDialog";
 import { SupervisorAlertBanner } from "@/components/SupervisorAlertBanner";
 import type { StreamEvent } from "@/supervisor-alerts";
 import { liveActivity, nextLiveActivity, NO_LIVE_ACTIVITY, useThreadActivity } from "@/components/gems/activity";
 import { Avatar, AvatarImageProvider } from "@/components/agents/Avatar";
+import { GalleryView } from "@/components/media/gallery-view";
+import { MediaImageProvider, MediaSessionProvider, MediaViewerProvider } from "@/components/media/media-view";
 import { AgentLibrary } from "@/components/agents/AgentLibrary";
 import { buildLaunchChoices, keepPick } from "@/components/agents/launch-choices";
 import { GemAppearanceProvider } from "@/components/gems/gem-appearance";
@@ -28,9 +49,11 @@ import {
 } from "./context-compaction-status";
 import { AppSidebar } from "@/components/shell/AppSidebar";
 import { networkOf, prepareRemoteOpen, targetsOn } from "@/components/shell/agent-network";
+import { AgentVersionNotice, agentVersionNotice } from "@/components/shell/AgentVersionNotice";
 import { liveAgentOf, poolSeenBy } from "@/components/shell/live-agent";
 import { PanelHost } from "@/components/panels/PanelHost";
 import { WaiterChat } from "@/components/shell/WaiterChat";
+import { panelHostMount } from "@/components/panels/panel-model";
 import type {
   PanelIntent,
   PanelOpenRequest,
@@ -60,6 +83,7 @@ import {
   type NetworkAgent,
   DEFAULT_SLASH_COMMANDS,
   errorText,
+  isAgentTooOld,
   type ModelChoice,
   type Profile,
   type SlashCommand,
@@ -206,6 +230,27 @@ function RuntimeShell({
   const runtimeState = useEngineRuntimeState();
   const [status, setStatus] = useState<string | null>(null);
   const [panelSheetOpen, setPanelSheetOpen] = useState(false);
+  const workspace = session.workspace ?? "";
+  // Code Editor, Git and Terminal work in the chat's folder; a chat without one shows Chat.
+  const shown: SessionView = !workspace && (view === "code" || view === "git" || view === "terminal") ? "chat" : view;
+  const [visited, setVisited] = useState({ editor: false, terminal: false });
+  useEffect(() => {
+    // Code and Git are one editor (same tabs and panes) with a different sidebar
+    const key = shown === "code" || shown === "git" ? "editor" : shown === "terminal" ? "terminal" : null;
+    if (key) setVisited((seen) => (seen[key] ? seen : { ...seen, [key]: true }));
+  }, [shown]);
+  // Ctrl+` opens the terminal, and a second press goes back to Chat.
+  useEffect(() => {
+    if (!workspace) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.ctrlKey && !event.metaKey && !event.altKey && event.key === "`") {
+        event.preventDefault();
+        setView(shown === "terminal" ? "chat" : "terminal");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [workspace, shown, setView]);
   // An agent on another computer reads @names in that computer's mesh.
   // The #158 signature also narrows by network/workspace once rows carry them;
   // rows without those fields (pre-aggregate engines) ignore the filters.
@@ -277,6 +322,7 @@ function RuntimeShell({
   }, [session.session_id]);
 
   return (
+    <MediaSessionProvider api={api} sessionId={session.session_id}>
     <>
       <ComposerKeeper sessionId={session.session_id} />
       {/* Below the shared sidebar breakpoint the sidebar and the session panel are sheets. */}
@@ -314,7 +360,7 @@ function RuntimeShell({
           )}
           <SupervisorAlertBanner events={supervisorEvents} />
           <div className="flex min-h-0 flex-1 flex-col">
-            {view === "chat" ? (
+            {shown === "chat" ? (
               <Thread
                 agents={targets.agents}
                 commands={commands}
@@ -323,6 +369,7 @@ function RuntimeShell({
                   session.supports_vision ?? profile?.supports_vision ?? true
                 }
                 identity={session.identity}
+                sessionId={session.session_id}
                 activity={activity}
                 onOpenGem={onOpenProperties}
                 remoteAgents={targets.remote}
@@ -335,9 +382,36 @@ function RuntimeShell({
                 onRetryHistory={onRetryHistory}
                 historyStartIndex={historyStartIndex}
               />
-            ) : (
+            ) : shown === "trajectory" ? (
               <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
-            )}
+            ) : shown === "gallery" ? (
+              <GalleryView api={api} sessionId={session.session_id} />
+            ) : null}
+            {/* Opened once, then kept mounted and hidden, so open files and shells survive a switch to Chat. */}
+            {workspace && visited.editor ? (
+              <div className={shown === "code" || shown === "git" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+                <Suspense fallback={<ViewLoading />}>
+                  <CodeEditorView
+                    key={`${session.device ?? ""}:${workspace}`}
+                    sessionId={session.session_id}
+                    device={session.device ?? ""}
+                    workspace={workspace}
+                    mode={shown === "git" ? "git" : "code"} />
+                </Suspense>
+              </div>
+            ) : null}
+            {workspace && visited.terminal ? (
+              <div className={shown === "terminal" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+                <Suspense fallback={<ViewLoading />}>
+                  <TerminalView
+                    key={`${session.device ?? ""}:${workspace}`}
+                    sessionId={session.session_id}
+                    device={session.device ?? ""}
+                    workspace={workspace}
+                  />
+                </Suspense>
+              </div>
+            ) : null}
           </div>
         </div>
         <SessionPanel
@@ -360,6 +434,7 @@ function RuntimeShell({
         />
       </div>
     </>
+    </MediaSessionProvider>
   );
 }
 
@@ -373,6 +448,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [agents, setAgents] = useState<AgentPoolEntry[]>([]);
   const [liveAgents, setLiveAgents] = useState<LiveAgent[]>([]);
+  // kollabor.updates.restart_agents, as GET /agents last said it.
+  const [restartAgents, setRestartAgents] = useState(false);
   // What New Session can start in the chosen folder: every folder has its own hub, so a
   // gem running elsewhere is free here. `agents` stays the whole computer's live state.
   const [launchPool, setLaunchPool] = useState<AgentPoolEntry[]>([]);
@@ -402,6 +479,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [studioFocus, setStudioFocus] = useState<StudioFocus | null>(null);
   const [profilesOpen, setProfilesOpen] = useState(false);
   const [appsOpen, setAppsOpen] = useState(false);
+  const [prChainOpen, setPrChainOpen] = useState(false);
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [agentLibraryInitialTab, setAgentLibraryInitialTab] = useState<"rosters" | "teams">("rosters");
   const [setupGuideOpen, setSetupGuideOpen] = useState(false);
@@ -542,6 +620,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     () => sessions.find((session) => session.session_id === activeId),
     [activeId, sessions],
   );
+  // Where the Settings host lives: a live session, the halt waiter, or sessionless setup.
+  const host = panelHostMount(activeSession, settingsOpen, api.haltFolder);
   const operationRef = useRef(0);
   // True once a chat is open or being opened, by the person or by the restore on load: the
   // restore never switches away from it, even when startup runs again (a saved edit's Fast Refresh).
@@ -623,6 +703,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       const next = result.agents || [];
       setAgents(next);
       setLiveAgents(result.live || []);
+      setRestartAgents(result.restart_agents === true);
       applyLaunchPool(launch.agents || []);
       return next;
     } catch {
@@ -1098,6 +1179,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         try {
           await api.streamEvents(activeId, controller.signal, (event) => {
             const type = event.type ?? "";
+            if (type === "agent_restart_failed" && event.session_id === activeId) {
+              setAgentRestart({
+                sessionId: activeId,
+                waiting: false,
+                failure: "The conversation could not be saved.",
+                tooOld: false,
+              });
+            }
             if (type === "supervisor_alert") setSupervisorEvents((prev) => [...prev.slice(-19), event]);
 
             const compactionStatus = parseContextCompactionStatus(event);
@@ -1190,8 +1279,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           }
           // Live hub state for the sidebar gems; skip the update when nothing
           // moved so the chat does not re-render every poll.
-          const { agents: pool = [], live: running = [] } = await api.listAgentPool(true);
+          const { agents: pool = [], live: running = [], restart_agents: restartFlag } = await api.listAgentPool(true);
           if (!controller.signal.aborted) {
+            setRestartAgents(restartFlag === true);
             setAgents((current) => (JSON.stringify(current) === JSON.stringify(pool) ? current : pool));
             setLiveAgents((current) => (JSON.stringify(current) === JSON.stringify(running) ? current : running));
           }
@@ -1215,6 +1305,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [versionMismatch, setVersionMismatch] = useState<{ page: string; engine: string } | null>(null);
   const [updateInfo, setUpdateInfo] = useState<Awaited<ReturnType<EngineApi["checkForUpdate"]>> | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
+  // The engine's own version (GET /version): what a chat's agent is compared with.
+  const [engineVersion, setEngineVersion] = useState("");
+  // One restart asked for from a chat's notice, until that agent publishes the engine's version.
+  const [agentRestart, setAgentRestart] = useState<{ sessionId: string; waiting: boolean; failure: string; tooOld: boolean } | null>(null);
+  // Notices put away for this page load, by chat and agent process.
+  const [dismissedVersionNotices, setDismissedVersionNotices] = useState<ReadonlySet<string>>(() => new Set());
 
   useEffect(() => {
     let active = true;
@@ -1235,6 +1331,27 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       window.alert(errorText(error));
     } finally { setUpdateBusy(false); }
   };
+
+  // The open chat's agent against the engine: older code gets a line above the chat (#968).
+  const activeAgent = activeSession ? liveAgentOf(activeSession, liveAgents) : undefined;
+  const versionNotice = agentVersionNotice({ engineVersion, agent: activeAgent, restartAgents });
+  const versionNoticeKey = activeSession && activeAgent ? `${activeSession.session_id}|${activeAgent.agent_id}` : "";
+  const restartHere = agentRestart && agentRestart.sessionId === activeId ? agentRestart : null;
+  const restartActiveAgent = async () => {
+    if (!activeSession) return;
+    const sessionId = activeSession.session_id;
+    setAgentRestart({ sessionId, waiting: false, failure: "", tooOld: false });
+    try {
+      const result = await api.restartAgent(sessionId);
+      setAgentRestart({ sessionId, waiting: result.waiting_for_turn, failure: "", tooOld: false });
+    } catch (error) {
+      setAgentRestart({ sessionId, waiting: false, failure: errorText(error), tooOld: isAgentTooOld(error) });
+    }
+  };
+  // Once the agent runs the engine's version (or is gone from presence) the ask is over.
+  useEffect(() => {
+    if (!versionNotice && agentRestart) setAgentRestart(null);
+  }, [versionNotice, agentRestart]);
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -1243,7 +1360,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         if (!mounted) return;
         const bundle = __APP_VERSION__;
         const engine = (config?.engine_version || "").trim();
-        if (!engine || !bundle || engine === bundle) return;
+        setEngineVersion(engine);
+        // Source checkouts report a PEP 440 local version segment (+<sha8>, or
+        // +unknown without git metadata); compare base versions so a matching
+        // build does not flag a mismatch (#684).
+        if (!engine || !bundle || sameVersionBase(engine, bundle)) return;
         setVersionMismatch({ page: bundle, engine });
       } catch {
         // The session bootstrap effect surfaces WebUI host/origin denials.
@@ -1638,7 +1759,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   return (
     <GemAppearanceProvider api={api} refreshKey={aliveKey}>
       <AvatarImageProvider api={api}>
-      <SidebarProvider className={`bg-muted/40 ${contained ? "h-full min-h-0" : ""}`}>
+      <MediaImageProvider api={api}>
+      <MediaViewerProvider>
+      <SidebarProvider className={`bg-muted/40 dark:bg-black ${contained ? "h-full min-h-0" : ""}`}>
         <AppSidebar
           learnActive={learnRoute !== null}
           whatsNewActive={whatsNewActive}
@@ -1688,6 +1811,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           onSettings={() => openSettings()}
           onHalt={() => openSettings({ tab: "network", intent: "halt" })}
           onLearn={() => navigateToLearn()}
+          onPrChain={() => setPrChainOpen(true)}
           onWhatsNew={navigateToWhatsNew}
           onStudio={() => {
             setStudioFocus(null);
@@ -1734,6 +1858,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           onOpenSettings={(tab) => openSettings({ tab })}
           onStartSession={() => void createSession()}
         />
+        <PrChainDialog api={api} open={prChainOpen} onOpenChange={setPrChainOpen} />
         {activeSession ? (
           <AppsDialog
             api={api}
@@ -1752,12 +1877,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             await loadSessions();
           }}
         />
-        {(activeSession && !activeSession.halted) || (settingsOpen && api.haltFolder) ? (
+        {host.mount ? (
           <PanelHost
-            key={activeSession && !activeSession.halted ? activeSession.session_id : "halt"}
+            key={host.key}
             api={api}
-            // No chat open, or a halt waiter's: the session-less Halt and Resume screen for that folder.
-            session={activeSession && !activeSession.halted ? activeSession : { session_id: "", workspace: api.haltFolder }}
+            // A live session, a halt waiter, or sessionless setup (#1114/#1115).
+            session={host.session ?? { session_id: "", workspace: "" }}
             displayName={agents.find((agent) => agent.name === activeSession?.identity)?.display_name}
             profiles={profiles}
             open={settingsOpen}
@@ -1786,6 +1911,17 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             >
               This page and Kollab are on different versions. Reload once the update finishes.
             </NoticeBar>
+          ) : null}
+          {versionNotice && !dismissedVersionNotices.has(versionNoticeKey) ? (
+            <AgentVersionNotice
+              notice={versionNotice}
+              busy={Boolean(restartHere) && !restartHere?.failure}
+              waiting={restartHere?.waiting ?? false}
+              failure={restartHere?.failure ?? ""}
+              tooOld={restartHere?.tooOld ?? false}
+              onRestart={() => void restartActiveAgent()}
+              onDismiss={() => setDismissedVersionNotices((current) => new Set(current).add(versionNoticeKey))}
+            />
           ) : null}
           {pickFailure && pickFailure.sessionId === activeId ? (
             <NoticeBar
@@ -1850,6 +1986,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                 key={`${activeId}:${runtimeEpoch}`}
                 api={api}
                 sessionId={activeSession.session_id}
+                agentIdentity={activeSession.identity}
                 initialState={initialState}
                 onStale={(stillCurrent) => resetThread(activeSession.session_id, stillCurrent)}
                 liveEvents={liveEventsRef}
@@ -1948,6 +2085,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           </div>
         </SidebarInset>
       </SidebarProvider>
+      </MediaViewerProvider>
+      </MediaImageProvider>
       </AvatarImageProvider>
     </GemAppearanceProvider>
   );

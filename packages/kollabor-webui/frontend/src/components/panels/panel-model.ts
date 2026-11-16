@@ -242,3 +242,48 @@ export function savePaths(fields: Pick<PanelField, "path" | "save_path">[], chan
   const files = [...new Set(fields.filter((f) => f.path in changed).map((f) => f.save_path || fallback))];
   return files.length ? files : [fallback];
 }
+
+/** A session-shaped object with only what the Settings host decision reads. */
+export type HostSessionLike = { session_id: string; halted?: string; workspace?: string | null };
+
+/** How App mounts the Settings host: a live session, the halt waiter, or sessionless setup. */
+export type PanelHostMount = {
+  mount: boolean;
+  key: string;
+  session: HostSessionLike | null;
+};
+
+/**
+ * Whether and how App shows PanelHost. A live, unhalted session owns the
+ * dialog; with none, an open Settings still mounts it - over a halted
+ * folder as the halt waiter, otherwise sessionless (#1114/#1115: the setup
+ * guide's Provider and Network steps open Settings before any session).
+ */
+export function panelHostMount(
+  activeSession: HostSessionLike | null | undefined,
+  settingsOpen: boolean,
+  haltFolder: string,
+): PanelHostMount {
+  if (activeSession && !activeSession.halted) {
+    return { mount: true, key: activeSession.session_id, session: activeSession };
+  }
+  if (!settingsOpen) return { mount: false, key: "", session: null };
+  if (haltFolder) {
+    return { mount: true, key: "halt", session: { session_id: "", workspace: haltFolder } };
+  }
+  return { mount: true, key: "setup", session: { session_id: "", workspace: "" } };
+}
+
+/**
+ * The panel a sessionless Settings mount serves for one tab. A halted folder
+ * opens on Halt and Resume; the setup mount serves the tab's own daemon
+ * panel through the engine's sessionless routes (#1114/#1115).
+ */
+export function sessionlessPanelName(tab: PanelTab, haltFolder: string): string {
+  return haltFolder ? "connect-halt" : PANEL_NAME[tab];
+}
+
+/** The tabs a sessionless Settings mount offers. */
+export function sessionlessTabs(haltedFolder: boolean): readonly SettingsTab[] {
+  return haltedFolder ? ["network"] : ["setup", "network"];
+}

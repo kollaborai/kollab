@@ -349,6 +349,7 @@ hub_spawn = ToolDefinition(
         "1. By identity: name='lapis' -> uses pool's agent_type for lapis\n"
         "2. By agent_type: name='coder' -> picks next available coder from pool\n"
         "3. Explicit: name='lapis' type='research' -> identity + type override\n"
+        "Set identity='name' to choose a specific hub identity for a role or harness.\n"
         "Returns 'already online' if identity is running. No discovery needed."
     ),
     category="hub",
@@ -356,7 +357,7 @@ hub_spawn = ToolDefinition(
     requires_permission=False,
     xml_tag="hub_spawn",
     xml_form="mixed",
-    xml_attributes=["name", "type", "llm"],
+    xml_attributes=["name", "identity", "type", "llm"],
     xml_body_param="task",
     parameters=[
         ToolParameter(
@@ -376,6 +377,15 @@ hub_spawn = ToolDefinition(
             required=True,
         ),
         ToolParameter(
+            name="identity",
+            type="string",
+            description=(
+                "Optional exact hub identity to use. Overrides the identity "
+                "selected from name; use this for a custom or specifically named agent."
+            ),
+            required=False,
+        ),
+        ToolParameter(
             name="task",
             type="string",
             description="Task description for the spawned agent",
@@ -393,6 +403,7 @@ hub_spawn = ToolDefinition(
     ],
     examples=[
         '<hub_spawn name="coder">fix the bug in foo.py</hub_spawn>',
+        '<hub_spawn name="coder" identity="jasper" llm="codex-cli">review the patch</hub_spawn>',
         '<hub_spawn name="lapis">investigate the auth module</hub_spawn>',
         '<hub_spawn name="lapis" type="research">deep dive on performance</hub_spawn>',
     ],
@@ -405,6 +416,7 @@ hub_spawn = ToolDefinition(
         "use hub_msg to assign work to EXISTING agents already on the hub",
         "if identity is already online, returns 'already online' with instructions to use hub_msg",
         "spawning by agent_type picks the next free persona of the folder's roster running that bundle",
+        "an explicit identity takes precedence over the role or adapter name",
     ],
 )
 

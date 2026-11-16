@@ -89,6 +89,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         state.attach_to_context       (phase 4.5 step 6 write)
         state.archive_context         (phase 4.5 step 6 write)
         state.restart_session         (phase 4.5 step 7 write)
+        state.restart_agent           (#968 write)
         state.enable_mcp_server       (phase 4.5 step 7 write)
         state.disable_mcp_server      (phase 4.5 step 7 write)
         state.test_mcp_server         (phase 4.5 step 7 read)
@@ -105,6 +106,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         state.hub_knocks              (one knock action on the relay's owner)
         state.get_panel               (describe a kollabor.panels panel)
         state.panel_action            (run one panel action)
+        state.code_call               (code editor files, git and terminal, #987)
     """
 
     async def _get_conversation(params: dict[str, Any]) -> dict[str, Any]:
@@ -376,6 +378,12 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         except ValueError as e:
             return {"error": str(e)}
         return snapshot.to_dict()
+
+    async def _restart_agent(params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await state_service.restart_agent()
+        except ValueError as e:
+            return {"error": str(e)}
 
     async def _enable_mcp_server(params: dict[str, Any]) -> dict[str, Any]:
         name = params.get("name", "")
@@ -737,6 +745,17 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         except Exception as exc:
             return _panel_error(exc)
 
+    async def _code_call(params: dict[str, Any]) -> dict[str, Any]:
+        op, call_params = params.get("op"), params.get("params", {})
+        if set(params) - {"op", "params"} or not isinstance(op, str) or not isinstance(call_params, dict):
+            return {"error": "invalid code request", "status": 400}
+        try:
+            return {"answer": await state_service.code_call(op, call_params)}
+        except Exception as exc:
+            # Never log params or the message: they can hold file contents and terminal input.
+            logger.error("code call failed: %s", type(exc).__name__)
+            return {"error": "code service unavailable", "status": 500}
+
     async def _goal_command(params: dict[str, Any]) -> dict[str, Any]:
         try:
             return await state_service.goal_command(str(params.get("text", "")))
@@ -791,6 +810,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.archive_context": _archive_context,
         # Phase 4.5 step 7: session management
         "state.restart_session": _restart_session,
+        "state.restart_agent": _restart_agent,
         # Phase 4.5 step 7: MCP writes (file-only, no hot-reload)
         "state.enable_mcp_server": _enable_mcp_server,
         "state.disable_mcp_server": _disable_mcp_server,
@@ -816,6 +836,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.hub_knocks": _hub_knocks,
         "state.get_panel": _get_panel,
         "state.panel_action": _panel_action,
+        "state.code_call": _code_call,
         "state.hub_connect": _hub_connect,
         "state.hub_send_msg": _hub_send_msg,
         "state.list_hub_agents": _list_hub_agents,
