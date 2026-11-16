@@ -54,6 +54,25 @@ def test_installed_plugin_root_cannot_be_symlinked_outside_plugin_directory(tmp_
         assert client.get("/plugins/hello/web/main.js").status_code == 404
 
 
+def test_installed_plugin_asset_is_not_served_after_approved_files_change(tmp_path, monkeypatch):
+    from kollabor_plugins.packages import files_sha256
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    home = tmp_path / ".kollab"
+    root = home / "plugins/hello"
+    dist = root / "web/dist"
+    dist.mkdir(parents=True)
+    asset = dist / "lazy.js"
+    asset.write_text("approved")
+    digest = files_sha256(root)
+    (home / "plugins.json").write_text(json.dumps({"plugins": {"hello": {"enabled": True, "files_sha256": digest}}, "dev": {}}))
+    with TestClient(create_app(), base_url="http://localhost", client=("127.0.0.1", 1234)) as client:
+        assert client.get("/plugins/hello/web/lazy.js").status_code == 200
+        asset.write_text("modified after approval")
+        assert client.get("/plugins/hello/web/lazy.js").status_code == 404
+
+
 def test_installed_plugin_root_cannot_alias_another_plugin(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
