@@ -50,11 +50,20 @@ try {
     });
     await removeEmpty.waitFor();
     await removeEmpty.click();
-    await page.getByRole("status").getByText(/Press Remove Gemini provider again/).waitFor();
+    const emptyConfirmation = page.getByRole("status");
+    await emptyConfirmation.getByText(/Press Confirm to remove the Gemini provider/).waitFor();
+    if (width >= 820) {
+      const emptyCard = page.getByRole("heading", { name: "Models — Gemini" }).locator("xpath=..")
+        .locator("div.rounded-lg");
+      const reason = await emptyCard.getByText("no models — catalog unavailable").boundingBox();
+      const confirmationBox = await emptyConfirmation.boundingBox();
+      assert.ok(reason && confirmationBox && confirmationBox.y >= reason.y + reason.height,
+        `empty-group confirmation should sit below provider details at ${width}px`);
+    }
     await page.getByRole("button", { name: "Use gpt-model" }).click();
     assert.equal(await page.evaluate(() => window.llmProviderRemovalCalls), 0);
     await page.getByRole("button", { name: "Remove Gemini provider Models — Gemini" }).click();
-    await page.getByRole("status").getByText(/Press Remove Gemini provider again/).waitFor();
+    await page.getByRole("status").getByText(/Press Confirm to remove the Gemini provider/).waitFor();
     await page.getByRole("button", { name: "Confirm Models — Gemini" }).click();
     await page.getByRole("heading", { name: "Models — Gemini" }).waitFor({ state: "detached" });
     assert.equal(await page.evaluate(() => window.llmProviderRemovalCalls), 1);
@@ -69,7 +78,7 @@ try {
     await page.getByRole("button", { name: "Remove Anthropic provider claude-model" }).click();
     await confirmation.waitFor();
     const confirmationText = await confirmation.innerText();
-    if (!confirmationText.includes("Press Confirm again")) failures.push("confirmation copy must match the Confirm button");
+    if (!confirmationText.includes("Press Confirm to remove")) failures.push("confirmation copy must match the Confirm button");
     if (confirmationText.includes("Press Remove Anthropic provider again")) failures.push("confirmation copy still names the wrong action");
     if (width >= 820) {
       const row = page.getByRole("button", { name: "Confirm claude-model" }).locator("xpath=ancestor::li[1]");
