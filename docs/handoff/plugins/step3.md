@@ -89,7 +89,8 @@
 ## Lead decision and next step (2026-11-16)
 
 - `abcc7d4ff` amends the canonical spec in its own commit: PhoneLink plugin web parts are deferred to #1203. Earlier PhoneLink blocker, paired-phone, relay and Docker directions below are historical and superseded. Do not use Docker, a relay or a paired phone for step 3a.
-- Disk check: 11 GiB free. Next, red-first tests and explicit PhoneLink host capability, inventory-only loading and read-only Settings per the brief; then final gates, including `tests/unit/engine/test_phone_link_plugins.py`. Label phone behavior unit-tested, not checked on a paired phone. Prior screenshots and gates are not evidence for the final HEAD.
+- PhoneLink inventory-only: red tests `ba0b9a87c`, implementation `f3982641f`; focused frontend tests 32 passed and typecheck passed. This is unit-tested, not checked on a paired phone. Red log: `phonelink-red.log`; green: `phonelink-green.log` in the backup work directory specified by the brief. Event fixture was corrected to the existing JSON topic wire format in the implementation commit.
+- Disk check: 11 GiB free. Next: freeze HEAD, request scratch-stack restart, run all final gates and the fresh live smoke, including `tests/unit/engine/test_phone_link_plugins.py`, then rewrite this handoff as one current document. Prior screenshots and gates are not evidence for the final HEAD.
 
 ## Remaining work / exact next step
 
