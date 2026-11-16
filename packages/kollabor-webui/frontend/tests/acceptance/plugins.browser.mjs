@@ -263,6 +263,7 @@ try {
   await page.getByRole("button", { name: "Settings", exact: true }).first().click();
   const partialSettings = page.getByRole("dialog", { name: "Settings" });
   await partialSettings.getByRole("tab", { name: "Plugins" }).click();
+  await partialSettings.getByText("Version 1.2.3", { exact: true }).waitFor({ timeout: 3000 });
   await partialSettings.getByRole("switch", { name: "Fixture enabled" }).click();
   const partialDialog = page.getByRole("dialog", { name: "Turn off Fixture?" });
   await partialDialog.getByRole("button", { name: "Turn Off", exact: true }).click();
