@@ -31,6 +31,16 @@ Each conversation gets a unique session ID and timestamped filename.
     snapshots/                         # Conversation snapshots
 ```
 
+Raw API logs share the `kollabor.llm.raw_log_max_total_mb` limit across all
+project data folders (1,024 MB by default). When the limit is exceeded, the
+oldest raw session files are removed first, including files for worktrees that
+are no longer active. Raw API records use schema version 2. Within a session,
+later records store only new conversation messages when the previous history
+is an exact prefix; `conversation_local_previous_turn_id` identifies the base
+record. The provider request's `messages`, `contents`, or `input` history uses
+the same delta rule, with `wire_request_previous_turn_id` identifying its base.
+A non-matching history or a record after file rotation is stored in full.
+
 ## Resuming Conversations
 
 Use the `/resume` command to pick up where you left off:
