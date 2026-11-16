@@ -191,3 +191,16 @@ def test_generic_encoded_short_alias_blocks_actual_launch():
     )
     for option in ("-e", "-ec", "-enc"):
         assert _is_blocked_kollab_spawn(f"unknown-shell.exe {option} {encoded}")
+
+
+@pytest.mark.parametrize("tool", ["grep", "rg", "git grep"])
+def test_search_command_can_match_a_guarded_launch_as_text(tool):
+    assert not _is_blocked_kollab_spawn(f"{tool} -c 'kollab --agent coder'")
+
+
+@pytest.mark.parametrize("tool", ["grep", "rg", "git grep"])
+def test_search_command_can_match_encoded_launch_as_text(tool):
+    encoded = base64.b64encode("kollab --agent coder".encode("utf-16le")).decode(
+        "ascii"
+    )
+    assert not _is_blocked_kollab_spawn(f"{tool} -e {encoded}")
