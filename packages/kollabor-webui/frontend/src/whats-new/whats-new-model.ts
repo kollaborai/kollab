@@ -22,7 +22,11 @@ export type DialogRelease = {
 /** What this browser last acknowledged, persisted per browser like the setup guide. */
 export type SeenRecord = { seenVersion: string };
 
-const VERSION_RE = /^\d+(\.\d+)*$/;
+const VERSION_RE = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
+
+const isSupportedVersion = (version: string): boolean =>
+  VERSION_RE.test(version) &&
+  version.split(".").every((part) => Number.isSafeInteger(Number(part)));
 
 /** Numeric segment compare; non-versions fall back to string order, never NaN. */
 export function compareVersions(a: string, b: string): number {
@@ -52,7 +56,7 @@ const countOf = (sections: ChangeSection[], category: string): number =>
 export function buildRelease(result: WhatsNewResult): DialogRelease | null {
   if (result.status !== "ready") return null;
   const newest = result.sections[0];
-  if (!newest || newest.version === "Unreleased" || !VERSION_RE.test(newest.version)) {
+  if (!newest || !isSupportedVersion(newest.version)) {
     return null;
   }
   const next = result.sections[1];
@@ -71,7 +75,7 @@ export function loadSeenRecord(raw: string | null): SeenRecord | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as { seenVersion?: unknown };
-    return typeof parsed.seenVersion === "string" && VERSION_RE.test(parsed.seenVersion)
+    return typeof parsed.seenVersion === "string" && isSupportedVersion(parsed.seenVersion)
       ? { seenVersion: parsed.seenVersion }
       : null;
   } catch {
