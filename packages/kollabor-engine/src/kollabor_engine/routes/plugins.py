@@ -573,7 +573,7 @@ class RemovePluginOptions(BaseModel):
 @router.post("/{plugin_id}/enable")
 @router.post("/{plugin_id}/disable")
 async def set_plugin_enabled(request: Request, plugin_id: str):
-    from kollabor_plugins.services import supervisor_tick
+    from kollabor_plugins.services import ServiceStopError, supervisor_tick
 
     context = _package_context(plugin_id)
     if context is None:
@@ -600,6 +600,15 @@ async def set_plugin_enabled(request: Request, plugin_id: str):
         else:
             await request.app.state.plugin_service_controls.cancel_plugin(plugin_id)
             await request.app.state.plugin_dispatcher.invalidate(plugin_id)
+    except ServiceStopError as exc:
+        try:
+            await request.app.state.plugin_service_controls.cancel_plugin(plugin_id)
+        finally:
+            try:
+                await request.app.state.plugin_dispatcher.invalidate(plugin_id)
+            finally:
+                request.app.state.plugin_events.publish_change()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except OSError as exc:
