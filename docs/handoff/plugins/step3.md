@@ -161,6 +161,9 @@
 
 - Settings screenshot/overflow capture at source `711cecdf` plus the screenshot harness edit: `~/backups/plugins-step3-work/ui-review-711cecdf` contains 1440/820/390 dark and light captures, plus 320/768, failed-load and install-review captures. Browser acceptance passed and its log reports zero document/body overflow at all five widths. This covers Settings only, not every required state. Both visual-comparison calls and fallback image-analysis calls timed out; no visual verdict is claimed. A working vision reviewer still must compare every required state and both themes against the mockups.
 
+- Fixed-source preflight `fd8ef6fa13593539a4283ca64ee38fd896ec6cf5`: isolated frontend npm test passed 411/411, typecheck passed, browser acceptance passed, production build passed to `~/backups/plugins-step3-work/build-gate-fd8ef6fa`, and the separately invoked production runtime build/export test passed. Logs are `gate-fd8ef6fa-{test,typecheck,browser,build,runtime}.log` in that backup directory. Build emitted Vite/Rolldown IIFE/import.meta warnings; production CSP and live runtime behavior remain unverified. No commits ran while the gates were running. This evidence is not final acceptance because the real stopping lifecycle, required full visual review and live smoke are incomplete.
+- PR gate rechecked: #1065 is OPEN, not merged. No PR was opened. The required test ports were still occupied by the unrelated processes noted above; neither was touched. Vision comparison and fallback image analysis timed out.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
