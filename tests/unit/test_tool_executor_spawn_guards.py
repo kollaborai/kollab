@@ -267,3 +267,31 @@ def test_search_exceptions_do_not_exempt_executable_options(command):
 )
 def test_safe_search_execution_option_does_not_interpret_pattern_as_command(command):
     assert not _is_blocked_kollab_spawn(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -C /tmp/project/kollab fetch origin main 2>&1",
+        "git -C /tmp/project/kollab status 2>&1 | tail -5",
+        "git -C /tmp/project/kollab status >&2",
+        "git -C /tmp/project/kollab status <&0",
+        "git -C /tmp/project/kollab fetch origin main 2>&1 &",
+    ],
+)
+def test_fd_redirects_and_background_git_are_not_agent_launches(command):
+    assert not _is_blocked_kollab_spawn(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "kollab --agent coder 2>&1",
+        "kollab --hub stop all 2>&1",
+        "kollab --hub status 2>&1 &",
+        "echo safe 2>&1 && kollab --agent coder",
+        "unknown-shell.exe -C 'kollab --agent coder'",
+    ],
+)
+def test_redirects_preserve_real_agent_guard(command):
+    assert _is_blocked_kollab_spawn(command)
