@@ -159,6 +159,13 @@ try {
   const folderlessPanel = page.getByRole("complementary", { name: "Session Controls" });
   await folderlessPanel.waitFor({ timeout: 15000 });
   await folderlessPanel.getByRole("button", { name: /Fixture Board/ }).getByText("Stopping", { exact: true }).waitFor({ timeout: 5000 });
+  await page.getByRole("button", { name: "Settings", exact: true }).first().click();
+  const stoppingSettings = page.getByRole("dialog", { name: "Settings" });
+  await stoppingSettings.getByRole("tab", { name: "Plugins" }).click();
+  const stoppingDetails = stoppingSettings.getByRole("region", { name: "Fixture details" });
+  await stoppingDetails.getByText("Waiting for the plugin to stop.", { exact: true }).waitFor({ timeout: 5000 });
+  await stoppingDetails.getByText("worker · Stopping", { exact: true }).waitFor({ timeout: 5000 });
+  assert.equal(await stoppingDetails.getByRole("switch", { name: "Fixture enabled" }).isDisabled(), true, "cannot toggle while stopping");
   entry.state = "ok";
   entry.services[0].state = "crash-stopped";
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
