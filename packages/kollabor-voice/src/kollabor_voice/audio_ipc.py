@@ -323,6 +323,11 @@ class AudioIPC:
                 import numpy as np
 
                 samples = np.asarray(samples, dtype=np.float32).reshape(-1)
+                if not np.isfinite(samples).all():
+                    raise kva.FrameError(
+                        "invalid_audio", "Audio must contain only finite samples"
+                    )
+                samples = np.clip(samples, -1.0, 1.0)
                 await send(
                     kva.RESULT,
                     event="format",

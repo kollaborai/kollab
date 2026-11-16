@@ -83,7 +83,7 @@ class LoadoutCommandHandler(BaseCommandHandler):
                 SubcommandInfo("", "", "Open the loadout picker"),
                 SubcommandInfo("new", "", "Create a loadout"),
                 SubcommandInfo("default <name>", "", "Set startup default loadout"),
-                SubcommandInfo("fallback <name|off>", "", "Loadout to switch to when the model can't serve"),
+                SubcommandInfo("fallback <name|off>", "", "Loadout suggested when the model can't serve"),
                 SubcommandInfo("<name>", "", "Activate a loadout by name"),
             ],
         )
@@ -115,6 +115,7 @@ class LoadoutCommandHandler(BaseCommandHandler):
             return CommandResult(
                 success=True,
                 message=f"Fallback: {fallback.choice() or 'none'}. "
+                "Automatic switching is disabled. "
                 "Set it with /llm fallback <name>, or /llm fallback off.",
                 display_type="info",
             )
@@ -138,9 +139,9 @@ class LoadoutCommandHandler(BaseCommandHandler):
             )
         return CommandResult(
             success=True,
-            message=f"Fallback: {loadout.name}. When this model can't serve a turn "
-            "(usage limit, quota, rate limit, expired login), the agent switches "
-            "there once and runs the turn again (an ACP fallback asks you to send it again).",
+            message=f"Fallback: {loadout.name}. Automatic switching is disabled. "
+            "After a usage limit or expired login, the agent suggests this loadout "
+            "for explicit selection before you send the message again.",
             display_type="success",
         )
 
