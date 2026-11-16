@@ -8,6 +8,7 @@ Compatible with ANS semantic capability matching and ARDP
 capability advertisement.
 """
 
+import copy
 import logging
 import time
 from typing import TYPE_CHECKING, Dict, List, Tuple
@@ -28,11 +29,13 @@ class CapabilityRegistry:
         self._storage = storage
         # Reverse index: capability_name -> [(designation, CapabilityEntry)]
         self._index: Dict[str, List[Tuple[str, CapabilityEntry]]] = {}
+        self._persisted_index: Dict[str, list] = {}
         self._loaded = False
 
     def _ensure_loaded(self) -> None:
         if not self._loaded:
             raw = self._storage.load_capability_index()
+            self._persisted_index = copy.deepcopy(raw)
             self._index = {}
             for cap_name, entries in raw.items():
                 self._index[cap_name] = [
@@ -50,6 +53,7 @@ class CapabilityRegistry:
         """
         self._ensure_loaded()
         cap_name = capability.name
+        created_entries = set()
 
         if cap_name not in self._index:
             self._index[cap_name] = []
@@ -58,16 +62,22 @@ class CapabilityRegistry:
         for i, (d, _) in enumerate(self._index[cap_name]):
             if d == designation:
                 self._index[cap_name][i] = (designation, capability)
-                self._save()
+                self._save(updated_entries={(cap_name, designation)})
                 return
 
         self._index[cap_name].append((designation, capability))
-        self._save()
+        created_entries.add((cap_name, designation))
+        self._save(
+            updated_entries=created_entries,
+            created_entries=created_entries,
+        )
         logger.debug(f"{designation} declared capability: {cap_name} v{capability.version}")
 
     def declare_many(self, designation: str, capabilities: List[CapabilityEntry]) -> None:
         """Declare multiple capabilities at once (batched save)."""
         self._ensure_loaded()
+        updated_entries = set()
+        created_entries = set()
         for cap in capabilities:
             cap_name = cap.name
             if cap_name not in self._index:
@@ -81,8 +91,13 @@ class CapabilityRegistry:
                     break
             if not updated:
                 self._index[cap_name].append((designation, cap))
+                created_entries.add((cap_name, designation))
+            updated_entries.add((cap_name, designation))
 
-        self._save()
+        self._save(
+            updated_entries=updated_entries,
+            created_entries=created_entries,
+        )
 
     def revoke(self, designation: str, capability_name: str) -> None:
         """Revoke a capability declaration."""
@@ -93,7 +108,7 @@ class CapabilityRegistry:
             ]
             if not self._index[capability_name]:
                 del self._index[capability_name]
-            self._save()
+            self._save(deleted_entries={(capability_name, designation)})
 
     def revoke_all(self, designation: str) -> None:
         """Revoke all capabilities for a designation (on deregister)."""
@@ -107,7 +122,7 @@ class CapabilityRegistry:
                 empty_caps.append(cap_name)
         for cap_name in empty_caps:
             del self._index[cap_name]
-        self._save()
+        self._save(deleted_designations={designation})
 
     # --- Queries ---
 
@@ -167,7 +182,7 @@ class CapabilityRegistry:
                 c.confidence = max(c.confidence, evidence_confidence.get(evidence, 0.5))
                 c.last_demonstrated = time.time()
                 entries[i] = (d, c)
-                self._save()
+                self._save(updated_entries={(capability_name, designation)})
                 logger.debug(
                     f"promoted {designation}/{capability_name} to {evidence} "
                     f"(confidence={c.confidence:.2f})"
@@ -192,7 +207,7 @@ class CapabilityRegistry:
                     c.evidence = "endorsed"
                     c.confidence = max(c.confidence, 0.9)
                 entries[i] = (d, c)
-                self._save()
+                self._save(updated_entries={(capability_name, target)})
                 return
 
     # --- Rebuild ---
@@ -210,7 +225,7 @@ class CapabilityRegistry:
                 if cap.name not in self._index:
                     self._index[cap.name] = []
                 self._index[cap.name].append((designation, cap))
-        self._save()
+        self._save(replace=True)
         self._loaded = True
         logger.debug(f"rebuilt capability index: {len(self._index)} capabilities")
 
@@ -221,12 +236,88 @@ class CapabilityRegistry:
 
     # --- Internal ---
 
-    def _save(self) -> None:
-        """Persist index to storage."""
+    def _save(
+        self,
+        *,
+        updated_entries=(),
+        created_entries=(),
+        deleted_entries=(),
+        deleted_designations=(),
+        replace: bool = False,
+    ) -> None:
+        """Persist only this registry operation's changes to storage."""
         raw = {}
-        for cap_name, entries in self._index.items():
-            raw[cap_name] = [
-                {"designation": d, "capability": c.to_dict()}
-                for d, c in entries
+        base_entries = {}
+        if replace:
+            updated_entries = {
+                (cap_name, designation)
+                for cap_name, entries in self._index.items()
+                for designation, _ in entries
+            }
+        for cap_name, designation in updated_entries:
+            capability = next(
+                (
+                    capability
+                    for entry_designation, capability in self._index.get(
+                        cap_name, []
+                    )
+                    if entry_designation == designation
+                ),
+                None,
+            )
+            if capability is not None:
+                entry = {
+                    "designation": designation,
+                    "capability": capability.to_dict(),
+                }
+                raw.setdefault(cap_name, []).append(entry)
+                persisted_entry = next(
+                    (
+                        item
+                        for item in self._persisted_index.get(cap_name, [])
+                        if item.get("designation") == designation
+                    ),
+                    None,
+                )
+                if persisted_entry is not None:
+                    base_entries[(cap_name, designation)] = copy.deepcopy(
+                        persisted_entry
+                    )
+        self._storage.save_capability_index(
+            raw,
+            base_entries=base_entries,
+            created_entries=created_entries,
+            deleted_entries=deleted_entries,
+            deleted_designations=deleted_designations,
+            replace=replace,
+        )
+        if replace:
+            self._persisted_index = copy.deepcopy(raw)
+            return
+        for designation in deleted_designations:
+            for cap_name in list(self._persisted_index):
+                self._persisted_index[cap_name] = [
+                    item
+                    for item in self._persisted_index[cap_name]
+                    if item.get("designation") != designation
+                ]
+                if not self._persisted_index[cap_name]:
+                    del self._persisted_index[cap_name]
+        for cap_name, designation in deleted_entries:
+            self._persisted_index[cap_name] = [
+                item
+                for item in self._persisted_index.get(cap_name, [])
+                if item.get("designation") != designation
             ]
-        self._storage.save_capability_index(raw)
+            if not self._persisted_index[cap_name]:
+                del self._persisted_index[cap_name]
+        for cap_name, entries in raw.items():
+            persisted_entries = self._persisted_index.setdefault(cap_name, [])
+            for entry in entries:
+                designation = entry["designation"]
+                for index, persisted_entry in enumerate(persisted_entries):
+                    if persisted_entry.get("designation") == designation:
+                        persisted_entries[index] = copy.deepcopy(entry)
+                        break
+                else:
+                    persisted_entries.append(copy.deepcopy(entry))
