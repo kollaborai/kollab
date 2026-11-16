@@ -1,10 +1,10 @@
-import json
 from types import SimpleNamespace
 
 import pytest
-from kollabor_agent.mcp_integration import MCPIntegration
-from kollabor.state import LocalStateService
 from kollabor_engine.session import EngineSession
+
+from kollabor.state import LocalStateService
+from kollabor_agent.mcp_integration import MCPIntegration
 
 
 @pytest.mark.asyncio
