@@ -656,7 +656,11 @@ def stop_services(plugin_id: str) -> list[str]:
     """Signal only verified wrappers belonging to the named plugin."""
     if not _ID.fullmatch(plugin_id):
         raise ValueError("Invalid plugin id")
-    run_dir = Path.home() / ".kollab" / "plugin-data" / plugin_id / "run"
+    data_dir = Path.home() / ".kollab" / "plugin-data"
+    run_dir = data_dir / plugin_id / "run"
+    if any(path.is_symlink() for path in (data_dir, data_dir / plugin_id, run_dir)):
+        logger.warning("Refusing to inspect symlinked service run directory for %s", plugin_id)
+        return ["run directory"]
     failures = []
     for pid_path in run_dir.glob("*.pid"):
         try:
@@ -672,17 +676,35 @@ def stop_services(plugin_id: str) -> list[str]:
             # or state are damaged; never let a display failure orphan it.
             failures.append(pid_path.stem)
             logger.warning("Could not record stop for service %s: %s", pid_path.name, exc)
+        signalled = False
         try:
+            if pid_path.is_symlink():
+                raise ValueError("Service pid file may not be a symlink")
             identity = json.loads(pid_path.read_text(encoding="utf-8"))
             wrapper = identity.get("wrapper")
             if _verified_wrapper(wrapper):
                 os.kill(wrapper["pid"], signal.SIGTERM)
+                signalled = True
             elif _identity_alive(wrapper, wrapper=True):
                 logger.warning("Refusing to signal unverifiable wrapper for %s", pid_path.name)
         except ProcessLookupError:
+            failures.remove(pid_path.stem)
             continue
         except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
             logger.warning("Could not stop service %s: %s", pid_path.name, exc)
+        state_path = run_dir / f"{pid_path.stem}.state"
+        try:
+            if state_path.is_symlink():
+                raise ValueError("Service state file may not be a symlink")
+            state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+            if not isinstance(state, dict):
+                raise ValueError("Invalid service state")
+            state.update({"desired": "stopped", "status": "stopping" if signalled else "stop-failed",
+                          "stop_deadline": None,
+                          "error": "Could not verify the stop. Check the process before retrying."})
+            _write_state(state_path, state)
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning("Could not record failed stop for %s: %s", pid_path.name, exc)
     return failures
 
 
