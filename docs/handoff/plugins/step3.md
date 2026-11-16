@@ -86,6 +86,11 @@
 - The run container, temporary tagged image, and source scratch directory were removed. A specifically identified 544.5 MB image-build cache record was removed, but other records associated with the test were reported non-reclaimable even with targeted prune; do not prune unrelated Docker cache or containers. They may retain the tracked-source copy until Docker can reclaim them.
 - No PhoneLink plugin fix was implemented. The installed `@babel/parser` is an existing development dependency, not a declared runtime dependency; parsing alone does not solve cyclic ESM graph execution, React singleton identity, CSS/asset routing, or the directory trust boundary. `es-module-shims` would be a new dependency, prohibited by this brief. A complete design and red-first paired plugin regression remain necessary.
 
+## Lead decision and next step (2026-11-16)
+
+- `abcc7d4ff` amends the canonical spec in its own commit: PhoneLink plugin web parts are deferred to #1203. Earlier PhoneLink blocker, paired-phone, relay and Docker directions below are historical and superseded. Do not use Docker, a relay or a paired phone for step 3a.
+- Disk check: 11 GiB free. Next, red-first tests and explicit PhoneLink host capability, inventory-only loading and read-only Settings per the brief; then final gates, including `tests/unit/engine/test_phone_link_plugins.py`. Label phone behavior unit-tested, not checked on a paired phone. Prior screenshots and gates are not evidence for the final HEAD.
+
 ## Remaining work / exact next step
 
 
