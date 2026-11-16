@@ -10,7 +10,7 @@ export function describeUses(value: unknown): { throughKollab: string[]; onItsOw
     const [kind, ...rest] = item.split(":");
     const detail = rest.join(":");
     if (!detail) return [];
-    if (kind === "run") return [`Runs: ${detail}.`];
+    if (kind === "run") return [`Runs: ${detail}`];
     if (kind === "net") return [`Talks to: ${detail}.`];
     if (kind === "files") return [`Reads or writes: ${detail}.`];
     return [];

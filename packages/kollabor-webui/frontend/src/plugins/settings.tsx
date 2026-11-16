@@ -119,7 +119,7 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate, detailRe
         onCheckedChange={checked => { if (checked) void perform("enable"); else setConfirmation("disable"); }} /> : null}
       {canChange && entry.kind === "installed" ? <div className="ml-auto flex flex-wrap gap-2"><Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => onUpdate(entry.id)}>Update</Button><Button type="button" size="xs" variant="ghost" disabled={busy} onClick={() => setConfirmation("remove")}>Remove</Button></div> : null}
     </div>
-    <p className="text-muted-foreground mt-2 break-words text-xs">{entry.kind === "built-in" ? "Built In" : entry.kind === "dev" ? "Development" : "Installed"}{entry.source ? ` · ${entry.source}` : ""}</p>
+    <p className="text-muted-foreground mt-2 break-words text-xs">{entry.kind === "built-in" ? "Built In" : entry.kind === "dev" ? "Development" : "Installed"}{entry.kind !== "built-in" && entry.source ? ` · ${entry.source}` : ""}</p>
     {stopping ? <p role="status" className="text-muted-foreground mt-2 text-sm">Waiting for the plugin to stop.</p> : null}
     {error ? <p role="alert" className="text-destructive mt-2 break-words text-sm">{error}</p> : null}
     {entry.state === "changed-on-disk" && entry.error ? <p className="text-destructive mt-2 break-words text-sm">{entry.error}. Update or reinstall the plugin to review its files again.</p> : null}
@@ -173,7 +173,7 @@ export function PluginsSettings({ host, api, session, canManage }: { host: Plugi
             {group.title === "Installed" && canManage && !snapshot.disabled ? <Button type="button" size="xs" variant="outline" onClick={() => setOperation({ action: "install" })}><Plus className="size-3" /> Add Plugin</Button> : null}
           </div>
           {group.title === "Installed" && !group.entries.length && !snapshot.loading && !snapshot.inventoryError && !snapshot.disabled ?
-            <p className="text-muted-foreground mb-2 text-sm">No plugins installed.{canManage ? " Use Add Plugin to install one." : ""}</p> : null}
+            <p className="text-muted-foreground mb-2 text-sm">No plugins yet.</p> : null}
           <div className="flex flex-col gap-1">{group.entries.map(entry => {
             const key = entryKey(entry);
             const services = validServices(entry);
