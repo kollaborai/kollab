@@ -143,6 +143,8 @@
 
 - Changed-on-disk inventory: red browser commit `557dc774` found that the actual engine value `changed-on-disk` was labelled Failed (`changed-disk-red.log`). Settings now distinguish it from load errors and give update/reinstall guidance; isolated browser acceptance and typecheck passed (`changed-disk-green.log`, `changed-disk-typecheck.log`). Process states use similarly hyphenated `crash-stopped`; that presentation still needs a red-first check.
 
+- Crash-stopped service label: red browser commit `847a1e28` showed that the engine's `crash-stopped` value did not render as `Stopped After 5 Crashes` (`crash-stopped-red.log`). The corrected wire spelling passes isolated browser acceptance and typecheck (`crash-stopped-green.log`, `crash-stopped-typecheck.log`).
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.

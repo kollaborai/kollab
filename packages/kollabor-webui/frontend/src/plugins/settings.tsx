@@ -20,7 +20,7 @@ function ServiceRow({ service, api, id, canManage, refresh, onError }: {
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string | null>(null);
   const state = service.state === "running" ? "Running" : service.state === "stopping" ? "Stopping" :
-    service.state === "exited" ? "Exited" : service.state === "failed" || service.state === "crash_stopped" ? "Stopped After 5 Crashes" :
+    service.state === "exited" ? "Exited" : service.state === "failed" || service.state === "crash-stopped" ? "Stopped After 5 Crashes" :
     service.state === "stopped" ? "Stopped" : service.state;
   const control = async (action: string) => {
     setBusy(true);
