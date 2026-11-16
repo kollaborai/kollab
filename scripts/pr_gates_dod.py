@@ -726,8 +726,15 @@ def _declared_non_testable_findings(cfg: DodConfig, data: PRData) -> set[str]:
         for line in commit.message.splitlines():
             marker = re.match(r"\s*no regression test:\s*(.*)", line, re.IGNORECASE)
             if marker:
-                for match in _finding_matches(pattern, marker.group(1)):
+                declaration = marker.group(1)
+                for match in _finding_matches(pattern, declaration):
                     finding = match.group(0)
+                    reason = declaration[match.end() :].strip()
+                    if not re.match(r"^[-:]\s*\S", reason):
+                        continue
+                    reason = re.sub(r"^[-:]\s*", "", reason).strip(" .!?-")
+                    if not reason:
+                        continue
                     order = getattr(commit, "timeline_order", None)
                     orders = finding_orders.get(finding, [])
                     committed_at = _commit_time(commit.committed_at)
@@ -837,10 +844,21 @@ def _check_red_first(cfg: DodConfig, data: PRData, findings: set[str]) -> str:
             if test_paths and not implementation_paths:
                 if len(test_paths) != len(paths):
                     return f"regression test for {finding} must be committed alone"
-                if any(
+                patches = getattr(commit, "file_patches", {})
+                legacy_blob_match = not hasattr(commit, "file_patches") and any(
                     _mentions_finding(data.changed_file_contents.get(path, ""), finding)
                     for path in test_paths
-                ):
+                )
+                if any(
+                    _patch_adds_finding(patches.get(path, ""), finding)
+                    or (
+                        _patch_adds_strict_xfail(patches.get(path, ""))
+                        and _mentions_finding(
+                            data.changed_file_contents.get(path, ""), finding
+                        )
+                    )
+                    for path in test_paths
+                ) or legacy_blob_match:
                     pending_test = True
                 continue
             if implementation_paths:
@@ -874,6 +892,23 @@ def _only_strict_xfail_removal(patch: str) -> bool:
         if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
     ]
     return changes == ["-@pytest.mark.xfail(strict=True)"]
+
+
+def _patch_adds_finding(patch: str, finding: str) -> bool:
+    return any(
+        line.startswith("+")
+        and not line.startswith("+++")
+        and _mentions_finding(line[1:], finding)
+        for line in patch.splitlines()
+    )
+
+
+def _patch_adds_strict_xfail(patch: str) -> bool:
+    return any(
+        line[1:].strip() == "@pytest.mark.xfail(strict=True)"
+        for line in patch.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    )
 
 
 # --- evaluation -----------------------------------------------------------------
