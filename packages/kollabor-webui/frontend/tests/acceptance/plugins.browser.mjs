@@ -86,6 +86,7 @@ try {
   let brokenDisableCalls = 0;
   let stopRetryCalls = 0;
   let partialStopFailure = false;
+  let failCrashLog = true;
   let fixtureRemoved = false;
   let folderless = false;
   // Deliberately skew the engine clock to exercise a remote browser with a different clock.
@@ -145,6 +146,7 @@ try {
       return route.fulfill({ json: { ...preview, job_id: "update-fixture", action: "update", status: "complete" } });
     }
     if (url.pathname === "/engine/plugins/fixture/services/worker/log" && route.request().method() === "GET") {
+      if (failCrashLog) return route.fulfill({ status: 503, json: { detail: "Log is unavailable; retry" } });
       return route.fulfill({ contentType: "text/plain", body: "redacted fixture crash log" });
     }
     if (url.pathname === "/engine/plugins/fixture/services/worker/stop" && route.request().method() === "POST") {
@@ -278,6 +280,10 @@ try {
   await crashNotice.waitFor({ timeout: 15000 });
   await crashNotice.getByRole("button", { name: "View Log", exact: true }).click();
   const crashLog = page.getByRole("dialog", { name: "worker Log" });
+  await crashLog.getByRole("alert").getByText("Log is unavailable; retry", { exact: true }).waitFor();
+  await crashLog.getByRole("button", { name: "Close" }).click();
+  failCrashLog = false;
+  await crashNotice.getByRole("button", { name: "View Log", exact: true }).click();
   await crashLog.getByText("redacted fixture crash log", { exact: true }).waitFor();
   await crashLog.getByRole("button", { name: "Close" }).click();
   await page.getByText("Fixture plugin notice", { exact: true }).waitFor({ timeout: 15000 });
