@@ -1,7 +1,6 @@
 import { useEffect } from "react";
 import { Box, FileCode, GitBranch, LayoutDashboard, ListTodo, Plug, Puzzle, Terminal, type LucideIcon } from "lucide-react";
 import type { Session } from "@/api";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { SessionView } from "@/components/shell/SessionPanel";
@@ -26,7 +25,7 @@ export function parsePluginView(view: SessionView): { pluginId: string; viewId: 
 function MenuCount({ context, count, compact = false }: { context: PluginContext; count: NonNullable<PluginMenu["count"]>; compact?: boolean }) {
   const { data } = context.useApi<{ text?: string; hint?: string }>(count.path, { refreshOn: count.refreshOn });
   if (!data?.text) return null;
-  return <Badge variant="secondary" className={compact ? "absolute -right-2 -top-1 h-3 min-w-3 px-0.5 text-[8px]" : "ml-auto"} title={data.hint}>{data.text}</Badge>;
+  return <span className={compact ? "absolute -right-2 -top-1 text-[8px] tabular-nums" : "text-muted-foreground ml-auto tabular-nums"} title={data.hint}>{data.text}</span>;
 }
 
 function SessionControl({ label, Icon, collapsed, disabled, disabledReason, active, failed, stopping, stopped, noHeartbeat, count, onClick }: {
@@ -41,19 +40,18 @@ function SessionControl({ label, Icon, collapsed, disabled, disabledReason, acti
       {!status && count ? <MenuCount context={count.context} count={count.value} compact /> : null}</span>
   </TooltipIconButton>;
   return <Button type="button" variant="ghost" size="sm" disabled={disabled} aria-pressed={active}
-    title={disabled ? tooltip : undefined} onClick={onClick} className={cn(ROW, active && "bg-accent text-accent-foreground font-medium")}>
+    title={status || disabled ? tooltip : undefined} onClick={onClick} className={cn(ROW, active && "bg-accent text-accent-foreground font-medium")}>
     <Icon className="size-3.5" /><span className="min-w-0 truncate">{label}</span>
-    {status ? <Badge variant={stopping ? "secondary" : noHeartbeat && !failed && !stopped ? "outline" : "destructive"}
-      className={cn("ml-auto", noHeartbeat && !failed && !stopping && !stopped && "border-amber-500 text-amber-700 dark:text-amber-400")}>{status}</Badge> : count ? <MenuCount context={count.context} count={count.value} /> : null}
+    {status ? <span className={cn("ml-auto min-w-0 truncate", stopping ? "text-muted-foreground" : noHeartbeat && !failed && !stopped ? "text-amber-700 dark:text-amber-400" : "text-destructive")}>{status}</span> : count ? <MenuCount context={count.context} count={count.value} /> : null}
   </Button>;
 }
 
 /** Appends plugin entries to the existing session controls, not a separate sidebar. */
-export function PluginSessionControls({ host, session, view, onViewChange, onNavigate, collapsed = false }: {
-  host: PluginHost; session: Session; view: SessionView; onViewChange: (view: SessionView) => void; onNavigate: () => void; collapsed?: boolean;
+export function PluginSessionControls({ host, session, view, onViewChange, onNavigate, collapsed = false, section = "all" }: {
+  host: PluginHost; session: Session; view: SessionView; onViewChange: (view: SessionView) => void; onNavigate: () => void; collapsed?: boolean; section?: "all" | "views" | "menus";
 }) {
   const snapshot = usePluginSnapshot(host);
-  const monitorHeartbeat = snapshot.entries.some(entry => entry.services?.some(service =>
+  const monitorHeartbeat = section !== "views" && snapshot.entries.some(entry => entry.services?.some(service =>
     typeof service === "object" && service !== null && "state" in service && service.state === "running" &&
     "heartbeat_s" in service && typeof service.heartbeat_s === "number" && service.heartbeat_s > 0));
   useHeartbeatClock(monitorHeartbeat);
@@ -63,7 +61,7 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
     return name(a.id).localeCompare(name(b.id)) || a.id.localeCompare(b.id);
   });
   return <>
-    {plugins.flatMap(plugin => plugin.views.filter(item => !item.needs_folder || session.workspace).map(item => {
+    {section !== "menus" && <>{plugins.flatMap(plugin => plugin.views.filter(item => !item.needs_folder || session.workspace).map(item => {
       const key = pluginViewKey(plugin.id, item.id);
       const Icon = ICONS[item.icon ?? ""] ?? Puzzle;
       return <SessionControl key={`view:${key}`} label={item.label} Icon={Icon} collapsed={collapsed}
@@ -79,8 +77,8 @@ export function PluginSessionControls({ host, session, view, onViewChange, onNav
         return [<SessionControl key={`failed-view:${key}`} label={label} Icon={Puzzle} collapsed={collapsed} failed={snapshot.renderFailed.includes(entry.id) ? "render" : "load"}
           active={view === key} onClick={() => onViewChange(key)} />];
       });
-    })}
-    {[...snapshot.entries.filter(entry => entry.enabled && !entry.shadowed && snapshot.errors[entry.id]).map(entry => {
+    })}</>}
+    {section !== "views" && [...snapshot.entries.filter(entry => entry.enabled && !entry.shadowed && snapshot.errors[entry.id]).map(entry => {
       const declared = Array.isArray(entry.contributes?.menu) ? entry.contributes.menu : [];
       return { id: entry.id, name: entry.name, rows: declared.flatMap((raw: unknown) => {
         if (!raw || typeof raw !== "object") return [];

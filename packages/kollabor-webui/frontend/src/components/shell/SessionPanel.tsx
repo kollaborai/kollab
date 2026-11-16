@@ -412,7 +412,7 @@ export function SessionPanel({
             <span>{label}</span>
           </Button>
         ))}
-        {pluginHost ? <PluginSessionControls host={pluginHost} session={session} view={view} onNavigate={() => onSheetOpenChange(false)} onViewChange={next => {
+        {pluginHost ? <PluginSessionControls host={pluginHost} session={session} view={view} section="views" onNavigate={() => onSheetOpenChange(false)} onViewChange={next => {
           onViewChange(next);
           onSheetOpenChange(false);
         }} /> : null}
@@ -489,6 +489,10 @@ export function SessionPanel({
           <Users className="size-3.5" /><span>Who Is Online</span>
           <span className="text-muted-foreground ml-auto tabular-nums">{agents === null ? "…" : agents.length}</span>
         </Button>
+        {pluginHost ? <PluginSessionControls host={pluginHost} session={session} view={view} section="menus" onNavigate={() => onSheetOpenChange(false)} onViewChange={next => {
+          onViewChange(next);
+          onSheetOpenChange(false);
+        }} /> : null}
         <Button type="button" variant="ghost" size="sm" className={ROW} onClick={() => openDialog(onOpenSettings)}>
           <Settings2 className="size-3.5" /><span>Settings</span>
         </Button>
