@@ -12,6 +12,7 @@
 //      prefix reachable from cache, no engine round trip       [history-cache]
 //   I: a tool call and result split across pages reunite without a branch
 //   J: a superseding refresh during a local send preserves the submitted row
+//   observed-hub-note: an observed note appears on its history event, dimmed
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -1246,6 +1247,60 @@ try {
         k.events.splice(0).forEach((release) => release(""));
         k.assistant.splice(0).forEach((release) => release());
       }
+    },
+  );
+
+  // An observed note reaches an idle peer as a history record, without a turn.
+  // Its hub_message event must be enough to reload and draw the dimmed note.
+  const observed = { arrived: false, events: [], refreshes: 0 };
+  const observedHud =
+    "<agent_hud>\n[hub:user->lapis]\n+ [hub channel: user -> lapis]\n  OBSERVED-NOTE\n  (the human is typing in lapis's window. do NOT relay, repeat, or respond to lapis about this message — they already see it.)\n</agent_hud>";
+  await scenario(
+    "observed-hub-note",
+    () => ({
+      resolve(options) {
+        if (options.after) {
+          observed.refreshes += 1;
+          return {
+            status: 200,
+            body: mkPage(1, 2, {
+              history: observed.arrived ? [{ role: "user", content: observedHud }] : [],
+            }),
+          };
+        }
+        return {
+          status: 200,
+          body: mkPage(0, 1, { history: [{ role: "user", content: "THREAD-SEED" }] }),
+        };
+      },
+      events(route) {
+        return new Promise((resolve) => {
+          observed.events.push(() =>
+            resolve(route.fulfill({
+              status: 200,
+              contentType: "text/event-stream",
+              body: 'data: {"type":"hub_message"}\n\n',
+            }).catch(() => {})),
+          );
+        });
+      },
+    }),
+    async (page, _requests, capture) => {
+      await openThread(page, "THREAD-SEED");
+      for (let n = 0; n < 100 && !observed.events.length; n++) await page.waitForTimeout(100);
+      if (!observed.events.length) throw new Error("event stream was not held");
+      observed.arrived = true;
+      observed.events.splice(0).forEach((release) => release());
+      const note = page.locator('[data-slot="kollab_hub-message"]').filter({ hasText: "OBSERVED-NOTE" });
+      await note.first().waitFor({ timeout: 10000 });
+      if (!observed.refreshes) throw new Error("hub_message did not refresh history");
+      const className = await note.first().getAttribute("class");
+      if (!className?.includes("opacity-60")) {
+        fail("observed-hub-note", `note was not dimmed (class=${className})`);
+      } else {
+        ok("observed-hub-note", "history event draws the observed note immediately with dimmed styling");
+      }
+      await capture();
     },
   );
 
