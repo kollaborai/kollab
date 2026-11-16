@@ -544,6 +544,20 @@ try {
   await customSettings.waitFor();
   assert.equal(await customSettings.locator('xpath=ancestor::*[@data-plugin="fixture"]').count(), 1, "custom settings have plugin-specific CSS scope");
   assert.equal(await customSettings.evaluate(node => getComputedStyle(node).color), "rgb(12, 34, 56)");
+  await page.setViewportSize({ width: 390, height: 800 });
+  await settings.getByRole("button", { name: "Hello", exact: true }).click();
+  await page.waitForFunction(() => {
+    const detail = document.querySelector('[aria-label="Hello details"]');
+    return detail && document.activeElement === detail && detail.getBoundingClientRect().top >= 0 && detail.getBoundingClientRect().top < innerHeight;
+  }, null, { timeout: 5000 });
+  await settings.getByRole("button", { name: "Hello", exact: true }).click();
+  await page.waitForFunction(() => {
+    const detail = document.querySelector('[aria-label="Hello details"]');
+    return detail && document.activeElement === detail && detail.getBoundingClientRect().top >= 0 && detail.getBoundingClientRect().top < innerHeight;
+  }, null, { timeout: 5000 });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await settings.getByRole("button", { name: "Fixture", exact: true }).click();
+  assert.notEqual(await fixtureRow.evaluate(node => node === document.activeElement), true, "desktop selection does not move focus to details");
   await settings.getByRole("button", { name: "Add Plugin" }).click();
   const add = page.getByRole("dialog", { name: "Add Plugin" });
   await captureReview(page, "add-plugin");

@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useId, useRef, useState, type RefObject } from "react";
 import { Box, Plus } from "lucide-react";
 import type { EngineApi, PanelField, Session } from "@/api";
 import { FieldRenderer, type Draft } from "@/components/panels/FieldRenderer";
@@ -60,7 +60,7 @@ function ServiceRow({ service, host, api, id, canManage, canStart, refresh, onEr
   </div>;
 }
 
-function PluginDetail({ entry, host, api, session, canManage, onUpdate }: { entry: PluginEntry; host: PluginHost; api: EngineApi; session?: Session; canManage: boolean; onUpdate: (id: string) => void }) {
+function PluginDetail({ entry, host, api, session, canManage, onUpdate, detailRef }: { entry: PluginEntry; host: PluginHost; api: EngineApi; session?: Session; canManage: boolean; onUpdate: (id: string) => void; detailRef: RefObject<HTMLElement | null> }) {
   const snapshot = usePluginSnapshot(host);
   const [draft, setDraft] = useState<Draft>({});
   const [busy, setBusy] = useState(false);
@@ -94,7 +94,7 @@ function PluginDetail({ entry, host, api, session, canManage, onUpdate }: { entr
   };
   const status = failure ? (snapshot.renderFailed.includes(entry.id) ? "Failed to Render" : "Failed to Load") :
     entry.state === "changed-on-disk" ? "Changed on Disk" : entry.state === "stopping" ? "Stopping" : entry.state === "stop-failed" ? "Failed to Stop" : entry.enabled ? "On" : "Off";
-  return <section aria-label={`${entry.name} details`} className="min-w-0 py-1">
+  return <section ref={detailRef} tabIndex={-1} aria-label={`${entry.name} details`} className="min-w-0 py-1">
     <div className="flex min-w-0 flex-wrap items-center gap-2">
       <h2 className="min-w-0 truncate font-semibold">{entry.name}</h2>
       <Badge variant={failure || entry.state === "changed-on-disk" || stopFailed ? "destructive" : "secondary"}>{status}</Badge>
@@ -132,6 +132,7 @@ export function PluginsSettings({ host, api, session, canManage }: { host: Plugi
   useHeartbeatClock(snapshot.entries.some(entry => validServices(entry).some(service => service.state === "running" || service.state === "stopping")));
   const [operation, setOperation] = useState<{ action: "install" | "update"; pluginId?: string } | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const detailRef = useRef<HTMLElement>(null);
   const entryKey = (entry: PluginEntry) => `${entry.kind}:${entry.id}:${entry.source ?? ""}`;
   const groups = [
     { title: "Installed", entries: snapshot.entries.filter(entry => entry.kind === "installed") },
@@ -161,7 +162,13 @@ export function PluginsSettings({ host, api, session, canManage }: { host: Plugi
             const status = failure ? "Failed" : entry.state === "changed-on-disk" ? "Changed on Disk" : entry.state === "stopping" ? "Stopping" : entry.state === "stop-failed" ? "Failed to Stop" : entry.enabled ? "On" : "Off";
             return <Button key={key} type="button" variant={selected && entryKey(selected) === key ? "secondary" : "ghost"}
               className="h-auto min-h-12 w-full min-w-0 justify-start gap-2 px-2 py-2 text-left" aria-label={entry.name} aria-describedby={descriptionId}
-              aria-pressed={Boolean(selected && entryKey(selected) === key)} onClick={() => setSelectedKey(key)}>
+              aria-pressed={Boolean(selected && entryKey(selected) === key)} onClick={() => {
+                setSelectedKey(key);
+                if (window.matchMedia("(width < 48rem)").matches) requestAnimationFrame(() => {
+                  detailRef.current?.scrollIntoView({ block: "start" });
+                  detailRef.current?.focus({ preventScroll: true });
+                });
+              }}>
               <Box className="size-4 shrink-0" /><span className="flex min-w-0 flex-col items-start"><span className="max-w-full truncate font-medium">{entry.name}</span>
                 <span id={descriptionId} className="text-muted-foreground flex max-w-full flex-col items-start text-xs">
                   <span>{status}</span>
@@ -174,7 +181,7 @@ export function PluginsSettings({ host, api, session, canManage }: { host: Plugi
         </section>)}
         <p className="text-muted-foreground text-xs">The terminal's /config lists the same plugins and settings.</p>
       </nav>
-      {selected ? <PluginDetail key={entryKey(selected)} entry={selected} host={host} api={api} session={session} canManage={canManage} onUpdate={pluginId => setOperation({ action: "update", pluginId })} /> : null}
+      {selected ? <PluginDetail key={entryKey(selected)} entry={selected} host={host} api={api} session={session} canManage={canManage} detailRef={detailRef} onUpdate={pluginId => setOperation({ action: "update", pluginId })} /> : null}
     </div>
     {operation ? <PluginInstallDialog api={api} action={operation.action} pluginId={operation.pluginId}
       onClose={() => setOperation(null)} onApplied={() => host.refresh()} /> : null}
