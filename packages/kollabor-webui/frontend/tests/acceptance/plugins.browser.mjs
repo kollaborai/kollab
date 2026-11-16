@@ -90,6 +90,7 @@ try {
   let failCrashLog = true;
   let fixtureRemoved = false;
   let folderless = false;
+  let sessionless = false;
   // Deliberately skew the engine clock to exercise a remote browser with a different clock.
   const engineNow = () => Date.now() / 1000 + 10_000;
   const commit = "a".repeat(40);
@@ -223,12 +224,23 @@ try {
     if (url.pathname === "/engine/prompts/libraries") return route.fulfill({ json: { libraries: [], roles: [] } });
     if (url.pathname === "/engine/plugins/events") return route.fulfill({ contentType: "text/event-stream", body: ": open\n\n" });
     if (url.pathname === "/engine/plugins/fixture/api/badge") return route.fulfill({ json: { text: "4", hint: "4 items need attention" } });
-    if (url.pathname === "/engine/sessions") return route.fulfill({ json: { sessions: [{ session_id: "fixture-session", name: "Fixture Session", agent: "coder", identity: "local-coder", profile: "default", workspace: folderless ? "" : "/fixture", external: false }], network: { device: "test", remote: [] }, offline: [], hidden: [] } });
+    if (url.pathname === "/engine/sessions") return route.fulfill({ json: { sessions: sessionless ? [] : [{ session_id: "fixture-session", name: "Fixture Session", agent: "coder", identity: "local-coder", profile: "default", workspace: folderless ? "" : "/fixture", external: false }], network: { device: "test", remote: [] }, offline: [], hidden: [] } });
     if (url.pathname.endsWith("/history")) return route.fulfill({ json: { history: [{ role: "assistant", content: "Before <fixture_tag><b>untrusted</b></fixture_tag> after <hello_note>Welcome</hello_note>", metadata: {} }], start_index: 0, end_index: 1, has_more_older: false, has_more_newer: false, source: "mirror" } });
     if (url.pathname.startsWith("/api/")) return route.fulfill({ json: { available: false } });
     if (url.pathname.startsWith("/engine/")) return route.fulfill({ json: { sessions: [], profiles: [], agents: [], live: [], bundles: [], variants: {}, roles: [], libraries: [], sections: [], identities: [], teams: [], models: [], commands: [], network: {device:"",remote:[]}, offline: [], hidden: [], order: [] } });
     return route.continue();
   });
+  // A fresh installation has no chats. Plugin management must still be reachable.
+  sessionless = true;
+  await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "Settings", exact: true }).first().click({ timeout: 5000 });
+  const emptySettings = page.getByRole("dialog", { name: "Settings" });
+  await emptySettings.getByRole("tab", { name: "Plugins" }).click();
+  await emptySettings.getByRole("button", { name: "Add Plugin" }).waitFor({ timeout: 5000 });
+  await page.keyboard.press("Escape");
+  await emptySettings.waitFor({ state: "hidden" });
+  sessionless = false;
+  inventoryReads = 0;
   const initialResponse = await page.goto(`${origin}/?plugins=off`, { waitUntil: "domcontentloaded" });
   if (builtDirectory) assert.equal(initialResponse?.headers()["content-security-policy"], `script-src 'self' '${importMapHash}'`);
   await page.getByText("Plugins are off for this page", { exact: false }).waitFor({ timeout: 15000 });
