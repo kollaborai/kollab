@@ -1847,7 +1847,6 @@ class ContextCompactionPlugin(BasePlugin):
             self._acp_compact_armed = True
             return
         if self._acp_compact_armed:
-            self._acp_compact_armed = False
             self._compact_acp_harness("threshold")
 
     def _compact_acp_harness(self, reason: str, ask: bool = True) -> str:
@@ -1866,6 +1865,10 @@ class ContextCompactionPlugin(BasePlugin):
             if reason == "threshold":
                 self._set_compaction_status("warning", message)
             return message
+        if reason == "threshold":
+            # Keep the threshold armed until the command exists; usage may arrive
+            # before the harness advertises its available commands.
+            self._acp_compact_armed = False
         if self._acp_compacting:
             return "the harness is already compacting its own context"
         self._acp_compacting = True
