@@ -45,6 +45,21 @@ describe("plugin host lifecycle", () => {
     host.close();
   });
 
+  it("refreshes declared menu labels when the manifest changes without a bundle change", async () => {
+    const importer = vi.fn(async () => ({ default: (k: { menu(id: string): void }) => k.menu("board") }));
+    const { host, setInventory } = setup({ importer });
+    const before = { ...entry("hello"), contributes: { menu: [{ id: "board", label: "Old label" }] } };
+    setInventory([before]);
+    await host.start();
+    expect(host.getSnapshot().registry.plugins[0].menus[0].label).toBe("Old label");
+    const after = { ...before, contributes: { menu: [{ id: "board", label: "New label" }] } };
+    setInventory([after]);
+    await host.refresh();
+    expect(host.getSnapshot().registry.plugins[0].menus[0].label).toBe("New label");
+    expect(importer).toHaveBeenCalledTimes(2);
+    host.close();
+  });
+
   it("skips an import left in progress by a frozen page until the user retries", async () => {
     const session = storage();
     session.setItem("kollab:plugin:loading:hello", "1");
