@@ -521,17 +521,24 @@ def _is_blocked_kollab_spawn(
             "/k",
         }
         normalized = [argument.lower().split("=", 1)[0] for argument in args]
-        # Outside a known PowerShell executable, short flags such as -e and
-        # -enc belong to many ordinary programs (grep, git, test, ...).
-        # Recognize a real encoded launch by inspecting the payload instead of
-        # rejecting every command which happens to use the same short option.
-        encoded_options = {"-e", "-ec", "-enc", "-encodedcommand"}
+        # Outside PowerShell, the short -e flag belongs to many ordinary
+        # programs. Inspect its payload instead of rejecting every occurrence;
+        # retain conservative handling for less ambiguous encoded flags.
+        encoded_options = {
+            "-e",
+            "-ec",
+            "-enc",
+            "-encodedcommand",
+            "--ec",
+            "--enc",
+            "--encodedcommand",
+        }
         for index, option in enumerate(normalized):
             if option not in encoded_options:
                 continue
-            # Keep unfamiliar shell-like programs and the unmistakable long
-            # PowerShell flag conservative, including malformed payloads.
-            if executable.endswith("shell") or option == "-encodedcommand":
+            # Only short -e overlaps broadly with ordinary programs. Keep
+            # other encoded flags and unfamiliar shells conservative.
+            if option != "-e" or executable.endswith("shell"):
                 return True
             _, has_inline_value, inline_value = args[index].partition("=")
             if has_inline_value:
@@ -645,9 +652,7 @@ def _is_blocked_kollab_spawn(
         # Catch shell command substitutions without treating ordinary quoted
         # mentions (e.g. echo 'kollab --agent') as executable commands.
         for token in tokens:
-            nested_commands = re.findall(
-                r"\$\(([^()]*)\)|`([^`]+)`|[<>]\(([^()]*)\)", token
-            )
+            nested_commands = re.findall(r"\$\(([^()]*)\)|[<>]\(([^()]*)\)", token)
             for groups in nested_commands:
                 nested = next((group for group in groups if group), "")
                 if nested and _is_blocked_kollab_spawn(
@@ -658,6 +663,39 @@ def _is_blocked_kollab_spawn(
 
     if _depth > 8:
         return suspicious_launch(command, background)
+
+    # Unlike shlex tokens, the original command preserves quote/escape context.
+    # Scan backticks here so spaces do not split real substitutions and single-
+    # quoted or escaped backticks remain ordinary data.
+    in_single = False
+    in_double = False
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and not in_single:
+            index += 2
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+        elif char == '"' and not in_single:
+            in_double = not in_double
+        elif char == "`" and not in_single:
+            end = index + 1
+            while end < len(command):
+                if command[end] == "\\":
+                    end += 2
+                elif command[end] == "`":
+                    break
+                else:
+                    end += 1
+            if end < len(command):
+                if _is_blocked_kollab_spawn(
+                    command[index + 1 : end], background=background, _depth=_depth + 1
+                ):
+                    return True
+                index = end
+        index += 1
+
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
         lexer.whitespace_split = True
