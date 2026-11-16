@@ -309,7 +309,9 @@ class OpenAIOAuthClient:
         session = await self._get_session()
         deadline = time.monotonic() + max(0, DEVICE_CODE_TIMEOUT)
         interval = max(1, int(device.interval))
-        last_status_log = 0.0
+        # time.monotonic() counts from boot, so a 0.0 start would hold back the
+        # first status log on a host up for under a minute (#1041).
+        last_status_log = float("-inf")
 
         logger.info(
             "Waiting for OpenAI device authorization "
