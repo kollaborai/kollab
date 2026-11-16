@@ -293,21 +293,37 @@ async def test_an_idle_voice_service_running_other_code_is_replaced(install):
     assert await asyncio.wait_for(service.wait(), 5) == -signal.SIGTERM
 
 
-@pytest.mark.parametrize(
-    "owner, install",
-    [(None, "ours"), ("livekit:voice-in-another-chat", OTHER_CODE)],
-    ids=["this code", "in use"],
-)
-async def test_a_voice_service_with_this_code_or_in_use_keeps_running(owner, install):
+async def test_a_voice_service_with_this_code_or_in_use_keeps_running():
     service = await asyncio.create_subprocess_exec("sleep", "60")
     try:
         status = {
-            "owner": owner,
+            "owner": "livekit:voice-in-another-chat",
             "pid": service.pid,
-            "install": install_identity() if install == "ours" else install,
+            "install": install_identity(),
         }
         await LiveKitRuntime._retire_stale_service(_Service(status), runtime_ready=True)
         await asyncio.sleep(0.2)
+        assert service.returncode is None
+    finally:
+        service.kill()
+        await service.wait()
+
+
+async def test_an_active_voice_service_running_other_code_is_flagged_stale(monkeypatch):
+    from kollabor_voice import control
+
+    monkeypatch.setattr(control, "install_identity", lambda: {"code": "new-wheel"})
+    service = await asyncio.create_subprocess_exec("sleep", "60")
+    try:
+        status = {
+            "owner": "chat:old",
+            "pid": service.pid,
+            "install": {"path": "/older/kollab/kollabor_voice", "code": "old-wheel"},
+        }
+        with pytest.raises(RuntimeHostError) as err:
+            await LiveKitRuntime._retire_stale_service(_Service(status), runtime_ready=True)
+        assert err.value.code == "voice_service_busy"
+        assert "older Kollab" in err.value.detail
         assert service.returncode is None
     finally:
         service.kill()
