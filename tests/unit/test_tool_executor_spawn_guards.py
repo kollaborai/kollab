@@ -204,3 +204,15 @@ def test_search_command_can_match_encoded_launch_as_text(tool):
         "ascii"
     )
     assert not _is_blocked_kollab_spawn(f"{tool} -e {encoded}")
+
+
+@pytest.mark.parametrize("tool", ["grep", "rg", "git grep"])
+def test_search_command_does_not_hide_command_substitutions(tool):
+    assert _is_blocked_kollab_spawn(
+        f"{tool} -e x $(kollab --agent coder)"
+    )
+
+
+@pytest.mark.parametrize("option", ["-e", "-ec", "-enc", "-EncodedCommand"])
+def test_unknown_shell_malformed_encoded_command_stays_blocked(option):
+    assert _is_blocked_kollab_spawn(f"unknown-shell.exe {option} not-base64")
