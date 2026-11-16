@@ -125,6 +125,30 @@ describe("plugin host lifecycle", () => {
   });
 
 
+  it("notifies once when a service reaches its crash limit and again after recovery", async () => {
+    const active = { ...entry("hello"), services: [{ name: "worker", state: "running" }] };
+    const crashed = { ...active, services: [{ name: "worker", state: "crash-stopped" }] };
+    const json = vi.fn().mockResolvedValueOnce({ schema: 1, plugins: [active] })
+      .mockResolvedValueOnce({ schema: 1, plugins: [crashed] })
+      .mockResolvedValueOnce({ schema: 1, plugins: [crashed] })
+      .mockResolvedValueOnce({ schema: 1, plugins: [active] })
+      .mockResolvedValueOnce({ schema: 1, plugins: [crashed] });
+    const toast = vi.fn();
+    const { host } = setup({ json, toast });
+    try {
+      await host.start();
+      expect(toast).not.toHaveBeenCalled();
+      await host.refresh();
+      expect(toast).toHaveBeenCalledWith("hello: worker stopped after 5 crashes. Open Settings → Plugins to view its log.");
+      await host.refresh();
+      expect(toast).toHaveBeenCalledTimes(1);
+      await host.refresh();
+      await host.refresh();
+      expect(toast).toHaveBeenCalledTimes(2);
+    } finally { host.close(); }
+  });
+
+
   it("refreshes declared menu labels when the manifest changes without a bundle change", async () => {
     const importer = vi.fn(async () => ({ default: (k: { menu(id: string): void }) => k.menu("board") }));
     const { host, setInventory } = setup({ importer });
