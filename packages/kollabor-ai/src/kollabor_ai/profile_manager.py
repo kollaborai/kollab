@@ -2790,7 +2790,8 @@ class ProfileManager:
         if not provider_name:
             return []
 
-        paths = [get_existing_global_config_path()]
+        global_config_path = get_existing_global_config_path()
+        paths = [global_config_path]
         paths.extend(get_local_config_path_candidates(self._local_folder))
         unique_paths: List[Path] = []
         seen_paths: set[Path] = set()
@@ -2829,7 +2830,16 @@ class ProfileManager:
                     for name in matching:
                         api_key = str(profiles[name].get("api_key") or "")
                         if api_key.startswith(KEYRING_SENTINEL_PREFIX):
-                            secret_names.add(api_key[len(KEYRING_SENTINEL_PREFIX) :])
+                            secret_name = api_key[len(KEYRING_SENTINEL_PREFIX) :]
+                            if (
+                                path.resolve() == global_config_path.resolve()
+                                or secret_name == _project_secret_name(name, path)
+                            ):
+                                # Older local configs can point at an unscoped
+                                # key shared with another project. Only delete
+                                # local keys whose path-scoped name proves this
+                                # config owns the entry.
+                                secret_names.add(secret_name)
             except Exception as exc:
                 logger.error("Could not read provider config %s: %s", path, exc)
                 return []
