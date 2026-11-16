@@ -1820,6 +1820,12 @@ def test_regression_suppressions_require_exact_trusted_annotation(tmp_path):
     )
     report = pr_gates_dod.evaluate(cfg, data)
     assert report.detail_for("regression_test") == ""
+    assert len(report.audit_notes) == 2
+    assert "F11 occurrence 1 in issue_comment 100" in report.summary()
+    assert all(
+        note.source_body_sha256 == hashlib.sha256(source.encode()).hexdigest()
+        for note in report.audit_notes
+    )
 
 
 def test_regression_test_rejects_unrelated_added_assertion_that_names_finding(
@@ -1902,12 +1908,6 @@ def test_regression_test_rejects_non_testable_exception_for_code_fix(
     data = make_data(commits=(fix,), comments=(finding,), changed_files=["kollabor/core.py"])
 
     assert "regression_test" in pr_gates_dod.evaluate(cfg, data).failed_names()
-    assert len(report.audit_notes) == 2
-    assert "F11 occurrence 1 in issue_comment 100" in report.summary()
-    assert all(
-        note.source_body_sha256 == hashlib.sha256(source.encode()).hexdigest()
-        for note in report.audit_notes
-    )
 
 
 def test_regression_code_default_trusts_no_reviewer(tmp_path):
