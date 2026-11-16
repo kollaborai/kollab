@@ -214,6 +214,9 @@
 - Added tests for slow polling and the startup/disable race: red `ec6bcd52` and fix `ec69b9b1` avoid overlapping slow stopping refreshes; red `7340bdab` and fix `91d2de5c` serialize approval/PID publication with disable (`stopping-poll-overlap-red.log`, `stopping-poll-overlap-green.log`, `start-stop-race-red.log`, `start-stop-race-final.log`). Red `6ad2b50e` and fix `9da1f39f` report a manually stopping service at plugin level (`manual-stop-red2.log`, `manual-stop-green.log`). Vision retry: both `ui_diff_check` and parallel fallback `analyze_image` calls timed out again; still no visual verdict.
 
 
+- Crash notice contract before the next UI edit: `PluginHostOptions.onServiceCrash?: (events: ServiceCrash[]) => void`, with `ServiceCrash = {pluginId: string, pluginName: string, serviceName: string}`. Host emits only newly crash-stopped services, once per observed crash episode; if the callback is absent it retains the existing text-toast behavior. App owns dismissible notices keyed by plugin/service; View Log fetches the existing authenticated, redacted `GET /plugins/{id}/services/{name}/log` and opens a read-only dialog, reporting errors instead of suppressing them. No engine route or plugin capability change. Browser acceptance must prove the action opens the right log, and the host transition test remains intact.
+
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
