@@ -69,3 +69,39 @@ async def test_a_waking_hub_message_is_published_for_web_clients():
         published.append(events.get_nowait())
     hub_events = [event for event in published if event["type"] == "hub_message"]
     assert [event["message_id"] for event in hub_events] == [message.id]
+
+
+@pytest.mark.asyncio
+async def test_an_observed_hub_message_is_published_for_web_clients():
+    tap = DisplayTap()
+    events = tap.subscribe("web")
+    llm = _LLM()
+    renderer = SimpleNamespace(
+        message_coordinator=SimpleNamespace(display_message_sequence=MagicMock())
+    )
+    event_bus = _EventBus({"llm_service": llm, "renderer": renderer, "display_tap": tap})
+    plugin = HubPlugin(event_bus=event_bus)
+    plugin._identity = AgentRuntime(
+        name="koordinator", identity="koordinator", agent_id="koordinator-id"
+    )
+    plugin._task_ledger = None
+    plugin._presence = MagicMock()
+
+    message = HubMessage(
+        action="message",
+        from_agent="human",
+        from_identity="lapis",
+        to="koordinator",
+        scope=MessageScope.DIRECT.value,
+        content="Starting the verification now.",
+        metadata={"source_agent": "lapis"},
+    )
+    await plugin._on_message_received(message)
+
+    assert not llm.conversation_history
+    llm.conversation_logger.log_system_message.assert_awaited_once()
+    published = []
+    while not events.empty():
+        published.append(events.get_nowait())
+    hub_events = [event for event in published if event["type"] == "hub_message"]
+    assert [event["message_id"] for event in hub_events] == [message.id]
