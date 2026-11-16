@@ -2856,16 +2856,24 @@ class ProfileManager:
                 except Exception:
                     logger.debug("Could not reload retained profile %s", name)
 
+        def active_profile_is_removed(llm: dict) -> bool:
+            active_name = llm.get("active_profile")
+            if active_name not in removed:
+                return False
+            profiles = llm.get("profiles", {})
+            active_profile = profiles.get(active_name) if isinstance(profiles, dict) else None
+            return not (
+                isinstance(active_profile, dict)
+                and str(active_profile.get("provider") or "").strip().lower()
+                != provider_name
+            )
+
         updated_paths = {path.resolve() for path, _, _ in updates}
         for path, config_data in scanned_configs:
             if path.resolve() in updated_paths:
                 continue
             llm = config_data.get("kollabor", {}).get("llm", {})
-            if (
-                isinstance(llm, dict)
-                and llm.get("active_profile") in removed
-                and llm.get("active_profile") not in retained_names
-            ):
+            if isinstance(llm, dict) and active_profile_is_removed(llm):
                 updates.append((path, config_data, set()))
 
         staged_updates: List[tuple[Path, Path]] = []
@@ -2875,10 +2883,7 @@ class ProfileManager:
                 profiles = llm["profiles"]
                 for name in matching:
                     profiles.pop(name, None)
-                if (
-                    llm.get("active_profile") in removed
-                    and llm.get("active_profile") not in retained_names
-                ):
+                if active_profile_is_removed(llm):
                     llm.pop("active_profile", None)
 
                 target_path = Path(os.path.realpath(path))
