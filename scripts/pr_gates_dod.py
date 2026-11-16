@@ -251,6 +251,9 @@ class Commit:
     sha: str
     message: str
     verified: bool
+    committed_at: str = ""
+    files: tuple[str, ...] = ()
+    file_patches: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -281,6 +284,7 @@ class PRComment:
     comment_id: int
     body: str
     author_login: str
+    created_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -666,6 +670,7 @@ def _check_regression_test(
         audit_notes = []
         for body in data.review_comment_bodies or ():
             findings.update(match.group(0) for match in _finding_matches(pattern, body or ""))
+    findings.difference_update(_declared_non_testable_findings(cfg, data))
     if not findings:
         return "", audit_notes
     test_files = [
@@ -683,7 +688,163 @@ def _check_regression_test(
             "no regression test covers finding id(s): "
             f"{', '.join(uncovered)} under {', '.join(cfg.regression.test_paths)}"
         ), audit_notes
+    order_failure = _check_red_first(cfg, data, findings)
+    if order_failure:
+        return order_failure, audit_notes
     return "", audit_notes
+
+
+def _declared_non_testable_findings(cfg: DodConfig, data: PRData) -> set[str]:
+    """Read explicit no-test declarations from fix commit messages."""
+    declarations: set[str] = set()
+    pattern = re.compile(cfg.regression.finding_id_pattern)
+    finding_times: dict[str, list[datetime]] = {}
+    for comment in data.comments:
+        if comment.author_login == data.pull_author_login:
+            continue
+        timestamp = _commit_time(comment.created_at)
+        if timestamp is None:
+            continue
+        for match in _finding_matches(pattern, comment.body or ""):
+            finding_times.setdefault(match.group(0), []).append(timestamp)
+    for commit in data.commits:
+        committed_at = _commit_time(commit.committed_at)
+        if committed_at is None:
+            continue
+        subject = commit.message.splitlines()[0] if commit.message else ""
+        if not re.match(r"^fix(?:\([^)]+\))?!?:\s+", subject):
+            continue
+        if not commit.files or any(
+            _is_test_path(path, cfg.regression.test_paths) for path in commit.files
+        ):
+            continue
+        for line in commit.message.splitlines():
+            marker = re.match(r"\s*no regression test:\s*(.*)", line, re.IGNORECASE)
+            if marker:
+                for match in _finding_matches(pattern, marker.group(1)):
+                    finding = match.group(0)
+                    timestamps = finding_times.get(finding, [])
+                    if timestamps and committed_at >= max(timestamps):
+                        declarations.add(finding)
+    return declarations
+
+
+def _is_test_path(path: str, test_paths: tuple[str, ...] | list[str]) -> bool:
+    return any(path.startswith(prefix) for prefix in test_paths)
+
+
+def _commit_time(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _is_implementation_path(path: str, test_paths: tuple[str, ...] | list[str]) -> bool:
+    return not _is_test_path(path, test_paths) and not path.startswith(
+        ("docs/", "changes/")
+    ) and not path.endswith(".md")
+
+
+def _check_red_first(cfg: DodConfig, data: PRData, findings: set[str]) -> str:
+    """Require one standalone test commit before each post-finding code commit."""
+    if not data.comments:
+        return ""
+    pattern = re.compile(cfg.regression.finding_id_pattern)
+    suppressions: set[tuple[str, int, str, int]] = set()
+    marker_comment_ids: set[int] = set()
+    if tuple(comment.body for comment in data.comments) == tuple(data.review_comment_bodies):
+        suppressions, marker_comment_ids, _audit_notes = _finding_suppressions(
+            cfg, data, pattern
+        )
+    finding_times: dict[str, list[datetime]] = {}
+    for comment in data.comments:
+        if (
+            comment.author_login == data.pull_author_login
+            or comment.comment_id in marker_comment_ids
+            or comment.body.lstrip().startswith(SUPPRESSION_MARKER_PREFIX)
+        ):
+            continue
+        occurrence_counts: dict[str, int] = {}
+        active_findings: set[str] = set()
+        for match in _finding_matches(pattern, comment.body or ""):
+            finding_id = match.group(0)
+            occurrence_counts[finding_id] = occurrence_counts.get(finding_id, 0) + 1
+            key = (comment.kind, comment.comment_id, finding_id, occurrence_counts[finding_id])
+            if key not in suppressions:
+                active_findings.add(finding_id)
+        if not active_findings:
+            continue
+        timestamp = _commit_time(comment.created_at)
+        if timestamp is None:
+            if comment.created_at:
+                return "cannot verify red-first order: review finding timestamp is invalid"
+            continue
+        for finding in active_findings:
+            finding_times.setdefault(finding, []).append(timestamp)
+
+    for finding in sorted(findings):
+        timestamps = finding_times.get(finding)
+        if not timestamps:
+            continue
+        latest_finding = max(timestamps)
+        pending_test = False
+        for commit in data.commits:
+            committed_at = _commit_time(commit.committed_at)
+            if committed_at is None:
+                return f"cannot verify red-first order for {finding}: commit timestamp is missing or invalid"
+            if committed_at < latest_finding:
+                continue
+            paths = tuple(commit.files)
+            if not paths:
+                return f"cannot verify red-first order for {finding}: commit file list is missing"
+            test_paths = tuple(
+                path for path in paths if _is_test_path(path, cfg.regression.test_paths)
+            )
+            implementation_paths = tuple(
+                path for path in paths if _is_implementation_path(path, cfg.regression.test_paths)
+            )
+            if test_paths and not implementation_paths:
+                if len(test_paths) != len(paths):
+                    return f"regression test for {finding} must be committed alone"
+                if any(
+                    _mentions_finding(data.changed_file_contents.get(path, ""), finding)
+                    for path in test_paths
+                ):
+                    pending_test = True
+                continue
+            if implementation_paths:
+                if test_paths:
+                    patches = getattr(commit, "file_patches", {})
+                    xfail_removal = pending_test and all(
+                        _only_strict_xfail_removal(patches.get(path, ""))
+                        for path in test_paths
+                    )
+                    if not xfail_removal:
+                        return (
+                            f"fix commit for {finding} modifies its regression test; "
+                            "test must be in a separate commit; only strict xfail "
+                            "removal is allowed"
+                        )
+                if not pending_test:
+                    return (
+                        f"no test-only commit for {finding} landed before the fix; "
+                        "commit the regression test before the fix"
+                    )
+                pending_test = False
+        if pending_test:
+            return f"regression test for {finding} was not followed by a separate fix commit"
+    return ""
+
+
+def _only_strict_xfail_removal(patch: str) -> bool:
+    changes = [
+        line
+        for line in patch.splitlines()
+        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+    ]
+    return changes == ["-@pytest.mark.xfail(strict=True)"]
 
 
 # --- evaluation -----------------------------------------------------------------
@@ -904,6 +1065,7 @@ def collect_pr_data(
     *,
     root: str = ".",
     test_paths: tuple[str, ...] = ("tests/",),
+    finding_id_pattern: str = DEFAULT_FINDING_PATTERN,
     need_spec_or_fix_brief: bool = False,
 ) -> PRData:
     """Collect PR facts without checking out or executing PR-controlled code."""
@@ -943,6 +1105,7 @@ def collect_pr_data(
             comment_id=comment_id if type(comment_id) is int and comment_id > 0 else 0,
             body=body,
             author_login=login(entry),
+            created_at=str(entry.get("created_at") or ""),
         )
 
     comment_records = tuple(
@@ -1025,6 +1188,47 @@ def collect_pr_data(
         cursor = next_cursor
     unresolved = sum(1 for node in thread_nodes if not node.get("isResolved"))
 
+    finding_pattern = re.compile(finding_id_pattern)
+    has_finding = any(
+        _finding_matches(finding_pattern, comment.body or "") for comment in comment_records
+    )
+    commit_details: dict[str, tuple[str, tuple[str, ...], dict[str, str]]] = {}
+    if has_finding:
+        pull_author = login(pull)
+        for comment in comment_records:
+            if comment.author_login == pull_author or not _finding_matches(
+                finding_pattern, comment.body or ""
+            ):
+                continue
+            if _commit_time(comment.created_at) is None:
+                raise RuntimeError("review finding timestamp is missing or invalid; failing closed")
+        if len(commits_raw) > 256:
+            raise RuntimeError("too many commits to verify red-first order; failing closed")
+        for entry in commits_raw:
+            sha = entry.get("sha")
+            if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+                raise RuntimeError("invalid commit identity; failing closed")
+            detail = _gh("api", f"repos/{repo}/commits/{sha}")
+            detail_commit = detail.get("commit", {})
+            committer = detail_commit.get("committer") or detail_commit.get("author") or {}
+            committed_at = committer.get("date", "")
+            files = detail.get("files")
+            if not isinstance(committed_at, str) or not committed_at or not isinstance(files, list):
+                raise RuntimeError(f"incomplete commit details for {sha}; failing closed")
+            if len(files) >= 300:
+                raise RuntimeError(f"commit file list may be truncated for {sha}; failing closed")
+            paths = tuple(file.get("filename") for file in files if isinstance(file, dict))
+            if len(paths) != len(files) or not all(isinstance(path, str) for path in paths):
+                raise RuntimeError(f"invalid commit file list for {sha}; failing closed")
+            patches = {
+                file["filename"]: file["patch"]
+                for file in files
+                if isinstance(file, dict)
+                and isinstance(file.get("filename"), str)
+                and isinstance(file.get("patch"), str)
+            }
+            commit_details[sha] = (committed_at, paths, patches)
+
     commits = tuple(
         Commit(
             sha=entry["sha"],
@@ -1032,6 +1236,9 @@ def collect_pr_data(
             verified=bool(
                 (entry.get("commit", {}).get("verification", {}) or {}).get("verified")
             ),
+            committed_at=commit_details.get(entry["sha"], ("", (), {}))[0],
+            files=commit_details.get(entry["sha"], ("", (), {}))[1],
+            file_patches=commit_details.get(entry["sha"], ("", (), {}))[2],
         )
         for entry in commits_raw
     )
@@ -1144,6 +1351,7 @@ def main(argv: list[str] | None = None) -> int:
             args.repo,
             args.pr,
             test_paths=tuple(cfg.regression.test_paths),
+            finding_id_pattern=cfg.regression.finding_id_pattern,
             need_spec_or_fix_brief="spec_or_fix_brief" in cfg.checks,
         )
         if args.post and data.head_sha != args.head_sha:

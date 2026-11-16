@@ -118,8 +118,9 @@ in `docs/product-ready-checklist.md`.
 - [ ] Every review finding has a failing regression test landed before its
   fix (as its own commit, or marked strict `xfail`); the fix flipped it green
   without editing the test, and removing that marker was the only test change.
+  The `regression_test` gate checks commit order after the finding was posted.
   A finding no test can reproduce, such as wording in a doc, says so in its
-  fix commit instead.
+  fix commit with `No regression test: F14 - reason.`
 
 ## Productization checklist
 
