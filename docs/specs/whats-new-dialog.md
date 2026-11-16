@@ -63,7 +63,7 @@ The dialog title is `What's New in <version>` and the subline is `Updated from <
 ## Docs and changelog fragment
 
 - This specification: `docs/specs/whats-new-dialog.md`.
-- User-visible change: `changes/1106.feature.md`.
+- User-visible change: `changes/1106.added.md`.
 
 ## Open questions
 
