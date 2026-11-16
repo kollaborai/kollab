@@ -248,6 +248,9 @@ try {
   await page.getByRole("button", { name: "Settings", exact: true }).first().click();
   const stoppingSettings = page.getByRole("dialog", { name: "Settings" });
   await stoppingSettings.getByRole("tab", { name: "Plugins" }).click();
+  const stoppingListRow = stoppingSettings.getByRole("button", { name: "Fixture", exact: true });
+  await stoppingListRow.getByText("Stopping · 12 min left", { exact: true }).waitFor({ timeout: 3000 });
+  await stoppingListRow.getByText("Running · No Heartbeat for 6 min", { exact: true }).waitFor({ timeout: 3000 });
   const stoppingDetails = stoppingSettings.getByRole("region", { name: "Fixture details" });
   await stoppingDetails.getByText("Waiting for the plugin to stop.", { exact: true }).waitFor({ timeout: 5000 });
   await stoppingDetails.getByText("worker", { exact: true }).locator("..").getByText("Stopping · 12 min left", { exact: true }).waitFor({ timeout: 5000 });
@@ -471,6 +474,7 @@ try {
   await settings.getByText("Hello plugin settings example.", { exact: true }).waitFor();
   await settings.getByRole("button", { name: "Fixture", exact: true }).click();
   if (process.env.PLUGIN_SCREENSHOTS) await page.screenshot({ path: resolve(process.env.PLUGIN_SCREENSHOTS, "settings-actual.png") });
+  await settings.getByRole("button", { name: "Fixture", exact: true }).getByText("Stopped After 5 Crashes", { exact: true }).waitFor({ timeout: 3000 });
   const fixtureRow = settings.getByRole("region", { name: "Fixture details" });
   await fixtureRow.waitFor({ timeout: 5000 });
   await fixtureRow.getByText("Stopped After 5 Crashes", { exact: true }).waitFor({ timeout: 5000 });
