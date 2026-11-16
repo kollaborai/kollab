@@ -454,10 +454,16 @@ function historyToMessages(
       // A turn that was only agent status stays in the Trajectory tab.
       if (!content.length) return;
       lastReply = undefined;  // a shown prompt already ends the reply's group
+      // The stored copies of the images this row sent (#1088): the bubble's
+      // [imageN] tokens render as thumbnails from these refs.
+      const media = Array.isArray(message.media)
+        ? message.media.filter((entry) => entry && typeof entry.ref === "string")
+        : [];
       messages.push({
         id: `history-${sourceIndex}`,
         role: "user",
         content,
+        ...(media.length ? { metadata: { custom: { media } } } : {}),
       });
       return;
     }

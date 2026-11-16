@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CheckCircle2, ChevronRight, X } from "lucide-react";
+import { CheckCircle2, X } from "lucide-react";
 import type { EngineApi } from "@/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -172,7 +172,7 @@ export function SetupGuide({
                   data-testid={`setup-step-${item.id}`}
                 >
                 {complete ? (
-                  <CheckCircle2 className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                  <CheckCircle2 className="size-4 shrink-0 text-highlight" />
                 ) : (
                   <span
                     aria-hidden="true"
@@ -198,7 +198,6 @@ export function SetupGuide({
             onClick={target ? runTarget : advance}
           >
             {target ? "Open" : "Finish"}
-            <ChevronRight />
           </Button>
         </footer>
       </DialogContent>
