@@ -241,6 +241,8 @@
 
 - Service list accessibility: red browser `c06beda2b` showed `aria-label` hid the visible process state from the list row's accessible description (`service-a11y-red.log`). Fix `2f364047d` associates the status text through `aria-describedby` while keeping the plugin name as the button name. Browser acceptance and typecheck passed (`service-a11y-green.log`, `service-a11y-typecheck.log`).
 
+- Current screenshot matrix: at `623b41553`, fake-engine browser acceptance captured fresh dark/light 1440/820/390 screenshots in `~/backups/plugins-step3-work/ui-review-623b41553`; its measured document/body/dialog horizontal overflow was zero for stopping, failed load, tab, page, modal, stopped service, add, and install review. This does not prove there is no clipped inner content and is not a real-engine smoke. Two additional `ui_diff_check` comparisons of desktop Settings and mobile Add against saved reference screenshots timed out after 60 seconds each; visual reviewer sign-off remains outstanding.
+
 ## Remaining
 
 1. Audit the actual implementation against brief items 1–9 and the canonical spec; the progress entries above supersede the earlier remaining list. Next: test declared view and command labels for failed bundles, retry/turn-off interactions and collapsed desktop controls, using red-first commits. Also verify stopping recovery in browser.
