@@ -1,4 +1,5 @@
 import { PluginEventStream } from "./events";
+import { engineClock } from "./heartbeat";
 import { PluginLoader, type WebPluginEntry } from "./loader";
 import { PluginRegistry, type PluginDraft, type RegistrySnapshot } from "./registry";
 import { createPluginContext, type PluginContext, type PluginOpen } from "./sdk";
@@ -87,6 +88,7 @@ export class PluginHost {
   private sequence = 0;
   private markerSequence = 0;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private clockSample: { serverTime: unknown; sampledAt: number } | null = null;
   private snapshot: PluginHostSnapshot;
 
   constructor(private readonly options: PluginHostOptions) {
@@ -140,6 +142,7 @@ export class PluginHost {
     });
   }
 
+  engineTime = () => this.clockSample ? engineClock(this.clockSample.serverTime, this.clockSample.sampledAt, performance.now()) : null;
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener); };
 
@@ -157,9 +160,11 @@ export class PluginHost {
     this.loading = true;
     this.publish();
     try {
-      const response = await this.options.json("/plugins") as { schema?: unknown; plugins?: unknown };
+      const response = await this.options.json("/plugins") as { schema?: unknown; plugins?: unknown; server_time?: unknown };
+      const sampledAt = performance.now();
       if (sequence !== this.sequence || this.closed) return;
       if (response.schema !== 1 || !Array.isArray(response.plugins)) throw new Error("Invalid plugin inventory");
+      this.clockSample = { serverTime: response.server_time, sampledAt };
       this.entries = response.plugins as PluginEntry[];
       this.syncHeartbeatPolling();
       this.inventoryError = null;
