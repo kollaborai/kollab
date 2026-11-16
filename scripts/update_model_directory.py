@@ -95,20 +95,30 @@ def _as_number(value) -> float:
 def map_models_dev_model(name: str, entry: dict, provider_slug: str) -> dict:
     """Map one models.dev model entry onto the kollab schema."""
     mapped: dict = {"provider": MODELS_DEV_PROVIDERS[provider_slug]}
-    limit = entry.get("limit") or {}
+    limit = entry.get("limit")
+    if not isinstance(limit, dict):
+        limit = {}
     if isinstance(limit.get("context"), int) and limit["context"] > 0:
         mapped["context_window"] = limit["context"]
     if isinstance(limit.get("output"), int) and limit["output"] > 0:
         mapped["max_output"] = limit["output"]
-    modalities = (entry.get("modalities") or {}).get("input") or []
-    mapped["supports_vision"] = "image" in modalities
+    modalities = entry.get("modalities")
+    if not isinstance(modalities, dict):
+        modalities = {}
+    input_modalities = modalities.get("input")
+    if not isinstance(input_modalities, list):
+        input_modalities = []
+    mapped["supports_vision"] = "image" in input_modalities
     mapped["supports_tools"] = bool(entry.get("tool_call"))
     mapped["supports_thinking"] = bool(entry.get("reasoning"))
-    if entry.get("temperature") is False:
-        mapped["supports_sampling"] = False
+    temperature = entry.get("temperature")
+    if isinstance(temperature, bool):
+        mapped["supports_sampling"] = temperature
     if entry.get("release_date"):
         mapped["released"] = entry["release_date"]
-    pricing = entry.get("pricing") or {}
+    pricing = entry.get("pricing")
+    if not isinstance(pricing, dict):
+        pricing = {}
     if isinstance(pricing.get("input"), (int, float)):
         mapped["pricing_in"] = round(_as_number(pricing["input"]), 6)
     if isinstance(pricing.get("output"), (int, float)):
@@ -123,15 +133,27 @@ def map_openrouter_model(entry: dict) -> dict:
     mapped: dict = {"provider": "openrouter"}
     if isinstance(entry.get("context_length"), int) and entry["context_length"] > 0:
         mapped["context_window"] = entry["context_length"]
-    max_completion = (entry.get("top_provider") or {}).get("max_completion_tokens")
+    top_provider = entry.get("top_provider")
+    if not isinstance(top_provider, dict):
+        top_provider = {}
+    max_completion = top_provider.get("max_completion_tokens")
     if isinstance(max_completion, int) and max_completion > 0:
         mapped["max_output"] = max_completion
-    modalities = (entry.get("architecture") or {}).get("input_modalities") or []
-    mapped["supports_vision"] = "image" in modalities
+    architecture = entry.get("architecture")
+    if not isinstance(architecture, dict):
+        architecture = {}
+    input_modalities = architecture.get("input_modalities")
+    if not isinstance(input_modalities, list):
+        input_modalities = []
+    mapped["supports_vision"] = "image" in input_modalities
     parameters = entry.get("supported_parameters") or []
+    if not isinstance(parameters, list):
+        parameters = []
     mapped["supports_tools"] = "tools" in parameters
     mapped["supports_thinking"] = "reasoning" in parameters or "include_reasoning" in parameters
-    pricing = entry.get("pricing") or {}
+    pricing = entry.get("pricing")
+    if not isinstance(pricing, dict):
+        pricing = {}
     # OpenRouter prices are per-token strings; the directory is per-million.
     if pricing.get("prompt") not in (None, ""):
         mapped["pricing_in"] = round(_as_number(pricing["prompt"]) * 1_000_000, 4)
@@ -140,7 +162,7 @@ def map_openrouter_model(entry: dict) -> dict:
     cache_read = pricing.get("input_cache_read")
     if cache_read not in (None, ""):
         mapped["pricing_cached_in"] = round(_as_number(cache_read) * 1_000_000, 4)
-    if entry.get("created"):
+    if isinstance(entry.get("created"), int) and not isinstance(entry["created"], bool):
         mapped["released"] = unix_to_date(entry["created"])
     return mapped
 
@@ -154,15 +176,25 @@ def merge_sources(data: dict, models_dev: dict, openrouter: dict):
     changed: list = []
 
     mapped_by_key: dict = {}
-    for provider_slug, provider_data in (models_dev or {}).items():
+    if not isinstance(models_dev, dict):
+        models_dev = {}
+    for provider_slug, provider_data in models_dev.items():
         target = MODELS_DEV_PROVIDERS.get(provider_slug)
-        if not target:
+        if not target or not isinstance(provider_data, dict):
             continue
-        for name, entry in (provider_data.get("models") or {}).items():
+        provider_models = provider_data.get("models")
+        if not isinstance(provider_models, dict):
+            continue
+        for name, entry in provider_models.items():
             if isinstance(entry, dict) and not entry.get("deprecated"):
                 mapped_by_key[name] = map_models_dev_model(name, entry, provider_slug)
-    for entry in (openrouter or {}).get("data") or []:
-        if not isinstance(entry, dict) or not entry.get("id"):
+    if not isinstance(openrouter, dict):
+        openrouter = {}
+    openrouter_entries = openrouter.get("data")
+    if not isinstance(openrouter_entries, list):
+        openrouter_entries = []
+    for entry in openrouter_entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or not entry["id"]:
             continue
         key = openrouter_catalog_id(entry["id"])
         if key in mapped_by_key:
@@ -181,6 +213,11 @@ def merge_sources(data: dict, models_dev: dict, openrouter: dict):
         else:
             for field in SOURCED_FIELDS:
                 if field not in mapped:
+                    continue
+                # Sampling defaults to supported when the catalog is silent.
+                # Keep that implicit default (and an unchanged catalog) while
+                # still allowing a sourced True to clear an explicit False.
+                if field == "supports_sampling" and mapped[field] is True and field not in existing:
                     continue
                 if existing.get(field) != mapped[field]:
                     changed.append((key, field, existing.get(field), mapped[field]))
