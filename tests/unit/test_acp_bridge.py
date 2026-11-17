@@ -944,6 +944,72 @@ def test_group_signal_never_reaches_a_pgid_whose_anchor_is_gone(tmp_path, monkey
     assert sent == [(4242, signal.SIGTERM)]
 
 
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX signals only")
+@pytest.mark.asyncio
+async def test_adapter_tree_keeps_default_sigpipe(tmp_path):
+    """A pipeline under the adapter ends quietly on a closed pipe, as it does
+    in a terminal; an inherited SIG_IGN makes `yes` report a broken pipe."""
+    import shutil
+
+    if shutil.which("yes") is None or shutil.which("head") is None:
+        pytest.skip("needs yes and head")
+    err, started = tmp_path / "yes.err", tmp_path / "started"
+    script = f'yes 2>"{err}" | head -1 >/dev/null; : > "{started}"; exec "{sys.executable}" -c "$ACP_FAKE"'
+    runner = ACPRunner(
+        ACPProfile("pipe", ("/bin/sh", "-c", script), cwd=str(tmp_path), env={"ACP_FAKE": FAKE_ADAPTER}),
+        persist_profile_resolution=False,
+    )
+    try:
+        await runner._start_process()
+        assert started.exists()
+    finally:
+        await runner._terminate_process()
+    assert err.read_text() == ""
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX process groups only")
+def test_anchor_check_works_on_descriptors_above_1024(tmp_path):
+    """select() cannot take a descriptor of 1024 or more; a live anchor there
+    must still read as alive, or cleanup stops signaling the group."""
+    import resource
+    import socket
+
+    target = 1500
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard != resource.RLIM_INFINITY and hard <= target:
+        pytest.skip("cannot raise the descriptor limit")
+    resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, target + 1), hard))
+    ours, theirs = socket.socketpair()
+    high = socket.socket(fileno=os.dup2(ours.fileno(), target))
+    ours.close()
+    try:
+        runner = ACPRunner(ACPProfile("high", (sys.executable, "-c", "pass"), cwd=str(tmp_path)))
+        runner._process_group_id = 4242
+        runner._group_anchor = high
+        assert runner._group_anchor_alive() is True
+        theirs.close()
+        assert runner._group_anchor_alive() is False
+    finally:
+        high.close()
+        theirs.close()
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX launcher only")
+@pytest.mark.asyncio
+async def test_adapter_exec_failure_reports_the_os_error(tmp_path):
+    """A failed exec surfaces the OS error, not a closed ACP connection."""
+    bad = tmp_path / "not-a-program"
+    bad.write_bytes(b"\x00\x01\x02 not an executable")
+    bad.chmod(0o755)
+    runner = ACPRunner(ACPProfile("bad", (str(bad),), cwd=str(tmp_path)), persist_profile_resolution=False)
+    try:
+        with pytest.raises(OSError, match="Exec format error"):
+            await runner._start_process()
+    finally:
+        await runner._terminate_process()
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork and setsid")
 @pytest.mark.asyncio
 async def test_startup_failure_cleans_same_group_orphan_after_root_exits(tmp_path, monkeypatch):
