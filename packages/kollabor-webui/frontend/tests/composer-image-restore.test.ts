@@ -19,6 +19,11 @@ describe("stripImageTokens", () => {
     expect(result).toEqual({ text: "hello world", tokenCount: 2 });
   });
 
+  it("strips a managed token line after typed draft text", () => {
+    const result = stripImageTokens("Please inspect this\n[image1]");
+    expect(result).toEqual({ text: "Please inspect this", tokenCount: 1 });
+  });
+
   it("preserves image-like text inline with the draft", () => {
     const result = stripImageTokens("[image1]hello from alpha");
     expect(result).toEqual({ text: "[image1]hello from alpha", tokenCount: 0 });
