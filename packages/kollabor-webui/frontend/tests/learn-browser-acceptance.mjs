@@ -324,7 +324,8 @@ export async function openPage(browser, baseUrl, fixtures, options = {}) {
     isMobile: options.isMobile ?? false,
     hasTouch: options.isMobile ?? false,
   });
-  const initialGuideState = options.initialGuideState ?? "dismissed";
+  const initialGuideState =
+    options.initialGuideState ?? JSON.stringify({ step: "done", dismissed: true });
   await context.addInitScript((state) => {
     localStorage.setItem("kollab.setup-guide.v1", state);
   }, initialGuideState);

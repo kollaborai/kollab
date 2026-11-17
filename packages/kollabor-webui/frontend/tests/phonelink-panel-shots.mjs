@@ -127,7 +127,7 @@ try {
   ]) {
     const context = await browser.newContext({ viewport: { width, height } });
     await context.addInitScript(() =>
-      localStorage.setItem("kollab.setup-guide.v1", "dismissed"),
+      localStorage.setItem("kollab.setup-guide.v1", JSON.stringify({ step: "done", dismissed: true })),
     );
     const page = await context.newPage();
     page.on("console", (message) => {

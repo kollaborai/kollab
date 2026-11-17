@@ -164,7 +164,7 @@ const highlightOf = (page) =>
 
 const makeContext = async (browser, width, height, theme, extra = {}, simulateHybrid = false) => {
   const context = await browser.newContext({ viewport: { width, height }, ...extra });
-  await context.addInitScript(() => localStorage.setItem("kollab.setup-guide.v1", "dismissed"));
+  await context.addInitScript(() => localStorage.setItem("kollab.setup-guide.v1", JSON.stringify({ step: "done", dismissed: true })));
   const page = await context.newPage();
   // Do not allow a fixture run to open a socket to any live local service.
   await page.routeWebSocket("**/*", (socket) => socket.close());
