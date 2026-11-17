@@ -52,6 +52,12 @@ Use the `/resume` command to pick up where you left off:
 
 The resume system restores the full message history so the LLM has context from the previous session.
 
+## Branching Conversations
+
+Use `/branch <session_id> <message_index>` to start a separate conversation from a saved session. The branch
+includes the selected message and the messages before it. Kollab attempts to save the active conversation first
+when it has messages, then makes the branch active while leaving the saved source available.
+
 ## Saving Conversations
 
 Use `/save` to export a conversation in different formats:

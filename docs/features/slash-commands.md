@@ -48,6 +48,7 @@ Use arrow keys to navigate, Enter to execute.
 | `/permissions` | `/perms`, `/security` | Manage permission modes |
 | `/mcp` | `/mcps`, `/servers` | Open the MCP manager |
 | `/resume` | - | Resume previous conversation |
+| `/branch <id> <index>` | - | Branch a saved conversation at a message |
 | `/terminal` | `/tmux`, `/t` | Manage tmux sessions |
 | `/login` | - | OAuth login for providers |
 | `/config` | `/settings`, `/preferences` | Edit configuration |
