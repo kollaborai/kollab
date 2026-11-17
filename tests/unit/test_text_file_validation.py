@@ -9,7 +9,6 @@ import pytest
 
 from kollabor_agent.file_operations_executor import FileOperationsExecutor
 
-
 OPERATIONS = [
     {"type": "file_read"},
     {"type": "file_grep", "pattern": "needle"},
