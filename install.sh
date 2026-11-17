@@ -300,7 +300,7 @@ verify_install() {
 
     # ORIGINAL_PATH is the environment a newly opened shell inherits.
     found=$(PATH="$ORIGINAL_PATH" command -v "$CMD_NAME" || true)
-    if [[ "$found" != "$executable" ]]; then
+    if [[ ! "$found" -ef "$executable" ]]; then
         if [[ -n "$found" ]]; then
             warn "Another $CMD_NAME comes first on PATH: $found"
             info "The installed executable is $executable. Put $INSTALLED_DIR before it in PATH, then open a new shell."
