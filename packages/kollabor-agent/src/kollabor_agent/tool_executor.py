@@ -3306,8 +3306,8 @@ class ToolExecutor:
         3. Readability heuristic (highest text-to-tag ratio element)
         4. Fallback: strip non-content tags, extract remaining text
 
-        Uses beautifulsoup4 with lxml parser. Falls back to regex-based
-        extraction if bs4 is not available.
+        Uses beautifulsoup4 with Python's built-in HTML parser. Falls back to
+        regex-based extraction if bs4 is not available.
         """
         try:
             from bs4 import BeautifulSoup
