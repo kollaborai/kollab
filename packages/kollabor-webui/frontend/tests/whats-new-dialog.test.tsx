@@ -124,6 +124,14 @@ describe("WhatsNewDialog", () => {
     expect(html).toContain("Plus 3 fixes.");
   });
 
+  it("says one fix, not one fixes", () => {
+    const html = renderToStaticMarkup(
+      <WhatsNewDialog open release={{ ...release, fixedCount: 1 }} onOpenChange={noop} onSeeAllChanges={noop} />,
+    );
+    expect(html).toContain("Plus 1 fix.");
+    expect(html).not.toContain("1 fixes");
+  });
+
   it("omits the fixes line when the release fixes nothing", () => {
     const html = renderToStaticMarkup(
       <WhatsNewDialog open release={{ ...release, fixedCount: 0 }} onOpenChange={noop} onSeeAllChanges={noop} />,
