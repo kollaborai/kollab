@@ -158,6 +158,32 @@ async def test_repeated_cancellation_during_spawn_reaps_child(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_cancellation_during_failed_spawn_still_raises_cancelled(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    spawn_started = asyncio.Event()
+    release_spawn = asyncio.Event()
+
+    async def delayed_failure(*_args, **_kwargs):
+        spawn_started.set()
+        await release_spawn.wait()
+        raise FileNotFoundError(2, "No such file or directory", "whisper")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_failure)
+    task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
+    await spawn_started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    release_spawn.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process group lifecycle")
 async def test_cancellation_stops_real_transcriber_descendants(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
@@ -237,11 +263,19 @@ async def test_cancellation_kills_pipe_holder_after_transcriber_exits(
         await asyncio.sleep(0.02)
     assert child_pid.exists(), "pipe-holding descendant did not start"
     task.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=10)
-
-    assert not list(tmp_path.glob("kollab-telegram-voice-*"))
+    try:
+        _, pending = await asyncio.wait({task}, timeout=10)
+        assert not pending, "cancel did not return while a descendant held the pipes"
+        assert task.cancelled()
+        assert not list(tmp_path.glob("kollab-telegram-voice-*"))
+    finally:
+        if child_pid.exists():
+            try:
+                os.kill(int(child_pid.read_text()), 9)
+            except ProcessLookupError:
+                pass
+        if not task.done():
+            await asyncio.wait({task}, timeout=10)
 
 
 @pytest.mark.asyncio
@@ -258,10 +292,18 @@ async def test_timeout_kills_pipe_holder_after_transcriber_exits(tmp_path, monke
     whisper.chmod(0o700)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
 
-    result = await asyncio.wait_for(
-        _bridge()._transcribe_voice("synthetic-file-id"), timeout=75
-    )
-
-    assert result == "[voice message - transcription timed out]"
-    assert child_pid.exists(), "pipe-holding descendant did not start"
-    assert not list(tmp_path.glob("kollab-telegram-voice-*"))
+    task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
+    try:
+        _, pending = await asyncio.wait({task}, timeout=75)
+        assert not pending, "60 s timeout did not return while a descendant held the pipes"
+        assert task.result() == "[voice message - transcription timed out]"
+        assert child_pid.exists(), "pipe-holding descendant did not start"
+        assert not list(tmp_path.glob("kollab-telegram-voice-*"))
+    finally:
+        if child_pid.exists():
+            try:
+                os.kill(int(child_pid.read_text()), 9)
+            except ProcessLookupError:
+                pass
+        if not task.done():
+            await asyncio.wait({task}, timeout=10)
