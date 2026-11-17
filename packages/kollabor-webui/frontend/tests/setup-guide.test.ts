@@ -11,6 +11,8 @@ import {
   SETUP_STEPS,
   STORAGE_KEY,
   emptyFacts,
+  getStartedOpensSetup,
+  hasChosenProvider,
   initialGuideState,
   loadGuideState,
   nextStep,
@@ -48,6 +50,20 @@ test("fresh state starts at welcome, not dismissed", () => {
     step: "welcome",
     skipped: [],
   });
+});
+
+test("a profile without a provider does not count as chosen", () => {
+  assert.equal(hasChosenProvider([{ name: "work", provider: null }], "work"), false);
+  assert.equal(hasChosenProvider([{ name: "work" }], "work"), false);
+  assert.equal(hasChosenProvider([{ name: "work", provider: "" }], "work"), false);
+});
+
+test("Get Started opens Setup for missing and auto providers only", () => {
+  assert.equal(getStartedOpensSetup(emptyFacts()), true);
+  assert.equal(
+    getStartedOpensSetup({ ...emptyFacts(), providerChosen: true }),
+    false,
+  );
 });
 
 test("loadGuideState survives a round trip", () => {
