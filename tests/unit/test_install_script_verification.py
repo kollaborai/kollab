@@ -354,15 +354,18 @@ def test_pip_user_configuration_verifies_the_user_scripts_dir(
         f'''#!/bin/sh
 if [ "$1" = "-c" ]; then
     if [ "$3" = "posix_user" ]; then echo '{user_scripts}'; else echo '{system_scripts}'; fi
-elif [ "$2" = "config" ] && [ "$4" = "install.user" ]; then
-    echo true
+    exit 0
 fi
+script="$1"
+shift
+exec /bin/sh "$script" "$@"
 ''',
     )
     _write_executable(
         tools_dir / "pip3",
         f'''#!{python}
-if [ "$2" = "--help" ]; then echo --user; fi
+if [ "$1" = "config" ] && [ "$2" = "get" ] && [ "$3" = "install.user" ]; then echo true; fi
+if [ "$1" = "install" ] && [ "$2" = "--help" ]; then echo --user; fi
 exit 0
 ''',
     )
