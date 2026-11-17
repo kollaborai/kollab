@@ -12,19 +12,17 @@ import { makeFixtures, openPage, openVite, until } from "./learn-browser-accepta
 const SHOTS = process.argv[2] || process.env.GALLERY_SHOT_DIR;
 const SESSION = "learn-regression-session";
 
-// 1x1 PNG and JPEG look-a-like: enough for <img> to render and decode().
-const PNG_BYTES = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
-  "base64",
+// Distinct, labeled images keep the selected attachment visible in screenshots.
+const IMAGE_A_BYTES = Buffer.from(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="400"><rect width="640" height="400" fill="#8b1e1e"/><text x="320" y="220" fill="white" font-size="72" text-anchor="middle">Image A</text></svg>',
 );
-const PNG_BLUE = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
-  "base64",
+const IMAGE_B_BYTES = Buffer.from(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="400"><rect width="640" height="400" fill="#1848c8"/><text x="320" y="220" fill="white" font-size="72" text-anchor="middle">Image B</text></svg>',
 );
 
 const MEDIA = [
-  { ref: "20261114-210000-aaaa", mime: "image/png" },
-  { ref: "20261114-210100-bbbb", mime: "image/png" },
+  { ref: "20261114-210000-aaaa", mime: "image/svg+xml" },
+  { ref: "20261114-210100-bbbb", mime: "image/svg+xml" },
 ];
 const HISTORY = [
   { role: "user", content: "first [image1]", media: [MEDIA[0]] },
@@ -86,8 +84,8 @@ function wrapWithMedia(fixtures, { listedMedia = MEDIA, listFailure = false } = 
       if (MEDIA.some((entry) => entry.ref === mediaMatch[1])) {
         return route.fulfill({
           status: 200,
-          contentType: "image/png",
-          body: mediaMatch[1].endsWith("aaaa") ? PNG_BYTES : PNG_BLUE,
+          contentType: "image/svg+xml",
+          body: mediaMatch[1].endsWith("aaaa") ? IMAGE_A_BYTES : IMAGE_B_BYTES,
         });
       }
       return route.fulfill({ status: 404, contentType: "application/json", body: "{}" });

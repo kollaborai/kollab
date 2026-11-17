@@ -27,7 +27,7 @@ const api = {
   },
   async request() {
     return new Response(
-      new Blob(["<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12'><rect width='12' height='12' fill='blue'/></svg>"], {
+      new Blob(["<svg xmlns='http://www.w3.org/2000/svg' width='640' height='400'><rect width='640' height='400' fill='blue'/><text x='320' y='220' fill='white' font-size='72' text-anchor='middle'>Image B</text></svg>"], {
         type: "image/svg+xml",
       }),
       { status: 200 },
