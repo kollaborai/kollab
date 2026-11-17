@@ -49,14 +49,14 @@ STOP_TERM_SECONDS = 1.0
 STOP_KILL_SECONDS = 2.0  # final SIGKILL wait — a wedged event loop swallows SIGTERM
 
 
-def parse_timeout(timeout_str: str) -> int:
+def parse_timeout(timeout_str: str) -> float:
     """Parse timeout string into seconds.
 
     Args:
         timeout_str: Timeout string like "30s", "2min", "1h"
 
     Returns:
-        Timeout in seconds
+        Timeout in seconds, including fractional seconds
 
     Raises:
         ValueError: If timeout format is invalid
@@ -78,11 +78,11 @@ def parse_timeout(timeout_str: str) -> int:
 
     # Convert to seconds
     if unit in ("s", "sec", "second", "seconds"):
-        return int(value)
+        return value
     elif unit in ("m", "min", "minute", "minutes"):
-        return int(value * 60)
+        return value * 60
     elif unit in ("h", "hour", "hours"):
-        return int(value * 3600)
+        return value * 3600
     else:
         raise ValueError(f"Unknown time unit: {unit}")
 
