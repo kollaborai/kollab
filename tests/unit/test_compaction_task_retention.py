@@ -108,6 +108,24 @@ def test_oversized_live_task_is_bounded_and_left_for_summary() -> None:
     assert summarizable == [message]
 
 
+def test_persisted_legacy_excerpt_drops_summarized_below_marker() -> None:
+    message = _task_message(
+        "live-942",
+        "[Active TaskLedger task live-942; latest assignment excerpt]\n"
+        + "BEGIN_CANARY "
+        + "a" * 3_600
+        + "\n[Remaining assignment text is summarized below.]",
+    )
+    message.metadata["context_compaction_task_excerpt"] = True
+
+    preserved, _summarizable = _plugin()._extract_preservable_messages(
+        [message], live_task_ids={"live-942"}
+    )
+
+    assert len(preserved) == 1
+    assert "summarized below" not in preserved[0].content
+
+
 def test_live_task_ids_include_assigned_paused_and_targeted_open_cards() -> None:
     active = SimpleNamespace(id="active", assignee="sapphire", status="active")
     paused = SimpleNamespace(id="paused", assignee="sapphire", status="paused")
