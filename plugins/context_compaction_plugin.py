@@ -1865,6 +1865,14 @@ class ContextCompactionPlugin(BasePlugin):
         lookup = getattr(acp, "advertised_command", None)
         command = lookup("compact") if callable(lookup) else None
         if not isinstance(command, str) or not command:
+            if acp is None:
+                message = (
+                    "the ACP session is not active, so kollab cannot send a "
+                    "compaction request right now. Nothing was changed."
+                )
+                if reason == "threshold":
+                    self._set_compaction_status("warning", message)
+                return message
             message = (
                 "this ACP agent compacts its own context, and the harness advertises no "
                 "compaction command, so kollab cannot ask it to compact. Nothing was changed."
