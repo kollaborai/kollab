@@ -101,3 +101,27 @@ def test_plugin_data_files_are_denied_not_only_runtime_token(tmp_path, monkeypat
     result = executor.execute_operation({"type": "file_read", "file": str(data)})
     assert not result["success"]
     assert "private sentinel" not in str(result)
+
+
+@pytest.mark.parametrize("protected,alias", [
+    ("plugin-data/example/private.json", "PLUGIN-DATA/example/private.json"),
+    ("plugins/example/private.json", "PLUGINS/example/private.json"),
+    ("engine.token", "ENGINE.TOKEN"),
+])
+def test_case_variant_protected_paths_are_denied(tmp_path, monkeypatch, protected, alias):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    root = tmp_path / ".kollab"
+    source = root / protected
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("private sentinel", encoding="utf-8")
+    alternate = root / alias
+    if not alternate.exists():
+        pytest.skip("filesystem is case-sensitive")
+
+    executor = FileOperationsExecutor(workspace=tmp_path)
+    executor.set_path_access_mode(PathAccessMode.ANYWHERE)
+    result = executor.execute_operation({"type": "file_read", "file": str(alternate)})
+
+    assert not result["success"]
+    assert "private sentinel" not in str(result)
