@@ -3065,9 +3065,10 @@ class ToolExecutor:
         from a 200 OK), retries with Playwright headless browser (if installed)
         to handle JS-rendered pages.
 
-        Downloaded input is capped at 500000 bytes and decoded input at
-        2000000 bytes. The complete output, including its URL header and any
-        truncation marker, is capped by max_chars (default 5000, maximum 50000).
+        At most 500000 downloaded bytes are retained and decoded input is
+        capped at 2000000 bytes. A one-byte lookahead detects overflow. The
+        complete output, including its URL header and any truncation marker,
+        is capped by max_chars (default 5000, maximum 50000).
 
         Args:
             tool_data: Dict with 'url' (required), 'max_chars' (optional),
@@ -3142,7 +3143,7 @@ class ToolExecutor:
                 current_url = url
                 downloaded = 0
                 for redirect_count in range(11):
-                    if downloaded >= max_download_bytes:
+                    if downloaded > max_download_bytes:
                         return ToolExecutionResult(
                             tool_id=tool_id,
                             tool_type="web_fetch",
@@ -3188,23 +3189,13 @@ class ToolExecutor:
                                 redirect_chunk = await resp.content.read(
                                     min(
                                         64 * 1024,
-                                        max_download_bytes - downloaded,
+                                        max_download_bytes - downloaded + 1,
                                     )
                                 )
                                 if not redirect_chunk:
                                     break
                                 downloaded += len(redirect_chunk)
                                 if downloaded > max_download_bytes:
-                                    return ToolExecutionResult(
-                                        tool_id=tool_id,
-                                        tool_type="web_fetch",
-                                        success=False,
-                                        error="Response exceeded the 500000-byte download limit",
-                                    )
-                                if downloaded == max_download_bytes and (
-                                    redirect_length is None
-                                    or redirect_length > downloaded
-                                ):
                                     return ToolExecutionResult(
                                         tool_id=tool_id,
                                         tool_type="web_fetch",
@@ -3273,21 +3264,12 @@ class ToolExecutor:
                         decoded_size = 0
                         while True:
                             chunk = await resp.content.read(
-                                min(64 * 1024, max_download_bytes - downloaded)
+                                min(64 * 1024, max_download_bytes - downloaded + 1)
                             )
                             if not chunk:
                                 break
                             downloaded += len(chunk)
                             if downloaded > max_download_bytes:
-                                return ToolExecutionResult(
-                                    tool_id=tool_id,
-                                    tool_type="web_fetch",
-                                    success=False,
-                                    error="Response exceeded the 500000-byte download limit",
-                                )
-                            if downloaded == max_download_bytes and (
-                                declared_length is None or declared_length > downloaded
-                            ):
                                 return ToolExecutionResult(
                                     tool_id=tool_id,
                                     tool_type="web_fetch",

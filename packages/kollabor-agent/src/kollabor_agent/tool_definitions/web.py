@@ -71,8 +71,9 @@ web_fetch = ToolDefinition(
         "data first, then meta tags, then semantic HTML5 (<article>/<main>/"
         "<section>), then readability fallback (highest text-to-tag ratio "
         "element), then tag-stripped full page as last resort. This keeps "
-        "results compact and relevant. Downloads are capped at 500000 bytes "
-        "and decompressed responses at 2000000 bytes. The optional browser "
+        "results compact and relevant. At most 500000 downloaded bytes are "
+        "retained, with a one-byte overflow check; decompressed responses "
+        "are capped at 2000000 bytes. The optional browser "
         "fallback renders that bounded source and blocks external requests."
     ),
     safety_features=[

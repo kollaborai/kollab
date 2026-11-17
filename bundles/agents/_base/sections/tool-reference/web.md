@@ -14,7 +14,8 @@ web-fetch — retrieve a URL and return clean text:
     - decodes HTML entities
     - main-content extraction (skips boilerplate)
     - output never exceeds max_chars; header and truncation marker count toward the limit
-    - stops after 500000 downloaded bytes or 2000000 decompressed bytes
+    - retains at most 500000 downloaded bytes, with a one-byte overflow check
+    - stops after 2000000 decompressed bytes
     - optional browser fallback renders only that bounded source; external requests are blocked
     - 30-second timeout
     - follows redirects
