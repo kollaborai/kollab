@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -106,6 +107,66 @@ def test_oversized_live_task_is_bounded_and_left_for_summary() -> None:
     assert len(preserved) == 1
     assert len(preserved[0].content) <= MAX_PRESERVED_HUB_TASK_CHARS
     assert summarizable == [message]
+
+
+def test_emergency_rollover_preserves_oversized_live_task_across_reload() -> None:
+    task_id = "live-942"
+    assignment = (
+        "BEGIN_CANARY: inspect the producer before editing.\n"
+        + "ordinary assignment detail\n" * 700
+        + "MIDDLE_CANARY: preserve the retry and authorization constraints.\n"
+        + "ordinary assignment detail\n" * 700
+        + "END_CANARY: report the exact verification evidence."
+    )
+    task = _task_message(task_id, assignment)
+    history = [
+        Message(role="system", content="system instructions"),
+        Message(role="user", content="earlier request"),
+        task,
+        Message(role="user", content="current request"),
+    ]
+    plugin = _plugin()
+    plugin._get_conversation_history = MagicMock(side_effect=lambda: history)
+    plugin._keep_recent_count = MagicMock(return_value=1)
+    plugin._find_split_point = MagicMock(return_value=3)
+    plugin._get_live_task_ids = MagicMock(return_value={task_id})
+    plugin._get_current_session_id = MagicMock(return_value="synthetic-session")
+    plugin._apply_pending_compaction = AsyncMock()
+    plugin._log_compaction_event = AsyncMock()
+    plugin._effective_prompt_tokens = MagicMock(return_value=0)
+    plugin._compaction_round = 0
+    plugin._last_summarization_model = None
+
+    async def rollover() -> list[Message]:
+        assert await plugin._rollover_with_summary({}, None, boundary="turn")
+        compacted = plugin._pending_compaction
+        assert compacted is not None
+        return compacted
+
+    first = asyncio.run(rollover())
+    persisted = json.loads(
+        json.dumps(
+            [
+                {"role": message.role, "content": message.content, "metadata": message.metadata}
+                for message in first
+            ]
+        )
+    )
+    history[:] = [Message(**message) for message in persisted]
+    plugin._compaction_round = 1
+    second = asyncio.run(rollover())
+
+    task_context = "\n".join(
+        message.content
+        for message in second
+        if message.metadata.get("context_compaction_task_excerpt")
+    )
+    assert "BEGIN_CANARY" in task_context
+    assert "MIDDLE_CANARY" in task_context
+    assert "END_CANARY" in task_context
+    assert f"/hub tasks status {task_id}" in task_context
+    assert "If retrieval fails" in task_context
+    assert "Remaining assignment text is summarized below." not in task_context
 
 
 def test_live_task_ids_include_assigned_paused_and_targeted_open_cards() -> None:
