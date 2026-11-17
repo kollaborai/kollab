@@ -8095,34 +8095,94 @@ class HubPlugin(BasePlugin):
 
         Schedules live in ``~/.kollab/schedules.json`` and their fires are
         recorded in ``~/.kollab/schedules-runs.jsonl``; the timer sleeps until
-        the next grid point (see schedules.py). Firing reuses today's cron
-        delivery path: a hub message tagged with the schedule id. Stage 2
-        replaces the send with start/queue/new-instance delivery.
+        the next grid point (see schedules.py). Delivery (stage 2) starts a
+        stopped agent, queues behind a busy one or runs a second instance:
+        see schedule_delivery.py.
         """
         from kollabor_config.config_utils import get_config_directory
 
-        async def fire(row, agent: str, due: float, now: float):
-            job = HubCronJob(
-                id=row.id,
-                target=agent,
-                message=row.prompt,
-                interval_seconds=row.interval_seconds,
-                next_fire=due,
+        from .presence import find_live_socket, live_agents_on_machine
+        from .schedule_delivery import (
+            ONLINE_TIMEOUT_SECONDS,
+            DeliveryProbes,
+            deliver,
+        )
+
+        def find_socket(name: str):
+            return find_live_socket(name)
+
+        def state_of(name: str) -> str:
+            for _hub_dir, record in live_agents_on_machine():
+                if record.get("identity") == name:
+                    return str(record.get("state") or "idle")
+            return "idle"
+
+        def launch(spec) -> bool:
+            import subprocess
+
+            env = {**os.environ, **spec.env}
+            proc = subprocess.Popen(
+                spec.argv,
+                cwd=spec.cwd or None,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
-            # Same bound as the recurring jobs: a send that never returns
-            # (unknown local target, stalled routing) must not wedge the
-            # timer; it records a timed-out run and moves on.
+            logger.info(
+                "schedules: launched %s (pid %s, exit_after_turn=%s)",
+                spec.identity,
+                proc.pid,
+                spec.exit_after_turn,
+            )
+            deadline = time.monotonic() + ONLINE_TIMEOUT_SECONDS
+            while time.monotonic() < deadline:
+                if find_live_socket(spec.identity):
+                    return True
+                time.sleep(0.5)
+            return False
+
+        async def send(name: str, socket, content: str, metadata: dict) -> bool:
+            msg = HubMessage(
+                action="message",
+                from_agent=self._identity.agent_id if self._identity else "",
+                from_identity="schedule",
+                to=name,
+                content=content,
+                scope=MessageScope.DIRECT.value,
+                metadata=metadata,
+            )
             try:
-                dropped = await asyncio.wait_for(
-                    self._fire_cron_job(job), SCHEDULE_SEND_TIMEOUT_SECONDS
+                rejections = await self._route_message(msg)
+            except Exception as exc:
+                logger.warning(
+                    "schedules: send to %s failed (%s)", name, type(exc).__name__
+                )
+                return False
+            if rejections:
+                logger.warning(
+                    "schedules: send to %s refused: %s", name, rejections[0][1]
+                )
+                return False
+            return True
+
+        probes = DeliveryProbes(
+            find_socket=find_socket, state_of=state_of, launch=launch, send=send
+        )
+
+        async def fire(row, agent: str, due: float, now: float):
+            # A start can wait for the agent to come online, so the fire is
+            # bounded by the online timeout, not the plain send timeout. A
+            # delivery that never returns must not wedge the timer.
+            try:
+                return await asyncio.wait_for(
+                    deliver(row, agent, due, now, probes),
+                    ONLINE_TIMEOUT_SECONDS + 2 * SCHEDULE_SEND_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
-                logger.warning(
-                    "schedules: %s send to %s timed out", row.id, agent
-                )
-                return False, "send timed out"
-            error = job.last_error or ("device gone" if dropped else "")
-            return (not error), error
+                logger.warning("schedules: %s delivery timed out", row.id)
+                return False, "delivery timed out"
 
         root = get_config_directory()
         self._schedule_timer = ScheduleTimer(

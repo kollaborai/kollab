@@ -10,7 +10,6 @@ id so replies and run records line up. These tests fake the probes (sockets,
 presence states, process starts); the tmux spec covers one real start.
 """
 
-import asyncio
 import sys
 from pathlib import Path
 
@@ -45,11 +44,11 @@ class Fakes:
         self.states = dict(states or {})  # agent -> presence state
         self.online_after_start = online_after_start
         self.launches = []  # LaunchSpec records
-        self.sends = []  # (socket, content, metadata)
+        self.sends = []  # (agent, socket, content, metadata)
 
     def probes(self) -> DeliveryProbes:
-        async def send(socket, content, metadata):
-            self.sends.append((socket, content, metadata))
+        async def send(agent, socket, content, metadata):
+            self.sends.append((agent, socket, content, metadata))
             return True
 
         def launch(spec):
@@ -118,7 +117,8 @@ async def test_idle_agent_gets_the_message_on_its_socket():
 
     assert ok, error
     assert fakes.launches == []
-    socket, content, metadata = fakes.sends[0]
+    agent, socket, content, metadata = fakes.sends[0]
+    assert agent == "lapis"
     assert socket == "/tmp/lapis.sock"
     assert "[schedule s1]" in content
     assert "check the queue" in content
@@ -170,14 +170,15 @@ async def test_agent_at_this_device_is_treated_locally():
         _row(), "lapis@this-mac", 1600.0, 1600.1, fakes.probes()
     )
     assert ok, error
-    assert fakes.sends[0][0] == "/tmp/lapis.sock"
+    assert fakes.sends[0][0] == "lapis"  # the device part is stripped
+    assert fakes.sends[0][1] == "/tmp/lapis.sock"
 
 
 @pytest.mark.asyncio
 async def test_send_refusal_is_reported():
     fakes = Fakes(sockets={"lapis": "/tmp/lapis.sock"})
 
-    async def refuse(socket, content, metadata):
+    async def refuse(agent, socket, content, metadata):
         return False
 
     probes = fakes.probes()
