@@ -60,7 +60,10 @@ async def test_tool_executor_does_not_block_shell_text_that_mentions_kollab():
 
 @pytest.mark.asyncio
 async def test_tool_executor_blocks_background_kollab_processes():
+    from unittest.mock import AsyncMock
+
     executor = ToolExecutor(MagicMock(), MagicMock())
+    executor.shell_executor.run = AsyncMock()
 
     result = await executor._execute_terminal_command(
         {
@@ -78,7 +81,7 @@ async def test_tool_executor_blocks_background_kollab_processes():
         "Run informational commands in the foreground; use <hub_spawn> for "
         "peers and /hub stop all for agents owned by this caller."
     )
-    executor.shell_executor.run.assert_not_called()
+    executor.shell_executor.run.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
