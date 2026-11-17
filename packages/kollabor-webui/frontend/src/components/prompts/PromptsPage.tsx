@@ -432,7 +432,7 @@ export function PromptsView(props: {
   libraries: PromptLibrary[] | null;
   roles: string[];
   loadError: string | null;
-      retryingLibraries?: boolean;
+  retryingLibraries?: boolean;
   target: PromptTarget;
   groups: SectionGroup[];
   composition: Composition | null;
