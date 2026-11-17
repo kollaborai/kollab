@@ -1116,7 +1116,12 @@ const ComposerSlot: FC<{
   onSteer: (event: { preventDefault: () => void }) => void;
 }> = ({ voice, running, permissionStop, onBeforeSend, onSteer }) => {
   return (
-    <div className="aui-composer-slot relative size-9 shrink-0">
+    <div
+      className={cn(
+        "aui-composer-slot relative h-9 shrink-0",
+        running || permissionStop ? "w-20" : "w-9",
+      )}
+    >
       {voice && (
         <>
           <TooltipIconButton
@@ -1180,7 +1185,7 @@ const ComposerSlot: FC<{
             variant="default"
             className={cn(
               SLOT_BUTTON,
-              "!left-auto !right-10 scale-100 opacity-100 visible",
+              "!left-auto !right-1 scale-100 opacity-100 visible",
             )}
             aria-label="Stop generating"
           >
@@ -1197,7 +1202,7 @@ const ComposerSlot: FC<{
           onClick={() => { void permissionStop.cancel(); }}
           className={cn(
             SLOT_BUTTON,
-            "!left-auto !right-10 scale-100 opacity-100 visible",
+            "!left-auto !right-1 scale-100 opacity-100 visible",
           )}
           aria-label="Stop generating"
         >
