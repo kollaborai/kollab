@@ -12,7 +12,10 @@ async function main() {
   let browser;
   try {
     browser = await launchAcceptanceBrowser();
-    const view = await openPage(browser, baseUrl, makeFixtures());
+    const view = await openPage(browser, baseUrl, makeFixtures(), {
+      viewport: { width: 390, height: 844 },
+      isMobile: true,
+    });
     await view.page.route("**/sessions*", (route) =>
       route.fulfill({
         status: 200,
@@ -26,11 +29,21 @@ async function main() {
     await view.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
     await view.page.getByRole("button", { name: "Guided setup", exact: true }).click();
     await view.page.getByRole("heading", { name: "Join a network", exact: true }).waitFor({ state: "visible" });
+    const guide = view.page.getByRole("dialog");
+    const guideBounds = await guide.boundingBox();
+    const openBounds = await view.page.getByTestId("setup-guide-next").boundingBox();
+    assert.ok(guideBounds && openBounds);
+    const bottomGap = guideBounds.y + guideBounds.height - (openBounds.y + openBounds.height);
+    assert.ok(
+      bottomGap >= 12,
+      `the active guide should cover the staged setup action row below its footer (gap: ${bottomGap}px)`,
+    );
+    await fs.mkdir(screenshotDir, { recursive: true });
+    await view.page.screenshot({ path: path.join(screenshotDir, "guide-network-phone-dark.png"), fullPage: true });
     await view.page.getByTestId("setup-guide-next").click();
     await view.page.getByTestId("setup-step-agent").waitFor({ state: "visible" });
     assert.equal(await view.page.getByTestId("setup-step-agent").getAttribute("aria-current"), "step");
     await view.page.keyboard.press("Escape");
-    await fs.mkdir(screenshotDir, { recursive: true });
     await view.page.screenshot({ path: path.join(screenshotDir, "setup-guide-resolved-step.png"), fullPage: true });
     assert.deepEqual(view.pageErrors, [], "the setup guide should not throw while advancing");
     console.log(`PASS: saved setup-guide-resolved-step.png to ${screenshotDir}`);
