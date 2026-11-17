@@ -35,6 +35,38 @@ async function main() {
     assert.deepEqual(view.pageErrors, [], "the setup guide should not throw while advancing");
     console.log(`PASS: saved setup-guide-resolved-step.png to ${screenshotDir}`);
     await view.context.close();
+
+    const fresh = await openPage(browser, baseUrl, makeFixtures(), {
+      initialGuideState: JSON.stringify({ step: "welcome", dismissed: true }),
+    });
+    try {
+      await fresh.page.route("**/profiles", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ active: "default", profiles: [{ name: "default", provider: "auto" }] }),
+        }),
+      );
+      await fresh.page.route("**/sessions*", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ sessions: [], network: { live: false, remote: [], networks: [] } }),
+        }),
+      );
+      await fresh.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+      await fresh.page.getByRole("button", { name: "Guided setup", exact: true }).click();
+      await fresh.page.getByRole("heading", { name: "Welcome to Kollab", exact: true }).waitFor({ state: "visible" });
+      const setupPanelRequest = fresh.page.waitForRequest(
+        (request) => new URL(request.url()).pathname === "/setup/panels/setup",
+        { timeout: 5000 },
+      );
+      await fresh.page.getByTestId("setup-guide-next").click();
+      await setupPanelRequest;
+      assert.equal(await fresh.page.getByTestId("setup-step-network").getAttribute("aria-current"), "step");
+    } finally {
+      await fresh.context.close();
+    }
   } finally {
     await browser?.close();
     await server.close();
