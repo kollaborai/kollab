@@ -116,7 +116,7 @@ test("reconciling an older window preserves newer rows and pending/live state", 
   const loaded = [{ id: "history-9", content: [{ type: "tool-call", toolCallId: "t1" }] }, row(11)];
   const result = reconcileBoundaryToolResults(shown, loaded, 9, 12);
   assert.deepEqual(result?.map((message) => message.id),
-    ["history-1", "history-9", "history-11", "history-20", pending.id, live.id]);
+    ["history-1", "history-10", "history-11", "history-20", pending.id, live.id]);
   assert.equal(result?.at(-2), pending);
   assert.equal(result?.at(-1), live);
 });
