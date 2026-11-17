@@ -995,6 +995,37 @@ def test_anchor_check_works_on_descriptors_above_1024(tmp_path):
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
 
 
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX process groups only")
+def test_group_of_only_an_unreaped_dead_member_signals_without_error(tmp_path):
+    """A member that exited but is not reaped yet stays in its group. macOS
+    answers killpg on such a group with EPERM, Linux with success; with the
+    anchor alive neither may raise, and the group is empty once it is reaped."""
+    import signal
+    import socket
+    import subprocess
+    import time
+
+    member = subprocess.Popen([sys.executable, "-c", "pass"], process_group=0)
+    deadline = time.monotonic() + 5
+    while psutil.Process(member.pid).status() != psutil.STATUS_ZOMBIE:
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    ours, theirs = socket.socketpair()
+    runner = ACPRunner(ACPProfile("zombie", (sys.executable, "-c", "pass"), cwd=str(tmp_path)))
+    runner._process_group_id = member.pid
+    runner._group_anchor = ours
+    try:
+        assert runner._signal_owned_process_group(signal.SIGTERM) in (True, False)
+        assert runner._owned_process_group_exists() is True
+        member.wait(timeout=5)
+        assert runner._owned_process_group_exists() is False
+        assert runner._signal_owned_process_group(signal.SIGKILL) is False
+    finally:
+        member.wait(timeout=5)
+        ours.close()
+        theirs.close()
+
+
 @pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX launcher only")
 @pytest.mark.asyncio
 async def test_adapter_exec_failure_reports_the_os_error(tmp_path):
