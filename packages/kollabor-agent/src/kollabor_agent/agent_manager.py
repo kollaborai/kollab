@@ -139,6 +139,7 @@ class Skill:
     metadata: Dict[str, Any] = field(default_factory=dict)
     allowed_tools: List[str] = field(default_factory=list)
     source: str = "bundled"
+    bundled_copy_differs: bool = False
 
     @classmethod
     def from_file(cls, file_path: Path, source: str = "bundled") -> Optional["Skill"]:
@@ -317,6 +318,7 @@ class SkillLibrary:
         self.local_dir = get_local_skills_dir(project_path)
         self._skills: Dict[str, Skill] = {}
         self._skill_dirs: Dict[str, tuple[Path, str]] = {}  # name -> (dir, source)
+        self._bundled_copy_differs: set[str] = set()
         self._loaded = False
         self._discover()
 
@@ -345,6 +347,19 @@ class SkillLibrary:
                     # Higher priority tiers overwrite lower ones
                     self._skill_dirs[entry.name] = (entry, source)
 
+        self._bundled_copy_differs.clear()
+        if self.bundled_dir and self.global_dir:
+            for name, (skill_dir, source) in self._skill_dirs.items():
+                if source != "global":
+                    continue
+                bundled_skill = self.bundled_dir / name / "SKILL.md"
+                global_skill = skill_dir / "SKILL.md"
+                try:
+                    if bundled_skill.read_bytes() != global_skill.read_bytes():
+                        self._bundled_copy_differs.add(name)
+                except OSError:
+                    continue
+
         logger.info(f"Discovered {len(self._skill_dirs)} skills in library")
 
     def refresh(self) -> None:
@@ -372,6 +387,7 @@ class SkillLibrary:
             if name not in self._skills:
                 skill = Skill.from_directory(skill_dir, source=source)
                 if skill:
+                    skill.bundled_copy_differs = name in self._bundled_copy_differs
                     self._skills[name] = skill
                 else:
                     logger.warning(f"Failed to load skill from {skill_dir}")

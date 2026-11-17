@@ -19,6 +19,7 @@ from typing import BinaryIO, Optional
 from .atomic_write import write_text_atomic
 
 logger = logging.getLogger(__name__)
+_warned_shadowed_skill_paths: set[tuple[Path, Path]] = set()
 
 # Platform check
 IS_WINDOWS = sys.platform == "win32"
@@ -1411,9 +1412,11 @@ def _retire_seeded_skills(global_skills_dir: Path) -> None:
         backup_dir = global_skills_dir / SEED_BACKUP_DIR_NAME
         if _is_link_or_reparse(backup_dir):
             logger.warning("Preserving linked skill backup directory: %s", backup_dir)
+            _warn_shadowed_global_skills(global_skills_dir)
             return
         known = _load_skill_seed_hashes()
         if known is None:
+            _warn_shadowed_global_skills(global_skills_dir)
             return
         with _seed_directory(global_skills_dir, create=False) as skills_fd:
             with _seed_directory(backup_dir, create=True) as backup_fd:
@@ -1477,6 +1480,49 @@ def _retire_seeded_skills(global_skills_dir: Path) -> None:
             "Retired seed skills: moved=%s, kept_as_edited=%s, skipped=%s",
             moved, edited, skipped,
         )
+
+    _warn_shadowed_global_skills(global_skills_dir)
+
+
+def _warn_shadowed_global_skills(global_skills_dir: Path) -> None:
+    """Warn once for active global skills that differ from bundled copies."""
+    bundled_skills_dir = get_bundled_skills_dir()
+    if (
+        bundled_skills_dir is None
+        or _is_link_or_reparse(global_skills_dir)
+        or not global_skills_dir.is_dir()
+    ):
+        return
+    for global_skill_dir in global_skills_dir.iterdir():
+        if (
+            not global_skill_dir.is_dir()
+            or _is_link_or_reparse(global_skill_dir)
+            or global_skill_dir.name.startswith(".")
+        ):
+            continue
+        global_skill_file = global_skill_dir / "SKILL.md"
+        bundled_skill_file = bundled_skills_dir / global_skill_dir.name / "SKILL.md"
+        if (
+            _is_link_or_reparse(global_skill_file)
+            or not global_skill_file.is_file()
+            or not bundled_skill_file.is_file()
+        ):
+            continue
+        try:
+            differs = global_skill_file.read_bytes() != bundled_skill_file.read_bytes()
+        except OSError:
+            continue
+        if differs:
+            paths = (global_skill_file, bundled_skill_file)
+            if paths in _warned_shadowed_skill_paths:
+                continue
+            _warned_shadowed_skill_paths.add(paths)
+            logger.warning(
+                "Global skill %s shadows bundled skill at %s with different SKILL.md contents; "
+                "the global copy remains active",
+                global_skill_file,
+                bundled_skill_file,
+            )
 
 
 def _migrate_old_prompt_to_agent(old_prompt_file: Path, agent_dir: Path) -> None:
