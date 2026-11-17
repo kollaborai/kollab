@@ -226,7 +226,10 @@ export function makeFixtures(options = {}) {
     }
     if (endpoint.endsWith("/permissions")) return json(route, { pending_prompts: [], approval_mode: "trust_all" });
     if (endpoint.endsWith("/events")) {
-      return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
+      const body = (options.events ?? [])
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join("");
+      return route.fulfill({ status: 200, contentType: "text/event-stream", body });
     }
     if (method === "POST" && endpoint.endsWith("/profile")) {
       if (pickHold) await pickHold.promise;

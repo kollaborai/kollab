@@ -241,6 +241,11 @@ class LLMService:
                 )
             except Exception as exc:
                 logger.warning("HUD entry not written to history: %s", exc)
+                display = getattr(self, "message_display_service", None)
+                if display is not None:
+                    display.display_system_message(
+                        "Conversation history not saved for this message."
+                    )
 
     async def inject_tool_grant(
         self,

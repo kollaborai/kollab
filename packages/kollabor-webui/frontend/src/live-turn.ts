@@ -63,6 +63,7 @@ type EventLike = {
   success?: unknown;
   output?: unknown;
   error?: unknown;
+  message?: unknown;
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -114,7 +115,16 @@ export function applyLiveEvent(current: LiveTurn, event: EventLike): LiveTurn {
     if (newer) return current;
     // Not an ACP turn (no request id): the reload this event triggers brings
     // its reply at once.
-    if (!current.requestId) return emptyLiveTurn();
+    if (!current.requestId) {
+      const hasHistoryNotice = current.parts.some(
+        (part) => part.type === "text" && part.text.includes("ℹ Conversation history not saved for this "),
+      );
+      if (!hasHistoryNotice) return emptyLiveTurn();
+      return {
+        ...current,
+        settled: type === "error" ? "error" : type === "turn_cancelled" ? "cancelled" : "complete",
+      };
+    }
     // An ACP turn gets one terminal event of its own after the engine's
     // turn_cancelled, which fires the moment a stop is asked, before the daemon
     // stored the reply. Keep the text until the history brings it.
@@ -122,10 +132,26 @@ export function applyLiveEvent(current: LiveTurn, event: EventLike): LiveTurn {
     return { ...current, settled: type === "turn_cancelled" ? "cancelled" : type === "error" ? "error" : "complete" };
   }
   // A settled turn shows nothing more; a newer request starts its own.
-  if (current.settled && !newer) return current;
-  const turn: LiveTurn = newer ? { parts: [], requestId } : current;
+  const settledNotice = current.settled === "complete" && current.parts.some(
+    (part) => part.type === "text" && part.text.includes("ℹ Conversation history not saved for this "),
+  );
+  if (current.settled && !newer && !settledNotice) return current;
+  const turn: LiveTurn = newer || settledNotice ? { parts: [], requestId } : current;
   const id = turn.requestId || requestId;
   const grown = (parts: LivePart[]): LiveTurn => (id ? { parts, requestId: id } : { parts });
+  if (type === "notice") {
+    const message = typeof event.message === "string" ? event.message : "";
+    if (!message || !/^Conversation history not saved for this (message|reply)\.$/.test(message)) return current;
+    const parts = [...turn.parts];
+    const last = parts.at(-1);
+    const notice = `ℹ ${message}`;
+    if (last?.type === "text") {
+      parts[parts.length - 1] = { type: "text", text: `${last.text}\n\n${notice}` };
+    } else {
+      parts.push({ type: "text", text: `${notice}\n\n` });
+    }
+    return grown(parts);
+  }
   if (type === "token") {
     const delta = typeof event.text === "string" ? event.text : "";
     if (!delta) return current;
