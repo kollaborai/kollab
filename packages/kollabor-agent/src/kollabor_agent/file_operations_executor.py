@@ -22,6 +22,7 @@ import hashlib
 import logging
 import os
 import shutil
+import stat
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -372,20 +373,44 @@ class FileOperationsExecutor:
         return candidates
 
     def is_text_file(self, filepath: str) -> bool:
-        """Check if file is text (not binary).
+        """Return whether a regular file passes the UTF-8 content probe.
 
-        Args:
-            filepath: File path to check
+        Tool handlers use _validate_text_file directly to retain the reason
+        when this boolean check would discard it.
+        """
+        is_valid, _ = self._validate_text_file(filepath, "read")
+        return is_valid
 
-        Returns:
-            True if file is text
+    def _validate_text_file(
+        self, filepath: str, action: str, max_size_mb: Optional[float] = None
+    ) -> Tuple[bool, str]:
+        """Validate a text-operation input without collapsing errors into binary.
+
+        Only regular files reach the content probe. File kind takes precedence
+        over size, and only a decoding failure is classified as binary.
+        Path access validation must already have succeeded in tool handlers.
         """
         try:
+            mode = os.stat(filepath).st_mode
+            if stat.S_ISDIR(mode):
+                return False, f"Cannot {action} directory: {filepath}"
+            if not stat.S_ISREG(mode):
+                return False, f"Cannot {action} non-regular file: {filepath}"
+
+            if max_size_mb is not None:
+                is_valid, error = self.check_file_size(filepath, max_size_mb)
+                if not is_valid:
+                    return False, error
+
             with open(filepath, "r", encoding="utf-8") as f:
                 f.read(1024)  # Try reading first 1KB as text
-            return True
-        except (UnicodeDecodeError, OSError):
-            return False
+            return True, ""
+        except UnicodeDecodeError:
+            return False, f"Cannot {action} binary file: {filepath}"
+        except FileNotFoundError:
+            return False, f"File not found: {filepath}"
+        except OSError as e:
+            return False, f"Cannot {action} file: {filepath}: {e}"
 
     def check_file_size(self, filepath: str, max_size_mb: float) -> Tuple[bool, str]:
         """Check if file size is within limits.
@@ -783,18 +808,11 @@ class FileOperationsExecutor:
         if not is_valid:
             return {"success": False, "error": error}
 
-        if not os.path.exists(filepath):
-            return {"success": False, "error": f"File not found: {filepath}"}
-
-        # Check file size
-        is_valid, error = self.check_file_size(filepath, self.max_edit_size_mb)
+        is_valid, error = self._validate_text_file(
+            filepath, "edit", self.max_edit_size_mb
+        )
         if not is_valid:
             return {"success": False, "error": error}
-
-        # Check if text file
-        if not self.is_text_file(filepath):
-            file_type = "directory" if os.path.isdir(filepath) else "binary file"
-            return {"success": False, "error": f"Cannot edit {file_type}: {filepath}"}
 
         # Read file
         try:
@@ -1239,16 +1257,9 @@ class FileOperationsExecutor:
         if not is_valid:
             return {"success": False, "error": error}
 
-        if not os.path.exists(filepath):
-            return {"success": False, "error": f"File not found: {filepath}"}
-
-        # Check if text file
-        if not self.is_text_file(filepath):
-            file_type = "directory" if os.path.isdir(filepath) else "binary file"
-            return {
-                "success": False,
-                "error": f"Cannot append to {file_type}: {filepath}",
-            }
+        is_valid, error = self._validate_text_file(filepath, "append to")
+        if not is_valid:
+            return {"success": False, "error": error}
 
         # Create backup
         backup_path = self.create_backup(filepath)
@@ -1293,16 +1304,9 @@ class FileOperationsExecutor:
         if not is_valid:
             return {"success": False, "error": error}
 
-        if not os.path.exists(filepath):
-            return {"success": False, "error": f"File not found: {filepath}"}
-
-        # Check if text file
-        if not self.is_text_file(filepath):
-            file_type = "directory" if os.path.isdir(filepath) else "binary file"
-            return {
-                "success": False,
-                "error": f"Cannot insert into {file_type}: {filepath}",
-            }
+        is_valid, error = self._validate_text_file(filepath, "insert into")
+        if not is_valid:
+            return {"success": False, "error": error}
 
         # Read file
         try:
@@ -1372,16 +1376,9 @@ class FileOperationsExecutor:
         if not is_valid:
             return {"success": False, "error": error}
 
-        if not os.path.exists(filepath):
-            return {"success": False, "error": f"File not found: {filepath}"}
-
-        # Check if text file
-        if not self.is_text_file(filepath):
-            file_type = "directory" if os.path.isdir(filepath) else "binary file"
-            return {
-                "success": False,
-                "error": f"Cannot insert into {file_type}: {filepath}",
-            }
+        is_valid, error = self._validate_text_file(filepath, "insert into")
+        if not is_valid:
+            return {"success": False, "error": error}
 
         # Read file
         try:
@@ -1635,18 +1632,11 @@ class FileOperationsExecutor:
         if not is_valid:
             return {"success": False, "error": error}
 
-        if not os.path.exists(filepath):
-            return {"success": False, "error": f"File not found: {filepath}"}
-
-        # Check file size
-        is_valid, error = self.check_file_size(filepath, self.max_read_size_mb)
+        is_valid, error = self._validate_text_file(
+            filepath, "read", self.max_read_size_mb
+        )
         if not is_valid:
             return {"success": False, "error": error}
-
-        # Check if text file
-        if not self.is_text_file(filepath):
-            file_type = "directory" if os.path.isdir(filepath) else "binary file"
-            return {"success": False, "error": f"Cannot read {file_type}: {filepath}"}
 
         # Read file as bytes (needed for ContextService hash dedup)
         try:
@@ -1819,21 +1809,11 @@ class FileOperationsExecutor:
         if not is_valid:
             return {"success": False, "error": error}
 
-        if not os.path.exists(filepath):
-            return {"success": False, "error": f"File not found: {filepath}"}
-
-        if os.path.isdir(filepath):
-            return {"success": False, "error": f"Cannot grep directory: {filepath}"}
-
-        # Check file size
-        is_valid, error = self.check_file_size(filepath, self.max_read_size_mb)
+        is_valid, error = self._validate_text_file(
+            filepath, "grep", self.max_read_size_mb
+        )
         if not is_valid:
             return {"success": False, "error": error}
-
-        # Check if text file
-        if not self.is_text_file(filepath):
-            file_type = "directory" if os.path.isdir(filepath) else "binary file"
-            return {"success": False, "error": f"Cannot grep {file_type}: {filepath}"}
 
         # Read file and search for pattern
         try:
