@@ -38,6 +38,23 @@ logger = logging.getLogger(__name__)
 TERMINAL_TASK_STATUSES = frozenset(
     {"done", "failed", "closed", "cancelled", "obsolete"}
 )
+_PENDING_REPLY_FIELDS = frozenset(
+    {
+        "task_id",
+        "assignee",
+        "requested_by",
+        "message_id",
+        "created_at",
+        "deadline_seconds",
+        "status",
+        "resolution",
+        "terminal_status",
+        "resolved_reason",
+        "resolved_by_message_id",
+        "resolved_at",
+        "expired_at",
+    }
+)
 
 
 @dataclass
@@ -355,7 +372,27 @@ class TaskLedger:
                         "pending reply envelope must contain an expected_replies list"
                     )
                 return []
-            return replies
+            normalized_replies = []
+            changed = False
+            for item in replies:
+                if not isinstance(item, dict):
+                    changed = True
+                    continue
+                normalized = {
+                    key: value
+                    for key, value in item.items()
+                    if key in _PENDING_REPLY_FIELDS
+                }
+                if len(normalized) != len(item):
+                    changed = True
+                normalized_replies.append(normalized)
+            if changed:
+                logger.warning(
+                    "Normalizing malformed pending reply entries in %s", path.name
+                )
+                if for_mutation:
+                    self._write_pending_replies_unlocked(normalized_replies)
+            return normalized_replies
         except Exception as e:
             if for_mutation:
                 logger.warning(
@@ -815,8 +852,21 @@ class TaskLedger:
             kept = []
             for item in replies:
                 if item.get("status") == "pending":
-                    age = now - item.get("created_at", 0)
-                    if age > self.PENDING_REPLY_TTL:
+                    raw_created_at = item.get("created_at", 0)
+                    if isinstance(raw_created_at, bool) or not isinstance(
+                        raw_created_at, (int, float)
+                    ):
+                        expired = True
+                    else:
+                        try:
+                            created_at = float(raw_created_at)
+                        except OverflowError:
+                            expired = True
+                        else:
+                            expired = not math.isfinite(created_at) or (
+                                now - created_at > self.PENDING_REPLY_TTL
+                            )
+                    if expired:
                         item["status"] = "expired"
                         item["expired_at"] = now
                         changed = True

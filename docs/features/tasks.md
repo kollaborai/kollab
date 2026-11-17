@@ -11,6 +11,10 @@ on every turn, so they survive compaction. Use these for long-running
 multi-agent coordination where you need task state to persist across
 turns.
 
+Pending replies share the task ledger and expire after 24 hours. The ledger
+keeps only known reply fields and prunes malformed timestamps so one corrupt
+entry cannot block the remaining replies.
+
 Tools (registered in plugins/hub/plugin.py):
 
 - task_checkpoint — report progress on a task
