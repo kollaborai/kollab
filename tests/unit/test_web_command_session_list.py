@@ -264,8 +264,8 @@ def test_session_list_titles_and_subtitles_are_markdown_escaped():
         [
             {
                 "id": "session-1",
-                "title": "*bold* [click](https://example.invalid) — Café 東京",
-                "subtitle": "![image](https://example.invalid/image.png)",
+                "title": "*bold* [click](x) — Café 東京",
+                "subtitle": "![image](x)",
                 "action": "resume_session",
                 "metadata": {"session_id": "session-1"},
             }
@@ -274,10 +274,10 @@ def test_session_list_titles_and_subtitles_are_markdown_escaped():
 
     output = _web_command_output(result, "resume")
 
-    assert r"\*bold\* \[click\]\(https://example.invalid\) — Café 東京" in output
-    assert r"\!\[image\]\(https://example.invalid/image.png\)" in output
-    assert "[click](https://example.invalid)" not in output
-    assert "![image](https://example.invalid/image.png)" not in output
+    assert r"\*bold\* \[click\]\(x\) — Café 東京" in output
+    assert r"\!\[image\]\(x\)" in output
+    assert "[click](x)" not in output
+    assert "![image](x)" not in output
 
 
 def test_session_without_explicit_action_is_not_rendered_as_a_bare_row():
