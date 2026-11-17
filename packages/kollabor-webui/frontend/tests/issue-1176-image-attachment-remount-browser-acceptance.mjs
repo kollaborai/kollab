@@ -132,6 +132,7 @@ async function main() {
       undefined,
       { timeout: 5_000 },
     );
+    await shell.page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await shell.page.waitForFunction(
       () => document.querySelectorAll('.aui-composer-attachments [aria-label^="Image attachment"]').length === 0,
     );
