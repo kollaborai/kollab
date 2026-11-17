@@ -9,7 +9,7 @@ import { makeFixtures, openPage, openVite, until } from "./learn-browser-accepta
 // outputs. Screenshots are opt-in: set GALLERY_SHOT_DIR to a directory to
 // capture chat/gallery evidence shots there.
 
-const SHOTS = process.env.GALLERY_SHOT_DIR;
+const SHOTS = process.argv[2] || process.env.GALLERY_SHOT_DIR;
 const SESSION = "learn-regression-session";
 
 // 1x1 PNG and JPEG look-a-like: enough for <img> to render and decode().
@@ -52,6 +52,8 @@ const STALE_HISTORY = [
   { role: "user", content: "first [image1]", media: [MEDIA[0]] },
   { role: "assistant", content: "Got the first." },
   { role: "user", content: "later [image1]", media: [MEDIA[1]] },
+  { role: "user", content: "failed [image1]", media: [{ ref: "", mime: "image/png", failed: true }] },
+  { role: "user", content: "missing [image1]" },
 ];
 const ARTIFACT = {
   ref: "shell-exec-call1-aaaa.output",
@@ -60,7 +62,7 @@ const ARTIFACT = {
   modified: "2026-11-14T21:00:00",
 };
 
-function wrapWithMedia(fixtures, { listedMedia = MEDIA } = {}) {
+function wrapWithMedia(fixtures, { listedMedia = MEDIA, listFailure = false } = {}) {
   const original = fixtures.respond.bind(fixtures);
   const mediaListReads = [];
   async function respond(route) {
@@ -70,6 +72,9 @@ function wrapWithMedia(fixtures, { listedMedia = MEDIA } = {}) {
     const method = request.method();
     if (method === "GET" && endpoint === "/media") {
       mediaListReads.push(url.searchParams.get("session_id"));
+      if (listFailure) {
+        return route.fulfill({ status: 503, contentType: "application/json", body: "{}" });
+      }
       return route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -148,7 +153,7 @@ async function assertNoRawTokens(page) {
 async function openSessionPage(browser, baseUrl, options = {}, width = 0) {
   const fixtures = wrapWithMedia(
     makeFixtures({ history: options.history ?? HISTORY, ...(options.fixtures ?? {}) }),
-    { listedMedia: options.listedMedia ?? MEDIA },
+    { listedMedia: options.listedMedia ?? MEDIA, listFailure: options.listFailure ?? false },
   );
   const shell = await openPage(browser, baseUrl, fixtures, options.openPage ?? {});
   await shell.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
@@ -202,6 +207,7 @@ async function verifyStaleSessionViewer(shell, width) {
   const { page } = shell;
   const thumbs = page.getByRole("button", { name: "Open image" });
   assert.equal(await waitForThumbnails(page), 2, "expected both same-session history thumbnails");
+  assert.equal(await page.getByText("[image1]", { exact: true }).count(), 2, "missing and failed slots should stay inert text");
   assert.deepEqual(shell.fixtures.mediaListReads, [SESSION], "the viewer should have one loaded session list");
 
   const imageBThumb = thumbs.nth(1).locator("img");
@@ -232,6 +238,54 @@ async function verifyStaleSessionViewer(shell, width) {
   await page.keyboard.press("ArrowRight");
   await viewer.getByText("2 / 2", { exact: true }).waitFor({ state: "visible" });
   assert.equal(await viewer.locator("img").getAttribute("src"), imageBSrc);
+}
+
+async function verifyFailedSessionMediaList(shell) {
+  const { page } = shell;
+  const thumbs = page.getByRole("button", { name: "Open image" });
+  assert.equal(await waitForThumbnails(page), 2, "message-local thumbnails should render when the list request fails");
+  assert.deepEqual(shell.fixtures.mediaListReads, [SESSION], "the failed session list should be requested once");
+
+  const imageBThumb = thumbs.nth(1).locator("img");
+  await imageBThumb.evaluate((element) => element.decode());
+  const imageBSrc = await imageBThumb.getAttribute("src");
+  await thumbs.nth(1).click();
+  const viewer = page.getByRole("dialog", { name: "Sent image", exact: true });
+  await viewer.waitFor({ state: "visible" });
+  const displayed = viewer.locator("img");
+  await displayed.evaluate((element) => element.decode());
+  assert.equal(await displayed.getAttribute("src"), imageBSrc, "a failed refresh must fall back to the clicked row's image");
+  assert.ok(await viewer.getByText("1 / 1", { exact: true }).isVisible(), "failed refresh should not add unrelated images");
+}
+
+async function verifySessionSwitch(browser, baseUrl) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  try {
+    await page.goto(`${baseUrl}/tests/acceptance/media-session-switch.html`, { waitUntil: "domcontentloaded" });
+    const media = page.getByTestId("session-media");
+    await page.getByText("session-a-image", { exact: true }).waitFor({ state: "visible" });
+
+    await page.getByRole("button", { name: "Switch session", exact: true }).click();
+    await page.getByText("loading", { exact: true }).waitFor({ state: "visible" });
+    assert.equal(await media.getAttribute("data-leaked"), "no", "session A media must not remain visible while session B loads");
+    assert.equal(await page.getByRole("button", { name: "Open image" }).count(), 0);
+
+    await page.getByRole("button", { name: "Load session B media", exact: true }).click();
+    await page.getByText("session-b-image", { exact: true }).waitFor({ state: "visible" });
+    assert.equal(await media.getAttribute("data-leaked"), "no");
+    const thumb = page.getByRole("button", { name: "Open image", exact: true });
+    await thumb.locator("img").evaluate((element) => element.decode());
+    const expectedSrc = await thumb.locator("img").getAttribute("src");
+    await thumb.click();
+    const viewer = page.getByRole("dialog", { name: "Sent image", exact: true });
+    await viewer.waitFor({ state: "visible" });
+    await viewer.locator("img").evaluate((element) => element.decode());
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/session-switch.png` });
+    assert.equal(await viewer.locator("img").getAttribute("src"), expectedSrc, "session B must open its own image");
+    assert.ok(await viewer.getByText("1 / 1", { exact: true }).isVisible());
+  } finally {
+    await page.close();
+  }
 }
 
 // The view tabs render with a stable testid in both the desktop rail and the
@@ -281,6 +335,7 @@ async function main() {
   if (SHOTS) fs.mkdirSync(SHOTS, { recursive: true });
   const { server, baseUrl } = await openVite();
   let browser;
+  const failures = [];
   try {
     browser = await launchAcceptanceBrowser();
 
@@ -302,10 +357,36 @@ async function main() {
         listedMedia: [MEDIA[0]],
         openPage: { viewport: { width, height }, isMobile },
       }, width);
-      await verifyStaleSessionViewer(staleShell, width);
-      await staleShell.context.close();
+      try {
+        await verifyStaleSessionViewer(staleShell, width);
+      } catch (error) {
+        failures.push(error);
+      } finally {
+        await staleShell.context.close();
+      }
+
+      if (width === 1280) {
+        const failedListShell = await openSessionPage(browser, baseUrl, {
+          history: STALE_HISTORY,
+          listFailure: true,
+          openPage: { viewport: { width, height }, isMobile },
+        }, width);
+        try {
+          await verifyFailedSessionMediaList(failedListShell);
+        } catch (error) {
+          failures.push(error);
+        } finally {
+          await failedListShell.context.close();
+        }
+      }
       console.log(`gallery acceptance ok at ${width}px`);
     }
+    try {
+      await verifySessionSwitch(browser, baseUrl);
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length) throw new AggregateError(failures, "media viewer browser acceptance failed");
     console.log(SHOTS ? `#1088 gallery browser acceptance PASS; screenshots in ${SHOTS}` : "#1088 gallery browser acceptance PASS");
   } finally {
     await browser?.close();
