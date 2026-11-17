@@ -40,6 +40,13 @@ gracefully signal and verify a whole process tree with its current Node-only
 mechanism. It reports cleanup as unverified and does not count that suite as
 passed.
 
+The standalone sidebar footer proof opens the mocked shell at 390px and 820px,
+checks all eight controls are at least 44x44 CSS pixels, and checks that the
+footer and page fit without horizontal overflow. It saves
+`sidebar-footer-touch-targets-390.png` and
+`sidebar-footer-touch-targets-820.png`. Run it from the frontend directory with
+`node tests/sidebar-footer-touch-target-browser-acceptance.mjs <artifact-dir>`.
+
 CI prepares the artifact directory before build and test commands and uploads
 it with `if: always()`. A parallel run must not connect to a real user's
 engine, use their home directory, or reuse a fixed port. The included suites
