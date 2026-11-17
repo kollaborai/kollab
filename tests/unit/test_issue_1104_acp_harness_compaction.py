@@ -199,6 +199,24 @@ class TestAutomaticCompactOnAcpChat(unittest.IsolatedAsyncioTestCase):
         await _settle(plugin)
         self.assertEqual(acp.submit.await_count, 2)
 
+    async def test_threshold_retry_survives_failed_manual_compaction_interleave(self):
+        plugin, _llm, acp = _plugin({"plugins.context_compaction.ask_model_first": True})
+
+        async def fail_after_threshold_update(_text, *, record=True):
+            plugin.acp_usage_updated(300_000, 1_000_000)
+            raise RuntimeError("temporary disconnect")
+
+        acp.submit = AsyncMock(side_effect=fail_after_threshold_update)
+        plugin._compact_acp_harness("requested by user", ask=True)
+        await _settle(plugin)
+        self.assertEqual(acp.submit.await_count, 1)
+
+        acp.submit = AsyncMock(return_value={"text": "", "stop_reason": "end_turn"})
+        plugin.acp_usage_updated(300_000, 1_000_000)
+        await _settle(plugin)
+
+        self.assertEqual(acp.submit.await_count, 2)
+
     async def test_explicit_global_threshold_is_the_trigger_for_acp_too(self):
         plugin, _llm, acp = _plugin({"plugins.context_compaction.token_threshold_k": 500})
         plugin.acp_usage_updated(600_000, 1_000_000)  # over 500K, under the ratio
