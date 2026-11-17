@@ -1966,13 +1966,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                     Release notes
                   </a>
                   <NoticeAction disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>
-                    {updateBusy ? "Updating…" : "Update now"}
+                    {updateBusy ? "Updating…" : "Update Now"}
                   </NoticeAction>
                 </>
               }
               onDismiss={() => setUpdateInfo(null)}
+              detail={`Kollab ${updateInfo.release.version} is available.`}
             >
-              Kollab {updateInfo.release.version} is available.
+              A Kollab update is available.
             </NoticeBar>
           ) : null}
           {contextCompactionStatus ? (
