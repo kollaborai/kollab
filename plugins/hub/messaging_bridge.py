@@ -56,12 +56,21 @@ async def _await_shielded_task(task: asyncio.Task):
 
 async def _stop_transcriber(proc, communication_task: asyncio.Task) -> None:
     """End the isolated whisper process tree, then drain and reap its leader."""
+    import os
+
     from kollabor_config import proc_ctl
 
     try:
         proc_ctl.kill_tree(proc.pid, proc_ctl.HARD)
     except ProcessLookupError:
-        pass
+        # Whisper can already be reaped while a descendant still holds its
+        # inherited pipes. Its PID was also the isolated session's process
+        # group ID, so stop remaining members before waiting for pipe EOF.
+        if os.name != "nt":
+            try:
+                os.killpg(proc.pid, proc_ctl.HARD)
+            except ProcessLookupError:
+                pass
     await proc.wait()
     await asyncio.gather(communication_task, return_exceptions=True)
 
@@ -389,10 +398,15 @@ class TelegramBridge(MessagingBridge):
                 )
                 try:
                     proc = await asyncio.shield(spawn_task)
-                except asyncio.CancelledError:
+                except asyncio.CancelledError as cancellation:
                     # Shield process creation so cancellation cannot orphan a child
                     # between spawn and assignment to ``proc``.
-                    proc, _ = await _await_shielded_task(spawn_task)
+                    try:
+                        proc, _ = await _await_shielded_task(spawn_task)
+                    except BaseException:
+                        # A creation failure must not replace cancellation already
+                        # requested by the caller.
+                        raise cancellation
                     communication_task = asyncio.create_task(proc.communicate())
                     cleanup_task = asyncio.create_task(
                         _stop_transcriber(proc, communication_task)
