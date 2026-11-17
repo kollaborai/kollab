@@ -261,6 +261,23 @@ class VersionCheckService:
                 if self._forced_result is not None:
                     self._last_result = self._forced_result
                     return self._forced_result
+
+            if not force and self._is_cache_valid():
+                release = self._get_cached_release()
+                if release:
+                    status = self._status_for_release(release)
+                    if status is None:
+                        result = UpdateCheckResult(
+                            "failed", None, None, last_successful_check
+                        )
+                        self._last_result = result
+                        return result
+                    result = UpdateCheckResult(
+                        status, release, last_successful_check, last_successful_check
+                    )
+                    self._last_result = result
+                    return result
+
             if monotonic_now < self._rate_limit_retry_until:
                 retry_after = math.ceil(self._rate_limit_retry_until - monotonic_now)
                 result = UpdateCheckResult(
@@ -287,22 +304,6 @@ class VersionCheckService:
                 )
                 self._last_result = result
                 return result
-
-            if not force and self._is_cache_valid():
-                release = self._get_cached_release()
-                if release:
-                    status = self._status_for_release(release)
-                    if status is None:
-                        result = UpdateCheckResult(
-                            "failed", None, None, last_successful_check
-                        )
-                        self._last_result = result
-                        return result
-                    result = UpdateCheckResult(
-                        status, release, last_successful_check, last_successful_check
-                    )
-                    self._last_result = result
-                    return result
 
             try:
                 self._retry_until = 0.0
