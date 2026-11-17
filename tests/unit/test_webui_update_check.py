@@ -1,9 +1,15 @@
-"""The web server's update check reports a newer release instead of failing."""
+"""The web server reports truthful update-check states and bounds lookups."""
 
+import asyncio
+
+import httpx
+import pytest
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 from kollabor_webui import server
 
 from kollabor.updates import VersionCheckService
+from kollabor.version import __version__
 
 
 def test_update_check_reports_a_newer_release(monkeypatch):
@@ -21,3 +27,93 @@ def test_update_check_reports_a_newer_release(monkeypatch):
     body = response.json()
     assert body["available"] is True
     assert body["release"]["version"] == "99.0.0"
+    assert body["status"] == "available"
+
+
+def test_update_check_reports_current_after_a_successful_lookup(monkeypatch):
+    async def latest(self):
+        return {"tag_name": f"v{__version__}", "name": "Current", "html_url": "https://example.invalid/current"}
+
+    monkeypatch.setattr(VersionCheckService, "_fetch_latest_release", latest)
+    with TestClient(server.create_app(), base_url="http://127.0.0.1", client=("127.0.0.1", 12345)) as client:
+        body = client.get("/api/update/check").json()
+
+    assert body["status"] == "current"
+    assert body["available"] is False
+    assert body["last_successful_check"]
+
+
+@pytest.mark.parametrize("release_data", [None, {"tag_name": "not-a-version"}])
+def test_update_check_reports_unknown_when_release_lookup_fails(monkeypatch, release_data):
+    async def latest(self):
+        return release_data
+
+    monkeypatch.setattr(VersionCheckService, "_fetch_latest_release", latest)
+    with TestClient(server.create_app(), base_url="http://127.0.0.1", client=("127.0.0.1", 12345)) as client:
+        body = client.get("/api/update/check").json()
+
+    assert body["status"] == "failed"
+    assert body["available"] is False
+    assert body["last_successful_check"] is None
+
+
+def test_update_check_reports_disabled_separately(monkeypatch):
+    async def latest(self):
+        raise AssertionError("disabled update checks must not fetch releases")
+
+    monkeypatch.setattr(VersionCheckService, "_fetch_latest_release", latest)
+    app = server.create_app()
+    app.state.update_check_config = {"kollabor.updates.check_enabled": False}
+    with TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 12345)) as client:
+        body = client.get("/api/update/check").json()
+
+    assert body["status"] == "disabled"
+    assert body["available"] is False
+
+
+@pytest.mark.asyncio
+async def test_concurrent_update_check_requests_share_one_release_lookup(monkeypatch):
+    calls = 0
+    started = asyncio.Event()
+    release_lookup = asyncio.Event()
+
+    async def latest(self):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release_lookup.wait()
+        return {"tag_name": f"v{__version__}", "name": "Current", "html_url": "https://example.invalid/current"}
+
+    monkeypatch.setattr(VersionCheckService, "_fetch_latest_release", latest)
+    app = server.create_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+        requests = [asyncio.create_task(client.get("/api/update/check")) for _ in range(3)]
+        await asyncio.wait_for(started.wait(), timeout=2)
+        await asyncio.sleep(0)
+        release_lookup.set()
+        responses = await asyncio.gather(*requests)
+
+    assert calls == 1
+    assert all(response.json()["status"] == "current" for response in responses)
+
+
+@pytest.mark.asyncio
+async def test_timeout_is_unknown_and_next_check_recovers(monkeypatch):
+    calls = 0
+
+    async def latest(self):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ReadTimeout("release lookup timed out")
+        return {"tag_name": f"v{__version__}", "name": "Current", "html_url": "https://example.invalid/current"}
+
+    monkeypatch.setattr(VersionCheckService, "_fetch_latest_release", latest)
+    app = server.create_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+        failed = (await client.get("/api/update/check")).json()
+        recovered = (await client.get("/api/update/check?refresh=true")).json()
+
+    assert failed["status"] == "failed"
+    assert recovered["status"] == "current"
+    assert recovered["last_successful_check"]
