@@ -51,9 +51,17 @@ async function main() {
       const page = await context.newPage();
       const pageErrors = [];
       const consoleErrors = [];
+      const failedResponses = [];
       page.on("pageerror", (error) => pageErrors.push(error.message));
       page.on("console", (message) => {
-        if (message.type() === "error") consoleErrors.push(message.text());
+        if (message.type() === "error") {
+          consoleErrors.push(`${message.text()} (${message.location().url})`);
+        }
+      });
+      page.on("response", (response) => {
+        if (response.status() >= 400) {
+          failedResponses.push(`${response.status()} ${new URL(response.url()).pathname}`);
+        }
       });
       try {
         await page.goto(`${baseUrl}/tests/hub-tool-row.fixture.html`, { waitUntil: "domcontentloaded" });
@@ -99,6 +107,7 @@ async function main() {
         }
 
         assert.deepEqual(pageErrors, []);
+        assert.deepEqual(failedResponses, [], `failed responses: ${failedResponses.join(", ")}`);
         assert.deepEqual(consoleErrors, []);
       } finally {
         await context.close();
