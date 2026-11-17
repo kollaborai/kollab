@@ -164,8 +164,16 @@ def test_emergency_rollover_preserves_oversized_live_task_across_reload() -> Non
     assert "BEGIN_CANARY" in task_context
     assert "MIDDLE_CANARY" in task_context
     assert "END_CANARY" in task_context
-    assert f"/hub tasks status {task_id}" in task_context
-    assert "If retrieval fails" in task_context
+    assert "Immediately ask the assigner to resend" in task_context
+    assert "hub_msg" in task_context
+    assert "/hub tasks status" not in task_context
+    reminder = next(
+        message.content
+        for message in second
+        if message.metadata.get("compaction_task_reminder")
+    )
+    assert "ask the assigner to resend" in reminder
+    assert "/hub tasks status" not in reminder
     assert "Remaining assignment text is summarized below." not in task_context
 
 
