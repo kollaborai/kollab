@@ -342,6 +342,44 @@ fi
     assert "4.5.6" in result.stdout
 
 
+@pytest.mark.parametrize("user_setting", ["environment", "config"])
+def test_pip_user_configuration_verifies_the_user_scripts_dir(
+    tmp_path: Path, user_setting: str
+) -> None:
+    tools_dir = tmp_path / "tools"
+    system_scripts = tmp_path / "system scripts"
+    user_scripts = tmp_path / "user scripts"
+    python = _write_executable(
+        tools_dir / "python3",
+        f'''#!/bin/sh
+if [ "$1" = "-c" ]; then
+    if [ "$3" = "posix_user" ]; then echo '{user_scripts}'; else echo '{system_scripts}'; fi
+elif [ "$2" = "config" ] && [ "$4" = "install.user" ]; then
+    echo true
+fi
+''',
+    )
+    _write_executable(
+        tools_dir / "pip3",
+        f'''#!{python}
+if [ "$2" = "--help" ]; then echo --user; fi
+exit 0
+''',
+    )
+    _fake_executable(user_scripts, "4.5.6")
+    extra_env = {"PIP_USER": "1"} if user_setting == "environment" else {}
+
+    result = _run_installer_method(
+        tmp_path,
+        method="pip",
+        path_dirs=[tools_dir, user_scripts, Path("/usr/bin"), Path("/bin")],
+        extra_env=extra_env,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert str(user_scripts / "kollab") in result.stdout
+
+
 def test_pip_env_split_shebang_resolves_the_interpreter(
     tmp_path: Path,
 ) -> None:
