@@ -13,9 +13,11 @@ Profiles can be defined in config.json under core.llm.profiles.
 import copy
 import json
 import logging
+import math
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -709,6 +711,14 @@ class LLMProfile:
     # Bumped by ProfileManager.update_profile on every edit. Not serialized: a
     # caller that awaits (such as a model lookup) compares it to see an edit.
     revision: int = field(default=0, compare=False, repr=False)
+    # Runtime history is persisted separately from profile values so recording
+    # a turn never runs the profile/keyring save path.
+    last_completed_turn: Optional[Dict[str, str]] = field(
+        default=None, compare=False, repr=False
+    )
+    unsupported_models: Dict[str, float] = field(
+        default_factory=dict, compare=False, repr=False
+    )
 
     def _get_env_key(self, field: str) -> str:
         """Generate env var key for this profile and field.
@@ -1421,6 +1431,7 @@ class ProfileManager:
         self._apply_pending_active_profile()
 
         self._detect_env_provider()
+        self._load_profile_runtime_state()
         # Note: Default profile initialization is now handled by config_utils.initialize_config()
         # which runs earlier in app startup and creates global/local config with profiles
 
@@ -1439,7 +1450,212 @@ class ProfileManager:
         self._detect_oauth_provider()
         self._apply_pending_active_profile()
         self._detect_env_provider()
+        self._load_profile_runtime_state()
         logger.info("Profiles reloaded from config")
+
+    def _profile_runtime_config_paths(self) -> tuple[Path, Optional[Path]]:
+        """Return the shared and selected workspace config paths."""
+        global_path = get_existing_global_config_path()
+        if not global_path.exists():
+            global_path = get_global_config_path()
+        local_path = next(
+            (
+                path
+                for path in get_local_config_path_candidates(self._local_folder)
+                if path.exists()
+            ),
+            get_local_config_path() if self._local_folder is None else None,
+        )
+        return global_path, local_path
+
+    @staticmethod
+    def _read_profile_runtime_config(path: Optional[Path]) -> Optional[Dict[str, Any]]:
+        if path is None or not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning(
+                "Unable to read profile runtime state (%s)", type(exc).__name__
+            )
+            return None
+        return data if isinstance(data, dict) else None
+
+    @staticmethod
+    def _profile_runtime_llm_config(data: Dict[str, Any]) -> Dict[str, Any]:
+        kollabor = data.get("kollabor")
+        if not isinstance(kollabor, dict):
+            return {}
+        llm = kollabor.get("llm")
+        return llm if isinstance(llm, dict) else {}
+
+    def _load_profile_runtime_state(self) -> None:
+        global_path, local_path = self._profile_runtime_config_paths()
+        global_data = self._read_profile_runtime_config(global_path) or {}
+        local_data = self._read_profile_runtime_config(local_path) or {}
+        global_llm = self._profile_runtime_llm_config(global_data)
+        local_llm = self._profile_runtime_llm_config(local_data)
+        global_state = global_llm.get("profile_state")
+        local_state = local_llm.get("profile_state")
+        local_profiles = local_llm.get("profiles")
+        if not isinstance(global_state, dict):
+            global_state = {}
+        if not isinstance(local_state, dict):
+            local_state = {}
+        if not isinstance(local_profiles, dict):
+            local_profiles = {}
+
+        for name, profile in self._profiles.items():
+            profile.last_completed_turn = None
+            profile.unsupported_models = {}
+            state_map = local_state if name in local_profiles else global_state
+            state = state_map.get(name)
+            if not isinstance(state, dict):
+                continue
+
+            completed = state.get("last_completed_turn")
+            if isinstance(completed, dict):
+                model = completed.get("model")
+                effort = completed.get("effort")
+                completed_at = completed.get("completed_at")
+                if (
+                    isinstance(model, str)
+                    and model.strip()
+                    and isinstance(effort, str)
+                    and isinstance(completed_at, str)
+                    and completed_at.strip()
+                ):
+                    profile.last_completed_turn = {
+                        "model": model,
+                        "effort": effort,
+                        "completed_at": completed_at,
+                    }
+
+            unsupported = state.get("unsupported_models")
+            if isinstance(unsupported, dict):
+                for model, revision in unsupported.items():
+                    if (
+                        not isinstance(model, str)
+                        or not model.strip()
+                        or not isinstance(revision, (int, float))
+                        or isinstance(revision, bool)
+                    ):
+                        continue
+                    try:
+                        revision_value = float(revision)
+                    except (OverflowError, ValueError):
+                        continue
+                    if math.isfinite(revision_value) and revision_value >= 0:
+                        profile.unsupported_models[model] = revision_value
+
+    def _persist_profile_runtime_state(self, profile_name: str) -> bool:
+        profile = self._profiles.get(profile_name)
+        if profile is None:
+            return False
+
+        global_path, local_path = self._profile_runtime_config_paths()
+        local_data = self._read_profile_runtime_config(local_path) or {}
+        local_profiles = self._profile_runtime_llm_config(local_data).get("profiles")
+        if (
+            local_path is not None
+            and isinstance(local_profiles, dict)
+            and profile_name in local_profiles
+        ):
+            path = local_path
+        else:
+            path = global_path
+
+        data = self._read_profile_runtime_config(path)
+        if data is None:
+            return False
+        kollabor = data.setdefault("kollabor", {})
+        if not isinstance(kollabor, dict):
+            return False
+        llm = kollabor.setdefault("llm", {})
+        if not isinstance(llm, dict):
+            return False
+        profile_state = llm.setdefault("profile_state", {})
+        if not isinstance(profile_state, dict):
+            return False
+
+        state: Dict[str, Any] = {}
+        if profile.last_completed_turn:
+            state["last_completed_turn"] = dict(profile.last_completed_turn)
+        if profile.unsupported_models:
+            state["unsupported_models"] = dict(profile.unsupported_models)
+        if state:
+            profile_state[profile_name] = state
+        else:
+            profile_state.pop(profile_name, None)
+        if not profile_state:
+            llm.pop("profile_state", None)
+
+        try:
+            write_text_atomic(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            logger.warning(
+                "Unable to persist profile runtime state (%s)", type(exc).__name__
+            )
+            return False
+        return True
+
+    def record_completed_turn(
+        self,
+        profile_name: str,
+        model: str,
+        effort: str,
+        *,
+        completed_at: Optional[str] = None,
+    ) -> bool:
+        profile = self._profiles.get(profile_name)
+        if profile is None or not isinstance(model, str) or not model.strip():
+            return False
+        completed_at = completed_at or datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        ).replace("+00:00", "Z")
+        profile.last_completed_turn = {
+            "model": model,
+            "effort": effort if isinstance(effort, str) else "",
+            "completed_at": completed_at,
+        }
+        return self._persist_profile_runtime_state(profile_name)
+
+    def mark_model_unsupported(self, profile_name: str, model: str) -> bool:
+        profile = self._profiles.get(profile_name)
+        if profile is None or not isinstance(model, str) or not model.strip():
+            return False
+        from kollabor_ai.model_catalog import cached_provider_models_updated_at
+
+        revision = cached_provider_models_updated_at(profile, max_age=float("inf"))
+        if not math.isfinite(revision) or revision < 0:
+            revision = 0.0
+        profile.unsupported_models[model] = float(revision)
+        return self._persist_profile_runtime_state(profile_name)
+
+    def get_unavailable_models(self, profile_name: str) -> List[str]:
+        profile = self._profiles.get(profile_name)
+        if profile is None or not profile.unsupported_models:
+            return []
+        from kollabor_ai.model_catalog import (
+            cached_provider_models,
+            cached_provider_models_updated_at,
+        )
+
+        catalog = cached_provider_models(profile, max_age=float("inf"))
+        revision = cached_provider_models_updated_at(profile, max_age=float("inf"))
+        available = {
+            str(entry.get("id"))
+            for entry in catalog
+            if isinstance(entry, dict) and entry.get("id")
+        }
+        changed = False
+        for model, failed_revision in list(profile.unsupported_models.items()):
+            if revision > failed_revision and model in available:
+                del profile.unsupported_models[model]
+                changed = True
+        if changed:
+            self._persist_profile_runtime_state(profile_name)
+        return sorted(profile.unsupported_models)
 
     @property
     def is_auto_detected(self) -> bool:
