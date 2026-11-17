@@ -121,6 +121,36 @@ class TestInboxSizeBound:
 # ---------------------------------------------------------------------------
 
 class TestInboxTTLExpiry:
+    @pytest.mark.parametrize(
+        "bad_timestamp",
+        ["invalid", [], {}, float("nan"), float("inf"), -float("inf"), None],
+    )
+    def test_malformed_timestamp_does_not_abort_or_consume_neighboring_controls(
+        self, tmp_path: Path, bad_timestamp
+    ) -> None:
+        inbox = tmp_path / "lapis"
+        inbox.mkdir()
+
+        def control(content: str) -> dict:
+            data = _make_msg(content=content).to_dict()
+            data["metadata"] = {"task_assignment": True}
+            return data
+
+        before = inbox / "0000001-before.json"
+        malformed = inbox / "0000002-malformed.json"
+        after = inbox / "0000003-after.json"
+        before.write_text(json.dumps(control("before")))
+        bad_data = _make_msg(content="corrupt").to_dict()
+        bad_data["timestamp"] = bad_timestamp
+        malformed.write_text(json.dumps(bad_data))
+        after.write_text(json.dumps(control("after")))
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            result = AgentMessenger.read_mailbox("lapis")
+
+        assert [message.content for message in result] == ["before", "after"]
+        assert not malformed.exists()
+
     def test_expired_messages_not_returned(self, tmp_path: Path) -> None:
         inbox = tmp_path / "lapis"
         inbox.mkdir()
