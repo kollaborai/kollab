@@ -945,9 +945,6 @@ class ConfigLoader:
         self, path: Path, *, allow_unreadable_current: bool = False
     ) -> tuple[bool, Dict[str, Any]]:
         """Check the file version and shape while the caller holds its config lock."""
-        if self.config_load_error and not allow_unreadable_current:
-            return False, {}
-
         key = _config_path_key(path)
         expected = self._config_file_snapshots.get(key, _UNTRACKED)
         current, status, snapshot = _read_config_file(path)
@@ -1038,10 +1035,6 @@ class ConfigLoader:
         Returns:
             True if save successful, False otherwise.
         """
-        if self.config_load_error:
-            logger.warning("Config save refused: %s", self.config_load_error)
-            return False
-
         # JSON round-trip instead of deepcopy: strips non-serializable objects
         # (asyncio.Future, etc.) that plugins may inject at runtime.
         try:
@@ -1107,6 +1100,7 @@ class ConfigLoader:
 
             save_path.parent.mkdir(parents=True, exist_ok=True)
             with locked_file(save_path.with_name(save_path.name + ".lock"), private=True):
+                load_error = self.config_load_error
                 allowed, _ = self._check_file_for_write(save_path)
                 if not allowed:
                     logger.warning("Config save refused: %s", self.config_load_error)
@@ -1118,6 +1112,8 @@ class ConfigLoader:
                 )
                 if not self._record_file_snapshot(save_path):
                     return False
+                if load_error:
+                    self.config_load_error = load_error
             logger.info("Saved configuration")
             return True
         except Exception as e:
