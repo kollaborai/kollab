@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-
 REPO = Path(__file__).resolve().parents[2]
 KOORDINATOR_SECTION = REPO / "bundles/agents/koordinator/sections/00-header.md"
 
