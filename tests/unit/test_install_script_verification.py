@@ -310,3 +310,31 @@ fi
     assert result.returncode == 0, result.stdout + result.stderr
     assert str(scripts_dir / "kollab") in result.stdout
     assert "4.5.6" in result.stdout
+
+
+def test_pip_env_split_shebang_resolves_the_interpreter(
+    tmp_path: Path,
+) -> None:
+    tools_dir = tmp_path / "tools"
+    scripts_dir = tmp_path / "custom scripts"
+    _fake_executable(scripts_dir, "4.5.6")
+    python = _write_executable(
+        tools_dir / "python3",
+        f"#!/bin/sh\nprintf '%s\\n' '{scripts_dir}'\n",
+    )
+    pip_script = _write_executable(
+        tools_dir / "pip3",
+        "#!/usr/bin/env -S python3 -I\n",
+    )
+
+    result = _run_installer_method(
+        tmp_path,
+        method="pip",
+        path_dirs=[tools_dir, scripts_dir, Path("/usr/bin"), Path("/bin")],
+    )
+
+    assert python.exists()
+    assert pip_script.exists()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert str(scripts_dir / "kollab") in result.stdout
+    assert "4.5.6" in result.stdout
