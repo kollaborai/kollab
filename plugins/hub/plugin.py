@@ -83,6 +83,8 @@ from .nudge_engine import NudgeEngine
 from .presence import PresenceManager, get_messages_dir, pid_alive, wait_until_socket_answers
 from .recurring_jobs import (
     SEND_TIMEOUT_SECONDS as SCHEDULE_SEND_TIMEOUT_SECONDS,
+)
+from .recurring_jobs import (
     RecurringJobs,
     default_job_config,
 )
