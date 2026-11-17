@@ -1871,12 +1871,13 @@ class ContextCompactionPlugin(BasePlugin):
             if reason == "threshold":
                 self._set_compaction_status("warning", message)
             return message
-        if reason == "threshold":
-            # Keep the threshold armed until the command exists; usage may arrive
-            # before the harness advertises its available commands.
-            self._acp_compact_armed = False
         if self._acp_compacting:
             return "the harness is already compacting its own context"
+        if reason == "threshold":
+            # Keep the threshold armed until a compaction attempt actually starts;
+            # usage may arrive before the harness advertises its command or while
+            # a manual compaction is already in progress.
+            self._acp_compact_armed = False
         self._acp_compacting = True
         task = asyncio.create_task(self._run_acp_compaction(acp, command, reason, ask))
         self._compaction_tasks.add(task)
