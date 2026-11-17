@@ -27,14 +27,17 @@ async function main() {
       localStorage.setItem("kollab.setup-guide.v1", JSON.stringify({ step: "provider", dismissed: false }));
     });
     await view.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    const animationPause = await view.page.addStyleTag({
+      content: '[data-slot="dialog-content"] { animation-play-state: paused !important; }',
+    });
     await view.page.getByRole("button", { name: "Guided setup", exact: true }).click();
-    await view.page.waitForTimeout(20);
     const openingOpacity = await view.page.getByRole("dialog").evaluate((element) => getComputedStyle(element).opacity);
     assert.equal(
       openingOpacity,
       "1",
       `the guide should fully cover the staged setup surface while opening (opacity: ${openingOpacity})`,
     );
+    await animationPause.evaluate((element) => element.remove());
     await view.page.getByRole("heading", { name: "Join a network", exact: true }).waitFor({ state: "visible" });
     const guide = view.page.getByRole("dialog");
     const guideBounds = await guide.boundingBox();
