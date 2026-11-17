@@ -295,9 +295,9 @@ Tool registry format:
 }
 ```
 
-The Web UI shows completed MCP calls with readable tool labels. Hub tool rows
-show the recipient in the collapsed row; thread and reply ids remain in the
-expanded call details.
+The Web UI shows completed Hub MCP calls with readable tool labels. Hub tool
+rows show the recipient in the collapsed row; thread and reply ids remain in
+the expanded call details.
 
 ## On-demand Tool Loading
 

@@ -144,12 +144,12 @@ function summarizeTerminalCommand(command: string): string {
   );
 }
 
-export function normalizeMcpToolName(toolName: string): string {
+export function normalizeHubMcpToolName(toolName: string): string {
   const trimmed = toolName.trim();
-  if (!trimmed.startsWith("mcp__")) return trimmed;
-
-  const serverSeparator = trimmed.indexOf("__", "mcp__".length);
-  return serverSeparator === -1 ? trimmed : trimmed.slice(serverSeparator + 2);
+  const hubToolMatch = trimmed.match(
+    /^mcp__kollab-hub__(hub_msg|hub_reply|hub_broadcast)$/,
+  );
+  return hubToolMatch?.[1] ?? trimmed;
 }
 
 export function humanizeToolName(toolName: string): string {
@@ -161,7 +161,7 @@ export function humanizeToolName(toolName: string): string {
     file_write: "Write File",
     terminal: "Run Command",
   };
-  const normalized = normalizeMcpToolName(toolName) || "tool";
+  const normalized = normalizeHubMcpToolName(toolName) || "tool";
   if (knownLabels[normalized]) return knownLabels[normalized];
 
   const leaf = normalized.split(/[:./]/).at(-1) ?? normalized;
@@ -177,7 +177,7 @@ export function summarizeToolCall(toolName: string, argsText?: string): string {
   // history carries the bare native name. Reduce both to the native name.
   const displayName = toolName.match(/^([\w-]+):(?:\s|$)/)?.[1] ?? toolName.trim();
   const normalizedName =
-    normalizeMcpToolName(displayName).replaceAll("-", "_") || "tool";
+    normalizeHubMcpToolName(displayName).replaceAll("-", "_") || "tool";
 
   if (normalizedName === "terminal" && typeof args.command === "string") {
     return summarizeTerminalCommand(args.command);

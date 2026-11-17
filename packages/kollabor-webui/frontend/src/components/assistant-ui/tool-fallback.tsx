@@ -27,7 +27,7 @@ import { formatContent } from "@/utils/format-content";
 import {
   askedForOk,
   humanizeToolName,
-  normalizeMcpToolName,
+  normalizeHubMcpToolName,
   summarizeToolCall,
 } from "@/utils/tool-summary";
 import { Button } from "@/components/ui/button";
@@ -808,7 +808,7 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   const card = harnessCard(result);
   const cardTitle =
     typeof card?.title === "string" && card.title.trim() ? card.title.trim() : undefined;
-  const normalizedToolName = normalizeMcpToolName(cardTitle ?? toolName).replaceAll(
+  const normalizedToolName = normalizeHubMcpToolName(cardTitle ?? toolName).replaceAll(
     "-",
     "_",
   );
@@ -832,7 +832,7 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
           unfinished ? { type: "running" } : status;
   const displayTitle = card
     ? cardTitle
-      ? isHubTool || cardTitle.startsWith("mcp__")
+      ? isHubTool
         ? humanizeToolName(cardTitle)
         : cardTitle
       : displayKind || "Tool"
