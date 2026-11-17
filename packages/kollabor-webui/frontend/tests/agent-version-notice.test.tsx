@@ -1,14 +1,16 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, isAgentTooOld } from "@/api";
 import { DaemonNotice } from "@/components/code/DaemonNotice";
 import { AgentVersionNotice, agentVersionNotice } from "@/components/shell/AgentVersionNotice";
 import { TerminalView } from "@/components/terminal/TerminalView";
 
+const terminalMock = vi.hoisted(() => ({ errorCode: "daemon_outdated" }));
+
 vi.mock("@/components/terminal/use-terminal-ws-connection", () => ({
   useTerminalWsConnection: () => ({
     status: "error",
-    errorCode: "daemon_outdated",
+    errorCode: terminalMock.errorCode,
     errorMessage: "This agent runs older code.",
     reconnecting: false,
     refusal: null,
@@ -152,6 +154,10 @@ describe("agents that cannot restart themselves (#968)", () => {
 describe("daemon outdated notices", () => {
   const stopAndStart = "This agent started before Restart Agent existed. Run kollab --hub stop lapis in a terminal, then select its Offline row in the sidebar to start it again.";
 
+  beforeEach(() => {
+    terminalMock.errorCode = "daemon_outdated";
+  });
+
   function panelNoticeProps(version: string, restartAgents: boolean) {
     return {
       notice: agentVersionNotice({
@@ -187,5 +193,13 @@ describe("daemon outdated notices", () => {
     );
     expect(html).toContain(stopAndStart);
     expect(html).not.toMatch(/>Retry<\/button>/);
+  });
+
+  it("keeps Retry for other Terminal errors", () => {
+    terminalMock.errorCode = "request_failed";
+    const html = renderToStaticMarkup(
+      <TerminalView sessionId="s1" workspace="/workspace" daemonNotice={panelNoticeProps("", false)} />,
+    );
+    expect(html).toMatch(/>Retry<\/button>/);
   });
 });
