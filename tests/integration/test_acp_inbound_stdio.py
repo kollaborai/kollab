@@ -321,7 +321,7 @@ def configure_acp(home, workspace, scenario="normal"):
     (directory / "config.json").write_text(json.dumps(config))
 
 
-def owned_daemons(home):
+def owned_daemons(home, workspace=None):
     result = []
     for path in home.glob(".kollab/**/presence/*.json"):
         try:
@@ -421,6 +421,32 @@ async def test_real_stdio_invalid_session_and_workspace_never_spawn_daemon(tmp_p
         assert failure.value.error["code"] == -32602
     assert owned_daemons(home) == []
     assert connection.bad_lines == [] and connection.process.returncode == 0
+
+
+@pytest.mark.asyncio
+async def test_new_session_registers_live_owned_daemon_in_project_scope(tmp_path):
+    home = tmp_path / "home"
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    async with local_provider() as (endpoint, _calls):
+        configure(home, endpoint)
+        async with client(workspace, home, "owned-native") as connection:
+            await connection.rpc(
+                "initialize", {"protocolVersion": 1, "clientCapabilities": {}}
+            )
+            session_id = (
+                await connection.rpc(
+                    "session/new", {"cwd": str(workspace), "mcpServers": []}
+                )
+            )["sessionId"]
+            await connection.rpc(
+                "session/set_mode",
+                {"sessionId": session_id, "modeId": "trust_all"},
+            )
+            records = owned_daemons(home, workspace)
+            assert len(records) == 1
+            assert process_alive(records[0]["pid"])
+            assert Path(records[0]["socket_path"]).exists()
 
 
 @pytest.mark.asyncio
