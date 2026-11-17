@@ -155,14 +155,18 @@ describe("composer attachment retention per draft key", () => {
     expect(freshLoad("k3")).toEqual([]);
   });
 
-  it("retention is memory-only: a reload (module re-import) starts empty", async () => {
+  it("restores pending images after a page reload", async () => {
+    const durableStorage = new Map();
     const { saveComposerAttachments: freshSave } = await import("@/composer-draft");
-    freshSave("k4", [
+    await (freshSave as unknown as (...args: unknown[]) => Promise<void>)("k4", [
       { id: "a1", type: "image", name: "a.png", contentType: "image/png" },
-    ]);
+    ], durableStorage);
     vi.resetModules();
     const reloaded = await import("@/composer-draft");
-    expect(reloaded.loadComposerAttachments("k4")).toEqual([]);
+    const restored = await (
+      reloaded.loadComposerAttachments as unknown as (...args: unknown[]) => Promise<unknown[]>
+    )("k4", durableStorage);
+    expect(restored).toHaveLength(1);
   });
 
   it("ignores a null draft key", () => {
