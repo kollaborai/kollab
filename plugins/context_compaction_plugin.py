@@ -1929,9 +1929,12 @@ class ContextCompactionPlugin(BasePlugin):
             self._acp_compaction_session_key = None
             if reason == "threshold" and not succeeded:
                 self._acp_compact_armed = True
-            elif reason != "threshold" and self._acp_threshold_crossing_pending:
-                self._acp_compact_armed = not succeeded
-                self._acp_threshold_crossing_pending = False
+            elif reason != "threshold":
+                if self._acp_threshold_crossing_pending:
+                    self._acp_compact_armed = not succeeded
+                    self._acp_threshold_crossing_pending = False
+                elif succeeded:
+                    self._acp_compact_armed = False
             if retry_new_session:
                 self._acp_threshold_crossing_pending = False
                 self._acp_compact_armed = True
