@@ -45,6 +45,14 @@ const HISTORY = [
   },
   { role: "assistant", content: "Got that too." },
 ];
+// The session list has A when it is loaded. Later history in this same
+// session contains B, but the list response is still A: this is the stale
+// cache state that used to make B's thumbnail open A.
+const STALE_HISTORY = [
+  { role: "user", content: "first [image1]", media: [MEDIA[0]] },
+  { role: "assistant", content: "Got the first." },
+  { role: "user", content: "later [image1]", media: [MEDIA[1]] },
+];
 const ARTIFACT = {
   ref: "shell-exec-call1-aaaa.output",
   name: "shell-exec-call1-aaaa",
@@ -52,18 +60,20 @@ const ARTIFACT = {
   modified: "2026-11-14T21:00:00",
 };
 
-function wrapWithMedia(fixtures) {
+function wrapWithMedia(fixtures, { listedMedia = MEDIA } = {}) {
   const original = fixtures.respond.bind(fixtures);
+  const mediaListReads = [];
   async function respond(route) {
     const request = route.request();
     const url = new URL(request.url());
     const endpoint = url.pathname.replace(/^\/api(?=\/)/, "");
     const method = request.method();
     if (method === "GET" && endpoint === "/media") {
+      mediaListReads.push(url.searchParams.get("session_id"));
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ session_id: SESSION, media: MEDIA }),
+        body: JSON.stringify({ session_id: SESSION, media: listedMedia }),
       });
     }
     const mediaMatch = /^\/media\/([^/]+)$/.exec(endpoint);
@@ -98,7 +108,7 @@ function wrapWithMedia(fixtures) {
     }
     return original(route);
   }
-  return { ...fixtures, respond };
+  return { ...fixtures, mediaListReads, respond };
 }
 
 async function launchAcceptanceBrowser() {
@@ -137,7 +147,8 @@ async function assertNoRawTokens(page) {
 
 async function openSessionPage(browser, baseUrl, options = {}, width = 0) {
   const fixtures = wrapWithMedia(
-    makeFixtures({ history: HISTORY, ...(options.fixtures ?? {}) }),
+    makeFixtures({ history: options.history ?? HISTORY, ...(options.fixtures ?? {}) }),
+    { listedMedia: options.listedMedia ?? MEDIA },
   );
   const shell = await openPage(browser, baseUrl, fixtures, options.openPage ?? {});
   await shell.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
@@ -185,6 +196,42 @@ async function verifyViewer(shell) {
   await viewer.getByText("1 / 2", { exact: true }).waitFor({ state: "visible" });
   await page.keyboard.press("Escape");
   await viewer.waitFor({ state: "hidden" });
+}
+
+async function verifyStaleSessionViewer(shell, width) {
+  const { page } = shell;
+  const thumbs = page.getByRole("button", { name: "Open image" });
+  assert.equal(await waitForThumbnails(page), 2, "expected both same-session history thumbnails");
+  assert.deepEqual(shell.fixtures.mediaListReads, [SESSION], "the viewer should have one loaded session list");
+
+  const imageBThumb = thumbs.nth(1).locator("img");
+  await imageBThumb.evaluate((element) => element.decode());
+  const imageBSrc = await imageBThumb.getAttribute("src");
+  assert.ok(imageBSrc, "image B should be visibly loaded in its thumbnail");
+
+  await thumbs.nth(1).click();
+  const viewer = page.getByRole("dialog", { name: "Sent image", exact: true });
+  await viewer.waitFor({ state: "visible" });
+  const displayed = viewer.locator("img");
+  await displayed.evaluate((element) => element.decode());
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/stale-viewer-${width}.png` });
+
+  assert.equal(
+    await displayed.getAttribute("src"),
+    imageBSrc,
+    "clicking image B must show B even when the loaded session list only contains image A",
+  );
+  assert.deepEqual(shell.fixtures.mediaListReads, [SESSION], "opening B must not remount or refresh the session list");
+  assert.ok(await viewer.getByText("2 / 2", { exact: true }).isVisible(), "B should be appended after cached A");
+  await page.keyboard.press("ArrowLeft");
+  await viewer.getByText("1 / 2", { exact: true }).waitFor({ state: "visible" });
+  assert.equal(
+    await viewer.locator("img").getAttribute("src"),
+    await thumbs.nth(0).locator("img").getAttribute("src"),
+  );
+  await page.keyboard.press("ArrowRight");
+  await viewer.getByText("2 / 2", { exact: true }).waitFor({ state: "visible" });
+  assert.equal(await viewer.locator("img").getAttribute("src"), imageBSrc);
 }
 
 // The view tabs render with a stable testid in both the desktop rail and the
@@ -249,6 +296,14 @@ async function main() {
       if (SHOTS) await shell.page.screenshot({ path: `${SHOTS}/chat-${width}.png` });
       await verifyGallery(shell, width);
       await shell.context.close();
+
+      const staleShell = await openSessionPage(browser, baseUrl, {
+        history: STALE_HISTORY,
+        listedMedia: [MEDIA[0]],
+        openPage: { viewport: { width, height }, isMobile },
+      }, width);
+      await verifyStaleSessionViewer(staleShell, width);
+      await staleShell.context.close();
       console.log(`gallery acceptance ok at ${width}px`);
     }
     console.log(SHOTS ? `#1088 gallery browser acceptance PASS; screenshots in ${SHOTS}` : "#1088 gallery browser acceptance PASS");
