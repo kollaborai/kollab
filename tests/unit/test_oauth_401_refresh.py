@@ -41,7 +41,7 @@ def _service(auth_type="oauth"):
 def _wire(service, results, refreshed_key="new-token"):
     service._call_provider_nonstream = AsyncMock(side_effect=results)
 
-    async def refresh():
+    async def refresh(*_args):
         await asyncio.sleep(0)
         if refreshed_key:
             service._profile.api_key = refreshed_key
