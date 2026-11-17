@@ -28,6 +28,13 @@ async function main() {
     });
     await view.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
     await view.page.getByRole("button", { name: "Guided setup", exact: true }).click();
+    await view.page.waitForTimeout(20);
+    const openingOpacity = await view.page.getByRole("dialog").evaluate((element) => getComputedStyle(element).opacity);
+    assert.equal(
+      openingOpacity,
+      "1",
+      `the guide should fully cover the staged setup surface while opening (opacity: ${openingOpacity})`,
+    );
     await view.page.getByRole("heading", { name: "Join a network", exact: true }).waitFor({ state: "visible" });
     const guide = view.page.getByRole("dialog");
     const guideBounds = await guide.boundingBox();
