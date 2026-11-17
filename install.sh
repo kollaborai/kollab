@@ -288,7 +288,7 @@ run_version_check() {
 
 # Try pip (standard)
 try_pip() {
-    local install_scheme="" scripts_dir
+    local install_scheme="" scripts_dir configured_user user_setting
     if ! command_exists pip && ! command_exists pip3; then
         return 1
     fi
@@ -297,6 +297,22 @@ try_pip() {
     command_exists pip3 && pip_cmd="pip3"
 
     info "Installing with $pip_cmd (system-wide)..."
+
+    user_setting=$(printf '%s' "${PIP_USER:-}" | tr '[:upper:]' '[:lower:]')
+    case "$user_setting" in
+        1|true|yes|on)
+            install_scheme="posix_user"
+            ;;
+        0|false|no|off)
+            ;;
+        *)
+            configured_user=$("$pip_cmd" config get install.user 2>/dev/null || true)
+            user_setting=$(printf '%s' "$configured_user" | tr '[:upper:]' '[:lower:]')
+            case "$user_setting" in
+                1|true|yes|on) install_scheme="posix_user" ;;
+            esac
+            ;;
+    esac
 
     # Check if we need --user flag
     if "$pip_cmd" install --help 2>&1 | grep -q -- --user; then
