@@ -88,3 +88,16 @@ def test_engine_token_symlink_target_is_protected_through_alias(tmp_path, monkey
     (root / "engine.token").symlink_to(target)
     executor = FileOperationsExecutor(workspace=tmp_path)
     assert not executor.execute_operation({"type": "file_read", "file": str(target)})["success"]
+
+
+def test_plugin_data_files_are_denied_not_only_runtime_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+    data = tmp_path / ".kollab" / "plugin-data" / "example" / "private.json"
+    data.parent.mkdir(parents=True)
+    data.write_text('{"secret":"private sentinel"}', encoding="utf-8")
+    executor = FileOperationsExecutor(workspace=tmp_path)
+    executor.set_path_access_mode(PathAccessMode.ANYWHERE)
+    result = executor.execute_operation({"type": "file_read", "file": str(data)})
+    assert not result["success"]
+    assert "private sentinel" not in str(result)
