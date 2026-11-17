@@ -145,6 +145,14 @@ def _make_mock_aiohttp_response(status=200, text="", url="https://example.com"):
     resp.status = status
     resp.reason = "OK" if status < 400 else "Error"
     resp.text = AsyncMock(return_value=text)
+    encoded = text.encode() if isinstance(text, str) else text
+
+    class MockContent:
+        async def iter_chunked(self, chunk_size):
+            for offset in range(0, len(encoded), chunk_size):
+                yield encoded[offset : offset + chunk_size]
+
+    resp.content = MockContent()
     resp.headers = {}
     resp.url = url
     resp.__aenter__ = AsyncMock(return_value=resp)
