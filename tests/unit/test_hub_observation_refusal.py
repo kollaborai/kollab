@@ -189,6 +189,30 @@ async def test_delivery_failure_leaves_message_for_replay_after_restart(
         assert messenger_module.AgentMessenger.get_inbox_count("receiver") == 0
 
 
+@pytest.mark.asyncio
+async def test_accepted_delivery_is_acknowledged_before_batch_returns(tmp_path):
+    message = HubMessage(
+        action="message", from_agent="peer-id-1", from_identity="peer-1",
+        to="receiver", content="accepted once",
+    )
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="agent-1", identity="receiver")
+    plugin._on_message_received = AsyncMock(return_value=None)
+
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        batch = messenger_module.AgentMessenger.read_mailboxes(
+            ["agent-1", "receiver"], consume=False
+        )
+        acknowledged = await plugin._deliver_inbox_batch(batch)
+        replay = messenger_module.AgentMessenger.read_mailboxes(
+            ["agent-1", "receiver"], consume=False
+        )
+
+    assert acknowledged == {message.id}
+    assert replay == []
+
+
 class _RefusingController:
     active = True
 
