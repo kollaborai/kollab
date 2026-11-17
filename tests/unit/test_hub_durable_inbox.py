@@ -123,7 +123,18 @@ class TestInboxSizeBound:
 class TestInboxTTLExpiry:
     @pytest.mark.parametrize(
         "bad_timestamp",
-        ["invalid", [], {}, float("nan"), float("inf"), -float("inf"), None],
+        [
+            "invalid",
+            [],
+            {},
+            float("nan"),
+            float("inf"),
+            -float("inf"),
+            1e300,
+            -1e300,
+            None,
+            "<missing>",
+        ],
     )
     def test_malformed_timestamp_does_not_abort_or_consume_neighboring_controls(
         self, tmp_path: Path, bad_timestamp
@@ -141,7 +152,10 @@ class TestInboxTTLExpiry:
         after = inbox / "0000003-after.json"
         before.write_text(json.dumps(control("before")))
         bad_data = _make_msg(content="corrupt").to_dict()
-        bad_data["timestamp"] = bad_timestamp
+        if bad_timestamp == "<missing>":
+            bad_data.pop("timestamp")
+        else:
+            bad_data["timestamp"] = bad_timestamp
         malformed.write_text(json.dumps(bad_data))
         after.write_text(json.dumps(control("after")))
 
