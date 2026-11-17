@@ -15,7 +15,7 @@ def test_system_message_is_published_to_web_clients():
 
     service.display_system_message("Conversation history not saved for this reply.")
 
-    event = tap._subscribers["web"].get_nowait()
+    event = events.get_nowait()
     assert event["type"] == "notice"
     assert event["message"] == "Conversation history not saved for this reply."
     coordinator.display_message_sequence.assert_called_once()
