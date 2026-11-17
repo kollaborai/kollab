@@ -455,6 +455,63 @@ async def test_branch_current_preserves_original_and_loads_new_branch(tmp_path):
         if message["role"] in {"user", "assistant"}
     ] == [(role, content) for role, content in original_messages[:2]]
 
+
+@pytest.mark.asyncio
+async def test_modal_branch_current_preserves_original_and_loads_new_branch(tmp_path):
+    from plugins.resume_conversation_plugin import ResumeConversationPlugin
+
+    config = SimpleNamespace(
+        _conversations_dir=tmp_path,
+        get=lambda _key, default=None: default,
+    )
+    manager = ConversationManager(config)
+    manager.save_conversations = False
+    original_session_id = manager.current_session_id
+    original_messages = [
+        ("user", "first message 🧭"),
+        ("assistant", "first answer 你好"),
+        ("user", "later question"),
+        ("assistant", "later answer"),
+    ]
+    for role, content in original_messages:
+        manager.add_message(role, content)
+
+    llm_service = SimpleNamespace(
+        conversation_history=[
+            {"role": role, "content": content} for role, content in original_messages
+        ],
+        session_stats={"messages": len(original_messages)},
+    )
+    plugin = ResumeConversationPlugin()
+    plugin.conversation_manager = manager
+    plugin.llm_service = llm_service
+
+    result = await plugin._handle_modal_command(
+        {
+            "command": {
+                "action": "branch_execute",
+                "metadata": {"session_id": "current", "message_index": 1},
+            }
+        },
+        event=None,
+    )
+
+    assert manager.current_session_id != original_session_id
+    original_path = tmp_path / f"{original_session_id}.jsonl"
+    original_session = json.loads(original_path.read_text().splitlines()[0])
+    assert [message["content"] for message in original_session["messages"]] == [
+        content for _, content in original_messages
+    ]
+    assert [message.content for message in llm_service.conversation_history] == [
+        "first message 🧭",
+        "first answer 你好",
+    ]
+    assert [
+        (role, content)
+        for role, content, _ in result["display_messages"]
+        if role in {"user", "assistant"}
+    ] == [(role, content) for role, content in original_messages[:2]]
+
     def test_session_metadata_dataclass(self):
         """Test SessionMetadata dataclass."""
         from kollabor_events.data_models import SessionMetadata
