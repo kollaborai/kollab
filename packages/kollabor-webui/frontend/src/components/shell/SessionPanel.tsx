@@ -271,7 +271,7 @@ export function SessionPanel({
   useEffect(() => {
     setMode(normalizeApprovalMode(session.approval_mode));
     void loadMcp(session.session_id);
-  }, [loadMcp, session.approval_mode]);
+  }, [loadMcp, session.approval_mode, session.session_id]);
 
   useEffect(() => {
     void loadAgents();
