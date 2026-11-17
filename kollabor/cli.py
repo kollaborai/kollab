@@ -5,6 +5,7 @@ import asyncio
 import difflib
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -86,6 +87,9 @@ def parse_timeout(timeout_str: str) -> float:
         seconds = value * 3600
     else:
         raise ValueError(f"Unknown time unit: {unit}")
+
+    if not math.isfinite(seconds):
+        raise ValueError("Timeout value must be finite")
 
     if seconds == 0 and any(char in "123456789" for char in value_text):
         raise ValueError("Timeout value is too small to represent in seconds")
