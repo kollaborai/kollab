@@ -1,7 +1,8 @@
 """Regression tests for terminal-spawn guards in agent tool execution."""
 
 import base64
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -354,3 +355,70 @@ def test_unknown_wrapper_double_dash_encoded_command_stays_blocked(option):
 @pytest.mark.parametrize("option", ["-ec", "-enc"])
 def test_unknown_wrapper_multichar_encoded_flags_stay_conservative(option):
     assert _is_blocked_kollab_spawn(f"mytool {option} not-base64")
+
+
+SUBSTITUTION_GUARD_CASES = [
+    pytest.param("echo '$(kollab --agent coder)'", False, False, id="single-quoted-command-text"),
+    pytest.param('echo "<(kollab --agent coder)"', False, False, id="double-quoted-input-process-text"),
+    pytest.param('echo ">(kollab --agent coder)"', False, False, id="double-quoted-output-process-text"),
+    pytest.param("echo '\"$(kollab --agent coder)\"'", False, False, id="nested-single-quoted-text"),
+    pytest.param('echo "\$(kollab --agent coder)"', False, False, id="escaped-command-substitution"),
+    pytest.param("echo '>(kollab --agent coder)' &", False, False, id="backgrounded-literal-text"),
+    pytest.param("echo $(kollab --agent coder)", True, False, id="unquoted-command-substitution"),
+    pytest.param('echo "$(kollab --agent coder)"', True, False, id="double-quoted-command-substitution"),
+    pytest.param('echo "\'$(kollab --agent coder)\'"', True, False, id="single-quotes-inside-double-quotes"),
+    pytest.param("cat <(kollab --agent coder)", True, False, id="input-process-substitution"),
+    pytest.param("echo >(kollab --agent coder)", True, False, id="output-process-substitution"),
+    pytest.param('echo "$(true; (kollab --agent coder))"', True, False, id="nested-parentheses"),
+    pytest.param('echo "$(printf \')\'; kollab --agent coder)"', True, False, id="quoted-closing-parenthesis"),
+    pytest.param('echo "$(echo "$(kollab --agent coder)")"', True, False, id="nested-command-substitution"),
+    pytest.param('echo "$(printf safe)"', False, False, id="safe-double-quoted-command-substitution"),
+    pytest.param('echo "$(kollab --agent coder"', True, False, id="unmatched-command-substitution"),
+    pytest.param(r"echo $'\'' $(kollab -a coder) 'x'", True, False, id="ansi-c-quote-tokenizer-error"),
+    pytest.param('bash -c "echo \\$(kollab --agent coder)"', True, False, id="shell-wrapper"),
+    pytest.param("kollab --agent coder &", True, False, id="background-command"),
+    pytest.param("kollab --agent coder 2>&1", True, False, id="file-descriptor-redirection"),
+    pytest.param("echo '$(kollab --agent coder)'", False, True, id="background-flag-literal-text"),
+    pytest.param("kollab --agent coder", True, True, id="background-flag-command"),
+]
+
+
+@pytest.mark.parametrize(
+    ("command", "blocked", "background"), SUBSTITUTION_GUARD_CASES
+)
+def test_spawn_guard_respects_shell_substitution_context(command, blocked, background):
+    assert _is_blocked_kollab_spawn(command, background=background) is blocked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "blocked", "background"), SUBSTITUTION_GUARD_CASES
+)
+async def test_terminal_dispatch_preserves_shell_substitution_guard(
+    command, blocked, background
+):
+    executor = ToolExecutor(MagicMock(), MagicMock())
+    executor.tmux_plugin = None
+    executor.shell_executor.run = AsyncMock(
+        return_value=SimpleNamespace(
+            error="", success=True, stdout="ok\n", stderr="", exit_code=0
+        )
+    )
+
+    result = await executor._execute_terminal_command(
+        {
+            "type": "terminal",
+            "id": "substitution-guard",
+            "command": command,
+            "background": background,
+        }
+    )
+
+    if blocked:
+        assert not result.success
+        assert "spawning agents via terminal" in result.error
+        executor.shell_executor.run.assert_not_awaited()
+    else:
+        assert result.success
+        assert result.output == "ok\n"
+        executor.shell_executor.run.assert_awaited_once()
