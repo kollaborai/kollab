@@ -3120,8 +3120,11 @@ async def _handle_cli_web_ui(restart: bool = False, hosts: Optional[str] = None)
         else {}
     )
     def start_engine():
+        command = [*py, "-m", "kollabor_engine", "serve", "--port", str(engine_port)]
+        if "--no-plugins" in sys.argv[1:]:
+            command.append("--no-plugins")
         return subprocess.Popen(
-            [*py, "-m", "kollabor_engine", "serve", "--port", str(engine_port)],
+            command,
             **group_flags,
         )
 

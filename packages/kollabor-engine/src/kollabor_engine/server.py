@@ -204,14 +204,17 @@ async def _engine_lifespan(app: FastAPI):
                         # be retried on the next engine start; never stop it here.
                         logger.exception("could not reown WebUI session %s", session_id)
         logger.info("Engine started")
-        from kollabor_plugins.services import supervise_services
+        import sys
 
-        dispatcher = getattr(app.state, "plugin_dispatcher", None)
-        if dispatcher is not None:
-            await dispatcher.warm()
-        engine_url = getattr(app.state, "plugin_engine_url", None)
-        supervisor = supervise_services(engine_url=engine_url) if engine_url else supervise_services()
-        supervisor_task = asyncio.create_task(supervisor, name="plugin-supervisor")
+        if "--no-plugins" not in sys.argv[1:]:
+            from kollabor_plugins.services import supervise_services
+
+            dispatcher = getattr(app.state, "plugin_dispatcher", None)
+            if dispatcher is not None:
+                await dispatcher.warm()
+            engine_url = getattr(app.state, "plugin_engine_url", None)
+            supervisor = supervise_services(engine_url=engine_url) if engine_url else supervise_services()
+            supervisor_task = asyncio.create_task(supervisor, name="plugin-supervisor")
         if getattr(app.state, "warm_model_choices", False):  # set by `serve`, never by a test's app
             warm_task = asyncio.create_task(_warm_model_choices(), name="model-picker-warm")
         phone_link = getattr(app.state, "phone_link", None)
@@ -340,6 +343,10 @@ def create_app(port: Optional[int] = None) -> FastAPI:
     async def auth_middleware(request: Request, call_next):
         import os
         import sys
+
+        path = request.scope["path"]
+        if "--no-plugins" in sys.argv[1:] and (path == "/plugins" or path.startswith("/plugins/")):
+            return JSONResponse(status_code=404, content={"detail": "Plugins are disabled"})
 
         from .routes.plugins import remote_plugin_route_allowed
 
