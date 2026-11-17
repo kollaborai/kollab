@@ -1880,7 +1880,7 @@ class TerminalLLMChat:
                     "Startup ready set in finally (startup may be incomplete)"
                 )
 
-    async def start_pipe_mode(self, piped_input: str, timeout: int = 120) -> None:
+    async def start_pipe_mode(self, piped_input: str, timeout: float = 120) -> None:
         """Start in pipe mode: process input and exit after response.
 
         Args:

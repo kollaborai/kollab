@@ -5,6 +5,7 @@ import asyncio
 import difflib
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -49,14 +50,14 @@ STOP_TERM_SECONDS = 1.0
 STOP_KILL_SECONDS = 2.0  # final SIGKILL wait — a wedged event loop swallows SIGTERM
 
 
-def parse_timeout(timeout_str: str) -> int:
+def parse_timeout(timeout_str: str) -> float:
     """Parse timeout string into seconds.
 
     Args:
         timeout_str: Timeout string like "30s", "2min", "1h"
 
     Returns:
-        Timeout in seconds
+        Timeout in seconds, including fractional seconds
 
     Raises:
         ValueError: If timeout format is invalid
@@ -73,18 +74,26 @@ def parse_timeout(timeout_str: str) -> int:
             f"Invalid timeout format: {timeout_str}. Use format like '30s', '2min', or '1h'"
         )
 
-    value = float(match.group(1))
+    value_text = match.group(1)
+    value = float(value_text)
     unit = match.group(2)
 
     # Convert to seconds
     if unit in ("s", "sec", "second", "seconds"):
-        return int(value)
+        seconds = value
     elif unit in ("m", "min", "minute", "minutes"):
-        return int(value * 60)
+        seconds = value * 60
     elif unit in ("h", "hour", "hours"):
-        return int(value * 3600)
+        seconds = value * 3600
     else:
         raise ValueError(f"Unknown time unit: {unit}")
+
+    if not math.isfinite(seconds):
+        raise ValueError("Timeout value must be finite")
+
+    if seconds == 0 and any(char in "123456789" for char in value_text):
+        raise ValueError("Timeout value is too small to represent in seconds")
+    return seconds
 
 
 def build_cli_help_text(command_registry: "SlashCommandRegistry") -> str:
