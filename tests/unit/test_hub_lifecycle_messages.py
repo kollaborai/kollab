@@ -1,5 +1,6 @@
 """Hub lifecycle notices remain visible without waking peer models."""
 
+import asyncio
 import json
 import logging
 from types import SimpleNamespace
@@ -245,6 +246,87 @@ async def test_acp_join_notice_never_reports_the_profile_model_when_options_fail
     assert "profile-model" not in content
     assert "effort: low" not in content
     assert "profile: main\n" in content
+
+
+class _LateHarness:
+    """The live startup order: the hub plugin starts and announces while the
+    ACP runner has not opened its session yet, so its options are unreadable
+    until the test flips ``active``."""
+
+    def __init__(self):
+        self.active = False
+
+    def advertised_config_options(self):
+        return [
+            {"id": "model", "category": "model", "currentValue": "haiku"},
+            {"id": "thought_level", "category": "thought_level", "currentValue": "max"},
+        ]
+
+
+@pytest.mark.asyncio
+async def test_acp_join_notice_waits_for_the_harness_session_to_open():
+    """An ACP agent's arrival notice must wait for the harness's options.
+
+    Live startup runs the hub mesh before the ACP runner (application starts
+    the runner once the hub socket answers), so the harness reports its model
+    and effort only after the announce point. The notice waits instead of
+    going out without them."""
+    profile = SimpleNamespace(
+        name="main", get_provider=lambda: "acp", get_model=lambda: "", get_effort=lambda: ""
+    )
+    harness = _LateHarness()
+    event_bus = _EventBus(
+        {
+            "profile_manager": SimpleNamespace(get_active_profile=lambda: profile),
+            "acp_orchestrator": harness,
+        }
+    )
+    plugin = HubPlugin(event_bus=event_bus)
+    plugin._identity = _runtime("lapis", "lapis-id")
+    peer = _runtime("koordinator", "koordinator-id", name="koordinator")
+    plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+    announcing = asyncio.create_task(plugin._announce_to_peers([peer]))
+    await asyncio.sleep(0.15)
+    assert plugin._deliver_to_agent.await_count == 0, (
+        "the notice went out before the harness reported its options"
+    )
+    harness.active = True
+    await asyncio.wait_for(announcing, timeout=5)
+
+    content = plugin._deliver_to_agent.await_args.args[1].content
+    assert "model: haiku\n" in content
+    assert "effort: max\n" in content
+
+
+@pytest.mark.asyncio
+async def test_acp_join_notice_stops_waiting_at_the_cap_and_omits_model_lines(monkeypatch):
+    """Options that never arrive must not block arrival: after the cap the
+    notice goes out without model and effort."""
+    monkeypatch.setattr("plugins.hub.plugin.ACP_ARRIVAL_OPTIONS_WAIT", 0.2)
+    profile = SimpleNamespace(
+        name="main", get_provider=lambda: "acp", get_model=lambda: "", get_effort=lambda: ""
+    )
+    harness = _LateHarness()  # never becomes active
+    event_bus = _EventBus(
+        {
+            "profile_manager": SimpleNamespace(get_active_profile=lambda: profile),
+            "acp_orchestrator": harness,
+        }
+    )
+    plugin = HubPlugin(event_bus=event_bus)
+    plugin._identity = _runtime("lapis", "lapis-id")
+    peer = _runtime("koordinator", "koordinator-id", name="koordinator")
+    plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+    announcing = asyncio.create_task(plugin._announce_to_peers([peer]))
+    await asyncio.sleep(0.05)
+    assert plugin._deliver_to_agent.await_count == 0, "the cap must still hold the notice"
+    await asyncio.wait_for(announcing, timeout=5)
+
+    content = plugin._deliver_to_agent.await_args.args[1].content
+    assert "model:" not in content
+    assert "effort:" not in content
 
 
 @pytest.mark.asyncio
