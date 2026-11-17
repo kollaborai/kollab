@@ -4827,7 +4827,7 @@ class HubPlugin(BasePlugin):
         json_str = tool_data.get("json_str", "")
         try:
             if state is not None:
-                updates = {"state": state}
+                updates = {"investigation_notes": state}
             else:
                 updates = json.loads(json_str)
             self._session_state_mgr.update_state(self._vault._vault_dir, updates)
