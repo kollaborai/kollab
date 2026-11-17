@@ -98,7 +98,7 @@ class ToolExecutionResult:
 def _is_blocked_kollab_spawn(
     command: str, *, background: bool = False, _depth: int = 0
 ) -> bool:
-    """Detect Kollab agent launches and all-agent stops through common wrappers."""
+    """Detect Kollab launches through common wrappers using a shell-text heuristic."""
     import ast
     import base64
     import re
@@ -117,18 +117,131 @@ def _is_blocked_kollab_spawn(
             r"\b(?:kollab|main\.py|kollabor_cli_main)\b", text, re.IGNORECASE
         )
         dangerous = re.search(
-            r"--agent(?:=|\b)|--detached(?:=|\b)|"
+            r"(?<![\w-])-a\S*|(?<![\w-])-d(?==|[^\w-]|$)|"
+            r"(?<![\w-])--ag(?:e(?:n(?:t)?)?)?(?==|[^\w-]|$)|"
+            r"(?<![\w-])--det(?:a(?:c(?:h(?:e(?:d)?)?)?)?)?(?==|[^\w-]|$)|"
             r"--hub(?:=|\s+)(?:stop|kill)(?:\s+|=)all",
             text,
             re.IGNORECASE,
         )
         return bool(target and (is_background or dangerous))
 
+    def substitution_end(text: str, opening_index: int) -> int | None:
+        frames = [{"depth": 1, "single": False, "double": False, "ansi": False}]
+        index = opening_index + 2
+        while index < len(text):
+            frame = frames[-1]
+            char = text[index]
+
+            if frame["ansi"]:
+                if char == "\\":
+                    index += 2
+                    continue
+                if char == "'":
+                    frame["ansi"] = False
+                index += 1
+                continue
+            if char == "\\" and not frame["single"]:
+                index += 2
+                continue
+            if frame["single"]:
+                if char == "'":
+                    frame["single"] = False
+                index += 1
+                continue
+            if frame["double"]:
+                if char == '"':
+                    frame["double"] = False
+                elif text.startswith("$(", index):
+                    frames.append(
+                        {"depth": 1, "single": False, "double": False, "ansi": False}
+                    )
+                    index += 2
+                    continue
+                index += 1
+                continue
+            if text.startswith("$'", index):
+                frame["ansi"] = True
+                index += 2
+                continue
+            if char == "'":
+                frame["single"] = True
+            elif char == '"':
+                frame["double"] = True
+            elif text.startswith(("$(", "<(", ">("), index):
+                frames.append(
+                    {"depth": 1, "single": False, "double": False, "ansi": False}
+                )
+                index += 2
+                continue
+            elif char == "(":
+                frame["depth"] += 1
+            elif char == ")":
+                frame["depth"] -= 1
+                if frame["depth"] == 0:
+                    if len(frames) == 1:
+                        return index
+                    frames.pop()
+            index += 1
+        return None
+
+    def shell_substitutions_blocked(
+        text: str, is_background: bool, depth: int
+    ) -> bool:
+        in_single = False
+        in_double = False
+        index = 0
+        while index < len(text):
+            char = text[index]
+            if char == "\\" and not in_single:
+                index += 2
+                continue
+            if not in_single and not in_double and text.startswith("$'", index):
+                index += 2
+                while index < len(text):
+                    if text[index] == "\\":
+                        index += 2
+                    elif text[index] == "'":
+                        index += 1
+                        break
+                    else:
+                        index += 1
+                continue
+            if char == "'" and not in_double:
+                in_single = not in_single
+                index += 1
+                continue
+            if char == '"' and not in_single:
+                in_double = not in_double
+                index += 1
+                continue
+
+            is_command_substitution = not in_single and text.startswith("$(", index)
+            is_process_substitution = (
+                not in_single
+                and not in_double
+                and char in "<>"
+                and text.startswith("(", index + 1)
+            )
+            if is_command_substitution or is_process_substitution:
+                end = substitution_end(text, index)
+                body = text[index + 2 : end] if end is not None else text[index + 2 :]
+                if _is_blocked_kollab_spawn(
+                    body, background=is_background, _depth=depth + 1
+                ):
+                    return True
+                if end is None:
+                    return suspicious_launch(body, is_background)
+                index = end + 1
+                continue
+            index += 1
+        return False
+
     def blocked_args(args: list[str], is_background: bool) -> bool:
         if is_background:
             return True
         lowered = [str(arg).lower() for arg in args]
-        # Shell indirection such as eval or $(...) is outside this text guard;
+        # Shell indirection such as eval is outside this text heuristic;
         # cli_main also checks launch context at runtime.
         for index, arg in enumerate(lowered):
             if arg == "--":
@@ -189,6 +302,21 @@ def _is_blocked_kollab_spawn(
             )
             if name not in spawn_calls and not name.startswith(("spawn", "exec")):
                 continue
+
+            shell_mode: bool | None = False
+            shell_keyword = next(
+                (keyword.value for keyword in node.keywords if keyword.arg == "shell"),
+                None,
+            )
+            shell_argument = shell_keyword
+            if shell_argument is None and len(node.args) > 8:
+                shell_argument = node.args[8]
+            if shell_argument is not None:
+                try:
+                    shell_mode = bool(ast.literal_eval(shell_argument))
+                except (ValueError, TypeError):
+                    shell_mode = None
+
             for argument in [*node.args, *(keyword.value for keyword in node.keywords)]:
                 try:
                     value = ast.literal_eval(argument)
@@ -202,7 +330,16 @@ def _is_blocked_kollab_spawn(
                 elif isinstance(value, (list, tuple)) and all(
                     isinstance(item, str) for item in value
                 ):
-                    if scan_tokens(list(value), is_background, depth + 1):
+                    if shell_mode is True and value and _is_blocked_kollab_spawn(
+                        value[0], background=is_background, _depth=depth + 1
+                    ):
+                        return True
+                    if scan_tokens(
+                        list(value),
+                        is_background,
+                        depth + 1,
+                        scan_substitutions=shell_mode is None,
+                    ):
                         return True
         return False
 
@@ -624,7 +761,13 @@ def _is_blocked_kollab_spawn(
             return blocked_args(args, is_background)
         return False
 
-    def scan_tokens(tokens: list[str], is_background: bool, depth: int) -> bool:
+    def scan_tokens(
+        tokens: list[str],
+        is_background: bool,
+        depth: int,
+        *,
+        scan_substitutions: bool = True,
+    ) -> bool:
         if depth > 8:
             return suspicious_launch(" ".join(tokens), is_background)
         segment: list[str] = []
@@ -649,20 +792,24 @@ def _is_blocked_kollab_spawn(
         if inspect_segment(segment, is_background, depth):
             return True
 
-        # Catch shell command substitutions without treating ordinary quoted
-        # mentions (e.g. echo 'kollab --agent') as executable commands.
-        for token in tokens:
-            nested_commands = re.findall(r"\$\(([^()]*)\)|[<>]\(([^()]*)\)", token)
-            for groups in nested_commands:
-                nested = next((group for group in groups if group), "")
-                if nested and _is_blocked_kollab_spawn(
-                    nested, background=is_background, _depth=depth + 1
-                ):
-                    return True
+        # Keep the conservative marker scan for already-tokenized argv lists.
+        # Shell strings are scanned before shlex removes their quote context.
+        if scan_substitutions:
+            for token in tokens:
+                nested_commands = re.findall(r"\$\(([^()]*)\)|[<>]\(([^()]*)\)", token)
+                for groups in nested_commands:
+                    nested = next((group for group in groups if group), "")
+                    if nested and _is_blocked_kollab_spawn(
+                        nested, background=is_background, _depth=depth + 1
+                    ):
+                        return True
         return False
 
     if _depth > 8:
         return suspicious_launch(command, background)
+
+    if shell_substitutions_blocked(command, background, _depth):
+        return True
 
     # Unlike shlex tokens, the original command preserves quote/escape context.
     # Scan backticks here so spaces do not split real substitutions and single-
@@ -703,7 +850,7 @@ def _is_blocked_kollab_spawn(
         tokens = list(lexer)
     except ValueError:
         return suspicious_launch(command, background)
-    return scan_tokens(tokens, background, _depth)
+    return scan_tokens(tokens, background, _depth, scan_substitutions=False)
 
 
 class ToolExecutor:

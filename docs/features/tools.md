@@ -1,7 +1,7 @@
 ---
 title: "Tool Calling"
 created: 2026-02-24
-modified: 2026-09-20
+modified: 2026-11-17
 status: active
 ---
 # Tool Calling
@@ -73,6 +73,12 @@ With working directory:
 ```
 <terminal cwd="/tmp">pwd</terminal>
 ```
+
+The terminal tool blocks direct Kollab agent launches and the CLI commands that
+stop or kill all hub agents. Use `<hub_spawn>` for peers and `/hub stop all` for
+agents owned by this caller. Quoted command and process-substitution examples
+are treated as text; shell-executed substitutions remain checked. The guard is
+a shell-text heuristic, not an OS sandbox.
 
 Execution methods:
 - tmux sessions (preferred, supports background jobs)
