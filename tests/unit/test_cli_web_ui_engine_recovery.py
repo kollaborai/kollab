@@ -11,6 +11,7 @@ import json
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 
@@ -137,6 +138,26 @@ def test_a_dead_engine_is_started_again_on_the_same_port(stack, capsys):
     assert restarted, "the launcher left the web UI without an engine"
     assert engines[1].poll() is not None  # the launcher stops the engine it restarted when it exits
     assert "engine" in capsys.readouterr().out.lower()
+
+
+def test_no_plugins_is_forwarded_to_the_engine(stack, monkeypatch):
+    engines, webuis = stack
+    commands = []
+    original_popen = subprocess.Popen
+
+    def capture_engine_command(cmd, *args, **kwargs):
+        if any("kollabor_engine" in str(part) for part in cmd):
+            commands.append(cmd)
+        return original_popen(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", capture_engine_command)
+    monkeypatch.setattr(sys, "argv", ["kollab", "--web-ui", "--no-plugins"])
+    launcher = run_launcher()
+    assert wait_for(lambda: webuis), "the web UI never started"
+    webuis[0].done.set()
+    launcher.join(timeout=10)
+    assert len(engines) == 1
+    assert commands and "--no-plugins" in commands[0]
 
 
 def test_an_engine_that_is_alive_but_slow_is_not_touched(stack, monkeypatch):
