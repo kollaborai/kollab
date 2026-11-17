@@ -479,6 +479,24 @@ class TestBoundedReplay:
 # ---------------------------------------------------------------------------
 
 class TestReadMailboxes:
+    def test_unacknowledged_replay_survives_until_explicit_ack(self, tmp_path: Path) -> None:
+        inbox = tmp_path / "lapis"
+        inbox.mkdir()
+        message = _make_msg(content="retryable")
+        path = inbox / "00000001-message.json"
+        path.write_text(json.dumps(message.to_dict()))
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            first = AgentMessenger.read_mailboxes(["lapis"], consume=False)
+            replayed = AgentMessenger.read_mailboxes(["lapis"], consume=False)
+            AgentMessenger.acknowledge_mailboxes(["lapis"], {message.id})
+            after_ack = AgentMessenger.read_mailboxes(["lapis"], consume=False)
+
+        assert [msg.id for msg in first] == [message.id]
+        assert [msg.id for msg in replayed] == [message.id]
+        assert after_ack == []
+        assert not path.exists()
+
     def _write_to(self, tmp_path: Path, identity: str, n: int) -> None:
         inbox = tmp_path / identity
         inbox.mkdir(parents=True, exist_ok=True)
