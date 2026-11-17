@@ -94,7 +94,7 @@ from .rosters import (
     split_ref,
 )
 from .scratchpad import Scratchpad
-from .session_state import SessionState, SessionStateManager
+from .session_state import SessionState, SessionStateError, SessionStateManager
 from .startup_messages import HUB_NEW_FEATURES, choose_startup_tip
 from .supervisor import (
     DEFAULT_ALERT_COOLDOWN,
@@ -4837,12 +4837,19 @@ class HubPlugin(BasePlugin):
                 success=True,
                 output=f"saved: {list(updates.keys())}",
             )
-        except json.JSONDecodeError as e:
+        except SessionStateError as e:
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="state_update",
                 success=False,
-                error=f"invalid json: {e}",
+                error=str(e)[:240],
+            )
+        except json.JSONDecodeError:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="state_update",
+                success=False,
+                error="invalid json input",
             )
 
     async def _handle_task_checkpoint_tool(self, tool_data: dict):
