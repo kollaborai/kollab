@@ -6949,7 +6949,13 @@ class HubPlugin(BasePlugin):
                             [self._identity.agent_id, self._identity.identity],
                             acknowledged,
                         )
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as exc:
+                acknowledged = getattr(exc, "acknowledged_message_ids", set())
+                if acknowledged and self._identity:
+                    AgentMessenger.acknowledge_mailboxes(
+                        [self._identity.agent_id, self._identity.identity],
+                        acknowledged,
+                    )
                 break
             except Exception as e:
                 logger.debug(f"Mailbox check error: {e}")
@@ -7006,14 +7012,17 @@ class HubPlugin(BasePlugin):
         normal per-message _on_message_received path so existing live-delivery
         behaviour is preserved.
         """
-        if messages and messages[0].action == "inbox_summary":
-            return await self._inject_inbox_replay(messages)
-        else:
-            acknowledged: set[str] = set()
+        acknowledged: set[str] = set()
+        try:
+            if messages and messages[0].action == "inbox_summary":
+                return await self._inject_inbox_replay(messages, acknowledged)
             for msg in messages:
                 if await self._deliver_inbox_message(msg):
                     acknowledged.add(msg.id)
             return acknowledged
+        except asyncio.CancelledError as exc:
+            exc.acknowledged_message_ids = acknowledged.copy()
+            raise
 
     async def _deliver_inbox_message(self, msg: HubMessage) -> bool:
         """Deliver one mailbox message; refusal leaves its file unacknowledged."""
@@ -7029,7 +7038,9 @@ class HubPlugin(BasePlugin):
             )
             return False
 
-    async def _inject_inbox_replay(self, messages: List[HubMessage]) -> set[str]:
+    async def _inject_inbox_replay(
+        self, messages: List[HubMessage], acknowledged: Optional[set[str]] = None
+    ) -> set[str]:
         """Coalesce a bounded inbox replay into a single injected block.
 
         messages[0] must be the inbox_summary; messages[1:] are the replayed
@@ -7051,7 +7062,7 @@ class HubPlugin(BasePlugin):
             msg for msg in replay_msgs if _is_durable_control(msg.to_dict())
         ]
         ordinary_msgs = [msg for msg in replay_msgs if msg not in control_msgs]
-        acknowledged: set[str] = set()
+        acknowledged = acknowledged if acknowledged is not None else set()
         for msg in control_msgs:
             if await self._deliver_inbox_message(msg):
                 acknowledged.add(msg.id)
