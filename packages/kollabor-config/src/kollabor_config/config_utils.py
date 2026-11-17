@@ -1412,9 +1412,11 @@ def _retire_seeded_skills(global_skills_dir: Path) -> None:
         backup_dir = global_skills_dir / SEED_BACKUP_DIR_NAME
         if _is_link_or_reparse(backup_dir):
             logger.warning("Preserving linked skill backup directory: %s", backup_dir)
+            _warn_shadowed_global_skills(global_skills_dir)
             return
         known = _load_skill_seed_hashes()
         if known is None:
+            _warn_shadowed_global_skills(global_skills_dir)
             return
         with _seed_directory(global_skills_dir, create=False) as skills_fd:
             with _seed_directory(backup_dir, create=True) as backup_fd:
@@ -1479,6 +1481,11 @@ def _retire_seeded_skills(global_skills_dir: Path) -> None:
             moved, edited, skipped,
         )
 
+    _warn_shadowed_global_skills(global_skills_dir)
+
+
+def _warn_shadowed_global_skills(global_skills_dir: Path) -> None:
+    """Warn once for active global skills that differ from bundled copies."""
     bundled_skills_dir = get_bundled_skills_dir()
     if (
         bundled_skills_dir is None
