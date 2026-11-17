@@ -3,21 +3,22 @@ import type { ThreadUserMessagePart } from "@assistant-ui/core";
 /**
  * Composer image restoration for draft switches.
  *
- * Composer drafts survive a session switch as TEXT only (localStorage), but
- * an image attachment lives in the composer runtime, which a session switch
- * drops (issue #1103). The saved text keeps the `[imageN]` placeholder the
- * token synchronizer wrote, so after a switch the placeholder points at
- * nothing and sends only its literal text.
+ * Composer text drafts use localStorage; image attachments are retained per
+ * draft key in memory and IndexedDB because the composer runtime is dropped on
+ * a session switch or page reload (issue #1103). The saved text keeps the
+ * `[imageN]` placeholder the token synchronizer wrote, so it must be restored
+ * with its attachment before the user can send it.
  *
  * Fix shape:
- * - Image attachments are retained in memory per draft key (composer-draft)
+ * - Image attachments are retained in memory and IndexedDB per draft key
+ *   (composer-draft)
  *   and re-added on restore through the same adapter path a manual attach
  *   uses, so the thumbnail sends with the message.
  * - Managed `[imageN]` tokens are stripped from the restored text first
  *   (inline or as their own lines); the synchronizer re-writes fresh tokens
  *   for the restored attachments, so text and attachments never disagree.
- * - Tokens with no attachment behind them (page reload) therefore disappear,
- *   and orphanImageNotice tells the user to paste the image again.
+ * - If a stored attachment cannot be restored, its token disappears and
+ *   orphanImageNotice tells the user to paste the image again.
  */
 
 export type ComposerAttachmentLike = Readonly<{
@@ -96,8 +97,8 @@ export function collectImageAttachments(
 }
 
 /**
- * The notice for tokens stripped on restore with no attachment behind them
- * (a reload keeps text but never attachments). Null when nothing was lost.
+ * The notice for tokens stripped on restore with no available attachment.
+ * Null when nothing was lost.
  */
 export function orphanImageNotice(
   tokenCount: number,

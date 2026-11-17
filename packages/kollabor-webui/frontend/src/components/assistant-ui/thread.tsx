@@ -34,6 +34,7 @@ import { cn } from "@/lib/utils";
 import {
   loadComposerAttachments,
   loadComposerDraft,
+  loadPersistedComposerAttachments,
   queueComposerDraftSubmission,
   saveComposerAttachments,
   saveComposerDraft,
@@ -559,6 +560,7 @@ const Composer: FC<{
   const [busySubmitError, setBusySubmitError] = useState<string | null>(null);
 
   useLayoutEffect(() => {
+    let cancelled = false;
     const key = draftKey ?? null;
     // Capability changes can rerun this effect after the attachment adapter
     // has already rewritten the image tokens. Restore each key once so a
@@ -567,55 +569,69 @@ const Composer: FC<{
     // Token lines belong to attachments, and attachments do not live in the
     // text draft. Strip them first, then restore what the same tab kept.
     const restored = stripImageTokens(loadComposerDraft(key) ?? "");
-    const keptImages = loadComposerAttachments(key);
-    if (attachmentsEnabled || keptImages.length === 0) {
-      lastRestoredDraftKey.current = key;
-    }
     restoredDraft.current = { key, text: restored.text };
     skipEmptyDraftPersist.current = false;
-    setOrphanTokenNotice(orphanImageNotice(restored.tokenCount, attachmentsEnabled ? keptImages.length : 0));
     if (aui.composer.getState().text !== restored.text) {
       aui.composer.setText(restored.text);
     }
-    // Re-add each kept image; the token synchronizer rewrites fresh
-    // [imageN] tokens, so text and attachments never disagree.
-    let restoredImageCount = 0;
-    const reattach = async () => {
+    const restoreImages = async () => {
+      const keptImages = loadComposerAttachments(key);
+      if (keptImages.length === 0) {
+        keptImages.push(...(await loadPersistedComposerAttachments(key)));
+      }
+      if (cancelled) return;
+      if (attachmentsEnabled || keptImages.length === 0) {
+        lastRestoredDraftKey.current = key;
+      }
+      setOrphanTokenNotice(
+        orphanImageNotice(restored.tokenCount, attachmentsEnabled ? keptImages.length : 0),
+      );
+      if (keptImages.length === 0 || !attachmentsEnabled) return;
+
+      // Re-add each kept image; the token synchronizer rewrites fresh
+      // [imageN] tokens, so text and attachments never disagree.
+      let restoredImageCount = 0;
       for (const image of keptImages) {
-        // Pending attachments restore through the adapter exactly as a
-        // manual attach does; complete ones come back as descriptors.
-        if (image.file instanceof File) {
-          await aui.composer.addAttachment(image.file);
-        } else {
-          await aui.composer.addAttachment({
-            type: "image",
-            name: image.name,
-            contentType: image.contentType,
-            content: [...(image.content ?? [])] as ThreadUserMessagePart[],
-          });
+        try {
+          // Pending attachments restore through the adapter exactly as a
+          // manual attach does; complete ones come back as descriptors.
+          if (image.file instanceof File) {
+            await aui.composer.addAttachment(image.file);
+          } else {
+            await aui.composer.addAttachment({
+              type: "image",
+              name: image.name,
+              contentType: image.contentType,
+              content: [...(image.content ?? [])] as ThreadUserMessagePart[],
+            });
+          }
+          restoredImageCount += 1;
+        } catch {
+          // Continue restoring the remaining images after one fails.
         }
-        restoredImageCount += 1;
+      }
+      if (!cancelled) {
+        setOrphanTokenNotice(
+          orphanImageNotice(restored.tokenCount, restoredImageCount),
+        );
       }
     };
-    if (keptImages.length > 0 && attachmentsEnabled) {
-      reattach()
-        .then(() =>
-          setOrphanTokenNotice(
-            orphanImageNotice(restored.tokenCount, restoredImageCount),
-          ),
-        )
-        .catch(() =>
-          setOrphanTokenNotice(
-            orphanImageNotice(restored.tokenCount, restoredImageCount),
-          ),
-        );
-    }
+    void restoreImages();
+    return () => {
+      cancelled = true;
+    };
   }, [aui, draftKey, attachmentsEnabled]);
 
   // Keep the per-key image retention in step with the composer; a session
   // switch drops the runtime, the next mount reads this back.
   useEffect(() => {
-    saveComposerAttachments(draftKey ?? null, collectImageAttachments(composerImages));
+    // Do not let the initial empty composer erase IndexedDB while restoration
+    // is still reading this draft's stored attachments.
+    if (restoredDraft.current?.key === (draftKey ?? null)) return;
+    void saveComposerAttachments(
+      draftKey ?? null,
+      collectImageAttachments(composerImages),
+    );
   }, [composerImages, draftKey]);
 
   // The orphan notice describes the restored draft; the first user edit or
