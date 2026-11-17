@@ -1,3 +1,4 @@
+import builtins
 import json
 from pathlib import Path
 
@@ -119,5 +120,72 @@ def test_late_config_failure_restores_earlier_file_after_atomic_rollback_fails(
     monkeypatch.setattr(type(global_path), "write_text", deny_direct_global_rollback)
 
     assert manager.remove_provider_profiles("anthropic") == []
+    assert json.loads(global_path.read_text(encoding="utf-8")) == original
+    assert json.loads(local_path.read_text(encoding="utf-8")) == original
+
+
+def test_late_commit_and_denied_restores_do_not_partially_remove_provider(
+    monkeypatch, tmp_path
+):
+    global_path = tmp_path / "home" / ".kollab" / "config.json"
+    local_path = tmp_path / "project" / ".kollab" / "config.json"
+    original = {
+        "kollabor": {
+            "llm": {"profiles": {"anthropic-cloud": {"provider": "anthropic"}}}
+        }
+    }
+    for path in (global_path, local_path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(original), encoding="utf-8")
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ProfileManager, "_detect_oauth_provider", lambda self: None)
+    monkeypatch.setattr(
+        profile_module, "get_existing_global_config_path", lambda: global_path
+    )
+    monkeypatch.setattr(
+        profile_module,
+        "get_local_config_path_candidates",
+        lambda folder=None: [local_path],
+    )
+    manager = ProfileManager()
+
+    replace = profile_module.os.replace
+    writes = type(global_path).write_text
+    builtin_open = builtins.open
+    global_replacements = 0
+
+    def deny_late_commit_and_global_restore(source, destination):
+        nonlocal global_replacements
+        target = Path(destination).resolve()
+        if target == local_path.resolve() and str(source).endswith(
+            ".provider-removal.tmp"
+        ):
+            raise PermissionError("late local commit denied")
+        if target == global_path.resolve():
+            global_replacements += 1
+            if global_replacements > 2:
+                raise PermissionError("global restore denied")
+        return replace(source, destination)
+
+    def deny_direct_global_restore(path, *args, **kwargs):
+        if Path(path).resolve() == global_path.resolve():
+            raise PermissionError("global direct restore denied")
+        return writes(path, *args, **kwargs)
+
+    def deny_final_global_restore(path, mode="r", *args, **kwargs):
+        if "w" in mode and Path(path).resolve() == global_path.resolve():
+            raise PermissionError("global final restore denied")
+        return builtin_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(profile_module.os, "replace", deny_late_commit_and_global_restore)
+    monkeypatch.setattr(type(global_path), "write_text", deny_direct_global_restore)
+    monkeypatch.setattr(builtins, "open", deny_final_global_restore)
+
+    assert manager.remove_provider_profiles("anthropic") == []
+    monkeypatch.setattr(profile_module.os, "replace", replace)
+    monkeypatch.setattr(type(global_path), "write_text", writes)
+    monkeypatch.setattr(builtins, "open", builtin_open)
     assert json.loads(global_path.read_text(encoding="utf-8")) == original
     assert json.loads(local_path.read_text(encoding="utf-8")) == original
