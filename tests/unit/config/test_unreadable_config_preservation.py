@@ -264,3 +264,41 @@ def test_explicit_backup_and_repair_keep_the_original_bytes_and_mode(tmp_path):
         assert stat.S_IMODE(backup.stat().st_mode) == 0o640
     finally:
         service.shutdown()
+
+
+def test_restore_from_backup_repairs_unreadable_config_with_exact_bytes_and_mode(tmp_path):
+    path = tmp_path / "explicit.json"
+    _write_bytes(path, b'{"api_key":"DO_NOT_ECHO",', mode=0o600)
+    service = ConfigService(path, fast_mode=True)
+    backup = tmp_path / "known-good.json"
+    known_good = b'{\n  "settings": {"repaired": true},\n  "api_key": "DO_NOT_ECHO"\n}\n'
+    _write_bytes(backup, known_good, mode=0o640)
+
+    try:
+        assert service.get_config_error()
+        assert service.restore_from_backup(backup) is True
+        assert path.read_bytes() == known_good
+        assert stat.S_IMODE(path.stat().st_mode) == 0o640
+        assert service.get_config_error() is None
+        assert service.get("settings.repaired") is True
+    finally:
+        service.shutdown()
+
+
+def test_restore_from_backup_refuses_a_target_changed_since_load(tmp_path):
+    path = tmp_path / "explicit.json"
+    _write_bytes(path, b'{"api_key":"DO_NOT_ECHO",')
+    service = ConfigService(path, fast_mode=True)
+    backup = tmp_path / "known-good.json"
+    _write_bytes(backup, b'{"settings":{"repaired":true}}')
+    changed = b'{"settings":{"changed_elsewhere":true}}'
+
+    try:
+        _write_bytes(path, changed)
+        assert service.restore_from_backup(backup) is False
+        assert path.read_bytes() == changed
+        error = service.get_config_error()
+        assert error and "changed" in error.lower()
+        assert "DO_NOT_ECHO" not in error
+    finally:
+        service.shutdown()
