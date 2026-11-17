@@ -239,6 +239,10 @@ Resolution order for the skill library (later tiers override earlier ones on nam
 2. `~/.kollab/skills/` (global)
 3. `.kollab/skills/` (local project)
 
+When a global skill shares a name with a bundled skill but its `SKILL.md` differs,
+Kollab logs a startup warning with both paths and marks the active global copy in
+the skill pickers. The global copy is preserved so intentional edits are not lost.
+
 Assign skills to an agent via `agent.json`'s `"skills"` array.
 
 ### Minimal SKILL.md example
