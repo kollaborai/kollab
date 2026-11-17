@@ -3231,18 +3231,29 @@ class ContextCompactionPlugin(BasePlugin):
         oversized_indices: set[int] = set()
         for index, msg in latest_tasks:
             content = str(getattr(msg, "content", "") or "")
+            excerpt_suffix = "\n[Remaining assignment text is summarized below.]"
+            metadata = getattr(msg, "metadata", None)
+            if (
+                isinstance(metadata, dict)
+                and metadata.get("context_compaction_task_excerpt") is True
+            ):
+                normalized_content = content.removesuffix(excerpt_suffix)
+                if normalized_content != content:
+                    msg = copy.copy(msg)
+                    msg.content = normalized_content
+                    content = normalized_content
             if len(content) <= MAX_PRESERVED_HUB_TASK_CHARS:
                 preserved_by_index[index] = msg
                 continue
 
             task_id = (self._message_task_id(msg) or "unknown")[:128]
             prefix = f"[Active TaskLedger task {task_id}; latest assignment excerpt]\n"
-            suffix = "\n[Remaining assignment text is summarized below.]"
             excerpt_budget = max(
-                0, MAX_PRESERVED_HUB_TASK_CHARS - len(prefix) - len(suffix)
+                0,
+                MAX_PRESERVED_HUB_TASK_CHARS - len(prefix) - len(excerpt_suffix),
             )
             truncated = copy.copy(msg)
-            truncated.content = f"{prefix}{content[:excerpt_budget]}{suffix}"
+            truncated.content = f"{prefix}{content[:excerpt_budget]}{excerpt_suffix}"
             truncated.metadata = {
                 **(getattr(msg, "metadata", None) or {}),
                 "context_compaction_task_excerpt": True,

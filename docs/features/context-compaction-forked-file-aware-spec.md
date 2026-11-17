@@ -1,7 +1,7 @@
 ---
 title: "Forked File-Aware Context Compaction Spec"
 created: 2026-03-05
-modified: 2026-10-22
+modified: 2026-11-17
 status: proposed
 ---
 # Forked File-Aware Context Compaction Spec
@@ -163,6 +163,8 @@ These guards apply to both the basic and forked strategies:
   An untracked hub request is eligible as human intent only when direct-scope
   recipient metadata names this agent. Raw hub task assignments with IDs are
   excluded; active work is represented by TaskLedger-selected excerpts above.
+  A persisted excerpt loses its previous truncation note before it is retained
+  again during compaction.
 - `max_session_turns` is a visible/logged warning, not an automatic stop. Its
   default is `0` (disabled); a positive configured value enables the warning.
   Turn count and start time persist with session stats, restore on resume, and
