@@ -83,6 +83,28 @@ def test_overlapping_hunks_and_multiple_shared_files_are_reported():
     assert {match.number for match in matches} == {1, 3}
 
 
+def test_rename_source_overlaps_a_change_to_the_original_path():
+    renamed = _pr(
+        2,
+        files=[
+            {
+                "filename": "src/new.py",
+                "previous_filename": "src/old.py",
+                "patch": "@@ -10,2 +10,2 @@\n changed",
+            }
+        ],
+    )
+    edited = _pr(
+        1,
+        files=[{"filename": "src/old.py", "patch": "@@ -11,1 +11,1 @@\n other"}],
+    )
+
+    matches = detector.find_overlaps(renamed, [edited])
+
+    assert len(matches) == 1
+    assert "src/old.py" in matches[0].reasons[0]
+
+
 def test_insertion_at_the_end_of_a_changed_hunk_is_adjacent_not_overlapping():
     current = _pr(
         2,
