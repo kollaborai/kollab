@@ -351,27 +351,6 @@ const ThreadRoot: FC<{
         className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll"
       >
         <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col px-4 pt-4">
-          {historyStatus ? (
-            <div
-              data-slot="history-status"
-              role={historyStatus.kind === "error" ? "alert" : "status"}
-              aria-live={historyStatus.kind === "error" ? "assertive" : "polite"}
-              className={cn(
-                "mx-auto mb-3 flex w-full max-w-(--thread-max-width) items-center justify-between gap-3 rounded-md px-3 py-2 text-xs",
-                historyStatus.kind === "error"
-                  ? "bg-destructive/10 text-destructive"
-                  : "text-muted-foreground bg-muted/50",
-              )}
-            >
-              <span>{historyStatus.message}</span>
-              {historyStatus.kind === "error" && onRetryHistory ? (
-                <Button type="button" size="sm" variant="outline" onClick={onRetryHistory}>
-                  Retry
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
-
           {/* Auto margins on the welcome and the footer center them together
               while the thread is empty, and unlike justify-center they never
               push the top out of reach when a tall hero overflows. */}
@@ -398,6 +377,28 @@ const ThreadRoot: FC<{
                 : "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
             )}
           >
+            {/* Keep transient status in the sticky footer so its mount/unmount
+                does not change the positions of transcript rows above it. */}
+            {historyStatus ? (
+              <div
+                data-slot="history-status"
+                role={historyStatus.kind === "error" ? "alert" : "status"}
+                aria-live={historyStatus.kind === "error" ? "assertive" : "polite"}
+                className={cn(
+                  "mx-auto flex w-full max-w-(--thread-max-width) items-center justify-between gap-3 rounded-md px-3 py-2 text-xs",
+                  historyStatus.kind === "error"
+                    ? "bg-destructive/10 text-destructive"
+                    : "text-muted-foreground bg-muted/50",
+                )}
+              >
+                <span>{historyStatus.message}</span>
+                {historyStatus.kind === "error" && onRetryHistory ? (
+                  <Button type="button" size="sm" variant="outline" onClick={onRetryHistory}>
+                    Retry
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
             <div data-slot="aui_composer-dock" className="flex min-w-0 items-end gap-2 sm:gap-3">
