@@ -1,6 +1,7 @@
 """The engine owns the plugin supervisor task, not the plugin processes."""
 
 import asyncio
+import sys
 
 import pytest
 from fastapi import FastAPI
@@ -56,3 +57,19 @@ async def test_engine_supervisor_receives_listening_origin(monkeypatch):
     async with _engine_lifespan(app):
         await asyncio.wait_for(started.wait(), timeout=1)
     assert seen == ["http://127.0.0.1:8123"]
+
+
+@pytest.mark.asyncio
+async def test_engine_does_not_start_plugin_supervisor_when_plugins_disabled(monkeypatch):
+    from kollabor_plugins import services
+
+    started = asyncio.Event()
+
+    async def supervisor():
+        started.set()
+
+    monkeypatch.setattr(sys, "argv", ["kollab", "--no-plugins"])
+    monkeypatch.setattr(services, "supervise_services", supervisor)
+    async with _engine_lifespan(FastAPI()):
+        await asyncio.sleep(0)
+    assert not started.is_set()
