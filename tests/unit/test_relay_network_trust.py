@@ -348,6 +348,9 @@ async def test_remote_agents_row_shape_and_device_fallback_for_older_peers(bridg
         "acp_waiting": False,
         "agent_type": "",
         "current_tool": None,
+        # This test's agents publish no version, so the row says "" (#1093).
+        "version": "",
+        "build": "",
     }
 
     # An older peer sends no "device" field at all; the caller falls back to

@@ -135,11 +135,45 @@ function bornCoat(
   return {};
 }
 
+/** Hair a crew gem is born with: styles that read over fur (gem_appearance.py CREW_HAIRS). */
+export const CREW_HAIRS = ["short", "long", "spiky", "mohawk", "crop", "fringe", "bob", "page", "mane", "plume", "crest", "quiff"] as const;
+/** How far apart (0-255 luma) a crew gem's hair and fur shades are (gem_appearance.py CREW_CONTRAST). */
+export const CREW_CONTRAST = 80;
+const luma = ([red, green, blue]: readonly number[]) => 0.299 * red + 0.587 * green + 0.114 * blue;
+
+/**
+ * A crew persona's born coat and hat (gem_appearance.py ``crew_coat``): fur in a
+ * natural shade, hair on top in a shade that stands out from it, never a hat.
+ * A fixed draw from the key, so it sticks.
+ */
+export function crewCoat(key: string, vocabulary: GemLookVocabulary): Omit<GemLook, "color"> {
+  const shades = vocabulary.birthHairColors ?? [];
+  const furColor = drawn(key, "crewFurColor", shades);
+  if (!furColor) return { hat: "none" };
+  const contrast = shades.filter((shade) => Math.abs(luma(shade) - luma(furColor)) >= CREW_CONTRAST);
+  return {
+    hat: "none",
+    fur: drawn(key, "fur", vocabulary.birthFurs ?? []),
+    furColor: [...furColor],
+    hair: drawn(key, "crewHair", CREW_HAIRS),
+    hairColor: [...(drawn(key, "crewHairColor", contrast) ?? furColor)],
+  };
+}
+
 const isColor = (value: unknown): value is [number, number, number] =>
   Array.isArray(value) &&
   value.length === 3 &&
   value.every((channel) => Number.isInteger(channel) && channel >= 0 && channel <= 255);
 const lookColor = (value: unknown): LookColor | undefined => (value === "gem" || isColor(value) ? value : undefined);
+
+const crewShaped = (look: GemLook) =>
+  look.hat === "none" &&
+  !!look.fur &&
+  look.fur !== "none" &&
+  CREW_HAIRS.includes(look.hair as (typeof CREW_HAIRS)[number]) &&
+  isColor(look.furColor) &&
+  isColor(look.hairColor) &&
+  Math.abs(luma(look.hairColor) - luma(look.furColor)) >= CREW_CONTRAST;
 
 /** Known knobs only, each held to its range. */
 function knobSettings(value: unknown, ranges: Readonly<Record<string, readonly [number, number]>>) {
@@ -169,14 +203,20 @@ export function resolveGemLook(
   vocabulary: GemLookVocabulary,
 ): ResolvedGemLook {
   const own: GemLook = (key && appearance?.gems?.[key]) || {};
-  const rolled: GemLook = (key && appearance?.born?.[key]) || {};
+  const recorded: GemLook = (key && appearance?.born?.[key]) || {};
+  // A crew persona wears the crew coat and no hat; one rolled before that rule keeps only its eyes.
+  const identity = key?.split("@")[0];
+  const crew =
+    !!identity &&
+    !!appearance?.crew?.some((name) => name === identity || name === identity.replace(/-\d+$/, ""));
+  const rolled: GemLook = crew && !crewShaped(recorded) ? { ...recorded, ...crewCoat(key, vocabulary) } : recorded;
   const known = (value: string | undefined, valid: ReadonlySet<string>) =>
     value && valid.has(value) ? value : undefined;
   const look: ResolvedGemLook = {};
   const bornFace = known(rolled.face, vocabulary.faces) ?? (key ? drawn(key, "face", vocabulary.birthFaces) : undefined);
   const face = known(own.face, vocabulary.faces) ?? bornFace;
   const hat = known(own.hat, vocabulary.hats);
-  const bornHat = known(rolled.hat, vocabulary.hats) ?? (key ? drawn(key, "hat", vocabulary.birthHats) : undefined);
+  const bornHat = known(rolled.hat, vocabulary.hats) ?? (key && !crew ? drawn(key, "hat", vocabulary.birthHats) : undefined);
   const bornColor = key ? drawn(key, "color", vocabulary.birthColors) : undefined;
   const season = known(appearance?.season, vocabulary.seasons);
   if (face) look.face = face;

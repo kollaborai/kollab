@@ -33,13 +33,13 @@ never writes production code.
 
 ## Team
 
-| Hub name | Name | Role | Bundle | Reports to |
-|---|---|---|---|---|
-| `julia` | Julia Novak | Head of Product | `default` | human |
-| `arjun` | Arjun Rao | Product Manager | `technical-writer` | julia |
-| `nina` | Nina Kowalski | UX Researcher | `research` | julia |
-| `oscar` | Oscar Lindqvist | Product Designer | `creative-writer` | julia |
-| `lucas` | Lucas Ferreira | Product Analyst | `data-analyst` | julia |
+| Hub name | Role | Bundle | Reports to |
+|---|---|---|---|
+| `head-of-product` | Head of Product | `default` | human |
+| `product-manager` | Product Manager | `technical-writer` | head-of-product |
+| `ux-researcher` | UX Researcher | `research` | head-of-product |
+| `product-designer` | Product Designer | `creative-writer` | head-of-product |
+| `product-analyst` | Product Analyst | `data-analyst` | head-of-product |
 
 ## Hand-off outside the team
 

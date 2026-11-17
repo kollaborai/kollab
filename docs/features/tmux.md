@@ -13,6 +13,18 @@ The tmux plugin lets you manage terminal sessions directly from Kollab without l
 - [tmux](https://github.com/tmux/tmux) must be installed
 - Automatically detected at startup; if not found, the `/terminal` command won't be available
 
+## Disabling the Plugin
+
+Set `plugins.tmux.enabled` to `false` in Kollab's configuration to keep the tmux plugin from loading:
+
+```yaml
+plugins:
+  tmux:
+    enabled: false
+```
+
+When disabled, the `/terminal` commands and tmux session access are unavailable.
+
 ## Commands
 
 Use `/terminal` (aliases: `/tmux`, `/term`, `/t`):

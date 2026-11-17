@@ -273,6 +273,7 @@ class _StopLoop(Exception):
 def _mailbox_plugin(refusals, injected=None):
     """A plugin whose receiver refuses every message, in ACP dispatch mode."""
     plugin = HubPlugin.__new__(HubPlugin)
+    plugin._mailbox_stop_event = asyncio.Event()
     plugin._identity = SimpleNamespace(agent_id="agent-1", identity="receiver")
     plugin.config = None
     llm = SimpleNamespace()
@@ -297,12 +298,15 @@ async def _run_one_mailbox_poll(plugin):
     """Run the production poll loop for exactly one tick."""
     ticks = []
 
-    async def fake_sleep(seconds):
-        ticks.append(seconds)
-        if len(ticks) > 1:
-            raise asyncio.CancelledError
+    async def fake_wait_for(awaitable, timeout):
+        ticks.append(timeout)
+        awaitable.close()
+        if len(ticks) == 1:
+            raise asyncio.TimeoutError
+        plugin._mailbox_stop_event.set()
+        return True
 
-    with patch("plugins.hub.plugin.asyncio.sleep", fake_sleep):
+    with patch("plugins.hub.plugin.asyncio.wait_for", fake_wait_for):
         await plugin._mailbox_loop()
 
 
@@ -329,6 +333,7 @@ async def test_a_long_outage_poll_offers_every_refused_message_again(
     # queued.
     refusals, injected = [], []
     plugin = _mailbox_plugin(refusals, injected if with_inject else None)
+    assert plugin._mailbox_stop_event is not None
     with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
         sent = await _fill_mailbox(messenger_module.INBOX_MAX_REPLAY + 5)
 

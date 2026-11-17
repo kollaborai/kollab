@@ -2,7 +2,7 @@
 
 import asyncio
 
-from kollabor_agent.tool_executor import ToolExecutor
+from kollabor_agent.tool_executor import ToolExecutionResult, ToolExecutor
 
 
 def _run_async(coro):
@@ -243,16 +243,20 @@ class TestInternalTypeBypass:
             terminal_timeout=30,
             mcp_timeout=30,
         )
-        executor.set_bundle_scope(["terminal"])  # Only terminal, not sub-types
+        executor.set_bundle_scope(["file-read"])  # No terminal access
         return executor
 
-    def test_terminal_status_bypasses_scope(self):
+    def test_terminal_status_requires_terminal_scope(self):
         executor = self._make_scoped_executor()
-        assert executor._check_bundle_scope("terminal_status") is None
+        error = executor._check_bundle_scope("terminal_status")
+        assert error is not None
+        assert "terminal" in error
 
-    def test_terminal_output_bypasses_scope(self):
+    def test_terminal_output_requires_terminal_scope(self):
         executor = self._make_scoped_executor()
-        assert executor._check_bundle_scope("terminal_output") is None
+        error = executor._check_bundle_scope("terminal_output")
+        assert error is not None
+        assert "terminal" in error
 
     def test_terminal_send_requires_an_explicit_bundle_grant(self):
         executor = self._make_scoped_executor()
@@ -261,9 +265,50 @@ class TestInternalTypeBypass:
         executor.set_bundle_scope(["terminal", "terminal-send"])
         assert executor._check_bundle_scope("terminal_send") is None
 
-    def test_terminal_kill_bypasses_scope(self):
+    def test_terminal_kill_requires_terminal_scope(self):
         executor = self._make_scoped_executor()
-        assert executor._check_bundle_scope("terminal_kill") is None
+        error = executor._check_bundle_scope("terminal_kill")
+        assert error is not None
+        assert "terminal" in error
+
+    def test_scoped_agent_cannot_access_operator_started_session(self):
+        async def run_attempt(tool_type):
+            executor = self._make_scoped_executor()
+            dispatched = False
+
+            class EventBus:
+                async def emit_with_hooks(self, *args, **kwargs):
+                    return {}
+
+            executor.event_bus = EventBus()
+
+            async def terminal_dispatch(tool_data):
+                nonlocal dispatched
+                dispatched = True
+                return ToolExecutionResult(
+                    tool_id=tool_data["id"],
+                    tool_type=tool_data["type"],
+                    success=True,
+                )
+
+            executor._execute_terminal_command = terminal_dispatch
+            result = await executor._execute_tool_inner(
+                {
+                    "id": f"operator-session-{tool_type}",
+                    "type": tool_type,
+                    "name": tool_type,
+                    "session_id": "operator-session",
+                    "session_name": "operator-session",
+                }
+            )
+
+            assert result.success is False
+            assert result.metadata["scope_denied"] is True
+            assert "terminal" in result.error
+            assert dispatched is False
+
+        for tool_type in ("terminal_status", "terminal_output", "terminal_kill"):
+            _run_async(run_attempt(tool_type))
 
     def test_mcp_tool_is_denied_without_mcp_grant(self):
         executor = self._make_scoped_executor()

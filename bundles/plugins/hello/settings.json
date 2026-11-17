@@ -1,0 +1,6 @@
+{
+  "description": "Example plugin settings",
+  "widgets": [
+    {"type": "text_input", "config_path": "greeting", "label": "Greeting", "default": "Hello"}
+  ]
+}
