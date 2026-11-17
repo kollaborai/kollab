@@ -62,6 +62,22 @@ describe("UserText render", () => {
     expect(markup).toContain("[image1]");
     expect(markup).not.toContain("media-thumb");
   });
+
+  it("keeps a failed slot literal and renders the next stored image in its slot", () => {
+    stateWith(["text"], [
+      { ref: "", mime: "", failed: true },
+      { ref: "stored-2", mime: "image/png" },
+    ]);
+    const markup = renderToStaticMarkup(
+      <UserText text="failed [image1], stored [image2]" />,
+    );
+    expect(markup).toContain("failed ");
+    expect(markup).toContain("[image1]");
+    expect(markup).toContain(", stored ");
+    expect(markup).toContain('data-ref="stored-2"');
+    expect(markup).not.toContain("[image2]");
+    expect(markup).not.toContain('data-ref=""');
+  });
 });
 
 describe("UserText padded-token spelling (#1140 R4)", () => {
