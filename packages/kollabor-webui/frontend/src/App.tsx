@@ -2065,7 +2065,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                     label={agentName(nextGem.name, nextGem.display_name)}
                   />
                 ) : (
-                  <KollabLogo mist className="text-foreground/80 mb-2 h-10 w-auto" />
+                  <KollabLogo glass className="text-foreground/80 mb-2 h-10 w-auto" />
                 )}
                 <h1 className="text-2xl font-semibold tracking-tight">
                   {nextGem ? agentName(nextGem.name, nextGem.display_name) : "Start a Session"}
