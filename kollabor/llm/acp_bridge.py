@@ -847,8 +847,13 @@ class ACPRunner:
         if os.name == "posix":
             self._release_group_anchor()
             ours, theirs = socket.socketpair()
-            # The launcher reports a failed exec here; a successful exec closes it.
-            status_read, status_write = os.pipe()
+            try:
+                # The launcher reports a failed exec here; a successful exec closes it.
+                status_read, status_write = os.pipe()
+            except BaseException:
+                ours.close()
+                theirs.close()
+                raise
             try:
                 self._process = await asyncio.create_subprocess_exec(
                     sys.executable,
@@ -875,7 +880,14 @@ class ACPRunner:
             self._group_anchor = ours
             self._process_group_id = self._process.pid
             try:
-                exec_failure = await asyncio.to_thread(os.read, status_read, 32)
+                exec_failure = await asyncio.wait_for(
+                    self._read_exec_status(status_read),
+                    timeout=(
+                        getattr(self, "startup_timeout", None)
+                        or getattr(self, "operation_timeout", None)
+                        or 30
+                    ),
+                )
             finally:
                 os.close(status_read)
             if exec_failure:
@@ -1137,6 +1149,26 @@ class ACPRunner:
             # Survivors still fail the members-remain check at teardown.
             return False
         return True
+
+    @staticmethod
+    async def _read_exec_status(fd: int) -> bytes:
+        """Wait on the event loop, not a blocked thread, so a timeout can
+        cancel the wait while the launcher is stuck before exec."""
+        loop = asyncio.get_running_loop()
+        ready: asyncio.Future[bytes] = loop.create_future()
+
+        def read() -> None:
+            if not ready.done():
+                try:
+                    ready.set_result(os.read(fd, 32))
+                except OSError:
+                    ready.set_result(b"")
+
+        loop.add_reader(fd, read)
+        try:
+            return await ready
+        finally:
+            loop.remove_reader(fd)
 
     def _group_anchor_alive(self) -> bool:
         """True while the anchor holds the adapter's session. The anchor never
