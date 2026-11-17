@@ -209,6 +209,7 @@ const mainConfig = defineConfig({
       "tests/field-renderer-textarea.test.tsx",
       "tests/hub-note-recipient.test.tsx",
       "tests/thread-pending-images.test.ts",
+      "tests/composer-keeper.test.ts",
       "src/components/assistant-ui/tool-fallback.test.tsx",
       "src/components/assistant-ui/user-text.test.tsx",
       "src/engine-version.test.ts",

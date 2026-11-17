@@ -6,7 +6,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { useAuiState } from "@assistant-ui/react";
 import { Loader2, Plus, SlidersHorizontal, Waypoints } from "lucide-react";
 import { Thread } from "./components/Thread";
-import { ComposerKeeper } from "./components/assistant-ui/composer-keeper";
+import { ComposerKeeper, forgetComposerText } from "./components/assistant-ui/composer-keeper";
 import { TrajectoryView } from "./components/trajectory/TrajectoryView";
 
 // Monaco and xterm are large: each view loads the first time it is opened, not with the main bundle.
@@ -1603,6 +1603,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     setBusyMessage("Stopping session…");
     try {
       await api.deleteSession(sessionId);
+      forgetComposerText(sessionId);
       const result = await loadSessions();
       await refreshAgentPool();
       if (operation !== operationRef.current) return;
