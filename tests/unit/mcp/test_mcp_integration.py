@@ -362,6 +362,94 @@ class TestMCPServerConnection(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    def test_reader_discards_invalid_envelopes_and_correlates_concurrent_responses(self):
+        """Bad frames are ignored, server requests are rejected, and calls survive."""
+
+        async def run_test():
+            raw_frames = [
+                b"[]",
+                b'"private payload"',
+                b"17",
+                b"null",
+                b'{"private":"private payload",}',
+                json.dumps(
+                    {"jsonrpc": "1.0", "id": "first", "result": "bad version"}
+                ).encode(),
+                json.dumps(
+                    {"jsonrpc": "2.0", "id": True, "result": "private payload"}
+                ).encode(),
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "first",
+                        "result": "private payload",
+                        "error": {"code": -1, "message": "private payload"},
+                    }
+                ).encode(),
+                json.dumps(
+                    {"jsonrpc": "2.0", "method": "notifications/progress"}
+                ).encode(),
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "server-request",
+                        "method": "sampling/createMessage",
+                        "params": {"secret": "private payload"},
+                    }
+                ).encode(),
+                json.dumps(
+                    {"jsonrpc": "2.0", "id": "second", "result": {"value": 2}}
+                ).encode(),
+                json.dumps(
+                    {"jsonrpc": "2.0", "id": "first", "result": {"value": 1}}
+                ).encode(),
+            ]
+            frames = b"\n".join(raw_frames) + b"\n"
+            connection = MCPServerConnection("test", "fake")
+            connection.initialized = True
+            connection.process = _FakeProcess(
+                stdout=_ChunkedStdout([frames], hold_open=True)
+            )
+
+            first_request = asyncio.create_task(
+                connection._send_request(
+                    {"jsonrpc": "2.0", "id": "first", "method": "first"}
+                )
+            )
+            second_request = asyncio.create_task(
+                connection._send_request(
+                    {"jsonrpc": "2.0", "id": "second", "method": "second"}
+                )
+            )
+            with self.assertLogs(
+                "kollabor_agent.mcp_integration", level="DEBUG"
+            ) as logs:
+                first, second = await asyncio.gather(first_request, second_request)
+
+            self.assertEqual(first["result"], {"value": 1})
+            self.assertEqual(second["result"], {"value": 2})
+            self.assertTrue(connection.initialized)
+            self.assertEqual(connection._pending_requests, {})
+            self.assertNotIn("private payload", "\n".join(logs.output))
+            writes = [
+                json.loads(write.decode())
+                for write in connection.process.stdin.writes
+            ]
+            server_response = next(
+                message for message in writes if message.get("id") == "server-request"
+            )
+            self.assertEqual(
+                server_response,
+                {
+                    "jsonrpc": "2.0",
+                    "id": "server-request",
+                    "error": {"code": -32601, "message": "Method not found"},
+                },
+            )
+            await connection.close()
+
+        asyncio.run(run_test())
+
     def test_json_rpc_notifications_do_not_satisfy_pending_request(self):
         """Notifications without ids are ignored while waiting for a response."""
 
