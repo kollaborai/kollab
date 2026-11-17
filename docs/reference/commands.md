@@ -646,8 +646,8 @@ type / in the input box to open the command menu.
     aliases: /history, /conversations
     modal picker, client-only (deferred to 4.6)
 
-  /branch [session_id [msg_idx]]  fork from specific message
-    deferred to 4.6 (needs state.branch_conversation rpc)
+  /branch <session_id> <msg_idx>  fork a saved conversation
+  /branch current <msg_idx>       fork the live conversation into a new session
 
   /compact [now|status|preview]   context compaction
     (no args)                     ask the model what to keep; it answers with

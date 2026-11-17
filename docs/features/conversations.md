@@ -52,6 +52,12 @@ Use the `/resume` command to pick up where you left off:
 
 The resume system restores the full message history so the LLM has context from the previous session.
 
+## Branching Conversations
+
+Use `/branch current <message-index>` to continue the live conversation from a message in a new session. The original conversation is saved under its existing session ID, and the new branch becomes the active conversation. The index is zero-based and includes the selected message.
+
+Use `/branch <session-id> <message-index>` to branch from a saved conversation.
+
 ## Saving Conversations
 
 Use `/save` to export a conversation in different formats:

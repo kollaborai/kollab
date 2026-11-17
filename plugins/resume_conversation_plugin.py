@@ -356,26 +356,17 @@ class ResumeConversationPlugin:
                         display_type="error",
                     )
 
-                # Create branch from current - keep messages up to branch_index.
-                # Use the in-place helper so QueueProcessor / SessionManager /
-                # hub plugin keep their cached list reference valid.
-                branched_messages = current_messages[: branch_index + 1]
-                self._replace_conversation_history(branched_messages)
+                assert self.conversation_manager is not None
+                source_session_id = self.conversation_manager.current_session_id
+                if not self.conversation_manager.save_session(source_session_id):
+                    return CommandResult(
+                        success=False,
+                        message="Could not save the current conversation before branching",
+                        display_type="error",
+                    )
 
-                # Update session stats to reflect truncated messages
-                if hasattr(self.llm_service, "session_stats"):
-                    self.llm_service.session_stats["messages"] = len(branched_messages)
-
-                msg_count = len(branched_messages)
-                removed_count = len(current_messages) - msg_count
-
-                return CommandResult(
-                    success=True,
-                    message=f"[ok] Branched at message {branch_index}\n"
-                    f"    Kept {msg_count} messages, removed {removed_count}\n"
-                    f"    Continue the conversation from this point.",
-                    display_type="success",
-                )
+                # Branch from the saved source so the original session remains intact.
+                session_id = source_session_id
 
             # Branch from saved session
             assert self.conversation_manager is not None
@@ -1825,6 +1816,21 @@ class ResumeConversationPlugin:
                     self._ensure_conversation_manager()
                     and self.conversation_manager is not None
                 ):
+                    if session_id == "current":
+                        source_session_id = self.conversation_manager.current_session_id
+                        if not self.conversation_manager.save_session(
+                            source_session_id
+                        ):
+                            data["display_messages"] = [
+                                (
+                                    "system",
+                                    "[error] Could not save the current conversation before branching",
+                                    {},
+                                )
+                            ]
+                            return data
+                        session_id = source_session_id
+
                     result = self.conversation_manager.branch_session(
                         session_id, message_index
                     )
