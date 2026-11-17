@@ -455,6 +455,7 @@ class TestMCPServerConnection(unittest.TestCase):
 
         async def run_test():
             frames = b'{"jsonrpc":"2.0","id":"server","method":"x","params":7}\n'
+            frames += b'{"jsonrpc":"2.0","id":true,"method":"sampling/createMessage"}\n'
             frames += b'{"jsonrpc":"2.0","id":"client","result":{"ok":true}}\n'
             connection = MCPServerConnection("test", "fake")
             connection.initialized = True
@@ -472,6 +473,14 @@ class TestMCPServerConnection(unittest.TestCase):
                 {
                     "jsonrpc": "2.0",
                     "id": "server",
+                    "error": {"code": -32600, "message": "Invalid Request"},
+                },
+                writes,
+            )
+            self.assertIn(
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
                     "error": {"code": -32600, "message": "Invalid Request"},
                 },
                 writes,
