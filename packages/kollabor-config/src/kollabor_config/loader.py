@@ -1156,8 +1156,15 @@ class ConfigLoader:
             return local_path
 
         # Check project config (middle priority)
-        project_path = get_project_data_dir() / "config.json"
-        if any((path / "config.json").exists() for path in get_project_data_dir_candidates()):
+        project_path = next(
+            (
+                path / "config.json"
+                for path in get_project_data_dir_candidates()
+                if _config_path_is_present(path / "config.json")
+            ),
+            None,
+        )
+        if project_path is not None:
             logger.debug(f"Saving to project config: {project_path}")
             return project_path
 
