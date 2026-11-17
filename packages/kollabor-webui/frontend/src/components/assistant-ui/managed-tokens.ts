@@ -40,9 +40,11 @@ export function synchronizeComposerImageTokens(
   const tokensInText = [
     ...new Set(text.match(/\[image0*[1-9]\d*\]/g) ?? []),
   ];
-  const textWithoutImageTokens = stripManagedTokens(text, tokensInText)
-    .replace(/^\s+/, "")
-    .replace(/\n{3,}/g, "\n\n");
+  const strippedText = stripManagedTokens(text, tokensInText);
+  const textWithoutImageTokens =
+    strippedText === text
+      ? text
+      : strippedText.replace(/^\s+/, "").replace(/\n{3,}/g, "\n\n");
   const nextTokens = Array.from(
     { length: Math.max(0, Math.floor(imageCount)) },
     (_, index) => `[image${index + 1}]`,
