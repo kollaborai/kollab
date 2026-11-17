@@ -89,15 +89,10 @@ async def test_terminate_waits_until_owned_process_group_is_empty_after_kill(tmp
         persist_profile_resolution=False,
     )
     runner._process_group_id = 4242
-    runner._process_group_guard = SimpleNamespace(returncode=0)
-    checks = iter((True, False))
+    # Empty during the SIGTERM grace, one member right after SIGKILL, then empty.
+    checks = iter((False, True, False))
     group_states = []
     observed = []
-
-    async def wait_for_guard():
-        return 0
-
-    runner._process_group_guard.wait = wait_for_guard
     monkeypatch.setattr(runner, "_live_owned_processes", lambda: [])
     monkeypatch.setattr(
         runner, "_signal_owned_process_group", lambda signum: observed.append(signum)
@@ -113,12 +108,12 @@ async def test_terminate_waits_until_owned_process_group_is_empty_after_kill(tmp
     await runner._terminate_process()
 
     assert observed[-1] == bridge_mod.signal.SIGKILL
-    assert group_states == [True, False]
+    assert group_states == [False, True, False]
     assert runner._process_group_id is None
 
 
 @pytest.mark.asyncio
-async def test_process_group_guard_keeps_group_identity_after_adapter_exits(tmp_path):
+async def test_group_anchor_keeps_group_identity_after_adapter_exits(tmp_path):
     runner = ACPRunner(
         ACPProfile("owned", (sys.executable, "-c", FAKE_ADAPTER), cwd=str(tmp_path)),
         persist_profile_resolution=False,
@@ -126,13 +121,15 @@ async def test_process_group_guard_keeps_group_identity_after_adapter_exits(tmp_
     try:
         await runner._start_process()
         assert runner._process is not None
-        assert runner._process_group_guard is not None
-        assert runner._process_group_id == runner._process_group_guard.pid
+        # The adapter keeps the launcher's PID and leads its own group.
+        assert runner._process_group_id == runner._process.pid
         runner._process.terminate()
         await runner._process.wait()
-        assert os.getpgid(runner._process_group_guard.pid) == runner._process_group_id
+        # The anchor outlives the adapter, so the group id is still held.
+        assert runner._group_anchor_alive()
     finally:
         await runner._terminate_process()
+    assert runner._group_anchor is None
 
 
 @pytest.mark.asyncio

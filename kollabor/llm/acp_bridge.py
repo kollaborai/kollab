@@ -7,9 +7,11 @@ import hashlib
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -617,6 +619,40 @@ class _Client(acp.Client):
         return await self.runner._request_permission(session_id, tool_call, options)
 
 
+# POSIX launcher for the adapter. It runs as the leader of a new session (no
+# controlling terminal, so a tool reading /dev/tty fails at once), forks an
+# anchor into that session under its own process group, then execs the adapter
+# with the same PID. While the anchor lives, the session id (which equals the
+# adapter's process-group id) cannot be reused, so the group id stays ours.
+# Because the anchor is outside the adapter's group, an empty group means every
+# adapter process is gone. The anchor exits when kollab closes its socket end
+# or exits.
+_POSIX_GROUP_LAUNCHER = """
+import os, signal, sys
+anchor = int(sys.argv[1])
+pid = os.fork()
+if pid == 0:
+    os.setpgid(0, 0)
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, signal.SIG_IGN)
+    null = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(null, fd)
+    try:
+        while os.read(anchor, 1):
+            pass
+    except OSError:
+        pass
+    os._exit(0)
+try:
+    os.setpgid(pid, pid)
+except OSError:
+    pass
+os.close(anchor)
+os.execvp(sys.argv[2], sys.argv[2:])
+"""
+
+
 class ACPRunner:
     """One SDK-owned ACP process/session with FIFO prompt queue."""
 
@@ -681,14 +717,13 @@ class ACPRunner:
         self.session_id: str | None = None
         self._connection: Any = None
         self._process: Any = None
-        self._process_group_guard: asyncio.subprocess.Process | None = None
+        self._group_anchor: socket.socket | None = None
         self._client = _Client(self)
         self._stderr_task: asyncio.Task[None] | None = None
         self._process_tracker: asyncio.Task[None] | None = None
         self._owned_processes: dict[int, psutil.Process] = {}
         self._adapter_pid: int | None = None
         self._process_group_id: int | None = None
-        self._process_group_spent = False
         self._teardown_lock = asyncio.Lock()
         self._queue: asyncio.Queue[ACPAdmission | None] = asyncio.Queue(maxsize=10)
         self._worker: asyncio.Task[None] | None = None
@@ -801,41 +836,30 @@ class ACPRunner:
                 "The existing binding was kept; select the previous adapter or start a new session."
             )
         if os.name == "posix":
-            # Keep a stable process-group leader alive until the final group
-            # signal. Otherwise the OS may reuse the numeric PGID after the
-            # adapter exits, and a later cleanup signal could hit an unrelated
-            # process group.
-            self._process_group_guard = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-c",
-                "import os, signal, time; parent = os.getppid(); "
-                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-                "exec('while os.getppid() == parent: time.sleep(0.2)')",
-                cwd=cwd,
-                env={},
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                process_group=0,
-            )
-            self._process_group_id = self._process_group_guard.pid
-            self._process_group_spent = False
+            self._release_group_anchor()
+            ours, theirs = socket.socketpair()
             try:
                 self._process = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-c",
+                    _POSIX_GROUP_LAUNCHER,
+                    str(theirs.fileno()),
                     *command,
                     cwd=cwd,
                     env=env,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    process_group=self._process_group_id,
+                    start_new_session=True,
+                    pass_fds=(theirs.fileno(),),
                 )
             except BaseException:
-                self._process_group_guard.kill()
-                await self._process_group_guard.wait()
-                self._process_group_guard = None
-                self._process_group_id = None
+                ours.close()
                 raise
+            finally:
+                theirs.close()
+            self._group_anchor = ours
+            self._process_group_id = self._process.pid
         else:
             self._process = await asyncio.create_subprocess_exec(
                 *command,
@@ -1074,15 +1098,12 @@ class ACPRunner:
         return alive
 
     def _signal_owned_process_group(self, signum: int) -> bool:
-        """Signal only the POSIX group created with this adapter process, and
-        only while its guard leader still holds the group id."""
+        """Signal only the adapter's POSIX group, and only while its anchor
+        still holds the group id."""
         group_id = self._process_group_id
-        if group_id is None or not hasattr(os, "killpg"):
-            return False
-        guard = self._process_group_guard
-        if self._process_group_spent or (guard is not None and guard.returncode is not None):
-            # The guard is gone, so the OS may have reused this numeric PGID
-            # for an unrelated group. Never signal it again.
+        if group_id is None or not hasattr(os, "killpg") or not self._group_anchor_alive():
+            # Without the anchor the OS may have reused this numeric id for an
+            # unrelated group. Never signal it.
             return False
         try:
             os.killpg(group_id, signum)
@@ -1092,11 +1113,28 @@ class ACPRunner:
             raise ACPError(
                 f"cannot signal recorded ACP process group {group_id}"
             ) from exc
-        if signum == getattr(signal, "SIGKILL", None):
-            # SIGKILL also ends the guard. Mark the id spent now rather than
-            # when asyncio reaps the guard, which can happen at any moment.
-            self._process_group_spent = True
         return True
+
+    def _group_anchor_alive(self) -> bool:
+        """True while the anchor holds the adapter's session. The anchor never
+        writes, so a readable socket means it exited."""
+        anchor = self._group_anchor
+        if anchor is None:
+            return False
+        try:
+            readable, _, _ = select.select([anchor], [], [], 0)
+        except (OSError, ValueError):
+            readable = [anchor]
+        if not readable:
+            return True
+        self._release_group_anchor()
+        return False
+
+    def _release_group_anchor(self) -> None:
+        """Let the anchor exit. Call only once the adapter's group is empty."""
+        anchor, self._group_anchor = self._group_anchor, None
+        if anchor is not None:
+            anchor.close()
 
     def _owned_process_group_exists(self) -> bool:
         """Check the recorded group without enumerating its members."""
@@ -1802,7 +1840,10 @@ class ACPRunner:
                 self._signal_owned_process_group(signal.SIGTERM)
                 deadline = loop.time() + 5
                 terminated: set[psutil.Process] = set()
-                while alive := self._live_owned_processes():
+                # Give every member of the adapter's group its SIGTERM grace,
+                # not only the adapter. The anchor is outside the group, so the
+                # group check is exact.
+                while (alive := self._live_owned_processes()) or self._owned_process_group_exists():
                     for owner in reversed(alive):
                         if owner not in terminated:
                             with contextlib.suppress(psutil.Error):
@@ -1833,14 +1874,8 @@ class ACPRunner:
                     if asyncio.get_running_loop().time() >= deadline:
                         break
                     await asyncio.sleep(0.05)
-                # The guard remains the group leader through this one final
-                # group signal. Do not signal the numeric PGID after it exits.
+                # The anchor still holds the group id through this final signal.
                 self._signal_owned_process_group(getattr(signal, "SIGKILL", signal.SIGTERM))
-                group_guard = self._process_group_guard
-                self._process_group_guard = None
-                if group_guard is not None:
-                    with contextlib.suppress(asyncio.TimeoutError):
-                        await asyncio.wait_for(group_guard.wait(), timeout=1)
                 loop = asyncio.get_running_loop()
                 group_members_remain = self._owned_process_group_exists()
                 deadline = loop.time() + 1
@@ -1857,21 +1892,21 @@ class ACPRunner:
                     await asyncio.wait({close_task}, timeout=0.1)
                 survivors = self._live_owned_processes()
                 unreaped_adapter = process is not None and process.returncode is None
-                group_guard_unreaped = group_guard is not None and group_guard.returncode is None
                 if (
                     not survivors
                     and not unreaped_adapter
-                    and not group_guard_unreaped
                     and not group_members_remain
                 ):
                     self._owned_processes.clear()
                     self._adapter_pid = None
                     self._process_group_id = None
+                    # The group is empty; the anchor may now release its id.
+                    self._release_group_anchor()
                 else:
                     detail = ", ".join(str(owner.pid) for owner in survivors)
                     if unreaped_adapter:
                         detail += f" (adapter {process.pid} not reaped)"
-                    if group_guard_unreaped or group_members_remain:
+                    if group_members_remain:
                         detail += f" (process group {self._process_group_id} still has members)"
                     raise ACPError(
                         "ACP owned process cleanup incomplete: " + detail
