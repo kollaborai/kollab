@@ -25,8 +25,8 @@ describe("sameVersionBase", () => {
   });
 });
 
-// App.tsx mounts the banner check inside a large component, so the guard is
-// pinned at its source: it must call sameVersionBase, not compare strings.
+// App.tsx mounts the banner check inside a large component, so pin the warning
+// guard to the same build-identity comparison exercised above.
 describe("App version-mismatch guard", () => {
   it("requires a confirmed mismatch using the frontend bundle build SHA", () => {
     expect(appSource).toMatch(
