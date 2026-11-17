@@ -1420,8 +1420,8 @@ async def test_align_requires_content_identity_for_paired_rows(monkeypatch):
     assert captured["controller"].state["synced"] is None
 
 
-def test_align_helper_renames_only_matching_content():
-    """Helper-level: exact-content rows rename; a mismatched tail refuses."""
+def test_align_helper_preserves_streamed_ids_for_matching_content():
+    """Exact-content alignment records history positions without replacing row ids."""
     fresh = [
         {"id": "user-x", "role": "user", "content": "q"},
         {
@@ -1435,7 +1435,8 @@ def test_align_helper_renames_only_matching_content():
         {"role": "assistant", "content": "final answer"},
     ]
     assert messages._assistant_align_streamed_ids(fresh, good) is True
-    assert [m["id"] for m in fresh] == ["history-0", "history-1"]
+    assert [m["id"] for m in fresh] == ["user-x", "assistant-x"]
+    assert [m["metadata"]["custom"]["historySourceIndex"] for m in fresh] == [0, 1]
 
     stale = [
         {"role": "user", "content": "q"},
@@ -1479,7 +1480,36 @@ def test_align_helper_tolerates_split_tool_round_with_call_identity():
         {"role": "assistant", "content": "done"},
     ]
     assert messages._assistant_align_streamed_ids(streamed, stored) is True
-    assert [m["id"] for m in streamed] == ["history-1", "history-4"]
+    assert [m["id"] for m in streamed] == ["user-x", "assistant-x"]
+    assert [m["metadata"]["custom"]["historySourceIndex"] for m in streamed] == [1, 4]
+
+
+def test_align_helper_keeps_prior_indexes_when_a_new_turn_arrives():
+    """Already aligned rows stay stable while a later streamed turn is aligned."""
+    streamed = [
+        {"id": "user-first", "role": "user", "content": "first"},
+        {"id": "assistant-first", "role": "assistant", "content": "first answer"},
+    ]
+    first_history = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "first answer"},
+    ]
+    assert messages._assistant_align_streamed_ids(streamed, first_history) is True
+
+    streamed.extend([
+        {"id": "user-second", "role": "user", "content": "second"},
+        {"id": "assistant-second", "role": "assistant", "content": "second answer"},
+    ])
+    full_history = [
+        *first_history,
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": "second answer"},
+    ]
+    assert messages._assistant_align_streamed_ids(streamed, full_history) is True
+    assert [row["id"] for row in streamed] == [
+        "user-first", "assistant-first", "user-second", "assistant-second",
+    ]
+    assert [row["metadata"]["custom"]["historySourceIndex"] for row in streamed] == [0, 1, 2, 3]
 
 
 def test_align_helper_rejects_calls_row_without_call_identity():
