@@ -15,3 +15,16 @@ def test_parse_timeout_rejects_positive_duration_below_float_range():
     timeout = "0." + ("0" * 399) + "1s"
     with pytest.raises(ValueError, match="too small"):
         parse_timeout(timeout)
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [
+        "9" * 400 + "s",
+        "1" + ("0" * 308) + "min",
+        "1" + ("0" * 308) + "h",
+    ],
+)
+def test_parse_timeout_rejects_nonfinite_durations(timeout):
+    with pytest.raises(ValueError, match="finite"):
+        parse_timeout(timeout)
