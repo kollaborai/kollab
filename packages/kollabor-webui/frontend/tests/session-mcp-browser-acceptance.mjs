@@ -161,6 +161,9 @@ try {
   await dialog.getByText("Loading session MCP status…").waitFor();
   await page.keyboard.press("Escape");
   await page.getByTestId("switch-session").click();
+  const sessionBRow = page.getByRole("button", { name: "MCP Servers" });
+  await sessionBRow.getByText("0 connected", { exact: true }).waitFor({ timeout: 5000 });
+  assert.ok(requests.includes("/sessions/session-b/mcp"), "session MCP state must reload after a session switch without opening the dialog");
   await page.getByRole("button", { name: "MCP Servers" }).click();
   const sessionBDialog = page.getByRole("dialog", { name: "MCP Servers" });
   await sessionBDialog.getByText("session-b-only", { exact: true }).waitFor();
