@@ -31,8 +31,8 @@ web_fetch = ToolDefinition(
             name="max_chars",
             type="integer",
             description=(
-                "Maximum characters of text to return (default: 5000). "
-                "Content is truncated to this limit after extraction."
+                "Maximum characters in the complete output, including the URL "
+                "header and truncation marker (default: 5000; range: 1-50000)."
             ),
             required=False,
             default=5000,
@@ -71,8 +71,9 @@ web_fetch = ToolDefinition(
         "data first, then meta tags, then semantic HTML5 (<article>/<main>/"
         "<section>), then readability fallback (highest text-to-tag ratio "
         "element), then tag-stripped full page as last resort. This keeps "
-        "results compact and relevant — a 100KB page typically yields 2-5KB "
-        "of actual content."
+        "results compact and relevant. Downloads are capped at 500000 bytes "
+        "and decompressed responses at 2000000 bytes. The optional browser "
+        "fallback renders that bounded source and blocks external requests."
     ),
     safety_features=[
         "30-second timeout prevents hanging on slow servers",

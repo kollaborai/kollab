@@ -3054,7 +3054,9 @@ class ToolExecutor:
     # WEB TOOLS (web-fetch, web-search)
     # ------------------------------------------------------------------
 
-    async def _execute_web_fetch(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
+    async def _execute_web_fetch(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
         """Fetch a URL and return cleaned text content.
 
         Uses aiohttp with a 30-second timeout. Content extraction follows
@@ -3063,7 +3065,9 @@ class ToolExecutor:
         from a 200 OK), retries with Playwright headless browser (if installed)
         to handle JS-rendered pages.
 
-        Output is truncated to max_chars (default 5000).
+        Downloaded input is capped at 500000 bytes and decoded input at
+        2000000 bytes. The complete output, including its URL header and any
+        truncation marker, is capped by max_chars (default 5000, maximum 50000).
 
         Args:
             tool_data: Dict with 'url' (required), 'max_chars' (optional),
@@ -3072,12 +3076,28 @@ class ToolExecutor:
         Returns:
             ToolExecutionResult with the cleaned text or an error message.
         """
+        import zlib
+        from urllib.parse import urljoin, urlparse
+
         import aiohttp
 
         tool_id = tool_data.get("id", "unknown")
         url = tool_data.get("url", "").strip()
-        max_chars = int(tool_data.get("max_chars", 5000))
+        max_chars = tool_data.get("max_chars", 5000)
         extract_main = tool_data.get("extract_main", True)
+
+        if (
+            isinstance(max_chars, bool)
+            or not isinstance(max_chars, int)
+            or max_chars < 1
+            or max_chars > 50_000
+        ):
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="web_fetch",
+                success=False,
+                error="max_chars must be an integer from 1 to 50000",
+            )
 
         if not url:
             return ToolExecutionResult(
@@ -3088,15 +3108,13 @@ class ToolExecutor:
             )
 
         # Basic URL validation
-        from urllib.parse import urlparse
-
         parsed = urlparse(url)
         if not parsed.scheme or not parsed.netloc:
             return ToolExecutionResult(
                 tool_id=tool_id,
                 tool_type="web_fetch",
                 success=False,
-                error=f"Invalid URL: {url}",
+                error="Invalid URL",
             )
         if parsed.scheme not in ("http", "https"):
             return ToolExecutionResult(
@@ -3107,59 +3125,248 @@ class ToolExecutor:
             )
 
         try:
+            max_download_bytes = 500_000
+            max_decoded_bytes = 2_000_000
+            redirect_statuses = {301, 302, 303, 307, 308}
             timeout = aiohttp.ClientTimeout(total=30)
             headers = {
+                "Accept-Encoding": "identity, gzip, deflate",
                 "User-Agent": (
                     "Mozilla/5.0 (compatible; KollabAgent/1.0; "
                     "+https://github.com/kollaborai/kollab)"
                 ),
             }
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url, headers=headers, allow_redirects=True) as resp:
-                    if resp.status >= 400:
+            async with aiohttp.ClientSession(
+                timeout=timeout, auto_decompress=False
+            ) as session:
+                current_url = url
+                downloaded = 0
+                for redirect_count in range(11):
+                    if downloaded >= max_download_bytes:
                         return ToolExecutionResult(
                             tool_id=tool_id,
                             tool_type="web_fetch",
                             success=False,
-                            error=f"HTTP {resp.status} {resp.reason}",
+                            error="Response exceeded the 500000-byte download limit",
                         )
+                    async with session.get(
+                        current_url, headers=headers, allow_redirects=False
+                    ) as resp:
+                        if resp.status in redirect_statuses:
+                            location = resp.headers.get("Location")
+                            if not location:
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Redirect response had no Location header",
+                                )
+                            if redirect_count == 10:
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Too many redirects",
+                                )
+                            try:
+                                redirect_length = int(
+                                    resp.headers.get("Content-Length", "")
+                                )
+                            except ValueError, TypeError:
+                                redirect_length = None
+                            if (
+                                redirect_length is not None
+                                and redirect_length > max_download_bytes - downloaded
+                            ):
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Response exceeded the 500000-byte download limit",
+                                )
+                            while True:
+                                redirect_chunk = await resp.content.read(
+                                    min(
+                                        64 * 1024,
+                                        max_download_bytes - downloaded,
+                                    )
+                                )
+                                if not redirect_chunk:
+                                    break
+                                downloaded += len(redirect_chunk)
+                                if downloaded > max_download_bytes:
+                                    return ToolExecutionResult(
+                                        tool_id=tool_id,
+                                        tool_type="web_fetch",
+                                        success=False,
+                                        error="Response exceeded the 500000-byte download limit",
+                                    )
+                                if downloaded == max_download_bytes and (
+                                    redirect_length is None
+                                    or redirect_length > downloaded
+                                ):
+                                    return ToolExecutionResult(
+                                        tool_id=tool_id,
+                                        tool_type="web_fetch",
+                                        success=False,
+                                        error="Response exceeded the 500000-byte download limit",
+                                    )
+                            current_url = urljoin(current_url, location)
+                            redirected = urlparse(current_url)
+                            if redirected.scheme not in ("http", "https"):
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Redirect used an unsupported URL scheme",
+                                )
+                            continue
 
-                    # Content-Length check: warn on very large pages
-                    try:
-                        content_length = resp.headers.get("Content-Length", "")
-                        if content_length and int(content_length) > 500_000:
-                            logger.warning(
-                                f"web_fetch: large page {url} ({content_length} bytes)"
+                        if resp.status >= 400:
+                            return ToolExecutionResult(
+                                tool_id=tool_id,
+                                tool_type="web_fetch",
+                                success=False,
+                                error=f"HTTP {resp.status} {resp.reason}",
                             )
-                    except (ValueError, TypeError):
-                        pass
 
-                    final_url = str(resp.url)
-                    raw = await resp.text(errors="replace")
+                        final_url = str(resp.url)
+                        content_length = resp.headers.get("Content-Length")
+                        try:
+                            declared_length = (
+                                int(content_length) if content_length else None
+                            )
+                        except ValueError, TypeError:
+                            declared_length = None
+                        if declared_length is not None and declared_length < 0:
+                            declared_length = None
+                        if (
+                            declared_length is not None
+                            and declared_length > max_download_bytes - downloaded
+                        ):
+                            return ToolExecutionResult(
+                                tool_id=tool_id,
+                                tool_type="web_fetch",
+                                success=False,
+                                error="Response exceeded the 500000-byte download limit",
+                            )
+
+                        encoding = resp.headers.get(
+                            "Content-Encoding", "identity"
+                        ).lower()
+                        decompressor = None
+                        if encoding in ("", "identity"):
+                            pass
+                        elif encoding == "gzip":
+                            decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                        elif encoding == "deflate":
+                            decompressor = zlib.decompressobj()
+                        else:
+                            return ToolExecutionResult(
+                                tool_id=tool_id,
+                                tool_type="web_fetch",
+                                success=False,
+                                error="Response uses an unsupported content encoding",
+                            )
+
+                        decoded_parts = []
+                        decoded_size = 0
+                        while True:
+                            chunk = await resp.content.read(
+                                min(64 * 1024, max_download_bytes - downloaded)
+                            )
+                            if not chunk:
+                                break
+                            downloaded += len(chunk)
+                            if downloaded > max_download_bytes:
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Response exceeded the 500000-byte download limit",
+                                )
+                            if downloaded == max_download_bytes and (
+                                declared_length is None or declared_length > downloaded
+                            ):
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Response exceeded the 500000-byte download limit",
+                                )
+                            if decompressor is None:
+                                decoded = chunk
+                            else:
+                                decoded = decompressor.decompress(
+                                    chunk, max_decoded_bytes - decoded_size + 1
+                                )
+                                if decompressor.unconsumed_tail:
+                                    return ToolExecutionResult(
+                                        tool_id=tool_id,
+                                        tool_type="web_fetch",
+                                        success=False,
+                                        error="Response exceeded the 2000000-byte decoded limit",
+                                    )
+                            decoded_size += len(decoded)
+                            if decoded_size > max_decoded_bytes:
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Response exceeded the 2000000-byte decoded limit",
+                                )
+                            decoded_parts.append(decoded)
+
+                        if decompressor is not None:
+                            tail = decompressor.flush()
+                            decoded_size += len(tail)
+                            if decoded_size > max_decoded_bytes:
+                                return ToolExecutionResult(
+                                    tool_id=tool_id,
+                                    tool_type="web_fetch",
+                                    success=False,
+                                    error="Response exceeded the 2000000-byte decoded limit",
+                                )
+                            decoded_parts.append(tail)
+
+                        charset = resp.charset
+                        if not isinstance(charset, str) or not charset:
+                            charset = "utf-8"
+                        raw = b"".join(decoded_parts).decode(charset, errors="replace")
+                        break
 
             # Extract main content using priority chain
             text = self._extract_main_content(raw, extract_main)
 
             # Playwright fallback: if aiohttp got suspiciously little text
-            # from a valid response, the page may be JS-rendered.
+            # from a valid response, render the bounded source for inline JS.
             if len(text) < 500:
-                pw_text = await self._playwright_fetch(url)
+                pw_text = await self._playwright_fetch(raw, max_chars=2_000_000)
                 if pw_text and len(pw_text) > len(text):
                     text = pw_text
-                    logger.info(f"web_fetch: used Playwright fallback for {url}")
+                    logger.info("web_fetch: used Playwright fallback")
 
-            # Truncate to max_chars (accounting for the URL header)
             header = f"URL: {final_url}\n\n"
-            available = max(100, max_chars - len(header))
-            if len(text) > available:
-                text = text[:available] + "\n...[truncated]"
+            output = header + text
+            if len(output) > max_chars:
+                marker = "\n...[truncated]"
+                if max_chars > len(marker):
+                    output = output[: max_chars - len(marker)] + marker
+                else:
+                    output = output[:max_chars]
 
+            parsed_final_url = urlparse(final_url)
+            metadata_url = parsed_final_url._replace(
+                netloc=parsed_final_url.netloc.rsplit("@", 1)[-1],
+                query="",
+                fragment="",
+            ).geturl()
             return ToolExecutionResult(
                 tool_id=tool_id,
                 tool_type="web_fetch",
                 success=True,
-                output=header + text,
-                metadata={"url": final_url, "chars": len(text)},
+                output=output,
+                metadata={"url": metadata_url, "chars": len(output)},
             )
 
         except asyncio.TimeoutError:
@@ -3174,18 +3381,20 @@ class ToolExecutor:
                 tool_id=tool_id,
                 tool_type="web_fetch",
                 success=False,
-                error=f"Network error: {e}",
+                error=f"Network error: {type(e).__name__}",
             )
         except Exception as e:
-            logger.error(f"web_fetch error for {url}: {e}", exc_info=True)
+            logger.error("web_fetch failed: %s", type(e).__name__, exc_info=True)
             return ToolExecutionResult(
                 tool_id=tool_id,
                 tool_type="web_fetch",
                 success=False,
-                error=f"Fetch error: {e}",
+                error=f"Fetch error: {type(e).__name__}",
             )
 
-    async def _execute_web_search(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
+    async def _execute_web_search(
+        self, tool_data: Dict[str, Any]
+    ) -> ToolExecutionResult:
         """Search the web using DuckDuckGo's HTML endpoint and return results.
 
         No API key required. Parses the top N results (title, URL, snippet)
@@ -3460,12 +3669,11 @@ class ToolExecutor:
 
         return "\n".join(lines)
 
-    async def _playwright_fetch(self, url: str) -> str:
-        """Fetch a URL using Playwright headless browser (optional).
+    async def _playwright_fetch(self, html: str, *, max_chars: int = 2_000_000) -> str:
+        """Render bounded HTML for inline JavaScript when extraction is sparse.
 
-        Used as a fallback for JS-rendered pages where aiohttp returns
-        sparse content. Returns extracted text or empty string if
-        Playwright is not available or fails.
+        External requests are blocked so the browser cannot bypass the HTTP
+        byte limits enforced by web-fetch.
         """
         try:
             from playwright.async_api import async_playwright
@@ -3475,14 +3683,24 @@ class ToolExecutor:
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
-                page = await browser.new_page()
-                await page.goto(url, timeout=20000, wait_until="networkidle")
-                html = await page.content()
-                await browser.close()
+                try:
+                    page = await browser.new_page()
 
-            return self._extract_main_content(html)
+                    async def block_external_request(route):
+                        await route.abort()
+
+                    await page.route("**/*", block_external_request)
+                    await page.set_content(html, wait_until="domcontentloaded")
+                    text = await page.locator("body").evaluate(
+                        "(body, limit) => body.innerText.slice(0, limit)",
+                        max_chars,
+                    )
+                finally:
+                    await browser.close()
+
+            return str(text)[:max_chars]
         except Exception as e:
-            logger.debug(f"Playwright fetch failed for {url}: {e}")
+            logger.debug("Playwright fetch failed: %s", type(e).__name__)
             return ""
 
     @staticmethod
