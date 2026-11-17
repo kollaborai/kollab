@@ -3238,9 +3238,9 @@ class ContextCompactionPlugin(BasePlugin):
             task_id = (self._message_task_id(msg) or "unknown")[:128]
             prefix = f"[Active TaskLedger task {task_id}; latest assignment excerpt]\n"
             suffix = (
-                "\n[This assignment excerpt is incomplete. Retrieve the full "
-                f"current assignment with `/hub tasks status {task_id}`. If "
-                "retrieval fails, stop and ask the assigner to resend it; do "
+                "\n[This assignment excerpt is incomplete. Immediately ask the "
+                "assigner to resend the omitted instructions with the `hub_msg` "
+                "tool before continuing. If no reply is available, stop; do "
                 "not infer omitted instructions.]"
             )
             excerpt_separator = "\n[... omitted assignment text ...]\n"
@@ -4095,8 +4095,8 @@ class ContextCompactionPlugin(BasePlugin):
                 "[Task Reminder after context compaction]",
                 (
                     "The following active hub tasks were preserved above. "
-                    "An excerpt marked incomplete must be retrieved from its "
-                    "TaskLedger card before continuing."
+                    "For any incomplete excerpt, first use the `hub_msg` tool "
+                    "to ask its assigner to resend the omitted instructions."
                     if any(
                         getattr(task_msg, "metadata", {}).get(
                             "context_compaction_task_excerpt"
@@ -4118,8 +4118,8 @@ class ContextCompactionPlugin(BasePlugin):
                     preview += "..."
                 task_id = self._message_task_id(task_msg)
                 retrieval = (
-                    f" Use `/hub tasks status {task_id}` to retrieve the full "
-                    "assignment; if retrieval fails, ask the assigner to resend it."
+                    " Use the `hub_msg` tool to ask the assigner to resend the "
+                    "omitted instructions before continuing."
                     if getattr(task_msg, "metadata", {}).get(
                         "context_compaction_task_excerpt"
                     )
@@ -4138,9 +4138,9 @@ class ContextCompactionPlugin(BasePlugin):
                 for task_msg in preserved_tasks
             ):
                 reminder_lines.append(
-                    "Continue only with the instructions present in the excerpt "
-                    "or retrieved from TaskLedger. If retrieval is unavailable, "
-                    "ask the assigner to resend the missing text."
+                    "Continue only with instructions present in the excerpt or "
+                    "resent by the assigner. If the resend is unavailable, stop "
+                    "and do not infer omitted instructions."
                 )
             else:
                 reminder_lines.append(

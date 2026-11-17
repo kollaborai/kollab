@@ -164,9 +164,9 @@ These guards apply to both the basic and forked strategies:
   recipient metadata names this agent. Raw hub task assignments with IDs are
   excluded; active work is represented by TaskLedger-selected excerpts above.
   Oversized active assignments retain bounded beginning, middle, and ending
-  text. The excerpt says when text is omitted and points to the durable
-  TaskLedger command `/hub tasks status <id>`; if retrieval fails, the agent
-  must ask the assigner to resend the missing instructions instead of guessing.
+  text. The excerpt says when text is omitted and immediately directs the agent
+  to ask its assigner to resend the missing instructions with the `hub_msg` tool.
+  If no reply is available, the agent must stop instead of guessing.
 - `max_session_turns` is a visible/logged warning, not an automatic stop. Its
   default is `0` (disabled); a positive configured value enables the warning.
   Turn count and start time persist with session stats, restore on resume, and
