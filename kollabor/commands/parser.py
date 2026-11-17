@@ -1,6 +1,7 @@
 """Slash command parser for Kollab."""
 
 import logging
+import re
 import shlex
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -59,6 +60,13 @@ class SlashCommandParser:
             # Split command and arguments using shell-like parsing
             # This handles quoted arguments properly: /save "my file.txt"
             try:
+                # POSIX shlex treats unquoted backslashes as escapes. Protect
+                # separators in unquoted Windows drive and UNC path arguments.
+                command_text = re.sub(
+                    r"(?<!\S)(?:--?[\w-]+=)?(?:[A-Za-z]:\\|\\\\)[^\s]+",
+                    lambda match: match.group(0).replace("\\", "\\\\"),
+                    command_text,
+                )
                 parts = shlex.split(command_text)
             except ValueError as e:
                 # Handle malformed quotes gracefully
