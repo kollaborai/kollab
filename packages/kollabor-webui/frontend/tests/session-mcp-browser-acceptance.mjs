@@ -13,7 +13,6 @@ const require = createRequire(import.meta.url);
 const { chromium } = require("playwright-core");
 const here = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = path.resolve(here, "..");
-const repoRoot = path.resolve(frontendRoot, "../../..");
 const screenshotDir = path.join(os.tmpdir(), "kollab-session-mcp");
 await mkdir(screenshotDir, { recursive: true });
 const sessionServer = (name) => ({
@@ -107,6 +106,7 @@ try {
     await dialog.getByText(/global.*unavailable|could not load global/i).count(),
     "show why global definitions are unavailable",
   );
+  assert.ok((await dialog.innerText()).includes("global unavailable · session-only unknown"));
   assert.equal(await dialog.getByText("configured by agent", { exact: true }).count(), 0);
   assert.equal(await dialog.getByRole("button", { name: "Edit session-only" }).isDisabled(), true);
   assert.equal(await dialog.getByRole("button", { name: "Delete session-only" }).isDisabled(), true);
@@ -131,6 +131,7 @@ try {
   failSession = true;
   await dialog.getByRole("button", { name: "Refresh" }).click();
   await dialog.getByText(/Session MCP status unavailable/).waitFor();
+  assert.ok((await dialog.innerText()).includes("1 global · session-only unknown"));
   assert.equal(await dialog.getByRole("button", { name: "Connect" }).isDisabled(), true);
   assert.equal(await dialog.getByRole("button", { name: "Edit global-server" }).isEnabled(), true);
 
@@ -171,7 +172,6 @@ try {
 
   console.log("PASS MCP source failures, empty success, retry, session switch, stale response, and permission boundary");
   console.log(`SCREENSHOT session-mcp-global-failure.png (${screenshotDir})`);
-  console.log(`FRONTEND ${repoRoot}`);
 } finally {
   await browser?.close();
   await server.close();
