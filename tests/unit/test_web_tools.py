@@ -90,9 +90,7 @@ class TestWebToolDefinitions(unittest.TestCase):
         self.assertTrue(query_param.required)
         self.assertEqual(query_param.type, "string")
 
-        max_results_param = next(
-            p for p in tool.parameters if p.name == "max_results"
-        )
+        max_results_param = next(p for p in tool.parameters if p.name == "max_results")
         self.assertFalse(max_results_param.required)
         self.assertEqual(max_results_param.type, "integer")
         self.assertEqual(max_results_param.default, 5)
@@ -205,7 +203,7 @@ class TestWebFetchExecution(unittest.TestCase):
             "type": "web_fetch",
             "id": "web_fetch_0",
             "url": "https://example.com",
-            "raw": '<web-fetch><url>https://example.com</url></web-fetch>',
+            "raw": "<web-fetch><url>https://example.com</url></web-fetch>",
         }
 
         mock_resp = _make_mock_aiohttp_response(
@@ -215,7 +213,9 @@ class TestWebFetchExecution(unittest.TestCase):
         with _patch_aiohttp_session(mock_get=mock_resp):
             result = _run(self.executor._execute_web_fetch(tool_data))
 
-            self.assertTrue(result.success, f"Expected success, got error: {result.error}")
+            self.assertTrue(
+                result.success, f"Expected success, got error: {result.error}"
+            )
             self.assertIn("Hello World", result.output)
             # HTML tags should be stripped
             self.assertNotIn("<html>", result.output)
@@ -231,7 +231,7 @@ class TestWebFetchExecution(unittest.TestCase):
             "id": "web_fetch_0",
             "url": "https://example.com",
             "max_chars": 100,
-            "raw": '<web-fetch><url>https://example.com</url><max_chars>100</max_chars></web-fetch>',
+            "raw": "<web-fetch><url>https://example.com</url><max_chars>100</max_chars></web-fetch>",
         }
 
         mock_resp = _make_mock_aiohttp_response(text=html)
@@ -242,8 +242,9 @@ class TestWebFetchExecution(unittest.TestCase):
             self.assertTrue(result.success)
             # Output includes a URL header line + truncated text + truncation marker
             self.assertLessEqual(
-                len(result.output), 200,
-                f"Output should be roughly truncated, got {len(result.output)} chars"
+                len(result.output),
+                200,
+                f"Output should be roughly truncated, got {len(result.output)} chars",
             )
 
     def test_web_fetch_bounds_output_and_streams_response(self):
@@ -298,6 +299,7 @@ class TestWebFetchExecution(unittest.TestCase):
 
     def test_web_fetch_local_http_redirect_chunked_and_compressed_limits(self):
         """Exercise redirects, unknown lengths and gzip expansion over real HTTP."""
+
         async def run_case():
             large_body = b"Z" * 2_100_000
             compressed_body = gzip.compress(large_body)
@@ -419,6 +421,7 @@ class TestWebFetchExecution(unittest.TestCase):
 
     def test_web_fetch_cancellation_closes_response(self):
         """Cancellation during streaming propagates and closes the response."""
+
         async def run_case():
             started = asyncio.Event()
             response = _make_mock_aiohttp_response()
@@ -449,7 +452,7 @@ class TestWebFetchExecution(unittest.TestCase):
             "type": "web_fetch",
             "id": "web_fetch_0",
             "url": "not-a-valid-url",
-            "raw": '<web-fetch><url>not-a-valid-url</url></web-fetch>',
+            "raw": "<web-fetch><url>not-a-valid-url</url></web-fetch>",
         }
 
         # URL validation rejects before any network call
@@ -464,7 +467,7 @@ class TestWebFetchExecution(unittest.TestCase):
             "type": "web_fetch",
             "id": "web_fetch_0",
             "url": "https://slow-server.example.com",
-            "raw": '<web-fetch><url>https://slow-server.example.com</url></web-fetch>',
+            "raw": "<web-fetch><url>https://slow-server.example.com</url></web-fetch>",
         }
 
         mock_session = AsyncMock()
@@ -484,7 +487,7 @@ class TestWebFetchExecution(unittest.TestCase):
         tool_data = {
             "type": "web_fetch",
             "id": "web_fetch_0",
-            "raw": '<web-fetch></web-fetch>',
+            "raw": "<web-fetch></web-fetch>",
         }
 
         result = _run(self.executor._execute_web_fetch(tool_data))
@@ -498,7 +501,7 @@ class TestWebFetchExecution(unittest.TestCase):
             "type": "web_fetch",
             "id": "web_fetch_0",
             "url": "https://example.com/nonexistent",
-            "raw": '<web-fetch><url>https://example.com/nonexistent</url></web-fetch>',
+            "raw": "<web-fetch><url>https://example.com/nonexistent</url></web-fetch>",
         }
 
         mock_resp = _make_mock_aiohttp_response(status=404, text="Not Found")
@@ -555,22 +558,32 @@ class TestWebSearchExecution(unittest.TestCase):
                 f'<div class="result">'
                 f'<a class="result__a" href="//duckduckgo.com/l/?uddg={url}">{title}</a>'
                 f'<a class="result__snippet">{snippet}</a>'
-                f'</div>'
+                f"</div>"
             )
         return f'<html><body>{"".join(items)}</body></html>'
 
     def test_web_search_basic(self):
         """Test basic search returns parsed results."""
-        search_html = self._make_search_html([
-            ("Python docs", "https%3A%2F%2Fdocs.python.org", "The official Python documentation"),
-            ("Python tutorial", "https%3A%2F%2Ftutorial.python.org", "Learn Python step by step"),
-        ])
+        search_html = self._make_search_html(
+            [
+                (
+                    "Python docs",
+                    "https%3A%2F%2Fdocs.python.org",
+                    "The official Python documentation",
+                ),
+                (
+                    "Python tutorial",
+                    "https%3A%2F%2Ftutorial.python.org",
+                    "Learn Python step by step",
+                ),
+            ]
+        )
 
         tool_data = {
             "type": "web_search",
             "id": "web_search_0",
             "query": "python documentation",
-            "raw": '<web-search><query>python documentation</query></web-search>',
+            "raw": "<web-search><query>python documentation</query></web-search>",
         }
 
         mock_resp = _make_mock_aiohttp_response(text=search_html)
@@ -578,11 +591,13 @@ class TestWebSearchExecution(unittest.TestCase):
         with _patch_aiohttp_session(mock_post=mock_resp):
             result = _run(self.executor._execute_web_search(tool_data))
 
-            self.assertTrue(result.success, f"Expected success, got error: {result.error}")
             self.assertTrue(
-                "Python docs" in result.output or
-                "docs.python.org" in result.output or
-                "python" in result.output.lower()
+                result.success, f"Expected success, got error: {result.error}"
+            )
+            self.assertTrue(
+                "Python docs" in result.output
+                or "docs.python.org" in result.output
+                or "python" in result.output.lower()
             )
 
     def test_web_search_max_results(self):
@@ -598,7 +613,7 @@ class TestWebSearchExecution(unittest.TestCase):
             "id": "web_search_0",
             "query": "test query",
             "max_results": 3,
-            "raw": '<web-search><query>test query</query><max_results>3</max_results></web-search>',
+            "raw": "<web-search><query>test query</query><max_results>3</max_results></web-search>",
         }
 
         mock_resp = _make_mock_aiohttp_response(text=search_html)
@@ -606,11 +621,12 @@ class TestWebSearchExecution(unittest.TestCase):
         with _patch_aiohttp_session(mock_post=mock_resp):
             result = _run(self.executor._execute_web_search(tool_data))
 
-            self.assertTrue(result.success, f"Expected success, got error: {result.error}")
+            self.assertTrue(
+                result.success, f"Expected success, got error: {result.error}"
+            )
             result_count = result.output.count("https://example.com/")
             self.assertLessEqual(
-                result_count, 3,
-                f"Should return at most 3 results, got {result_count}"
+                result_count, 3, f"Should return at most 3 results, got {result_count}"
             )
 
     def test_web_search_missing_query(self):
@@ -618,7 +634,7 @@ class TestWebSearchExecution(unittest.TestCase):
         tool_data = {
             "type": "web_search",
             "id": "web_search_0",
-            "raw": '<web-search></web-search>',
+            "raw": "<web-search></web-search>",
         }
 
         result = _run(self.executor._execute_web_search(tool_data))
@@ -632,11 +648,13 @@ class TestWebSearchExecution(unittest.TestCase):
             "type": "web_search",
             "id": "web_search_0",
             "query": "test query",
-            "raw": '<web-search><query>test query</query></web-search>',
+            "raw": "<web-search><query>test query</query></web-search>",
         }
 
         mock_session = AsyncMock()
-        mock_session.post = MagicMock(side_effect=aiohttp.ClientError("Connection refused"))
+        mock_session.post = MagicMock(
+            side_effect=aiohttp.ClientError("Connection refused")
+        )
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=None)
 
