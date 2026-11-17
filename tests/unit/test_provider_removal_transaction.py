@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 
-from kollabor_ai.profile_manager import ProfileManager
 import kollabor_ai.profile_manager as profile_module
+from kollabor_ai.profile_manager import ProfileManager
 
 
 def test_denied_later_config_write_keeps_earlier_config_unchanged(monkeypatch, tmp_path):
