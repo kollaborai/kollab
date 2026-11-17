@@ -670,6 +670,75 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.success)
         self.assertIn("timed out", result.error.lower())
 
+    async def test_execute_tool_honors_foreground_timeout_without_tmux(self):
+        self.executor.terminal_timeout = 120
+        self.executor.shell_executor.run = AsyncMock(
+            return_value=ShellResult(
+                success=False,
+                stdout="",
+                stderr="",
+                exit_code=-1,
+                timed_out=True,
+                error="Command timed out after 30s",
+            )
+        )
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "terminal-timeout-fallback",
+                "command": "sleep 60",
+                "timeout": "30s",
+            }
+        )
+
+        self.assertFalse(result.success)
+        self.executor.shell_executor.run.assert_awaited_once_with(
+            "sleep 60", timeout=30, cwd=None
+        )
+
+    async def test_execute_tool_honors_foreground_timeout_with_tmux(self):
+        self.executor.terminal_timeout = 120
+        self.executor.tmux_plugin = MagicMock()
+        self.executor.tmux_plugin.execute_foreground = AsyncMock(
+            return_value={
+                "success": False,
+                "output": "",
+                "error": "Command timed out after 30s",
+                "exit_code": -1,
+            }
+        )
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "terminal-timeout-tmux",
+                "command": "sleep 60",
+                "timeout": "30s",
+            }
+        )
+
+        self.assertFalse(result.success)
+        self.executor.tmux_plugin.execute_foreground.assert_awaited_once_with(
+            command="sleep 60", timeout=30, cwd=None
+        )
+
+    async def test_execute_tool_rejects_invalid_terminal_timeout_before_running(self):
+        self.executor.shell_executor.run = AsyncMock()
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "terminal-invalid-timeout",
+                "command": "sleep 60",
+                "timeout": "thirty seconds",
+            }
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("timeout", result.error.lower())
+        self.executor.shell_executor.run.assert_not_awaited()
+
     async def test_execute_mcp_tool_success(self):
         """Test successful MCP tool execution."""
         tool_data = {
