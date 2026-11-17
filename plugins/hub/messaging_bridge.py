@@ -42,6 +42,18 @@ from kollabor_config.file_lock import try_lock, unlock
 logger = logging.getLogger(__name__)
 
 
+async def _await_shielded_task(task: asyncio.Task):
+    """Finish an owned task despite repeated cancellation of its caller."""
+    interrupted = False
+    while True:
+        try:
+            return await asyncio.shield(task), interrupted
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            interrupted = True
+
+
 async def _stop_transcriber(proc, communication_task: asyncio.Task) -> None:
     """End the isolated whisper process tree, then drain and reap its leader."""
     from kollabor_config import proc_ctl
@@ -380,15 +392,12 @@ class TelegramBridge(MessagingBridge):
                 except asyncio.CancelledError:
                     # Shield process creation so cancellation cannot orphan a child
                     # between spawn and assignment to ``proc``.
-                    try:
-                        proc = await asyncio.shield(spawn_task)
-                    except BaseException:
-                        raise
+                    proc, _ = await _await_shielded_task(spawn_task)
                     communication_task = asyncio.create_task(proc.communicate())
                     cleanup_task = asyncio.create_task(
                         _stop_transcriber(proc, communication_task)
                     )
-                    await asyncio.shield(cleanup_task)
+                    await _await_shielded_task(cleanup_task)
                     raise
 
                 communication_task = asyncio.create_task(proc.communicate())
@@ -397,16 +406,26 @@ class TelegramBridge(MessagingBridge):
                         asyncio.shield(communication_task), timeout=60
                     )
                 except asyncio.TimeoutError:
-                    await _stop_transcriber(proc, communication_task)
+                    cleanup_task = asyncio.create_task(
+                        _stop_transcriber(proc, communication_task)
+                    )
+                    _, interrupted = await _await_shielded_task(cleanup_task)
+                    if interrupted:
+                        raise asyncio.CancelledError
                     raise
                 except asyncio.CancelledError:
                     cleanup_task = asyncio.create_task(
                         _stop_transcriber(proc, communication_task)
                     )
-                    await asyncio.shield(cleanup_task)
+                    await _await_shielded_task(cleanup_task)
                     raise
                 except Exception:
-                    await _stop_transcriber(proc, communication_task)
+                    cleanup_task = asyncio.create_task(
+                        _stop_transcriber(proc, communication_task)
+                    )
+                    _, interrupted = await _await_shielded_task(cleanup_task)
+                    if interrupted:
+                        raise asyncio.CancelledError
                     raise
 
                 result_stdout = stdout_bytes.decode("utf-8", errors="replace")
