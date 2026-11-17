@@ -561,7 +561,16 @@ class MCPServerConnection:
                 logger.debug(
                     "Ignoring malformed JSON-RPC request from %s", self.server_name
                 )
-                return None
+                if "id" not in message:
+                    return None
+                response_id = message.get("id")
+                if not _valid_json_rpc_id(response_id):
+                    response_id = None
+                return {
+                    "jsonrpc": "2.0",
+                    "id": response_id,
+                    "error": {"code": -32600, "message": "Invalid Request"},
+                }
             if "id" not in message:
                 logger.debug("Ignoring MCP notification from %s", self.server_name)
                 return None
