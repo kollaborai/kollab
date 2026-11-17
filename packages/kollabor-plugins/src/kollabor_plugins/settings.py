@@ -82,13 +82,96 @@ def _valid_data_id(plugin_id: object) -> bool:
     return bool(_ID.fullmatch(base))
 
 
-def save(plugin_id: str, values: dict) -> None:
-    """Serialize validation and saving with install, update, detach and removal."""
+def _builtin(plugin_id: str) -> dict | None:
+    from .registry import plugin_entries
+
+    return next(
+        (entry for entry in plugin_entries() if entry.get("kind") == "built-in" and entry.get("id") == plugin_id),
+        None,
+    )
+
+
+def _save_builtin(
+    entry: dict, values: dict, *, enable: bool = False, allow_secrets: bool = False,
+    config_service=None, save_target: str = "global",
+) -> None:
+    """Validate a built-in edit and use the same config writer as the config UI."""
+    from kollabor.panels.config import apply_config_changes, read_managed_state, validate_config_changes
+    from kollabor_config.config_utils import get_global_config_path, get_local_config_path
+    from kollabor_config.managed_config import managed_by
+    from kollabor_config.service import ConfigService
+
+    if not isinstance(values, dict):
+        raise ValueError("Plugin values must be an object")
+    prefix = f"plugins.{entry['id']}."
+    enabled_path = f"{prefix}enabled"
+    fields = {
+        field["path"]: field
+        for field in entry.get("settings", [])
+        if isinstance(field, dict)
+        and isinstance(field.get("path"), str)
+        and field["path"].startswith(prefix)
+        and (allow_secrets or not field.get("secret"))
+        and (enable or field["path"] != enabled_path)
+    }
+    if enable and enabled_path not in fields:
+        managed, _ = read_managed_state()
+        owner = managed_by(enabled_path, managed) if managed is not None else None
+        fields[enabled_path] = {"type": "checkbox", "editable": owner is None, "managed_by": owner}
+    errors = validate_config_changes(fields, values)
+    if errors:
+        raise ValueError("Invalid plugin settings: " + ", ".join(sorted(errors)))
+    if not values:
+        return
+    if save_target not in {"local", "global"}:
+        raise ValueError("Invalid config save target")
+    path = get_local_config_path() if save_target == "local" else get_global_config_path()
+    if path.is_symlink():
+        raise ValueError("Config file cannot be a symlink")
+    if path.exists():
+        try:
+            if not isinstance(json.loads(path.read_text(encoding="utf-8")), dict):
+                raise ValueError("Invalid config file")
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError("Invalid config file") from exc
+    service = config_service if config_service is not None else ConfigService(path, fast_mode=True, initialize=False)
+    try:
+        if not apply_config_changes(
+            service, values, save_target, route_builtin=False,
+            atomic=callable(getattr(service, "save_keys", None)),
+        ):
+            raise OSError("Cannot save plugin config")
+    finally:
+        if config_service is None:
+            service.shutdown()
+
+
+def save(
+    plugin_id: str, values: dict, *, allow_secrets: bool = False,
+    config_service=None, save_target: str = "global",
+) -> None:
+    """Serialize validation and saving with install, update, detach and removal.
+
+    ``allow_secrets`` is reserved for the local config panel, which already
+    provides masked secret editing. Remote/plugin callers use the default.
+    """
+    if not isinstance(plugin_id, str):
+        raise ValueError("Invalid plugin id")
     home = Path.home() / ".kollab"
     home.mkdir(parents=True, exist_ok=True)
+    # Discovery can itself recover installs under plugins.json.lock; do it first.
+    registry = _read_registry(home / "plugins.json")
+    entry = None if plugin_id in registry["plugins"] or plugin_id.endswith("@dev") else _builtin(plugin_id)
     with locked_file(home / "plugins.json.lock", private=True):
         _recover_locked(home)
-        _save_locked(plugin_id, values)
+        registry = _read_registry(home / "plugins.json")
+        if entry is not None and plugin_id not in registry["plugins"]:
+            _save_builtin(
+                entry, values, allow_secrets=allow_secrets,
+                config_service=config_service, save_target=save_target,
+            )
+        else:
+            _save_locked(plugin_id, values)
 
 
 def _save_locked(plugin_id: str, values: dict) -> None:
@@ -134,19 +217,29 @@ def _save_locked(plugin_id: str, values: dict) -> None:
         write_text_atomic(path, json.dumps(current, indent=2, ensure_ascii=False) + "\n")
 
 
-def set_enabled(plugin_id: str, enabled: bool) -> None:
-    """Set an installed package's enabled state and capture PATH on enable."""
-    if not isinstance(plugin_id, str) or not _ID.fullmatch(plugin_id):
+def set_enabled(plugin_id: str, enabled: bool, *, config_service=None, save_target: str = "global") -> None:
+    """Set a plugin's enabled state, capturing PATH for packages on enable."""
+    if not isinstance(plugin_id, str):
         raise ValueError("Invalid plugin id")
     if type(enabled) is not bool:
         raise ValueError("Enabled state must be a boolean")
     home = Path.home() / ".kollab"
     home.mkdir(parents=True, exist_ok=True)
+    registry = _read_registry(home / "plugins.json")
+    entry = None if plugin_id in registry["plugins"] else _builtin(plugin_id)
     with locked_file(home / "plugins.json.lock", private=True):
         _recover_locked(home)
         path = home / "plugins.json"
         registry = _read_registry(path)
         record = registry["plugins"].get(plugin_id)
+        if entry is not None and record is None:
+            _save_builtin(
+                entry, {f"plugins.{plugin_id}.enabled": enabled}, enable=True,
+                config_service=config_service, save_target=save_target,
+            )
+            return
+        if not _ID.fullmatch(plugin_id):
+            raise ValueError("Invalid plugin id")
         if not isinstance(record, dict):
             raise ValueError("Plugin is not installed")
         record["enabled"] = enabled
