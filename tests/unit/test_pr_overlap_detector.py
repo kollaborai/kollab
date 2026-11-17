@@ -90,6 +90,7 @@ def test_common_base_or_one_nonoverlapping_file_is_not_enough():
 def test_comment_marker_is_stable_for_both_pr_orders():
     assert detector.overlap_marker(12, 4) == detector.overlap_marker(4, 12)
     assert detector.overlap_marker(12, 4) in detector.overlap_comment(12, 4)
+    assert detector.overlap_comment(12, 4) == detector.overlap_comment(4, 12)
 
 
 def test_existing_pair_comment_is_not_posted_twice(monkeypatch):
