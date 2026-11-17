@@ -217,6 +217,26 @@ class TestAutomaticCompactOnAcpChat(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(acp.submit.await_count, 2)
 
+    async def test_successful_manual_compaction_consumes_crossing_seen_in_flight(self):
+        plugin, _llm, acp = _plugin({"plugins.context_compaction.ask_model_first": False})
+        gate = asyncio.Event()
+
+        async def wait_for_manual_compaction(_text, *, record=True):
+            await gate.wait()
+            return {"text": "", "stop_reason": "end_turn"}
+
+        acp.submit = AsyncMock(side_effect=wait_for_manual_compaction)
+        plugin.acp_usage_updated(100_000, 1_000_000)
+        await plugin._start_manual_compaction(ask=False)
+        plugin.acp_usage_updated(350_000, 1_000_000)
+        gate.set()
+        await _settle(plugin)
+
+        plugin.acp_usage_updated(310_000, 1_000_000)
+        await _settle(plugin)
+
+        self.assertEqual(acp.submit.await_count, 1)
+
     async def test_explicit_global_threshold_is_the_trigger_for_acp_too(self):
         plugin, _llm, acp = _plugin({"plugins.context_compaction.token_threshold_k": 500})
         plugin.acp_usage_updated(600_000, 1_000_000)  # over 500K, under the ratio
