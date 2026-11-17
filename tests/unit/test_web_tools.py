@@ -332,6 +332,23 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertTrue(result.success, result.error)
         self.assertIn("Text form works", result.output)
 
+    def test_web_fetch_falls_back_for_unknown_charset(self):
+        """An unrecognized server charset must not turn extraction into an error."""
+        response = _make_mock_aiohttp_response(
+            text="<html><body><p>Charset fallback works</p></body></html>"
+        )
+        response.charset = "utf8mb4"
+
+        with _patch_aiohttp_session(mock_get=response):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"id": "web_fetch_charset", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn("Charset fallback works", result.output)
+
     def test_web_fetch_local_http_redirect_chunked_and_compressed_limits(self):
         """Exercise redirects, unknown lengths and gzip expansion over real HTTP."""
 
