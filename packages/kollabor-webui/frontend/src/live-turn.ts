@@ -255,8 +255,28 @@ export function historyReplacesLiveTurn(turn: LiveTurn, tail: ReadonlyArray<Hist
  * The live turn after history replaced it: its late events stay ignored, and
  * the queued turn it held back starts from its first event.
  */
-export const replacedLiveTurn = (turn: LiveTurn): LiveTurn =>
-  (turn.held ?? []).reduce(applyLiveEvent, { parts: [], requestId: turn.requestId, settled: "replaced" });
+export const replacedLiveTurn = (turn: LiveTurn): LiveTurn => {
+  if (turn.held?.length) {
+    return turn.held.reduce(applyLiveEvent, {
+      parts: [],
+      requestId: turn.requestId,
+      settled: "replaced",
+    });
+  }
+  const notices = turn.parts.flatMap((part) =>
+    part.type === "text"
+      ? part.text
+          .split("\n\n")
+          .filter((line) => /^ℹ Conversation history not saved for this (message|reply)\.$/.test(line))
+          .map((text) => ({ type: "text" as const, text }))
+      : [],
+  );
+  return {
+    parts: notices,
+    requestId: turn.requestId,
+    settled: notices.length ? "complete" : "replaced",
+  };
+};
 
 /**
  * The ephemeral assistant message, or null while nothing has streamed.
