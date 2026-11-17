@@ -67,9 +67,12 @@ export function loadGuideState(raw: string | null): GuideState {
       step?: unknown;
       dismissed?: unknown;
     };
+    // "provider" was a card until #1217. A browser that saved it had engaged
+    // the guide, so it resumes at the next card instead of looking untouched.
+    const saved = parsed.step === "provider" ? "network" : parsed.step;
     const step =
-      typeof parsed.step === "string" && parsed.step in STEP_INDEX
-        ? (parsed.step as SetupStepId)
+      typeof saved === "string" && saved in STEP_INDEX
+        ? (saved as SetupStepId)
         : "welcome";
     return { step, dismissed: parsed.dismissed === true };
   } catch {
