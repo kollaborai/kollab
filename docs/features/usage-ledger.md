@@ -71,6 +71,8 @@ price table entry wins over the built-in rates. An invalid entry is ignored with
 log line. Without a price, the cost reads as **unpriced**. It is never guessed
 or shown as zero.
 
+The built-in rates ship with the Kollab wheel and single-file binary.
+
 ### Budget alerts
 
 ```json

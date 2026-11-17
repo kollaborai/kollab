@@ -26,23 +26,37 @@ import {
   ToolGroupTrigger,
 } from "@/components/assistant-ui/tool-group";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
-import { splitMediaSegments } from "@/components/media/media-tokens";
+import { resolveMediaSegment, splitMediaSegments } from "@/components/media/media-tokens";
 import { MediaThumb, useMediaViewer, useSessionMedia } from "@/components/media/media-view";
 import { agentStatus, bundleName } from "@/components/panels/panel-model";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
+  loadComposerAttachments,
   loadComposerDraft,
+  loadPersistedComposerAttachments,
   queueComposerDraftSubmission,
+  saveComposerAttachments,
   saveComposerDraft,
 } from "@/composer-draft";
+import {
+  collectImageAttachments,
+  orphanImageNotice,
+  stripImageTokens,
+  stripLeadingImageTokens,
+} from "@/composer-restore";
+import { useShallow } from "zustand/shallow";
+import type { ThreadUserMessagePart } from "@assistant-ui/core";
 import {
   useVoiceMode,
   type VoiceActivity,
   type VoiceMode,
 } from "@/voice-mode";
 import { useRoomVoiceMode, useVoiceRoomLive, VoiceRoomBar } from "@/voice/voice-room";
-import { usePendingPermissionCancellation } from "@/runtime";
+import {
+  imageAttachmentAdapter,
+  usePendingPermissionCancellation,
+} from "@/runtime";
 import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
   panelCommandRequest,
@@ -60,6 +74,7 @@ import {
   MessagePrimitive,
   SuggestionPrimitive,
   ThreadPrimitive,
+  type PendingAttachment,
   type ToolCallMessagePartComponent,
   useAui,
   useAssistantTransportSendCommand,
@@ -86,6 +101,7 @@ import {
   useMemo,
   useLayoutEffect,
   useRef,
+  useState,
   type ComponentType,
   type FC,
   type KeyboardEvent,
@@ -123,6 +139,7 @@ export type ThreadProps = {
   commands?: readonly SlashCommand[] | undefined;
   /** Open a Settings tab; called for a bare panel command typed in the composer. */
   onOpenPanel?: ((request: PanelOpenRequest) => void) | undefined;
+  onOpenWelcome?: (() => void) | undefined;
   /** Offer image attachments; false hides the paperclip and refuses drops and pastes. */
   attachmentsEnabled?: boolean | undefined;
   /** Visible status while a bounded history page is being fetched. */
@@ -164,6 +181,7 @@ export const Thread: FC<ThreadProps> = ({
   agents = [],
   commands = [],
   onOpenPanel,
+  onOpenWelcome,
   attachmentsEnabled = true,
   historyStatus,
   onLoadOlder,
@@ -180,6 +198,7 @@ export const Thread: FC<ThreadProps> = ({
         agents={agents}
         commands={commands}
         onOpenPanel={onOpenPanel}
+        onOpenWelcome={onOpenWelcome}
         attachmentsEnabled={attachmentsEnabled}
         historyStatus={historyStatus}
         onLoadOlder={onLoadOlder}
@@ -196,6 +215,7 @@ const ThreadRoot: FC<{
   agents: readonly AgentPoolEntry[];
   commands: readonly SlashCommand[];
   onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
+  onOpenWelcome: (() => void) | undefined;
   attachmentsEnabled: boolean;
   historyStatus: ThreadProps["historyStatus"];
   onLoadOlder: ThreadProps["onLoadOlder"];
@@ -207,6 +227,7 @@ const ThreadRoot: FC<{
   agents,
   commands,
   onOpenPanel,
+  onOpenWelcome,
   attachmentsEnabled,
   historyStatus,
   onLoadOlder,
@@ -410,6 +431,7 @@ const ThreadRoot: FC<{
                 agents={agents}
                 commands={commands}
                 onOpenPanel={onOpenPanel}
+                onOpenWelcome={onOpenWelcome}
                 attachmentsEnabled={attachmentsEnabled}
                 draftKey={draftKey}
               />
@@ -454,7 +476,7 @@ const ThreadScrollToBottom: FC = () => {
       <TooltipIconButton
         tooltip="Scroll to Bottom"
         variant="outline"
-        className="aui-thread-scroll-to-bottom absolute -top-12 z-10 self-center rounded-full p-4 disabled:invisible"
+        className="aui-thread-scroll-to-bottom z-10 self-center rounded-md p-4 disabled:invisible"
       >
         <ArrowDownIcon />
       </TooltipIconButton>
@@ -502,9 +524,10 @@ const Composer: FC<{
   agents: readonly AgentPoolEntry[];
   commands: readonly SlashCommand[];
   onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
+  onOpenWelcome: (() => void) | undefined;
   attachmentsEnabled: boolean;
   draftKey: ThreadProps["draftKey"];
-}> = ({ agents, commands, onOpenPanel, attachmentsEnabled, draftKey }) => {
+}> = ({ agents, commands, onOpenPanel, onOpenWelcome, attachmentsEnabled, draftKey }) => {
   const aui = useAui();
   const sendTransportCommand = useAssistantTransportSendCommand();
   // The mic starts the LiveKit room in this browser; /voice (the computer
@@ -526,16 +549,108 @@ const Composer: FC<{
   );
   const isRunning = useAuiState((s) => s.thread.isRunning);
   const composerText = useAuiState((s) => s.composer.text);
+  const composerImages = useAuiState(
+    useShallow((s) => s.composer.attachments),
+  );
+  const [orphanTokenNotice, setOrphanTokenNotice] = useState<string | null>(
+    null,
+  );
   const restoredDraft = useRef<{ key: string | null; text: string } | null>(null);
+  const lastRestoredDraftKey = useRef<string | null | undefined>(undefined);
   const skipEmptyDraftPersist = useRef(false);
+  const [busySubmitError, setBusySubmitError] = useState<string | null>(null);
 
   useLayoutEffect(() => {
+    let cancelled = false;
     const key = draftKey ?? null;
-    const text = loadComposerDraft(key) ?? "";
-    restoredDraft.current = { key, text };
+    // Capability changes can rerun this effect after the attachment adapter
+    // has already rewritten the image tokens. Restore each key once so a
+    // single retained image cannot be attached twice.
+    if (lastRestoredDraftKey.current === key) return;
+    // Token lines belong to attachments, and attachments do not live in the
+    // text draft. Strip them first, then restore what the same tab kept.
+    const restored = stripImageTokens(loadComposerDraft(key) ?? "");
+    restoredDraft.current = { key, text: restored.text };
     skipEmptyDraftPersist.current = false;
-    if (aui.composer.getState().text !== text) aui.composer.setText(text);
-  }, [aui, draftKey]);
+    if (aui.composer.getState().text !== restored.text) {
+      aui.composer.setText(restored.text);
+    }
+    const restoreImages = async () => {
+      const keptImages = loadComposerAttachments(key);
+      if (keptImages.length === 0) {
+        keptImages.push(...(await loadPersistedComposerAttachments(key)));
+      }
+      if (cancelled) return;
+      if (attachmentsEnabled || keptImages.length === 0) {
+        lastRestoredDraftKey.current = key;
+      }
+      setOrphanTokenNotice(
+        orphanImageNotice(restored.tokenCount, attachmentsEnabled ? keptImages.length : 0),
+      );
+      if (keptImages.length === 0 || !attachmentsEnabled) return;
+
+      // The runtime can put its own copy of the text back after the strip
+      // above, and text typed next to a bare token shares its line. Let the
+      // runtime finish its swap, then take the stale tokens off the text as
+      // it is right now.
+      await Promise.resolve();
+      if (cancelled) return;
+      const live = stripImageTokens(aui.composer.getState().text);
+      const inline = stripLeadingImageTokens(live.text, keptImages.length - live.tokenCount);
+      if (live.tokenCount + inline.count > 0) aui.composer.setText(inline.text);
+
+      // Re-add each kept image; the token synchronizer rewrites fresh
+      // [imageN] tokens, so text and attachments never disagree.
+      let restoredImageCount = 0;
+      for (const image of keptImages) {
+        try {
+          // Pending attachments restore through the adapter exactly as a
+          // manual attach does; complete ones come back as descriptors.
+          if (image.file instanceof File) {
+            await aui.composer.addAttachment(image.file);
+          } else {
+            await aui.composer.addAttachment({
+              type: "image",
+              name: image.name,
+              contentType: image.contentType,
+              content: [...(image.content ?? [])] as ThreadUserMessagePart[],
+            });
+          }
+          restoredImageCount += 1;
+        } catch {
+          // Continue restoring the remaining images after one fails.
+        }
+      }
+      if (!cancelled) {
+        setOrphanTokenNotice(
+          orphanImageNotice(restored.tokenCount, restoredImageCount),
+        );
+      }
+    };
+    void restoreImages();
+    return () => {
+      cancelled = true;
+    };
+  }, [aui, draftKey, attachmentsEnabled]);
+
+  // Keep the per-key image retention in step with the composer; a session
+  // switch drops the runtime, the next mount reads this back.
+  useEffect(() => {
+    // Do not let the initial empty composer erase IndexedDB while restoration
+    // is still reading this draft's stored attachments.
+    if (restoredDraft.current?.key === (draftKey ?? null)) return;
+    void saveComposerAttachments(
+      draftKey ?? null,
+      collectImageAttachments(composerImages),
+    );
+  }, [composerImages, draftKey]);
+
+  // The orphan notice describes the restored draft; the first user edit or
+  // send after the restore retires it.
+  useEffect(() => {
+    if (restoredDraft.current !== null) return;
+    setOrphanTokenNotice(null);
+  }, [composerText]);
 
   useEffect(() => {
     const key = draftKey ?? null;
@@ -557,16 +672,27 @@ const Composer: FC<{
     saveComposerDraft(key, composerText);
   }, [composerText, draftKey]);
 
-  const lastBusySubmit = useRef<{ fingerprint: string; at: number } | null>(
-    null,
-  );
+  const lastBusySubmit = useRef<{
+    fingerprint: string;
+    at: number;
+    inFlight: Set<string>;
+  } | null>(null);
 
-  // A bare /config, /llm, /model, /setup or /connect (also /connect code and
-  // /connect knocks) opens its Settings tab and posts no text. Any other line is
-  // sent exactly as typed. Runs on form submit (Enter) and on the Send button.
+  // A bare /welcome opens the local guide; panel commands open Settings and post
+  // no text. Any other line is sent exactly as typed. Runs on form submit and Send.
   const openPanelFromComposer = (event: { preventDefault: () => void }) => {
-    if (!onOpenPanel) return;
     const { text, attachments } = aui.composer.getState();
+    if (
+      onOpenWelcome &&
+      attachments.length === 0 &&
+      text.trim().toLowerCase() === "/welcome"
+    ) {
+      event.preventDefault();
+      aui.composer.setText("");
+      onOpenWelcome();
+      return;
+    }
+    if (!onOpenPanel) return;
     const request =
       attachments.length === 0 ? panelCommandRequest(text, commands) : null;
     if (!request) return;
@@ -577,7 +703,7 @@ const Composer: FC<{
 
   // Picking a panel command in the slash menu (Enter or click) opens its tab
   // instead of leaving "/config" in the box for a second Enter.
-  const sendBusyMessage = (event: {
+  const sendBusyMessage = async (event: {
     preventDefault: () => void;
     defaultPrevented?: boolean;
   }) => {
@@ -588,8 +714,13 @@ const Composer: FC<{
     const fingerprint = `${state.text}\u0000${state.attachments
       .map((attachment) => attachment.id)
       .join(",")}`;
-    const now = Date.now();
     const previous = lastBusySubmit.current;
+    const inFlight = previous?.inFlight ?? new Set();
+    if (inFlight.has(fingerprint)) {
+      event.preventDefault();
+      return;
+    }
+    const now = Date.now();
     if (
       previous &&
       previous.fingerprint === fingerprint &&
@@ -598,29 +729,61 @@ const Composer: FC<{
       event.preventDefault();
       return;
     }
-    lastBusySubmit.current = { fingerprint, at: now };
+    lastBusySubmit.current = { fingerprint, at: now, inFlight };
+    inFlight.add(fingerprint);
     event.preventDefault();
-    const parts: Array<
-      | { type: "text"; text: string }
-      | { type: "image"; image: string }
-    > = [];
-    if (state.text.trim()) parts.push({ type: "text", text: state.text });
-    for (const attachment of state.attachments) {
-      for (const part of attachment.content ?? []) {
-        if (part.type === "text") parts.push({ type: "text", text: part.text });
-        if (part.type === "image") parts.push({ type: "image", image: part.image });
+    setBusySubmitError(null);
+    try {
+      const attachments = await Promise.all(
+        state.attachments.map(async (attachment) => {
+          if (attachment.content) return attachment;
+          if (
+            attachment.type === "image" &&
+            attachment.status.type === "requires-action"
+          ) {
+            return imageAttachmentAdapter.send(attachment as PendingAttachment);
+          }
+          throw new Error("Attachment is not ready to send");
+        }),
+      );
+      const parts: Array<
+        | { type: "text"; text: string }
+        | { type: "image"; image: string }
+      > = [];
+      if (state.text.trim()) parts.push({ type: "text", text: state.text });
+      for (const attachment of attachments) {
+        for (const part of attachment.content ?? []) {
+          if (part.type === "text") parts.push({ type: "text", text: part.text });
+          if (part.type === "image") parts.push({ type: "image", image: part.image });
+        }
       }
+      if (parts.length === 0) throw new Error("Message has no sendable content");
+      queueComposerDraftSubmission(draftKey, state.text);
+      if (state.text.length > 0) skipEmptyDraftPersist.current = true;
+      sendTransportCommand({
+        type: "add-message",
+        message: { role: "user", parts },
+        parentId: null,
+        sourceId: null,
+      });
+      const currentState = aui.composer.getState();
+      const currentFingerprint = `${currentState.text}\u0000${currentState.attachments
+        .map((attachment) => attachment.id)
+        .join(",")}`;
+      if (currentFingerprint === fingerprint) {
+        void aui.composer.reset();
+      }
+    } catch {
+      if (lastBusySubmit.current?.fingerprint === fingerprint) {
+        lastBusySubmit.current = {
+          ...lastBusySubmit.current,
+          at: Number.NEGATIVE_INFINITY,
+        };
+      }
+      setBusySubmitError("Could not send the message. Retry or remove the attachment.");
+    } finally {
+      inFlight.delete(fingerprint);
     }
-    if (parts.length === 0) return;
-    queueComposerDraftSubmission(draftKey, state.text);
-    if (state.text.length > 0) skipEmptyDraftPersist.current = true;
-    sendTransportCommand({
-      type: "add-message",
-      message: { role: "user", parts },
-      parentId: null,
-      sourceId: null,
-    });
-    void aui.composer.reset();
   };
 
   const submitBusyMessage = (event: {
@@ -655,10 +818,20 @@ const Composer: FC<{
     id: string;
     metadata?: Record<string, unknown> | undefined;
   }) => {
-    if (!onOpenPanel || aui.composer.getState().attachments.length > 0) return;
     const insert = item.metadata?.insertText;
+    const commandText = `/${typeof insert === "string" ? insert : item.id}`;
+    if (
+      onOpenWelcome &&
+      aui.composer.getState().attachments.length === 0 &&
+      commandText.trim().toLowerCase() === "/welcome"
+    ) {
+      aui.composer.setText("");
+      onOpenWelcome();
+      return;
+    }
+    if (!onOpenPanel || aui.composer.getState().attachments.length > 0) return;
     const request = panelCommandRequest(
-      `/${typeof insert === "string" ? insert : item.id}`,
+      commandText,
       commands,
     );
     if (!request) return;
@@ -912,6 +1085,11 @@ const Composer: FC<{
           emptyMessage="No online agents"
           emptyHint="Try @broadcast to reach every agent in this project."
         />
+        {busySubmitError ? (
+          <p role="alert" className="text-destructive px-2 text-xs">
+            {busySubmitError}
+          </p>
+        ) : null}
         <ComposerPrimitive.AttachmentDropzone
           asChild
           disabled={!attachmentsEnabled}
@@ -920,6 +1098,14 @@ const Composer: FC<{
             data-slot="aui_composer-shell"
             className="flex w-full flex-col gap-2 rounded-(--composer-radius) bg-(--composer-bg) focus-within:bg-[color-mix(in_oklab,var(--color-muted)_45%,var(--color-background))] p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[background-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
           >
+            {orphanTokenNotice ? (
+              <p
+                role="status"
+                className="aui-composer-orphan-notice text-muted-foreground/90 px-1 text-xs leading-4"
+              >
+                {orphanTokenNotice}
+              </p>
+            ) : null}
             <ComposerAttachments />
             {voiceAvailable && terminalVoice.on ? (
               <VoiceStatus activity={terminalVoice.activity} />
@@ -1301,7 +1487,7 @@ const AssistantActionBar: FC = () => {
  * A live row carries its pictures as image parts, so there the tokens render
  * as nothing instead of duplicating the picture next to them.
  */
-const UserText: FC<{ text?: string }> = ({ text }) => {
+export const UserText: FC<{ text?: string }> = ({ text }) => {
   const media = useAuiState(
     (s) => s.message.metadata?.custom?.media,
   ) as MediaEntry[] | undefined;
@@ -1315,18 +1501,34 @@ const UserText: FC<{ text?: string }> = ({ text }) => {
   return (
     <>
       {segments.map((segment, index) => {
-        if (segment.kind === "text") return <span key={index}>{segment.text}</span>;
-        if (imageParts > 0) return null;
-        const entry = media?.[segment.index];
-        if (!entry) return <span key={index}>[image{segment.index + 1}]</span>;
-        const viewerItems = sessionMedia?.length ? sessionMedia : media;
-        const viewerIndex = viewerItems?.findIndex((item) => item.ref === entry.ref) ?? -1;
+        // A live row shows its pictures as image parts, so its token
+        // segments render as nothing instead of duplicating the attached
+        // picture next to them (#1140 review). Typed [[imageN]] escapes
+        // keep their literal text. The check runs before resolving: a live
+        // row carries no media list, so resolving would misclassify.
+        if (imageParts > 0 && segment.kind === "token") return null;
+        const resolved = resolveMediaSegment(segment, media);
+        if (resolved.kind === "text") return <span key={index}>{resolved.text}</span>;
+        // Literal [imageN] text: the escaped form, or a slot whose picture
+        // is missing or failed - it never requests a ref and never opens
+        // the viewer (#1124 P2a).
+        if (resolved.kind === "literal") return <span key={index}>{resolved.text}</span>;
+        const { entry, index: slot } = resolved;
+        // A resolved thumb implies the row has a media list; an empty list
+        // just yields a -1 viewer index, falling back to the slot position.
+        // Placeholder slots (failed or empty refs) carry no picture for the
+        // viewer to show, so they are filtered out of the fallback list
+        // (#1140 review).
+        const viewerItems = (sessionMedia?.length ? sessionMedia : (media ?? [])).filter(
+          (item) => item.ref && !item.failed,
+        );
+        const viewerIndex = viewerItems.findIndex((item) => item.ref === entry.ref);
         return (
           <MediaThumb
             key={index}
             ref_={entry.ref}
             className="my-1 align-middle"
-            onOpen={openViewer ? () => openViewer(viewerItems ?? media, viewerIndex >= 0 ? viewerIndex : segment.index) : undefined}
+            onOpen={openViewer ? () => openViewer(viewerItems, viewerIndex >= 0 ? viewerIndex : slot) : undefined}
           />
         );
       })}

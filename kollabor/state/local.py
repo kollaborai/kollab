@@ -1983,7 +1983,9 @@ class LocalStateService(StateService):
         publish_semantic(self._event_bus, "profile_changed", profile=snapshot.to_dict())
         return snapshot
 
-    async def set_approval_mode(self, mode: str) -> PermissionSnapshot:
+    async def set_approval_mode(
+        self, mode: str, persist: bool = True
+    ) -> PermissionSnapshot:
         """Change the tool permission approval mode and return the new snapshot.
 
         Accepts the canonical enum names ("DEFAULT", "CONFIRM_ALL",
@@ -1991,6 +1993,10 @@ class LocalStateService(StateService):
         (-> CONFIRM_ALL) and "trust" (-> TRUST_ALL) so the RPC path
         matches what /permissions strict and /permissions trust already
         send. Case-insensitive.
+
+        With persist=False the mode applies to this session only; the
+        saved default in the config is left alone (a session start must
+        never move a person's saved choice, #1111).
 
         Raises ValueError if the mode name is not recognized or the
         permission manager is not available.
@@ -2024,7 +2030,7 @@ class LocalStateService(StateService):
                 f"unknown approval mode: {mode!r} (expected DEFAULT, CONFIRM_ALL, AUTO_APPROVE_EDITS, or TRUST_ALL)"
             )
 
-        pm.set_approval_mode(enum_val)
+        pm.set_approval_mode(enum_val, persist=persist)
         # Re-read to build the new snapshot -- set_approval_mode may
         # persist side-effects (config save) that we want reflected.
         return await self.get_permission_state()
@@ -2886,21 +2892,21 @@ class LocalStateService(StateService):
 
         return MCPManager()
 
-    async def enable_mcp_server(self, name: str) -> McpSnapshot:
-        """Enable an MCP server by flipping `enabled = True` in the settings file.
-
-        Phase 4.5 step 7: no hot-reload -- caller surfaces "restart to
-        apply" in the success message. This mirrors /profile set which
-        also requires a provider reinit; the symmetric choice here is to
-        punt the subprocess lifecycle rabbit hole to phase 4.6 and ship
-        the predictable file-write path now.
-        """
-        mgr = self._mcp_manager()
-        result = mgr.enable_server(name)
-        if not result.get("success"):
-            err = result.get("error") or f"failed to enable MCP server {name!r}"
-            raise ValueError(err)
-        logger.info(f"MCP server {name!r} enabled via state_service")
+    async def enable_mcp_server(self, name: str, *, persist: bool = True) -> McpSnapshot:
+        """Enable an MCP server persistently or for this daemon only."""
+        if persist:
+            mgr = self._mcp_manager()
+            result = mgr.enable_server(name)
+            if not result.get("success"):
+                err = result.get("error") or f"failed to enable MCP server {name!r}"
+                raise ValueError(err)
+        else:
+            integration = getattr(self._llm_service, "mcp_integration", None)
+            server = getattr(integration, "mcp_servers", {}).get(name)
+            if not isinstance(server, dict):
+                raise ValueError(f"MCP server {name!r} is not configured")
+            integration.session_servers[name] = {**server, "enabled": True}
+        logger.info("MCP server %r enabled via state_service (persist=%s)", name, persist)
         return await self.get_mcp_state()
 
     async def disable_mcp_server(self, name: str) -> McpSnapshot:

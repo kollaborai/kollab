@@ -259,7 +259,8 @@ def parse_team(
             raise LibraryError(f"{seat}: expected an object")
         ref = entry.get("persona")
         if isinstance(ref, dict):
-            persona = _persona(ref, "", {"kind": "initials"}, seat)
+            # A team member written inline is a crew gem unless it sets its own avatar.
+            persona = _persona(ref, "", {"kind": "gem"}, seat)
         elif isinstance(ref, str) and ref.strip():
             persona = _lookup(rosters, ref.strip(), [roster or prefer])
             if persona is None:
@@ -470,7 +471,7 @@ def persona_context(persona: Persona) -> List[str]:
     if not (persona.prompt or persona.role):
         return []
     head = f"your persona: {persona.display_name or persona.name}"
-    if persona.role:
+    if persona.role and persona.role != persona.display_name:
         head += f" ({persona.role})"
     return [head, *([persona.prompt] if persona.prompt else [])]
 

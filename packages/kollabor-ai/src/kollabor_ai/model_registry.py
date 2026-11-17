@@ -45,7 +45,19 @@ def load_model_registry() -> Dict[str, Any]:
         try:
             if path.exists():
                 with open(path) as handle:
-                    registry = json.load(handle)
+                    loaded = json.load(handle)
+                if not isinstance(loaded, dict):
+                    logger.warning("Ignoring malformed model registry root in %s", path)
+                    continue
+                registry = loaded
+                for section in ("models", "provider_defaults"):
+                    if not isinstance(registry.get(section), dict):
+                        logger.warning(
+                            "Ignoring malformed %s section in model registry %s",
+                            section,
+                            path,
+                        )
+                        registry[section] = {}
                 break
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Failed to load bundled model registry %s: %s", path, exc)
@@ -55,12 +67,25 @@ def load_model_registry() -> Dict[str, Any]:
         if user_path.exists():
             with open(user_path) as handle:
                 user_data = json.load(handle)
-            if "models" in user_data:
-                registry.setdefault("models", {}).update(user_data["models"])
-            if "provider_defaults" in user_data:
-                registry.setdefault("provider_defaults", {}).update(
-                    user_data["provider_defaults"]
-                )
+            if not isinstance(user_data, dict):
+                logger.warning("Ignoring malformed user model registry root in %s", user_path)
+            else:
+                for section in ("models", "provider_defaults"):
+                    overrides = user_data.get(section)
+                    if section not in user_data:
+                        continue
+                    if not isinstance(overrides, dict):
+                        logger.warning(
+                            "Ignoring malformed %s section in user model registry %s",
+                            section,
+                            user_path,
+                        )
+                        continue
+                    current = registry.get(section)
+                    if not isinstance(current, dict):
+                        current = {}
+                        registry[section] = current
+                    current.update(overrides)
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning("Failed to load user model overrides %s: %s", user_path, exc)
 
@@ -82,21 +107,118 @@ def get_model_registry() -> Dict[str, Any]:
     return _REGISTRY
 
 
-def _best_match(model: str, field: str) -> Optional[Any]:
+def _registry_section(name: str) -> Dict[str, Any]:
+    """Return a catalog mapping, treating malformed roots/sections as empty."""
+    registry = get_model_registry()
+    if not isinstance(registry, dict):
+        return {}
+    section = registry.get(name)
+    return section if isinstance(section, dict) else {}
+
+
+# Aggregator surfaces hand out "vendor/model" (and "vendor/model:tag")
+# strings. The vendor segment tells us the underlying model's family, and
+# tags like ":free" are billing variants, so both strip before lookup.
+_KNOWN_VENDORS = frozenset(
+    {
+        "openai",
+        "anthropic",
+        "google",
+        "gemini",
+        "zai",
+        "zhipuai",
+        "xai",
+        "deepseek",
+        "qwen",
+        "mistralai",
+        "meta-llama",
+        "moonshotai",
+        "amazon",
+        "microsoft",
+        "inclusionai",
+        "minimax",
+    }
+)
+
+# Native provider represented by a vendor prefix in aggregator model IDs.
+# Other vendors are handled by an exact OpenRouter catalog entry; they must
+# not inherit capabilities from an unrelated unprefixed model with the same
+# suffix.
+_VENDOR_REGISTRY_PROVIDERS = {
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "google": "gemini",
+    "gemini": "gemini",
+}
+
+# These OpenRouter vendor aliases intentionally resolve to the locally curated
+# custom-provider records. Other vendors need an exact OpenRouter catalog entry
+# before their capabilities can be used.
+_VENDOR_FIELD_PROVIDERS = {
+    **_VENDOR_REGISTRY_PROVIDERS,
+    "zai": "custom",
+    "zhipuai": "custom",
+}
+
+
+def _lookup_candidates(model: str, provider: Optional[str] = None) -> List[str]:
+    """Candidate forms of a model string, most specific first.
+
+    The full string always tries first. Aggregator-prefixed strings
+    (``vendor/model`` where vendor is known, or the provider surface is
+    openrouter) also try the stripped name and the suffix-stripped name, so
+    ``openai/gpt-5.6-luna:free`` resolves ``gpt-5.6-luna``.
+    """
+    model_l = (model or "").lower().strip()
+    if not model_l:
+        return []
+    candidates = [model_l]
+    if "/" in model_l:
+        vendor, _, rest = model_l.partition("/")
+        vendor = vendor.strip()
+        rest = rest.strip()
+        if rest and (provider == "openrouter" or vendor in _KNOWN_VENDORS):
+            if ":" in rest:
+                candidates.append(rest.rsplit(":", 1)[0])
+            candidates.append(rest)
+    if ":" in candidates[0] and "/" not in model_l:
+        # Bare ":free"-style suffix without a vendor segment.
+        stripped = model_l.rsplit(":", 1)[0]
+        if stripped:
+            candidates.append(stripped)
+    return candidates
+
+
+def _best_match(
+    model: str, field: str, provider: Optional[str] = None
+) -> Optional[Any]:
     """Longest-prefix registry lookup for a single field.
 
     ``gpt-5.6-terra-2026-07-09`` matches the ``gpt-5.6-terra`` entry rather
-    than ``gpt-5.6``, because the longest matching entry name wins. Entries
-    missing the field are skipped, so a specific entry never shadows a more
-    general one that actually carries the value.
+    than ``gpt-5.6``, because the longest matching entry name wins. An exact
+    catalog entry stops the search: when the model string names a real entry
+    that omits the field, its silence is authoritative (the default applies)
+    and shorter-generation prefixes never leak their values in (a new
+    ``gpt-5`` entry must not turn ``gpt-5.6`` into a no-sampling model).
     """
     model_l = (model or "").lower()
     if not model_l:
         return None
 
+    registry_models = _registry_section("models")
+    exact = registry_models.get(model_l)
+    if isinstance(exact, dict):
+        if provider and str(exact.get("provider") or "").lower() != provider:
+            return None
+        return exact.get(field)
+
     best: Optional[Any] = None
     best_len = 0
-    for name, info in get_model_registry().get("models", {}).items():
+    for name, info in registry_models.items():
+        if not isinstance(name, str) or not isinstance(info, dict):
+            continue
+        if provider and str(info.get("provider") or "").lower() != provider:
+            continue
         if not model_l.startswith(name.lower()) or len(name) <= best_len:
             continue
         value = info.get(field)
@@ -106,6 +228,65 @@ def _best_match(model: str, field: str) -> Optional[Any]:
     return best
 
 
+def _lookup_field(
+    model: str, field: str, provider: Optional[str] = None
+) -> Optional[Any]:
+    """Resolve a field for a model string, aggregator prefixes included.
+
+    Tries :func:`_lookup_candidates` in order. An exact catalog id owns its
+    field even when the field is absent, so its default cannot be replaced by
+    a value inherited from a stripped fallback form.
+    """
+    registry_models = _registry_section("models")
+    model_l = (model or "").lower().strip()
+    vendor = model_l.partition("/")[0].strip() if "/" in model_l else ""
+    vendor_provider = _VENDOR_FIELD_PROVIDERS.get(vendor)
+    provider_l = registry_provider_for(provider) if provider else None
+    candidates = _lookup_candidates(model, provider_l)
+
+    # A vendor-prefixed fallback is safe only when both the vendor and any
+    # explicitly selected provider identify the catalog provider. Exact
+    # aggregator entries still work when a vendor has no native catalog map.
+    fallback_allowed = bool(vendor_provider) and (
+        provider_l in (None, "openrouter", vendor_provider)
+    )
+    if vendor and len(candidates) > 1 and not fallback_allowed:
+        candidates = candidates[:1]
+
+    for index, candidate in enumerate(candidates):
+        candidate_provider: Optional[str] = None
+        if vendor:
+            if index == 0 and provider_l:
+                candidate_provider = (
+                    "openrouter" if provider_l == "openrouter" else provider_l
+                )
+            elif index > 0:
+                candidate_provider = vendor_provider
+        if candidate in registry_models:
+            exact = registry_models[candidate]
+            if candidate_provider and (
+                not isinstance(exact, dict)
+                or str(exact.get("provider") or "").lower() != candidate_provider
+            ):
+                return None
+            return exact.get(field) if isinstance(exact, dict) else None
+        best = _best_match(candidate, field, candidate_provider)
+        if best is not None:
+            return best
+    return None
+
+
+def _positive_int(value: Any) -> Optional[int]:
+    """Convert a positive integer-like catalog value, rejecting malformed data."""
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def resolve_context_window(model: str, provider: Optional[str] = None) -> Optional[int]:
     """Resolve a model's context window.
 
@@ -113,17 +294,15 @@ def resolve_context_window(model: str, provider: Optional[str] = None) -> Option
     named ``glm-4.7``), then the provider default. ``None`` if neither resolves
     — callers fall back to the config default.
     """
-    window = _best_match(model, "context_window")
-    if window:
-        return int(window)
+    window = _positive_int(_lookup_field(model, "context_window", provider))
+    if window is not None:
+        return window
 
     fallback: Optional[int] = None
     if provider:
-        defaults = (
-            get_model_registry().get("provider_defaults", {}).get(provider.lower())
-        )
-        if defaults and defaults.get("context_window"):
-            fallback = int(defaults["context_window"])
+        defaults = _registry_section("provider_defaults").get(provider.lower())
+        if isinstance(defaults, dict):
+            fallback = _positive_int(defaults.get("context_window"))
 
     if model and model not in _WARNED_UNLISTED:
         _WARNED_UNLISTED.add(model)
@@ -144,12 +323,12 @@ def supports_sampling(model: str) -> bool:
     ``supports_sampling: false``; anything unmarked is assumed to accept them,
     so an unknown model keeps the old behavior.
     """
-    return _best_match(model, "supports_sampling") is not False
+    return _lookup_field(model, "supports_sampling") is not False
 
 
 def supports_thinking(model: str) -> bool:
     """Whether a model reasons, so it takes an effort level. Unmarked models are assumed to."""
-    return _best_match(model, "supports_thinking") is not False
+    return _lookup_field(model, "supports_thinking") is not False
 
 
 # What every effort API takes, for a model the registry gives no levels for.
@@ -165,7 +344,7 @@ def effort_levels(model: str) -> Optional[List[str]]:
     """
     if not supports_thinking(model):
         return []
-    levels = _best_match(model, "effort_levels")
+    levels = _lookup_field(model, "effort_levels")
     return [str(level) for level in levels] if isinstance(levels, list) else None
 
 
@@ -176,24 +355,25 @@ def thinking_default(model: str) -> Optional[str]:
     text (``display: "omitted"``) unless a request asks for the summary.
     Unmarked models (thinking off by default, or not Claude) get nothing.
     """
-    value = _best_match(model, "thinking_default")
+    value = _lookup_field(model, "thinking_default")
     return value if isinstance(value, str) else None
 
 
-def supports_vision(model: str, provider: Optional[str] = None) -> bool:
-    """Whether the catalog explicitly allows image input for a model.
-
-    Unknown models are treated as unsupported so a pasted image is never sent
-    to an endpoint that has not declared a vision contract. Provider surfaces
-    that serve OpenAI models (Azure and the Responses API) use the OpenAI
-    catalog through :func:`registry_provider_for`.
-    """
+def _vision_match(model: str, provider_l: Optional[str]) -> Optional[bool]:
+    """Longest-prefix supports_vision lookup, optionally provider-scoped."""
     model_l = (model or "").lower()
-    provider_l = registry_provider_for(provider or "") if provider else None
+    registry_models = _registry_section("models")
+    exact = registry_models.get(model_l)
+    if isinstance(exact, dict) and not (
+        provider_l and str(exact.get("provider") or "").lower() != provider_l
+    ):
+        # Exact entry: its answer (bool or silent default) is final.
+        value = exact.get("supports_vision")
+        return value if isinstance(value, bool) else None
     best_len = 0
     result: Optional[bool] = None
-    for name, info in get_model_registry().get("models", {}).items():
-        if not isinstance(info, dict):
+    for name, info in registry_models.items():
+        if not isinstance(name, str) or not isinstance(info, dict):
             continue
         if provider_l and str(info.get("provider") or "").lower() != provider_l:
             continue
@@ -202,16 +382,59 @@ def supports_vision(model: str, provider: Optional[str] = None) -> bool:
             if isinstance(value, bool):
                 best_len = len(name)
                 result = value
-    return result is True
+    return result
+
+
+def supports_vision(model: str, provider: Optional[str] = None) -> bool:
+    """Whether the catalog explicitly allows image input for a model.
+
+    Unknown models are treated as unsupported so a pasted image is never sent
+    to an endpoint that has not declared a vision contract. Provider surfaces
+    that serve OpenAI models (Azure and the Responses API) use the OpenAI
+    catalog through :func:`registry_provider_for`. Aggregator model strings
+    (``openrouter`` and known ``vendor/model`` prefixes) fall back to the
+    stripped underlying entry, whose vendor names the real provider.
+    """
+    provider_l = registry_provider_for(provider or "") if provider else None
+    candidates = _lookup_candidates(model, provider.lower() if provider else None)
+    if not candidates:
+        return False
+    exact = _registry_section("models").get(candidates[0])
+    if exact is not None:
+        if not isinstance(exact, dict):
+            return False
+        exact_provider = str(exact.get("provider") or "").lower()
+        if provider_l and exact_provider != provider_l:
+            return False
+        # An exact entry owns its silence as well as an explicit bool. It must
+        # not fall through to a less-specific stripped model name.
+        return exact.get("supports_vision") is True
+    result = _vision_match(candidates[0], provider_l)
+    if result is not None or len(candidates) == 1:
+        return result is True
+    # A stripped model name is only safe when its vendor identifies the same
+    # provider as the matching catalog entry. OpenRouter's exact vendor/model
+    # entries were checked above; unknown vendors cannot borrow a native
+    # provider's capability from a coincidentally matching suffix.
+    fallback_provider = provider_l
+    if "/" in (model or ""):
+        vendor = model.lower().split("/", 1)[0].strip()
+        vendor_provider = _VENDOR_REGISTRY_PROVIDERS.get(vendor)
+        if not vendor_provider:
+            return False
+        if provider_l not in (None, "openrouter", vendor_provider):
+            return False
+        fallback_provider = vendor_provider
+    for candidate in candidates[1:]:
+        scoped = _vision_match(candidate, fallback_provider)
+        if scoped is not None:
+            return scoped is True
+    return False
 
 
 def resolve_default_model(provider: str) -> Optional[str]:
     """Resolve the catalog-declared default model for a provider."""
-    defaults = (
-        get_model_registry()
-        .get("provider_defaults", {})
-        .get((provider or "").lower(), {})
-    )
+    defaults = _registry_section("provider_defaults").get((provider or "").lower(), {})
     default = defaults.get("default_model") if isinstance(defaults, dict) else None
     return str(default) if default else None
 
@@ -242,7 +465,9 @@ def list_models_for_provider(
         return []
 
     out: List[Tuple[str, Dict[str, Any]]] = []
-    for name, info in get_model_registry().get("models", {}).items():
+    for name, info in _registry_section("models").items():
+        if not isinstance(name, str):
+            continue
         if not isinstance(info, dict):
             continue
         if str(info.get("provider") or "").lower() != provider_l:

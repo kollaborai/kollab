@@ -2,27 +2,27 @@
   "name": "research",
   "description": "Research desk: research director, desk researcher, market and competitive analyst, fact checker and report writer. Produces sourced briefs and reports with every claim traceable; marks anything unverified.",
   "roster": "research-crew",
-  "lead": "alistair",
+  "lead": "research-director",
   "members": [
     {
-      "persona": "alistair",
+      "persona": "research-director",
       "reports_to": null
     },
     {
-      "persona": "ines",
-      "reports_to": "alistair"
+      "persona": "desk-researcher",
+      "reports_to": "research-director"
     },
     {
-      "persona": "kai",
-      "reports_to": "alistair"
+      "persona": "market-competitive-analyst",
+      "reports_to": "research-director"
     },
     {
-      "persona": "vera",
-      "reports_to": "alistair"
+      "persona": "fact-checker",
+      "reports_to": "research-director"
     },
     {
-      "persona": "tariq",
-      "reports_to": "alistair"
+      "persona": "report-writer",
+      "reports_to": "research-director"
     }
   ]
 }

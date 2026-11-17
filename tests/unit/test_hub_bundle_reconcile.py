@@ -60,8 +60,8 @@ class TestDesiredBundleForIdentity(unittest.TestCase):
         )
 
     def test_persona_from_another_roster_runs_its_agent(self):
-        self.assertEqual(desired_bundle_for_identity("maya"), "research")
-        self.assertEqual(desired_bundle_for_identity("marketing-crew/theo"), "creative-writer")
+        self.assertEqual(desired_bundle_for_identity("brand-strategist"), "research")
+        self.assertEqual(desired_bundle_for_identity("marketing-crew/copywriter"), "creative-writer")
 
     def test_gem_without_agent_uses_default(self):
         # Defensive: a persona whose agent is empty should fall back rather

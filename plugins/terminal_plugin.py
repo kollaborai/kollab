@@ -842,10 +842,7 @@ Aliases: /t, /term, /tmux"""
             if os.name == "nt":
                 cmd_parts = _windows_terminal_cmd(command)
             else:
-                try:
-                    cmd_parts = shlex.split(command)
-                except ValueError:
-                    cmd_parts = ["/bin/sh", "-c", command]
+                cmd_parts = [env.get("SHELL", "/bin/sh"), "-c", command]
             proc = subprocess.Popen(
                 cmd_parts,
                 stdin=subprocess.PIPE,

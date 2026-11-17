@@ -4,8 +4,8 @@ Agent names do not have to be gems. A **roster** is a set of personas (a name, a
 look, a bundle, a prompt); a **team** puts personas in a reporting chain. Both are JSON.
 
 ```bash
-kollab --as maya                    # a persona from any roster
-kollab --as marketing-crew/maya     # when two rosters share a name
+kollab --as brand-strategist                    # a persona from any roster
+kollab --as marketing-crew/brand-strategist     # when two rosters share a name
 kollab --hub org marketing          # launch a team (also: /hub org marketing "launch the beta")
 ```
 
@@ -46,6 +46,7 @@ other roster's personas after it (each with its picture and job title); picking 
 fills in its **Type**. The sidebar's **Agents** button shows every roster and team and
 launches a team into a folder (**Launch Team**). Rows, the chat header and the settings
 call a persona by its display name.
+Long names wrap in the Agents list on narrow screens so the full label stays readable.
 
 Web/engine: `GET /rosters`, `GET /teams`, `POST /teams/<name>/launch {"workspace": "..."}`.
 Contract and every field: [docs/specs/rosters-and-teams.md](../specs/rosters-and-teams.md).

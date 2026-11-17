@@ -2,27 +2,27 @@
   "name": "people",
   "description": "People team: head of people, recruiter, sourcer, onboarding coordinator and people-operations partner. Writes job posts, screens fairly, coordinates interviews and onboarding, and drafts policies; candidates and employees are contacted only on approval.",
   "roster": "people-crew",
-  "lead": "rosa",
+  "lead": "head-of-people",
   "members": [
     {
-      "persona": "rosa",
+      "persona": "head-of-people",
       "reports_to": null
     },
     {
-      "persona": "ethan",
-      "reports_to": "rosa"
+      "persona": "recruiter",
+      "reports_to": "head-of-people"
     },
     {
-      "persona": "lila",
-      "reports_to": "ethan"
+      "persona": "talent-sourcer",
+      "reports_to": "recruiter"
     },
     {
-      "persona": "noah",
-      "reports_to": "rosa"
+      "persona": "onboarding-coordinator",
+      "reports_to": "head-of-people"
     },
     {
-      "persona": "gemma",
-      "reports_to": "rosa"
+      "persona": "people-operations-partner",
+      "reports_to": "head-of-people"
     }
   ]
 }

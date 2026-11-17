@@ -107,6 +107,13 @@ LINKED_ISSUE_RE = re.compile(
     re.IGNORECASE,
 )
 TOKEN_RE = re.compile(r"(ghp_|github_pat_)[A-Za-z0-9_]+")
+# Ruff's pyflakes rules share the finding-id shape (F63, F7, F82). The code list a
+# lint flag selects or ignores (ruff check --select E9,F63,F7,F82) names rules,
+# not findings (#1024). Only that flag context counts: the same list in prose can
+# be either, so it stays findings.
+RULE_SELECTION_RE = re.compile(
+    r"--(?:extend-)?(?:select|ignore)(?:=|\s+)['\"]?([A-Z]+\d*(?:,[A-Z]+\d*)*)"
+)
 
 
 class ConfigError(Exception):
@@ -274,6 +281,10 @@ class PRComment:
     comment_id: int
     body: str
     author_login: str
+    created_at: str = ""
+    review_id: int = 0
+    api_url: str = ""
+    updated_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -443,6 +454,16 @@ def _mentions_finding(content: str, finding: str) -> bool:
     return re.search(pattern, content, re.IGNORECASE) is not None
 
 
+def _finding_matches(pattern: re.Pattern[str], body: str) -> list[re.Match[str]]:
+    """Finding-id matches in body, outside lint flag rule selections (#1024)."""
+    selections = [run.span(1) for run in RULE_SELECTION_RE.finditer(body)]
+    return [
+        match
+        for match in pattern.finditer(body)
+        if not any(start <= match.start() < end for start, end in selections)
+    ]
+
+
 def _json_object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -574,7 +595,7 @@ def _finding_suppressions(
         occurrence = annotation["occurrence"]
         matches = [
             match.group(0)
-            for match in pattern.finditer(source.body)
+            for match in _finding_matches(pattern, source.body)
             if match.group(0) == finding_id
         ]
         if occurrence > len(matches):
@@ -612,9 +633,11 @@ def _finding_suppressions(
 
 def _check_regression_test(
     cfg: DodConfig, data: PRData
-) -> tuple[str, list[FindingSuppression]]:
+) -> tuple[str, list[FindingSuppression], str]:
     pattern = re.compile(cfg.regression.finding_id_pattern)
     findings: set[str] = set()
+    finding_revisions: list[datetime] = []
+    metadata_complete = bool(data.comments)
     if data.comments:
         metadata_matches = tuple(comment.body for comment in data.comments) == tuple(
             data.review_comment_bodies
@@ -627,7 +650,7 @@ def _check_regression_test(
                 if comment.comment_id in marker_comment_ids and comment.kind == "issue_comment":
                     continue
                 occurrence_counts: dict[str, int] = {}
-                for match in pattern.finditer(comment.body or ""):
+                for match in _finding_matches(pattern, comment.body or ""):
                     finding_id = match.group(0)
                     occurrence_counts[finding_id] = occurrence_counts.get(finding_id, 0) + 1
                     suppression_key = (
@@ -638,19 +661,34 @@ def _check_regression_test(
                     )
                     if suppression_key not in suppressions:
                         findings.add(finding_id)
+                        # These are server comment timestamps, never Git dates.
+                        created = _comment_time(comment.created_at)
+                        updated = _comment_time(getattr(comment, "updated_at", "") or comment.created_at)
+                        if created is None or updated is None or updated < created:
+                            metadata_complete = False
+                        else:
+                            finding_revisions.append(updated)
         else:
             # Incomplete or mismatched metadata cannot authorize any exception.
+            metadata_complete = False
             audit_notes = []
             for body in (*data.review_comment_bodies, *(c.body for c in data.comments)):
-                findings.update(match.group(0) for match in pattern.finditer(body or ""))
+                findings.update(match.group(0) for match in _finding_matches(pattern, body or ""))
     else:
         # Legacy/local test callers have no comment metadata, so no annotation
         # can be trusted and every ID remains gate-relevant.
         audit_notes = []
         for body in data.review_comment_bodies or ():
-            findings.update(match.group(0) for match in pattern.finditer(body or ""))
+            findings.update(match.group(0) for match in _finding_matches(pattern, body or ""))
     if not findings:
-        return "", audit_notes
+        return "", audit_notes, ""
+    warning = (
+        "red-first execution is not verified by this gate for finding id(s): "
+        f"{', '.join(sorted(findings))}; the independent reviewer must verify "
+        "failing-before/passing-after results, standalone test commit order, "
+        "unchanged assertions, and finding-specific xfail removal. "
+        "Approval records reviewer responsibility, not automated execution proof."
+    )
     test_files = [
         (path, content)
         for path, content in (data.changed_file_contents or {}).items()
@@ -663,10 +701,36 @@ def _check_regression_test(
             uncovered.append(finding)
     if uncovered:
         return (
-            "no regression test covers finding id(s): "
+            "no changed test text references finding id(s): "
             f"{', '.join(uncovered)} under {', '.join(cfg.regression.test_paths)}"
-        ), audit_notes
-    return "", audit_notes
+        ), audit_notes, warning
+    if (
+        metadata_complete and finding_revisions and data.pull_author_login
+        and re.fullmatch(r"[0-9a-f]{40}", data.head_sha)
+    ):
+        for reviewer in cfg.regression.trusted_reviewers:
+            if reviewer.casefold() == data.pull_author_login.casefold():
+                continue
+            approval = _latest_current_head_review(data, reviewer)
+            if (
+                approval is not None
+                and datetime.fromisoformat(approval.submitted_at.replace("Z", "+00:00")) > max(finding_revisions)
+            ):
+                return "", audit_notes, warning
+    return (
+        "independent current-head approval required for finding id(s): "
+        f"{', '.join(sorted(findings))}; approval must follow the latest finding revision"
+    ), audit_notes, warning
+
+
+
+def _comment_time(value: str) -> datetime | None:
+    """Parse a server-provided comment timestamp, never contributor Git dates."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo is not None else None
 
 
 # --- evaluation -----------------------------------------------------------------
@@ -693,8 +757,10 @@ def evaluate(cfg: DodConfig, data: PRData) -> DoDReport:
         elif name == "linked_issue":
             detail = _check_linked_issue(data)
         elif name == "regression_test":
-            detail, suppression_notes = _check_regression_test(cfg, data)
+            detail, suppression_notes, manual_warning = _check_regression_test(cfg, data)
             audit_notes.extend(suppression_notes)
+            if manual_warning:
+                warnings.append((name, manual_warning))
         elif name == "spec_or_fix_brief":
             detail = _check_spec_or_fix_brief(data)
             if detail and cfg.spec_or_fix_brief_mode == "warn":
@@ -926,6 +992,14 @@ def collect_pr_data(
             comment_id=comment_id if type(comment_id) is int and comment_id > 0 else 0,
             body=body,
             author_login=login(entry),
+            created_at=str(entry.get("created_at") or ""),
+            updated_at=str(entry.get("updated_at") or entry.get("created_at") or ""),
+            review_id=(
+                entry.get("pull_request_review_id")
+                if type(entry.get("pull_request_review_id")) is int
+                else 0
+            ),
+            api_url=str(entry.get("url") or ""),
         )
 
     comment_records = tuple(
@@ -1109,7 +1183,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default=".github/pr-gates.toml")
     parser.add_argument("--repo", help="OWNER/REPO, e.g. kollaborai/kollab")
     parser.add_argument("--pr", type=int, help="pull request number")
-    parser.add_argument("--head-sha", help="PR head SHA (required with --post)")
+    parser.add_argument("--head-sha", help="expected PR head SHA (checked when supplied)")
     parser.add_argument(
         "--post", action="store_true", help="post one check run with the verdict"
     )
@@ -1129,7 +1203,7 @@ def main(argv: list[str] | None = None) -> int:
             test_paths=tuple(cfg.regression.test_paths),
             need_spec_or_fix_brief="spec_or_fix_brief" in cfg.checks,
         )
-        if args.post and data.head_sha != args.head_sha:
+        if args.post and args.head_sha and data.head_sha != args.head_sha:
             raise RuntimeError("event head differs from collected PR head; failing closed")
     except (ConfigError, RuntimeError, KeyError, ValueError) as exc:
         print(f"pr-gates DoD: error: {_redact(str(exc))}", file=sys.stderr)
@@ -1151,11 +1225,9 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.post:
-        if not args.head_sha:
-            parser.error("--head-sha is required with --post")
         # The posted check run carries the verdict; the job exits 0 so the
         # workflow's own check does not duplicate the outcome.
-        main_post_if_enabled(cfg, report, repo=args.repo, head_sha=args.head_sha)
+        main_post_if_enabled(cfg, report, repo=args.repo, head_sha=args.head_sha or data.head_sha)
         return 0
 
     return report.exit_code

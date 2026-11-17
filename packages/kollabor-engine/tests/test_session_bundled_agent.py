@@ -108,7 +108,9 @@ async def test_a_team_launches_with_every_members_bundle_on_an_empty_home(
 
     body = response.json()
     assert body["failed"] == [], body
-    assert body["started"] == ["omar", "maya", "theo", "priya", "luz", "jonas"]
+    assert body["started"] == [
+        "campaign-lead", "brand-strategist", "copywriter", "growth-analyst", "social-lead", "content-editor"
+    ]
     # No member names a profile, so each starts on the active one, as New Session would.
     assert {s.kwargs["profile"].name for s in FakeSession.made} == {"saved"}
     assert [s.kwargs["agent"] for s in FakeSession.made] == [
