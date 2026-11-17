@@ -54,7 +54,7 @@ async function runFailureRecovery(browser, baseUrl, screenshots) {
     await view.page.getByText("Show the welcome guide again", { exact: true }).waitFor({ state: "visible" });
     assert.ok(catalogRequests.length >= 2, "retry must cross the real session command request boundary");
     assert.deepEqual(view.pageErrors, []);
-    assert.deepEqual(view.consoleErrors, []);
+    assert.deepEqual(view.consoleErrors.filter((error) => !error.includes("status of 502")), []);
     console.log("PASS: isolated 502, visible retry, session command recovery, typed draft preserved");
   } finally {
     await view.context.close();
