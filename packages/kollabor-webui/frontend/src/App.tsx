@@ -299,7 +299,12 @@ function RuntimeShell({
   const [commandCatalogRetry, setCommandCatalogRetry] = useState(0);
   const catalogIsCurrent = commandCatalog.sessionId === session.session_id;
   const commandCatalogStatus = catalogIsCurrent ? commandCatalog.status : "loading";
-  const commands = catalogIsCurrent ? commandCatalog.commands : [];
+  const welcomeCommand = DEFAULT_SLASH_COMMANDS.find((command) => command.name === "welcome");
+  const catalogIsAuthoritative = catalogIsCurrent &&
+    (commandCatalog.status === "ready" || commandCatalog.status === "fallback");
+  const commands = catalogIsAuthoritative
+    ? commandCatalog.commands
+    : welcomeCommand ? [welcomeCommand] : [];
   // `thread.extras` is absent on first render; runtime.tsx guards the hook, and
   // this optional chain keeps App.tsx safe even if that guard is ever removed.
   const transportError = runtimeState?.state?.error;
@@ -320,16 +325,13 @@ function RuntimeShell({
         if (!mounted) return;
         const source = result.commands ?? [];
         const hasCommands = source.length > 0;
-        const welcome = DEFAULT_SLASH_COMMANDS.find(
-          (command) => command.name === "welcome",
-        );
         setCommandCatalog({
           sessionId: session.session_id,
           status: hasCommands ? "ready" : "empty",
           commands: hasCommands
             ? [
                 ...source.filter((command) => command.name.toLowerCase() !== "welcome"),
-                ...(welcome ? [welcome] : []),
+                ...(welcomeCommand ? [welcomeCommand] : []),
               ]
             : [],
         });
