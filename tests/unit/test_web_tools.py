@@ -405,12 +405,13 @@ class TestWebFetchExecution(unittest.TestCase):
             "url": "https://example.com/page",
             "max_chars": 100,
         }
+        fallback = AsyncMock(return_value="fallback " * 1000)
         with (
             _patch_aiohttp_session(mock_get=response),
             patch.object(
                 self.executor,
                 "_playwright_fetch",
-                new=AsyncMock(return_value="fallback " * 1000),
+                new=fallback,
             ),
         ):
             result = _run(self.executor._execute_web_fetch(tool_data))
@@ -418,6 +419,9 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertLessEqual(len(result.output), 100)
         self.assertIn("...[truncated]", result.output)
+        fallback.assert_awaited_once_with(
+            "<html><body>x</body></html>", max_chars=2_000_000
+        )
 
     def test_web_fetch_cancellation_closes_response(self):
         """Cancellation during streaming propagates and closes the response."""
