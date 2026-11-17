@@ -3,6 +3,8 @@
 import errno
 import os
 import socket
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import pytest
@@ -67,14 +69,15 @@ def test_text_probe_preserves_os_error_in_tool_result(tmp_path, operation, error
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX file kinds")
 @pytest.mark.parametrize("operation", [None, *OPERATIONS], ids=lambda op: op["type"] if op else "is_text_file")
 @pytest.mark.parametrize("file_kind", ["fifo", "socket"])
-def test_non_regular_files_are_rejected_without_opening(tmp_path, operation, file_kind):
-    target = tmp_path / "special"
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+def test_non_regular_files_are_rejected_without_opening(operation, file_kind):
+    # AF_UNIX addresses have a small length limit, unlike ordinary file paths.
+    with TemporaryDirectory(dir="/tmp") as directory, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+        target = Path(directory) / "special"
         if file_kind == "fifo":
             os.mkfifo(target)
         else:
             server.bind(str(target))
-        executor = FileOperationsExecutor(workspace=tmp_path)
+        executor = FileOperationsExecutor(workspace=directory)
 
         with patch("builtins.open", side_effect=AssertionError("special file was opened")) as opened:
             if operation is None:
