@@ -22,7 +22,6 @@ from .config_utils import (
     get_local_config_directory,
     get_local_config_path,
     get_local_config_path_candidates,
-    get_project_data_dir,
     get_project_data_dir_candidates,
     get_system_prompt_content,
     get_system_prompt_path,
