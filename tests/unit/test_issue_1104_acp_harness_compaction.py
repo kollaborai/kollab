@@ -227,6 +227,38 @@ class TestAutomaticCompactOnAcpChat(unittest.IsolatedAsyncioTestCase):
         await _settle(plugin)
         self.assertEqual(acp.submit.await_count, 2)
 
+    async def test_successful_manual_compaction_consumes_armed_trigger(self):
+        plugin, _llm, acp = _plugin()
+        acp.submit = AsyncMock(
+            side_effect=[RuntimeError("temporary disconnect"), {"text": "compacted"}]
+        )
+
+        plugin.acp_usage_updated(300_000, 1_000_000)
+        await _settle(plugin)
+        self.assertTrue(plugin._acp_compact_armed)
+
+        await plugin._start_manual_compaction(ask=False)
+        await _settle(plugin)
+        plugin.acp_usage_updated(300_000, 1_000_000)
+        await _settle(plugin)
+
+        self.assertEqual(acp.submit.await_count, 2)
+
+    async def test_successful_manual_compaction_consumes_trigger_waiting_for_command(self):
+        plugin, _llm, acp = _plugin(command=None)
+
+        plugin.acp_usage_updated(300_000, 1_000_000)
+        await _settle(plugin)
+        self.assertTrue(plugin._acp_compact_armed)
+
+        acp._command = "/compact"
+        await plugin._start_manual_compaction(ask=False)
+        await _settle(plugin)
+        plugin.acp_usage_updated(300_000, 1_000_000)
+        await _settle(plugin)
+
+        self.assertEqual(acp.submit.await_count, 1)
+
     async def test_threshold_retry_survives_failed_manual_compaction_interleave(self):
         plugin, _llm, acp = _plugin({"plugins.context_compaction.ask_model_first": True})
 
