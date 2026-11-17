@@ -211,6 +211,10 @@ try_pipx() {
 # system installs and --user installs tied to the executable pip just wrote.
 pip_scripts_dir() {
     local pip_cmd="$1" scheme="$2" pip_path shebang python_cmd env_args
+    if [[ -n "${PIP_PREFIX:-}" ]]; then
+        printf '%s/bin\n' "$PIP_PREFIX"
+        return 0
+    fi
     pip_path=$(command -v "$pip_cmd") || return 1
     IFS= read -r shebang < "$pip_path" || return 1
     shebang="${shebang#\#!}"
