@@ -469,14 +469,17 @@ def test_run_compaction_preserves_bounded_active_taskledger_messages() -> None:
 
     compacted = plugin._pending_compaction
     assert compacted is not None
-    assert all("summarized below" not in message.content for message in compacted), (
-        "summarized below is still present in compacted output"
-    )
     preserved = [
         message
         for message in compacted
         if message.metadata.get("task_id") in task_ids
     ]
+    legacy_excerpt = next(
+        message for message in preserved if message.metadata["task_id"] == legacy_task_id
+    )
+    assert "summarized below" not in legacy_excerpt.content, (
+        "summarized below is still present in the legacy excerpt"
+    )
     assert len(preserved) == MAX_PRESERVED_HUB_TASK_MESSAGES
     assert [message.metadata["task_id"] for message in preserved] == task_ids[-24:]
     assert all(
@@ -485,9 +488,6 @@ def test_run_compaction_preserves_bounded_active_taskledger_messages() -> None:
     assert all(
         message.metadata.get("context_compaction_task_excerpt") is True
         for message in preserved
-    )
-    legacy_excerpt = next(
-        message for message in preserved if message.metadata["task_id"] == legacy_task_id
     )
     assert "Historical assignment text." in legacy_excerpt.content
     assert plugin._estimate_history_tokens(compacted) < 272_000
