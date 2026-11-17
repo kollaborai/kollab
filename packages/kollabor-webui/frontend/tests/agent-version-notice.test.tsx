@@ -187,6 +187,13 @@ describe("daemon outdated notices", () => {
     expect(html).toContain("Run /restart to update the agent version running.");
   });
 
+  it("keeps a usable stop-and-start action while version information is unavailable", () => {
+    const html = renderToStaticMarkup(
+      <DaemonNotice notice={null} fallbackName="lapis" busy={false} onRestart={() => {}} />,
+    );
+    expect(html).toContain("This agent runs older code. Run kollab --hub stop lapis in a terminal");
+  });
+
   it("the Terminal does not offer Retry for daemon_outdated", () => {
     const html = renderToStaticMarkup(
       <TerminalView sessionId="s1" workspace="/workspace" daemonNotice={panelNoticeProps("", false)} />,
