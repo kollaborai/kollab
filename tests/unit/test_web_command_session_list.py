@@ -91,6 +91,9 @@ async def test_web_resume_and_branch_lists_render_actionable_rows():
     assert "Plan a release" in fork_sessions
     assert "/resume session-1" in fork_sessions
 
+    fork_search_results = await _web_reply(plugin, "fork", ["search", "release"])
+    assert "/resume search-1" in fork_search_results
+
     resume_sessions = await _web_reply(plugin, "resume", [])
     assert "Investigate a regression" in resume_sessions
     assert "/resume session-2" in resume_sessions
