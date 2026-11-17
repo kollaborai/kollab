@@ -1,16 +1,19 @@
 """Exercise pipe-mode startup against a real, deliberately slow MCP server."""
 
 import asyncio
+import contextlib
 import json
 import os
+import signal
 import socket
 import sys
 import tempfile
 from pathlib import Path
 
-import psutil
 import pytest
 from aiohttp import web
+
+from tests.unit._owned_processes import asyncio_child_signal_is_reap_serialized
 
 ROOT = Path(__file__).resolve().parents[2]
 MCP_DISCOVERY_DELAY_SECONDS = 13
@@ -49,19 +52,13 @@ def _tool_names(payload: object) -> set[str]:
     return names
 
 
-def _terminate_process_tree(pid: int) -> None:
-    try:
-        root = psutil.Process(pid)
-    except psutil.NoSuchProcess:
-        pass
-    else:
-        children = root.children(recursive=True)
-        for child in children:
-            try:
-                child.kill()
-            except psutil.NoSuchProcess:
-                pass
-        psutil.wait_procs(children, timeout=5)
+def _kill_cli_group(process: asyncio.subprocess.Process) -> None:
+    """Kill the pipe-mode CLI's private process group, which holds the MCP
+    server it spawned, without a host-wide process scan. Signal only while the
+    CLI is unreaped, so the group id is still ours."""
+    if process.returncode is None and asyncio_child_signal_is_reap_serialized():
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
 
 
 @pytest.mark.asyncio
@@ -202,6 +199,7 @@ async def test_pipe_mode_sends_builtin_tools_while_stdio_mcp_discovery_is_slow()
             "-u",
             str(ROOT / "main.py"),
             "-p",
+            "--no-daemon",
             "--agent",
             "coder",
             cwd=workspace,
@@ -209,6 +207,7 @@ async def test_pipe_mode_sends_builtin_tools_while_stdio_mcp_discovery_is_slow()
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         assert process.stdin is not None
         assert process.stdout is not None
@@ -227,8 +226,7 @@ async def test_pipe_mode_sends_builtin_tools_while_stdio_mcp_discovery_is_slow()
             try:
                 await asyncio.wait_for(process.wait(), timeout=10)
             except asyncio.TimeoutError:
-                _terminate_process_tree(process.pid)
-                process.terminate()
+                _kill_cli_group(process)
                 await process.wait()
             stdout = (await stdout_task).decode(errors="replace")
             stderr = (await stderr_task).decode(errors="replace")
@@ -251,8 +249,7 @@ async def test_pipe_mode_sends_builtin_tools_while_stdio_mcp_discovery_is_slow()
     finally:
         release_response.set()
         if process is not None and process.returncode is None:
-            _terminate_process_tree(process.pid)
-            process.kill()
+            _kill_cli_group(process)
             try:
                 await asyncio.wait_for(process.wait(), timeout=10)
             except asyncio.TimeoutError:
