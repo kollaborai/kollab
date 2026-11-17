@@ -108,6 +108,27 @@ def test_unparseable_release_version_is_unknown_and_not_cached(monkeypatch):
     assert app.state.update_check_config.values == {}
 
 
+def test_filtered_prerelease_is_a_successful_current_result(monkeypatch):
+    async def latest(self):
+        return {
+            "tag_name": f"v{__version__}-rc1",
+            "name": "Release candidate",
+            "html_url": "https://example.invalid/candidate",
+            "prerelease": True,
+        }
+
+    monkeypatch.setattr(VersionCheckService, "_fetch_latest_release", latest)
+    app = server.create_app()
+    from fastapi.testclient import TestClient
+
+    with TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 12345)) as client:
+        body = client.get("/api/update/check").json()
+
+    assert body["status"] == "current"
+    assert body["last_successful_check"]
+    assert app.state.update_check_config.values["kollabor.updates.cached_release_is_prerelease"] is True
+
+
 @pytest.mark.asyncio
 async def test_forced_request_waiting_on_lookup_shares_its_result(monkeypatch):
     calls = 0
