@@ -6,6 +6,7 @@ level (spec sections 8.3, 8.5, 9.3).
 
 import asyncio
 import os
+import sqlite3
 import subprocess
 import sys
 import unittest
@@ -50,7 +51,7 @@ class FakeCoordinator:
         self.tool_executor = SimpleNamespace(
             register_plugin_handler=lambda *a, **k: None
         )
-        self.renderer = SimpleNamespace(pipe_mode=pipe_mode)
+        self.renderer = SimpleNamespace(pipe_mode=pipe_mode, message_coordinator=None)
         self._queue_processor = FakeQueueProcessor()
         self._image_store = EphemeralImageStore()
         self.supports_image_input = lambda: True
@@ -136,6 +137,45 @@ class DriverTests(unittest.TestCase):
         )
         goal_id: str = record.goal_id
         return goal_id
+
+    def test_store_error_is_reported_and_driver_stops(self):
+        goal_id = self._create()
+        driver, coord = self._make_driver()
+        displayed = []
+        coord.renderer.message_coordinator = SimpleNamespace(
+            display_message_sequence=lambda sequence: displayed.extend(sequence)
+        )
+        original_transition = self.store.transition
+
+        def fail_transition(*args, **kwargs):
+            raise sqlite3.OperationalError("database or disk is full")
+
+        self.store.transition = fail_transition
+        try:
+            asyncio.run(driver.start(goal_id))
+        finally:
+            self.store.transition = original_transition
+
+        self.assertNotIn(goal_id, driver._running_goals)
+        self.assertEqual(len(displayed), 1)
+        self.assertIn("database or disk is full", displayed[0][1])
+        self.assertIn("stopped", displayed[0][1].lower())
+
+    def test_resume_schedules_an_active_goal_without_persisted_pause(self):
+        from kollabor.commands.system_commands.handlers.goal import GoalCommandHandler
+
+        goal_id = self._create()
+        scheduled = []
+        handler = GoalCommandHandler(None, None)
+        handler._service = self.service
+        handler._conversation_uid = lambda: "conv-1"
+        handler._execution_unavailable_reason = lambda: None
+        handler._schedule_goal_turn = lambda record: scheduled.append(record.goal_id)
+
+        result = handler._do_resume("")
+
+        self.assertTrue(result.success)
+        self.assertEqual(scheduled, [goal_id])
 
     def test_goal_turns_claim_a_fresh_serial_per_turn(self):
         """Each goal turn is an admitted turn and claims a fresh admission
