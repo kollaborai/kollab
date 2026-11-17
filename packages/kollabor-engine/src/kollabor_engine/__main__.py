@@ -110,6 +110,7 @@ def main():
         default="127.0.0.1",
         help="Host to bind (default: 127.0.0.1, local only)",
     )
+    serve.add_argument("--no-plugins", action="store_true", help="Start without plugin code")
 
     args = parser.parse_args()
 
