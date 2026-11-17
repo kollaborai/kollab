@@ -177,6 +177,53 @@ def test_emergency_rollover_preserves_oversized_live_task_across_reload() -> Non
     assert "Remaining assignment text is summarized below." not in task_context
 
 
+def test_mixed_task_reminder_does_not_apply_excerpt_stop_rule_to_complete_task() -> None:
+    task_id = "live-942-long"
+    assignment = (
+        "BEGIN_CANARY: inspect the producer before editing.\n"
+        + "ordinary assignment detail\n" * 700
+        + "MIDDLE_CANARY: preserve the retry and authorization constraints.\n"
+        + "ordinary assignment detail\n" * 700
+        + "END_CANARY: report the exact verification evidence."
+    )
+    history = [
+        Message(role="system", content="system instructions"),
+        Message(role="user", content="earlier request"),
+        _task_message(task_id, assignment),
+        _task_message("live-942-short", "finish the migration"),
+        Message(role="user", content="current request"),
+    ]
+    plugin = _plugin()
+    plugin._get_conversation_history = MagicMock(side_effect=lambda: history)
+    plugin._keep_recent_count = MagicMock(return_value=1)
+    plugin._find_split_point = MagicMock(return_value=4)
+    plugin._get_live_task_ids = MagicMock(
+        return_value={task_id, "live-942-short"}
+    )
+    plugin._get_current_session_id = MagicMock(return_value="synthetic-session")
+    plugin._apply_pending_compaction = AsyncMock()
+    plugin._log_compaction_event = AsyncMock()
+    plugin._effective_prompt_tokens = MagicMock(return_value=0)
+    plugin._compaction_round = 0
+    plugin._last_summarization_model = None
+
+    async def rollover() -> list[Message]:
+        assert await plugin._rollover_with_summary({}, None, boundary="turn")
+        compacted = plugin._pending_compaction
+        assert compacted is not None
+        return compacted
+
+    compacted = asyncio.run(rollover())
+    reminder = next(
+        message.content
+        for message in compacted
+        if message.metadata.get("compaction_task_reminder")
+    )
+
+    assert "finish the migration" in reminder
+    assert "If the resend is unavailable, stop" not in reminder
+
+
 def test_live_task_ids_include_assigned_paused_and_targeted_open_cards() -> None:
     active = SimpleNamespace(id="active", assignee="sapphire", status="active")
     paused = SimpleNamespace(id="paused", assignee="sapphire", status="paused")
