@@ -580,6 +580,15 @@ class GoalCommandHandler(BaseCommandHandler):
             return CommandResult(
                 success=False, message=capability_error, display_type="error"
             )
+        if record.status == "active" and budget is None and turn_limit is None:
+            # A driver can stop after a persistence error without saving the
+            # paused state. Scheduling is idempotent while a driver is active.
+            self._schedule_goal_turn(record)
+            return CommandResult(
+                success=True,
+                message=f"goal {record.short_id} driver restarted",
+                display_type="success",
+            )
         try:
             updated = self.service.resume(
                 record.goal_id, token_budget=budget, auto_turn_limit=turn_limit
