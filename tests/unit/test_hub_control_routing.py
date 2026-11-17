@@ -70,3 +70,32 @@ async def test_mailbox_writer_reports_success_only_after_durable_admission(
 
     assert admitted is True
     assert len(list((tmp_path / "receiver").glob("*.json"))) == 1
+
+
+@pytest.mark.asyncio
+async def test_offline_control_retry_ignores_route_delivery_metadata(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(messenger, "get_messages_dir", lambda: tmp_path)
+    plugin = HubPlugin(event_bus=MagicMock())
+    plugin._identity = AgentRuntime(
+        name="coordinator",
+        identity="sapphire",
+        agent_id="sapphire-id",
+        is_coordinator=True,
+    )
+    plugin._presence = MagicMock()
+    plugin._presence.discover_agents_async = AsyncMock(return_value=[])
+    message = HubMessage(
+        id="offline-retry",
+        action="message",
+        from_identity="sapphire",
+        to="koordinator",
+        content="assign task",
+        metadata={"task_assignment": True},
+    )
+
+    assert await plugin._route_message(message) == []
+    assert message.metadata["_queued_for"] == ["koordinator"]
+    assert await plugin._route_message(message) == []
+    assert len(list((tmp_path / "koordinator").glob("*.json"))) == 1
