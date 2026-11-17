@@ -71,8 +71,16 @@ Default location for user-wide settings. Created automatically on first run.
 
 Config files are written whole (a temporary file renamed over the old one, mode
 `0600`), so kollab windows started together never read half a file. A file kollab
-cannot parse, such as a hand edit with a stray comma, is copied to
-`config.json.corrupt` before a fresh config takes its place.
+cannot read or parse, such as a hand edit with a stray comma, is treated as an
+unreadable or malformed layer rather than as missing configuration. Ordinary
+saves, startup migrations, and automatic plugin updates pause so they cannot
+replace that file with defaults. A settings save reports the affected layer and
+the recovery action without displaying configuration values. Back up the file,
+repair it as a JSON object or restore a valid backup, then reload before saving.
+If another process changes a config file after it was loaded, saving is refused;
+reload before retrying so the other writer's changes are preserved. Backups keep
+the original bytes and file mode, and a new backup does not overwrite an older
+one.
 
 ### Project Config
 
