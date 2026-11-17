@@ -72,7 +72,39 @@ async def test_tool_executor_blocks_background_kollab_processes():
     )
 
     assert not result.success
-    assert "spawning agents via terminal" in result.error
+    assert result.error == (
+        "Background Kollab commands are blocked in agent terminals, including "
+        "informational commands. Run them in the foreground. Use <hub_spawn> "
+        "to launch peers and /hub stop all for agents owned by this caller."
+    )
+    executor.shell_executor.run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["kollab --version", "kollab --help", "kollab --hub status"],
+)
+@pytest.mark.asyncio
+async def test_terminal_executor_allows_foreground_informational_kollab_command(
+    command,
+):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    executor = ToolExecutor(MagicMock(), MagicMock())
+    executor.shell_executor.run = AsyncMock(
+        return_value=SimpleNamespace(
+            error="", success=True, stdout="synthetic result\n", stderr="", exit_code=0
+        )
+    )
+
+    result = await executor._execute_terminal_command(
+        {"type": "terminal", "id": "foreground-info", "command": command}
+    )
+
+    assert result.success
+    assert result.output == "synthetic result\n"
+    executor.shell_executor.run.assert_awaited_once()
 
 
 @pytest.mark.parametrize(

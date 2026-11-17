@@ -80,3 +80,17 @@ def test_cli_does_not_refuse_agent_text_without_agent_option(argv, monkeypatch):
     cli.cli_main()
 
     assert launches == [False]
+
+
+def test_cli_allows_hub_status_from_tool_shell(monkeypatch):
+    monkeypatch.setenv("KOLLAB_TOOL_SHELL", "1")
+    monkeypatch.delenv("KOLLAB_AGENT_PID", raising=False)
+    monkeypatch.setattr(cli, "_update_before_launch", lambda: None)
+    monkeypatch.setattr(cli, "_should_use_daemon", lambda: False)
+    launches = []
+    monkeypatch.setattr(cli, "_run_async_main_with_sigterm_cleanup", launches.append)
+    monkeypatch.setattr(sys, "argv", ["kollab", "--hub", "status"])
+
+    cli.cli_main()
+
+    assert launches == [False]
