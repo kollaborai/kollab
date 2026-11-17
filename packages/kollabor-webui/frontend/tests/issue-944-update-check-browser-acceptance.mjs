@@ -33,7 +33,7 @@ async function main() {
     }));
     await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
 
-    const failure = page.getByRole("alert").filter({ hasText: "Couldn't check for updates." });
+    const failure = page.getByRole("status").filter({ hasText: "Couldn't check for updates." });
     await failure.waitFor({ state: "visible", timeout: 10_000 });
     assert.match(await failure.innerText(), /Last successful check:/);
     assert.equal(await page.getByText("Kollab is up to date.", { exact: false }).count(), 0);
@@ -68,7 +68,7 @@ async function main() {
       last_successful_check: lastSuccess,
     };
     await current.getByRole("button", { name: "Check Again", exact: true }).click();
-    const refreshedFailure = page.getByRole("alert").filter({ hasText: "Still unable to check for updates." });
+    const refreshedFailure = page.getByRole("status").filter({ hasText: "Update check failed again." });
     await refreshedFailure.waitFor({ state: "visible", timeout: 5_000 });
     await current.waitFor({ state: "hidden", timeout: 5_000 });
     assert.equal(await page.getByText("Kollab is up to date.", { exact: false }).count(), 0);
@@ -81,6 +81,12 @@ async function main() {
         checked_at: Date.now() / 1000, last_successful_check: Date.now() / 1000,
         retry_after_seconds: null, notes: [],
       }, "Kollab 99.0.0 is available."],
+      ["current", {
+        current_version: "0.15.3", status: "current", available: false,
+        release: { version: "0.15.3", tag_name: "v0.15.3", name: "Current", url: "https://example.invalid/release", is_prerelease: false },
+        checked_at: Date.now() / 1000, last_successful_check: Date.now() / 1000,
+        retry_after_seconds: null, notes: [],
+      }, "Kollab is up to date."],
       ["disabled", {
         current_version: "0.15.3", status: "disabled", available: false,
         release: null, checked_at: null, last_successful_check: null,
@@ -89,7 +95,8 @@ async function main() {
       ["rate-limited", {
         current_version: "0.15.3", status: "failed", available: false,
         release: null, checked_at: null, last_successful_check: lastSuccess,
-        retry_after_seconds: 60, notes: [],
+        retry_after_seconds: 60, retry_at: Date.now() / 1000 + 60,
+        retry_reason: "rate_limit", notes: [],
       }, "GitHub is rate limiting checks"],
     ]) {
       const state = await openPage(browser, baseUrl, makeFixtures());
@@ -99,11 +106,19 @@ async function main() {
         body: JSON.stringify(response),
       }));
       await state.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-      const notice = name === "disabled"
-        ? state.page.getByRole("status").filter({ hasText: text })
-        : state.page.getByRole(name === "available" ? "status" : "alert").filter({ hasText: text });
+      const notice = state.page.getByRole("status").filter({ hasText: text });
       await notice.waitFor({ state: "visible", timeout: 10_000 });
+      if (name === "rate-limited") {
+        assert.equal(await notice.getByRole("button", { name: "Try Again", exact: true }).isDisabled(), true);
+      }
       await notice.screenshot({ path: path.join(screenshotDir, `issue-944-update-check-${name}.png`) });
+      for (const width of [390, 820]) {
+        await state.page.setViewportSize({ width, height: 844 });
+        const bounds = await notice.boundingBox();
+        assert.ok(bounds, `${name} notice is visible at ${width}px`);
+        assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width, `${name} notice fits ${width}px viewport`);
+        await notice.screenshot({ path: path.join(screenshotDir, `issue-944-update-check-${name}-${width}.png`) });
+      }
       await state.context.close();
     }
 
