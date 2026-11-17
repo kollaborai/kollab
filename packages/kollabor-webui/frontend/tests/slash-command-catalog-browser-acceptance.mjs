@@ -14,7 +14,19 @@ import {
 
 const screenshotDir = path.resolve(process.argv[2] ?? ".slash-command-catalog-screenshots");
 
-async function runFailureRecovery(browser, baseUrl, screenshots) {
+async function openChat(page, baseUrl) {
+  await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+  await page.getByTestId("guided-setup-open").click();
+  await page.getByRole("button", { name: "Get Started", exact: true }).click();
+  await page.getByTestId("setup-step-agent").waitFor({ state: "visible" });
+  await page.getByRole("button", { name: "Skip", exact: true }).click();
+  await page.getByRole("button", { name: "Start Session", exact: true }).click();
+  const input = page.getByRole("textbox", { name: "Message input" });
+  await input.waitFor({ state: "visible" });
+  return input;
+}
+
+async function runFailureRecovery(browser, baseUrl, screenshots, failureMode = "502") {
   const fixtures = makeFixtures();
   const view = await openPage(browser, baseUrl, fixtures);
   let fail = true;
@@ -23,7 +35,11 @@ async function runFailureRecovery(browser, baseUrl, screenshots) {
     catalogRequests.push(route.request().url());
     if (fail) {
       fail = false;
-      await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ detail: "synthetic daemon timeout" }) });
+      if (failureMode === "timeout") {
+        await route.abort("timedout");
+      } else {
+        await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ detail: "synthetic daemon unavailable" }) });
+      }
       return;
     }
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
@@ -32,14 +48,7 @@ async function runFailureRecovery(browser, baseUrl, screenshots) {
     }) });
   });
   try {
-    await view.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await view.page.getByTestId("guided-setup-open").click();
-    await view.page.getByRole("button", { name: "Get Started", exact: true }).click();
-    await view.page.getByTestId("setup-step-agent").waitFor({ state: "visible" });
-    await view.page.getByRole("button", { name: "Skip", exact: true }).click();
-    await view.page.getByRole("button", { name: "Start Session", exact: true }).click();
-    const input = view.page.getByRole("textbox", { name: "Message input" });
-    await input.waitFor({ state: "visible" });
+    const input = await openChat(view.page, baseUrl);
     await input.fill("/session-only draft");
     const unavailable = view.page.getByRole("status").filter({ hasText: "Commands couldn't be loaded for this session" });
     await unavailable.waitFor({ state: "visible", timeout: 10_000 });
@@ -54,8 +63,8 @@ async function runFailureRecovery(browser, baseUrl, screenshots) {
     await view.page.getByText("Show the welcome guide again", { exact: true }).waitFor({ state: "visible" });
     assert.ok(catalogRequests.length >= 2, "retry must cross the real session command request boundary");
     assert.deepEqual(view.pageErrors, []);
-    assert.deepEqual(view.consoleErrors.filter((error) => !error.includes("status of 502")), []);
-    console.log("PASS: isolated 502, visible retry, session command recovery, typed draft preserved");
+    assert.deepEqual(view.consoleErrors.filter((error) => !error.includes("status of 502") && !error.includes("net::ERR_TIMED_OUT")), []);
+    console.log(`PASS: isolated ${failureMode}, visible retry, session command recovery, typed draft preserved`);
   } finally {
     await view.context.close();
   }
@@ -72,19 +81,52 @@ async function runHealthySession(browser, baseUrl) {
     ] }),
   }));
   try {
-    await view.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await view.page.getByTestId("guided-setup-open").click();
-    await view.page.getByRole("button", { name: "Get Started", exact: true }).click();
-    await view.page.getByTestId("setup-step-agent").waitFor({ state: "visible" });
-    await view.page.getByRole("button", { name: "Skip", exact: true }).click();
-    await view.page.getByRole("button", { name: "Start Session", exact: true }).click();
-    const input = view.page.getByRole("textbox", { name: "Message input" });
-    await input.waitFor({ state: "visible" });
+    const input = await openChat(view.page, baseUrl);
     await input.fill("/");
     await view.page.getByText("A command from this session", { exact: true }).waitFor({ state: "visible" });
     assert.equal(await view.page.getByText("Show available commands and usage", { exact: true }).count(), 0);
     assert.deepEqual(view.pageErrors, []);
     console.log("PASS: healthy session renders its server catalog");
+  } finally {
+    await view.context.close();
+  }
+}
+
+async function runEmptyCatalog(browser, baseUrl) {
+  const fixtures = makeFixtures();
+  const view = await openPage(browser, baseUrl, fixtures);
+  await view.page.route("**/sessions/learn-regression-session/commands", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ session_id: "learn-regression-session", commands: [] }),
+  }));
+  try {
+    const input = await openChat(view.page, baseUrl);
+    await input.fill("/");
+    await view.page.getByRole("status").filter({ hasText: "No commands are available for this session" }).waitFor({ state: "visible" });
+    assert.equal(await view.page.getByText("Show available commands and usage", { exact: true }).count(), 0,
+      "an authoritative empty response must not expose built-in commands");
+    assert.deepEqual(view.pageErrors, []);
+    console.log("PASS: successful empty catalog stays empty");
+  } finally {
+    await view.context.close();
+  }
+}
+
+async function runLegacyFallback(browser, baseUrl) {
+  const fixtures = makeFixtures();
+  const view = await openPage(browser, baseUrl, fixtures);
+  await view.page.route("**/sessions/learn-regression-session/commands", (route) => route.fulfill({
+    status: 404,
+    contentType: "application/json",
+    body: JSON.stringify({ detail: "unsupported endpoint" }),
+  }));
+  try {
+    const input = await openChat(view.page, baseUrl);
+    await input.fill("/help");
+    await view.page.getByText("This engine does not provide a live command catalog", { exact: false }).waitFor({ state: "visible" });
+    await view.page.getByText("Show available commands and usage", { exact: true }).waitFor({ state: "visible" });
+    console.log("PASS: unsupported endpoint uses an explicitly labeled compatibility catalog");
   } finally {
     await view.context.close();
   }
@@ -96,7 +138,10 @@ async function main() {
   try {
     browser = await launchAcceptanceBrowser();
     await runFailureRecovery(browser, baseUrl, screenshotDir);
+    await runFailureRecovery(browser, baseUrl, screenshotDir, "timeout");
     await runHealthySession(browser, baseUrl);
+    await runEmptyCatalog(browser, baseUrl);
+    await runLegacyFallback(browser, baseUrl);
   } finally {
     await browser?.close();
     await server.close();
