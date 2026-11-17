@@ -52,8 +52,12 @@ async function runFailureRecovery(browser, baseUrl, screenshots, failureMode = "
     await input.fill("/session-only draft");
     const unavailable = view.page.getByRole("status").filter({ hasText: "Commands couldn't be loaded for this session" });
     await unavailable.waitFor({ state: "visible", timeout: 10_000 });
+    await input.fill("/");
+    assert.equal(await view.page.getByText("Show the welcome guide again", { exact: true }).count(), 1,
+      "the welcome command must stay available while this session catalog is unavailable");
     assert.equal(await view.page.getByText("Show available commands and usage", { exact: true }).count(), 0,
       "built-in commands must not be presented as confirmed session commands after a 502");
+    await input.fill("/session-only draft");
     fs.mkdirSync(screenshots, { recursive: true });
     await view.page.screenshot({ path: path.join(screenshots, "slash-command-catalog-unavailable.png"), animations: "disabled" });
     for (const width of [820, 390]) {
@@ -110,10 +114,31 @@ async function runEmptyCatalog(browser, baseUrl) {
     const input = await openChat(view.page, baseUrl);
     await input.fill("/");
     await view.page.getByRole("status").filter({ hasText: "No commands are available for this session" }).waitFor({ state: "visible" });
+    assert.equal(await view.page.getByText("Show the welcome guide again", { exact: true }).count(), 1,
+      "the welcome command must stay available when this session has no registered commands");
     assert.equal(await view.page.getByText("Show available commands and usage", { exact: true }).count(), 0,
       "an authoritative empty response must not expose built-in commands");
     assert.deepEqual(view.pageErrors, []);
     console.log("PASS: successful empty catalog stays empty");
+  } finally {
+    await view.context.close();
+  }
+}
+
+async function runLoadingCatalog(browser, baseUrl) {
+  const fixtures = makeFixtures();
+  const view = await openPage(browser, baseUrl, fixtures);
+  await view.page.route("**/sessions/learn-regression-session/commands", () => new Promise(() => {}));
+  try {
+    const input = await openChat(view.page, baseUrl);
+    await input.fill("/");
+    await view.page.getByRole("status").filter({ hasText: "Loading commands for this session" }).waitFor({ state: "visible" });
+    assert.equal(await view.page.getByText("Show the welcome guide again", { exact: true }).count(), 1,
+      "the welcome command must stay available while this session catalog is loading");
+    assert.equal(await view.page.getByText("Show available commands and usage", { exact: true }).count(), 0,
+      "loading must not expose unconfirmed built-in commands");
+    assert.deepEqual(view.pageErrors, []);
+    console.log("PASS: loading catalog keeps only the welcome command available");
   } finally {
     await view.context.close();
   }
@@ -236,6 +261,7 @@ async function main() {
     await runFailureRecovery(browser, baseUrl, screenshotDir, "timeout");
     await runHealthySession(browser, baseUrl);
     await runEmptyCatalog(browser, baseUrl);
+    await runLoadingCatalog(browser, baseUrl);
     await runLegacyFallback(browser, baseUrl);
     await runMissingSession404(browser, baseUrl);
     await runSessionSwitchStaleResponse(browser, baseUrl);
