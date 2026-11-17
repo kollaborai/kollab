@@ -26,6 +26,9 @@ def _make_git_scoped_executor(workspace):
         mcp_timeout=30,
     )
     executor.workspace = workspace
+    executor.event_bus = SimpleNamespace(
+        emit_with_hooks=AsyncMock(return_value=None)
+    )
     executor.sandbox_gate.check = Mock(return_value=None)
     executor.set_bundle_scope(["file-read", "file-grep", "git"])
     executor.shell_executor.run_argv = AsyncMock(
