@@ -112,8 +112,50 @@ async def test_timeout_is_unknown_and_next_check_recovers(monkeypatch):
     app = server.create_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         failed = (await client.get("/api/update/check")).json()
+        app.state.update_service._retry_until = 0
         recovered = (await client.get("/api/update/check?refresh=true")).json()
 
     assert failed["status"] == "failed"
     assert recovered["status"] == "current"
     assert recovered["last_successful_check"]
+
+
+@pytest.mark.asyncio
+async def test_forced_retry_respects_transient_failure_cooldown(monkeypatch):
+    calls = 0
+
+    async def fail(self):
+        nonlocal calls
+        calls += 1
+        return None
+
+    monkeypatch.setattr(VersionCheckService, "_fetch_latest_release", fail)
+    app = server.create_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+        first = await client.get("/api/update/check")
+        retry = await client.get("/api/update/check?refresh=true")
+
+    assert first.json()["status"] == "failed"
+    assert retry.json()["status"] == "failed"
+    assert retry.json()["retry_after_seconds"] > 0
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_repeated_forced_successful_checks_share_the_fresh_result(monkeypatch):
+    calls = 0
+
+    async def latest(self):
+        nonlocal calls
+        calls += 1
+        return {"tag_name": f"v{__version__}", "name": "Current", "html_url": "https://example.invalid/current"}
+
+    monkeypatch.setattr(VersionCheckService, "_fetch_latest_release", latest)
+    app = server.create_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+        first = await client.get("/api/update/check?refresh=true")
+        second = await client.get("/api/update/check?refresh=true")
+
+    assert first.json()["status"] == "current"
+    assert second.json()["status"] == "current"
+    assert calls == 1
