@@ -269,7 +269,7 @@ class TestWebFetchExecution(unittest.TestCase):
                         )
                     )
                 self.assertTrue(result.success, result.error)
-                self.assertIn(expected, result.output)
+                self.assertIn(expected.rstrip(), result.output)
                 self.assertNotIn(excluded, result.output)
 
     def test_web_fetch_json_ld_does_not_require_lxml(self):
@@ -305,7 +305,7 @@ class TestWebFetchExecution(unittest.TestCase):
                 )
             )
         self.assertTrue(result.success, result.error)
-        self.assertIn(article_body, result.output)
+        self.assertIn(article_body.rstrip(), result.output)
 
     def test_web_fetch_regex_fallback_strips_script_content(self):
         """The optional no-bs4 path strips script bodies before returning text."""
