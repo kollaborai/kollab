@@ -137,7 +137,7 @@ class TestInboxTTLExpiry:
         ],
     )
     def test_malformed_timestamp_does_not_abort_or_consume_neighboring_controls(
-        self, tmp_path: Path, bad_timestamp
+        self, tmp_path: Path, bad_timestamp, caplog
     ) -> None:
         inbox = tmp_path / "lapis"
         inbox.mkdir()
@@ -148,22 +148,64 @@ class TestInboxTTLExpiry:
             return data
 
         before = inbox / "0000001-before.json"
-        malformed = inbox / "0000002-malformed.json"
-        after = inbox / "0000003-after.json"
-        before.write_text(json.dumps(control("before")))
-        bad_data = _make_msg(content="corrupt").to_dict()
+        control_before = inbox / "0000002-control-before.json"
+        malformed = inbox / "0000003-malformed.json"
+        after = inbox / "0000004-after.json"
+        control_after = inbox / "0000005-control-after.json"
+        before.write_text(json.dumps(_make_msg(content="ordinary-before").to_dict()))
+        control_before.write_text(json.dumps(control("control-before")))
+        bad_data = _make_msg(content="SENSITIVE_CORRUPT_CONTENT").to_dict()
         if bad_timestamp == "<missing>":
             bad_data.pop("timestamp")
         else:
             bad_data["timestamp"] = bad_timestamp
         malformed.write_text(json.dumps(bad_data))
-        after.write_text(json.dumps(control("after")))
+        after.write_text(json.dumps(_make_msg(content="ordinary-after").to_dict()))
+        control_after.write_text(json.dumps(control("control-after")))
 
         with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
             result = AgentMessenger.read_mailbox("lapis")
 
-        assert [message.content for message in result] == ["before", "after"]
+        assert [message.content for message in result] == [
+            "ordinary-before",
+            "control-before",
+            "ordinary-after",
+            "control-after",
+        ]
         assert not malformed.exists()
+        assert "invalid timestamp" in caplog.text
+        assert "SENSITIVE_CORRUPT_CONTENT" not in caplog.text
+
+    def test_bad_record_unlink_failure_does_not_abort_valid_neighbors(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        inbox = tmp_path / "lapis"
+        inbox.mkdir()
+        before = _make_msg(content="before")
+        after = _make_msg(content="after")
+        before_path = inbox / "0000001-before.json"
+        malformed_path = inbox / "0000002-malformed.json"
+        after_path = inbox / "0000003-after.json"
+        before_path.write_text(json.dumps(before.to_dict()))
+        bad_data = _make_msg(content="DO_NOT_LOG_THIS").to_dict()
+        bad_data["timestamp"] = "invalid"
+        malformed_path.write_text(json.dumps(bad_data))
+        after_path.write_text(json.dumps(after.to_dict()))
+        original_unlink = Path.unlink
+
+        def fail_target(self, *args, **kwargs):
+            if self == malformed_path:
+                raise PermissionError("simulated corrupt-file unlink failure")
+            return original_unlink(self, *args, **kwargs)
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            with patch.object(Path, "unlink", new=fail_target):
+                result = AgentMessenger.read_mailbox("lapis", consume=False)
+
+        assert [message.id for message in result] == [before.id, after.id]
+        assert malformed_path.exists()
+        assert "Could not discard malformed mailbox record" in caplog.text
+        assert "DO_NOT_LOG_THIS" not in caplog.text
 
     def test_expired_messages_not_returned(self, tmp_path: Path) -> None:
         inbox = tmp_path / "lapis"
