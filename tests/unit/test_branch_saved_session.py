@@ -54,11 +54,13 @@ async def test_saved_branch_command_uses_state_service_and_returns_visible_resul
         branch_conversation=AsyncMock(return_value=_branch_result())
     )
     plugin = _plugin_for_branch(state_service)
+    plugin._ensure_conversation_manager = Mock(return_value=False)
 
     result = await plugin.handle_branch(SimpleNamespace(args=["saved-source", "0"]))
 
     assert result.success is True
     assert result.message == _branch_result()["success_message"]
+    plugin._ensure_conversation_manager.assert_not_called()
     state_service.branch_conversation.assert_awaited_once_with("saved-source", 0)
     plugin.conversation_manager.branch_session.assert_not_called()
     plugin.event_bus.emit_with_hooks.assert_not_awaited()
@@ -222,6 +224,27 @@ async def test_branch_state_rpc_validates_and_forwards_saved_session():
 
     assert result == payload
     state_service.branch_conversation.assert_awaited_once_with("saved-source", 0)
+
+
+@pytest.mark.asyncio
+async def test_branch_state_rpc_rejects_missing_session_and_boolean_index():
+    state_service = SimpleNamespace(branch_conversation=AsyncMock())
+    registered: dict[str, object] = {}
+    register_state_handlers(
+        SimpleNamespace(register=registered.__setitem__), state_service
+    )
+    handler = registered["state.branch_conversation"]
+
+    missing_session = await handler(  # type: ignore[operator]
+        {"session_id": " ", "branch_index": 0}
+    )
+    boolean_index = await handler(  # type: ignore[operator]
+        {"session_id": "saved-source", "branch_index": True}
+    )
+
+    assert missing_session == {"error": "session_id is required"}
+    assert boolean_index == {"error": "branch_index must be an integer"}
+    state_service.branch_conversation.assert_not_awaited()
 
 
 @pytest.mark.asyncio
