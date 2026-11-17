@@ -96,6 +96,47 @@ def test_custom_skill_stays(layout):
     assert (layout.skills / "my-custom" / "SKILL.md").exists()
 
 
+def test_different_global_copy_warns_and_is_preserved(layout, caplog):
+    edited = TDD_V2 + "user edit\n"
+    _global(layout, "tdd", edited)
+
+    config_utils._retire_seeded_skills(layout.skills)
+
+    warning = next(
+        record.message for record in caplog.records if "shadows bundled skill" in record.message
+    )
+    assert str(layout.skills / "tdd" / "SKILL.md") in warning
+    assert str(config_utils.get_bundled_skills_dir() / "tdd" / "SKILL.md") in warning
+    assert (layout.skills / "tdd" / "SKILL.md").read_text(encoding="utf-8") == edited
+
+
+def test_linked_seed_backup_does_not_skip_shadow_warning(layout, tmp_path, caplog):
+    _global(layout, "debugging", DEBUG_V1)
+    edited = TDD_V2 + "user edit\n"
+    _global(layout, "tdd", edited)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (layout.skills / ".seed-backup").symlink_to(outside, target_is_directory=True)
+
+    config_utils._retire_seeded_skills(layout.skills)
+
+    warnings = [record.message for record in caplog.records if "shadows bundled skill" in record.message]
+    assert len(warnings) == 1
+    assert str(layout.skills / "tdd" / "SKILL.md") in warnings[0]
+    assert str(config_utils.get_bundled_skills_dir() / "tdd" / "SKILL.md") in warnings[0]
+    assert (layout.skills / "debugging" / "SKILL.md").read_text(encoding="utf-8") == DEBUG_V1
+    assert (layout.skills / "tdd" / "SKILL.md").read_text(encoding="utf-8") == edited
+    assert (layout.skills / ".seed-backup").is_symlink()
+
+
+def test_identical_global_copy_does_not_warn(layout, caplog):
+    _global(layout, "tdd", TDD_V2)
+
+    config_utils._retire_seeded_skills(layout.skills)
+
+    assert not any("shadows bundled skill" in record.message for record in caplog.records)
+
+
 def test_seed_of_a_skill_no_longer_bundled_moves(layout):
     _global(layout, "old-tool", RETIRED)
 
