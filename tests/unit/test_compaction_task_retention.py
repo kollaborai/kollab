@@ -515,6 +515,43 @@ def test_emergency_rollover_empty_open_state_clears_prior_item() -> None:
     assert plugin._build_compacted_history.call_args.kwargs["open_state"] == ""
 
 
+def test_emergency_rollover_reports_live_tasks_omitted_by_hard_cap() -> None:
+    history = [Message(role="system", content="system instructions")]
+    history.extend(
+        _task_message(f"live-{index}", f"[{index:02d}] small assignment")
+        for index in range(30)
+    )
+    history.append(Message(role="user", content="current request"))
+    live_ids = {f"live-{index}" for index in range(30)}
+    plugin = _plugin()
+    plugin._get_conversation_history = MagicMock(return_value=history)
+    plugin._keep_recent_count = MagicMock(return_value=1)
+    plugin._find_split_point = MagicMock(return_value=31)
+    plugin._get_live_task_ids = MagicMock(return_value=live_ids)
+    plugin._get_current_session_id = MagicMock(return_value="synthetic-session")
+    plugin._apply_pending_compaction = AsyncMock()
+    plugin._log_compaction_event = AsyncMock()
+    plugin._effective_prompt_tokens = MagicMock(return_value=0)
+    plugin._compaction_round = 0
+    plugin._last_summarization_model = None
+
+    asyncio.run(plugin._rollover_with_summary({}, None, boundary="turn"))
+
+    compacted_text = "\n".join(
+        str(message.content) for message in plugin._pending_compaction
+    )
+    present = sum(
+        1 for index in range(30) if f"[{index:02d}] small assignment" in compacted_text
+    )
+    assert present == MAX_PRESERVED_HUB_TASK_MESSAGES
+    omitted_count = 30 - MAX_PRESERVED_HUB_TASK_MESSAGES
+    assert (
+        f"{omitted_count} live task messages were omitted by the "
+        f"{MAX_PRESERVED_HUB_TASK_MESSAGES}-message preservation limit"
+        in compacted_text
+    )
+
+
 def test_emergency_summary_prioritizes_request_and_filters_stale_tasks() -> None:
     plugin = _plugin()
     filler_tasks = [
