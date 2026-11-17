@@ -67,6 +67,7 @@ async function main() {
           const view = await openPage(browser, baseUrl, fixtures, {
             viewport: { width: size.width, height: size.height },
             isMobile: size.isMobile,
+            reducedMotion: "reduce",
           });
 
           try {
@@ -113,7 +114,7 @@ async function main() {
               };
               const controls = [...document.querySelectorAll(
                 '[aria-label="Send message"], [aria-label="Send message while generating"], [aria-label="Stop generating"]',
-              )].filter((node) => node.getClientRects().length).map((node) => {
+              )].filter((node) => node.getClientRects().length && getComputedStyle(node).visibility === "visible").map((node) => {
                 const rect = node.getBoundingClientRect();
                 return {
                   label: node.getAttribute("aria-label"),
@@ -127,6 +128,10 @@ async function main() {
                 control.left < content.right && control.right > content.left
                 && control.top < content.bottom && control.bottom > content.top,
               );
+              const overlappingControls = controls.flatMap((control, index) => controls.slice(index + 1)
+                .filter((other) => control.left < other.right && control.right > other.left
+                  && control.top < other.bottom && control.bottom > other.top)
+                .map((other) => [control.label, other.label]));
               return {
                 viewport: { width: innerWidth, height: innerHeight },
                 input: {
@@ -141,6 +146,7 @@ async function main() {
                 content,
                 controls,
                 overlaps,
+                overlappingControls,
               };
             });
 
@@ -160,6 +166,7 @@ async function main() {
             console.log(`Screenshot ${size.width}px ${theme} ${state}: ${screenshotName}`);
             console.log(`Composer control geometry: ${JSON.stringify(layout)}`);
             assert.deepEqual(layout.overlaps, [], `draft text overlaps a visible control at ${size.width}px in ${theme} ${state}`);
+            assert.deepEqual(layout.overlappingControls, [], `visible composer controls overlap at ${size.width}px in ${theme} ${state}`);
             assert.deepEqual(view.pageErrors, []);
             assert.deepEqual(view.consoleErrors, []);
             assert.deepEqual(view.externalRequests, []);
