@@ -135,23 +135,32 @@ async def test_cancellation_reaps_child_before_removing_artifacts(tmp_path, monk
 async def test_cancellation_stops_real_transcriber_descendants(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     whisper = tmp_path / "whisper"
+    writer_script = tmp_path / "writer.py"
     writer_pid = tmp_path / "writer.pid"
     writes = tmp_path / "writes"
+    writer_script.write_text(
+        textwrap.dedent(
+            f"""\
+            import pathlib, time
+            path = pathlib.Path({str(writes)!r})
+            while True:
+                with path.open("a") as stream:
+                    stream.write("x\\n")
+                    stream.flush()
+                time.sleep(0.02)
+            """
+        )
+    )
     whisper.write_text(
         "#!/usr/bin/env python3\n"
         + textwrap.dedent(
             f"""\
-            import pathlib, subprocess, sys, time
+            import subprocess, sys, time
             from pathlib import Path
             outdir = Path(sys.argv[sys.argv.index("--output_dir") + 1])
             audio = Path(sys.argv[1])
             (outdir / (audio.stem + ".txt")).write_text("partial transcript")
-            child = subprocess.Popen([
-                sys.executable, "-c",
-                "import pathlib,time; p=pathlib.Path({str(writes)!r}); "
-                "p.touch(); "
-                "exec('while True:\\n with p.open(\'a\') as f: f.write(\'x\\n\'); f.flush()\\n time.sleep(0.02)')",
-            ])
+            child = subprocess.Popen([sys.executable, {str(writer_script)!r}])
             Path({str(writer_pid)!r}).write_text(str(child.pid))
             while True:
                 time.sleep(1)
