@@ -395,6 +395,7 @@ class ContextCompactionPlugin(BasePlugin):
         self._acp_compact_armed = True
         self._acp_threshold_crossing_pending = False
         self._acp_meter_session_key: tuple[Any, Any] | None = None
+        self._acp_compaction_session_key: tuple[Any, Any] | None = None
         # "Can't shrink" stop (see _should_compact): the swap sets just_applied, the
         # next reported prompt is the compacted one, shrink_floor holds it when it
         # was still over the threshold, tokens_at_trigger is what fired the round.
@@ -1852,6 +1853,8 @@ class ContextCompactionPlugin(BasePlugin):
             self._acp_compact_armed = True
         if used < self._resolve_threshold(size)[0]:
             self._acp_compact_armed = True
+            if session_key is not None and session_key != self._acp_compaction_session_key:
+                self._acp_threshold_crossing_pending = False
             return
         if self._acp_compact_armed:
             self._compact_acp_harness("threshold")
@@ -1890,6 +1893,7 @@ class ContextCompactionPlugin(BasePlugin):
             # a manual compaction is already in progress.
             self._acp_compact_armed = False
         self._acp_compacting = True
+        self._acp_compaction_session_key = self._acp_meter_session_key
         task = asyncio.create_task(self._run_acp_compaction(acp, command, reason, ask))
         self._compaction_tasks.add(task)
         task.add_done_callback(self._compaction_task_done)
@@ -1917,11 +1921,21 @@ class ContextCompactionPlugin(BasePlugin):
             self._set_compaction_status("failed", "The harness did not compact its own context.")
         finally:
             self._acp_compacting = False
+            retry_new_session = (
+                self._acp_threshold_crossing_pending
+                and self._acp_meter_session_key is not None
+                and self._acp_meter_session_key != self._acp_compaction_session_key
+            )
+            self._acp_compaction_session_key = None
             if reason == "threshold" and not succeeded:
                 self._acp_compact_armed = True
             elif reason != "threshold" and self._acp_threshold_crossing_pending:
                 self._acp_compact_armed = not succeeded
                 self._acp_threshold_crossing_pending = False
+            if retry_new_session:
+                self._acp_threshold_crossing_pending = False
+                self._acp_compact_armed = True
+                self._compact_acp_harness("threshold")
 
     def _acp_owns_chat(self) -> bool:
         """Whether an ACP agent owns this chat (the test the message handler
