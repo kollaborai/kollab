@@ -90,7 +90,9 @@ export function PromptsPage({ api }: { api: PromptsApi }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<Message | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [retryingLibraries, setRetryingLibraries] = useState(false);
   const request = useRef(0);
+  const retryingLibrariesRef = useRef(false);
 
   const refreshLibraries = useCallback(async () => {
     const result = await api.listLibraries();
@@ -101,6 +103,21 @@ export function PromptsPage({ api }: { api: PromptsApi }) {
   useEffect(() => {
     refreshLibraries().catch((reason) => setLoadError(errorText(reason)));
   }, [refreshLibraries]);
+
+  const retryLibraries = async () => {
+    if (retryingLibrariesRef.current) return;
+    retryingLibrariesRef.current = true;
+    setRetryingLibraries(true);
+    try {
+      await refreshLibraries();
+      setLoadError(null);
+    } catch (reason) {
+      setLoadError(errorText(reason));
+    } finally {
+      retryingLibrariesRef.current = false;
+      setRetryingLibraries(false);
+    }
+  };
 
   // A role's own sections, overrides and picks.
   useEffect(() => {
@@ -267,6 +284,7 @@ export function PromptsPage({ api }: { api: PromptsApi }) {
       libraries={libraries}
       roles={roles}
       loadError={loadError}
+      retryingLibraries={retryingLibraries}
       target={target}
       groups={groups}
       composition={composition}
@@ -279,6 +297,7 @@ export function PromptsPage({ api }: { api: PromptsApi }) {
       busy={busy}
       message={message}
       editorOpen={editorOpen}
+      onRetryLibraries={() => void retryLibraries()}
       onOpenTarget={openTarget}
       onSelectRow={(row) => void loadRow(row)}
       onToggleRow={(row, include) => void toggle(row, include)}
@@ -413,6 +432,7 @@ export function PromptsView(props: {
   libraries: PromptLibrary[] | null;
   roles: string[];
   loadError: string | null;
+      retryingLibraries?: boolean;
   target: PromptTarget;
   groups: SectionGroup[];
   composition: Composition | null;
@@ -425,6 +445,7 @@ export function PromptsView(props: {
   busy: boolean;
   message: Message | null;
   editorOpen: boolean;
+  onRetryLibraries?: () => void;
   onOpenTarget: (target: PromptTarget) => void;
   onSelectRow: (row: SectionRow) => void;
   onToggleRow: (row: SectionRow, include: boolean) => void;
@@ -440,6 +461,7 @@ export function PromptsView(props: {
   onCloseEditor: () => void;
 }) {
   const { libraries, roles, target, groups, selected, busy } = props;
+  const retryingLibraries = props.retryingLibraries ?? false;
   const [filter, setFilter] = useState("");
   const [closed, setClosed] = useState<Set<string>>(new Set());
   const isRole = target.kind === "role";
@@ -483,6 +505,35 @@ export function PromptsView(props: {
       </select>
     </label>
   );
+
+  if (props.loadError) {
+    return (
+      <div
+        className="relative flex min-h-0 flex-1 flex-col lg:flex-row lg:gap-3 lg:px-6 lg:pb-6"
+        data-testid="prompts-page"
+        aria-busy={retryingLibraries}
+      >
+        <div
+          className="flex w-full items-center gap-3 px-4 pt-3 pb-2 lg:px-0"
+          data-testid="prompts-load-error"
+        >
+          <p role="alert" className="text-destructive min-w-0 flex-1 text-sm break-words">
+            {props.loadError}
+          </p>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            data-testid="prompts-retry"
+            disabled={retryingLibraries}
+            onClick={() => props.onRetryLibraries?.()}
+          >
+            {retryingLibraries ? "Retrying…" : "Retry"}
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col lg:flex-row lg:gap-3 lg:px-6 lg:pb-6" data-testid="prompts-page">
