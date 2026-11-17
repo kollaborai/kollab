@@ -9,3 +9,9 @@ from kollabor.cli import parse_timeout
 )
 def test_parse_timeout_preserves_fractional_durations(timeout, expected_seconds):
     assert parse_timeout(timeout) == pytest.approx(expected_seconds)
+
+
+def test_parse_timeout_rejects_positive_duration_below_float_range():
+    timeout = "0." + ("0" * 399) + "1s"
+    with pytest.raises(ValueError, match="too small"):
+        parse_timeout(timeout)
