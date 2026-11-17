@@ -268,6 +268,54 @@ class FileOperationsExecutor:
         except (ValueError, OSError):
             return False
 
+    def is_read_denied_path(self, filepath: str) -> bool:
+        """Deny agent file tools access to plugin code and data.
+
+        This is not a shell sandbox. Resolve symlinks before checking so aliases
+        cannot be used to read the protected paths.
+        """
+        try:
+            path = Path(filepath).expanduser()
+            if not path.is_absolute():
+                path = self.project_root / path
+            lexical = Path(os.path.abspath(path))
+            resolved = lexical.resolve()
+
+            def same_or_case_aliased_prefix(candidate: Path, protected: Path) -> bool:
+                if candidate.is_relative_to(protected):
+                    return True
+                parts = candidate.parts
+                if len(parts) < len(protected.parts):
+                    return False
+                prefix = Path(*parts[:len(protected.parts)])
+                try:
+                    return prefix.exists() and protected.exists() and os.path.samefile(prefix, protected)
+                except OSError:
+                    return False
+
+            home_root = Path.home() / ".kollab"
+            roots = {Path(os.path.abspath(home_root)), home_root.resolve()}
+            override = os.environ.get("KOLLAB_CONFIG_DIR", "").strip()
+            token_roots = roots | ({Path(override).expanduser().resolve()} if override else set())
+            token_paths = {root / "engine.token" for root in token_roots}
+            token_paths |= {token.resolve() for token in token_paths}
+            if any(
+                same_or_case_aliased_prefix(candidate, token)
+                for candidate in (lexical, resolved)
+                for token in token_paths
+            ):
+                return True
+            for candidate in (lexical, resolved):
+                for root in roots:
+                    if same_or_case_aliased_prefix(candidate, root / "plugins"):
+                        return True
+                    data = root / "plugin-data"
+                    if same_or_case_aliased_prefix(candidate, data):
+                        return True
+            return False
+        except (OSError, RuntimeError, ValueError):
+            return True
+
     def is_protected_path(self, filepath: str) -> bool:
         """Check if file path is protected from deletion/modification.
 
@@ -610,6 +658,14 @@ class FileOperationsExecutor:
                 )
 
             return {"success": False, "error": "\n".join(error_lines)}
+
+        # Several file operations read contents indirectly (copy, edit and ACP
+        # snapshots as well as read/grep). Check both paths before any snapshot.
+        if op_type.startswith("file_"):
+            for key in ("file", "from", "to"):
+                candidate = operation.get(key)
+                if isinstance(candidate, str) and self.is_read_denied_path(candidate):
+                    return {"success": False, "error": "Access to protected file denied"}
 
         # Single chokepoint for every write: refuse hand-rolled backup files.
         # Backups are automatic, live outside the project, and are dropped on

@@ -75,3 +75,24 @@ def test_a_seeded_copy_shows_its_defaults_as_global(machine):
 
     assert rows["debugging"].startswith("[global] ")
     assert not rows["kollab-development"].startswith("[")
+
+
+def test_different_global_skill_copy_is_marked_in_skill_lists(machine):
+    folder = machine.parent / "skills" / "kollab-development"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\nname: kollab-development\ndescription: personal copy\n---\ncustom\n"
+    )
+    manager = AgentManager()
+    skill_rows(manager, "kollabor")
+
+    picker = SkillCommandHandler(MagicMock(), MagicMock(), manager)
+    picker_modal = picker._get_skills_modal_definition(skip_reload=True)
+    picker_description = next(
+        row["description"]
+        for section in picker_modal["sections"]
+        for row in section["commands"]
+        if row.get("skill_name") == "kollab-development"
+    )
+
+    assert "differs from bundled" in picker_description

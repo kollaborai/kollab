@@ -12,6 +12,7 @@ import signal
 import subprocess
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import psutil
 
@@ -22,6 +23,31 @@ from .packages import _ID, _SERVICE, _read_registry, files_sha256
 
 logger = logging.getLogger(__name__)
 _LOG_LIMIT = 10 * 1024 * 1024
+_DEFAULT_ENGINE_URL = "http://127.0.0.1:7433"
+
+
+def _engine_url(value: str | None = None) -> str:
+    """Only deliver a plugin credential to a local engine origin."""
+    value = value if value is not None else os.environ.get("KOLLAB_ENGINE_URL", _DEFAULT_ENGINE_URL)
+    try:
+        if not isinstance(value, str) or any(ord(ch) <= 32 or ord(ch) == 127 for ch in value):
+            raise ValueError("Invalid local engine URL")
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname not in {"127.0.0.1", "::1"}
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port is None
+            or not 1 <= parsed.port <= 65535
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("Invalid local engine URL")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Invalid local engine URL") from exc
+    return value.rstrip("/")
 
 
 def redact_log(text: str, secret_values: list[str] | tuple[str, ...] = ()) -> str:
@@ -246,6 +272,20 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
         _write_state(pid_path, identity)
         state = {"desired": "running", "status": "starting", "exit_history": []}
         _write_state(state_path, state)
+        # The engine and wrapper share one token-file writer. Mint only after
+        # rechecking the approved plugin under its service lock.
+        try:
+            from .context import PluginContext
+            from .tokens import PluginTokenFiles
+
+            engine_url = _engine_url()
+            context = PluginContext(plugin_id, root, home / "plugin-data" / plugin_id, manifest, grants=granted)
+            token = PluginTokenFiles().mint(context)
+        except Exception:
+            state["status"] = "error"
+            state["error"] = "Could not prepare plugin engine credentials"
+            _write_state(state_path, state)
+            return 1
         crashes: list[float] = []
         while not stopping:
             env = {
@@ -257,6 +297,8 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
             env["KOLLAB_PLUGIN_ID"] = plugin_id
             env["KOLLAB_PLUGIN_ROOT"] = str(root)
             env["KOLLAB_PLUGIN_DATA"] = str(home / "plugin-data" / plugin_id)
+            env["KOLLAB_ENGINE_URL"] = engine_url
+            env["KOLLAB_PLUGIN_TOKEN"] = token
             env.update(secret_values)
             try:
                 child = subprocess.Popen(
@@ -281,7 +323,7 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
             _write_state(state_path, state)
             deadline = None
             term_sent = False
-            log_filter = _LogFilter(list(secret_values.values()))
+            log_filter = _LogFilter([*secret_values.values(), token])
             with selectors.DefaultSelector() as selector:
                 selector.register(child.stdout, selectors.EVENT_READ)
                 while selector.get_map() or child.poll() is None:
@@ -419,10 +461,13 @@ def _recorded_process_alive(pid_path: Path) -> bool:
         return True
 
 
-def supervisor_tick() -> None:
+def supervisor_tick(*, engine_url: str | None = None) -> None:
     """Start eligible installed and approved development services."""
     from kollabor.binary import kollab_argv
 
+    wrapper_env = os.environ.copy()
+    wrapper_env["KOLLAB_ENGINE_URL"] = _engine_url(engine_url)
+    wrapper_env.pop("KOLLAB_PLUGIN_TOKEN", None)
     home = Path.home() / ".kollab"
     registry = _read_registry(home / "plugins.json")
     candidates = list(registry["plugins"].items()) + [
@@ -478,6 +523,7 @@ def supervisor_tick() -> None:
                         stderr=subprocess.DEVNULL,
                         start_new_session=True,
                         close_fds=True,
+                        env=wrapper_env,
                     )
                 except (OSError, ValueError, TypeError) as exc:
                     logger.warning("Could not start service %s/%s: %s", plugin_id, service_name, exc)
@@ -487,7 +533,9 @@ def supervisor_tick() -> None:
                 os.close(fd)
 
 
-def control_service(plugin_id: str, service_name: str, action: str) -> None:
+def control_service(
+    plugin_id: str, service_name: str, action: str, *, engine_url: str | None = None
+) -> None:
     """Set one installed service's desired state and signal only its verified wrapper."""
     if not _valid_plugin_id(plugin_id) or not _SERVICE.fullmatch(service_name):
         raise ValueError("Invalid plugin or service name")
@@ -525,7 +573,10 @@ def control_service(plugin_id: str, service_name: str, action: str) -> None:
             raise ValueError("Service is already running or has an unverifiable process")
         state.update({"desired": "running", "status": "starting"})
         _write_state(state_path, state)
-        supervisor_tick()
+        if engine_url is None:
+            supervisor_tick()
+        else:
+            supervisor_tick(engine_url=engine_url)
         return
     identity = {}
     if not pid_path.exists() and not pid_path.is_symlink():
@@ -588,11 +639,14 @@ def stop_services(plugin_id: str) -> None:
             logger.warning("Could not stop service %s: %s", pid_path.name, exc)
 
 
-async def supervise_services() -> None:
+async def supervise_services(*, engine_url: str | None = None) -> None:
     """Sweep on startup and every 30 seconds until the application shuts down."""
     while True:
         try:
-            await asyncio.to_thread(supervisor_tick)
+            if engine_url is None:
+                await asyncio.to_thread(supervisor_tick)
+            else:
+                await asyncio.to_thread(supervisor_tick, engine_url=engine_url)
         except Exception:
             logger.exception("Plugin service supervisor sweep failed")
         await asyncio.sleep(30)
