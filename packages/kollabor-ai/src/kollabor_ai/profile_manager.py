@@ -2876,6 +2876,13 @@ class ProfileManager:
             if isinstance(llm, dict) and active_profile_is_removed(llm):
                 updates.append((path, config_data, set()))
 
+        if len(updates) > 1:
+            logger.error(
+                "Provider profile removal would update multiple configs; refusing "
+                "to avoid a partial removal"
+            )
+            return []
+
         staged_updates: List[tuple[Path, Path]] = []
         try:
             for path, config_data, matching in updates:

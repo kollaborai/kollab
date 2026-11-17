@@ -82,7 +82,7 @@ def test_remove_provider_profiles_deletes_global_profiles_and_clears_active(
     assert manager.get_profile("anthropic-cloud") is None
 
 
-def test_remove_provider_profiles_deletes_folder_profiles_only_from_folder_config(
+def test_remove_provider_profiles_refuses_to_update_multiple_configs(
     monkeypatch, tmp_path
 ):
     global_path = tmp_path / "home" / ".kollab" / "config.json"
@@ -102,22 +102,16 @@ def test_remove_provider_profiles_deletes_folder_profiles_only_from_folder_confi
     )
     manager = _manager(monkeypatch, tmp_path, global_path, local_path)
 
-    assert manager.remove_provider_profiles("anthropic") == [
-        "anthropic-cloud",
-        "anthropic-local",
-    ]
+    global_before = _read_config(global_path)
+    local_before = _read_config(local_path)
 
-    global_llm = _read_config(global_path)["kollabor"]["llm"]
-    assert "anthropic-cloud" not in global_llm["profiles"]
-    assert global_llm["active_profile"] == "openai"
-    local_llm = _read_config(local_path)["kollabor"]["llm"]
-    assert local_llm["profiles"] == {
-        "openai": {"provider": "openai", "api_key": "keep"}
-    }
-    assert "active_profile" not in local_llm
+    assert manager.remove_provider_profiles("anthropic") == []
+
+    assert _read_config(global_path) == global_before
+    assert _read_config(local_path) == local_before
 
 
-def test_remove_folder_profile_clears_global_active_profile_reference(
+def test_remove_folder_profile_refuses_cross_config_active_profile_cleanup(
     monkeypatch, tmp_path
 ):
     global_path = tmp_path / "home" / ".kollab" / "config.json"
@@ -134,10 +128,13 @@ def test_remove_folder_profile_clears_global_active_profile_reference(
     )
     manager = _manager(monkeypatch, tmp_path, global_path, local_path)
 
-    assert manager.remove_provider_profiles("anthropic") == ["anthropic-local"]
+    global_before = _read_config(global_path)
+    local_before = _read_config(local_path)
 
-    global_llm = _read_config(global_path)["kollabor"]["llm"]
-    assert "active_profile" not in global_llm
+    assert manager.remove_provider_profiles("anthropic") == []
+
+    assert _read_config(global_path) == global_before
+    assert _read_config(local_path) == local_before
 
 
 def test_remove_provider_preserves_same_name_profile_from_other_provider(
