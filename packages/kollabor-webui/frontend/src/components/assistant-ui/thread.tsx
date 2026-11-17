@@ -36,6 +36,7 @@ import {
   queueComposerDraftSubmission,
   saveComposerDraft,
 } from "@/composer-draft";
+import { synchronizeComposerImageTokens } from "@/components/assistant-ui/managed-tokens";
 import {
   useVoiceMode,
   type VoiceActivity,
@@ -544,7 +545,11 @@ const Composer: FC<{
 
   useLayoutEffect(() => {
     const key = draftKey ?? null;
-    const text = loadComposerDraft(key) ?? "";
+    const draftText = loadComposerDraft(key) ?? "";
+    const imageCount = aui.composer
+      .getState()
+      .attachments.filter((attachment) => attachment.type === "image").length;
+    const text = synchronizeComposerImageTokens(draftText, imageCount);
     restoredDraft.current = { key, text };
     skipEmptyDraftPersist.current = false;
     if (aui.composer.getState().text !== text) aui.composer.setText(text);

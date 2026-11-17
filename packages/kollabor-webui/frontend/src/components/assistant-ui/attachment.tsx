@@ -3,7 +3,6 @@
 import {
   type PropsWithChildren,
   useEffect,
-  useRef,
   useState,
   type FC,
 } from "react";
@@ -40,7 +39,7 @@ import {
 } from "@/components/ui/avatar";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
-import { stripManagedTokens } from "./managed-tokens";
+import { synchronizeComposerImageTokens } from "./managed-tokens";
 
 const useFileSrc = (file: File | undefined) => {
   const [src, setSrc] = useState<string | undefined>(undefined);
@@ -280,26 +279,14 @@ const ComposerImageTokenSynchronizer: FC = () => {
         .join("\u0000"),
     ),
   );
-  const managedTokens = useRef<string[]>([]);
 
   // Only an attachment change rewrites the text. Running on every keystroke
   // trimmed the space being typed (it is always trailing) and wrote stale
   // text back over fast typing.
   useEffect(() => {
     const imageIds = imageAttachmentKey ? imageAttachmentKey.split("\u0000") : [];
-    const nextTokens = imageIds.map((_, index) => `[image${index + 1}]`);
     const text = aui.composer.getState().text;
-    // Escape-aware (#1124 P2a): managed-token stripping must not eat the
-    // inside of a typed [[imageN]] literal.
-    const textWithoutManagedTokens = stripManagedTokens(text, managedTokens.current)
-      .replace(/^\s+/, "")
-      .replace(/\n{3,}/g, "\n\n");
-
-    const nextText = [
-      ...nextTokens,
-      ...(textWithoutManagedTokens ? [textWithoutManagedTokens] : []),
-    ].join("\n");
-    managedTokens.current = nextTokens;
+    const nextText = synchronizeComposerImageTokens(text, imageIds.length);
     if (nextText !== text) aui.composer.setText(nextText);
   }, [aui, imageAttachmentKey]);
 
