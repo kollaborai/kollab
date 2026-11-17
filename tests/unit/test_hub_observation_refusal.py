@@ -121,7 +121,9 @@ async def test_a_refused_message_replayed_from_the_mailbox_stays_queued(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_delivery_failure_leaves_message_for_replay_after_restart(tmp_path):
+async def test_delivery_failure_leaves_message_for_replay_after_restart(
+    tmp_path, caplog
+):
     message = HubMessage(
         action="message", from_agent="peer-id-1", from_identity="peer-1",
         to="*", content="RETRY_AFTER_DELIVERY_FAILURE",
@@ -139,8 +141,9 @@ async def test_delivery_failure_leaves_message_for_replay_after_restart(tmp_path
         batch = messenger_module.AgentMessenger.read_mailboxes(
             ["receiver"], consume=False
         )
-        with pytest.raises(RuntimeError, match="simulated delivery failure"):
-            await failed_plugin._deliver_inbox_batch(batch)
+        assert await failed_plugin._deliver_inbox_batch(batch) == set()
+        assert "Mailbox delivery failed" in caplog.text
+        assert "RETRY_AFTER_DELIVERY_FAILURE" not in caplog.text
 
         replayed = messenger_module.AgentMessenger.read_mailboxes(
             ["receiver"], consume=False
