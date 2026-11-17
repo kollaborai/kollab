@@ -256,6 +256,53 @@ async def test_assistant_transport_preserves_image_part_in_submitted_message(
 
 
 @pytest.mark.asyncio
+async def test_assistant_transport_keeps_failed_image_slot_in_live_bubble_state(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "kollabor_config.config_utils.get_project_data_dir", lambda: tmp_path
+    )
+    session = _FakeSession([{"type": "turn_complete"}])
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[
+                {
+                    "type": "add-message",
+                    "message": {
+                        "parts": [
+                            {"type": "text", "text": "inspect these"},
+                            {
+                                "type": "image",
+                                "image": "data:image/png;base64,not-base64!",
+                            },
+                            {
+                                "type": "image",
+                                "image": "data:image/png;base64,iVBORw0KGgo=",
+                            },
+                        ]
+                    },
+                }
+            ],
+            state={"messages": []},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    user_message = captured["controller"].state["messages"][0]
+    assert user_message["content"] == "inspect these\n[image1]\n[image2]"
+    assert user_message["media"][0] == {"ref": "", "mime": "", "failed": True}
+    assert user_message["media"][1]["ref"]
+    assert user_message["media"][1]["mime"] == "image/png"
+
+
+@pytest.mark.asyncio
 async def test_assistant_transport_maps_permission_result(monkeypatch):
     session = _FakeSession([{"type": "turn_complete"}])
     monkeypatch.setattr(
