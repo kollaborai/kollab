@@ -3,6 +3,7 @@
 import asyncio
 
 from kollabor_agent.tool_executor import ToolExecutionResult, ToolExecutor
+from kollabor_ai.response_parser import ResponseParser
 
 
 def _run_async(coro):
@@ -165,6 +166,33 @@ class TestBundleScopeEnforcement:
                 }
             )
         )
+
+        assert result.success, result.error
+        assert result.metadata.get("scope_denied") is None
+        assert result.tool_type == "terminal_read"
+
+    def test_documented_xml_git_call_is_granted_under_git_only_bundle(self, tmp_path):
+        """The documented XML terminal form has no native Git name field."""
+        import subprocess
+        from unittest.mock import AsyncMock, MagicMock
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        parser = ResponseParser()
+        parsed_response = parser.parse_response(
+            "<terminal>git status --short</terminal>"
+        )
+        tool_data, = parser.get_all_tools(parsed_response)
+
+        assert tool_data["type"] == "terminal"
+        assert tool_data.get("name") is None
+
+        executor = _make_executor()
+        executor.workspace = tmp_path
+        executor.event_bus = MagicMock()
+        executor.event_bus.emit_with_hooks = AsyncMock(return_value=None)
+        executor.set_bundle_scope(["file-read", "file-grep", "git"])
+
+        result = _run_async(executor.execute_tool(tool_data))
 
         assert result.success, result.error
         assert result.metadata.get("scope_denied") is None
