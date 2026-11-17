@@ -7,7 +7,6 @@ check; only running the command does.
 
 import json
 import re
-import sys
 import time
 import uuid
 
