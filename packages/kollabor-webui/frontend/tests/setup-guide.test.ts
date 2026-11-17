@@ -234,4 +234,6 @@ test("App startup applies the first-run policy only when no session restores", a
   );
   assert.match(startup, /if \(first\) \{/);
   assert.match(startup, /else if \(noGuideYet\(\)\)/);
+  const firstRunBranch = startup.match(/else if \(noGuideYet\(\)\)\s*\{([^}]*)\}/)?.[1] ?? "";
+  assert.match(firstRunBranch, /setSetupGuideOpen\(true\)/);
 });
