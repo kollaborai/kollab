@@ -119,7 +119,7 @@ kollab [options] [query]
 core:
   query                           message to send (optional positional arg)
   -p, --pipe                      pipe mode: process input and exit
-  --timeout TIMEOUT               timeout for pipe mode (30s, 2min, 1h)
+  --timeout TIMEOUT               timeout for pipe mode (0.5s, 2min, 1h)
   --simple                        plain text output (no boxes/colors)
 
 agent and profile (cross attach boundary):
