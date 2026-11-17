@@ -2922,11 +2922,18 @@ class ProfileManager:
                         path, original_config_text[path.resolve()]
                     )
                 except Exception as rollback_exc:
-                    logger.critical(
-                        "Could not restore provider config %s after a failed removal: %s",
-                        path,
-                        rollback_exc,
-                    )
+                    try:
+                        path.write_text(
+                            original_config_text[path.resolve()], encoding="utf-8"
+                        )
+                    except Exception as fallback_exc:
+                        logger.critical(
+                            "Could not restore provider config %s after a failed removal "
+                            "(atomic restore: %s; direct restore: %s)",
+                            path,
+                            rollback_exc,
+                            fallback_exc,
+                        )
             for _, staged_path in staged_updates:
                 try:
                     staged_path.unlink(missing_ok=True)
