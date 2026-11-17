@@ -1000,24 +1000,6 @@ class ToolExecutor:
         if tool_type in self._INTERNAL_TYPES:
             return None
 
-        # MCP tools share one dispatch type, but bundle scopes may grant all
-        # MCP tools or a specific tool (optionally qualified by its server).
-        if tool_type == "mcp_tool":
-            if "mcp" in self._bundle_tools or "mcp-tool" in self._bundle_tools:
-                return None
-
-            if tool_name:
-                candidates = [tool_name]
-                tool_registry = getattr(self.mcp_integration, "tool_registry", None)
-                if isinstance(tool_registry, dict):
-                    tool_info = tool_registry.get(tool_name)
-                    if isinstance(tool_info, dict):
-                        server_name = tool_info.get("server")
-                        if server_name:
-                            candidates.append(f"mcp:{server_name}:{tool_name}")
-                if any(candidate in self._bundle_tools for candidate in candidates):
-                    return None
-
         registry_name = self._tool_type_to_registry_name(tool_type)
 
         # Internal type (returned None)
