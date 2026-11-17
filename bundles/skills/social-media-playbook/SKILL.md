@@ -41,12 +41,12 @@ human to approve batch C1 (posts) and C2 (replies).
 
 ## Team
 
-| Hub name | Name | Role | Bundle | Reports to |
-|---|---|---|---|---|
-| `aria` | Aria Chen | Social Media Strategist | `default` | human |
-| `leo` | Leo Martins | Content Creator | `creative-writer` | aria |
-| `zara` | Zara Ali | Community Manager | `default` | aria |
-| `omari` | Omari Banks | Social Analyst | `data-analyst` | aria |
+| Hub name | Role | Bundle | Reports to |
+|---|---|---|---|
+| `social-media-strategist` | Social Media Strategist | `default` | human |
+| `content-creator` | Content Creator | `creative-writer` | social-media-strategist |
+| `community-manager` | Community Manager | `default` | social-media-strategist |
+| `social-analyst` | Social Analyst | `data-analyst` | social-media-strategist |
 
 ## Hand-off outside the team
 

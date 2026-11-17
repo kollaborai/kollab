@@ -265,6 +265,11 @@ available. The active agent's tool scope, `kollabor.llm.native_tool_calling`, an
 the active profile's tool support still apply. Exposing a schema does not bypass
 the workspace's tool permission policy.
 
+Agent bundle scope treats terminal session management as part of the `terminal`
+capability. The `terminal-status`, `terminal-output`, and `terminal-kill` tools
+require that grant, so an agent without terminal access cannot inspect or stop
+a session started by the operator.
+
 File location: `packages/kollabor-agent/src/kollabor_agent/`
 
 - `tool_executor.py` - Main execution engine

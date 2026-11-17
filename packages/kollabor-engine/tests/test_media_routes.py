@@ -201,8 +201,30 @@ class TestHistoryOverlay:
         self.stub_registry(monkeypatch, "s12", history)
         page = await get_history("s12")
         rows = page["history"]
-        assert rows[0].get("media") == []
+        # The failed slot emits a dense placeholder at its own ordinal
+        # (#1124 P2a): it holds the row's slot visibly and binds nothing.
+        assert rows[0].get("media") == [{"ref": "", "mime": "", "failed": True}]
         assert [m["ref"] for m in rows[1]["media"]] == [png]
+
+    async def test_mixed_failure_row_keeps_dense_slots(self, monkeypatch):
+        """A row mixing a failed part and a stored part keeps slot parity
+        (#1124 P2a typed slot union): row.media stays dense, the tombstone
+        emitting a failed placeholder at its own ordinal, so [imageN] keeps
+        pointing at the Nth ATTEMPTED image instead of shifting. The
+        placeholder binds nothing - empty ref, failed flag - and the
+        gallery and viewer (list_for) never list it."""
+        from kollabor_engine.routes.sessions import get_history
+
+        record_failed(conversations_dir(), "s13")
+        png = save(conversations_dir(), "s13", PNG).ref
+        history = [
+            {"role": "user", "content": "lost [image1] kept [image2]"},
+        ]
+        self.stub_registry(monkeypatch, "s13", history)
+        page = await get_history("s13")
+        media = page["history"][0]["media"]
+        assert media[0] == {"ref": "", "mime": "", "failed": True}
+        assert media[1] == {"ref": png, "mime": "image/png"}
 
     async def test_older_page_skips_bound_images(self, monkeypatch):
         from kollabor_engine.routes.sessions import get_history
