@@ -1028,6 +1028,28 @@ def test_group_of_only_an_unreaped_dead_member_signals_without_error(tmp_path):
 
 @pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX launcher only")
 @pytest.mark.asyncio
+async def test_launcher_that_never_execs_fails_within_the_startup_timeout(tmp_path, monkeypatch):
+    """A launcher stuck before exec (stopped, or a hung filesystem) must not
+    hold start() past the startup timeout."""
+    import time
+
+    monkeypatch.setattr(bridge_mod, "_POSIX_GROUP_LAUNCHER", "import time\ntime.sleep(60)\n")
+    runner = ACPRunner(
+        ACPProfile("stuck", (sys.executable, "-c", "pass"), cwd=str(tmp_path)),
+        persist_profile_resolution=False,
+        startup_timeout=1,
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises((TimeoutError, asyncio.TimeoutError)):
+            await asyncio.wait_for(runner._start_process(), timeout=10)
+        assert time.monotonic() - started < 5
+    finally:
+        await runner._terminate_process()
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX launcher only")
+@pytest.mark.asyncio
 async def test_adapter_exec_failure_reports_the_os_error(tmp_path):
     """A failed exec surfaces the OS error, not a closed ACP connection."""
     bad = tmp_path / "not-a-program"
