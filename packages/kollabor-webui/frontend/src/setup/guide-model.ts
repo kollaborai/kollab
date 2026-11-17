@@ -127,11 +127,11 @@ export function emptyFacts(): SetupFacts {
  * all, so a profile merely existing must not count (#1217).
  */
 export function hasChosenProvider(
-  profiles: readonly { name: string; provider?: string }[],
+  profiles: readonly { name: string; provider?: string | null }[],
   active?: string | null,
 ): boolean {
   const current = profiles.find((profile) => profile.name === active);
-  return current !== undefined && current.provider !== "auto";
+  return Boolean(current?.provider && current.provider !== "auto");
 }
 
 /** "Get Started" opens Settings > Setup, the one provider screen, until a provider is chosen. */

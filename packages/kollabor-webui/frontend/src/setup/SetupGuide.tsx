@@ -55,6 +55,7 @@ export function SetupGuide({
     return loadGuideState(window.localStorage.getItem(STORAGE_KEY));
   });
   const [facts, setFacts] = useState<SetupFacts>(emptyFacts);
+  const [factsLoaded, setFactsLoaded] = useState(false);
 
   // Persist every transition; a reload resumes where the user left off.
   useEffect(() => {
@@ -64,8 +65,12 @@ export function SetupGuide({
 
   // Re-read engine facts while shown so completed steps disappear live.
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setFactsLoaded(false);
+      return;
+    }
     let mounted = true;
+    setFactsLoaded(false);
     (async () => {
       const [profiles, sessions, agents] = await Promise.all([
         api.listProfiles().catch(() => ({ profiles: [], active: undefined })),
@@ -88,6 +93,7 @@ export function SetupGuide({
             (sessions?.network?.networks || []).some((group) => group.live),
         ),
       });
+      setFactsLoaded(true);
     })();
     return () => {
       mounted = false;
@@ -209,6 +215,7 @@ export function SetupGuide({
             type="button"
             data-testid="setup-guide-next"
             className="ml-auto"
+            disabled={step === "welcome" && !factsLoaded}
             onClick={target ? runTarget : step === "done" ? () => onOpenChange(false) : getStarted}
           >
             {target ? "Open" : step === "done" ? "Finish" : "Get Started"}
