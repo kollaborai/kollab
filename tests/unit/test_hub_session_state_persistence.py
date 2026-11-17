@@ -161,6 +161,23 @@ class TestHubSessionStatePersistence(unittest.TestCase):
         self.assertLessEqual(len(failed_result.error), 240)
         self.assertNotIn(str(missing_vault), failed_result.error)
 
+    def test_state_update_tool_persists_body_in_investigation_notes(self):
+        self.manager.update_state(self.vault_dir, {"focus_file": "kept.py"})
+        plugin = object.__new__(HubPlugin)
+        plugin._vault = SimpleNamespace(_vault_dir=self.vault_dir)
+        plugin._session_state_mgr = self.manager
+
+        result = asyncio.run(
+            plugin._handle_state_update_tool(
+                {"id": "synthetic", "state": "working on phase B"}
+            )
+        )
+
+        saved = self.manager.load_state(self.vault_dir)
+        self.assertTrue(result.success)
+        self.assertEqual(saved.investigation_notes, "working on phase B")
+        self.assertEqual(saved.focus_file, "kept.py")
+
 
 if __name__ == "__main__":
     unittest.main()
