@@ -30,7 +30,7 @@ def test_noisy_server_does_not_block_concurrent_requests(tmp_path):
         "        for request in reversed(requests):\n"
         "            sys.stderr.buffer.write(b'x' * 1048576)\n"
         "            sys.stderr.buffer.flush()\n"
-        "            print(json.dumps({'id': request['id'], 'result': request['id']}), flush=True)\n",
+        "            print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': request['id']}), flush=True)\n",
         encoding="utf-8",
     )
 
@@ -77,7 +77,7 @@ def test_noisy_startup_can_initialize(tmp_path):
         "sys.stderr.buffer.write(b'x' * 1048576)\n"
         "sys.stderr.buffer.flush()\n"
         "request = json.loads(sys.stdin.readline())\n"
-        "print(json.dumps({'id': request['id'], 'result': {}}), flush=True)\n"
+        "print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': {}}), flush=True)\n"
         "sys.stdin.readline()\n",
         encoding="utf-8",
     )
