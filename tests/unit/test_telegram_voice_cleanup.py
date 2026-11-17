@@ -2,11 +2,16 @@
 
 import asyncio
 import logging
+import os
+import sys
 import tempfile
+import textwrap
+import time
 from unittest.mock import AsyncMock
 
 import pytest
 
+from kollabor_config import proc_ctl
 from plugins.hub.messaging_bridge import TelegramBridge
 
 
@@ -23,6 +28,7 @@ class _TelegramResponse:
 class _Process:
     def __init__(self, outcome="success"):
         self.outcome = outcome
+        self.pid = 12345
         self.started = asyncio.Event()
         self.killed = False
         self.waited = False
@@ -51,6 +57,14 @@ def _bridge():
     return bridge
 
 
+def _patch_process_kill(monkeypatch, process):
+    monkeypatch.setattr(
+        proc_ctl,
+        "kill_tree",
+        lambda pid, sig: setattr(process, "killed", True),
+    )
+
+
 @pytest.mark.asyncio
 async def test_success_removes_audio_and_does_not_log_transcript(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
@@ -70,6 +84,7 @@ async def test_success_removes_audio_and_does_not_log_transcript(tmp_path, monke
 async def test_timeout_removes_audio_and_reaps_child(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     process = _Process("timeout")
+    _patch_process_kill(monkeypatch, process)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
 
     result = await _bridge()._transcribe_voice("synthetic-file-id")
@@ -84,6 +99,7 @@ async def test_subprocess_error_removes_audio_and_reaps_child(tmp_path, monkeypa
     caplog.set_level(logging.ERROR)
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     process = _Process("error")
+    _patch_process_kill(monkeypatch, process)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
 
     result = await _bridge()._transcribe_voice("synthetic-file-id")
@@ -98,6 +114,7 @@ async def test_subprocess_error_removes_audio_and_reaps_child(tmp_path, monkeypa
 async def test_cancellation_reaps_child_before_removing_artifacts(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     process = _Process("cancel")
+    _patch_process_kill(monkeypatch, process)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
 
     task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
@@ -109,3 +126,49 @@ async def test_cancellation_reaps_child_before_removing_artifacts(tmp_path, monk
 
     assert process.killed and process.waited
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process group lifecycle")
+async def test_cancellation_stops_real_transcriber_descendants(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    whisper = tmp_path / "whisper"
+    writer_pid = tmp_path / "writer.pid"
+    writes = tmp_path / "writes"
+    whisper.write_text(
+        "#!/usr/bin/env python3\n"
+        + textwrap.dedent(
+            f"""\
+            import pathlib, subprocess, sys, time
+            from pathlib import Path
+            outdir = Path(sys.argv[sys.argv.index("--output_dir") + 1])
+            audio = Path(sys.argv[1])
+            (outdir / (audio.stem + ".txt")).write_text("partial transcript")
+            child = subprocess.Popen([
+                sys.executable, "-c",
+                "import pathlib,time; p=pathlib.Path({str(writes)!r}); "
+                "p.touch(); "
+                "exec('while True:\\n with p.open(\'a\') as f: f.write(\'x\\n\'); f.flush()\\n time.sleep(0.02)')",
+            ])
+            Path({str(writer_pid)!r}).write_text(str(child.pid))
+            while True:
+                time.sleep(1)
+            """
+        )
+    )
+    whisper.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+    task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
+    deadline = time.monotonic() + 5
+    while not writer_pid.exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+    assert writer_pid.exists(), "transcriber descendant did not start"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    before = writes.read_text()
+    await asyncio.sleep(0.15)
+    assert writes.read_text() == before
+    assert not list(tmp_path.glob("kollab-telegram-voice-*"))
