@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import unittest
+import zlib
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -348,6 +349,31 @@ class TestWebFetchExecution(unittest.TestCase):
 
         self.assertTrue(result.success, result.error)
         self.assertIn("Charset fallback works", result.output)
+
+    def test_web_fetch_decodes_both_deflate_wire_formats(self):
+        """The deflate content encoding appears with and without a zlib wrapper."""
+        body = b"<html><body><p>Deflate decoding works</p></body></html>"
+        for window_bits in (zlib.MAX_WBITS, -zlib.MAX_WBITS):
+            with self.subTest(window_bits=window_bits):
+                compressor = zlib.compressobj(wbits=window_bits)
+                compressed = compressor.compress(body) + compressor.flush()
+                response = _make_mock_aiohttp_response(
+                    text=compressed, url="https://example.com"
+                )
+                response.headers = {"Content-Encoding": "deflate"}
+
+                with _patch_aiohttp_session(mock_get=response):
+                    result = _run(
+                        self.executor._execute_web_fetch(
+                            {
+                                "id": "web_fetch_deflate",
+                                "url": "https://example.com",
+                            }
+                        )
+                    )
+
+                self.assertTrue(result.success, result.error)
+                self.assertIn("Deflate decoding works", result.output)
 
     def test_web_fetch_local_http_redirect_chunked_and_compressed_limits(self):
         """Exercise redirects, unknown lengths and gzip expansion over real HTTP."""
