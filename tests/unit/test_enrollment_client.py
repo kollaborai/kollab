@@ -1235,10 +1235,7 @@ async def test_issuer_offer_binds_one_human_action_and_revokes_it_on_close(tmp_p
     identity.is_coordinator = False
     with pytest.raises(EnrollmentProtocolError, match="unauthorized") as local_refusal:
         await issuer.create_offer("kollabor.ai")
-    assert local_refusal.value.refusal == (
-        "This device is not the authorized network coordinator. "
-        "Create the code from the device that owns the network."
-    )
+    assert local_refusal.value.refusal == "Not the network coordinator. Create the code there."
     assert local_refusal.value.source == "local"
     assert transport.request is None
     identity.is_coordinator = True
@@ -1357,10 +1354,7 @@ async def test_issuer_offer_binds_one_human_action_and_revokes_it_on_close(tmp_p
     transport.post_signed_retry = refuse_unauthorized
     with pytest.raises(EnrollmentProtocolError, match="unauthorized") as relay_refusal:
         await issuer.create_offer("kollabor.ai")
-    assert relay_refusal.value.refusal == (
-        "The relay rejected this session's authorization to create a device join code. "
-        "Reconnect the network owner to the relay, then retry."
-    )
+    assert relay_refusal.value.refusal == "Relay denied authorization. Reconnect the network owner."
     assert relay_refusal.value.source == "relay"
 
     await issuer.close()

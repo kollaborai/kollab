@@ -712,10 +712,7 @@ async def test_unauthorized_offer_reason_reaches_connect_screen(monkeypatch, cap
     from plugins.hub.plugin import HubPlugin
 
     monkeypatch.setattr(_TIME, lambda: 1_000)
-    expected = (
-        "This local Connect session is not authorized to create a device join code. "
-        "Open Connect on the device that owns the network."
-    )
+    expected = "Local session isn't authorized. Open Connect on the owner device."
     error = EnrollmentProtocolError("unauthorized")
 
     async def refuse(_domain):

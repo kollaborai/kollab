@@ -2660,10 +2660,7 @@ async def test_unauthorized_enrollment_offer_reason_survives_local_owner_rpc(mon
 
     assert result == {
         "error": "connect offer could not be created",
-        "reason": (
-            "The relay rejected this session's authorization to create a device join code. "
-            "Reconnect the network owner to the relay, then retry."
-        ),
+        "reason": "Relay denied authorization. Reconnect the network owner.",
     }
 
 
