@@ -406,6 +406,10 @@ with glibc 2.28+, on x86_64 or arm64) into `~/.local/bin`: no Python needed.
 (`/config`), each launch installs a newer release first and restarts into it. Every
 [release](https://github.com/kollaborai/kollab/releases) carries the binaries;
 elsewhere the installer falls back to the Python package below.
+The installer verifies the executable and version produced by its selected method and
+checks that a new shell resolves that same executable. If another `kollab` comes first
+on PATH or the install directory is missing, it reports the location and PATH change
+needed instead of claiming success.
 
 Python package managers:
 
