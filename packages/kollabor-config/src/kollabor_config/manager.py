@@ -148,6 +148,21 @@ class ConfigManager:
             True if save successful, False otherwise.
         """
 
+        if self.config_path.exists():
+            try:
+                existing = json.loads(self.config_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+                logger.warning(
+                    "Refusing to overwrite unreadable configuration (%s)",
+                    type(e).__name__,
+                )
+                return False
+            if not isinstance(existing, dict):
+                logger.warning(
+                    "Refusing to overwrite configuration with an invalid shape"
+                )
+                return False
+
         def save_json():
             write_text_atomic(self.config_path, json.dumps(config, indent=2))
 

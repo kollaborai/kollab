@@ -2083,13 +2083,14 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
     config_path = get_existing_global_config_path()
 
-    def _read_config() -> dict:
+    def _read_config() -> dict | None:
         if config_path.exists():
             try:
                 with open(config_path) as fh:
-                    return dict(json.load(fh))
+                    config = json.load(fh)
+                return config if isinstance(config, dict) else None
             except Exception:
-                return {}
+                return None
         return {}
 
     def _write_config(cfg: dict) -> None:
@@ -2548,6 +2549,12 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
     elif subcmd == "user":
         cfg = _read_config()
+        if cfg is None:
+            print(
+                "Hub configuration is unreadable; it was left unchanged.",
+                file=sys.stderr,
+            )
+            return
         if not rest:
             current = _get_nested(cfg, "plugins.hub.user_name")
             if not current:
@@ -2561,12 +2568,24 @@ async def _handle_cli_hub(hub_args: list) -> None:
 
     elif subcmd == "on":
         cfg = _read_config()
+        if cfg is None:
+            print(
+                "Hub configuration is unreadable; it was left unchanged.",
+                file=sys.stderr,
+            )
+            return
         _set_nested(cfg, "plugins.hub.enabled", True)
         _write_config(cfg)
         print("hub enabled")
 
     elif subcmd == "off":
         cfg = _read_config()
+        if cfg is None:
+            print(
+                "Hub configuration is unreadable; it was left unchanged.",
+                file=sys.stderr,
+            )
+            return
         _set_nested(cfg, "plugins.hub.enabled", False)
         _write_config(cfg)
         print("hub disabled")
