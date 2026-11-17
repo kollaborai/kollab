@@ -2961,13 +2961,20 @@ class ProfileManager:
                             original_config_text[path.resolve()], encoding="utf-8"
                         )
                     except Exception as fallback_exc:
-                        logger.critical(
-                            "Could not restore provider config %s after a failed removal "
-                            "(atomic restore: %s; direct restore: %s)",
-                            path,
-                            rollback_exc,
-                            fallback_exc,
-                        )
+                        try:
+                            with open(path, "w", encoding="utf-8") as stream:
+                                stream.write(original_config_text[path.resolve()])
+                                stream.flush()
+                                os.fsync(stream.fileno())
+                        except Exception as final_restore_exc:
+                            logger.critical(
+                                "Could not restore provider config %s after a failed removal "
+                                "(atomic restore: %s; direct restore: %s; final restore: %s)",
+                                path,
+                                rollback_exc,
+                                fallback_exc,
+                                final_restore_exc,
+                            )
             for _, staged_path in staged_updates:
                 try:
                     staged_path.unlink(missing_ok=True)
