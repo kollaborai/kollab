@@ -501,6 +501,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [agentLibraryInitialTab, setAgentLibraryInitialTab] = useState<"rosters" | "teams">("rosters");
   const [setupGuideOpen, setSetupGuideOpen] = useState(false);
+  const [firstRun] = useState(noGuideYet);
+  const [whatsNewDialogOpen, setWhatsNewDialogOpen] = useState(false);
+  const [whatsNewRelease, setWhatsNewRelease] = useState<DialogRelease | null>(null);
   const [welcomeGuideNotice, setWelcomeGuideNotice] = useState(false);
   const openWelcomeGuide = useCallback(() => {
     setWelcomeGuideNotice(false);
