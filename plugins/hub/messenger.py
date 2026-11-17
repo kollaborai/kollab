@@ -3418,8 +3418,15 @@ class AgentMessenger:
             try:
                 with open(f) as fh:
                     data = json.load(fh)
+            except OSError as e:
+                logger.warning(
+                    "Could not read mailbox record %s: %s", f.name, type(e).__name__
+                )
+                continue
             except Exception as e:
-                logger.warning(f"Bad mailbox message {f}: {e}")
+                logger.warning(
+                    "Bad mailbox message %s: %s", f.name, type(e).__name__
+                )
                 try:
                     f.unlink()
                 except Exception:

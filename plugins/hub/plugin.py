@@ -7019,10 +7019,20 @@ class HubPlugin(BasePlugin):
             for msg in messages:
                 if await self._deliver_inbox_message(msg):
                     acknowledged.add(msg.id)
+                    self._acknowledge_inbox_delivery({msg.id})
             return acknowledged
         except asyncio.CancelledError as exc:
             exc.acknowledged_message_ids = acknowledged.copy()
             raise
+
+    def _acknowledge_inbox_delivery(self, message_ids: set[str]) -> None:
+        """Persist each accepted mailbox delivery before yielding control."""
+        identity = getattr(self, "_identity", None)
+        if identity is None or not message_ids:
+            return
+        AgentMessenger.acknowledge_mailboxes(
+            [identity.agent_id, identity.identity], message_ids
+        )
 
     async def _deliver_inbox_message(self, msg: HubMessage) -> bool:
         """Deliver one mailbox message; refusal leaves its file unacknowledged."""
@@ -7066,6 +7076,7 @@ class HubPlugin(BasePlugin):
         for msg in control_msgs:
             if await self._deliver_inbox_message(msg):
                 acknowledged.add(msg.id)
+                self._acknowledge_inbox_delivery({msg.id})
 
         if not ordinary_msgs:
             return acknowledged
@@ -7083,6 +7094,7 @@ class HubPlugin(BasePlugin):
             for msg in ordinary_msgs:
                 if await self._deliver_inbox_message(msg):
                     acknowledged.add(msg.id)
+                    self._acknowledge_inbox_delivery({msg.id})
             return acknowledged
 
         lines: List[str] = [summary.content, ""]
@@ -7101,6 +7113,9 @@ class HubPlugin(BasePlugin):
             try:
                 await llm.inject_system_message(block, subtype="inbox_replay")
                 acknowledged.update(msg.id for msg in ordinary_msgs)
+                self._acknowledge_inbox_delivery(
+                    {msg.id for msg in ordinary_msgs}
+                )
                 logger.info(
                     "Injected inbox replay block: %d message(s) shown "
                     "(%s total queued)",
@@ -7115,6 +7130,7 @@ class HubPlugin(BasePlugin):
         for msg in ordinary_msgs:
             if await self._deliver_inbox_message(msg):
                 acknowledged.add(msg.id)
+                self._acknowledge_inbox_delivery({msg.id})
         return acknowledged
 
     async def _dreaming_loop(self) -> None:
