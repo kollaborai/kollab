@@ -130,6 +130,34 @@ async def test_cancellation_reaps_child_before_removing_artifacts(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_repeated_cancellation_during_spawn_reaps_child(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    process = _Process("cancel")
+    _patch_process_kill(monkeypatch, process)
+    spawn_started = asyncio.Event()
+    release_spawn = asyncio.Event()
+
+    async def delayed_spawn(*_args, **_kwargs):
+        spawn_started.set()
+        await release_spawn.wait()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_spawn)
+    task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
+    await spawn_started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    release_spawn.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert process.killed and process.waited
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process group lifecycle")
 async def test_cancellation_stops_real_transcriber_descendants(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
