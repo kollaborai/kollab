@@ -10664,7 +10664,10 @@ class HubPlugin(BasePlugin):
         # Active tasks (compaction-proof: they live on disk and are injected
         # every user turn, so they survive any compaction)
         if self._identity and self._task_ledger:
-            my_tasks = self._task_ledger.get_active_for(self._identity.identity)
+            read_errors: List[str] = []
+            my_tasks = self._task_ledger.get_active_for(
+                self._identity.identity, read_errors=read_errors
+            )
             if my_tasks:
                 task_lines = ["", "--- active tasks (DO NOT FORGET) ---"]
                 for task in my_tasks:
@@ -10711,6 +10714,13 @@ class HubPlugin(BasePlugin):
                 )
                 task_lines.append("--- end tasks ---")
                 roster_block += "\n" + "\n".join(task_lines)
+            if read_errors:
+                unreadable_count = len(read_errors)
+                card_label = "card" if unreadable_count == 1 else "cards"
+                roster_block += (
+                    "\nWARNING: Task ledger is incomplete; "
+                    f"{unreadable_count} task {card_label} could not be read."
+                )
 
         # Scratchpad and session state are intentionally not injected here.
         # They are mutable operational notes that can outlive their task and
@@ -15796,11 +15806,12 @@ class HubPlugin(BasePlugin):
         """List all tasks."""
         if self._task_ledger is None:
             return "task system not available"
-        all_tasks = self._task_ledger.get_all()
-        if not all_tasks:
+        read_errors: List[str] = []
+        all_tasks = self._task_ledger.get_all(read_errors=read_errors)
+        if not all_tasks and not read_errors:
             return "no tasks"
 
-        lines = [f"tasks: {len(all_tasks)} total"]
+        lines = [f"tasks: {len(all_tasks)} total"] if all_tasks else []
         for card in sorted(all_tasks, key=lambda c: -c.priority):
             status_icon = {
                 "active": ">>",
@@ -15819,6 +15830,13 @@ class HubPlugin(BasePlugin):
                 f" {card.elapsed_str()}"
             )
             lines.append(f"       {card.directive[:70]}")
+        if read_errors:
+            unreadable_count = len(read_errors)
+            card_label = "card" if unreadable_count == 1 else "cards"
+            lines.append(
+                "WARNING: Task ledger is incomplete; "
+                f"{unreadable_count} task {card_label} could not be read."
+            )
         return "\n".join(lines)
 
     def _tasks_mine(self) -> str:
@@ -15827,11 +15845,14 @@ class HubPlugin(BasePlugin):
             return "not connected to hub"
         if not self._task_ledger:
             return "task ledger not available"
-        my_tasks = self._task_ledger.get_active_for(self._identity.identity)
-        if not my_tasks:
+        read_errors: List[str] = []
+        my_tasks = self._task_ledger.get_active_for(
+            self._identity.identity, read_errors=read_errors
+        )
+        if not my_tasks and not read_errors:
             return "no active tasks assigned to you"
 
-        lines = [f"your tasks: {len(my_tasks)}"]
+        lines = [f"your tasks: {len(my_tasks)}"] if my_tasks else []
         for card in my_tasks:
             lines.append(
                 f"  [{card.id}] p{card.priority}"
@@ -15847,6 +15868,13 @@ class HubPlugin(BasePlugin):
                 )
             if card.status == "qa_review":
                 lines.append("    status: awaiting QA review")
+        if read_errors:
+            unreadable_count = len(read_errors)
+            card_label = "card" if unreadable_count == 1 else "cards"
+            lines.append(
+                "WARNING: Task ledger is incomplete; "
+                f"{unreadable_count} task {card_label} could not be read."
+            )
         return "\n".join(lines)
 
     def _tasks_assign(self, args: str) -> str:
