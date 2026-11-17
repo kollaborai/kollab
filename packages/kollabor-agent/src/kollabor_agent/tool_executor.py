@@ -1268,8 +1268,6 @@ class ToolExecutor:
         """
         tool_type = tool_data.get("type", "unknown")
         tool_id = tool_data.get("id", "unknown")
-        git_tool_alias = tool_type == "git" or tool_data.get("name") == "git"
-
         # Native callers are normalized before reaching this method, but keep
         # the legacy alias safe for direct/older callers too. The registered
         # ``git`` definition is documentation for terminal execution, not a
@@ -1278,14 +1276,14 @@ class ToolExecutor:
             tool_data = {**tool_data, "type": "terminal"}
             tool_type = "terminal"
 
-        # A Git grant is narrower than terminal access. Native Git arrives as
-        # a terminal dispatch, so route only a single shell-free Git command
-        # through the existing read-only terminal policy. This keeps Git hooks
-        # and other command execution outside the Git-only grant.
+        # A Git grant is narrower than terminal access. The documented XML
+        # form is parsed as a terminal dispatch without a tool name, so route
+        # only a single shell-free Git command through the existing read-only
+        # terminal policy. This keeps Git hooks and other command execution
+        # outside the Git-only grant.
         command = tool_data.get("command")
         git_bundle_read_only = (
-            git_tool_alias
-            and tool_type == "terminal"
+            tool_type == "terminal"
             and self._bundle_tools is not None
             and "git" in self._bundle_tools
             and "terminal" not in self._bundle_tools
