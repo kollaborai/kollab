@@ -121,3 +121,33 @@ def test_changed_pair_comment_updates_the_existing_notice(monkeypatch):
 
     assert calls[0][0][0] == "repos/owner/repo/issues/comments/7"
     assert calls[0][1]["method"] == "PATCH"
+
+
+def test_event_check_comments_on_both_prs_for_a_shared_issue(monkeypatch):
+    current = _pr(12, body="Fixes #616")
+    current["state"] = "open"
+    candidate = _pr(4, body="Refs #616")
+    candidate["state"] = "open"
+    posted = []
+
+    def pages(path):
+        if path.endswith("/pulls?state=open&per_page=100"):
+            return [candidate, current]
+        if path.endswith("/comments?per_page=100"):
+            return []
+        return []
+
+    def api(path, **kwargs):
+        if path.endswith("/pulls/12"):
+            return current
+        posted.append((path, kwargs))
+        return {}
+
+    monkeypatch.setattr(detector, "_gh_pages", pages)
+    monkeypatch.setattr(detector, "_gh_api", api)
+
+    matches = detector.check_pull_request("owner/repo", 12)
+
+    assert [match.number for match in matches] == [4]
+    assert [path.rsplit("/", 1)[-1] for path, _ in posted] == ["comments", "comments"]
+    assert {"/issues/12/" in path for path, _ in posted} == {True, False}
