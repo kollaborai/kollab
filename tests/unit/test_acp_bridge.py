@@ -562,13 +562,13 @@ async def test_session_lookup_ignores_session_whose_leader_pid_was_reused(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_start_and_close_never_read_any_process_environment(tmp_path, monkeypatch):
-    """#608: finding owned processes must not read other processes' environments."""
-    reads: list[int] = []
+async def test_close_checks_only_recent_same_user_process_markers(tmp_path, monkeypatch):
+    """#1044: marker lookup checks candidates without adopting unrelated processes."""
+    reads: list[tuple[int, str, float]] = []
     original_environ = psutil.Process.environ
 
     def recording_environ(self):
-        reads.append(self.pid)
+        reads.append((self.pid, self.info["username"], self.info["create_time"]))
         return original_environ(self)
 
     monkeypatch.setattr(psutil.Process, "environ", recording_environ)
@@ -583,9 +583,17 @@ async def test_start_and_close_never_read_any_process_environment(tmp_path, monk
             stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
         )
         assert (await runner.prompt("one turn")).text == "hello "
+        process_started_at = runner._process_started_at
+        process_username = runner._process_username
+        assert process_started_at is not None and process_username is not None
         await runner.close()
-        assert reads == []
-        assert outsider.returncode is None
+        assert outsider.pid in [pid for pid, _, _ in reads]
+        assert sum(pid == outsider.pid for pid, _, _ in reads) == 1
+        assert all(
+            username == process_username and birth >= process_started_at
+            for _, username, birth in reads
+        )
+        assert outsider.returncode is None and psutil.Process(outsider.pid).is_running()
         assert not runner._live_owned_processes()
     finally:
         with contextlib.suppress(Exception):

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -31,6 +32,8 @@ from acp.schema import (
 from kollabor.version import __version__
 
 from .acp_state import ACPBinding
+
+_ACP_OWNER_TOKEN_ENV = "KOLLAB_ACP_OWNER_TOKEN"
 
 
 class ACPError(RuntimeError):
@@ -688,6 +691,8 @@ class ACPRunner:
         self._adapter_pid: int | None = None
         self._process_started_at: float | None = None
         self._process_username: str | None = None
+        self._process_owner_token: str | None = None
+        self._checked_process_owner_markers: set[tuple[int, float]] = set()
         self._teardown_lock = asyncio.Lock()
         self._queue: asyncio.Queue[ACPAdmission | None] = asyncio.Queue(maxsize=10)
         self._worker: asyncio.Task[None] | None = None
@@ -780,6 +785,7 @@ class ACPRunner:
         if self._live_owned_processes():
             raise ACPError("previous ACP processes still require cleanup")
         self._owned_processes.clear()
+        self._checked_process_owner_markers.clear()
         self.state = "starting"
         if self.lifecycle_callback is not None:
             await self.lifecycle_callback("starting", self)
@@ -800,13 +806,16 @@ class ACPRunner:
                 "The existing binding was kept; select the previous adapter or start a new session."
             )
         self._process_username = psutil.Process(os.getpid()).username()
+        owner_token = secrets.token_urlsafe(32)
+        self._process_owner_token = owner_token
+        child_env = {**env, _ACP_OWNER_TOKEN_ENV: owner_token}
         # A rapidly exiting root may disappear before psutil can read it.
         # Allow one second of kernel birth-time rounding in that fallback.
         self._process_started_at = time.time() - 1
         self._process = await asyncio.create_subprocess_exec(
             *command,
             cwd=cwd,
-            env=env,
+            env=child_env,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -1004,30 +1013,35 @@ class ACPRunner:
             await asyncio.sleep(0.1)
 
     def _recover_session_processes(self) -> None:
-        """Recover same-user newborns still in the adapter's session.
+        """Recover same-user descendants by session or their per-run marker.
 
         The adapter starts as a session leader, so descendants that lose
-        their parent keep its pid as their session id. Never read another
-        process's environment to decide ownership (#608). A descendant that
-        calls setsid() before a tree sample sees it is not recovered.
+        their parent usually keep its pid as their session id. A descendant
+        that calls setsid() before a tree sample is instead matched by the
+        opaque marker inherited from this adapter. Marker lookup is limited to
+        same-user processes born during this run and never logs their env.
         """
-        if self._adapter_pid is None or self._process_started_at is None or not hasattr(os, "getsid"):
+        if self._adapter_pid is None or self._process_started_at is None:
             return
-        adapter = self._owned_processes.get(self._adapter_pid)
+        adapter_pid = self._adapter_pid
+        adapter = self._owned_processes.get(adapter_pid)
 
         def session_is_ours() -> bool:
             # A live process at the adapter's pid that is not the recorded
             # adapter means the number was reused: that session is not ours.
             try:
-                return psutil.Process(self._adapter_pid) == adapter
+                return psutil.Process(adapter_pid) == adapter
             except psutil.NoSuchProcess:
                 return True
             except psutil.Error:
                 return False
 
-        if not session_is_ours():
+        session_lookup_available = hasattr(os, "getsid") and session_is_ours()
+        owner_token = self._process_owner_token
+        if not session_lookup_available and owner_token is None:
             return
-        found: list[psutil.Process] = []
+        found: list[tuple[psutil.Process, bool]] = []
+        active_marker_candidates: set[tuple[int, float]] = set()
         for owner in psutil.process_iter(("pid", "create_time", "username")):
             with contextlib.suppress(psutil.Error, OSError):
                 birth = owner.info.get("create_time")
@@ -1038,17 +1052,39 @@ class ACPRunner:
                     continue
                 if self._owned_processes.get(owner.pid) == owner:
                     continue
-                # Recheck birth identity across the session-id read.
-                if (
-                    owner.is_running()
-                    and os.getsid(owner.pid) == self._adapter_pid
-                    and owner.is_running()
-                ):
-                    owner.create_time()
-                    found.append(owner)
-        if session_is_ours():
-            for owner in found:
-                self._owned_processes[owner.pid] = owner
+                in_owned_session = False
+                if session_lookup_available:
+                    if not owner.is_running():
+                        continue
+                    in_owned_session = os.getsid(owner.pid) == adapter_pid
+                    if in_owned_session and not owner.is_running():
+                        continue
+                if not in_owned_session:
+                    identity = (owner.pid, birth)
+                    active_marker_candidates.add(identity)
+                    if owner_token is None or identity in self._checked_process_owner_markers:
+                        continue
+                    self._checked_process_owner_markers.add(identity)
+                    environment = getattr(owner, "environ", None)
+                    if not callable(environment):
+                        continue
+                    try:
+                        marker_matches = environment().get(_ACP_OWNER_TOKEN_ENV) == owner_token
+                    except (psutil.Error, OSError, AttributeError):
+                        # An unreadable process environment is not proof of ownership.
+                        continue
+                    if not marker_matches:
+                        continue
+                if not owner.is_running():
+                    continue
+                owner.create_time()
+                found.append((owner, in_owned_session))
+        self._checked_process_owner_markers.intersection_update(active_marker_candidates)
+        adapter_session_still_ours = session_lookup_available and session_is_ours()
+        for owner, in_owned_session in found:
+            if in_owned_session and not adapter_session_still_ours:
+                continue
+            self._owned_processes[owner.pid] = owner
 
     def _live_owned_processes(self) -> list[psutil.Process]:
         self._refresh_process_tree()
@@ -1809,6 +1845,8 @@ class ACPRunner:
                     self._adapter_pid = None
                     self._process_started_at = None
                     self._process_username = None
+                    self._process_owner_token = None
+                    self._checked_process_owner_markers.clear()
                 else:
                     detail = ", ".join(str(owner.pid) for owner in survivors)
                     if unreaped_adapter:
