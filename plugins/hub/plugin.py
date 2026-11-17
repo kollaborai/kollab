@@ -67,6 +67,7 @@ from .messaging_bridge import (
 from .messenger import (
     AgentMessenger,
     AgentSocketServer,
+    InboxCapacityError,
     _coerce_line_count,
     _is_durable_control,
 )
@@ -12340,7 +12341,28 @@ class HubPlugin(BasePlugin):
         for agent in agents:
             if agent.agent_id == my_id:
                 continue
-            delivered = await self._deliver_to_agent(agent, message)
+            try:
+                delivered = await self._deliver_to_agent(agent, message)
+            except InboxCapacityError as exc:
+                reason = str(exc)
+                rejections.append((agent.identity, reason))
+                self._trace_delivery(
+                    message,
+                    "rejected",
+                    target=agent.identity,
+                    detail=reason,
+                )
+                continue
+            except OSError as exc:
+                reason = f"durable mailbox write failed ({type(exc).__name__})"
+                rejections.append((agent.identity, reason))
+                self._trace_delivery(
+                    message,
+                    "rejected",
+                    target=agent.identity,
+                    detail=reason,
+                )
+                continue
             if not delivered:
                 # Build a reason string for the rejection
                 cooldown_remaining = (
@@ -12358,10 +12380,30 @@ class HubPlugin(BasePlugin):
             message, delivered_identities
         )
         if queue_offline:
+            try:
+                await AgentMessenger.send_to_file(message.to, message)
+            except InboxCapacityError as exc:
+                rejections.append((message.to, str(exc)))
+                self._trace_delivery(
+                    message,
+                    "rejected",
+                    target=message.to,
+                    detail=str(exc),
+                )
+                return rejections
+            except OSError as exc:
+                reason = f"durable mailbox write failed ({type(exc).__name__})"
+                rejections.append((message.to, reason))
+                self._trace_delivery(
+                    message,
+                    "rejected",
+                    target=message.to,
+                    detail=reason,
+                )
+                return rejections
             queued_for = list((message.metadata or {}).get("_queued_for", []))
             if message.to not in queued_for:
                 message.metadata["_queued_for"] = [*queued_for, message.to]
-            await AgentMessenger.send_to_file(message.to, message)
             # A successful durable enqueue is accepted delivery; remove the
             # waiting rejection so the dispatch ledger will not allow replay.
             rejections = [
