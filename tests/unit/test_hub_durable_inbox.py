@@ -18,6 +18,7 @@ Coordinator visibility: get_all_inbox_counts() scans dirs without consuming.
 """
 
 import asyncio
+import builtins
 import json
 import time
 from collections import OrderedDict
@@ -220,6 +221,30 @@ class TestInboxTTLExpiry:
         assert malformed_path.exists()
         assert "Could not discard malformed mailbox record" in caplog.text
         assert "DO_NOT_LOG_THIS" not in caplog.text
+
+    def test_transient_read_failure_preserves_record_for_retry(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        inbox = tmp_path / "lapis"
+        inbox.mkdir()
+        message = _make_msg(content="retry after read failure")
+        path = inbox / "0000001-message.json"
+        path.write_text(json.dumps(message.to_dict()))
+        original_open = builtins.open
+
+        def fail_target(file, *args, **kwargs):
+            if Path(file) == path:
+                raise PermissionError("simulated transient read failure")
+            return original_open(file, *args, **kwargs)
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            with patch("builtins.open", side_effect=fail_target):
+                result = AgentMessenger.read_mailbox("lapis", consume=False)
+
+        assert result == []
+        assert path.exists()
+        assert "Could not read mailbox record" in caplog.text
+        assert "retry after read failure" not in caplog.text
 
     def test_expired_messages_not_returned(self, tmp_path: Path) -> None:
         inbox = tmp_path / "lapis"
