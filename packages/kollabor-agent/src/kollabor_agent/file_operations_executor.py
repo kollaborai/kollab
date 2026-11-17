@@ -269,7 +269,7 @@ class FileOperationsExecutor:
             return False
 
     def is_read_denied_path(self, filepath: str) -> bool:
-        """Deny agent file tools access to plugin code and runtime tokens.
+        """Deny agent file tools access to plugin code and data.
 
         This is not a shell sandbox. Resolve symlinks before checking so aliases
         cannot be used to read the protected paths.
@@ -294,9 +294,7 @@ class FileOperationsExecutor:
                         return True
                     data = root / "plugin-data"
                     if candidate.is_relative_to(data):
-                        parts = candidate.relative_to(data).parts
-                        if len(parts) == 3 and parts[1:] == ("run", "token"):
-                            return True
+                        return True
             return False
         except (OSError, RuntimeError, ValueError):
             return True
