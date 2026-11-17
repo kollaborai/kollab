@@ -120,19 +120,19 @@ async def test_web_resume_and_branch_lists_render_actionable_rows():
     _assert_action_row(
         branch_sessions,
         "Plan a release",
-        r"session\-1 \| 3 msgs \| main",
+        r"session-1 \| 3 msgs \| main",
         "/branch session-1",
     )
     _assert_action_row(
         branch_sessions,
         "Investigate a regression",
-        r"session\-2 \| 3 msgs \| main",
+        r"session-2 \| 3 msgs \| main",
         "/branch session-2",
     )
     _assert_action_row(
         branch_sessions,
         "Prepare a handoff",
-        r"session\-3 \| 3 msgs \| main",
+        r"session-3 \| 3 msgs \| main",
         "/branch session-3",
     )
     _assert_action_row(
@@ -150,7 +150,7 @@ async def test_web_resume_and_branch_lists_render_actionable_rows():
     _assert_action_row(
         fork_sessions,
         "Plan a release",
-        r"session\-1 \| 3 msgs \| main",
+        r"session-1 \| 3 msgs \| main",
         "/resume session-1",
     )
 
@@ -158,7 +158,7 @@ async def test_web_resume_and_branch_lists_render_actionable_rows():
     _assert_action_row(
         fork_search_results,
         "Find release notes",
-        r"search\-1 \| 2 msgs \| main",
+        r"search-1 \| 2 msgs \| main",
         "/resume search-1",
     )
 
@@ -166,7 +166,7 @@ async def test_web_resume_and_branch_lists_render_actionable_rows():
     _assert_action_row(
         resume_sessions,
         "Investigate a regression",
-        r"session\-2 \| 3 msgs \| main",
+        r"session-2 \| 3 msgs \| main",
         "/resume session-2",
     )
 
@@ -174,7 +174,7 @@ async def test_web_resume_and_branch_lists_render_actionable_rows():
     _assert_action_row(
         search_results,
         "Find release notes",
-        r"search\-1 \| 2 msgs \| main",
+        r"search-1 \| 2 msgs \| main",
         "/resume search-1",
     )
 
@@ -182,7 +182,7 @@ async def test_web_resume_and_branch_lists_render_actionable_rows():
     _assert_action_row(
         filtered_sessions,
         "Prepare a handoff",
-        r"session\-3 \| 3 msgs \| main",
+        r"session-3 \| 3 msgs \| main",
         "/resume session-3",
     )
     assert "Review a migration" not in filtered_sessions
