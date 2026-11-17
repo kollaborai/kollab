@@ -8,6 +8,7 @@ vi.mock("react", async (importOriginal) => {
     useEffect: (effect: () => void | (() => void)) => { effect(); },
     useMemo: (factory: () => unknown) => factory(),
     useCallback: (callback: unknown) => callback,
+    useRef: (initial: unknown) => ({ current: initial }),
   };
 });
 

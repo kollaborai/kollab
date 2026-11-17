@@ -1444,11 +1444,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         setActiveId(first.session_id);
         setInitialState(firstState);
         recoverPendingTurn(first.session_id, hasPendingPermission(firstState));
-      }
-      if (firstRun) {
-        // First run owns this mount even if setup has since persisted progress.
+      } else if (noGuideYet()) {
+        // First run: nothing to restore and no dismissal on record.
         setSetupGuideOpen(true);
-      } else {
+      }
+      // What's New never competes with a first run's setup guide.
+      if (!firstRun) {
         void (async () => {
           const decision = decideWhatsNew({
             result: await loadCanonicalWhatsNew(),
