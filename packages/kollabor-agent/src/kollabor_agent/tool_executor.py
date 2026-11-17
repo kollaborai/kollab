@@ -3087,6 +3087,12 @@ class ToolExecutor:
         max_chars = tool_data.get("max_chars", 5000)
         extract_main = tool_data.get("extract_main", True)
 
+        if isinstance(max_chars, str):
+            try:
+                max_chars = int(max_chars)
+            except ValueError:
+                max_chars = None
+
         if (
             isinstance(max_chars, bool)
             or not isinstance(max_chars, int)
