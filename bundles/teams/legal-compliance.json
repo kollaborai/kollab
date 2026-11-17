@@ -2,27 +2,27 @@
   "name": "legal-compliance",
   "description": "Legal and compliance support: general counsel lead, contracts, privacy, regulatory compliance, and IP/open-source licensing. Reviews and drafts for a qualified human; not legal advice, signs nothing.",
   "roster": "legal-crew",
-  "lead": "margaret",
+  "lead": "legal-ops-lead",
   "members": [
     {
-      "persona": "margaret",
+      "persona": "legal-ops-lead",
       "reports_to": null
     },
     {
-      "persona": "daniel",
-      "reports_to": "margaret"
+      "persona": "contracts-specialist",
+      "reports_to": "legal-ops-lead"
     },
     {
-      "persona": "leila",
-      "reports_to": "margaret"
+      "persona": "privacy-officer",
+      "reports_to": "legal-ops-lead"
     },
     {
-      "persona": "hugo",
-      "reports_to": "margaret"
+      "persona": "compliance-analyst",
+      "reports_to": "legal-ops-lead"
     },
     {
-      "persona": "yuki",
-      "reports_to": "margaret"
+      "persona": "ip-open-source-licensing-specialist",
+      "reports_to": "legal-ops-lead"
     }
   ]
 }

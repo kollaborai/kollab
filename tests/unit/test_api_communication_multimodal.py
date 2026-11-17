@@ -10,6 +10,7 @@ from kollabor_ai.message_content import EphemeralImageStore, normalize_message_c
 from kollabor_ai.providers.errors import ProviderError
 from kollabor_ai.providers.models import (
     ImageGenerationDelta,
+    OpenRouterConfig,
     StreamingResponse,
     TextDelta,
     UsageInfo,
@@ -17,6 +18,7 @@ from kollabor_ai.providers.models import (
 from kollabor_ai.providers.openai_responses_transformer import (
     OpenAIResponsesTransformer,
 )
+from kollabor_ai.providers.openrouter_provider import OpenRouterProvider
 
 PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
@@ -89,6 +91,52 @@ def test_image_capability_resolves_before_provider_initialization(tmp_path: Path
 
     assert service._provider is None
     assert service.supports_image_input() is True
+
+
+@pytest.mark.asyncio
+async def test_prefixed_openrouter_model_passes_image_gate_and_builds_request(
+    tmp_path: Path,
+):
+    profile = MagicMock()
+    profile.get_provider.return_value = "openrouter"
+    profile.get_model.return_value = "openai/gpt-6-luna"
+    config = MagicMock()
+    config.get = lambda key, default=None: default
+    service = APICommunicationService(config, tmp_path, profile)
+    provider = OpenRouterProvider(
+        OpenRouterConfig(
+            api_key="sk-test", model="openai/gpt-6-luna", max_tokens=512
+        )
+    )
+    service._provider = provider
+    assert service.supports_image_input() is True
+
+    store = EphemeralImageStore()
+    content = normalize_message_content(
+        [{"type": "image", "image": "data:image/png;base64,iVBORw0KGgo="}],
+        store,
+    )
+    provider.set_media_resolver(store.resolve)
+    provider._model_info = MagicMock()
+    provider._model_info.get_model_limits = AsyncMock(return_value=None)
+    provider._model_info.compute_effective_max_tokens.return_value = 512
+
+    request = await provider._build_request(
+        [{"role": "user", "content": content}], tools=None, kwargs={}
+    )
+
+    assert request["model"] == "openai/gpt-6-luna"
+    assert request["messages"][0]["content"][0]["image_url"]["url"] == (
+        "data:image/png;base64,iVBORw0KGgo="
+    )
+
+    mismatched_provider = OpenRouterProvider(
+        OpenRouterConfig(
+            api_key="sk-test", model="anthropic/gpt-6-luna", max_tokens=512
+        )
+    )
+    service._provider = mismatched_provider
+    assert service.supports_image_input() is False
 
 
 @pytest.mark.asyncio

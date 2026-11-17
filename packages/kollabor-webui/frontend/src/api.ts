@@ -89,6 +89,8 @@ export type GemAppearance = {
   gems?: Record<string, GemLook>;
   /** The engine's own folder: a bare gem name is the agent there. */
   home?: string;
+  /** Persona names of every roster but the gem pool: born furry, with contrasting hair and no hat. */
+  crew?: string[];
 };
 
 export type UpdateRelease = { version: string; tag_name: string; name: string; url: string; is_prerelease: boolean };
@@ -112,7 +114,12 @@ export type HistoryMessage = {
 };
 
 /** The engine's stored copy of one image a session sent (#1088). */
-export type MediaEntry = { ref: string; mime: string };
+export type MediaEntry = {
+  ref: string;
+  mime: string;
+  /** A slot whose storage failed: binds nothing, renders as literal text. */
+  failed?: boolean;
+};
 
 /** Why the session's last turn failed; it goes after `history_length` messages. */
 export type TurnError = { message: string; history_length: number };
@@ -594,6 +601,7 @@ export const DEFAULT_SLASH_COMMANDS: SlashCommand[] = [
   { name: "skills", description: "List available agent skills" },
   { name: "config", description: "Open system configuration" },
   { name: "setup", description: "Run first-time setup" },
+  { name: "welcome", description: "Show the welcome guide again" },
   { name: "doctor", description: "Run a readiness check" },
   { name: "login", description: "Sign in to a provider" },
   { name: "connect", description: "Open this device's agent network" },
@@ -986,7 +994,7 @@ export class EngineApi {
         } catch {
           // Keep status text for non-JSON errors.
         }
-        throw new ApiError(`${response.status}: ${detail}`, response.status, body);
+        throw new ApiError(detail, response.status, body);
       }
       const config = (await response.json()) as EngineConfig;
       if (config.token && config.token !== this.token) {
@@ -1020,7 +1028,7 @@ export class EngineApi {
       return this.request(path, init, false);
     }
     if (!response.ok) {
-      let detail = response.statusText;
+      let detail = response.statusText || `HTTP ${response.status}`;
       let body: unknown;
       try {
         body = await response.json();
@@ -1029,7 +1037,7 @@ export class EngineApi {
       } catch {
         // Keep status text for non-JSON errors.
       }
-      throw new ApiError(`${response.status}: ${detail}`, response.status, body);
+      throw new ApiError(detail, response.status, body);
     }
     return response;
   }
@@ -1055,7 +1063,7 @@ export class EngineApi {
           } catch {
             // Keep status text for non-JSON errors.
           }
-          throw new ApiError(`${response.status}: ${detail}`, response.status, body);
+          throw new ApiError(detail, response.status, body);
         }
         const config = (await response.json()) as EngineConfig;
         if (config.engine_url) this.setBaseUrl(config.engine_url);

@@ -79,6 +79,21 @@ UI or a team launch uses that chat's own folder, not the engine's
 session-context template (`_base/sections/01-session-context.md`) resolve through the
 same three tiers (`kollabor_config.get_agent_tier_dirs`).
 
+## Koordinator repository intake
+
+Before dispatching a new implementation lane for a GitHub issue, Koordinator
+checks the repository's open pull requests for an existing PR linked to that
+issue. It also checks for shared head branches, stacked branches, and substantial
+changed-file or hunk overlap. When it finds a likely duplicate, it holds the
+dispatch and prompts consolidation or closure with a reason. If the comparison
+cannot be completed, intake reports that uncertainty instead of dispatching as
+though the issue were clear.
+
+The PR overlap workflow runs on pull request open, reopen, and push events. It
+posts an idempotent overlap comment on both PRs and prompts Koordinator to review
+the pair. It flags candidates for a person to resolve; it never closes or merges
+a PR automatically.
+
 ## Agent Configuration
 
 ### agent.json (Optional)
@@ -145,6 +160,9 @@ type; when type metadata is missing, no mark is shown. Network/remote rows are a
 unmarked because their data does not include a bundle type; matching a remote name to
 a local roster entry could show the wrong type. The mark does not change identity,
 workspace grouping, or row actions.
+
+Remote directory rows ignore fields a peer does not recognize and skip a malformed
+row without hiding the other agents reported by that device.
 
 ## Hub Rosters and Teams
 
@@ -220,6 +238,10 @@ Resolution order for the skill library (later tiers override earlier ones on nam
 1. `bundles/skills/` (bundled)
 2. `~/.kollab/skills/` (global)
 3. `.kollab/skills/` (local project)
+
+When a global skill shares a name with a bundled skill but its `SKILL.md` differs,
+Kollab logs a startup warning with both paths and marks the active global copy in
+the skill pickers. The global copy is preserved so intentional edits are not lost.
 
 Assign skills to an agent via `agent.json`'s `"skills"` array.
 

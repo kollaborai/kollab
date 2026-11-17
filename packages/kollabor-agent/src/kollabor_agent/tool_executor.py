@@ -929,14 +929,10 @@ class ToolExecutor:
         """Clear bundle scope, allowing all tools."""
         self._bundle_tools = None
 
-    # Internal dispatch types that bypass scope checks.
-    # These are infrastructure types, not agent-facing tools.  ``mcp_tool``
-    # is deliberately absent: external MCP calls are agent-facing and must
-    # be denied when a bounded bundle does not grant them.
+    # Internal dispatch types that bypass scope checks. ``mcp_tool`` is
+    # deliberately absent: external MCP calls are agent-facing and must be
+    # denied when a bounded bundle does not grant them.
     _INTERNAL_TYPES = frozenset({
-        "terminal_status",
-        "terminal_output",
-        "terminal_kill",
         "malformed_file_op",
         "malformed_tool",
         "unknown",
@@ -955,6 +951,9 @@ class ToolExecutor:
         Returns:
             Registry-compatible name, or None if it's an internal type.
         """
+        if tool_type in {"terminal_status", "terminal_output", "terminal_kill"}:
+            return "terminal"
+
         # Internal dispatch types — not agent-facing tools
         if tool_type in self._INTERNAL_TYPES:
             return None
