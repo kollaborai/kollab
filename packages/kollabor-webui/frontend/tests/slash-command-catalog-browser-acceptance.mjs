@@ -56,6 +56,12 @@ async function runFailureRecovery(browser, baseUrl, screenshots, failureMode = "
       "built-in commands must not be presented as confirmed session commands after a 502");
     fs.mkdirSync(screenshots, { recursive: true });
     await view.page.screenshot({ path: path.join(screenshots, "slash-command-catalog-unavailable.png"), animations: "disabled" });
+    for (const width of [820, 390]) {
+      await view.page.setViewportSize({ width, height: width === 390 ? 844 : 1180 });
+      const dimensions = await view.page.evaluate(() => ({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth }));
+      assert.ok(dimensions.scrollWidth <= dimensions.width + 1, `horizontal overflow at ${width}px`);
+      await view.page.screenshot({ path: path.join(screenshots, `slash-command-catalog-unavailable-${width}.png`), animations: "disabled" });
+    }
     await unavailable.getByRole("button", { name: "Try Again", exact: true }).click();
     assert.equal(await input.inputValue(), "/session-only draft", "retry must preserve the typed composer draft");
     await input.fill("/");
