@@ -2910,6 +2910,40 @@ class ProfileManager:
             return []
 
         committed: List[Path] = []
+        preflight_stages: List[Path] = []
+        try:
+            for path, _, _ in updates:
+                target_path = Path(os.path.realpath(path))
+                original_text = original_config_text[path.resolve()]
+                if target_path.read_text(encoding="utf-8") != original_text:
+                    raise RuntimeError(f"Provider config changed during removal: {path}")
+
+                descriptor, staged_name = tempfile.mkstemp(
+                    prefix=f".{target_path.name}.",
+                    suffix=".provider-removal-check.tmp",
+                    dir=target_path.parent,
+                )
+                staged_path = Path(staged_name)
+                preflight_stages.append(staged_path)
+                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                    stream.write(original_text)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(staged_path, target_path)
+        except Exception as exc:
+            logger.error("Could not preflight provider profile removal: %s", exc)
+            for staged_path in preflight_stages:
+                try:
+                    staged_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            for _, staged_path in staged_updates:
+                try:
+                    staged_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return []
+
         try:
             for path, staged_path in staged_updates:
                 os.replace(staged_path, os.path.realpath(path))
