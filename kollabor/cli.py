@@ -73,18 +73,23 @@ def parse_timeout(timeout_str: str) -> float:
             f"Invalid timeout format: {timeout_str}. Use format like '30s', '2min', or '1h'"
         )
 
-    value = float(match.group(1))
+    value_text = match.group(1)
+    value = float(value_text)
     unit = match.group(2)
 
     # Convert to seconds
     if unit in ("s", "sec", "second", "seconds"):
-        return value
+        seconds = value
     elif unit in ("m", "min", "minute", "minutes"):
-        return value * 60
+        seconds = value * 60
     elif unit in ("h", "hour", "hours"):
-        return value * 3600
+        seconds = value * 3600
     else:
         raise ValueError(f"Unknown time unit: {unit}")
+
+    if seconds == 0 and any(char in "123456789" for char in value_text):
+        raise ValueError("Timeout value is too small to represent in seconds")
+    return seconds
 
 
 def build_cli_help_text(command_registry: "SlashCommandRegistry") -> str:
