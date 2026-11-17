@@ -132,6 +132,16 @@ class TestCompactOnAcpChat(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm.conversation_history, before)
         self.assertIn("compacts its own context", message)
 
+    async def test_inactive_acp_session_does_not_claim_command_is_unadvertised(self):
+        plugin, _llm, acp = _plugin()
+        acp.active = False
+
+        message = await plugin._start_manual_compaction(ask=False)
+
+        self.assertIn("ACP session is not active", message)
+        self.assertNotIn("advertises no compaction command", message)
+        acp.submit.assert_not_awaited()
+
 
 class TestAutomaticCompactOnAcpChat(unittest.IsolatedAsyncioTestCase):
     async def test_new_session_rearms_when_its_first_meter_is_above_threshold(self):
