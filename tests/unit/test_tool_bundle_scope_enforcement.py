@@ -229,7 +229,7 @@ class TestInternalTypeBypass:
             terminal_timeout=30,
             mcp_timeout=30,
         )
-        executor.set_bundle_scope(["terminal"])  # Only terminal, not sub-types
+        executor.set_bundle_scope(["file-read"])  # No terminal access
         return executor
 
     def test_terminal_status_requires_terminal_scope(self):
