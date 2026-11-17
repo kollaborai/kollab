@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import psutil
 import pytest
+from kollabor_engine import handover
 from kollabor_engine.handover import HandoverManifestError, HandoverStore
 from kollabor_engine.hub_bridge import HubBridge
 
@@ -174,6 +175,20 @@ def _stop_process(process: subprocess.Popen) -> None:
 
 def _disable_presence_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(HubBridge, "get_agent_by_identity", lambda *args, **kwargs: None)
+
+
+def _fail_fsync_on_call(monkeypatch: pytest.MonkeyPatch, call_number: int) -> None:
+    original_fsync = os.fsync
+    calls = 0
+
+    def fail_once(fd: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == call_number:
+            raise OSError("simulated fsync failure")
+        original_fsync(fd)
+
+    monkeypatch.setattr(handover.os, "fsync", fail_once)
 
 
 def test_manifest_is_port_scoped_private_and_excludes_profile_secrets(
@@ -471,3 +486,172 @@ def test_remove_session_write_failure_restores_in_memory_record(
         assert store._data["sessions"] == [row]
     finally:
         store.close()
+
+
+def test_remove_session_directory_sync_failure_keeps_installed_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = HandoverStore(7433, config_dir=tmp_path / "config")
+    store.acquire()
+    row = {"session_id": "web-session-sync", "daemon_pid": 4321}
+    store._data["sessions"] = [row]
+    store._write()
+    _fail_fsync_on_call(monkeypatch, 2)
+
+    try:
+        store.remove_session("web-session-sync")
+
+        assert store._data["sessions"] == []
+        assert json.loads(store.path.read_text(encoding="utf-8"))["sessions"] == []
+        assert "durability is uncertain" in caplog.text
+
+        store._write()
+        assert json.loads(store.path.read_text(encoding="utf-8"))["sessions"] == []
+    finally:
+        store.close()
+
+
+def test_remove_session_replace_failure_restores_memory_and_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = HandoverStore(7433, config_dir=tmp_path / "config")
+    store.acquire()
+    row = {"session_id": "web-session-replace", "daemon_pid": 4321}
+    store._data["sessions"] = [row]
+    store._write()
+
+    def fail_replace(source: str, destination: Path) -> None:
+        raise OSError("simulated manifest replace failure")
+
+    monkeypatch.setattr(handover.os, "replace", fail_replace)
+    try:
+        with pytest.raises(OSError, match="replace failure"):
+            store.remove_session("web-session-replace")
+
+        assert store._data["sessions"] == [row]
+        assert json.loads(store.path.read_text(encoding="utf-8"))["sessions"] == [row]
+    finally:
+        store.close()
+
+
+def test_register_session_file_sync_failure_restores_memory_and_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _disable_presence_lookup(monkeypatch)
+    daemon = _sleeping_process()
+    socket_path = tmp_path / "agent.sock"
+    socket_path.touch()
+    store = HandoverStore(7433, config_dir=tmp_path / "config")
+    store.acquire()
+    _fail_fsync_on_call(monkeypatch, 1)
+
+    try:
+        with pytest.raises(OSError, match="fsync failure"):
+            store.register_session(_session(tmp_path, daemon, socket_path))
+
+        assert store._data["sessions"] == []
+        assert json.loads(store.path.read_text(encoding="utf-8"))["sessions"] == []
+    finally:
+        store.close()
+        _stop_process(daemon)
+
+
+def test_register_session_directory_sync_failure_reowns_live_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _disable_presence_lookup(monkeypatch)
+    daemon = _sleeping_process()
+    socket_path = tmp_path / "agent.sock"
+    socket_path.touch()
+    first = HandoverStore(7433, config_dir=tmp_path / "config")
+    second = None
+    first.acquire()
+    _fail_fsync_on_call(monkeypatch, 2)
+
+    try:
+        first.register_session(_session(tmp_path, daemon, socket_path))
+        assert [row["session_id"] for row in first._data["sessions"]] == ["web-session-1"]
+        assert [row["session_id"] for row in json.loads(first.path.read_text())["sessions"]] == [
+            "web-session-1"
+        ]
+        assert "durability is uncertain" in caplog.text
+
+        first.close()
+        second = HandoverStore(7433, config_dir=tmp_path / "config")
+        assert [row["session_id"] for row in second.acquire()] == ["web-session-1"]
+        assert [row["session_id"] for row in second.reown_rows([])] == ["web-session-1"]
+        assert daemon.poll() is None
+    finally:
+        first.close()
+        if second is not None:
+            second.close()
+        _stop_process(daemon)
+
+
+def test_prune_directory_sync_failure_does_not_restore_stopped_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _disable_presence_lookup(monkeypatch)
+    daemon = _sleeping_process()
+    socket_path = tmp_path / "agent.sock"
+    socket_path.touch()
+    first = HandoverStore(7433, config_dir=tmp_path / "config")
+    second = None
+    first.acquire()
+    first.register_session(_session(tmp_path, daemon, socket_path))
+    _stop_process(daemon)
+    _fail_fsync_on_call(monkeypatch, 2)
+
+    try:
+        assert first.prune_dead_sessions() == 1
+        assert first._data["sessions"] == []
+        assert json.loads(first.path.read_text(encoding="utf-8"))["sessions"] == []
+
+        first.close()
+        second = HandoverStore(7433, config_dir=tmp_path / "config")
+        assert second.acquire() == []
+        assert second.reown_rows([]) == []
+    finally:
+        first.close()
+        if second is not None:
+            second.close()
+        _stop_process(daemon)
+
+
+def test_close_file_sync_failure_restores_in_memory_owner_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = HandoverStore(7433, config_dir=tmp_path / "config")
+    store.acquire()
+    before = json.loads(store.path.read_text(encoding="utf-8"))["owner"]
+    _fail_fsync_on_call(monkeypatch, 1)
+
+    store.close()
+
+    after = json.loads(store.path.read_text(encoding="utf-8"))["owner"]
+    assert store._data["owner"] == after == before
+
+
+def test_close_directory_sync_failure_reports_uncertainty_and_allows_reownership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    first = HandoverStore(7433, config_dir=tmp_path / "config")
+    first.acquire()
+    second = None
+    _fail_fsync_on_call(monkeypatch, 2)
+
+    try:
+        first.close()
+        assert json.loads(first.path.read_text(encoding="utf-8"))["owner"]["shutdown"] is True
+        assert "durability is uncertain" in caplog.text
+
+        second = HandoverStore(7433, config_dir=tmp_path / "config")
+        assert second.acquire() == []
+    finally:
+        first.close()
+        if second is not None:
+            second.close()
