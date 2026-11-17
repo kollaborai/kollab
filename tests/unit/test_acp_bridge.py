@@ -845,6 +845,31 @@ async def test_start_and_close_never_read_any_process_environment(tmp_path, monk
             await asyncio.wait_for(outsider.wait(), timeout=2)
 
 
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX process groups only")
+def test_group_signal_never_reaches_a_pgid_whose_guard_is_gone(tmp_path, monkeypatch):
+    """The guard leader holds the PGID. Once it is gone, the numeric id may be
+    reused by an unrelated group, so cleanup must never signal it again."""
+    import signal
+
+    sent = []
+    monkeypatch.setattr(os, "killpg", lambda pgid, signum: sent.append((pgid, signum)))
+    profile = ACPProfile("guard", (sys.executable, "-c", "pass"), cwd=str(tmp_path))
+
+    killed = ACPRunner(profile)
+    killed._process_group_id = 4242
+    killed._process_group_guard = SimpleNamespace(returncode=None)
+    assert killed._signal_owned_process_group(signal.SIGKILL) is True
+    # SIGKILL ended the guard with its group; the id is spent before asyncio reaps it.
+    assert killed._signal_owned_process_group(signal.SIGKILL) is False
+
+    exited = ACPRunner(profile)
+    exited._process_group_id = 4343
+    exited._process_group_guard = SimpleNamespace(returncode=-9)  # guard ended on its own
+    assert exited._signal_owned_process_group(signal.SIGTERM) is False
+
+    assert sent == [(4242, signal.SIGKILL)]
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork and setsid")
 @pytest.mark.asyncio
 async def test_startup_failure_cleans_same_group_orphan_after_root_exits(tmp_path, monkeypatch):
