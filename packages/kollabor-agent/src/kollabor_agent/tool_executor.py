@@ -706,6 +706,77 @@ def _is_blocked_kollab_spawn(
     return scan_tokens(tokens, background, _depth)
 
 
+def _terminal_find_escapes_workspace(command: str, cwd: Path, workspace: Path) -> bool:
+    """Return whether a find command starts outside the active workspace."""
+    if "`" in command and re.search(r"\b(?:find|gfind)\b", command):
+        return True
+
+    try:
+        lexer = shlex.shlex(
+            command.replace("\n", ";"), posix=True, punctuation_chars=";&|()"
+        )
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        tokens = list(lexer)
+        root = workspace.resolve()
+        canonical_cwd = cwd.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+    commands: list[list[str]] = [[]]
+    for token in tokens:
+        if token and all(char in ";&|()" for char in token):
+            commands.append([])
+        else:
+            commands[-1].append(token)
+
+    for words in commands:
+        index = 0
+        while index < len(words):
+            word = words[index]
+            if word in {"if", "then", "else", "elif", "do", "!"}:
+                index += 1
+            elif word in {"env", "command", "exec", "time", "nohup"}:
+                index += 1
+            elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word):
+                index += 1
+            else:
+                break
+
+        if index >= len(words) or Path(words[index]).name not in {"find", "gfind"}:
+            continue
+        if not canonical_cwd.is_relative_to(root):
+            return True
+
+        roots: list[str] = []
+        for word in words[index + 1 :]:
+            if word in {"-H", "-L", "-P", "--"} and not roots:
+                continue
+            if word.startswith("-") or word in {"!", "(", ")"}:
+                break
+            roots.append(word)
+        if not roots:
+            roots = ["."]
+
+        for search_root in roots:
+            if "$(" in search_root or "`" in search_root:
+                return True
+            expanded_root = os.path.expandvars(search_root)
+            if "$" in expanded_root:
+                return True
+            try:
+                candidate = Path(expanded_root).expanduser()
+                if not candidate.is_absolute():
+                    candidate = canonical_cwd / candidate
+                resolved = candidate.resolve(strict=False)
+            except (OSError, RuntimeError):
+                return True
+            if not resolved.is_relative_to(root):
+                return True
+
+    return False
+
+
 class ToolExecutor:
     """Execute tools with unified interface for terminal, MCP, and file operations.
 
@@ -1732,11 +1803,20 @@ class ToolExecutor:
                 ),
             )
 
+        cwd = self._resolve_terminal_cwd(tool_data.get("cwd"))
+        if _terminal_find_escapes_workspace(
+            command, cwd or Path.cwd(), self.workspace or Path.cwd()
+        ):
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type=tool_type,
+                success=False,
+                error="find search paths must stay inside the active workspace",
+            )
+
         logger.debug(
             f"Executing terminal command: {command[:100]}... (background={background})"
         )
-
-        cwd = self._resolve_terminal_cwd(tool_data.get("cwd"))
 
         # Use TmuxPlugin if available, otherwise fallback to ShellExecutor
         if self.tmux_plugin:

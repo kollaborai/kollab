@@ -69,6 +69,11 @@ On POSIX, background terminal commands run through the configured user shell,
 so assignments, command substitutions, pipes, and redirections work as they do
 for foreground terminal commands.
 
+Agent `find` searches must start inside the active workspace. Searches rooted at
+the home directory, `/Users`, `/`, a parent folder, or a symlink that leaves the
+workspace are refused before the command runs. Switch workspaces before
+searching another folder.
+
 With working directory:
 ```
 <terminal cwd="/tmp">pwd</terminal>
