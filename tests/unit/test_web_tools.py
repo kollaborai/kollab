@@ -233,6 +233,53 @@ class TestWebFetchExecution(unittest.TestCase):
                 f"Output should be roughly truncated, got {len(result.output)} chars"
             )
 
+    def test_web_fetch_bounds_output_and_streams_response(self):
+        """The public fetch path must cap output and consume a bounded stream."""
+        body = b"<html><body>" + (b"A" * 1_000_000) + b"</body></html>"
+
+        class BoundedContent:
+            def __init__(self):
+                self.read = 0
+
+            async def iter_chunked(self, _chunk_size):
+                for offset in range(0, len(body), 8192):
+                    chunk = body[offset : offset + 8192]
+                    self.read += len(chunk)
+                    yield chunk
+
+        mock_resp = _make_mock_aiohttp_response(text=body.decode())
+        mock_resp.content = BoundedContent()
+        mock_resp.headers = {"Content-Length": str(len(body))}
+        tool_data = {
+            "id": "web_fetch_bound",
+            "url": "https://example.com/article?token=secret",
+            "max_chars": 100,
+            "extract_main": False,
+        }
+
+        with _patch_aiohttp_session(mock_get=mock_resp):
+            result = _run(self.executor._execute_web_fetch(tool_data))
+
+        self.assertLessEqual(len(result.output), 100)
+        self.assertLessEqual(mock_resp.content.read, 500_000)
+        mock_resp.text.assert_not_awaited()
+
+    def test_web_fetch_rejects_invalid_output_limit(self):
+        """Invalid output limits fail clearly instead of being coerced."""
+        for value in (0, -1, 1.5, True, 10**100):
+            with self.subTest(max_chars=value):
+                result = _run(
+                    self.executor._execute_web_fetch(
+                        {
+                            "id": "web_fetch_invalid_limit",
+                            "url": "https://example.com",
+                            "max_chars": value,
+                        }
+                    )
+                )
+                self.assertFalse(result.success)
+                self.assertIn("max_chars", result.error)
+
     def test_web_fetch_invalid_url(self):
         """Test error handling for invalid URLs."""
         tool_data = {
