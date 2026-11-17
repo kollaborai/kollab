@@ -688,6 +688,7 @@ class ACPRunner:
         self._owned_processes: dict[int, psutil.Process] = {}
         self._adapter_pid: int | None = None
         self._process_group_id: int | None = None
+        self._process_group_spent = False
         self._teardown_lock = asyncio.Lock()
         self._queue: asyncio.Queue[ACPAdmission | None] = asyncio.Queue(maxsize=10)
         self._worker: asyncio.Task[None] | None = None
@@ -818,6 +819,7 @@ class ACPRunner:
                 process_group=0,
             )
             self._process_group_id = self._process_group_guard.pid
+            self._process_group_spent = False
             try:
                 self._process = await asyncio.create_subprocess_exec(
                     *command,
@@ -1077,6 +1079,11 @@ class ACPRunner:
         group_id = self._process_group_id
         if group_id is None or not hasattr(os, "killpg"):
             return False
+        guard = self._process_group_guard
+        if self._process_group_spent or (guard is not None and guard.returncode is not None):
+            # The guard is gone, so the OS may have reused this numeric PGID
+            # for an unrelated group. Never signal it again.
+            return False
         try:
             os.killpg(group_id, signum)
         except ProcessLookupError:
@@ -1085,6 +1092,10 @@ class ACPRunner:
             raise ACPError(
                 f"cannot signal recorded ACP process group {group_id}"
             ) from exc
+        if signum == getattr(signal, "SIGKILL", None):
+            # SIGKILL also ends the guard. Mark the id spent now rather than
+            # when asyncio reaps the guard, which can happen at any moment.
+            self._process_group_spent = True
         return True
 
     def _owned_process_group_exists(self) -> bool:
