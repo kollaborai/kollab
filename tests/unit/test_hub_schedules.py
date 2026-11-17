@@ -128,7 +128,8 @@ def test_store_skips_broken_rows_but_keeps_the_rest(tmp_path):
             [
                 {"id": "no-agents", "prompt": "p", "interval_seconds": 60, "anchor": 5},
                 {"id": "bad-interval", "agents": ["a"], "prompt": "p", "interval_seconds": 0, "anchor": 5},
-                {"id": "bad-when-busy", "agents": ["a"], "prompt": "p", "interval_seconds": 60, "anchor": 5, "when_busy": "explode"},
+                {"id": "bad-when-busy", "agents": ["a"], "prompt": "p",
+                 "interval_seconds": 60, "anchor": 5, "when_busy": "explode"},
                 _row(id="fine").__dict__,
             ]
         ),
@@ -197,11 +198,12 @@ async def test_timer_fires_on_the_grid_without_drift(tmp_path):
     assert fires.fires == [("s1", "lapis", 1000.0)]
     assert delay == pytest.approx(600.0)
 
-    # The fire landed a little late; the next due time is still on the grid.
+    # The fire landed a little late; the next due time is still on the grid,
+    # so the remaining wait shrinks by exactly the lateness.
     clock.advance(605.0)
     delay = await timer.pass_due()
     assert fires.fires[-1] == ("s1", "lapis", 1600.0)
-    assert delay == pytest.approx(600.0)
+    assert delay == pytest.approx(595.0)
 
     clock.advance(600.0)
     await timer.pass_due()
@@ -212,7 +214,7 @@ async def test_timer_fires_on_the_grid_without_drift(tmp_path):
 async def test_timer_sleeps_until_next_due_and_returns_none_when_empty(tmp_path):
     clock = FakeClock(1200.0)
     fires = Recorder()
-    timer = _timer(tmp_path, clock, fires, rows=[_row()])
+    timer = _timer(tmp_path, clock, fires, rows=[_row(anchor=1600.0)])
 
     # Next grid point is 1600; nothing is due yet.
     assert await timer.pass_due() == pytest.approx(400.0)
@@ -228,7 +230,8 @@ async def test_timer_restart_fires_catchup_once_then_continues(tmp_path):
     clock = FakeClock(1000.0)
     fires = Recorder()
     rows = [_row()]
-    _timer(tmp_path, clock, fires, rows=rows)  # device "shuts down" after this
+    first = _timer(tmp_path, clock, fires, rows=rows)
+    await first.pass_due()  # anchor fired at t=1000, recorded to the run log
 
     # Two grid points (1600, 2200) pass while the device is off.
     clock.advance(1400.0)  # now = 2400
@@ -236,8 +239,8 @@ async def test_timer_restart_fires_catchup_once_then_continues(tmp_path):
     # Back online: a fresh timer (new process, same files) fires exactly once.
     timer = _timer(tmp_path, clock, fires, rows=rows)
     await timer.pass_due()
-    assert len(fires.fires) == 1
-    assert fires.fires[0][2] == 1600.0  # stands in for the earliest missed point
+    assert len(fires.fires) == 2  # the anchor fire plus exactly one catch-up
+    assert fires.fires[-1][2] == 1600.0  # stands in for the earliest missed point
 
     # The run record says it fired late but for the missed grid point.
     record = timer._runs.last_run("s1")
@@ -250,7 +253,7 @@ async def test_timer_restart_fires_catchup_once_then_continues(tmp_path):
 
     # No burst: another pass with no time passed fires nothing new.
     assert await timer.pass_due() == pytest.approx(400.0)
-    assert len(fires.fires) == 1
+    assert len(fires.fires) == 2
 
 
 @pytest.mark.asyncio
@@ -271,7 +274,7 @@ async def test_timer_ignores_other_devices_schedules_and_keeps_them(tmp_path):
 async def test_timer_fires_only_owned_agents_of_a_mixed_row(tmp_path):
     clock = FakeClock(1000.0)
     fires = Recorder()
-    rows = [_row(agents=["infra@home-server", "lapis"])]
+    rows = [_row(agents=["infra@home-server", "lapis@mac"])]
     timer = _timer(tmp_path, clock, fires, device_name="home-server", rows=rows)
 
     await timer.pass_due()
