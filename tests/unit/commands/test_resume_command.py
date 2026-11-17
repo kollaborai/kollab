@@ -371,6 +371,44 @@ class TestResumeCommand:
         )  # resume and sessions commands
 
     @pytest.mark.asyncio
+    async def test_conversation_browser_command_names_match_behavior(self):
+        from plugins.resume_conversation_plugin import ResumeConversationPlugin
+
+        plugin = ResumeConversationPlugin()
+        command_registry = Mock()
+
+        await plugin.initialize(
+            event_bus=Mock(),
+            config=Mock(),
+            command_registry=command_registry,
+            conversation_manager=Mock(),
+            conversation_logger=Mock(),
+        )
+
+        commands = {
+            call.args[0].name: call.args[0]
+            for call in command_registry.register_command.call_args_list
+        }
+        assert "sessions" in commands
+        sessions = commands["sessions"]
+        assert sessions.handler == plugin.handle_sessions
+        assert sessions.description == "Browse, search, and resume conversations"
+        assert sessions.aliases == ["history"]
+        aliases = {alias for command in commands.values() for alias in command.aliases}
+        assert "fork" not in commands and "fork" not in aliases
+        assert "forks" not in aliases
+        assert commands["resume"].handler == plugin.handle_resume
+
+        result = await plugin.handle_sessions(
+            SlashCommand(
+                name="sessions",
+                args=["invalid"],
+                raw_input="/sessions invalid",
+            )
+        )
+        assert result.message == "Usage: /sessions [search <query>]"
+
+    @pytest.mark.asyncio
     async def test_resume_plugin_handle_resume(self):
         """Test resume plugin handle_resume method."""
         from plugins.resume_conversation_plugin import ResumeConversationPlugin
