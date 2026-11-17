@@ -58,6 +58,17 @@ test("a profile without a provider does not count as chosen", () => {
   assert.equal(hasChosenProvider([{ name: "work", provider: "" }], "work"), false);
 });
 
+test("an active real provider counts, but auto and missing profiles do not", () => {
+  const profiles = [
+    { name: "default", provider: "auto" },
+    { name: "claude-code", provider: "acp" },
+  ];
+  assert.equal(hasChosenProvider(profiles, "default"), false);
+  assert.equal(hasChosenProvider(profiles, "claude-code"), true);
+  assert.equal(hasChosenProvider(profiles, undefined), false);
+  assert.equal(hasChosenProvider(profiles, "gone"), false);
+});
+
 test("Get Started opens Setup for missing and auto providers only", () => {
   assert.equal(getStartedOpensSetup(emptyFacts()), true);
   assert.equal(
