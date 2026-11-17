@@ -68,6 +68,7 @@ from .messenger import (
     AgentMessenger,
     AgentSocketServer,
     InboxCapacityError,
+    InboxMessageIdConflictError,
     _coerce_line_count,
     _is_durable_control,
 )
@@ -12353,6 +12354,16 @@ class HubPlugin(BasePlugin):
                     detail=reason,
                 )
                 continue
+            except InboxMessageIdConflictError as exc:
+                reason = str(exc)
+                rejections.append((agent.identity, reason))
+                self._trace_delivery(
+                    message,
+                    "rejected",
+                    target=agent.identity,
+                    detail=reason,
+                )
+                continue
             except OSError as exc:
                 reason = f"durable mailbox write failed ({type(exc).__name__})"
                 rejections.append((agent.identity, reason))
@@ -12389,6 +12400,16 @@ class HubPlugin(BasePlugin):
                     "rejected",
                     target=message.to,
                     detail=str(exc),
+                )
+                return rejections
+            except InboxMessageIdConflictError as exc:
+                reason = str(exc)
+                rejections.append((message.to, reason))
+                self._trace_delivery(
+                    message,
+                    "rejected",
+                    target=message.to,
+                    detail=reason,
                 )
                 return rejections
             except OSError as exc:
