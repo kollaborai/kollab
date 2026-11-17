@@ -104,7 +104,7 @@ async def test_a_refused_message_replayed_from_the_mailbox_stays_queued(tmp_path
 
         def tick():
             return messenger_module.AgentMessenger.read_mailboxes(
-                ["agent-1", "receiver"]
+                ["agent-1", "receiver"], consume=False
             )
 
         await plugin._deliver_inbox_batch(tick())
@@ -113,7 +113,43 @@ async def test_a_refused_message_replayed_from_the_mailbox_stays_queued(tmp_path
         refuse[0] = False
         replayed = tick()
         assert [m.id for m in replayed] == [message.id]
-        await plugin._deliver_inbox_batch(replayed)
+        acknowledged = await plugin._deliver_inbox_batch(replayed)
+        messenger_module.AgentMessenger.acknowledge_mailboxes(
+            ["agent-1", "receiver"], acknowledged
+        )
+        assert messenger_module.AgentMessenger.get_inbox_count("receiver") == 0
+
+
+@pytest.mark.asyncio
+async def test_delivery_failure_leaves_message_for_replay_after_restart(tmp_path):
+    message = HubMessage(
+        action="message", from_agent="peer-id-1", from_identity="peer-1",
+        to="*", content="RETRY_AFTER_DELIVERY_FAILURE",
+    )
+    failed_plugin = HubPlugin.__new__(HubPlugin)
+
+    async def fail_delivery(_message):
+        raise RuntimeError("simulated delivery failure")
+
+    failed_plugin._on_message_received = fail_delivery
+    restarted_plugin = HubPlugin.__new__(HubPlugin)
+    restarted_plugin._on_message_received = AsyncMock(return_value=None)
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        batch = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        with pytest.raises(RuntimeError, match="simulated delivery failure"):
+            await failed_plugin._deliver_inbox_batch(batch)
+
+        replayed = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        assert [item.id for item in replayed] == [message.id]
+        acknowledged = await restarted_plugin._deliver_inbox_batch(replayed)
+        messenger_module.AgentMessenger.acknowledge_mailboxes(
+            ["receiver"], acknowledged
+        )
         assert messenger_module.AgentMessenger.get_inbox_count("receiver") == 0
 
 
@@ -347,7 +383,7 @@ async def test_a_long_outage_poll_offers_every_refused_message_again(
 @pytest.mark.asyncio
 async def test_a_refused_message_in_a_summarised_replay_stays_queued(tmp_path):
     # A replay that carries a summary (pre-restart drops) with no way to inject
-    # falls back to per-message delivery; that loop ignored the refusal.
+    # falls back to per-message delivery; refusal must leave the source file.
     refusals = []
     plugin = _mailbox_plugin(refusals)
     message = HubMessage(
@@ -360,7 +396,9 @@ async def test_a_refused_message_in_a_summarised_replay_stays_queued(tmp_path):
     )
     plugin.event_bus = SimpleNamespace(get_service=lambda name: None)
     with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
-        await plugin._deliver_inbox_batch([summary, message])
+        await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        acknowledged = await plugin._deliver_inbox_batch([summary, message])
 
         assert refusals == [message.id]
+        assert acknowledged == set()
         assert messenger_module.AgentMessenger.get_inbox_count("receiver") == 1

@@ -479,6 +479,54 @@ class TestBoundedReplay:
 # ---------------------------------------------------------------------------
 
 class TestReadMailboxes:
+    def test_later_mailbox_read_failure_preserves_prior_results(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        inbox = tmp_path / "good"
+        inbox.mkdir()
+        message = _make_msg(content="survives")
+        (inbox / "00000001-message.json").write_text(json.dumps(message.to_dict()))
+        original_read = AgentMessenger.read_mailbox
+
+        def fail_one_address(agent_id: str, **kwargs):
+            if agent_id == "broken":
+                raise OSError("simulated mailbox read failure")
+            return original_read(agent_id, **kwargs)
+
+        monkeypatch.setattr(
+            AgentMessenger, "read_mailbox", staticmethod(fail_one_address)
+        )
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            result = AgentMessenger.read_mailboxes(
+                ["good", "broken"], consume=False
+            )
+
+        assert [msg.id for msg in result] == [message.id]
+        assert (inbox / "00000001-message.json").exists()
+
+    def test_ack_unlink_failure_keeps_message_available_for_replay(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        inbox = tmp_path / "lapis"
+        inbox.mkdir()
+        message = _make_msg(content="retry after unlink error")
+        path = inbox / "00000001-message.json"
+        path.write_text(json.dumps(message.to_dict()))
+        original_unlink = Path.unlink
+
+        def fail_target(self, *args, **kwargs):
+            if self == path:
+                raise PermissionError("simulated unlink failure")
+            return original_unlink(self, *args, **kwargs)
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            with patch.object(Path, "unlink", new=fail_target):
+                AgentMessenger.acknowledge_mailboxes(["lapis"], {message.id})
+            replayed = AgentMessenger.read_mailboxes(["lapis"], consume=False)
+
+        assert [msg.id for msg in replayed] == [message.id]
+        assert "Could not acknowledge delivered mailbox record" in caplog.text
+
     def test_unacknowledged_replay_survives_until_explicit_ack(self, tmp_path: Path) -> None:
         inbox = tmp_path / "lapis"
         inbox.mkdir()
