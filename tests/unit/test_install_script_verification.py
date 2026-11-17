@@ -202,6 +202,22 @@ def test_custom_install_directory_reports_actual_executable(tmp_path: Path) -> N
     assert "2.0.0" in result.stdout
 
 
+def test_path_symlink_to_installed_executable_is_not_a_conflict(tmp_path: Path) -> None:
+    installed_dir = tmp_path / "real-bin"
+    path_alias = tmp_path / "path-alias"
+    path_alias.symlink_to(installed_dir, target_is_directory=True)
+
+    result = _run_verification(
+        tmp_path,
+        installed_dir=installed_dir,
+        path_dirs=[path_alias, Path("/usr/bin"), Path("/bin")],
+        installed_version="2.0.0",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Installation verified" in result.stdout
+
+
 def test_normal_install_reports_matching_executable_and_version(tmp_path: Path) -> None:
     installed_dir = tmp_path / "install-bin"
     result = _run_verification(
