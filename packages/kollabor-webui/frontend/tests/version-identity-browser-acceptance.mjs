@@ -37,6 +37,19 @@ async function main() {
     await mismatch.page.screenshot({ path: path.join(screenshotDir, "version-build-mismatch-desktop.png"), fullPage: true });
     await mismatch.context.close();
 
+    const tablet = await openPage(browser, baseUrl, makeFixtures({ engineVersion: `${packageVersion}+${staleSha}` }), {
+      viewport: { width: 820, height: 900 },
+    });
+    await tablet.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    const tabletNotice = tablet.page.getByRole("status").filter({
+      has: tablet.page.getByRole("button", { name: "Reload", exact: true }),
+    });
+    await tabletNotice.waitFor({ state: "visible", timeout: 5_000 });
+    const tabletOverflow = await tablet.page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
+    assert.equal(tabletOverflow, false, "the mismatch notice must not create horizontal overflow at 820px");
+    await tablet.page.screenshot({ path: path.join(screenshotDir, "version-build-mismatch-820.png"), fullPage: true });
+    await tablet.context.close();
+
     const mobile = await openPage(browser, baseUrl, makeFixtures({ engineVersion: `${packageVersion}+${staleSha}` }), {
       viewport: { width: 390, height: 844 },
       isMobile: true,
