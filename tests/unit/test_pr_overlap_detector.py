@@ -18,12 +18,12 @@ detector = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(detector)
 
 
-def _pr(number: int, *, title: str = "", body: str = "", head: str = "work/a", base: str = "main", files=None):
+def _pr(number: int, *, title: str = "", body: str = "", head: str | None = None, base: str = "main", files=None):
     return {
         "number": number,
         "title": title,
         "body": body,
-        "head": {"ref": head},
+        "head": {"ref": head or f"work/{number}"},
         "base": {"ref": base},
         "files": files or [],
     }
