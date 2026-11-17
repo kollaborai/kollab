@@ -556,7 +556,12 @@ class VersionCheckService:
         # release behind): re-check within ~1 hour so users learn about
         # new releases promptly instead of after the full interval.
         cached_version = self.config.get("kollabor.updates.cached_latest_version", "")
-        if _cache_shows_current_or_older(cached_version, self.current_version):
+        cached_is_filtered_prerelease = bool(
+            self.config.get("kollabor.updates.cached_release_is_prerelease", False)
+        ) and not self.include_prereleases
+        if cached_is_filtered_prerelease or _cache_shows_current_or_older(
+            cached_version, self.current_version
+        ):
             ttl_seconds = min(ttl_seconds, 3600)  # cap at 1 hour
 
         is_valid: bool = age_seconds < ttl_seconds
