@@ -75,6 +75,40 @@ async def _web_reply(
 
 
 @pytest.mark.asyncio
+async def test_goal_origin_web_command_uses_the_same_session_list_projection():
+    class WebEventBus:
+        async def emit_with_hooks(self, *_args, **_kwargs):
+            return {}
+
+    plugin = ResumeConversationPlugin()
+    plugin.discover_conversations = AsyncMock(
+        return_value=[_conversation("session-1", "Plan a release")]
+    )
+    registry = SlashCommandRegistry()
+    plugin._register_resume_commands(registry)
+
+    service = LocalStateService.__new__(LocalStateService)
+    service._event_bus = WebEventBus()
+    service._llm_service = None
+    service.get_conversation_uid = Mock(return_value="goal-origin")
+    result = await service._execute_slash_command(
+        "/resume",
+        SlashCommandParser(),
+        SlashCommandExecutor(registry),
+        goal_origin_uid="goal-origin",
+        private_goal_reply=True,
+    )
+
+    assert result["success"] is True
+    _assert_action_row(
+        result["message"],
+        "Plan a release",
+        r"session-1 \| 3 msgs \| main",
+        "/resume session-1",
+    )
+
+
+@pytest.mark.asyncio
 async def test_web_resume_and_branch_lists_render_actionable_rows():
     plugin = ResumeConversationPlugin()
     plugin.conversation_manager = Mock()
