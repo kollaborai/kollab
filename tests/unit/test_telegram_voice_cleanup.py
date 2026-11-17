@@ -163,9 +163,12 @@ async def test_cancellation_stops_real_transcriber_descendants(tmp_path, monkeyp
 
     task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
     deadline = time.monotonic() + 5
-    while not writer_pid.exists() and time.monotonic() < deadline:
+    while (
+        (not writer_pid.exists() or not writes.exists())
+        and time.monotonic() < deadline
+    ):
         await asyncio.sleep(0.02)
-    assert writer_pid.exists(), "transcriber descendant did not start"
+    assert writer_pid.exists() and writes.exists(), "transcriber descendant did not start"
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
