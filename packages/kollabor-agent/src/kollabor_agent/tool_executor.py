@@ -3690,7 +3690,9 @@ class ToolExecutor:
                         await route.abort()
 
                     await page.route("**/*", block_external_request)
-                    await page.set_content(html, wait_until="domcontentloaded")
+                    await page.set_content(
+                        html, wait_until="domcontentloaded", timeout=20_000
+                    )
                     text = await page.locator("body").evaluate(
                         "(body, limit) => body.innerText.slice(0, limit)",
                         max_chars,

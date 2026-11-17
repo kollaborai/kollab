@@ -270,9 +270,10 @@ a session started by the operator.
 ### Web Fetch
 
 `web-fetch` streams a response instead of buffering the full page. It stops at
-500000 downloaded bytes or 2000000 decompressed bytes, including response data
-from redirects. The optional Playwright fallback renders only that bounded
-response and blocks external requests.
+500000 downloaded bytes, including redirect response bodies. The final
+response is additionally limited to 2000000 decompressed bytes. The optional
+Playwright fallback renders only that bounded response and blocks external
+requests.
 
 `max_chars` limits the complete returned output, including the URL header and
 any truncation marker. It accepts integers from 1 through 50000 and defaults to
