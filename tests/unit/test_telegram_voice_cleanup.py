@@ -30,6 +30,7 @@ class _Process:
         self.outcome = outcome
         self.pid = 12345
         self.started = asyncio.Event()
+        self.release = asyncio.Event()
         self.killed = False
         self.waited = False
 
@@ -40,11 +41,12 @@ class _Process:
         if self.outcome == "error":
             raise OSError("request https://api.telegram.org/bot123:synthetic-secret/file")
         if self.outcome == "cancel":
-            await asyncio.Event().wait()
+            await self.release.wait()
         return b"synthetic transcript", b""
 
     def kill(self):
         self.killed = True
+        self.release.set()
 
     async def wait(self):
         self.waited = True
@@ -61,7 +63,7 @@ def _patch_process_kill(monkeypatch, process):
     monkeypatch.setattr(
         proc_ctl,
         "kill_tree",
-        lambda pid, sig: setattr(process, "killed", True),
+        lambda pid, sig: process.kill(),
     )
 
 
