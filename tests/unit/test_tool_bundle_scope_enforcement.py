@@ -142,6 +142,113 @@ class TestBundleScopeEnforcement:
         # (no shell executor configured) but the scope check passed
         assert result.metadata.get("scope_denied") is None
 
+    def test_git_native_tool_is_allowed_without_granting_terminal(self, tmp_path):
+        """A git grant permits native Git inspection without terminal access."""
+        import subprocess
+        from unittest.mock import AsyncMock, MagicMock
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        executor = _make_executor()
+        executor.workspace = tmp_path
+        executor.event_bus = MagicMock()
+        executor.event_bus.emit_with_hooks = AsyncMock(return_value=None)
+        executor.set_bundle_scope(["file-read", "file-grep", "git"])
+
+        result = _run_async(
+            executor.execute_tool(
+                {
+                    "id": "test-git-native",
+                    "type": "terminal",
+                    "name": "git",
+                    "command": "git status --short",
+                    "cwd": str(tmp_path),
+                }
+            )
+        )
+
+        assert result.success, result.error
+        assert result.metadata.get("scope_denied") is None
+        assert result.tool_type == "terminal_read"
+
+    def test_git_scope_rejects_terminal_and_shell_composed_commands(self, tmp_path):
+        """A git grant does not admit ordinary or shell-composed commands."""
+        executor = _make_executor()
+        executor.set_bundle_scope(["git"])
+        marker = tmp_path / "compound-command-ran"
+
+        ordinary = _run_async(
+            executor.execute_tool(
+                {"id": "ordinary-terminal", "type": "terminal", "command": "pwd"}
+            )
+        )
+        compound = _run_async(
+            executor.execute_tool(
+                {
+                    "id": "compound-git",
+                    "type": "terminal",
+                    "name": "git",
+                    "command": f"git status --short && touch {marker}",
+                }
+            )
+        )
+
+        assert ordinary.metadata.get("scope_denied") is True
+        assert compound.metadata.get("scope_denied") is True
+        assert not marker.exists()
+
+    def test_git_scope_cannot_run_repository_hooks(self, tmp_path):
+        """A Git-only grant cannot turn a Git commit hook into shell access."""
+        import subprocess
+        from unittest.mock import AsyncMock, MagicMock
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "config", "user.name", "Scope Test"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(tmp_path),
+                "config",
+                "user.email",
+                "scope-test@example.invalid",
+            ],
+            check=True,
+        )
+        (tmp_path / "tracked.txt").write_text("staged\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "tracked.txt"], check=True
+        )
+        marker = tmp_path / "hook-ran"
+        hook = tmp_path / ".git" / "hooks" / "pre-commit"
+        hook.write_text(f"#!/bin/sh\nprintf ran > '{marker}'\n")
+        hook.chmod(0o755)
+
+        executor = _make_executor()
+        executor.workspace = tmp_path
+        executor.event_bus = MagicMock()
+        executor.event_bus.emit_with_hooks = AsyncMock(return_value=None)
+        executor.set_bundle_scope(["file-read", "file-grep", "git"])
+
+        result = _run_async(
+            executor.execute_tool(
+                {
+                    "id": "git-commit-hook",
+                    "type": "terminal",
+                    "name": "git",
+                    "command": "git commit -m test",
+                    "cwd": str(tmp_path),
+                }
+            )
+        )
+
+        assert result.success is False
+        assert result.metadata.get("scope_denied") is None
+        assert "read-only" in result.error.lower()
+        assert not marker.exists()
+
     def test_execute_tool_allows_all_when_no_scope(self):
         """execute_tool allows all tools when no scope is set."""
         executor = _make_executor()
