@@ -433,7 +433,23 @@ def test_run_compaction_preserves_bounded_active_taskledger_messages() -> None:
     )
     history = [Message(role="system", content="Synthetic system prompt")]
     history.extend(
-        _task_message(task_id, "assignment body " + "x" * 6_000) for task_id in task_ids
+        _task_message(task_id, "assignment body " + "x" * 6_000)
+        for task_id in task_ids[:-1]
+    )
+    legacy_task_id = task_ids[-1]
+    history.append(
+        Message(
+            content=(
+                f"[Active TaskLedger task {legacy_task_id}; latest assignment excerpt]\n"
+                "Historical assignment text.\n"
+                "[Remaining assignment text is summarized below.]"
+            ),
+            metadata={
+                "hub_message": True,
+                "hub_is_intended": True,
+                "task_id": legacy_task_id,
+            },
+        )
     )
     history.extend(
         [
@@ -453,16 +469,27 @@ def test_run_compaction_preserves_bounded_active_taskledger_messages() -> None:
 
     compacted = plugin._pending_compaction
     assert compacted is not None
+    assert all("summarized below" not in message.content for message in compacted), (
+        "summarized below is still present in compacted output"
+    )
     preserved = [
         message
         for message in compacted
-        if message.metadata.get("context_compaction_task_excerpt")
+        if message.metadata.get("task_id") in task_ids
     ]
     assert len(preserved) == MAX_PRESERVED_HUB_TASK_MESSAGES
     assert [message.metadata["task_id"] for message in preserved] == task_ids[-24:]
     assert all(
         len(message.content) <= MAX_PRESERVED_HUB_TASK_CHARS for message in preserved
     )
+    assert all(
+        message.metadata.get("context_compaction_task_excerpt") is True
+        for message in preserved
+    )
+    legacy_excerpt = next(
+        message for message in preserved if message.metadata["task_id"] == legacy_task_id
+    )
+    assert "Historical assignment text." in legacy_excerpt.content
     assert plugin._estimate_history_tokens(compacted) < 272_000
     assert plugin._call_summarization_llm.await_count == 1
     assert plugin._log_compaction_event.await_args.kwargs["tasks_preserved"] == 24
