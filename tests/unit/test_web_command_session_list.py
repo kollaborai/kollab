@@ -114,19 +114,19 @@ async def test_web_resume_and_branch_lists_render_actionable_rows():
     _assert_action_row(
         branch_sessions,
         "Plan a release",
-        "session-1 | 3 msgs | main",
+        r"session\-1 \| 3 msgs \| main",
         "/branch session-1",
     )
     _assert_action_row(
         branch_sessions,
         "Investigate a regression",
-        "session-2 | 3 msgs | main",
+        r"session\-2 \| 3 msgs \| main",
         "/branch session-2",
     )
     _assert_action_row(
         branch_sessions,
         "Prepare a handoff",
-        "session-3 | 3 msgs | main",
+        r"session\-3 \| 3 msgs \| main",
         "/branch session-3",
     )
     assert "Review a migration" in branch_sessions
@@ -138,7 +138,7 @@ async def test_web_resume_and_branch_lists_render_actionable_rows():
     _assert_action_row(
         fork_sessions,
         "Plan a release",
-        "session-1 | 3 msgs | main",
+        r"session\-1 \| 3 msgs \| main",
         "/resume session-1",
     )
 
@@ -146,7 +146,7 @@ async def test_web_resume_and_branch_lists_render_actionable_rows():
     _assert_action_row(
         fork_search_results,
         "Find release notes",
-        "search-1 | 2 msgs | main",
+        r"search\-1 \| 2 msgs \| main",
         "/resume search-1",
     )
 
@@ -154,7 +154,7 @@ async def test_web_resume_and_branch_lists_render_actionable_rows():
     _assert_action_row(
         resume_sessions,
         "Investigate a regression",
-        "session-2 | 3 msgs | main",
+        r"session\-2 \| 3 msgs \| main",
         "/resume session-2",
     )
 
@@ -162,7 +162,7 @@ async def test_web_resume_and_branch_lists_render_actionable_rows():
     _assert_action_row(
         search_results,
         "Find release notes",
-        "search-1 | 2 msgs | main",
+        r"search\-1 \| 2 msgs \| main",
         "/resume search-1",
     )
 
@@ -170,7 +170,7 @@ async def test_web_resume_and_branch_lists_render_actionable_rows():
     _assert_action_row(
         filtered_sessions,
         "Prepare a handoff",
-        "session-3 | 3 msgs | main",
+        r"session\-3 \| 3 msgs \| main",
         "/resume session-3",
     )
     assert "Review a migration" not in filtered_sessions
@@ -228,8 +228,8 @@ def test_session_list_titles_and_subtitles_are_markdown_escaped():
 
     output = _web_command_output(result, "resume")
 
-    assert r"\*bold\* \[click\]\(https://example.invalid\)" in output
-    assert r"\!\[image\]\(https://example.invalid/image.png\)" in output
+    assert r"\*bold\* \[click\]\(https\:\/\/example\.invalid\)" in output
+    assert r"\!\[image\]\(https\:\/\/example\.invalid\/image\.png\)" in output
     assert "[click](https://example.invalid)" not in output
     assert "![image](https://example.invalid/image.png)" not in output
 
