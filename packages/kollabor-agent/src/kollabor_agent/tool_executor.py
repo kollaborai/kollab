@@ -3311,10 +3311,16 @@ class ToolExecutor:
         """
         try:
             from bs4 import BeautifulSoup
-            soup = BeautifulSoup(html, "lxml")
+            soup = BeautifulSoup(html, "html.parser")
         except ImportError:
             # bs4 not available — fall back to regex-based extraction
             return ToolExecutor._html_to_text_regex(html)
+
+        if extract_main:
+            # JSON-LD lives in script tags, so read it before removing scripts.
+            text = ToolExecutor._extract_json_ld(soup)
+            if text and len(text) > 200:
+                return text
 
         # Remove non-content elements entirely
         for tag in soup.find_all(["script", "style", "nav", "footer", "aside",
@@ -3323,11 +3329,6 @@ class ToolExecutor:
             tag.decompose()
 
         if extract_main:
-            # Priority 1: JSON-LD structured data
-            text = ToolExecutor._extract_json_ld(soup)
-            if text and len(text) > 200:
-                return text
-
             # Priority 2: Semantic HTML5 — <article>, <main>
             for selector in ["article", "main", "[role='main']"]:
                 element = soup.select_one(selector)
@@ -3358,14 +3359,16 @@ class ToolExecutor:
                     if not isinstance(item, dict):
                         continue
                     # Look for articleBody first (richest content)
-                    body = item.get("articleBody") or item.get("text", "")
-                    if body and len(body) > 200:
+                    body = item.get("articleBody")
+                    if not isinstance(body, str) or not body.strip():
+                        body = item.get("text", "")
+                    if isinstance(body, str) and len(body) > 200:
                         # Collapse whitespace
                         lines = [ln.strip() for ln in body.split("\n") if ln.strip()]
                         return "\n".join(lines)
                     # Fall back to description
                     desc = item.get("description", "")
-                    if desc and len(desc) > 100:
+                    if isinstance(desc, str) and len(desc) > 100:
                         return desc.strip()
             except (json.JSONDecodeError, TypeError):
                 continue
