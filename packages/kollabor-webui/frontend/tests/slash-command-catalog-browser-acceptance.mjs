@@ -132,6 +132,75 @@ async function runLegacyFallback(browser, baseUrl) {
   }
 }
 
+async function runSessionSwitchStaleResponse(browser, baseUrl) {
+  const localSession = {
+    session_id: "local-catalog-session",
+    name: "Local Catalog Session",
+    agent: "coder",
+    identity: "local-coder",
+    profile: "default",
+    workspace: "/learn-demo",
+    active: true,
+  };
+  const fixtures = makeFixtures({ sessions: [localSession] });
+  const view = await openPage(browser, baseUrl, fixtures);
+  let localCatalogCalls = 0;
+  let releaseStale;
+  const staleGate = new Promise((resolve) => { releaseStale = resolve; });
+  await view.page.route("**/sessions/local-catalog-session/commands", async (route) => {
+    localCatalogCalls += 1;
+    if (localCatalogCalls === 1) {
+      await staleGate;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        session_id: "local-catalog-session",
+        commands: [{ name: "stale-local", description: "A stale local command" }],
+      }) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      session_id: "local-catalog-session",
+      commands: [{ name: "local-current", description: "The current local command" }],
+    }) });
+  });
+  await view.page.route("**/sessions/remote-session-1/commands", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ session_id: "remote-session-1", commands: [
+      { name: "remote-current", description: "The current remote command" },
+    ] }),
+  }));
+  try {
+    await view.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await view.page.getByText(localSession.name, { exact: true }).waitFor({ state: "visible" });
+    await view.page.waitForFunction(() => document.querySelector('[data-testid="guided-setup-open"]') === null);
+    await view.page.waitForFunction(() => document.querySelectorAll('[data-sidebar="sidebar"] button').length > 0);
+    await view.page.waitForFunction(() => document.querySelector('[data-sidebar="sidebar"] button[title*="Local Catalog Session"]') !== null);
+    const composer = view.page.getByRole("textbox", { name: "Message input" });
+    await composer.fill("/");
+    const localRequestDeadline = Date.now() + 10_000;
+    while (localCatalogCalls === 0) {
+      assert.ok(Date.now() < localRequestDeadline, "local catalog request did not start");
+      await view.page.waitForTimeout(25);
+    }
+    await view.page.locator('[data-sidebar="sidebar"] button[title="Open Remote Coder on remote-build"]').click();
+    await view.page.getByRole("textbox", { name: "Message input" }).fill("/");
+    await view.page.getByText("The current remote command", { exact: true }).waitFor({ state: "visible" });
+    releaseStale();
+    await view.page.waitForResponse((response) => response.url().includes("/sessions/local-catalog-session/commands"));
+    await view.page.waitForTimeout(100);
+    assert.equal(await view.page.getByText("A stale local command", { exact: true }).count(), 0,
+      "a late response from the previous session must not replace the selected session catalog");
+    await view.page.locator('[data-sidebar="sidebar"] button[title*="Local Catalog Session"]').click();
+    await view.page.getByRole("textbox", { name: "Message input" }).fill("/");
+    await view.page.getByText("The current local command", { exact: true }).waitFor({ state: "visible" });
+    assert.equal(await view.page.getByText("A stale local command", { exact: true }).count(), 0);
+    console.log("PASS: late catalog response is ignored after session switch");
+  } finally {
+    releaseStale?.();
+    await view.context.close();
+  }
+}
+
 async function main() {
   const { server, baseUrl } = await openVite();
   let browser;
@@ -142,6 +211,7 @@ async function main() {
     await runHealthySession(browser, baseUrl);
     await runEmptyCatalog(browser, baseUrl);
     await runLegacyFallback(browser, baseUrl);
+    await runSessionSwitchStaleResponse(browser, baseUrl);
   } finally {
     await browser?.close();
     await server.close();
