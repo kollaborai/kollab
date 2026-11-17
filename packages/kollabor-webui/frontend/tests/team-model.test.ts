@@ -69,3 +69,9 @@ test("a launch says what started, what was already running and what failed, and 
   );
   assert.deepEqual(launchLines({ started: [], skipped: [], failed: [] }, nameOf), []);
 });
+
+test("the team header stacks on phones and stays horizontal from tablet widths", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("../src/components/agents/AgentLibrary.tsx", import.meta.url), "utf8");
+  assert.match(source, /className="flex flex-col items-start gap-3 px-2 sm:flex-row sm:justify-between"/);
+});

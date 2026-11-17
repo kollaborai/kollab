@@ -53,6 +53,8 @@ const STEP_INDEX: Record<SetupStepId, number> = {
 };
 
 export const STORAGE_KEY = "kollab.setup-guide.v1";
+export const WELCOME_GUIDE_DISMISSED_NOTICE =
+  "Welcome guide closed. Type /welcome in a chat to open it again.";
 
 export type GuideState = {
   step: SetupStepId;

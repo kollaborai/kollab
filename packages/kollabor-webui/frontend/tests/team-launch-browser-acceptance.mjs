@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -17,7 +17,7 @@ const sourceTeam = {
   path: "/learn-demo/.kollab/teams/test-team.json",
   members: [
     member("alice", "Alice", null, "Lead"),
-    member("bob", "Bob", "alice", "Manager"),
+    member("bob", "Cloud & Infrastructure Security Engineer", "alice", "Security Engineer"),
     member("carol", "Carol", "bob", "Worker"),
   ],
 };
@@ -200,19 +200,40 @@ async function main() {
       console.error("Mocked engine requests:", JSON.stringify(mockRequests, null, 2));
       throw error;
     }
+    await page.setViewportSize({ width: 390, height: 844 });
+    const role = teamCard.locator("li button .text-sm.font-medium").nth(1);
+    await role.waitFor({ state: "visible" });
+    assert.equal(await role.innerText(), "Cloud & Infrastructure Security Engineer");
+    const assertLabelFits = async () => assert.equal(
+      await role.evaluate((node) => node.scrollWidth <= node.clientWidth),
+      true,
+      "the full team role must be visible without horizontal clipping",
+    );
+    await assertLabelFits();
+    const proofOutput = process.env.KOLLAB_PROOF_OUTPUT_DIR || "/tmp/kollab-issue-1134";
+    mkdirSync(proofOutput, { recursive: true });
+    await page.evaluate(() => document.documentElement.classList.add("dark"));
+    await assertLabelFits();
+    await page.screenshot({ path: path.join(proofOutput, "teams-long-phone-dark.png"), fullPage: true });
+    await page.evaluate(() => document.documentElement.classList.remove("dark"));
+    await page.screenshot({ path: path.join(proofOutput, "teams-long-phone-light.png"), fullPage: true });
+    await page.setViewportSize({ width: 820, height: 900 });
+    await assertLabelFits();
+    await page.setViewportSize({ width: 390, height: 844 });
     await teamCard.getByRole("button", { name: "Configure & Launch", exact: true }).click();
     await page.getByRole("heading", { name: "Launch Test Team", exact: true }).waitFor({ state: "visible" });
 
-    await page.getByRole("checkbox", { name: "Include Bob", exact: true }).uncheck();
+    const longLabel = "Cloud & Infrastructure Security Engineer";
+    await page.getByRole("checkbox", { name: `Include ${longLabel}`, exact: true }).uncheck();
     const treePreview = page.locator('section[aria-labelledby="team-launch-preview-heading"]');
-    await treePreview.getByText("Not selected: Bob", { exact: true }).waitFor({ state: "visible" });
+    await treePreview.getByText(`Not selected: ${longLabel}`, { exact: true }).waitFor({ state: "visible" });
     const carolRow = treePreview.locator("li").filter({ hasText: "Carol" });
     assert.equal(await carolRow.evaluate((node) => node.style.paddingLeft), "1.25rem");
 
     await page.locator("#team-launch-folder").click();
     await page.getByRole("button", { name: /Other demo/ }).click();
     await page.getByRole("checkbox", { name: "Include Dana", exact: true }).waitFor({ state: "visible" });
-    assert.equal(await page.getByRole("checkbox", { name: "Include Bob", exact: true }).count(), 0);
+    assert.equal(await page.getByRole("checkbox", { name: `Include ${longLabel}`, exact: true }).count(), 0);
 
     const mission = "Ship the team-launch browser smoke";
     await page.getByLabel("Mission", { exact: true }).fill(mission);

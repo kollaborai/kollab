@@ -324,9 +324,11 @@ export async function openPage(browser, baseUrl, fixtures, options = {}) {
     isMobile: options.isMobile ?? false,
     hasTouch: options.isMobile ?? false,
   });
-  await context.addInitScript(() => {
-    localStorage.setItem("kollab.setup-guide.v1", JSON.stringify({ step: "done", dismissed: true }));
-  });
+  const initialGuideState =
+    options.initialGuideState ?? JSON.stringify({ step: "done", dismissed: true });
+  await context.addInitScript((state) => {
+    localStorage.setItem("kollab.setup-guide.v1", state);
+  }, initialGuideState);
 
   const page = await context.newPage();
   const pageErrors = [];
