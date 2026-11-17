@@ -712,7 +712,7 @@ async def test_unauthorized_offer_reason_reaches_connect_screen(monkeypatch, cap
     from plugins.hub.plugin import HubPlugin
 
     monkeypatch.setattr(_TIME, lambda: 1_000)
-    expected = "Local session isn't authorized. Open Connect on the owner device."
+    expected = "Local access denied. Use Connect on owner device."
     error = EnrollmentProtocolError("unauthorized")
 
     async def refuse(_domain):
@@ -739,7 +739,9 @@ async def test_unauthorized_offer_reason_reaches_connect_screen(monkeypatch, cap
     state._resolve_hub_plugin = lambda: hub
 
     with caplog.at_level(logging.WARNING, logger="plugins.hub.plugin"):
-        view, renderer, _ = await _open(None, create=state.hub_enrollment_offer)
+        view, renderer, _ = await _open(
+            None, create=state.hub_enrollment_offer, size=(72, 30)
+        )
     text = await _text(view, renderer)
 
     assert expected in text
