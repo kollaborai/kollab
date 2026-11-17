@@ -402,3 +402,31 @@ def test_stalled_version_command_times_out(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "timed out" in result.stdout
+
+
+def test_pip_shell_trampoline_resolves_interpreter_with_spaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tools_dir = tmp_path / "tools"
+    scripts_dir = tmp_path / "installed scripts"
+    _fake_executable(scripts_dir, "4.5.6")
+    python = _write_executable(
+        tools_dir / "python with space",
+        '#!/bin/sh\nif [ "$1" = "-c" ]; then echo "$SCRIPTS"; '
+        'elif [ "$2" = install ] && [ "$3" = --help ]; then echo --user; fi\n',
+    )
+    _write_executable(
+        tools_dir / "pip3",
+        f"#!/bin/sh\n'''exec' \"{python}\" \"$0\" \"$@\"\n' '''\n",
+    )
+
+    result = _run_installer_method(
+        tmp_path,
+        method="pip",
+        path_dirs=[tools_dir, scripts_dir, Path("/usr/bin"), Path("/bin")],
+        extra_env={"SCRIPTS": str(scripts_dir)},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert str(scripts_dir / "kollab") in result.stdout
+    assert "4.5.6" in result.stdout
