@@ -81,7 +81,7 @@ describe("guided setup footer", () => {
     // Welcome has no target and is the greeting: its button starts the tour.
     expect(guideMarkup("welcome")).toContain(">Get Started<");
     // Actionable steps open their surface.
-    expect(guideMarkup("provider")).toContain(">Open<");
+    expect(guideMarkup("network")).toContain(">Open<");
     expect(guideMarkup("agent")).toContain(">Open<");
     // Only the final step finishes.
     expect(guideMarkup("done")).toContain(">Finish<");

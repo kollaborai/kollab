@@ -13,6 +13,8 @@ import {
   SETUP_STEPS,
   STORAGE_KEY,
   emptyFacts,
+  getStartedOpensSetup,
+  hasChosenProvider,
   loadGuideState,
   nextStep,
   resolveStep,
@@ -75,7 +77,7 @@ export function SetupGuide({
       ]);
       if (!mounted) return;
       setFacts({
-        profileCount: (profiles.profiles || []).length,
+        providerChosen: hasChosenProvider(profiles.profiles || [], profiles.active),
         activeProfile: profiles.active ?? null,
         anyAgentActive: (agents.agents || []).some((agent) => agent.active),
         networkLive: Boolean(
@@ -103,6 +105,13 @@ export function SetupGuide({
     setState((prev) => ({ ...prev, step: nextStep(resolveStep(prev, facts).step) }));
   }, [facts]);
 
+  // Welcome's "Get Started": Settings > Setup is the one provider screen, so open it
+  // there until a provider is chosen, then carry on to what is left (#1217).
+  const getStarted = useCallback(() => {
+    if (getStartedOpensSetup(facts)) onOpenSettings("setup");
+    advance();
+  }, [facts, onOpenSettings, advance]);
+
   const dismiss = useCallback(() => {
     setState((prev) => ({ ...prev, dismissed: true }));
     onDismiss?.();
@@ -111,8 +120,7 @@ export function SetupGuide({
 
   const runTarget = useCallback(() => {
     if (!target) return;
-    if (target === "settings:setup") onOpenSettings("setup");
-    else if (target === "settings:network") onOpenSettings("network");
+    if (target === "settings:network") onOpenSettings("network");
     else onStartSession();
     // Opening the surface counts as engaging the step; move on so a reopen
     // resumes at what is left.
@@ -201,7 +209,7 @@ export function SetupGuide({
             type="button"
             data-testid="setup-guide-next"
             className="ml-auto"
-            onClick={target ? runTarget : step === "done" ? () => onOpenChange(false) : advance}
+            onClick={target ? runTarget : step === "done" ? () => onOpenChange(false) : getStarted}
           >
             {target ? "Open" : step === "done" ? "Finish" : "Get Started"}
           </Button>

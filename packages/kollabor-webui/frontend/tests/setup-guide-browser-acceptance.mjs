@@ -21,7 +21,7 @@ async function main() {
       }),
     );
     await view.context.addInitScript(() => {
-      localStorage.setItem("kollab.setup-guide.v1", JSON.stringify({ step: "provider", dismissed: false }));
+      localStorage.setItem("kollab.setup-guide.v1", JSON.stringify({ step: "network", dismissed: false }));
     });
     await view.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
     await view.page.getByRole("button", { name: "Guided setup", exact: true }).click();

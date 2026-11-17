@@ -37,7 +37,7 @@ test("stepIndex maps every step and next/prev stay in bounds", () => {
   assert.equal(nextStep("done"), "done");
   assert.equal(prevStep("welcome"), "welcome");
   assert.equal(nextStep("agent"), "done");
-  assert.equal(prevStep("provider"), "welcome");
+  assert.equal(prevStep("network"), "welcome");
 });
 
 test("fresh state starts at welcome, not dismissed", () => {
@@ -65,18 +65,6 @@ test("loadGuideState rejects malformed JSON and unknown steps", () => {
   assert.equal(loadGuideState(null).step, "welcome");
 });
 
-test("a finished provider setup auto-skips the provider step", () => {
-  const state: GuideState = { step: "provider", dismissed: false };
-  const facts: SetupFacts = {
-    ...emptyFacts(),
-    profileCount: 2,
-    activeProfile: "openai",
-  };
-  const result = resolveStep(state, facts);
-  assert.equal(result.step, "network");
-  assert.deepEqual(result.skipped, ["provider"]);
-});
-
 test("a live network auto-skips the network step", () => {
   const state: GuideState = { step: "network", dismissed: false };
   const facts: SetupFacts = { ...emptyFacts(), networkLive: true };
@@ -90,16 +78,16 @@ test("an active agent auto-skips the agent step", () => {
 });
 
 test("skips chain: everything already set lands on done", () => {
-  const state: GuideState = { step: "provider", dismissed: false };
+  const state: GuideState = { step: "network", dismissed: false };
   const facts: SetupFacts = {
-    profileCount: 1,
+    providerChosen: true,
     activeProfile: "local",
     anyAgentActive: true,
     networkLive: true,
   };
   const result = resolveStep(state, facts);
   assert.equal(result.step, "done");
-  assert.deepEqual(result.skipped, ["provider", "network", "agent"]);
+  assert.deepEqual(result.skipped, ["network", "agent"]);
 });
 
 test("dismissal is sticky and resolves to done", () => {
@@ -113,7 +101,6 @@ test("dismissal is sticky and resolves to done", () => {
 });
 
 test("each actionable step targets a real surface", () => {
-  assert.equal(stepTarget("provider"), "settings:setup");
   assert.equal(stepTarget("network"), "settings:network");
   assert.equal(stepTarget("agent"), "session:new");
   assert.equal(stepTarget("welcome"), null);

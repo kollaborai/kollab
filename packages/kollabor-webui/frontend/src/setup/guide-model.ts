@@ -4,7 +4,6 @@
 
 export type SetupStepId =
   | "welcome"
-  | "provider"
   | "network"
   | "agent"
   | "done";
@@ -21,11 +20,6 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     id: "welcome",
     title: "Welcome to Kollab",
     blurb: "Connect a model, join a network, and meet your first agent.",
-  },
-  {
-    id: "provider",
-    title: "Choose a provider",
-    blurb: "Pick how Kollab talks to a model. Skip to keep the default.",
   },
   {
     id: "network",
@@ -46,10 +40,9 @@ export const SETUP_STEPS: readonly SetupStep[] = [
 
 const STEP_INDEX: Record<SetupStepId, number> = {
   welcome: 0,
-  provider: 1,
-  network: 2,
-  agent: 3,
-  done: 4,
+  network: 1,
+  agent: 2,
+  done: 3,
 };
 
 export const STORAGE_KEY = "kollab.setup-guide.v1";
@@ -102,8 +95,11 @@ export function prevStep(step: SetupStepId): SetupStepId {
 
 /** Everything the steps gate on, fetched by the caller from real APIs. */
 export type SetupFacts = {
-  /** Named profiles from GET /profiles (the provider step's concern). */
-  profileCount: number;
+  /**
+   * The active profile runs a real provider (see hasChosenProvider). Settings >
+   * Setup is the only provider screen; this decides whether "Get Started" opens it.
+   */
+  providerChosen: boolean;
   /** The engine's active profile name, if any. */
   activeProfile: string | null;
   /** At least one agent is live right now (the agent step's concern). */
@@ -114,11 +110,30 @@ export type SetupFacts = {
 
 export function emptyFacts(): SetupFacts {
   return {
-    profileCount: 0,
+    providerChosen: false,
     activeProfile: null,
     anyAgentActive: false,
     networkLive: false,
   };
+}
+
+/**
+ * True when the active profile runs a real provider. The engine always lists its
+ * built-in profiles, and the active one on a fresh install is "default" with
+ * provider "auto" (resolved from env vars at run time), which is no choice at
+ * all, so a profile merely existing must not count (#1217).
+ */
+export function hasChosenProvider(
+  profiles: readonly { name: string; provider?: string }[],
+  active?: string | null,
+): boolean {
+  const current = profiles.find((profile) => profile.name === active);
+  return current !== undefined && current.provider !== "auto";
+}
+
+/** "Get Started" opens Settings > Setup, the one provider screen, until a provider is chosen. */
+export function getStartedOpensSetup(facts: SetupFacts): boolean {
+  return !facts.providerChosen;
 }
 
 /**
@@ -135,11 +150,6 @@ export function resolveStep(state: GuideState, facts: SetupFacts): {
   let step = state.step;
   for (let guard = 0; guard < SETUP_STEPS.length; guard += 1) {
     if (step === "welcome" || step === "done") break;
-    if (step === "provider" && facts.profileCount > 0) {
-      skipped.push(step);
-      step = nextStep(step);
-      continue;
-    }
     if (step === "network" && facts.networkLive) {
       skipped.push(step);
       step = nextStep(step);
@@ -158,10 +168,8 @@ export function resolveStep(state: GuideState, facts: SetupFacts): {
 /** Which concrete panel/route each step's action should open. */
 export function stepTarget(
   step: SetupStepId,
-): "settings:setup" | "settings:network" | "session:new" | null {
+): "settings:network" | "session:new" | null {
   switch (step) {
-    case "provider":
-      return "settings:setup";
     case "network":
       return "settings:network";
     case "agent":

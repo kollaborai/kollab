@@ -16,6 +16,14 @@ the same screen `/setup` opens. Leaving it (Esc) saves
 A detached daemon or a pipe run has no terminal, so it leaves the wizard for the
 next interactive launch.
 
+## Web UI welcome guide
+
+In the Web UI the welcome guide has no provider screen of its own: Settings >
+Setup is the one provider screen. **Get Started** opens it while the active
+profile has no real provider (a fresh install runs the built-in `default`
+profile, whose provider is `auto`, and that does not count as a choice). Once a
+provider is chosen, **Get Started** goes straight to the network and agent cards.
+
 ## What it does
 
 1. **Provider** — pick from Anthropic, OpenAI (API key), OpenAI (ChatGPT
