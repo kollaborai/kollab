@@ -304,7 +304,7 @@ class TestWebFetchExecution(unittest.TestCase):
 
             async def handle(reader, writer):
                 request = await reader.readuntil(b"\r\n\r\n")
-                path = request.split(b" ", 2)[1]
+                path = request.split(b" ", 2)[1].split(b"?", 1)[0]
                 if path == b"/redirect":
                     writer.write(
                         b"HTTP/1.1 302 Found\r\n"
@@ -341,7 +341,10 @@ class TestWebFetchExecution(unittest.TestCase):
                         + b"Content-Encoding: gzip\r\nConnection: close\r\n\r\n"
                         + compressed_body
                     )
-                await writer.drain()
+                try:
+                    await writer.drain()
+                except ConnectionError:
+                    pass
                 writer.close()
                 await writer.wait_closed()
 
@@ -371,7 +374,7 @@ class TestWebFetchExecution(unittest.TestCase):
                 normal = await self.executor._execute_web_fetch(
                     {
                         "id": "web_fetch_normal",
-                        "url": f"http://127.0.0.1:{port}/normal",
+                        "url": f"http://127.0.0.1:{port}/normal?token=secret",
                         "extract_main": False,
                     }
                 )
@@ -390,6 +393,7 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertTrue(normal.success)
         self.assertIn('"headline"', normal.output)
         self.assertLessEqual(len(normal.output), 5000)
+        self.assertNotIn("token=secret", normal.metadata["url"])
 
     def test_web_fetch_bounds_playwright_fallback_output(self):
         """Fallback text is subject to the same total output budget."""
