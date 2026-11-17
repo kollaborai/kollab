@@ -53,6 +53,28 @@ class TestSlashCommandParser(unittest.TestCase):
         self.assertEqual(command.name, "save")
         self.assertEqual(command.args, ["my file.txt", "--format", "json"])
 
+    def test_parse_unquoted_windows_paths_preserves_backslashes(self):
+        cases = [
+            (r"/open C:\work\docs\notes.txt", [r"C:\work\docs\notes.txt"]),
+            (r"/open \\server\share\notes.txt", [r"\\server\share\notes.txt"]),
+            (
+                r'/open "C:\work\docs and notes.txt"',
+                [r"C:\work\docs and notes.txt"],
+            ),
+            (
+                r"/open --path=C:\work\docs\notes.txt",
+                [r"--path=C:\work\docs\notes.txt"],
+            ),
+            (r"/open C:\資料\notes.txt", [r"C:\資料\notes.txt"]),
+            (r"/open my\ file.txt", ["my file.txt"]),
+        ]
+
+        for input_text, expected_args in cases:
+            with self.subTest(input_text=input_text):
+                command = self.parser.parse_command(input_text)
+                self.assertIsNotNone(command)
+                self.assertEqual(command.args, expected_args)
+
     def test_parse_command_with_parameters(self):
         """Test parameter extraction."""
         command = self.parser.parse_command("/config --theme=dark --verbose")
