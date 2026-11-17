@@ -21,6 +21,11 @@ const calls = [
   { title: "Hub Message", to: "Sapphire" },
   { title: "Hub Reply", to: "Sapphire" },
   { title: "Hub Broadcast" },
+  {
+    title: "mcp__calendar__lookup",
+    threadId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    replyTo: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  },
 ];
 
 async function main() {
@@ -72,6 +77,23 @@ async function main() {
         for (let index = 0; index < calls.length; index += 1) {
           const row = rows.nth(index);
           const visibleText = await row.innerText();
+          if (calls[index].threadId) {
+            assert.ok(
+              visibleText.includes(calls[index].title),
+              `existing MCP title changed: ${visibleText}`,
+            );
+            assert.ok(visibleText.includes("Other"), `existing MCP kind changed: ${visibleText}`);
+            assert.ok(
+              visibleText.includes(`Thread ${calls[index].threadId}`),
+              `existing thread detail changed: ${visibleText}`,
+            );
+            assert.ok(
+              visibleText.includes(`Replied-to ${calls[index].replyTo}`),
+              `existing reply detail changed: ${visibleText}`,
+            );
+            assert.ok(visibleText.includes("Completed"), `completion state missing: ${visibleText}`);
+            continue;
+          }
           assert.ok(visibleText.includes(calls[index].title), `readable title missing: ${visibleText}`);
           assert.ok(visibleText.includes("Completed"), `completion state missing: ${visibleText}`);
           assert.ok(!visibleText.includes("Other"), `generic category shown: ${visibleText}`);

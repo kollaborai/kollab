@@ -21,6 +21,14 @@ const calls = [
     name: "mcp__kollab-hub__hub_broadcast",
     args: { message: "Build is green.", thread_id: ids[3] },
   },
+  {
+    name: "mcp__calendar__lookup",
+    args: {
+      query: "events",
+      thread_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      reply_to: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    },
+  },
 ];
 
 createRoot(document.getElementById("root")!).render(
