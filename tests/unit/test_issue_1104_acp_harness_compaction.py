@@ -144,6 +144,24 @@ class TestCompactOnAcpChat(unittest.IsolatedAsyncioTestCase):
 
 
 class TestAutomaticCompactOnAcpChat(unittest.IsolatedAsyncioTestCase):
+    async def test_new_session_crossing_is_retried_after_inflight_compaction(self):
+        plugin, _llm, acp = _plugin()
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def submit(*_args, **_kwargs):
+            started.set()
+            await release.wait()
+            return {"text": "compacted", "stop_reason": "end_turn"}
+
+        acp.submit = AsyncMock(side_effect=submit)
+        plugin.acp_usage_updated(300_000, 1_000_000, session_key=("session-1", 1))
+        await started.wait()
+        plugin.acp_usage_updated(300_000, 1_000_000, session_key=("session-2", 2))
+        release.set()
+        await _settle(plugin)
+
+        self.assertEqual(acp.submit.await_count, 2)
+
     async def test_new_session_rearms_when_its_first_meter_is_above_threshold(self):
         plugin, _llm, acp = _plugin()
         bus = MagicMock()
