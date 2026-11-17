@@ -83,6 +83,19 @@ def test_overlapping_hunks_and_multiple_shared_files_are_reported():
     assert {match.number for match in matches} == {1, 3}
 
 
+def test_insertion_at_the_end_of_a_changed_hunk_is_adjacent_not_overlapping():
+    current = _pr(
+        2,
+        files=[{"filename": "src/a.py", "patch": "@@ -10,3 +10,3 @@\n changed"}],
+    )
+    adjacent = _pr(
+        1,
+        files=[{"filename": "src/a.py", "patch": "@@ -13,0 +14 @@\n added"}],
+    )
+
+    assert detector.find_overlaps(current, [adjacent]) == []
+
+
 def test_common_base_or_one_nonoverlapping_file_is_not_enough():
     current = _pr(
         2,
