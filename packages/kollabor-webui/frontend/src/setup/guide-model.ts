@@ -67,9 +67,9 @@ export function loadGuideState(raw: string | null): GuideState {
       step?: unknown;
       dismissed?: unknown;
     };
-    // "provider" was a card until #1217. A browser that saved it had engaged
-    // the guide, so it resumes at the next card instead of looking untouched.
-    const saved = parsed.step === "provider" ? "network" : parsed.step;
+    // "provider" was a card until #1217. Resume that saved state at the
+    // welcome card, as requested by the issue.
+    const saved = parsed.step === "provider" ? "welcome" : parsed.step;
     const step =
       typeof saved === "string" && saved in STEP_INDEX
         ? (saved as SetupStepId)
