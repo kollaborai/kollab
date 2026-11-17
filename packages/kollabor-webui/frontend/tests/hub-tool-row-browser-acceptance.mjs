@@ -72,7 +72,7 @@ async function main() {
         await page.goto(`${baseUrl}/tests/hub-tool-row.fixture.html`, { waitUntil: "domcontentloaded" });
         const rows = page.locator('[data-slot="tool-fallback-trigger"]');
         await rows.first().waitFor({ state: "visible", timeout: 10_000 });
-        assert.equal(await rows.count(), calls.length, "one visible row per Hub tool");
+        assert.equal(await rows.count(), calls.length, "one visible row per fixture call");
 
         for (let index = 0; index < calls.length; index += 1) {
           const row = rows.nth(index);
