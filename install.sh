@@ -23,6 +23,7 @@ RELEASES_URL="${KOLLAB_RELEASES_URL:-$REPO_URL/releases}"
 ORIGINAL_PATH="$PATH"
 INSTALLED_DIR="$HOME/.local/bin"
 DIR_ADDED_TO_PATH=0
+VERSION_CHECK_TIMEOUT_SECONDS=30
 
 # Colors
 RED='\033[0;31m'
@@ -234,6 +235,35 @@ pip_scripts_dir() {
         "$scheme"
 }
 
+# Keep a broken installed command from blocking the installer forever.
+run_version_check() {
+    local executable="$1" output_file pid elapsed status
+    output_file=$(mktemp) || return 1
+    env -u SCIE -u SCIE_ARGV0 -u PEX "$executable" --version >"$output_file" 2>&1 &
+    pid=$!
+    for ((elapsed = 0; elapsed < VERSION_CHECK_TIMEOUT_SECONDS * 10; elapsed++)); do
+        if [[ " $(jobs -pr) " != *" $pid "* ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+    if [[ " $(jobs -pr) " == *" $pid "* ]]; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        printf 'timed out after %s seconds' "$VERSION_CHECK_TIMEOUT_SECONDS"
+        rm -f "$output_file"
+        return 124
+    fi
+    if wait "$pid"; then
+        status=0
+    else
+        status=$?
+    fi
+    cat "$output_file"
+    rm -f "$output_file"
+    return "$status"
+}
+
 # Try pip (standard)
 try_pip() {
     local install_scheme="" scripts_dir
@@ -283,8 +313,15 @@ verify_install() {
         return 1
     fi
 
-    if ! shown=$(env -u SCIE -u SCIE_ARGV0 -u PEX "$executable" --version 2>&1); then
-        error "The installed executable at $executable did not start: $shown"
+    if shown=$(run_version_check "$executable"); then
+        :
+    else
+        local version_status=$?
+        if [[ "$version_status" -eq 124 ]]; then
+            error "The installed executable at $executable timed out on --version: $shown"
+        else
+            error "The installed executable at $executable did not start: $shown"
+        fi
         return 1
     fi
     version_line="${shown##*$'\n'}"
