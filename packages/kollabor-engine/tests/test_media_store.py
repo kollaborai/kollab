@@ -89,6 +89,28 @@ def test_open_media_roundtrip_and_rejects_bad_refs(tmp_path: Path) -> None:
             open_media(tmp_path, bad)
 
 
+def test_non_ascii_digit_tokens_are_not_tokens_and_bind_nothing(tmp_path: Path) -> None:
+    r"""#1140 R3: the image-token grammar is ASCII digits only.
+
+    Python's Unicode \d used to count [image1\u0661] (Arabic-Indic one) as a
+    token while the JS splitter treated it as literal text — the mismatch
+    made attach_media_to_rows bind a stored image to a row whose text was
+    plain prose and starve the real sender.
+    """
+    assert count_image_tokens("[image1\u0661]") == 0
+    assert count_image_tokens("[[image1\u0661]]") == 0
+    assert count_image_tokens("[image\u0661]") == 0
+
+    refs = [save(tmp_path, "s1", PNG).ref]
+    rows = [
+        {"role": "user", "content": "plain prose [image1\u0661] tail"},
+        {"role": "user", "content": "the real sender [image1]"},
+    ]
+    attach_media_to_rows(tmp_path, "s1", rows)
+    assert "media" not in rows[0]
+    assert [m["ref"] for m in rows[1]["media"]] == refs
+
+
 def test_attach_binds_rows_in_order(tmp_path: Path) -> None:
     refs = [save(tmp_path, "s1", url).ref for url in (PNG, JPEG, WEBP)]
     rows = [
@@ -142,6 +164,22 @@ def test_count_image_tokens_shapes() -> None:
     assert count_image_tokens([{"type": "image", "image": None}]) == 1
     assert count_image_tokens(None) == 0
     assert count_image_tokens(42) == 0
+    # Escaped literal [[imageN]] is text, not a media token (#1124 P2a):
+    # it must not consume a slot, or binding and the page-offset skip
+    # drift from what the frontend renders.
+    assert count_image_tokens("see [[image1]] below") == 0
+    assert count_image_tokens("[[image1]] and [image1]") == 1
+    # Zero-valued and all-zero-padded tokens are text, matching the
+    # frontend's near-miss grammar (value semantics, not leading digit).
+    assert count_image_tokens("[image0] is text") == 0
+    assert count_image_tokens("[image00] is text") == 0
+    assert count_image_tokens("[image01] is a token") == 1
+    # Malformed one-sided bracket runs count the inner token, matching the
+    # frontend splitter (#1140 review): the stray bracket of the run stays
+    # text, the well-formed token inside still binds its slot.
+    assert count_image_tokens("[[image1]") == 1
+    assert count_image_tokens("[image1]]") == 1
+    assert count_image_tokens("[[image1] then [image2]") == 2
 
 
 def test_attach_binds_mirror_part_rows(tmp_path: Path) -> None:
@@ -252,7 +290,11 @@ def test_failed_part_does_not_starve_later_rows(tmp_path: Path, monkeypatch) -> 
         },
     ]
     attach_media_to_rows(dir_, "s1", rows)
-    assert [m["ref"] for m in rows[0]["media"]] == [saved1[0]["ref"]]
+    # Dense slot union (#1124 P2a): row1's failed first part emits a
+    # placeholder at ordinal 0; its surviving ref stays at ordinal 1 and
+    # row2 still binds its own later ref.
+    assert rows[0]["media"][0] == {"ref": "", "mime": "", "failed": True}
+    assert [m["ref"] for m in rows[0]["media"][1:]] == [saved1[0]["ref"]]
     assert [m["ref"] for m in rows[1]["media"]] == [saved2[0]["ref"]]
 
 
@@ -344,9 +386,23 @@ def test_failure_matrix_binds_exactly_stored_refs(tmp_path: Path, monkeypatch) -
         ]
         attach_media_to_rows(dir_, session, history_rows)
         for j, row in enumerate(history_rows):
-            expected = [entry["ref"] for entry in stored_per_row[j]]
-            bound = [m["ref"] for m in row.get("media") or []]
-            assert bound == expected, f"{name} row{j}: bound {bound} != stored {expected}"
+            # Dense slot union (#1124 P2a): one entry per attempted slot;
+            # valid slots bind their stored refs in order, failed slots emit
+            # the placeholder that binds nothing.
+            row_pattern = rows_pattern[j]
+            bound = row.get("media") or []
+            assert len(bound) == len(row_pattern), (
+                f"{name} row{j}: {len(bound)} entries for {len(row_pattern)} slots"
+            )
+            stored = iter([entry["ref"] for entry in stored_per_row[j]])
+            for ok_flag, entry in zip(row_pattern, bound):
+                if ok_flag:
+                    assert entry["ref"] == next(stored), f"{name} row{j} valid slot"
+                    assert "failed" not in entry, f"{name} row{j} valid slot"
+                else:
+                    assert entry == {"ref": "", "mime": "", "failed": True}, (
+                        f"{name} row{j} failed slot"
+                    )
 
 
 def test_failed_slots_stay_out_of_listing(tmp_path: Path, monkeypatch) -> None:

@@ -38,7 +38,6 @@ from .managed_config import (
     write_managed_config,
 )
 from .manager import ConfigManager
-from .plugin_config_manager import PluginConfigManager, get_plugin_config_manager
 from .plugin_schema import (
     ConfigField,
     ConfigSchemaBuilder,
@@ -71,8 +70,6 @@ __all__ = [
     "ConfigField",
     "WidgetType",
     "ConfigSchemaBuilder",
-    "PluginConfigManager",
-    "get_plugin_config_manager",
     "encode_project_path",
     "get_project_data_dir",
     "get_conversations_dir",

@@ -134,13 +134,13 @@ def test_folder_roster_is_project_over_global(home, proj):
 def test_designations_come_from_the_folders_roster(home, proj):
     write(proj / ".kollab/config.json", {"plugins": {"hub": {"roster": "marketing-crew"}}})
     assigner = IdentityAssigner(folder=str(proj))
-    assert assigner.assign([]) == "omar"
-    assert assigner.assign(["omar", "maya"]) == "theo"
+    assert assigner.assign([]) == "campaign-lead"
+    assert assigner.assign(["campaign-lead", "brand-strategist"]) == "copywriter"
     # a persona of any roster can still be asked for by name
-    assert assigner.assign(["omar"], preferred="lapis") == "lapis"
+    assert assigner.assign(["campaign-lead"], preferred="lapis") == "lapis"
     # once the roster is used up, names are numbered
     taken = rosters.roster_names(proj)
-    assert assigner.assign(taken) == "omar-2"
+    assert assigner.assign(taken) == "campaign-lead-2"
     # another folder still gets gems
     assert IdentityAssigner(folder=str(proj.parent)).assign([]) == "lapis"
 
@@ -158,18 +158,18 @@ def test_find_persona_bare_prefixed_numbered_and_ambiguous(home, proj):
 
 
 def test_as_resolution(home, proj):
-    assert rosters.split_ref("marketing-crew/maya") == ("marketing-crew", "maya")
-    assert rosters.split_ref("maya") == ("", "maya")
-    assert desired_bundle_for_identity("marketing-crew/theo") == "creative-writer"
-    assert desired_bundle_for_identity("maya") == "research"
+    assert rosters.split_ref("marketing-crew/brand-strategist") == ("marketing-crew", "brand-strategist")
+    assert rosters.split_ref("brand-strategist") == ("", "brand-strategist")
+    assert desired_bundle_for_identity("marketing-crew/copywriter") == "creative-writer"
+    assert desired_bundle_for_identity("brand-strategist") == "research"
     assert desired_bundle_for_identity("lapis-2") == "coder"
     assert desired_bundle_for_identity("not-a-persona") == "default"
 
 
 def test_persona_context_only_for_authored_behavior(home, proj):
     assert rosters.persona_context(rosters.find_persona("lapis", proj)) == []
-    lines = rosters.persona_context(rosters.find_persona("maya", proj))
-    assert lines[0] == "your persona: Maya Lindqvist (Brand Strategist)"
+    lines = rosters.persona_context(rosters.find_persona("brand-strategist", proj))
+    assert lines[0] == "your persona: Brand Strategist"
     assert "positioning" in lines[1]
 
 
@@ -243,11 +243,11 @@ def test_a_team_naming_a_missing_roster_is_dropped(home, proj):
 
 def test_team_member_prompt_carries_the_chain_of_command(home, proj):
     t = rosters.load_library(proj).teams["marketing"]
-    jonas = next(m for m in t.members if m.persona.name == "jonas")
+    jonas = next(m for m in t.members if m.persona.name == "content-editor")
     text = rosters.team_member_prompt(t, jonas)
-    assert text.startswith("Review Theo's drafts")
-    assert "you report to: theo" in text
-    assert "your identity: jonas" in text and "omar (Campaign Lead)" in text
+    assert text.startswith("Review the Copywriter's drafts")
+    assert "you report to: copywriter" in text
+    assert "your identity: content-editor" in text and "campaign-lead (Campaign Lead)" in text
     omar = t.members[0]
     assert "your direct reports:" in rosters.team_member_prompt(t, omar)
 
@@ -287,3 +287,21 @@ def test_config_modal_offers_the_rosters_a_folder_can_pick(home, proj, monkeypat
         "crew",
     }
     assert HubPlugin.get_default_config()["plugins"]["hub"]["roster"] == "gems"
+
+
+def test_inline_team_members_are_gems_unless_they_pick_an_avatar(home, proj):
+    write(proj / ".kollab/rosters/crew.json", crew(names=("ana",)))
+    write(
+        proj / ".kollab/teams/inline.json",
+        {
+            "name": "inline",
+            "lead": "boss",
+            "members": [
+                {"persona": {"name": "boss", "display_name": "Boss"}},
+                {"persona": {"name": "pic", "avatar": {"kind": "emoji", "value": "x"}}, "reports_to": "boss"},
+            ],
+        },
+    )
+    members = {m.persona.name: m.persona for m in rosters.load_library(proj).teams["inline"].members}
+    assert members["boss"].avatar == {"kind": "gem"}
+    assert members["pic"].avatar == {"kind": "emoji", "value": "x"}
