@@ -214,6 +214,40 @@ async def test_acp_join_notice_reports_the_model_and_effort_the_harness_runs():
 
 
 @pytest.mark.asyncio
+async def test_acp_join_notice_never_reports_the_profile_model_when_options_fail():
+    """A running harness whose options cannot be read must not fall back to the
+    profile's model and effort: the profile does not describe what it runs."""
+    profile = SimpleNamespace(
+        name="main",
+        get_provider=lambda: "acp",
+        get_model=lambda: "profile-model",
+        get_effort=lambda: "low",
+    )
+
+    def options_fail():
+        raise RuntimeError("adapter did not answer")
+
+    harness = SimpleNamespace(active=True, advertised_config_options=options_fail)
+    event_bus = _EventBus(
+        {
+            "profile_manager": SimpleNamespace(get_active_profile=lambda: profile),
+            "acp_orchestrator": harness,
+        }
+    )
+    plugin = HubPlugin(event_bus=event_bus)
+    plugin._identity = _runtime("lapis", "lapis-id")
+    peer = _runtime("koordinator", "koordinator-id", name="koordinator")
+    plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+    await plugin._announce_to_peers([peer])
+
+    content = plugin._deliver_to_agent.await_args.args[1].content
+    assert "profile-model" not in content
+    assert "effort: low" not in content
+    assert "profile: main\n" in content
+
+
+@pytest.mark.asyncio
 async def test_join_notice_names_the_agent_bundle_and_its_description():
     agent = SimpleNamespace(
         name="community", description="Answers community forum questions."
