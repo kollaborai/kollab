@@ -16,6 +16,7 @@ export const browserSuites = Object.freeze([
   { name: "agent-sidebar", script: "tests/agent-sidebar-glyph-browser-acceptance.mjs" },
   { name: "team-launch", script: "tests/team-launch-browser-acceptance.mjs" },
   { name: "remote-chat-lifecycle", script: "tests/remote-chat-lifecycle-browser-acceptance.mjs" },
+  { name: "setup-guide", script: "tests/setup-guide-browser-acceptance.mjs" },
 ]);
 
 const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
