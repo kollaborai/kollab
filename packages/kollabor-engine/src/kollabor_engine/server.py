@@ -166,6 +166,7 @@ async def _engine_lifespan(app: FastAPI):
 
     set_handover_store(store)
     warm_task: Optional["asyncio.Task[None]"] = None
+    supervisor_task: Optional["asyncio.Task[None]"] = None
     try:
         if store is not None:
             pending = store.acquire()
@@ -203,6 +204,17 @@ async def _engine_lifespan(app: FastAPI):
                         # be retried on the next engine start; never stop it here.
                         logger.exception("could not reown WebUI session %s", session_id)
         logger.info("Engine started")
+        import sys
+
+        if "--no-plugins" not in sys.argv[1:]:
+            from kollabor_plugins.services import supervise_services
+
+            dispatcher = getattr(app.state, "plugin_dispatcher", None)
+            if dispatcher is not None:
+                await dispatcher.warm()
+            engine_url = getattr(app.state, "plugin_engine_url", None)
+            supervisor = supervise_services(engine_url=engine_url) if engine_url else supervise_services()
+            supervisor_task = asyncio.create_task(supervisor, name="plugin-supervisor")
         if getattr(app.state, "warm_model_choices", False):  # set by `serve`, never by a test's app
             warm_task = asyncio.create_task(_warm_model_choices(), name="model-picker-warm")
         phone_link = getattr(app.state, "phone_link", None)
@@ -213,6 +225,9 @@ async def _engine_lifespan(app: FastAPI):
                 logger.warning("PhoneLink is unavailable in this engine; local chat remains available")
         yield
     finally:
+        if supervisor_task is not None:
+            supervisor_task.cancel()
+            await asyncio.gather(supervisor_task, return_exceptions=True)
         try:
             if warm_task is not None:
                 warm_task.cancel()
@@ -222,6 +237,24 @@ async def _engine_lifespan(app: FastAPI):
             await acp_discovery.stop_warming()
         except Exception:
             logger.exception("Model picker warm-up shutdown failed")
+        jobs = getattr(app.state, "plugin_jobs", None)
+        if jobs is not None:
+            try:
+                await jobs.close()
+            except Exception:
+                logger.exception("Plugin job shutdown failed")
+        controls = getattr(app.state, "plugin_service_controls", None)
+        if controls is not None:
+            try:
+                await controls.shutdown()
+            except Exception:
+                logger.exception("Plugin service controls shutdown failed")
+        dispatcher = getattr(app.state, "plugin_dispatcher", None)
+        if dispatcher is not None:
+            try:
+                await dispatcher.shutdown()
+            except Exception:
+                logger.exception("Plugin dispatcher shutdown failed")
         phone_link = getattr(app.state, "phone_link", None)
         if phone_link is not None:
             try:
@@ -275,6 +308,21 @@ def create_app(port: Optional[int] = None) -> FastAPI:
         version="0.1.0",
         lifespan=_engine_lifespan,
     )
+    from .routes.plugins import PluginDispatcher, PluginEventHub, PluginServiceControls, PluginTokenStore
+
+    app.state.plugin_events = PluginEventHub()
+    app.state.plugin_tokens = PluginTokenStore()
+    app.state.plugin_engine_url = f"http://127.0.0.1:{port}" if port is not None else None
+    app.state.plugin_service_controls = PluginServiceControls(
+        app.state.plugin_events, engine_url=app.state.plugin_engine_url
+    )
+    app.state.plugin_dispatcher = PluginDispatcher(app.state.plugin_events, app.state.plugin_tokens)
+    from .plugin_jobs import PluginJobs
+
+    app.state.plugin_jobs = PluginJobs(
+        app.state.plugin_events, app.state.plugin_dispatcher,
+        app.state.plugin_service_controls, app.state.plugin_engine_url,
+    )
     _wire_voice(app, port)
     from .phone_link import PhoneLink
 
@@ -296,6 +344,16 @@ def create_app(port: Optional[int] = None) -> FastAPI:
         import os
         import sys
 
+        path = request.scope["path"]
+        if "--no-plugins" in sys.argv[1:] and (path == "/plugins" or path.startswith("/plugins/")):
+            return JSONResponse(status_code=404, content={"detail": "Plugins are disabled"})
+
+        from .routes.plugins import remote_plugin_route_allowed
+
+        if any(value.strip() == "1" for value in request.headers.getlist("x-kollab-plugin-remote")):
+            if not remote_plugin_route_allowed(request.method, request.scope["path"]):
+                return JSONResponse(status_code=403, content={"detail": "Plugin management is local only"})
+
         # Skip auth for tests if env var is set
         if os.environ.get("KOLLAB_ENGINE_BYPASS_AUTH") == "1" and "pytest" in sys.modules:
             return await call_next(request)
@@ -315,7 +373,9 @@ def create_app(port: Optional[int] = None) -> FastAPI:
             )
 
         token = auth_header[7:]
-        if not validate_token(token):
+        if not validate_token(token) and not app.state.plugin_tokens.authorize(
+            token, request.method, request.scope["path"], app.state.plugin_events
+        ):
             return JSONResponse(status_code=401, content={"detail": "Invalid token"})
 
         return await call_next(request)
@@ -356,10 +416,13 @@ def create_app(port: Optional[int] = None) -> FastAPI:
         return error_response(request, exc)
 
     # Mount routes
+    from .routes.artifacts import router as artifacts_router
     from .routes.mcp import router as mcp_router
+    from .routes.media import router as media_router
     from .routes.messages import router as messages_router
     from .routes.panels import network_router as halt_panels_router
     from .routes.panels import router as panels_router
+    from .routes.panels import setup_router
     from .routes.permissions import router as permissions_router
     from .routes.profiles import router as profiles_router
     from .routes.sessions import router as sessions_router
@@ -372,10 +435,12 @@ def create_app(port: Optional[int] = None) -> FastAPI:
     app.include_router(mcp_router)
     app.include_router(panels_router, dependencies=opens)
     app.include_router(halt_panels_router)
+    app.include_router(setup_router)
 
     from .routes.agents import router as agents_router
     from .routes.hub import router as hub_router
     from .routes.phonelink import router as phonelink_router
+    from .routes.plugins import router as plugins_router
     from .routes.prompts import router as prompts_router
     from .routes.rosters import router as rosters_router
     from .routes.teams import router as teams_router
@@ -383,11 +448,15 @@ def create_app(port: Optional[int] = None) -> FastAPI:
     app.include_router(agents_router)
     app.include_router(hub_router)
     app.include_router(phonelink_router)
+    app.include_router(plugins_router)
+    app.mount("/plugins/{plugin_id}/api", app.state.plugin_dispatcher)
     from .routes.voice import router as voice_router
 
     app.include_router(voice_router)
     app.include_router(prompts_router)
     app.include_router(rosters_router)
+    app.include_router(media_router)
+    app.include_router(artifacts_router)
     app.include_router(teams_router)
 
     from .routes.pr_chain import router as pr_chain_router

@@ -186,6 +186,7 @@ def create_app(
         if sensitive:
             response.headers.update(NO_STORE_HEADERS)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Content-Security-Policy", "script-src 'self'")
         response.headers.setdefault("X-Frame-Options", "DENY")
         return response
 
@@ -296,7 +297,7 @@ def create_app(
                 (k, v)
                 for k, v in request.headers.items()
                 if k.lower() not in _HOP_BY_HOP
-                and k.lower() != "x-kollab-client-ip"
+                and k.lower() not in {"x-kollab-client-ip", "x-kollab-plugin-remote"}
                 and not is_forwarded_client_header(k)
             ],
             content=await request.body(),
@@ -309,6 +310,16 @@ def create_app(
         if base != "/" and (routed == base or routed.startswith(base + "/")):
             routed = routed[len(base) :] or "/"
         first = routed.lstrip("/").split("/", 1)[0]
+        if first == "plugins" and not _is_local(request):
+            from kollabor_engine.routes.plugins import remote_plugin_route_allowed
+
+            if not remote_plugin_route_allowed(request.method, routed):
+                return JSONResponse(
+                    {"detail": "Plugin management is available only on this computer."},
+                    status_code=403,
+                    headers=NO_STORE_HEADERS,
+                )
+            upstream.headers["x-kollab-plugin-remote"] = "1"
         if first.lower() == "phonelink" and not _is_local(request):
             return JSONResponse(
                 {
@@ -359,6 +370,50 @@ def create_app(
     @app.get("/")
     async def index():
         return page(_assistant_static_dir() or LEGACY_STATIC_DIR)
+
+    @app.get("/plugins/{plugin_id}/web/{asset_path:path}")
+    async def plugin_asset(plugin_id: str, asset_path: str):
+        from kollabor_plugins.packages import _ID, _read_registry
+
+        missing = JSONResponse({"detail": "Not found"}, status_code=404)
+        is_dev = plugin_id.endswith("@dev")
+        base_id = plugin_id[:-4] if is_dev else plugin_id
+        if not _ID.fullmatch(base_id):
+            return missing
+        parts = asset_path.split("/")
+        if any(not part or part.startswith(".") for part in parts):
+            return missing
+        extensions = {".js", ".mjs", ".css", ".png", ".woff2", ".json"}
+        if Path(asset_path).suffix not in extensions:
+            return missing
+        home = Path.home() / ".kollab"
+        try:
+            registry = _read_registry(home / "plugins.json")
+            if is_dev:
+                folder = registry["dev"].get(base_id)
+                if not isinstance(folder, str):
+                    return missing
+                root = Path(folder).resolve()
+            else:
+                record = registry["plugins"].get(base_id)
+                if not isinstance(record, dict) or not record.get("enabled") or base_id in registry["dev"]:
+                    return missing
+                installed_root = (home / "plugins").resolve()
+                root = (installed_root / base_id).resolve()
+                if root.parent != installed_root:
+                    return missing
+            web = root / "web"
+            dist = web / "dist"
+            if web.is_symlink() or dist.is_symlink() or not dist.resolve().is_relative_to(root):
+                return missing
+            asset = _safe_asset(dist, asset_path)
+            if asset is not None:
+                relative = asset.relative_to(dist.resolve())
+                if any(part.startswith(".") for part in relative.parts) or asset.suffix not in extensions:
+                    return missing
+        except (OSError, ValueError, RuntimeError):
+            return missing
+        return FileResponse(asset) if asset is not None else missing
 
     @app.get("/{asset_path:path}")
     async def static_or_spa(asset_path: str):

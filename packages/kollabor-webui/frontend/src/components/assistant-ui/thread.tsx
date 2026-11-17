@@ -26,6 +26,8 @@ import {
   ToolGroupTrigger,
 } from "@/components/assistant-ui/tool-group";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
+import { resolveMediaSegment, splitMediaSegments } from "@/components/media/media-tokens";
+import { MediaThumb, useMediaViewer, useSessionMedia } from "@/components/media/media-view";
 import { agentStatus, bundleName } from "@/components/panels/panel-model";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -40,8 +42,11 @@ import {
   type VoiceMode,
 } from "@/voice-mode";
 import { useRoomVoiceMode, useVoiceRoomLive, VoiceRoomBar } from "@/voice/voice-room";
-import { usePendingPermissionCancellation } from "@/runtime";
-import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
+import {
+  imageAttachmentAdapter,
+  usePendingPermissionCancellation,
+} from "@/runtime";
+import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
   panelCommandRequest,
   type PanelOpenRequest,
@@ -58,6 +63,7 @@ import {
   MessagePrimitive,
   SuggestionPrimitive,
   ThreadPrimitive,
+  type PendingAttachment,
   type ToolCallMessagePartComponent,
   useAui,
   useAssistantTransportSendCommand,
@@ -84,6 +90,7 @@ import {
   useMemo,
   useLayoutEffect,
   useRef,
+  useState,
   type ComponentType,
   type FC,
   type KeyboardEvent,
@@ -121,6 +128,7 @@ export type ThreadProps = {
   commands?: readonly SlashCommand[] | undefined;
   /** Open a Settings tab; called for a bare panel command typed in the composer. */
   onOpenPanel?: ((request: PanelOpenRequest) => void) | undefined;
+  onOpenWelcome?: (() => void) | undefined;
   /** Offer image attachments; false hides the paperclip and refuses drops and pastes. */
   attachmentsEnabled?: boolean | undefined;
   /** Visible status while a bounded history page is being fetched. */
@@ -162,6 +170,7 @@ export const Thread: FC<ThreadProps> = ({
   agents = [],
   commands = [],
   onOpenPanel,
+  onOpenWelcome,
   attachmentsEnabled = true,
   historyStatus,
   onLoadOlder,
@@ -178,6 +187,7 @@ export const Thread: FC<ThreadProps> = ({
         agents={agents}
         commands={commands}
         onOpenPanel={onOpenPanel}
+        onOpenWelcome={onOpenWelcome}
         attachmentsEnabled={attachmentsEnabled}
         historyStatus={historyStatus}
         onLoadOlder={onLoadOlder}
@@ -194,6 +204,7 @@ const ThreadRoot: FC<{
   agents: readonly AgentPoolEntry[];
   commands: readonly SlashCommand[];
   onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
+  onOpenWelcome: (() => void) | undefined;
   attachmentsEnabled: boolean;
   historyStatus: ThreadProps["historyStatus"];
   onLoadOlder: ThreadProps["onLoadOlder"];
@@ -205,6 +216,7 @@ const ThreadRoot: FC<{
   agents,
   commands,
   onOpenPanel,
+  onOpenWelcome,
   attachmentsEnabled,
   historyStatus,
   onLoadOlder,
@@ -408,6 +420,7 @@ const ThreadRoot: FC<{
                 agents={agents}
                 commands={commands}
                 onOpenPanel={onOpenPanel}
+                onOpenWelcome={onOpenWelcome}
                 attachmentsEnabled={attachmentsEnabled}
                 draftKey={draftKey}
               />
@@ -452,7 +465,7 @@ const ThreadScrollToBottom: FC = () => {
       <TooltipIconButton
         tooltip="Scroll to Bottom"
         variant="outline"
-        className="aui-thread-scroll-to-bottom absolute -top-12 z-10 self-center rounded-full p-4 disabled:invisible"
+        className="aui-thread-scroll-to-bottom z-10 self-center rounded-md p-4 disabled:invisible"
       >
         <ArrowDownIcon />
       </TooltipIconButton>
@@ -500,9 +513,10 @@ const Composer: FC<{
   agents: readonly AgentPoolEntry[];
   commands: readonly SlashCommand[];
   onOpenPanel: ((request: PanelOpenRequest) => void) | undefined;
+  onOpenWelcome: (() => void) | undefined;
   attachmentsEnabled: boolean;
   draftKey: ThreadProps["draftKey"];
-}> = ({ agents, commands, onOpenPanel, attachmentsEnabled, draftKey }) => {
+}> = ({ agents, commands, onOpenPanel, onOpenWelcome, attachmentsEnabled, draftKey }) => {
   const aui = useAui();
   const sendTransportCommand = useAssistantTransportSendCommand();
   // The mic starts the LiveKit room in this browser; /voice (the computer
@@ -526,6 +540,7 @@ const Composer: FC<{
   const composerText = useAuiState((s) => s.composer.text);
   const restoredDraft = useRef<{ key: string | null; text: string } | null>(null);
   const skipEmptyDraftPersist = useRef(false);
+  const [busySubmitError, setBusySubmitError] = useState<string | null>(null);
 
   useLayoutEffect(() => {
     const key = draftKey ?? null;
@@ -555,16 +570,27 @@ const Composer: FC<{
     saveComposerDraft(key, composerText);
   }, [composerText, draftKey]);
 
-  const lastBusySubmit = useRef<{ fingerprint: string; at: number } | null>(
-    null,
-  );
+  const lastBusySubmit = useRef<{
+    fingerprint: string;
+    at: number;
+    inFlight: Set<string>;
+  } | null>(null);
 
-  // A bare /config, /llm, /model, /setup or /connect (also /connect code and
-  // /connect knocks) opens its Settings tab and posts no text. Any other line is
-  // sent exactly as typed. Runs on form submit (Enter) and on the Send button.
+  // A bare /welcome opens the local guide; panel commands open Settings and post
+  // no text. Any other line is sent exactly as typed. Runs on form submit and Send.
   const openPanelFromComposer = (event: { preventDefault: () => void }) => {
-    if (!onOpenPanel) return;
     const { text, attachments } = aui.composer.getState();
+    if (
+      onOpenWelcome &&
+      attachments.length === 0 &&
+      text.trim().toLowerCase() === "/welcome"
+    ) {
+      event.preventDefault();
+      aui.composer.setText("");
+      onOpenWelcome();
+      return;
+    }
+    if (!onOpenPanel) return;
     const request =
       attachments.length === 0 ? panelCommandRequest(text, commands) : null;
     if (!request) return;
@@ -575,7 +601,7 @@ const Composer: FC<{
 
   // Picking a panel command in the slash menu (Enter or click) opens its tab
   // instead of leaving "/config" in the box for a second Enter.
-  const sendBusyMessage = (event: {
+  const sendBusyMessage = async (event: {
     preventDefault: () => void;
     defaultPrevented?: boolean;
   }) => {
@@ -586,8 +612,13 @@ const Composer: FC<{
     const fingerprint = `${state.text}\u0000${state.attachments
       .map((attachment) => attachment.id)
       .join(",")}`;
-    const now = Date.now();
     const previous = lastBusySubmit.current;
+    const inFlight = previous?.inFlight ?? new Set();
+    if (inFlight.has(fingerprint)) {
+      event.preventDefault();
+      return;
+    }
+    const now = Date.now();
     if (
       previous &&
       previous.fingerprint === fingerprint &&
@@ -596,29 +627,61 @@ const Composer: FC<{
       event.preventDefault();
       return;
     }
-    lastBusySubmit.current = { fingerprint, at: now };
+    lastBusySubmit.current = { fingerprint, at: now, inFlight };
+    inFlight.add(fingerprint);
     event.preventDefault();
-    const parts: Array<
-      | { type: "text"; text: string }
-      | { type: "image"; image: string }
-    > = [];
-    if (state.text.trim()) parts.push({ type: "text", text: state.text });
-    for (const attachment of state.attachments) {
-      for (const part of attachment.content ?? []) {
-        if (part.type === "text") parts.push({ type: "text", text: part.text });
-        if (part.type === "image") parts.push({ type: "image", image: part.image });
+    setBusySubmitError(null);
+    try {
+      const attachments = await Promise.all(
+        state.attachments.map(async (attachment) => {
+          if (attachment.content) return attachment;
+          if (
+            attachment.type === "image" &&
+            attachment.status.type === "requires-action"
+          ) {
+            return imageAttachmentAdapter.send(attachment as PendingAttachment);
+          }
+          throw new Error("Attachment is not ready to send");
+        }),
+      );
+      const parts: Array<
+        | { type: "text"; text: string }
+        | { type: "image"; image: string }
+      > = [];
+      if (state.text.trim()) parts.push({ type: "text", text: state.text });
+      for (const attachment of attachments) {
+        for (const part of attachment.content ?? []) {
+          if (part.type === "text") parts.push({ type: "text", text: part.text });
+          if (part.type === "image") parts.push({ type: "image", image: part.image });
+        }
       }
+      if (parts.length === 0) throw new Error("Message has no sendable content");
+      queueComposerDraftSubmission(draftKey, state.text);
+      if (state.text.length > 0) skipEmptyDraftPersist.current = true;
+      sendTransportCommand({
+        type: "add-message",
+        message: { role: "user", parts },
+        parentId: null,
+        sourceId: null,
+      });
+      const currentState = aui.composer.getState();
+      const currentFingerprint = `${currentState.text}\u0000${currentState.attachments
+        .map((attachment) => attachment.id)
+        .join(",")}`;
+      if (currentFingerprint === fingerprint) {
+        void aui.composer.reset();
+      }
+    } catch {
+      if (lastBusySubmit.current?.fingerprint === fingerprint) {
+        lastBusySubmit.current = {
+          ...lastBusySubmit.current,
+          at: Number.NEGATIVE_INFINITY,
+        };
+      }
+      setBusySubmitError("Could not send the message. Retry or remove the attachment.");
+    } finally {
+      inFlight.delete(fingerprint);
     }
-    if (parts.length === 0) return;
-    queueComposerDraftSubmission(draftKey, state.text);
-    if (state.text.length > 0) skipEmptyDraftPersist.current = true;
-    sendTransportCommand({
-      type: "add-message",
-      message: { role: "user", parts },
-      parentId: null,
-      sourceId: null,
-    });
-    void aui.composer.reset();
   };
 
   const submitBusyMessage = (event: {
@@ -653,10 +716,20 @@ const Composer: FC<{
     id: string;
     metadata?: Record<string, unknown> | undefined;
   }) => {
-    if (!onOpenPanel || aui.composer.getState().attachments.length > 0) return;
     const insert = item.metadata?.insertText;
+    const commandText = `/${typeof insert === "string" ? insert : item.id}`;
+    if (
+      onOpenWelcome &&
+      aui.composer.getState().attachments.length === 0 &&
+      commandText.trim().toLowerCase() === "/welcome"
+    ) {
+      aui.composer.setText("");
+      onOpenWelcome();
+      return;
+    }
+    if (!onOpenPanel || aui.composer.getState().attachments.length > 0) return;
     const request = panelCommandRequest(
-      `/${typeof insert === "string" ? insert : item.id}`,
+      commandText,
       commands,
     );
     if (!request) return;
@@ -910,6 +983,11 @@ const Composer: FC<{
           emptyMessage="No online agents"
           emptyHint="Try @broadcast to reach every agent in this project."
         />
+        {busySubmitError ? (
+          <p role="alert" className="text-destructive px-2 text-xs">
+            {busySubmitError}
+          </p>
+        ) : null}
         <ComposerPrimitive.AttachmentDropzone
           asChild
           disabled={!attachmentsEnabled}
@@ -1292,6 +1370,62 @@ const AssistantActionBar: FC = () => {
   );
 };
 
+/**
+ * A user bubble's text: each [imageN] token becomes the thumbnail of the row's
+ * Nth stored image (#1088) and opens the viewer at it. Without a stored copy
+ * (an older row, or a picture the engine could not keep) the token stays text.
+ * A live row carries its pictures as image parts, so there the tokens render
+ * as nothing instead of duplicating the picture next to them.
+ */
+export const UserText: FC<{ text?: string }> = ({ text }) => {
+  const media = useAuiState(
+    (s) => s.message.metadata?.custom?.media,
+  ) as MediaEntry[] | undefined;
+  const imageParts = useAuiState(
+    (s) => s.message.parts.filter((part) => part.type === "image").length,
+  );
+  const openViewer = useMediaViewer();
+  const sessionMedia = useSessionMedia();
+  if (!text) return null;
+  const segments = splitMediaSegments(text);
+  return (
+    <>
+      {segments.map((segment, index) => {
+        // A live row shows its pictures as image parts, so its token
+        // segments render as nothing instead of duplicating the attached
+        // picture next to them (#1140 review). Typed [[imageN]] escapes
+        // keep their literal text. The check runs before resolving: a live
+        // row carries no media list, so resolving would misclassify.
+        if (imageParts > 0 && segment.kind === "token") return null;
+        const resolved = resolveMediaSegment(segment, media);
+        if (resolved.kind === "text") return <span key={index}>{resolved.text}</span>;
+        // Literal [imageN] text: the escaped form, or a slot whose picture
+        // is missing or failed - it never requests a ref and never opens
+        // the viewer (#1124 P2a).
+        if (resolved.kind === "literal") return <span key={index}>{resolved.text}</span>;
+        const { entry, index: slot } = resolved;
+        // A resolved thumb implies the row has a media list; an empty list
+        // just yields a -1 viewer index, falling back to the slot position.
+        // Placeholder slots (failed or empty refs) carry no picture for the
+        // viewer to show, so they are filtered out of the fallback list
+        // (#1140 review).
+        const viewerItems = (sessionMedia?.length ? sessionMedia : (media ?? [])).filter(
+          (item) => item.ref && !item.failed,
+        );
+        const viewerIndex = viewerItems.findIndex((item) => item.ref === entry.ref);
+        return (
+          <MediaThumb
+            key={index}
+            ref_={entry.ref}
+            className="my-1 align-middle"
+            onOpen={openViewer ? () => openViewer(viewerItems, viewerIndex >= 0 ? viewerIndex : slot) : undefined}
+          />
+        );
+      })}
+    </>
+  );
+};
+
 const UserMessage: FC = () => {
   return (
     <MessagePrimitive.Root
@@ -1303,7 +1437,7 @@ const UserMessage: FC = () => {
 
       <div className="aui-user-message-content-wrapper relative col-start-2 min-w-0">
         <div className="aui-user-message-content peer bg-muted text-foreground rounded-xl px-4 py-2 whitespace-pre-wrap wrap-break-word empty:hidden pointer-fine:text-sm">
-          <MessagePrimitive.Parts />
+          <MessagePrimitive.Parts components={{ Text: UserText }} />
         </div>
         <div className="aui-user-action-bar-wrapper absolute start-0 top-1/2 -translate-x-full -translate-y-1/2 pe-2 peer-empty:hidden rtl:translate-x-full">
           <UserActionBar />

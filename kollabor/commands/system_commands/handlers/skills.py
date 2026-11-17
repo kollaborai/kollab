@@ -232,6 +232,8 @@ class SkillCommandHandler(BaseCommandHandler):
                 status_parts.append("bundled")
             if status_parts:
                 description = f"[{'+'.join(status_parts)}] {description}"
+            if skill.bundled_copy_differs:
+                description = f"[global differs from bundled] {description}"
 
             skill_items.append(
                 {
@@ -366,6 +368,8 @@ class SkillCommandHandler(BaseCommandHandler):
                 tags.append("loaded")
             elif assigned:
                 tags.append("assigned")
+            if skill.bundled_copy_differs:
+                tags.append("global differs from bundled")
             if skill.skill_dir:
                 if (skill.skill_dir / "scripts").is_dir():
                     tags.append("scripts")

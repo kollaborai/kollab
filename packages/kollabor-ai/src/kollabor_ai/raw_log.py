@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -53,17 +53,17 @@ class ProfileSnapshot:
 class RawRequest:
     """Both views of the request: our intent and what the provider saw.
 
-    ``conversation_local`` is the conversation history as
-    ``api_communication_service`` prepared it — useful for understanding
-    what Kollab thought it was sending. ``wire_request`` is the exact
-    dict handed to the HTTP client (or SDK) immediately before transport.
-    A consumer who wants byte-level reproducibility should rely on
-    ``wire_request``; a consumer debugging Kollab's own pipeline should
-    rely on ``conversation_local``.
+    ``conversation_local`` is the conversation as ``api_communication_service``
+    prepared it. After the first record, matching history prefixes are stored
+    as deltas and linked by ``conversation_local_previous_turn_id``.
+    ``wire_request`` keeps the provider-native request fields, with recognized
+    history arrays stored as deltas and linked by ``wire_request_previous_turn_id``.
     """
 
     conversation_local: List[LocalMessage] = field(default_factory=list)
+    conversation_local_previous_turn_id: Optional[str] = None
     wire_request: Optional[Dict[str, Any]] = None
+    wire_request_previous_turn_id: Optional[str] = None
     wire_provider: str = ""
     tools: Optional[List[Dict[str, Any]]] = None
 

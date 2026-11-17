@@ -876,7 +876,7 @@ async def test_concurrent_attaches_serialize_mcp_snapshot_and_rollback(monkeypat
                 await self.release_server_b_snapshot.wait()
             return status
 
-        async def enable_mcp_server(self, name):
+        async def enable_mcp_server(self, name, *, persist=True):
             self.enabled[name] = True
 
         async def disable_mcp_server(self, name):
@@ -967,7 +967,7 @@ async def test_cancelled_mcp_attach_finishes_rollback_before_retry(monkeypatch, 
         async def test_mcp_server(self, name):
             return {"found": True, "enabled": self.enabled[name]}
 
-        async def enable_mcp_server(self, name):
+        async def enable_mcp_server(self, name, *, persist=True):
             self.enabled[name] = True
 
         async def disable_mcp_server(self, name):
@@ -1071,7 +1071,7 @@ async def test_attach_does_not_reenable_disconnected_mcp_server(
         async def test_mcp_server(self, name):
             return {"found": True, "enabled": self.enabled[name]}
 
-        async def enable_mcp_server(self, name):
+        async def enable_mcp_server(self, name, *, persist=True):
             self.enabled[name] = True
 
         async def disable_mcp_server(self, name):
@@ -1163,7 +1163,7 @@ async def test_connect_waits_until_attach_rollback_finishes(
         async def test_mcp_server(self, name):
             return {"found": True, "enabled": self.enabled[name]}
 
-        async def enable_mcp_server(self, name):
+        async def enable_mcp_server(self, name, *, persist=True):
             self.enabled[name] = True
 
         async def disable_mcp_server(self, name):
