@@ -61,7 +61,11 @@ import type {
 } from "@/components/panels/panel-model";
 import { ProfilesDialog } from "@/components/shell/ProfilesDialog";
 import { SetupGuide } from "@/setup/SetupGuide";
-import { WELCOME_GUIDE_DISMISSED_NOTICE } from "@/setup/guide-model";
+import {
+  STORAGE_KEY,
+  WELCOME_GUIDE_DISMISSED_NOTICE,
+  shouldAutoOpenGuide,
+} from "@/setup/guide-model";
 import { SessionPanel, type SessionView } from "@/components/shell/SessionPanel";
 import { latestTodoBlock } from "@/utils/todo-list";
 import { ShellHeader } from "@/components/shell/ShellHeader";
@@ -148,10 +152,12 @@ function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current:
 
 const api = new EngineApi();
 
-/** Whether this browser has no setup progress yet. Read before children mount. */
+/** True while this browser has no engaged guided-setup record: a first run,
+ * or a record stuck at an undismissed welcome (older builds wrote that on
+ * mount, so their owners never saw the auto-open either). */
 const noGuideYet = () => {
   try {
-    return window.localStorage.getItem("kollab.setup-guide.v1") === null;
+    return shouldAutoOpenGuide(window.localStorage.getItem(STORAGE_KEY));
   } catch {
     return false;
   }
@@ -1996,13 +2002,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                     Release notes
                   </a>
                   <NoticeAction disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>
-                    {updateBusy ? "Updating…" : "Update now"}
+                    {updateBusy ? "Updating…" : "Update Now"}
                   </NoticeAction>
                 </>
               }
               onDismiss={() => setUpdateInfo(null)}
+              detail={`Kollab ${updateInfo.release.version} is available.`}
             >
-              Kollab {updateInfo.release.version} is available.
+              A Kollab update is available.
             </NoticeBar>
           ) : null}
           {contextCompactionStatus ? (

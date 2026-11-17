@@ -234,6 +234,7 @@ const mainConfig = defineConfig({
       "tests/whats-new-model.test.ts",
       "tests/whats-new-boundaries.test.ts",
       "tests/whats-new-dialog.test.tsx",
+      "tests/composer-image-restore.test.ts",
       "tests/setup-guide-footer.test.tsx",
       "tests/setup-guide-close.test.tsx",
       "tests/setup-guide-first-run-persistence.test.tsx",

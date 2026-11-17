@@ -325,7 +325,8 @@ export async function openPage(browser, baseUrl, fixtures, options = {}) {
     isMobile: options.isMobile ?? false,
     hasTouch: options.isMobile ?? false,
   });
-  const initialGuideState = options.initialGuideState ?? "dismissed";
+  const initialGuideState =
+    options.initialGuideState ?? JSON.stringify({ step: "done", dismissed: true });
   await context.addInitScript(({ state, version }) => {
     localStorage.setItem("kollab.setup-guide.v1", state);
     localStorage.setItem("kollab.whats-new.v1", JSON.stringify({ seenVersion: version }));
@@ -654,7 +655,7 @@ async function main() {
     console.log(`Mocked API requests: ${shell.fixture.requests.length}`);
     console.log("Learn browser acceptance passed; all API calls were mocked and no live engine was used.");
   } finally {
-    await browser.close();
+    await browser?.close();
     await server.close();
   }
 }

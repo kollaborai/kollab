@@ -176,7 +176,7 @@ async function main() {
     });
     context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     await context.addInitScript(() => {
-      localStorage.setItem("kollab.setup-guide.v1", "dismissed");
+      localStorage.setItem("kollab.setup-guide.v1", JSON.stringify({ step: "done", dismissed: true }));
       localStorage.setItem("kollab.whats-new.v1", JSON.stringify({ seenVersion: "999.999.999" }));
     });
     const page = await context.newPage();

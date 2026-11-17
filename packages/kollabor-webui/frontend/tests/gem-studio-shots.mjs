@@ -165,7 +165,7 @@ const highlightOf = (page) =>
 const makeContext = async (browser, width, height, theme, extra = {}, simulateHybrid = false) => {
   const context = await browser.newContext({ viewport: { width, height }, ...extra });
   await context.addInitScript(() => {
-    localStorage.setItem("kollab.setup-guide.v1", "dismissed");
+    localStorage.setItem("kollab.setup-guide.v1", JSON.stringify({ step: "done", dismissed: true }));
     localStorage.setItem("kollab.whats-new.v1", JSON.stringify({ seenVersion: "999.999.999" }));
   });
   const page = await context.newPage();

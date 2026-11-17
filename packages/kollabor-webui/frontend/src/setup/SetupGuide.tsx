@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, X } from "lucide-react";
 import type { EngineApi } from "@/api";
 import { Button } from "@/components/ui/button";
@@ -17,6 +17,7 @@ import {
   nextStep,
   resolveStep,
   saveGuideState,
+  shouldPersistGuide,
   stepIndex,
   stepTarget,
   type GuideState,
@@ -52,15 +53,20 @@ export function SetupGuide({
     if (typeof window === "undefined") return loadGuideState(null);
     return loadGuideState(window.localStorage.getItem(STORAGE_KEY));
   });
-  const [initialState] = useState(state);
   const [facts, setFacts] = useState<SetupFacts>(emptyFacts);
 
-  // Persist progress after a transition. Writing the pristine default on mount
-  // would make a new browser look returning before startup checks first-run.
+  // Persist every transition; a reload resumes where the user left off.
+  // The persist decision itself is pure (guide-model shouldPersistGuide):
+  // the untouched first-run state must not reach storage, or App's first-run
+  // check is dead again (#1098).
+  const prevStateRef = useRef(state);
   useEffect(() => {
-    if (typeof window === "undefined" || state === initialState) return;
+    const prev = prevStateRef.current;
+    prevStateRef.current = state;
+    if (typeof window === "undefined") return;
+    if (!shouldPersistGuide(prev, state)) return;
     window.localStorage.setItem(STORAGE_KEY, saveGuideState(state));
-  }, [initialState, state]);
+  }, [state]);
 
   // Re-read engine facts while shown so completed steps disappear live.
   useEffect(() => {
