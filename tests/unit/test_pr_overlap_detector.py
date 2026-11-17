@@ -91,3 +91,34 @@ def test_common_base_or_one_nonoverlapping_file_is_not_enough():
 def test_comment_marker_is_stable_for_both_pr_orders():
     assert detector.overlap_marker(12, 4) == detector.overlap_marker(4, 12)
     assert detector.overlap_marker(12, 4) in detector.overlap_comment(12, 4)
+
+
+def test_existing_pair_comment_is_not_posted_twice(monkeypatch):
+    marker = detector.overlap_marker(4, 12)
+    calls = []
+    monkeypatch.setattr(
+        detector,
+        "_gh_pages",
+        lambda _path: [{"id": 7, "body": f"{marker}\nexisting notice"}],
+    )
+    monkeypatch.setattr(detector, "_gh_api", lambda *args, **kwargs: calls.append(args))
+
+    detector._ensure_comment("owner/repo", 12, f"{marker}\nexisting notice", marker)
+
+    assert calls == []
+
+
+def test_changed_pair_comment_updates_the_existing_notice(monkeypatch):
+    marker = detector.overlap_marker(4, 12)
+    calls = []
+    monkeypatch.setattr(
+        detector,
+        "_gh_pages",
+        lambda _path: [{"id": 7, "body": f"{marker}\nold notice"}],
+    )
+    monkeypatch.setattr(detector, "_gh_api", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    detector._ensure_comment("owner/repo", 12, f"{marker}\nupdated notice", marker)
+
+    assert calls[0][0][0] == "repos/owner/repo/issues/comments/7"
+    assert calls[0][1]["method"] == "PATCH"
