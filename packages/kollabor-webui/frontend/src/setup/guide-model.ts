@@ -69,12 +69,15 @@ export function loadGuideState(raw: string | null): GuideState {
     };
     // "provider" was a card until #1217. Resume that saved state at the
     // welcome card, as requested by the issue.
-    const saved = parsed.step === "provider" ? "welcome" : parsed.step;
-    const step =
-      typeof saved === "string" && saved in STEP_INDEX
-        ? (saved as SetupStepId)
-        : "welcome";
-    return { step, dismissed: parsed.dismissed === true };
+    const step = parsed.step === "provider" ? "welcome" : parsed.step;
+    const validStep =
+      typeof step === "string" &&
+      Object.prototype.hasOwnProperty.call(STEP_INDEX, step);
+    if (!validStep) return initialGuideState();
+    return {
+      step: step as SetupStepId,
+      dismissed: parsed.dismissed === true,
+    };
   } catch {
     return initialGuideState();
   }
@@ -183,4 +186,32 @@ export function stepTarget(
 }
 
 export const isSetupStepId = (value: string): value is SetupStepId =>
-  value in STEP_INDEX;
+  Object.prototype.hasOwnProperty.call(STEP_INDEX, value);
+
+/** The untouched first-run state: the tour has not engaged yet. */
+export function isInitialGuideState(state: GuideState): boolean {
+  return state.step === "welcome" && !state.dismissed;
+}
+
+/**
+ * Whether startup should open the guide on its own. No record at all is a
+ * first run. A record stuck at an undismissed welcome also counts: it carries
+ * no user decision (older builds wrote exactly that on mount, which is why
+ * the first-run branch never fired for anyone). Anything else means the
+ * person engaged the tour or dismissed it, and neither reopens on its own.
+ */
+export function shouldAutoOpenGuide(raw: string | null): boolean {
+  return isInitialGuideState(loadGuideState(raw));
+}
+
+/**
+ * Whether a guide state transition should be written to storage. The
+ * untouched first-run state is not a user decision: persisting it on mount
+ * is exactly what defeated App's first-run check (#1098). Identical states
+ * and reverts to the pristine state write nothing too, so no write can
+ * clobber an existing record with an undismissed-welcome entry.
+ */
+export function shouldPersistGuide(prev: GuideState, next: GuideState): boolean {
+  if (isInitialGuideState(next)) return false;
+  return prev.step !== next.step || prev.dismissed !== next.dismissed;
+}

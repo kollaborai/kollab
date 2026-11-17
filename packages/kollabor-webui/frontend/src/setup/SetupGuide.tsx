@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, X } from "lucide-react";
 import type { EngineApi } from "@/api";
 import { Button } from "@/components/ui/button";
@@ -19,6 +19,7 @@ import {
   nextStep,
   resolveStep,
   saveGuideState,
+  shouldPersistGuide,
   stepIndex,
   stepTarget,
   type GuideState,
@@ -58,8 +59,15 @@ export function SetupGuide({
   const [factsLoaded, setFactsLoaded] = useState(false);
 
   // Persist every transition; a reload resumes where the user left off.
+  // The persist decision itself is pure (guide-model shouldPersistGuide):
+  // the untouched first-run state must not reach storage, or App's first-run
+  // check is dead again (#1098).
+  const prevStateRef = useRef(state);
   useEffect(() => {
+    const prev = prevStateRef.current;
+    prevStateRef.current = state;
     if (typeof window === "undefined") return;
+    if (!shouldPersistGuide(prev, state)) return;
     window.localStorage.setItem(STORAGE_KEY, saveGuideState(state));
   }, [state]);
 
