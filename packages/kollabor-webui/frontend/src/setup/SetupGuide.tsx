@@ -72,8 +72,20 @@ export function SetupGuide({
     let mounted = true;
     setFactsLoaded(false);
     (async () => {
+      const profilesRequest = api
+        .listProfiles()
+        .catch(() => ({ profiles: [], active: undefined }));
+      void profilesRequest.then((profiles) => {
+        if (!mounted) return;
+        setFacts((prev) => ({
+          ...prev,
+          providerChosen: hasChosenProvider(profiles.profiles || [], profiles.active),
+          activeProfile: profiles.active ?? null,
+        }));
+        setFactsLoaded(true);
+      });
       const [profiles, sessions, agents] = await Promise.all([
-        api.listProfiles().catch(() => ({ profiles: [], active: undefined })),
+        profilesRequest,
         api
           .listSessions()
           .catch(() => null)
@@ -93,7 +105,6 @@ export function SetupGuide({
             (sessions?.network?.networks || []).some((group) => group.live),
         ),
       });
-      setFactsLoaded(true);
     })();
     return () => {
       mounted = false;
