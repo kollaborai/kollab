@@ -40,7 +40,7 @@ async def test_tool_executor_blocks_direct_and_wrapped_kollab_launches(command):
     )
 
     assert not result.success
-    assert "spawning agents via terminal" in result.error
+    assert "hub_spawn" in result.error
 
 
 @pytest.mark.asyncio
@@ -73,9 +73,10 @@ async def test_tool_executor_blocks_background_kollab_processes():
 
     assert not result.success
     assert result.error == (
-        "Background Kollab commands are blocked in agent terminals, including "
-        "informational commands. Run them in the foreground. Use <hub_spawn> "
-        "to launch peers and /hub stop all for agents owned by this caller."
+        "Agent terminals block direct or wrapped agent launches, CLI stop-all, "
+        "and background Kollab commands, including informational commands. "
+        "Run informational commands in the foreground; use <hub_spawn> for "
+        "peers and /hub stop all for agents owned by this caller."
     )
     executor.shell_executor.run.assert_not_called()
 
