@@ -3257,7 +3257,9 @@ class ToolExecutor:
                         elif encoding == "gzip":
                             decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
                         elif encoding == "deflate":
-                            decompressor = zlib.decompressobj()
+                            # Servers use both the zlib wrapper and raw DEFLATE
+                            # despite the HTTP deflate coding specifying a wrapper.
+                            decompressor = None
                         else:
                             return ToolExecutionResult(
                                 tool_id=tool_id,
@@ -3268,6 +3270,7 @@ class ToolExecutor:
 
                         decoded_parts = []
                         decoded_size = 0
+                        deflate_prefix = bytearray()
                         while True:
                             chunk = await resp.content.read(
                                 min(64 * 1024, max_download_bytes - downloaded + 1)
@@ -3282,6 +3285,22 @@ class ToolExecutor:
                                     success=False,
                                     error="Response exceeded the 500000-byte download limit",
                                 )
+                            if encoding == "deflate" and decompressor is None:
+                                deflate_prefix.extend(chunk)
+                                if len(deflate_prefix) < 2:
+                                    continue
+                                cmf, flg = deflate_prefix[:2]
+                                has_zlib_header = (
+                                    cmf & 0x0F == 8
+                                    and cmf >> 4 <= 7
+                                    and ((cmf << 8) | flg) % 31 == 0
+                                )
+                                window_bits = (
+                                    zlib.MAX_WBITS if has_zlib_header else -zlib.MAX_WBITS
+                                )
+                                decompressor = zlib.decompressobj(window_bits)
+                                chunk = bytes(deflate_prefix)
+                                deflate_prefix.clear()
                             if decompressor is None:
                                 decoded = chunk
                             else:
