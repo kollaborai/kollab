@@ -9,6 +9,7 @@ Mocks aiohttp to avoid real network calls.
 """
 
 import asyncio
+import gzip
 import os
 import sys
 import unittest
@@ -148,9 +149,13 @@ def _make_mock_aiohttp_response(status=200, text="", url="https://example.com"):
     encoded = text.encode() if isinstance(text, str) else text
 
     class MockContent:
-        async def iter_chunked(self, chunk_size):
-            for offset in range(0, len(encoded), chunk_size):
-                yield encoded[offset : offset + chunk_size]
+        def __init__(self):
+            self.offset = 0
+
+        async def read(self, size):
+            chunk = encoded[self.offset : self.offset + size]
+            self.offset += len(chunk)
+            return chunk
 
     resp.content = MockContent()
     resp.headers = {}
@@ -247,17 +252,18 @@ class TestWebFetchExecution(unittest.TestCase):
 
         class BoundedContent:
             def __init__(self):
-                self.read = 0
+                self.bytes_read = 0
+                self.offset = 0
 
-            async def iter_chunked(self, _chunk_size):
-                for offset in range(0, len(body), 8192):
-                    chunk = body[offset : offset + 8192]
-                    self.read += len(chunk)
-                    yield chunk
+            async def read(self, size):
+                chunk = body[self.offset : self.offset + size]
+                self.offset += len(chunk)
+                self.bytes_read += len(chunk)
+                return chunk
 
         mock_resp = _make_mock_aiohttp_response(text=body.decode())
         mock_resp.content = BoundedContent()
-        mock_resp.headers = {"Content-Length": str(len(body))}
+        mock_resp.headers = {}
         tool_data = {
             "id": "web_fetch_bound",
             "url": "https://example.com/article?token=secret",
@@ -269,7 +275,9 @@ class TestWebFetchExecution(unittest.TestCase):
             result = _run(self.executor._execute_web_fetch(tool_data))
 
         self.assertLessEqual(len(result.output), 100)
-        self.assertLessEqual(mock_resp.content.read, 500_000)
+        self.assertLessEqual(mock_resp.content.bytes_read, 500_000)
+        self.assertFalse(result.success)
+        self.assertIn("download limit", result.error)
         mock_resp.text.assert_not_awaited()
 
     def test_web_fetch_rejects_invalid_output_limit(self):
@@ -287,6 +295,149 @@ class TestWebFetchExecution(unittest.TestCase):
                 )
                 self.assertFalse(result.success)
                 self.assertIn("max_chars", result.error)
+
+    def test_web_fetch_local_http_redirect_chunked_and_compressed_limits(self):
+        """Exercise redirects, unknown lengths and gzip expansion over real HTTP."""
+        async def run_case():
+            large_body = b"Z" * 2_100_000
+            compressed_body = gzip.compress(large_body)
+
+            async def handle(reader, writer):
+                request = await reader.readuntil(b"\r\n\r\n")
+                path = request.split(b" ", 2)[1]
+                if path == b"/redirect":
+                    writer.write(
+                        b"HTTP/1.1 302 Found\r\n"
+                        b"Location: /chunked\r\nContent-Length: 0\r\n"
+                        b"Connection: close\r\n\r\n"
+                    )
+                elif path == b"/chunked":
+                    writer.write(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                        b"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                    )
+                    for offset in range(0, len(large_body), 32_768):
+                        chunk = large_body[offset : offset + 32_768]
+                        writer.write(f"{len(chunk):X}\r\n".encode() + chunk + b"\r\n")
+                        await writer.drain()
+                    writer.write(b"0\r\n\r\n")
+                elif path == b"/malformed":
+                    writer.write(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: invalid\r\n"
+                        b"Connection: close\r\n\r\nhello"
+                    )
+                elif path == b"/normal":
+                    normal_body = b'{"headline":"' + (b"news " * 120) + b'"}'
+                    writer.write(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                        + f"Content-Length: {len(normal_body)}\r\n".encode()
+                        + b"Connection: close\r\n\r\n"
+                        + normal_body
+                    )
+                else:
+                    writer.write(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                        + f"Content-Length: {len(compressed_body)}\r\n".encode()
+                        + b"Content-Encoding: gzip\r\nConnection: close\r\n\r\n"
+                        + compressed_body
+                    )
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+
+            server = await asyncio.start_server(handle, "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+            try:
+                redirected = await self.executor._execute_web_fetch(
+                    {
+                        "id": "web_fetch_chunked",
+                        "url": f"http://127.0.0.1:{port}/redirect",
+                        "extract_main": False,
+                    }
+                )
+                compressed = await self.executor._execute_web_fetch(
+                    {
+                        "id": "web_fetch_compressed",
+                        "url": f"http://127.0.0.1:{port}/compressed",
+                        "extract_main": False,
+                    }
+                )
+                malformed = await self.executor._execute_web_fetch(
+                    {
+                        "id": "web_fetch_malformed",
+                        "url": f"http://127.0.0.1:{port}/malformed?token=secret",
+                    }
+                )
+                normal = await self.executor._execute_web_fetch(
+                    {
+                        "id": "web_fetch_normal",
+                        "url": f"http://127.0.0.1:{port}/normal",
+                        "extract_main": False,
+                    }
+                )
+                return redirected, compressed, malformed, normal
+            finally:
+                server.close()
+                await server.wait_closed()
+
+        redirected, compressed, malformed, normal = _run(run_case())
+        self.assertFalse(redirected.success)
+        self.assertIn("download limit", redirected.error)
+        self.assertFalse(compressed.success)
+        self.assertIn("decoded limit", compressed.error)
+        self.assertFalse(malformed.success)
+        self.assertNotIn("token=secret", malformed.error)
+        self.assertTrue(normal.success)
+        self.assertIn('"headline"', normal.output)
+        self.assertLessEqual(len(normal.output), 5000)
+
+    def test_web_fetch_bounds_playwright_fallback_output(self):
+        """Fallback text is subject to the same total output budget."""
+        response = _make_mock_aiohttp_response(text="<html><body>x</body></html>")
+        tool_data = {
+            "id": "web_fetch_fallback",
+            "url": "https://example.com/page",
+            "max_chars": 100,
+        }
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                self.executor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value="fallback " * 1000),
+            ),
+        ):
+            result = _run(self.executor._execute_web_fetch(tool_data))
+
+        self.assertTrue(result.success)
+        self.assertLessEqual(len(result.output), 100)
+        self.assertIn("...[truncated]", result.output)
+
+    def test_web_fetch_cancellation_closes_response(self):
+        """Cancellation during streaming propagates and closes the response."""
+        async def run_case():
+            started = asyncio.Event()
+            response = _make_mock_aiohttp_response()
+
+            class BlockingContent:
+                async def read(self, _size):
+                    started.set()
+                    await asyncio.Event().wait()
+
+            response.content = BlockingContent()
+            with _patch_aiohttp_session(mock_get=response):
+                task = asyncio.create_task(
+                    self.executor._execute_web_fetch(
+                        {"id": "web_fetch_cancel", "url": "https://example.com"}
+                    )
+                )
+                await started.wait()
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            return response.__aexit__.await_count
+
+        self.assertEqual(_run(run_case()), 1)
 
     def test_web_fetch_invalid_url(self):
         """Test error handling for invalid URLs."""
