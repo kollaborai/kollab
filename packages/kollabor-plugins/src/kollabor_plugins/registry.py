@@ -590,7 +590,8 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
 
             settings = setting_widgets(root, manifest)
         except (OSError, ValueError, TypeError) as exc:
-            state, error = "error", str(exc)
+            logger.warning("Failed to load plugin metadata for %s", plugin_id, exc_info=exc)
+            state, error = "error", "Plugin metadata could not be loaded"
         if plugin_id in registry.package_errors and state == "ok":
             state, error = "error", registry.package_errors[plugin_id]
         service_entries = _service_entries(home, plugin_id, manifest)
@@ -638,7 +639,8 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
 
             dev_settings = setting_widgets(Path(folder), manifest)
         except (OSError, ValueError) as exc:
-            manifest, error = {}, str(exc)
+            logger.warning("Failed to load development plugin metadata for %s", plugin_id, exc_info=exc)
+            manifest, error = {}, "Development plugin metadata could not be loaded"
         entries.append(
             {
                 "id": f"{plugin_id}@dev",
