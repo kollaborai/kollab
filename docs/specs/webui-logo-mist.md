@@ -54,10 +54,10 @@ This change does not alter the logo silhouette or introduce a second implementat
 - Reuse the same logo component in both display locations. Decision recorded in issue #1246 and implemented in PR #1247.
 
 ## Test plan
-- `packages/kollabor-webui/frontend/tests/kollab-logo.test.tsx`: verify SVG geometry comes from `K_POLYS`, the initial fallback remains visible, missing WebGL2 and setup failures retain the fallback, and software renderers release the context.
+- `packages/kollabor-webui/frontend/tests/kollab-logo.test.tsx`: verify SVG geometry comes from `K_POLYS`, the initial fallback remains visible, missing WebGL2 and setup failures retain the fallback, software renderers release the context, and reduced motion schedules no further render after its still frame.
 - The PR description reports the frontend Vitest suite (49 files, 443 tests), TypeScript checking, and a production build.
 - The PR description reports browser observation of the sidebar glass K in dark and light themes, with no clipping or console errors. It also says the welcome-screen K was not visible in that stack because an agent gem replaced it; visual behavior there remains unverified in that run.
-- Sweep both locations: the sidebar header and welcome screen. The source implements reduced motion as a still frame, but the focused logo test file does not exercise that branch. The unmount cleanup and reduced-motion behavior need direct verification.
+- Sweep both locations: the sidebar header and welcome screen. The focused logo test covers the one-frame reduced-motion behavior. The unmount cleanup is directly checked by the review probe; the component unmount path itself remains untested.
 
 ## Docs and changelog fragment
 - Feature specification: `docs/specs/webui-logo-mist.md`.

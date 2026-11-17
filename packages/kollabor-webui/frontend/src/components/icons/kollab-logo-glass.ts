@@ -267,10 +267,8 @@ function build(
       renderer.setRenderTarget(null);
       renderer.render(scene, camera);
     }
-    // Reduced motion: hold a still frame, but keep polling so size and theme stay right.
-    frame = motion?.matches
-      ? window.setTimeout(() => draw(performance.now()), 500)
-      : requestAnimationFrame(draw);
+    // Reduced motion renders this frame once; do not keep a GPU render loop alive.
+    if (!motion?.matches) frame = requestAnimationFrame(draw);
   };
   draw(start);
 
