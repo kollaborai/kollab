@@ -215,7 +215,25 @@ pip_scripts_dir() {
     IFS= read -r shebang < "$pip_path" || return 1
     shebang="${shebang#\#!}"
     read -r python_cmd _ <<< "$shebang"
-    if [[ "$python_cmd" == */env ]]; then
+    if [[ "$python_cmd" == */sh ]]; then
+        IFS= read -r env_args < <(sed -n '2p' "$pip_path") || return 1
+        [[ "$env_args" == *exec* ]] || return 1
+        env_args="${env_args#*exec}"
+        env_args="${env_args#\'}"
+        env_args="${env_args# }"
+        if [[ "$env_args" == \"* ]]; then
+            python_cmd="${env_args#\"}"
+            python_cmd="${python_cmd%%\"*}"
+        elif [[ "$env_args" == \'* ]]; then
+            python_cmd="${env_args#\'}"
+            python_cmd="${python_cmd%%\'*}"
+        else
+            read -r python_cmd _ <<< "$env_args"
+        fi
+        if [[ "$python_cmd" != */* ]]; then
+            python_cmd=$(command -v "$python_cmd") || return 1
+        fi
+    elif [[ "$python_cmd" == */env ]]; then
         env_args="${shebang#*env }"
         read -r python_cmd _ <<< "$env_args"
         if [[ "$python_cmd" == "-S" ]]; then
