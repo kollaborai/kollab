@@ -53,14 +53,12 @@ def read_managed_state() -> tuple[Optional[ManagedConfig], dict]:
         return managed, {}
     try:
         data = json.loads(get_global_config_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return managed, {}
     return managed, data if isinstance(data, dict) else {}
 
 
-def managed_value(
-    managed: Optional[ManagedConfig], global_settings: dict, config_path: str
-) -> Any:
+def managed_value(managed: Optional[ManagedConfig], global_settings: dict, config_path: str) -> Any:
     """A synced key's value as the primary last wrote it, straight from disk.
 
     In an attached window this process's config service can lag a sync by a
@@ -89,12 +87,7 @@ def _loadout_rows(config_service: Any, managed, global_settings) -> list[dict]:
 
     Change it with /llm; on a secondary it also says who manages it.
     """
-    active = (
-        _effective(
-            config_service, managed, global_settings, "kollabor.llm.active_profile"
-        )
-        or "default"
-    )
+    active = _effective(config_service, managed, global_settings, "kollabor.llm.active_profile") or "default"
     rows = [
         {
             "type": "label",
@@ -108,9 +101,7 @@ def _loadout_rows(config_service: Any, managed, global_settings) -> list[dict]:
     if managed_by(model_path, managed):
         model = managed_value(managed, global_settings, model_path)
     else:
-        profiles = (
-            config_service.get("kollabor.llm.profiles") if config_service else None
-        )
+        profiles = config_service.get("kollabor.llm.profiles") if config_service else None
         profile = profiles.get(active) if isinstance(profiles, dict) else None
         model = profile.get("model") if isinstance(profile, dict) else None
     if model:
@@ -150,10 +141,7 @@ def build_config_sections(
         built.append(
             {
                 **section,
-                "widgets": [
-                    {**w, "managed_by": managed_by(w.get("config_path", ""), managed)}
-                    for w in widgets
-                ],
+                "widgets": [{**w, "managed_by": managed_by(w.get("config_path", ""), managed)} for w in widgets],
             }
         )
     return built
@@ -163,7 +151,8 @@ def build_config_sections(
 
 
 def apply_config_changes(
-    config_service: Any, changes: Mapping[str, Any], target: str
+    config_service: Any, changes: Mapping[str, Any], target: str, *,
+    route_builtin: bool = True, atomic: bool = False,
 ) -> bool:
     """Save ``{config_path: value}`` to ``target`` ("local" or "global").
 
@@ -174,12 +163,60 @@ def apply_config_changes(
     """
     if not changes:
         return True
-    for path, value in changes.items():
-        config_service.set(path, value)
+    builtin_changes = {}
+    try:
+        from kollabor_plugins.settings import apply_config_changes as apply_plugin_changes
+
+        changes = apply_plugin_changes(dict(changes))
+        if route_builtin and any(key.startswith("plugins.") for key in changes):
+            from kollabor_plugins.registry import plugin_entries
+            from kollabor_plugins.settings import save, set_enabled
+
+            paths = {}
+            for entry in plugin_entries():
+                if entry.get("kind") != "built-in" or not isinstance(entry.get("id"), str):
+                    continue
+                plugin_id = entry["id"]
+                prefix = f"plugins.{plugin_id}."
+                paths[f"{prefix}enabled"] = plugin_id
+                for field in entry.get("settings", []):
+                    path = field.get("path") if isinstance(field, dict) else None
+                    if isinstance(path, str) and path.startswith(prefix):
+                        paths[path] = plugin_id
+            builtin_values: dict[str, dict[str, Any]] = {}
+            enabled = {}
+            for key in list(changes):
+                plugin_id = paths.get(key)
+                if plugin_id is None:
+                    continue
+                value = changes.pop(key)
+                builtin_changes[key] = value
+                if key == f"plugins.{plugin_id}.enabled":
+                    enabled[plugin_id] = value
+                else:
+                    builtin_values.setdefault(plugin_id, {})[key] = value
+            for plugin_id, values in builtin_values.items():
+                save(
+                    plugin_id, values, allow_secrets=True,
+                    config_service=config_service, save_target=target,
+                )
+            for plugin_id, value in enabled.items():
+                set_enabled(plugin_id, value, config_service=config_service, save_target=target)
+    except Exception as exc:
+        logger.error("plugin settings save failed: %s", exc)
+        return False
+    if not changes and not builtin_changes:
+        return True
+    if not atomic:
+        for path, value in {**changes, **builtin_changes}.items():
+            config_service.set(path, value)
     ok = True
-    for path, value in changes.items():
-        if not config_service.save_key(path, value, save_target=target):
-            ok = False
+    if atomic and changes:
+        ok = config_service.save_keys(changes, save_target=target, strict=True)
+    else:
+        for path, value in changes.items():
+            if not config_service.save_key(path, value, save_target=target):
+                ok = False
     if not ok:
         logger.error("config save to %s failed for at least one key", target)
         return False
@@ -210,9 +247,7 @@ def _number_error(field: dict, value: Any) -> Optional[str]:
     return None
 
 
-def validate_config_changes(
-    fields: Mapping[str, dict], changes: Mapping[str, Any]
-) -> dict[str, str]:
+def validate_config_changes(fields: Mapping[str, dict], changes: Mapping[str, Any]) -> dict[str, str]:
     """Why each change is refused, ``{path: reason}`` (empty: all fine).
 
     ``fields`` is ``{path: field}`` from ``describe()``: only editable fields
@@ -288,6 +323,14 @@ def _field(row: dict, config_service: Any, managed, global_settings) -> dict:
         value = managed_value(managed, global_settings, path)
     elif wtype == "label":
         value = row.get("value")
+    elif path.startswith(("plugin-values.", "plugin-registry.", "plugin-service.")):
+        from kollabor_plugins.settings import config_value
+
+        try:
+            value = config_value(path, row.get("default"))
+        except (OSError, ValueError) as exc:
+            logger.warning("Cannot read plugin setting %s: %s", path, exc)
+            value = row.get("default")
     else:
         value = config_service.get(path)
         if value is None:
@@ -325,10 +368,7 @@ class ConfigPanel:
                 {
                     "id": f"s{index}",
                     "title": section.get("title", "Section"),
-                    "fields": [
-                        _field(row, service, managed, global_settings)
-                        for row in section["widgets"]
-                    ],
+                    "fields": [_field(row, service, managed, global_settings) for row in section["widgets"]],
                 }
                 for index, section in enumerate(sections)
             ],
@@ -339,9 +379,7 @@ class ConfigPanel:
             },
         }
 
-    async def act(
-        self, ctx: Any, action: str, payload: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def act(self, ctx: Any, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         if action != "save":
             raise unknown_action(self.name, action)
         changes, target = payload.get("changes"), payload.get("target")

@@ -65,6 +65,10 @@ Background execution:
 <terminal background="true" name="dev-server">npm run dev</terminal>
 ```
 
+On POSIX, background terminal commands run through the configured user shell,
+so assignments, command substitutions, pipes, and redirections work as they do
+for foreground terminal commands.
+
 With working directory:
 ```
 <terminal cwd="/tmp">pwd</terminal>
@@ -260,6 +264,11 @@ are added after discovery finishes. The active agent's tool scope,
 `kollabor.llm.native_tool_calling`, and
 the active profile's tool support still apply. Exposing a schema does not bypass
 the workspace's tool permission policy.
+
+Agent bundle scope treats terminal session management as part of the `terminal`
+capability. The `terminal-status`, `terminal-output`, and `terminal-kill` tools
+require that grant, so an agent without terminal access cannot inspect or stop
+a session started by the operator.
 
 File location: `packages/kollabor-agent/src/kollabor_agent/`
 

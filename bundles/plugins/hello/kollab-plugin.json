@@ -1,0 +1,20 @@
+{
+  "format": 1,
+  "id": "hello",
+  "name": "Hello",
+  "version": "0.1.0",
+  "description": "A small example plugin with a background process.",
+  "kollab": ">=0.21.1",
+  "python": "python/hello.py:HelloPlugin",
+  "settings": "settings.json",
+  "services": {
+    "hello": {
+      "command": ["python3", "-B", "bin/hello.py"],
+      "autostart": false,
+      "restart": "on-failure",
+      "stop_timeout_s": 30
+    }
+  },
+  "web": {"entry": "web/dist/index.js", "style": "web/dist/index.css"},
+  "uses": ["run:python3"]
+}

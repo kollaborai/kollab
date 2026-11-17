@@ -37,13 +37,13 @@ Privileged material stays in the team workspace; no external sharing.
 
 ## Team
 
-| Hub name | Name | Role | Bundle | Reports to |
-|---|---|---|---|---|
-| `margaret` | Margaret Doyle | Legal Ops Lead | `default` | human |
-| `daniel` | Daniel Cho | Contracts Specialist | `research` | margaret |
-| `leila` | Leila Haddadi | Privacy Officer | `research` | margaret |
-| `hugo` | Hugo Lefevre | Compliance Analyst | `research` | margaret |
-| `yuki` | Yuki Tanaka | IP & Open-Source Licensing Specialist | `research` | margaret |
+| Hub name | Role | Bundle | Reports to |
+|---|---|---|---|
+| `legal-ops-lead` | Legal Ops Lead | `default` | human |
+| `contracts-specialist` | Contracts Specialist | `research` | legal-ops-lead |
+| `privacy-officer` | Privacy Officer | `research` | legal-ops-lead |
+| `compliance-analyst` | Compliance Analyst | `research` | legal-ops-lead |
+| `ip-open-source-licensing-specialist` | IP & Open-Source Licensing Specialist | `research` | legal-ops-lead |
 
 ## Hand-off outside the team
 

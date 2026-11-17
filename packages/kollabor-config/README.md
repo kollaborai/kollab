@@ -27,19 +27,16 @@ files directly.
 | `manager.py` | global/project config manager compatibility layer |
 | `config_utils.py` | config directory, logs, conversations, prompt paths |
 | `plugin_schema.py` | plugin field/schema/widget definitions |
-| `plugin_config_manager.py` | plugin config retrieval and persistence |
 | `llm_task_config.py` | LLM task, queue, and background-task settings |
 | `migration.py` | config version migration helpers |
 
 ## Usage
 
 ```python
-from kollabor_config import ConfigService, get_plugin_config_manager
+from kollabor_config import ConfigService
 
 config = ConfigService.get_instance()
 model = config.get("kollabor.llm.model", "claude-3-5-sonnet")
-
-plugin_config = get_plugin_config_manager().get_plugin_config("my_plugin")
 ```
 
 ## Known Gaps
