@@ -48,8 +48,10 @@ async function runFailureRecovery(browser, baseUrl, screenshots) {
     fs.mkdirSync(screenshots, { recursive: true });
     await view.page.screenshot({ path: path.join(screenshots, "slash-command-catalog-unavailable.png"), animations: "disabled" });
     await unavailable.getByRole("button", { name: "Try Again", exact: true }).click();
-    await view.page.getByText("A command from this session", { exact: true }).waitFor({ state: "visible" });
     assert.equal(await input.inputValue(), "/session-only draft", "retry must preserve the typed composer draft");
+    await input.focus();
+    await input.press("End");
+    await view.page.getByText("A command from this session", { exact: true }).waitFor({ state: "visible" });
     assert.ok(catalogRequests.length >= 2, "retry must cross the real session command request boundary");
     assert.deepEqual(view.pageErrors, []);
     assert.deepEqual(view.consoleErrors, []);
