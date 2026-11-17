@@ -67,9 +67,6 @@ def _patch_standard_save_paths(paths, monkeypatch):
         "get_local_config_path_candidates",
         lambda: [paths["local"]],
     )
-    monkeypatch.setattr(
-        loader_module, "get_project_data_dir", lambda: paths["project"].parent
-    )
 
 
 @pytest.mark.parametrize("layer", ["global", "project", "local"])
