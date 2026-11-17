@@ -191,7 +191,7 @@ export function SetupGuide({
           })}
           </ol>
         </div>
-        <footer className="flex shrink-0 items-center justify-between gap-2 px-6 pt-3">
+        <footer className="flex shrink-0 items-center justify-between gap-2 px-6 pt-3 pb-3">
           {target ? (
             <Button type="button" variant="ghost" onClick={dismiss}>
               Skip
