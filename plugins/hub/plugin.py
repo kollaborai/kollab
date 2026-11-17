@@ -8584,8 +8584,12 @@ class HubPlugin(BasePlugin):
             return None
         try:
             acp = self.event_bus.get_service("acp_orchestrator")
-            if acp is None or getattr(acp, "active", False) is not True:
-                return None
+        except Exception as exc:
+            logger.debug("ACP orchestrator lookup for hub notice failed: %s", exc)
+            return None
+        if acp is None or getattr(acp, "active", False) is not True:
+            return None
+        try:
             from kollabor_ai.acp_options import find_option
 
             options = acp.advertised_config_options()
@@ -8600,8 +8604,10 @@ class HubPlugin(BasePlugin):
                 str(effort_option.get("currentValue") or ""),
             )
         except Exception as exc:
+            # A harness is running, so the profile's model and effort would be
+            # stale. Report both as unknown; the notice leaves unknowns out.
             logger.debug("ACP harness model for hub notice unavailable: %s", exc)
-            return None
+            return "", ""
 
     def _active_agent_details(self) -> Tuple[str, str]:
         """Return the active agent bundle's name and one-line description, or blanks."""
