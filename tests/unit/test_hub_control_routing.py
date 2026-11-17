@@ -99,3 +99,43 @@ async def test_offline_control_retry_ignores_route_delivery_metadata(
     assert message.metadata["_queued_for"] == ["koordinator"]
     assert await plugin._route_message(message) == []
     assert len(list((tmp_path / "koordinator").glob("*.json"))) == 1
+
+
+@pytest.mark.asyncio
+async def test_offline_control_id_conflict_is_a_route_rejection(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(messenger, "get_messages_dir", lambda: tmp_path)
+    plugin = HubPlugin(event_bus=MagicMock())
+    plugin._identity = AgentRuntime(
+        name="coordinator",
+        identity="sapphire",
+        agent_id="sapphire-id",
+        is_coordinator=True,
+    )
+    plugin._presence = MagicMock()
+    plugin._presence.discover_agents_async = AsyncMock(return_value=[])
+    original = HubMessage(
+        id="conflicting-retry",
+        action="message",
+        from_identity="sapphire",
+        to="koordinator",
+        content="first assignment",
+        metadata={"task_assignment": True},
+    )
+    conflict = HubMessage(
+        id=original.id,
+        action=original.action,
+        from_identity=original.from_identity,
+        to=original.to,
+        content="different assignment",
+        metadata={"task_assignment": True},
+    )
+    await AgentMessenger.send_to_file("koordinator", original)
+
+    assert await plugin._route_message(conflict) == [
+        (
+            "koordinator",
+            "durable message ID already exists with different content",
+        )
+    ]
