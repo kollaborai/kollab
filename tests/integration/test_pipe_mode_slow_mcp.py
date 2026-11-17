@@ -73,9 +73,11 @@ def _kill_cli_group(process: asyncio.subprocess.Process) -> None:
 async def test_pipe_mode_sends_builtin_tools_while_stdio_mcp_discovery_is_slow() -> (
     None
 ):
-    home_root = tempfile.TemporaryDirectory(prefix="kollab-home-pr899-")
+    # On Windows the MCP child can outlive a handle-killed CLI for a few seconds
+    # and holds the workspace as its cwd, so directory removal may fail there.
+    home_root = tempfile.TemporaryDirectory(prefix="kollab-home-pr899-", ignore_cleanup_errors=True)
     home = Path(home_root.name)
-    workspace_root = tempfile.TemporaryDirectory(prefix="kollab-pr899-")
+    workspace_root = tempfile.TemporaryDirectory(prefix="kollab-pr899-", ignore_cleanup_errors=True)
     workspace = Path(workspace_root.name) / "workspace"
     marker_dir = home / "mcp-markers"
     config_dir = home / ".kollab"
