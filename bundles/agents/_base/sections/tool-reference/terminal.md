@@ -4,6 +4,7 @@ basic foreground execution:
   <terminal>ls -la</terminal>                     # temp session, capture output
   <terminal>git status</terminal>                 # wait for completion
   <terminal>python -m pytest tests/</terminal>    # returns all output
+  <terminal timeout="30s">sleep 60</terminal>   # stop at the requested limit
 
 background persistent sessions:
   <terminal background="true" name="dev">npm run dev</terminal>
@@ -13,8 +14,12 @@ background persistent sessions:
   attributes:
     background="true"  # required for persistent session
     name="..."         # session name (auto-gen if omitted)
-    timeout="5m"       # auto-kill after duration (30s, 5m, 1h)
+    timeout="5m"       # foreground limit or background auto-kill (30s, 5m, 1h)
     cwd="/path"        # working directory
+
+  foreground commands use the configured terminal timeout when `timeout` is
+  omitted. Background sessions have no automatic timeout unless one is set.
+  Invalid timeout values are rejected before the command starts.
 
   use for:
     - dev servers (npm run dev, python -m http.server)

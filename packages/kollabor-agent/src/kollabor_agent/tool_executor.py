@@ -6,6 +6,7 @@ file operations with proper error handling, logging, and result processing.
 
 import asyncio
 import logging
+import math
 import os
 import re
 import shlex
@@ -1672,6 +1673,26 @@ class ToolExecutor:
             },
         )
 
+    def _parse_terminal_timeout(self, timeout: Any) -> int:
+        """Parse the terminal tool's duration and reject values we cannot enforce."""
+        if not isinstance(timeout, str):
+            raise ValueError("Invalid terminal timeout")
+
+        match = re.fullmatch(r"(\d+)([smh]?)", timeout.strip().lower())
+        if not match:
+            raise ValueError("Invalid terminal timeout")
+
+        value = int(match.group(1))
+        multiplier = {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2)]
+        timeout_seconds = value * multiplier
+        try:
+            finite_timeout = math.isfinite(timeout_seconds)
+        except OverflowError:
+            finite_timeout = False
+        if timeout_seconds <= 0 or not finite_timeout:
+            raise ValueError("Invalid terminal timeout")
+        return timeout_seconds
+
     async def _execute_terminal_command(
         self, tool_data: Dict[str, Any]
     ) -> ToolExecutionResult:
@@ -1717,6 +1738,25 @@ class ToolExecutor:
                 error="Empty command",
             )
 
+        requested_timeout = tool_data.get("timeout")
+        if requested_timeout is None:
+            timeout_seconds = self.terminal_timeout
+            background_timeout = None
+        else:
+            try:
+                timeout_seconds = self._parse_terminal_timeout(requested_timeout)
+            except ValueError:
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type=tool_type,
+                    success=False,
+                    error=(
+                        "Invalid terminal timeout. Use a positive duration such as "
+                        "30s, 5m, or 1h."
+                    ),
+                )
+            background_timeout = requested_timeout.strip().lower()
+
         # Block agents from spawning kollab processes via terminal.
         # Agents MUST use hub_spawn to spawn peers -- direct spawning
         # bypasses the hub mesh and creates invisible rogue processes.
@@ -1746,7 +1786,7 @@ class ToolExecutor:
                     result = await self.tmux_plugin.execute_background(
                         command=command,
                         name=tool_data.get("name"),
-                        timeout=tool_data.get("timeout"),
+                        timeout=background_timeout,
                         cwd=str(cwd) if cwd else None,
                     )
                     return ToolExecutionResult(
@@ -1765,7 +1805,7 @@ class ToolExecutor:
                     # Foreground execution via temporary subprocess
                     result = await self.tmux_plugin.execute_foreground(
                         command=command,
-                        timeout=self.terminal_timeout,
+                        timeout=timeout_seconds,
                         cwd=str(cwd) if cwd else None,
                     )
                     return ToolExecutionResult(
@@ -1786,7 +1826,7 @@ class ToolExecutor:
         try:
             result = await self.shell_executor.run(
                 command,
-                timeout=self.terminal_timeout,
+                timeout=timeout_seconds,
                 cwd=cwd,
             )
         finally:

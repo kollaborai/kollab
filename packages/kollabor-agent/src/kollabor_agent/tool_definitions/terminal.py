@@ -48,7 +48,8 @@ terminal_tool = ToolDefinition(
             name="timeout",
             type="string",
             description=(
-                "Auto-kill after duration (30s, 5m, 1h). Default 60s."
+                "Execution limit (30s, 5m, 1h). Overrides the configured "
+                "foreground limit or auto-kills a background session."
             ),
             required=False,
         ),
@@ -77,12 +78,13 @@ terminal_tool = ToolDefinition(
     notes=(
         "Background sessions run as persistent subprocesses and "
         "persist across turns. Use terminal-status, terminal-output, "
-        "terminal-send, terminal-kill to manage them. Foreground terminal has a "
-        "default timeout of 60 seconds."
+        "terminal-send, terminal-kill to manage them. Foreground commands use "
+        "the configured terminal timeout when timeout is omitted; background "
+        "sessions have no automatic timeout unless one is set."
     ),
     safety_features=[
         "background sessions run as subprocesses with auto-kill timeouts",
-        "foreground commands have 60s default timeout",
+        "foreground commands enforce a requested timeout or the configured default",
     ],
     key_rules=[
         "use background=true for dev servers, build scripts, and long-running processes",
