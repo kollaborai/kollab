@@ -3320,7 +3320,11 @@ class ToolExecutor:
                         charset = resp.charset
                         if not isinstance(charset, str) or not charset:
                             charset = "utf-8"
-                        raw = b"".join(decoded_parts).decode(charset, errors="replace")
+                        decoded_body = b"".join(decoded_parts)
+                        try:
+                            raw = decoded_body.decode(charset, errors="replace")
+                        except LookupError:
+                            raw = decoded_body.decode("utf-8", errors="replace")
                         break
 
             # Extract main content using priority chain
