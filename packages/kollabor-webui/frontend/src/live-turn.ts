@@ -256,13 +256,6 @@ export function historyReplacesLiveTurn(turn: LiveTurn, tail: ReadonlyArray<Hist
  * the queued turn it held back starts from its first event.
  */
 export const replacedLiveTurn = (turn: LiveTurn): LiveTurn => {
-  if (turn.held?.length) {
-    return turn.held.reduce(applyLiveEvent, {
-      parts: [],
-      requestId: turn.requestId,
-      settled: "replaced",
-    });
-  }
   const notices = turn.parts.flatMap((part) =>
     part.type === "text"
       ? part.text
@@ -271,6 +264,14 @@ export const replacedLiveTurn = (turn: LiveTurn): LiveTurn => {
           .map((text) => ({ type: "text" as const, text }))
       : [],
   );
+  if (turn.held?.length) {
+    const queued = turn.held.reduce(applyLiveEvent, {
+      parts: [],
+      requestId: turn.requestId,
+      settled: "replaced",
+    });
+    return notices.length ? { ...queued, parts: [...notices, ...queued.parts] } : queued;
+  }
   return {
     parts: notices,
     requestId: turn.requestId,
