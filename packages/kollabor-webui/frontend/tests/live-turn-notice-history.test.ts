@@ -27,3 +27,28 @@ test("history reconciliation keeps an unsaved-row notice without duplicating the
     text: "ℹ Conversation history not saved for this message.",
   }]);
 });
+
+test("history reconciliation keeps a save notice when a queued turn has started", () => {
+  let turn = applyLiveEvent(emptyLiveTurn(), {
+    type: "token",
+    text: "The reply was not saved.",
+    request_id: "r1",
+  });
+  turn = applyLiveEvent(turn, {
+    type: "notice",
+    request_id: "r1",
+    message: "Conversation history not saved for this reply.",
+  });
+  turn = applyLiveEvent(turn, { type: "turn_complete", request_id: "r1" });
+  turn = applyLiveEvent(turn, {
+    type: "token",
+    text: "Next turn.",
+    request_id: "r2",
+  });
+
+  const reconciled = liveMessage(replacedLiveTurn(turn));
+  assert.deepEqual(reconciled?.content, [
+    { type: "text", text: "ℹ Conversation history not saved for this reply." },
+    { type: "text", text: "Next turn." },
+  ]);
+});
