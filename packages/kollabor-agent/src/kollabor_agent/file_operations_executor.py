@@ -280,20 +280,37 @@ class FileOperationsExecutor:
                 path = self.project_root / path
             lexical = Path(os.path.abspath(path))
             resolved = lexical.resolve()
+
+            def same_or_case_aliased_prefix(candidate: Path, protected: Path) -> bool:
+                if candidate.is_relative_to(protected):
+                    return True
+                parts = candidate.parts
+                if len(parts) < len(protected.parts):
+                    return False
+                prefix = Path(*parts[:len(protected.parts)])
+                try:
+                    return prefix.exists() and protected.exists() and os.path.samefile(prefix, protected)
+                except OSError:
+                    return False
+
             home_root = Path.home() / ".kollab"
             roots = {Path(os.path.abspath(home_root)), home_root.resolve()}
             override = os.environ.get("KOLLAB_CONFIG_DIR", "").strip()
             token_roots = roots | ({Path(override).expanduser().resolve()} if override else set())
             token_paths = {root / "engine.token" for root in token_roots}
             token_paths |= {token.resolve() for token in token_paths}
-            if lexical in token_paths or resolved in token_paths:
+            if any(
+                same_or_case_aliased_prefix(candidate, token)
+                for candidate in (lexical, resolved)
+                for token in token_paths
+            ):
                 return True
             for candidate in (lexical, resolved):
                 for root in roots:
-                    if candidate.is_relative_to(root / "plugins"):
+                    if same_or_case_aliased_prefix(candidate, root / "plugins"):
                         return True
                     data = root / "plugin-data"
-                    if candidate.is_relative_to(data):
+                    if same_or_case_aliased_prefix(candidate, data):
                         return True
             return False
         except (OSError, RuntimeError, ValueError):
