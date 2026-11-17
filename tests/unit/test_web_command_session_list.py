@@ -24,6 +24,34 @@ def _conversation(session_id: str, request: str) -> SimpleNamespace:
     )
 
 
+def _assert_action_row(reply: str, title: str, details: str, command: str) -> None:
+    matching_rows = [line for line in reply.splitlines() if title in line]
+    assert len(matching_rows) == 1
+    row = matching_rows[0]
+    assert details in row
+    assert f"`{command}`" in row
+
+
+def _session_list_result(message: str, sessions: list[dict]) -> SimpleNamespace:
+    return SimpleNamespace(
+        success=True,
+        message=message,
+        ui_config=SimpleNamespace(
+            title="Sessions",
+            modal_config={
+                "footer": "Up/Down navigate | Enter select | Esc cancel",
+                "sections": [
+                    {
+                        "title": "Sessions",
+                        "type": "session_list",
+                        "sessions": sessions,
+                    }
+                ],
+            },
+        ),
+    )
+
+
 async def _web_reply(
     plugin: ResumeConversationPlugin, name: str, args: list[str]
 ) -> str:
@@ -56,12 +84,14 @@ async def test_web_resume_and_branch_lists_render_actionable_rows():
     plugin.conversation_logger = Mock()
     plugin._ensure_conversation_manager = Mock(return_value=True)
     plugin.llm_service = None
+    conversations = [
+        _conversation("session-1", "Plan a release"),
+        _conversation("session-2", "Investigate a regression"),
+        _conversation("session-3", "Prepare a handoff"),
+        _conversation("session-4", "Review a migration"),
+    ]
     plugin.discover_conversations = AsyncMock(
-        return_value=[
-            _conversation("session-1", "Plan a release"),
-            _conversation("session-2", "Investigate a regression"),
-            _conversation("session-3", "Prepare a handoff"),
-        ]
+        side_effect=lambda limit=None: conversations[:limit] if limit else conversations
     )
     plugin.conversation_logger.search_sessions.return_value = [
         {
@@ -81,35 +111,84 @@ async def test_web_resume_and_branch_lists_render_actionable_rows():
     ]
 
     branch_sessions = await _web_reply(plugin, "branch", [])
-    assert "Plan a release" in branch_sessions
-    assert "session-1 | 3 msgs | main" in branch_sessions
-    assert "/branch session-1" in branch_sessions
-    assert "/branch session-2" in branch_sessions
-    assert "/branch session-3" in branch_sessions
+    _assert_action_row(
+        branch_sessions,
+        "Plan a release",
+        "session-1 | 3 msgs | main",
+        "/branch session-1",
+    )
+    _assert_action_row(
+        branch_sessions,
+        "Investigate a regression",
+        "session-2 | 3 msgs | main",
+        "/branch session-2",
+    )
+    _assert_action_row(
+        branch_sessions,
+        "Prepare a handoff",
+        "session-3 | 3 msgs | main",
+        "/branch session-3",
+    )
+    assert "Review a migration" in branch_sessions
+    assert "Up/Down navigate" not in branch_sessions
+    assert "Enter select" not in branch_sessions
+    assert "Esc cancel" not in branch_sessions
 
     fork_sessions = await _web_reply(plugin, "fork", [])
-    assert "Plan a release" in fork_sessions
-    assert "/resume session-1" in fork_sessions
+    _assert_action_row(
+        fork_sessions,
+        "Plan a release",
+        "session-1 | 3 msgs | main",
+        "/resume session-1",
+    )
 
     fork_search_results = await _web_reply(plugin, "fork", ["search", "release"])
-    assert "/resume search-1" in fork_search_results
+    _assert_action_row(
+        fork_search_results,
+        "Find release notes",
+        "search-1 | 2 msgs | main",
+        "/resume search-1",
+    )
 
     resume_sessions = await _web_reply(plugin, "resume", [])
-    assert "Investigate a regression" in resume_sessions
-    assert "/resume session-2" in resume_sessions
+    _assert_action_row(
+        resume_sessions,
+        "Investigate a regression",
+        "session-2 | 3 msgs | main",
+        "/resume session-2",
+    )
 
     search_results = await _web_reply(plugin, "resume", ["search", "release"])
-    assert "Find release notes" in search_results
-    assert "/resume search-1" in search_results
+    _assert_action_row(
+        search_results,
+        "Find release notes",
+        "search-1 | 2 msgs | main",
+        "/resume search-1",
+    )
 
     filtered_sessions = await _web_reply(plugin, "resume", ["--limit", "3"])
-    assert "Prepare a handoff" in filtered_sessions
-    assert "/resume session-3" in filtered_sessions
+    _assert_action_row(
+        filtered_sessions,
+        "Prepare a handoff",
+        "session-3 | 3 msgs | main",
+        "/resume session-3",
+    )
+    assert "Review a migration" not in filtered_sessions
+    plugin.discover_conversations.assert_awaited_with(3)
 
     branch_points = await _web_reply(plugin, "branch", ["session-1"])
-    assert "A release plan" in branch_points
-    assert "/branch session-1 0" in branch_points
-    assert "/branch session-1 1" in branch_points
+    _assert_action_row(
+        branch_points,
+        "A release plan",
+        "user",
+        "/branch session-1 0",
+    )
+    _assert_action_row(
+        branch_points,
+        "The plan is ready",
+        "assistant",
+        "/branch session-1 1",
+    )
 
 
 def test_unusable_session_list_rows_keep_the_command_message():
@@ -131,3 +210,78 @@ def test_unusable_session_list_rows_keep_the_command_message():
     )
 
     assert _web_command_output(result, "fork") == "No sessions available"
+
+
+def test_session_list_titles_and_subtitles_are_markdown_escaped():
+    result = _session_list_result(
+        "No sessions available",
+        [
+            {
+                "id": "session-1",
+                "title": "*bold* [click](https://example.invalid)",
+                "subtitle": "![image](https://example.invalid/image.png)",
+                "action": "resume_session",
+                "metadata": {"session_id": "session-1"},
+            }
+        ],
+    )
+
+    output = _web_command_output(result, "resume")
+
+    assert r"\*bold\* \[click\]\(https://example.invalid\)" in output
+    assert r"\!\[image\]\(https://example.invalid/image.png\)" in output
+    assert "[click](https://example.invalid)" not in output
+    assert "![image](https://example.invalid/image.png)" not in output
+
+
+def test_session_without_explicit_action_is_not_rendered_as_a_bare_row():
+    result = _session_list_result(
+        "No actionable sessions",
+        [
+            {
+                "id": "session-1",
+                "title": "Unselectable conversation",
+                "subtitle": "3 msgs",
+                "metadata": {"session_id": "session-1"},
+            }
+        ],
+    )
+
+    assert _web_command_output(result, "fork") == "No actionable sessions"
+
+
+@pytest.mark.parametrize("session_id", ["bad id", "bad\nid", "bad`id", "bad/id"])
+def test_unsafe_session_ids_are_not_rendered_as_commands(session_id: str):
+    result = _session_list_result(
+        "No safe sessions",
+        [
+            {
+                "id": session_id,
+                "title": "Unsafe id",
+                "action": "resume_session",
+                "metadata": {"session_id": session_id},
+            }
+        ],
+    )
+
+    assert _web_command_output(result, "resume") == "No safe sessions"
+
+
+@pytest.mark.parametrize("message_index", [True, -1, "0"])
+def test_invalid_branch_message_indices_are_not_rendered(message_index):
+    result = _session_list_result(
+        "No safe branch points",
+        [
+            {
+                "id": "0",
+                "title": "Invalid branch point",
+                "action": "branch_execute",
+                "metadata": {
+                    "session_id": "session-1",
+                    "message_index": message_index,
+                },
+            }
+        ],
+    )
+
+    assert _web_command_output(result, "branch") == "No safe branch points"
