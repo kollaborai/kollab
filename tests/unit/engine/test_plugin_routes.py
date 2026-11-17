@@ -1,5 +1,7 @@
 """Engine plugin list delegates to the shared plugin inventory."""
 
+import sys
+
 import pytest
 from fastapi.testclient import TestClient
 from kollabor_engine.server import create_app
@@ -30,6 +32,19 @@ def test_plugin_list_uses_shared_inventory(tmp_path, monkeypatch):
         response = client.get("/plugins")
     assert response.status_code == 200
     assert response.json() == {"schema": 1, "plugins": entries}
+
+
+def test_no_plugins_disables_engine_plugin_routes(monkeypatch):
+    from kollabor_plugins import registry
+
+    monkeypatch.setattr(sys, "argv", ["kollabor_engine", "serve", "--no-plugins"])
+    monkeypatch.setenv("KOLLAB_ENGINE_BYPASS_AUTH", "1")
+    inventory_calls = []
+    monkeypatch.setattr(registry, "plugin_entries", lambda: inventory_calls.append(True) or [])
+    with TestClient(create_app()) as client:
+        response = client.get("/plugins")
+    assert response.status_code == 404
+    assert inventory_calls == []
 
 
 def test_plugin_settings_read_installed_development_and_builtin(tmp_path, monkeypatch):
