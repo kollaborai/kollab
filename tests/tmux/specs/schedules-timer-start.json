@@ -1,0 +1,49 @@
+{
+  "name": "schedules-timer-start",
+  "description": "Stage 1 of #612: on boot the hub coordinator starts the schedules grid timer, and a schedule already due in ~/.kollab/schedules.json fires exactly once. The timer start is logged, the fire is recorded as a line in ~/.kollab/schedules-runs.jsonl, and the schedule is never deleted from schedules.json (Waiting rule). Scratch HOME, --no-daemon, no keyring.",
+  "config": {
+    "command": "sh -c 'R=$(pwd); exec \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 5,
+    "show_captures": false
+  },
+  "setup": [
+    {
+      "action": "shell",
+      "description": "seed ~/.kollab/schedules.json with a schedule due two minutes ago",
+      "command": "A=$(date +%s); A=$((A - 120)); printf '[{\"id\":\"s1\",\"agents\":[\"probe-agent\"],\"prompt\":\"stage1 probe\",\"interval_seconds\":60,\"anchor\":%s}]' \"$A\" > \"$HOME/.kollab/schedules.json\"; cat \"$HOME/.kollab/schedules.json\"",
+      "assert_contains": "stage1 probe"
+    }
+  ],
+  "steps": [
+    { "action": "start_app" },
+    {
+      "action": "wait_for",
+      "pattern": "❯",
+      "timeout": 30,
+      "description": "the prompt is up"
+    },
+    {
+      "action": "shell",
+      "description": "the coordinator started the schedule timer",
+      "command": "for i in $(seq 1 25); do grep -rq \"schedule timer started\" \"$HOME/.kollab/projects\" 2>/dev/null && exit 0; sleep 1; done; echo 'no schedule-timer start line in the logs'; exit 1"
+    },
+    {
+      "action": "shell",
+      "description": "the due schedule fired and is recorded in the run log",
+      "command": "for i in $(seq 1 50); do [ -s \"$HOME/.kollab/schedules-runs.jsonl\" ] && exit 0; sleep 1; done; echo 'no run recorded in schedules-runs.jsonl'; exit 1"
+    },
+    {
+      "action": "shell",
+      "description": "the run record names the schedule and agent",
+      "command": "cat \"$HOME/.kollab/schedules-runs.jsonl\"",
+      "assert_contains": "\"id\":\"s1\"",
+      "show": true
+    },
+    {
+      "action": "shell",
+      "description": "the schedule is still stored (never deleted for firing)",
+      "command": "cat \"$HOME/.kollab/schedules.json\"",
+      "assert_contains": "stage1 probe"
+    }
+  ]
+}

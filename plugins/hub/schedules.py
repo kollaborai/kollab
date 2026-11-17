@@ -235,7 +235,11 @@ class ScheduleTimer:
         now = self._clock()
         upcoming: Optional[float] = None
         due_rows: List[Tuple[ScheduleRow, List[str], float]] = []
-        for row in self._store.load():
+        rows = self._store.load()
+        logger.info(
+            "schedules: pass at %.0f: %d row(s) loaded", now, len(rows)
+        )
+        for row in rows:
             if not row.active:
                 continue
             owned = self._owned_agents(row)
@@ -253,6 +257,9 @@ class ScheduleTimer:
                 upcoming = due
 
         for row, owned, due in due_rows:
+            logger.info(
+                "schedules: %s due at %.0f, firing for %s", row.id, due, owned
+            )
             # A fired row owes its next grid point too, so the timer knows
             # when to wake up again.
             nxt = due + row.interval_seconds

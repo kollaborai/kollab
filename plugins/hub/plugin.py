@@ -81,7 +81,11 @@ from .models import (
 from .notifier import HubNotifier, NtfyNotifier, load_ntfy_settings
 from .nudge_engine import NudgeEngine
 from .presence import PresenceManager, get_messages_dir, pid_alive, wait_until_socket_answers
-from .recurring_jobs import RecurringJobs, default_job_config
+from .recurring_jobs import (
+    SEND_TIMEOUT_SECONDS as SCHEDULE_SEND_TIMEOUT_SECONDS,
+    RecurringJobs,
+    default_job_config,
+)
 from .rosters import (
     DEFAULT_ROSTER,
     attach_persona_skills,
@@ -8103,7 +8107,18 @@ class HubPlugin(BasePlugin):
                 interval_seconds=row.interval_seconds,
                 next_fire=due,
             )
-            dropped = await self._fire_cron_job(job)
+            # Same bound as the recurring jobs: a send that never returns
+            # (unknown local target, stalled routing) must not wedge the
+            # timer; it records a timed-out run and moves on.
+            try:
+                dropped = await asyncio.wait_for(
+                    self._fire_cron_job(job), SCHEDULE_SEND_TIMEOUT_SECONDS
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "schedules: %s send to %s timed out", row.id, agent
+                )
+                return False, "send timed out"
             error = job.last_error or ("device gone" if dropped else "")
             return (not error), error
 
