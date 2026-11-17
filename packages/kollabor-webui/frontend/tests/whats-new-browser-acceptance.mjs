@@ -82,6 +82,7 @@ try {
   for (const width of [1280, 820, 390]) {
     const { context, page, errors } = await open(browser, { width });
     const dialog = page.getByRole("dialog", { name: "What’s New in 0.22.1", exact: true });
+    assert.deepEqual(errors, []);
     await dialog.waitFor();
     assert.equal(await dialog.locator("li").count(), 6);
     assert.match(await dialog.innerText(), /And 2 more\./);
