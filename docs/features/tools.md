@@ -69,6 +69,12 @@ On POSIX, background terminal commands run through the configured user shell,
 so assignments, command substitutions, pipes, and redirections work as they do
 for foreground terminal commands.
 
+Agent terminals block direct or wrapped agent launches and the CLI stop-all
+command `kollab --hub stop all`. They also block background invocations of the
+Kollab CLI, including informational commands such as `kollab --hub status`. Run
+informational commands in the foreground; use `<hub_spawn>` to launch peers and
+`/hub stop all` to stop agents owned by the current caller.
+
 With working directory:
 ```
 <terminal cwd="/tmp">pwd</terminal>

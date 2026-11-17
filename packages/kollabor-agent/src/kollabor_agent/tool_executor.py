@@ -1726,9 +1726,11 @@ class ToolExecutor:
                 tool_type=tool_type,
                 success=False,
                 error=(
-                    "spawning agents via terminal is blocked. "
-                    "CLI stop-all is also blocked; use /hub stop all for agents "
-                    "owned by this caller. Use <hub_spawn> to spawn peers."
+                    "Agent terminals block direct or wrapped agent launches, "
+                    "CLI stop-all, and background Kollab commands, including "
+                    "informational commands. Run informational commands in the "
+                    "foreground; use <hub_spawn> for peers and /hub stop all "
+                    "for agents owned by this caller."
                 ),
             )
 
