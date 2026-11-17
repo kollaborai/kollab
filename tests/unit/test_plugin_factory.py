@@ -121,6 +121,24 @@ class TestPluginFactory(unittest.TestCase):
             expected_result = {"Plugin1": mock_instance1, "Plugin2": mock_instance2}
             self.assertEqual(result, expected_result)
 
+    def test_instantiate_all_skips_disabled_plugin(self):
+        """A disabled plugin is omitted before its constructor can run."""
+        tmux_plugin = type("TmuxPlugin", (), {})
+        self.mock_config.get.side_effect = lambda key, default=None: (
+            False if key == "plugins.tmux.enabled" else default
+        )
+
+        with patch.object(self.factory, "instantiate_plugin") as mock_instantiate:
+            result = self.factory.instantiate_all(
+                {"TmuxPlugin": tmux_plugin},
+                self.mock_event_bus,
+                self.mock_renderer,
+                self.mock_config,
+            )
+
+        self.assertEqual(result, {})
+        mock_instantiate.assert_not_called()
+
     def test_get_instance(self):
         """Test getting plugin instance by name."""
         mock_instance = MagicMock()
