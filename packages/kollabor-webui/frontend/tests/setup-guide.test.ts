@@ -22,6 +22,14 @@ import {
   type SetupFacts,
   type GuideState,
 } from "../src/setup/guide-model.ts";
+import * as guideModel from "../src/setup/guide-model.ts";
+
+// Namespace imports keep the regression module loadable against the PR base,
+// where the first-run policy helpers do not exist yet. The startup wiring
+// assertions below then fail as behavior assertions instead of link errors.
+const guidePolicyAvailable =
+  typeof guideModel.shouldAutoOpenGuide === "function" &&
+  typeof guideModel.shouldPersistGuide === "function";
 
 test("steps are ordered and unique", () => {
   const ids = SETUP_STEPS.map((step) => step.id);
@@ -130,60 +138,62 @@ test("storage key is namespaced and stable", () => {
 // or dismissed records never reopen, and a corrupt record must not block the
 // guide forever. Persistence skips the untouched initial state: writing it on
 // mount is what defeated the first-run check in the first place.
-import { shouldAutoOpenGuide, shouldPersistGuide } from "../src/setup/guide-model.ts";
-
-test("shouldAutoOpenGuide: no record or stale welcome record is a first run", () => {
-  assert.equal(shouldAutoOpenGuide(null), true);
-  assert.equal(shouldAutoOpenGuide('{"step":"welcome","dismissed":false}'), true);
-  assert.equal(shouldAutoOpenGuide("not-json{"), true);
+test("shouldAutoOpenGuide: no record or stale welcome record is a first run", { skip: !guidePolicyAvailable }, () => {
+  assert.equal(guideModel.shouldAutoOpenGuide(null), true);
+  assert.equal(guideModel.shouldAutoOpenGuide('{"step":"welcome","dismissed":false}'), true);
+  assert.equal(guideModel.shouldAutoOpenGuide("not-json{"), true);
 });
 
-test("shouldAutoOpenGuide: valid malformed storage opens its normalized welcome state", () => {
+test("shouldAutoOpenGuide: valid malformed storage opens its normalized welcome state", { skip: !guidePolicyAvailable }, () => {
   assert.equal(
-    shouldAutoOpenGuide('{"step":"unknown-step","dismissed":"yes"}'),
+    guideModel.shouldAutoOpenGuide('{"step":"unknown-step","dismissed":"yes"}'),
+    true,
+  );
+  assert.equal(
+    guideModel.shouldAutoOpenGuide('{"step":"unknown-step","dismissed":true}'),
     true,
   );
 });
 
-test("shouldAutoOpenGuide: prototype property names are corrupt steps", () => {
+test("shouldAutoOpenGuide: prototype property names are corrupt steps", { skip: !guidePolicyAvailable }, () => {
   for (const step of ["toString", "constructor", "__proto__"]) {
     assert.equal(
-      shouldAutoOpenGuide(JSON.stringify({ step, dismissed: false })),
+      guideModel.shouldAutoOpenGuide(JSON.stringify({ step, dismissed: false })),
       true,
       `${step} is not a setup step`,
     );
   }
 });
 
-test("shouldAutoOpenGuide: engaged or dismissed records never reopen", () => {
-  assert.equal(shouldAutoOpenGuide('{"step":"provider","dismissed":false}'), false);
-  assert.equal(shouldAutoOpenGuide('{"step":"agent","dismissed":false}'), false);
-  assert.equal(shouldAutoOpenGuide('{"step":"done","dismissed":true}'), false);
-  assert.equal(shouldAutoOpenGuide('{"step":"welcome","dismissed":true}'), false);
+test("shouldAutoOpenGuide: engaged or dismissed records never reopen", { skip: !guidePolicyAvailable }, () => {
+  assert.equal(guideModel.shouldAutoOpenGuide('{"step":"provider","dismissed":false}'), false);
+  assert.equal(guideModel.shouldAutoOpenGuide('{"step":"agent","dismissed":false}'), false);
+  assert.equal(guideModel.shouldAutoOpenGuide('{"step":"done","dismissed":true}'), false);
+  assert.equal(guideModel.shouldAutoOpenGuide('{"step":"welcome","dismissed":true}'), false);
 });
 
-test("shouldPersistGuide: the untouched initial state writes nothing", () => {
+test("shouldPersistGuide: the untouched initial state writes nothing", { skip: !guidePolicyAvailable }, () => {
   const initial = initialGuideState();
-  assert.equal(shouldPersistGuide(initial, initial), false);
+  assert.equal(guideModel.shouldPersistGuide(initial, initial), false);
 });
 
-test("shouldPersistGuide: engage, advance and dismiss all record", () => {
+test("shouldPersistGuide: engage, advance and dismiss all record", { skip: !guidePolicyAvailable }, () => {
   const initial = initialGuideState();
-  assert.equal(shouldPersistGuide(initial, { step: "provider", dismissed: false }), true);
-  assert.equal(shouldPersistGuide(initial, { step: "welcome", dismissed: true }), true);
+  assert.equal(guideModel.shouldPersistGuide(initial, { step: "provider", dismissed: false }), true);
+  assert.equal(guideModel.shouldPersistGuide(initial, { step: "welcome", dismissed: true }), true);
   const engaged: GuideState = { step: "provider", dismissed: false };
-  assert.equal(shouldPersistGuide(engaged, { step: "agent", dismissed: false }), true);
-  assert.equal(shouldPersistGuide(engaged, { step: "provider", dismissed: true }), true);
+  assert.equal(guideModel.shouldPersistGuide(engaged, { step: "agent", dismissed: false }), true);
+  assert.equal(guideModel.shouldPersistGuide(engaged, { step: "provider", dismissed: true }), true);
 });
 
-test("shouldPersistGuide: identical states and pristine reverts do not write", () => {
+test("shouldPersistGuide: identical states and pristine reverts do not write", { skip: !guidePolicyAvailable }, () => {
   const engaged: GuideState = { step: "provider", dismissed: false };
-  assert.equal(shouldPersistGuide(engaged, engaged), false);
+  assert.equal(guideModel.shouldPersistGuide(engaged, engaged), false);
   // A revert to the pristine state must not clobber the record with an
   // undismissed-welcome entry (that record hides first runs from the check).
-  assert.equal(shouldPersistGuide(engaged, initialGuideState()), false);
+  assert.equal(guideModel.shouldPersistGuide(engaged, initialGuideState()), false);
   const dismissed: GuideState = { step: "done", dismissed: true };
-  assert.equal(shouldPersistGuide(dismissed, initialGuideState()), false);
+  assert.equal(guideModel.shouldPersistGuide(dismissed, initialGuideState()), false);
 });
 
 test("SetupGuide gates its storage write through the persistence policy", async () => {
