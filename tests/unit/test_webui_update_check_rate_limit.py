@@ -19,6 +19,18 @@ class _Config:
         return True
 
 
+class _StoredConfig(_Config):
+    def __init__(self):
+        self.values = {}
+
+    def get(self, key, default=None):
+        return self.values.get(key, default)
+
+    def save_key(self, key, value, **_kwargs):
+        self.values[key] = value
+        return True
+
+
 class _RateLimitedResponse:
     status = 429
     headers = {"Retry-After": "120"}
@@ -43,6 +55,38 @@ async def test_rate_limit_honors_retry_after():
 
     assert await service._fetch_latest_release() is None
     assert service._rate_limit_retry_until - before >= 119
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_refresh_still_serves_fresh_current_cache(monkeypatch):
+    service = VersionCheckService(_StoredConfig(), __version__)
+    calls = 0
+
+    async def current_then_rate_limited(self):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "tag_name": f"v{__version__}",
+                "name": f"Version {__version__}",
+                "html_url": "https://example.invalid/current",
+            }
+        self._rate_limit_retry_until = time.monotonic() + 120
+        return None
+
+    monkeypatch.setattr(
+        VersionCheckService, "_fetch_latest_release", current_then_rate_limited
+    )
+
+    assert (await service.check_status()).status == "current"
+    failed_refresh = await service.check_status(force=True)
+    page_load = await service.check_status()
+
+    assert failed_refresh.status == "failed"
+    assert failed_refresh.retry_reason == "rate_limit"
+    assert failed_refresh.retry_after_seconds >= 119
+    assert page_load.status == "current"
+    assert calls == 2
 
 
 @pytest.mark.asyncio
