@@ -213,3 +213,55 @@ async def test_cancellation_stops_real_transcriber_descendants(tmp_path, monkeyp
     await asyncio.sleep(0.15)
     assert writes.read_text() == before
     assert not list(tmp_path.glob("kollab-telegram-voice-*"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process group lifecycle")
+async def test_cancellation_kills_pipe_holder_after_transcriber_exits(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    whisper = tmp_path / "whisper"
+    child_pid = tmp_path / "child.pid"
+    whisper.write_text(
+        "#!/bin/sh\n"
+        f"sleep 120 & echo $! > {str(child_pid)!r}\n"
+        "exit 0\n"
+    )
+    whisper.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+    task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
+    deadline = time.monotonic() + 5
+    while not child_pid.exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+    assert child_pid.exists(), "pipe-holding descendant did not start"
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=10)
+
+    assert not list(tmp_path.glob("kollab-telegram-voice-*"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process group lifecycle")
+async def test_timeout_kills_pipe_holder_after_transcriber_exits(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    whisper = tmp_path / "whisper"
+    child_pid = tmp_path / "child.pid"
+    whisper.write_text(
+        "#!/bin/sh\n"
+        f"sleep 120 & echo $! > {str(child_pid)!r}\n"
+        "exit 0\n"
+    )
+    whisper.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+    result = await asyncio.wait_for(
+        _bridge()._transcribe_voice("synthetic-file-id"), timeout=75
+    )
+
+    assert result == "[voice message - transcription timed out]"
+    assert child_pid.exists(), "pipe-holding descendant did not start"
+    assert not list(tmp_path.glob("kollab-telegram-voice-*"))
