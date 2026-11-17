@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import re
-import select
 import shlex
 import shutil
 import signal
@@ -629,9 +628,10 @@ class _Client(acp.Client):
 # or exits.
 _POSIX_GROUP_LAUNCHER = """
 import os, signal, sys
-anchor = int(sys.argv[1])
+anchor, status = int(sys.argv[1]), int(sys.argv[2])
 pid = os.fork()
 if pid == 0:
+    os.close(status)
     os.setpgid(0, 0)
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, signal.SIG_IGN)
@@ -649,7 +649,16 @@ try:
 except OSError:
     pass
 os.close(anchor)
-os.execvp(sys.argv[2], sys.argv[2:])
+# Python ignores these at startup; the adapter tree gets the defaults back.
+for name in ("SIGPIPE", "SIGXFSZ"):
+    if hasattr(signal, name):
+        signal.signal(getattr(signal, name), signal.SIG_DFL)
+os.set_inheritable(status, False)
+try:
+    os.execvp(sys.argv[3], sys.argv[3:])
+except OSError as exc:
+    os.write(status, str(exc.errno).encode())
+    os._exit(127)
 """
 
 
@@ -838,12 +847,15 @@ class ACPRunner:
         if os.name == "posix":
             self._release_group_anchor()
             ours, theirs = socket.socketpair()
+            # The launcher reports a failed exec here; a successful exec closes it.
+            status_read, status_write = os.pipe()
             try:
                 self._process = await asyncio.create_subprocess_exec(
                     sys.executable,
                     "-c",
                     _POSIX_GROUP_LAUNCHER,
                     str(theirs.fileno()),
+                    str(status_write),
                     *command,
                     cwd=cwd,
                     env=env,
@@ -851,15 +863,27 @@ class ACPRunner:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     start_new_session=True,
-                    pass_fds=(theirs.fileno(),),
+                    pass_fds=(theirs.fileno(), status_write),
                 )
             except BaseException:
                 ours.close()
+                os.close(status_read)
                 raise
             finally:
                 theirs.close()
+                os.close(status_write)
             self._group_anchor = ours
             self._process_group_id = self._process.pid
+            try:
+                exec_failure = await asyncio.to_thread(os.read, status_read, 32)
+            finally:
+                os.close(status_read)
+            if exec_failure:
+                # Reap the launcher so teardown finds an empty group.
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self._process.wait(), timeout=5)
+                code = int(exec_failure)
+                raise OSError(code, os.strerror(code), command[0])
         else:
             self._process = await asyncio.create_subprocess_exec(
                 *command,
@@ -1107,12 +1131,11 @@ class ACPRunner:
             return False
         try:
             os.killpg(group_id, signum)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
+            # With the anchor alive the id is ours, so EPERM means no member
+            # could be signaled (macOS reports it for a group of zombies).
+            # Survivors still fail the members-remain check at teardown.
             return False
-        except PermissionError as exc:
-            raise ACPError(
-                f"cannot signal recorded ACP process group {group_id}"
-            ) from exc
         return True
 
     def _group_anchor_alive(self) -> bool:
@@ -1122,11 +1145,13 @@ class ACPRunner:
         if anchor is None:
             return False
         try:
-            readable, _, _ = select.select([anchor], [], [], 0)
-        except (OSError, ValueError):
-            readable = [anchor]
-        if not readable:
+            # A non-blocking peek, not select(), which fails for descriptors of 1024 or more.
+            if anchor.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT):
+                return True
+        except (BlockingIOError, InterruptedError):
             return True
+        except OSError:
+            pass
         self._release_group_anchor()
         return False
 
