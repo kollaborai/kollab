@@ -552,6 +552,11 @@ def _capture_test_subprocesses(monkeypatch, *, wait_for_exit=False):
 
     async def spawn(*args, **kwargs):
         process = await original_spawn(*args, **kwargs)
+        if kwargs.get("process_group") == 0:
+            # ACPRunner's POSIX group guard: it lives until close by design and
+            # close owns it. Waiting on it would fail start() before the adapter
+            # runs; killing it would make close refuse to signal the group.
+            return process
         # Retain the child owner; do not resolve a detached PID as a fallback.
         captured.append(process)
         if wait_for_exit:
