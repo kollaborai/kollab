@@ -40,6 +40,9 @@ async function main() {
     await animationPause.evaluate((element) => element.remove());
     await view.page.getByRole("heading", { name: "Join a network", exact: true }).waitFor({ state: "visible" });
     const guide = view.page.getByRole("dialog");
+    await guide.evaluate((element) =>
+      Promise.all(element.getAnimations().map((animation) => animation.finished.catch(() => undefined))),
+    );
     const guideBounds = await guide.boundingBox();
     const openBounds = await view.page.getByTestId("setup-guide-next").boundingBox();
     assert.ok(guideBounds && openBounds);
