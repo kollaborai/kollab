@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   dropTransientTurnDuplicates,
   historyHasAssistantRequestId,
+  historyMessageIndex,
   isCompactionMarker,
   mergeCompactionHistorySnapshot,
   mergeMissingHistoryMessages,
@@ -275,6 +276,50 @@ test("compaction shows a retained row once, from the compacted history", () => {
     "What is 2+2?",
     "4",
   ]);
+});
+
+test("compaction keeps carried row ids and updates their source indexes", () => {
+  const shown = [
+    {
+      id: "user-demo-session-120",
+      role: "user",
+      content: "current prompt",
+      metadata: { custom: { historySourceIndex: 120 } },
+    },
+    {
+      id: "assistant-demo-session-121",
+      role: "assistant",
+      content: "current answer",
+      metadata: { custom: { historySourceIndex: 121, requestId: "request-current" } },
+    },
+  ];
+  const marker = {
+    id: "history-0",
+    role: "assistant",
+    content: "Context compacted",
+    metadata: { custom: { contextCompaction: true, compactionRound: 1 } },
+  };
+  const loaded = [
+    marker,
+    { id: "history-1", role: "user", content: "current prompt" },
+    {
+      id: "history-2",
+      role: "assistant",
+      content: "current answer",
+      metadata: { custom: { requestId: "request-current" } },
+    },
+  ];
+
+  const rebased = mergeCompactionHistorySnapshot(shown, loaded);
+
+  assert.ok(rebased);
+  assert.deepEqual(rebased.history.map((message) => message.id), [
+    marker.id,
+    shown[0].id,
+    shown[1].id,
+  ]);
+  assert.equal(historyMessageIndex(rebased.history[1]), 1);
+  assert.equal(historyMessageIndex(rebased.history[2]), 2);
 });
 
 test("a row appended during compaction follows the retained rows, which still show once", () => {
