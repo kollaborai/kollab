@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 
@@ -10,7 +11,7 @@ def test_system_message_is_published_to_web_clients():
     events = tap.subscribe("web")
     coordinator = MagicMock()
     coordinator._display_tap = tap
-    renderer = MagicMock(message_coordinator=coordinator)
+    renderer = SimpleNamespace(message_coordinator=coordinator)
     service = MessageDisplayService(renderer)
 
     service.display_system_message("Conversation history not saved for this reply.")
