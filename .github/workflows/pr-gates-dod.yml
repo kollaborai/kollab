@@ -5,14 +5,22 @@ name: PR Gates DoD
 # (pr_gates.dod.check_name, default dod/ready-for-review) whose summary
 # names every failed item. It never posts comments.
 
-# pull_request_target runs the base branch's copy of this workflow and script, so a
-# PR cannot change its own grade or reach the token. The script reads the PR only
-# through the API; linked issue bodies are read-only too. This workflow never
-# checks out or runs PR code.
+# Only target/default-branch events run this privileged workflow. Review events
+# can load PR workflow code and must not be added here.
+# Every event checks out the trusted base, never the PR head or merge ref.
+# The script reads PR facts through the API and never executes PR code.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main, "release/**", "integration/**"]
+  issue_comment:
+    types: [created, edited, deleted]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to reevaluate
+        required: true
+        type: number
 
 permissions:
   contents: read
@@ -22,12 +30,14 @@ permissions:
 
 jobs:
   dod:
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request != null
     name: definition-of-done
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}
 
       - uses: actions/setup-python@v6
         with:
@@ -36,10 +46,12 @@ jobs:
       - name: Run pr-gates definition-of-done check
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           python scripts/pr_gates_dod.py \
             --config .github/pr-gates.toml \
             --repo "${{ github.repository }}" \
-            --pr "${{ github.event.pull_request.number }}" \
-            --head-sha "${{ github.event.pull_request.head.sha }}" \
+            --pr "$PR_NUMBER" \
+            --head-sha "$EVENT_HEAD_SHA" \
             --post
