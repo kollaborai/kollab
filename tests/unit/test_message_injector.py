@@ -55,5 +55,35 @@ class TestMessageInjector(unittest.IsolatedAsyncioTestCase):
         conversation.add_message.assert_not_called()
 
 
+    async def test_inject_through_a_real_event_bus_lands_in_the_conversation(self):
+        """#1151 acceptance: inject through a real EventBus with a real hook
+        that edits the message; the edited message reaches the conversation."""
+        from kollabor_events import EventBus, Hook, HookPriority
+
+        event_bus = EventBus()
+
+        async def tag(data, event):
+            return {"data": {**data, "content": data["content"] + "\n[tagged]"}}
+
+        await event_bus.register_hook(
+            Hook(
+                name="tag",
+                plugin_name="test",
+                event_type=EventType.PRE_MESSAGE_INJECT,
+                priority=HookPriority.LLM.value,
+                callback=tag,
+            )
+        )
+        conversation = MagicMock()
+        injector = MessageInjector(event_bus, conversation)
+
+        ok = await injector.inject("agent", "hello from agent", trigger_llm=False)
+
+        self.assertTrue(ok)
+        conversation.add_message.assert_called_once()
+        content = conversation.add_message.call_args.kwargs["content"]
+        self.assertIn("hello from agent", content)
+        self.assertIn("[tagged]", content)
+
 if __name__ == "__main__":
     unittest.main()
