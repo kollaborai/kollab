@@ -368,3 +368,37 @@ def test_pip_env_split_shebang_resolves_the_interpreter(
     assert result.returncode == 0, result.stdout + result.stderr
     assert str(scripts_dir / "kollab") in result.stdout
     assert "4.5.6" in result.stdout
+
+
+def test_stalled_version_command_times_out(tmp_path: Path) -> None:
+    functions = tmp_path / "installer-functions.sh"
+    functions.write_text(
+        INSTALL_SCRIPT.read_text().split('\nmain "$@"')[0] + "\n",
+        encoding="utf-8",
+    )
+    installed_dir = tmp_path / "install-bin"
+    installed_dir.mkdir()
+    executable = installed_dir / "kollab"
+    executable.write_text("#!/bin/sh\nexec sleep 20\n", encoding="utf-8")
+    executable.chmod(0o755)
+    env = os.environ.copy()
+    env.update({"HOME": str(tmp_path), "PATH": f"{installed_dir}:/usr/bin:/bin"})
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            'source "$1"; INSTALLED_DIR="$2"; VERSION_CHECK_TIMEOUT_SECONDS=1; verify_install',
+            "installer-test",
+            str(functions),
+            str(installed_dir),
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=3,
+    )
+
+    assert result.returncode != 0
+    assert "timed out" in result.stdout
