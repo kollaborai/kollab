@@ -422,6 +422,57 @@ class TestWebFetchExecution(unittest.TestCase):
             "<html><body>x</body></html>", max_chars=2_000_000
         )
 
+    def test_web_fetch_accepts_exact_download_limit_without_content_length(self):
+        """A body exactly at the download cap is allowed without a length header."""
+
+        async def run_case():
+            body = b"x" * 500_000
+
+            async def handle(reader, writer):
+                request = await reader.readuntil(b"\r\n\r\n")
+                path = request.split(b" ", 2)[1]
+                if path == b"/redirect":
+                    response = b"HTTP/1.1 302 Found\r\nLocation: /empty\r\n"
+                    response_body = body
+                elif path == b"/empty":
+                    response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                    response_body = b""
+                else:
+                    response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                    response_body = body
+                writer.write(
+                    response + b"Connection: close\r\n\r\n" + response_body
+                )
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+
+            server = await asyncio.start_server(handle, "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+            try:
+                direct = await self.executor._execute_web_fetch(
+                    {
+                        "id": "web_fetch_exact_cap",
+                        "url": f"http://127.0.0.1:{port}/body",
+                        "extract_main": False,
+                    }
+                )
+                redirected = await self.executor._execute_web_fetch(
+                    {
+                        "id": "web_fetch_exact_redirect_cap",
+                        "url": f"http://127.0.0.1:{port}/redirect",
+                        "extract_main": False,
+                    }
+                )
+                return direct, redirected
+            finally:
+                server.close()
+                await server.wait_closed()
+
+        direct, redirected = _run(run_case())
+        self.assertTrue(direct.success, direct.error)
+        self.assertTrue(redirected.success, redirected.error)
+
     def test_web_fetch_cancellation_closes_response(self):
         """Cancellation during streaming propagates and closes the response."""
 
