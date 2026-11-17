@@ -267,6 +267,37 @@ def test_valid_project_save_when_global_config_is_malformed(tmp_path, monkeypatc
     assert paths["global"].read_bytes() == original_global
 
 
+def test_project_candidate_is_the_layered_save_target(tmp_path, monkeypatch):
+    global_path = tmp_path / "global.json"
+    project_path = tmp_path / "project" / "config.json"
+    local_dir = tmp_path / "local"
+    project_path.parent.mkdir(parents=True)
+    original_global = b'{"api_key":"DO_NOT_ECHO",'
+    _write_bytes(global_path, original_global)
+    _write_bytes(project_path, b'{"settings":{"before":1}}')
+    monkeypatch.setattr(
+        loader_module, "get_existing_global_config_path", lambda: global_path
+    )
+    monkeypatch.setattr(
+        loader_module,
+        "get_project_data_dir_candidates",
+        lambda *args, **kwargs: [project_path.parent],
+    )
+    monkeypatch.setattr(
+        loader_module, "get_local_config_directory", lambda *args, **kwargs: local_dir
+    )
+    loader = ConfigLoader(ConfigManager(project_path), fast_mode=True)
+    loader.get_base_config = lambda: {"settings": {}}
+    loader.get_plugin_configs = lambda: {}
+
+    config = loader.load_complete_config()
+    config["settings"]["after"] = 2
+
+    assert loader.save_merged_config(config) is True
+    assert json.loads(project_path.read_text(encoding="utf-8"))["settings"]["after"] == 2
+    assert global_path.read_bytes() == original_global
+
+
 def test_settings_panel_reports_and_preserves_an_unreadable_global_config(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     workspace = tmp_path / "workspace"
