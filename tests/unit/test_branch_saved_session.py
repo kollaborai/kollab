@@ -165,6 +165,49 @@ async def test_local_branch_saves_current_and_moves_session_owners_together():
 
 
 @pytest.mark.asyncio
+async def test_failed_branch_restores_current_session_after_invalid_index():
+    changed: list[bool] = []
+
+    class ConversationManager:
+        current_session_id = "current-before"
+        messages = [{"role": "user", "content": "current conversation"}]
+
+        def save_conversation(self) -> None:
+            pass
+
+        def branch_session(self, session_id: str, index: int) -> dict:
+            self.current_session_id = session_id
+            self.messages = [{"role": "user", "content": "saved source"}]
+            return {"success": False, "error": "invalid branch point"}
+
+        def load_session(self, session_id: str) -> bool:
+            assert session_id == "current-before"
+            self.current_session_id = session_id
+            self.messages = [{"role": "user", "content": "current conversation"}]
+            return True
+
+    manager = ConversationManager()
+    state = object.__new__(LocalStateService)
+    state._llm_service = SimpleNamespace(conversation_manager=manager)
+
+    @asynccontextmanager
+    async def ownership(action: str):
+        assert action == "branch"
+        yield object(), False, lambda: changed.append(True)
+
+    state._conversation_ownership = ownership
+
+    with pytest.raises(ValueError, match="invalid branch point"):
+        await state.branch_conversation("saved-source", 99)
+
+    assert manager.current_session_id == "current-before"
+    assert manager.messages == [
+        {"role": "user", "content": "current conversation"}
+    ]
+    assert changed == []
+
+
+@pytest.mark.asyncio
 async def test_branch_state_rpc_validates_and_forwards_saved_session():
     payload = _branch_result()
     state_service = SimpleNamespace(
