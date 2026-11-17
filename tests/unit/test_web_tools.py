@@ -241,6 +241,24 @@ class TestWebFetchExecution(unittest.TestCase):
                 "ordinary fallback",
             ),
             (
+                "missing fields and non-string values",
+                (
+                    '<script type="application/ld+json">'
+                    + json.dumps(
+                        [
+                            {"name": "no article fields"},
+                            {
+                                "articleBody": ["x" * 201],
+                                "description": {"text": "not a string"},
+                            },
+                        ]
+                    )
+                    + "</script><p>ordinary fallback</p>"
+                ),
+                "ordinary fallback",
+                "not a string",
+            ),
+            (
                 "malformed and absent JSON-LD fallback",
                 (
                     '<script type="application/ld+json">{bad json</script>'
