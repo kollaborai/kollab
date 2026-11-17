@@ -106,7 +106,7 @@ def test_layered_reader_marks_a_partial_read_malformed(layer, tmp_path, monkeypa
 
 
 def test_layered_reader_does_not_skip_an_unreadable_project_candidate(tmp_path, monkeypatch):
-    paths = _layer_paths(tmp_path, monkeypatch)
+    _layer_paths(tmp_path, monkeypatch)
     unreadable = tmp_path / "old-project" / "config.json"
     later = tmp_path / "new-project" / "config.json"
     _write_bytes(later, b'{"settings":{"later_candidate":true}}')
