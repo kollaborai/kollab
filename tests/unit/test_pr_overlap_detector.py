@@ -49,6 +49,15 @@ def test_same_head_branch_and_stacked_branches_are_reported():
     assert all("branch" in " ".join(match.reasons).lower() for match in matches)
 
 
+def test_same_branch_name_from_different_forks_is_not_a_branch_overlap():
+    current = _pr(2, head="feature")
+    current["head"]["repo"] = {"full_name": "owner-one/repo"}
+    candidate = _pr(1, head="feature")
+    candidate["head"]["repo"] = {"full_name": "owner-two/repo"}
+
+    assert detector.find_overlaps(current, [candidate]) == []
+
+
 def test_overlapping_hunks_and_multiple_shared_files_are_reported():
     current = _pr(
         2,
