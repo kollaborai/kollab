@@ -1,4 +1,4 @@
-// Live proof for the older-history recovery fixes (#471 / PR #472 round 3).
+// Live proof for history recovery and long-message restoration.
 // The engine is a fixture; the UI is the built app (dist).
 //   node tests/history-recovery-proof.mjs [outDir]
 // Scenarios:
@@ -13,6 +13,8 @@
 //   I: a tool call and result split across pages reunite without a branch
 //   J: a superseding refresh during a local send preserves the submitted row
 //   observed-hub-note: an observed note appears on its history event, dimmed
+//   long-agent-reply: a >4 KB assistant reply is complete after a history reload
+//       screenshots: long-agent-reply-{1280,820,390}.png
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -210,6 +212,9 @@ const scenario = async (name, buildState, run) => {
       (url.origin === base && ["fetch", "xhr"].includes(request.resourceType()))
     ) {
       if (url.pathname.endsWith("/assistant") && history.assistant) return history.assistant(route);
+      if (url.pathname.endsWith("/history/output") && history.output) {
+        return history.output(route, url.searchParams.get("ref"));
+      }
       if (url.pathname.endsWith("/history") && !url.pathname.includes("/output")) {
         const options = {
           limit: url.searchParams.get("limit"),
@@ -246,9 +251,9 @@ const scenario = async (name, buildState, run) => {
   // (capture) while harness-level state is still held; the wrapper then skips
   // its post-run shot so the pixels on disk are the asserted ones.
   let captured = false;
-  const capture = async () => {
+  const capture = async (filename = `${name}.png`) => {
     captured = true;
-    await page.screenshot({ path: path.join(out, `${name}.png`), fullPage: false });
+    await page.screenshot({ path: path.join(out, filename), fullPage: false });
   };
   try {
     await run(page, requests, capture);
@@ -1392,6 +1397,60 @@ try {
         ok("D-offline-narrowed-prefix", "paged from cache with zero engine requests");
       } else {
         ok("D-offline-narrowed-prefix", `engine asked ${extra.length}x while offline (all 503)`);
+      }
+    },
+  );
+
+  const longReplyText = `${"Long agent reply. ".repeat(300)}\nLONG_REPLY_END 🌵`;
+  const longReplyPreview = `${"Long agent reply. ".repeat(227)}Long reply\n\n[Showing the first 4 KB of this message.]`;
+  const outputRequests = [];
+  await scenario(
+    "long-agent-reply",
+    () => ({
+      resolve: () => ({
+        status: 200,
+        body: mkPage(0, 1, {
+          history: [{
+            role: "assistant",
+            content: longReplyPreview,
+            metadata: {
+              history_output_truncated: true,
+              history_output_bytes: 8_192,
+              history_output_ref: "long-agent-reply-ref",
+            },
+          }],
+          has_more_older: false,
+          older_cursor: null,
+        }),
+      }),
+      output: (route, reference) => {
+        outputRequests.push(reference);
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ session_id: "demo-session", content: longReplyText }),
+        });
+      },
+    }),
+    async (page, _requests, capture) => {
+      await openThread(page, "LONG_REPLY_END 🌵");
+      const reply = page.locator('[data-slot="aui_assistant-message-root"]').last();
+      const rendered = await reply.innerText();
+      if (!rendered.includes("LONG_REPLY_END 🌵")) {
+        throw new Error("the full assistant reply tail was not rendered after reload");
+      }
+      if (rendered.includes("[Showing the first 4 KB of this message.]")) {
+        throw new Error("the history truncation marker was rendered as assistant text");
+      }
+      if (outputRequests.length !== 1 || outputRequests[0] !== "long-agent-reply-ref") {
+        throw new Error(`unexpected history output requests: ${JSON.stringify(outputRequests)}`);
+      }
+      ok("long-agent-reply", "history reload fetched and rendered the complete assistant reply");
+
+      for (const [width, height] of [[1280, 800], [820, 1180], [390, 844]]) {
+        await page.setViewportSize({ width, height });
+        await reply.scrollIntoViewIfNeeded();
+        await capture(`long-agent-reply-${width}.png`);
       }
     },
   );
