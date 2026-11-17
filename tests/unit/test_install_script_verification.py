@@ -430,3 +430,32 @@ def test_pip_shell_trampoline_resolves_interpreter_with_spaces(
     assert result.returncode == 0, result.stdout + result.stderr
     assert str(scripts_dir / "kollab") in result.stdout
     assert "4.5.6" in result.stdout
+
+
+def test_pip_prefix_install_verifies_its_custom_scripts_directory(
+    tmp_path: Path,
+) -> None:
+    tools_dir = tmp_path / "tools"
+    prefix = tmp_path / "custom prefix"
+    prefix_bin = prefix / "bin"
+    default_scripts = tmp_path / "default scripts"
+    _fake_executable(prefix_bin, "4.5.6")
+    python = _write_executable(
+        tools_dir / "python3",
+        f"#!/bin/sh\nif [ \"$1\" = \"-c\" ]; then echo '{default_scripts}'; fi\n",
+    )
+    _write_executable(
+        tools_dir / "pip3",
+        f"#!{python}\nif [ \"$2\" = \"--help\" ]; then echo --user; fi\n",
+    )
+
+    result = _run_installer_method(
+        tmp_path,
+        method="pip",
+        path_dirs=[tools_dir, prefix_bin, Path("/usr/bin"), Path("/bin")],
+        extra_env={"PIP_PREFIX": str(prefix)},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert str(prefix_bin / "kollab") in result.stdout
+    assert "4.5.6" in result.stdout
