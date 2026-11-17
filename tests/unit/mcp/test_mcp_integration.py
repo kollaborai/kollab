@@ -450,6 +450,36 @@ class TestMCPServerConnection(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    def test_reader_rejects_malformed_server_request(self):
+        """Malformed server requests with usable ids receive Invalid Request."""
+
+        async def run_test():
+            frames = b'{"jsonrpc":"2.0","id":"server","method":"x","params":7}\n'
+            frames += b'{"jsonrpc":"2.0","id":"client","result":{"ok":true}}\n'
+            connection = MCPServerConnection("test", "fake")
+            connection.initialized = True
+            connection.process = _FakeProcess(
+                stdout=_ChunkedStdout([frames], hold_open=True)
+            )
+
+            result = await connection._send_request(
+                {"jsonrpc": "2.0", "id": "client", "method": "test"}
+            )
+
+            self.assertEqual(result["result"], {"ok": True})
+            writes = [json.loads(write.decode()) for write in connection.process.stdin.writes]
+            self.assertIn(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "server",
+                    "error": {"code": -32600, "message": "Invalid Request"},
+                },
+                writes,
+            )
+            await connection.close()
+
+        asyncio.run(run_test())
+
     def test_json_rpc_notifications_do_not_satisfy_pending_request(self):
         """Notifications without ids are ignored while waiting for a response."""
 
