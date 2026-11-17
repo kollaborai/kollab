@@ -3,8 +3,10 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from kollabor.commands.executor import SlashCommandExecutor
+from kollabor.commands.parser import SlashCommandParser
+from kollabor.commands.registry import SlashCommandRegistry
 from kollabor.state.local import LocalStateService, _web_command_output
-from kollabor_events.models import SlashCommand
 from plugins.resume_conversation_plugin import ResumeConversationPlugin
 
 
@@ -55,21 +57,20 @@ def _session_list_result(message: str, sessions: list[dict]) -> SimpleNamespace:
 async def _web_reply(
     plugin: ResumeConversationPlugin, name: str, args: list[str]
 ) -> str:
-    handlers = {
-        "branch": plugin.handle_branch,
-        "fork": plugin.handle_sessions,
-        "resume": plugin.handle_resume,
-    }
-
-    class HandlerExecutor:
-        async def execute_command(self, command, event_bus):
-            return await handlers[command.name](command)
+    class WebEventBus:
+        async def emit_with_hooks(self, *_args, **_kwargs):
+            return {}
 
     command_text = " ".join([f"/{name}", *args])
-    command = SlashCommand(name=name, args=args, raw_input=command_text)
+    command = SlashCommandParser().parse_command(command_text)
+    assert command is not None
+    registry = SlashCommandRegistry()
+    plugin._register_resume_commands(registry)
     service = LocalStateService.__new__(LocalStateService)
-    service._event_bus = None
-    _, reply = await service._run_web_slash_command(command, HandlerExecutor())
+    service._event_bus = WebEventBus()
+    _, reply = await service._run_web_slash_command(
+        command, SlashCommandExecutor(registry)
+    )
     return reply
 
 
@@ -83,7 +84,12 @@ async def test_web_resume_and_branch_lists_render_actionable_rows():
     ]
     plugin.conversation_logger = Mock()
     plugin._ensure_conversation_manager = Mock(return_value=True)
-    plugin.llm_service = None
+    plugin.llm_service = SimpleNamespace(
+        conversation_history=[
+            {"role": "user", "content": "Active task"},
+            {"role": "assistant", "content": "Working"},
+        ]
+    )
     conversations = [
         _conversation("session-1", "Plan a release"),
         _conversation("session-2", "Investigate a regression"),
@@ -128,6 +134,12 @@ async def test_web_resume_and_branch_lists_render_actionable_rows():
         "Prepare a handoff",
         r"session\-3 \| 3 msgs \| main",
         "/branch session-3",
+    )
+    _assert_action_row(
+        branch_sessions,
+        r"\[\*CURRENT\*\] Active task",
+        r"2 msgs \| this session",
+        "/branch current",
     )
     assert "Review a migration" in branch_sessions
     assert "Up/Down navigate" not in branch_sessions
@@ -218,7 +230,7 @@ def test_session_list_titles_and_subtitles_are_markdown_escaped():
         [
             {
                 "id": "session-1",
-                "title": "*bold* [click](https://example.invalid)",
+                "title": "*bold* [click](https://example.invalid) — Café 東京",
                 "subtitle": "![image](https://example.invalid/image.png)",
                 "action": "resume_session",
                 "metadata": {"session_id": "session-1"},
@@ -228,8 +240,8 @@ def test_session_list_titles_and_subtitles_are_markdown_escaped():
 
     output = _web_command_output(result, "resume")
 
-    assert r"\*bold\* \[click\]\(https\:\/\/example\.invalid\)" in output
-    assert r"\!\[image\]\(https\:\/\/example\.invalid\/image\.png\)" in output
+    assert r"\*bold\* \[click\]\(https://example.invalid\) — Café 東京" in output
+    assert r"\!\[image\]\(https://example.invalid/image.png\)" in output
     assert "[click](https://example.invalid)" not in output
     assert "![image](https://example.invalid/image.png)" not in output
 
@@ -248,6 +260,24 @@ def test_session_without_explicit_action_is_not_rendered_as_a_bare_row():
     )
 
     assert _web_command_output(result, "fork") == "No actionable sessions"
+
+
+def test_whitespace_only_title_falls_back_to_session_id():
+    result = _session_list_result(
+        "No sessions available",
+        [
+            {
+                "id": "session-1",
+                "title": "   ",
+                "action": "resume_session",
+                "metadata": {"session_id": "session-1"},
+            }
+        ],
+    )
+
+    output = _web_command_output(result, "resume")
+
+    _assert_action_row(output, "session-1", "", "/resume session-1")
 
 
 @pytest.mark.parametrize("session_id", ["bad id", "bad\nid", "bad`id", "bad/id"])
@@ -285,3 +315,45 @@ def test_invalid_branch_message_indices_are_not_rendered(message_index):
     )
 
     assert _web_command_output(result, "branch") == "No safe branch points"
+
+
+def test_branch_execute_requires_session_id_in_metadata():
+    result = _session_list_result(
+        "No safe branch points",
+        [
+            {
+                "id": "0",
+                "title": "Branch point without session metadata",
+                "action": "branch_execute",
+                "metadata": {"message_index": 0},
+            }
+        ],
+    )
+
+    assert _web_command_output(result, "branch") == "No safe branch points"
+
+
+def test_mixed_safe_and_unsafe_rows_explain_hidden_choices():
+    result = _session_list_result(
+        "No sessions available",
+        [
+            {
+                "id": "session-1",
+                "title": "Safe session",
+                "action": "resume_session",
+                "metadata": {"session_id": "session-1"},
+            },
+            {
+                "id": "bad/id",
+                "title": "Unsafe session",
+                "action": "resume_session",
+                "metadata": {"session_id": "bad/id"},
+            },
+        ],
+    )
+
+    output = _web_command_output(result, "resume")
+
+    assert "Safe session" in output
+    assert "Unsafe session" not in output
+    assert "Some session rows were hidden" in output
