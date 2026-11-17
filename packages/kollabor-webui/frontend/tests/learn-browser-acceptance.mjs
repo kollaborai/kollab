@@ -652,7 +652,7 @@ async function main() {
     console.log(`Mocked API requests: ${shell.fixture.requests.length}`);
     console.log("Learn browser acceptance passed; all API calls were mocked and no live engine was used.");
   } finally {
-    await browser.close();
+    await browser?.close();
     await server.close();
   }
 }
