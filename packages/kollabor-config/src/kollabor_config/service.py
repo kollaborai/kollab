@@ -37,7 +37,7 @@ class ConfigService:
     POLL_SECONDS = 1.0
 
     def __init__(
-        self, config_path: Path, plugin_registry=None, fast_mode: bool = False
+        self, config_path: Path, plugin_registry=None, fast_mode: bool = False, *, initialize: bool = True
     ):
         """Initialize the configuration service.
 
@@ -45,6 +45,8 @@ class ConfigService:
             config_path: Path to the configuration file.
             plugin_registry: Optional plugin registry for plugin configs.
             fast_mode: If True, skip expensive operations like system prompt loading.
+            initialize: If False, skip loading, migrating, and polling configuration.
+                Intended for targeted writes using an explicit save target.
         """
         self.config_manager = ConfigManager(config_path)
         self.config_loader = ConfigLoader(
@@ -61,11 +63,10 @@ class ConfigService:
         self._mtimes: Dict[Path, Optional[int]] = {}
         self._poll_task: Optional[asyncio.Task] = None
 
-        # Load initial configuration
-        self._initialize_config()
-
-        # Start polling for other processes' saves (needs a running loop)
-        self._start_polling()
+        if initialize:
+            # Load initial configuration and poll for other processes' saves.
+            self._initialize_config()
+            self._start_polling()
 
         logger.info(f"Configuration service initialized: {config_path}")
 
@@ -264,14 +265,20 @@ class ConfigService:
         Returns:
             True if saved, False on error.
         """
+        return self.save_keys({key_path: value}, save_target=save_target)
+
+    def save_keys(
+        self, changes: Dict[str, Any], save_target: Optional[str] = None, *, strict: bool = False
+    ) -> bool:
+        """Persist several config keys in one locked atomic replacement.
+
+        Strict writes refuse unreadable files and conflicting non-object parents.
+        """
         import json
 
         from kollabor_events.dict_utils import safe_set
 
-        # 1. Update in-memory config
-        safe_set(self.config_manager.config, key_path, value)
-
-        # 2. Determine file path
+        # Determine file path
         if save_target == "local":
             save_path = get_local_config_path()
         elif save_target == "global":
@@ -279,34 +286,46 @@ class ConfigService:
         else:
             save_path = self.config_loader._get_config_save_path()
 
-        # 3. Read existing file (or start empty)
-        existing: Dict[str, Any] = {}
-        if save_path.exists():
-            try:
-                with open(save_path) as f:
-                    existing = json.load(f)
-            except (json.JSONDecodeError, OSError) as e:
-                logger.warning(f"Could not read {save_path}, starting fresh: {e}")
-                # The fresh dict replaces the file: keep what could not be read.
-                keep_unreadable_copy(save_path)
+        # The shared UI/plugin writer must serialize the read-modify-write, not
+        # just replace the file atomically: otherwise concurrent edits lose keys.
+        from .file_lock import locked_file
 
-        # 4. Patch the single key into the existing dict
-        safe_set(existing, key_path, value)
-
-        # 5. Write back whole, so another kollab reading right now never finds half
-        # a file (it would start blank and save that over the profiles and keys).
-        # ponytail: no cross-process lock, so two saves at the same instant can still
-        # drop one key (never the file); flock a sibling .lock if that ever matters.
-        save_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            write_text_atomic(
-                save_path, json.dumps(existing, indent=2, ensure_ascii=False)
-            )
-            self._note_own_write(save_path)
-            logger.info(f"Saved {key_path} to {save_path}")
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            with locked_file(save_path.with_name(save_path.name + ".lock"), private=True):
+                if strict and save_path.is_symlink():
+                    raise ValueError("Config file cannot be a symlink")
+                existing: Dict[str, Any] = {}
+                if save_path.exists():
+                    try:
+                        with open(save_path) as f:
+                            existing = json.load(f)
+                    except (json.JSONDecodeError, UnicodeError, OSError) as e:
+                        if strict:
+                            raise ValueError("Cannot read config file") from e
+                        logger.warning(f"Could not read {save_path}, starting fresh: {e}")
+                        keep_unreadable_copy(save_path)
+                if strict and not isinstance(existing, dict):
+                    raise ValueError("Config file must contain an object")
+                for key_path, value in changes.items():
+                    if strict:
+                        node = existing
+                        for segment in key_path.split(".")[:-1]:
+                            if segment not in node:
+                                break
+                            node = node[segment]
+                            if not isinstance(node, dict):
+                                raise ValueError("Config path conflicts with an existing value")
+                    if not safe_set(existing, key_path, value):
+                        raise ValueError("Invalid config path")
+                write_text_atomic(save_path, json.dumps(existing, indent=2, ensure_ascii=False))
+                for key_path, value in changes.items():
+                    safe_set(self.config_manager.config, key_path, value)
+                self._note_own_write(save_path)
+            logger.info("Saved %d config key(s) to %s", len(changes), save_path)
             return True
         except Exception as e:
-            logger.error(f"Failed to save {key_path} to {save_path}: {e}")
+            logger.error("Failed to save config keys to %s: %s", save_path, e)
             return False
 
     def reload(self) -> bool:
