@@ -595,7 +595,8 @@ test("each loaded row takes at most one shown row, matched from the newest", () 
   ];
   const rebased = mergeCompactionHistorySnapshot(shown, loaded);
   assert.ok(rebased);
-  assert.deepEqual(rebased.messages.map((message) => message.id), ["history-0", "history-1", "history-2", "history-3"]);
+  assert.deepEqual(rebased.messages.map((message) => message.id), ["history-0", "history-1", "history-2", "history-7"]);
+  assert.equal(rebased.messages[3]?.metadata?.custom?.historySourceIndex, 3);
   assert.equal(rebased.messages.filter((message) => message.content === "go").length, 2);
 });
 
