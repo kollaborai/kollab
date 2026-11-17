@@ -845,29 +845,106 @@ async def test_start_and_close_never_read_any_process_environment(tmp_path, monk
             await asyncio.wait_for(outsider.wait(), timeout=2)
 
 
+SESSION_PROBE = (
+    "import os\n"
+    "open(os.environ['ACP_SID_FILE'], 'w').write(str(os.getsid(0)))\n"
+)
+
+GRACE_CHILD = (
+    "import os, signal, time\n"
+    "if os.fork() == 0:\n"
+    "    null = os.open(os.devnull, os.O_RDWR)\n"
+    "    for fd in (0, 1, 2):\n"
+    "        os.dup2(null, fd)\n"
+    "    def finish(*_):\n"
+    "        time.sleep(1.5)\n"
+    "        open(os.environ['ACP_GRACE_DONE'], 'w').write('done')\n"
+    "        os._exit(0)\n"
+    "    signal.signal(signal.SIGTERM, finish)\n"
+    "    signal.alarm(30)\n"
+    "    open(os.environ['ACP_GRACE_READY'], 'w').write('ready')\n"
+    "    while True:\n"
+    "        time.sleep(0.1)\n"
+)
+
+
+async def _wait_for_file(path, timeout=5.0):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not (path.exists() and path.read_text()):
+        if asyncio.get_running_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(0.05)
+    return True
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX sessions only")
+@pytest.mark.asyncio
+async def test_adapter_runs_outside_the_parent_session(tmp_path):
+    """Without a controlling terminal, an adapter tool that reads /dev/tty
+    (ssh, sudo, git credentials) fails at once instead of stopping."""
+    sid_file = tmp_path / "sid"
+    runner = ACPRunner(
+        ACPProfile("session", (sys.executable, "-c", SESSION_PROBE + FAKE_ADAPTER), cwd=str(tmp_path),
+                   env={"ACP_SID_FILE": str(sid_file)}),
+        persist_profile_resolution=False,
+    )
+    try:
+        await runner._start_process()
+        assert await _wait_for_file(sid_file)
+        assert int(sid_file.read_text()) != os.getsid(0)
+    finally:
+        await runner._terminate_process()
+
+
 @pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX process groups only")
-def test_group_signal_never_reaches_a_pgid_whose_guard_is_gone(tmp_path, monkeypatch):
-    """The guard leader holds the PGID. Once it is gone, the numeric id may be
-    reused by an unrelated group, so cleanup must never signal it again."""
+@pytest.mark.asyncio
+async def test_close_lets_group_descendants_finish_their_sigterm_handler(tmp_path):
+    """Close sends SIGTERM to the adapter's group and waits for its members,
+    not only for the adapter, before SIGKILL."""
+    ready, done = tmp_path / "ready", tmp_path / "done"
+    runner = ACPRunner(
+        ACPProfile("grace", (sys.executable, "-c", GRACE_CHILD + FAKE_ADAPTER), cwd=str(tmp_path),
+                   env={"ACP_GRACE_READY": str(ready), "ACP_GRACE_DONE": str(done)}),
+        persist_profile_resolution=False,
+    )
+    try:
+        await runner._start_process()
+        assert await _wait_for_file(ready)
+    finally:
+        await runner._terminate_process()
+    assert done.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX process groups only")
+def test_group_signal_never_reaches_a_pgid_whose_anchor_is_gone(tmp_path, monkeypatch):
+    """The anchor keeps the adapter's group id from being reused. Once it is
+    gone, or none was recorded, the numeric id may belong to an unrelated
+    group, so cleanup must never signal it again."""
     import signal
+    import socket
 
     sent = []
     monkeypatch.setattr(os, "killpg", lambda pgid, signum: sent.append((pgid, signum)))
-    profile = ACPProfile("guard", (sys.executable, "-c", "pass"), cwd=str(tmp_path))
+    profile = ACPProfile("anchor", (sys.executable, "-c", "pass"), cwd=str(tmp_path))
 
-    killed = ACPRunner(profile)
-    killed._process_group_id = 4242
-    killed._process_group_guard = SimpleNamespace(returncode=None)
-    assert killed._signal_owned_process_group(signal.SIGKILL) is True
-    # SIGKILL ended the guard with its group; the id is spent before asyncio reaps it.
-    assert killed._signal_owned_process_group(signal.SIGKILL) is False
+    held = ACPRunner(profile)
+    ours, theirs = socket.socketpair()
+    held._process_group_id = 4242
+    held._group_anchor = ours
+    try:
+        assert held._signal_owned_process_group(signal.SIGTERM) is True
+        theirs.close()  # the anchor exited, for example killed from outside
+        assert held._signal_owned_process_group(signal.SIGKILL) is False
+        assert held._signal_owned_process_group(signal.SIGTERM) is False
+    finally:
+        ours.close()
+        theirs.close()
 
-    exited = ACPRunner(profile)
-    exited._process_group_id = 4343
-    exited._process_group_guard = SimpleNamespace(returncode=-9)  # guard ended on its own
-    assert exited._signal_owned_process_group(signal.SIGTERM) is False
+    unanchored = ACPRunner(profile)
+    unanchored._process_group_id = 4343
+    assert unanchored._signal_owned_process_group(signal.SIGTERM) is False
 
-    assert sent == [(4242, signal.SIGKILL)]
+    assert sent == [(4242, signal.SIGTERM)]
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork and setsid")
