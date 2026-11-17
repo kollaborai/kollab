@@ -393,6 +393,7 @@ class ContextCompactionPlugin(BasePlugin):
         self._compaction_tasks: set[asyncio.Task] = set()
         self._acp_compacting = False
         self._acp_compact_armed = True
+        self._acp_threshold_crossing_pending = False
         self._acp_meter_session_key: tuple[Any, Any] | None = None
         # "Can't shrink" stop (see _should_compact): the swap sets just_applied, the
         # next reported prompt is the compacted one, shrink_floor holds it when it
@@ -1872,6 +1873,8 @@ class ContextCompactionPlugin(BasePlugin):
                 self._set_compaction_status("warning", message)
             return message
         if self._acp_compacting:
+            if reason == "threshold":
+                self._acp_threshold_crossing_pending = True
             return "the harness is already compacting its own context"
         if reason == "threshold":
             # Keep the threshold armed until a compaction attempt actually starts;
@@ -1908,6 +1911,9 @@ class ContextCompactionPlugin(BasePlugin):
             self._acp_compacting = False
             if reason == "threshold" and not succeeded:
                 self._acp_compact_armed = True
+            elif reason != "threshold" and self._acp_threshold_crossing_pending:
+                self._acp_compact_armed = not succeeded
+                self._acp_threshold_crossing_pending = False
 
     def _acp_owns_chat(self) -> bool:
         """Whether an ACP agent owns this chat (the test the message handler
