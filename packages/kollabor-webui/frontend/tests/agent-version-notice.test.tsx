@@ -1,7 +1,25 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ApiError, isAgentTooOld } from "@/api";
+import { DaemonNotice } from "@/components/code/DaemonNotice";
 import { AgentVersionNotice, agentVersionNotice } from "@/components/shell/AgentVersionNotice";
+import { TerminalView } from "@/components/terminal/TerminalView";
+
+vi.mock("@/components/terminal/use-terminal-ws-connection", () => ({
+  useTerminalWsConnection: () => ({
+    status: "error",
+    errorCode: "daemon_outdated",
+    errorMessage: "This agent runs older code.",
+    reconnecting: false,
+    refusal: null,
+    close: () => {},
+  }),
+}));
+vi.mock("@/components/terminal/terminal-viewer", () => ({ TerminalViewer: () => null }));
+vi.mock("@/components/code/floating-sidebar", () => ({
+  FloatingFileSidebar: ({ children }: { children?: unknown }) => children,
+  useFileSidebarVisibility: () => ({ visible: true, narrow: false, toggle: () => {}, hide: () => {} }),
+}));
 
 const agent = { name: "lapis", agent_id: "a1", state: "idle", current_task: "", solo: false, project: "/w" };
 
@@ -128,5 +146,46 @@ describe("agents that cannot restart themselves (#968)", () => {
     expect(isAgentTooOld(new ApiError("409: this agent is not on a hub, so it cannot restart itself", 409, undefined))).toBe(false);
     expect(isAgentTooOld(new ApiError("500: this agent is too old to restart itself", 500, undefined))).toBe(false);
     expect(isAgentTooOld(new Error("this agent is too old to restart itself"))).toBe(false);
+  });
+});
+
+describe("daemon outdated notices", () => {
+  const stopAndStart = "This agent started before Restart Agent existed. Run kollab --hub stop lapis in a terminal, then select its Offline row in the sidebar to start it again.";
+
+  function panelNoticeProps(version: string, restartAgents: boolean) {
+    return {
+      notice: agentVersionNotice({
+        engineVersion: "0.22.0+aaaa1111",
+        agent: { ...agent, version },
+        restartAgents,
+      }),
+      fallbackName: agent.name,
+      busy: false,
+      onRestart: () => {},
+    };
+  }
+
+  it.each(["Terminal", "Code", "Git"])("shows the working stop-and-start instruction in %s for an unversioned agent", (panel) => {
+    const html = renderToStaticMarkup(<DaemonNotice {...panelNoticeProps("", false)} />);
+    expect(html, panel).toContain(stopAndStart);
+    expect(html).not.toContain("Retry");
+  });
+
+  it("shows Restart Agent for a versioned agent when the restart setting is on", () => {
+    const html = renderToStaticMarkup(<DaemonNotice {...panelNoticeProps("0.21.0+bbbb2222", true)} />);
+    expect(html).toContain("Restart Agent");
+  });
+
+  it("shows /restart for a versioned agent when the restart setting is off", () => {
+    const html = renderToStaticMarkup(<DaemonNotice {...panelNoticeProps("0.21.0+bbbb2222", false)} />);
+    expect(html).toContain("Run /restart to update the agent version running.");
+  });
+
+  it("the Terminal does not offer Retry for daemon_outdated", () => {
+    const html = renderToStaticMarkup(
+      <TerminalView sessionId="s1" workspace="/workspace" daemonNotice={panelNoticeProps("", false)} />,
+    );
+    expect(html).toContain(stopAndStart);
+    expect(html).not.toMatch(/>Retry<\/button>/);
   });
 });
