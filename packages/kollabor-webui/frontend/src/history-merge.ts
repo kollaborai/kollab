@@ -6,10 +6,27 @@ type Message = {
   convertConfig?: { joinStrategy?: string };
 };
 
-const historyIndex = (id: unknown): number | null => {
-  const index = /^history-(\d+)/.exec(String(id ?? ""))?.[1];
+const historySourceIndex = (message: Message): number | null => {
+  const index = message.metadata?.custom?.historySourceIndex;
+  return typeof index === "number" && Number.isInteger(index) && index >= 0 ? index : null;
+};
+
+const historyBaseIdIndex = (message: Message): number | null => {
+  const index = /^history-(\d+)$/.exec(String(message.id ?? ""))?.[1];
   return index === undefined ? null : Number(index);
 };
+
+const historyIndex = (message: Message): number | null => {
+  const sourceIndex = historySourceIndex(message);
+  if (sourceIndex !== null) return sourceIndex;
+  const index = /^history-(\d+)/.exec(String(message.id ?? ""))?.[1];
+  return index === undefined ? null : Number(index);
+};
+
+/** The source history row for a displayed message, including stable-id aliases. */
+export function historyMessageIndex(message: Message): number | null {
+  return historyIndex(message);
+}
 
 /** Insert newly reached history rows without dropping previously shown rows. */
 export function mergeMissingHistoryMessages<T extends Message>(
@@ -17,9 +34,17 @@ export function mergeMissingHistoryMessages<T extends Message>(
   loaded: ReadonlyArray<T>,
 ): { messages: T[]; added: T[] } {
   const present = new Set(shown.map((message) => message.id));
+  const representedRows = new Set(shown.flatMap((message) => {
+    const index = historySourceIndex(message) ?? historyBaseIdIndex(message);
+    return index === null ? [] : [index];
+  }));
   const order = new Map(loaded.map((message, index) => [message.id, index]));
   const added = loaded.filter((message) => {
-    if (historyIndex(message.id) === null || present.has(message.id)) return false;
+    const index = historyIndex(message);
+    const baseIndex = historyBaseIdIndex(message);
+    if (index === null || present.has(message.id) ||
+      (baseIndex !== null && representedRows.has(baseIndex)) ||
+      (historySourceIndex(message) !== null && representedRows.has(index))) return false;
     present.add(message.id);
     return true;
   });
@@ -56,8 +81,12 @@ export function reconcileBoundaryToolResults<T extends Message>(
   type Call = { messageId: string | undefined; index: number; partIndex: number };
   const pending: Fallback[] = [];
   const shownIds = new Set(shown.map((message) => message.id));
+  const shownRows = new Set(shown.flatMap((message) => {
+    const index = historySourceIndex(message) ?? historyBaseIdIndex(message);
+    return index === null ? [] : [index];
+  }));
   for (const message of shown) {
-    const index = historyIndex(message.id);
+    const index = historyIndex(message);
     const callId = message.metadata?.custom?.historyToolFallback;
     if (index === null || index < start || index >= end || typeof callId !== "string" ||
       !Array.isArray(message.content)) continue;
@@ -69,7 +98,7 @@ export function reconcileBoundaryToolResults<T extends Message>(
   if (!pending.length) return null;
   const calls = new Map<string, Call[]>();
   for (const message of loaded) {
-    const index = historyIndex(message.id);
+    const index = historyIndex(message);
     if (index === null || message.metadata?.custom?.historyToolFallback || !Array.isArray(message.content)) continue;
     message.content.forEach((part: unknown, partIndex: number) => {
       if (!part || typeof part !== "object") return;
@@ -92,15 +121,18 @@ export function reconcileBoundaryToolResults<T extends Message>(
       else high = middle;
     }
     const call = rows[low - 1];
-    if (!call || shownIds.has(call.messageId) || (low > 1 && rows[low - 2].index === call.index)) continue;
+    if (!call || shownIds.has(call.messageId) ||
+      (call.messageId === `history-${call.index}` && shownRows.has(call.index)) ||
+      (low > 1 && rows[low - 2].index === call.index)) continue;
     const key = `${call.messageId}:${call.partIndex}`;
     const group = matches.get(key) ?? [];
     group.push(fallback);
     matches.set(key, group);
   }
   const replaced = new Set<string | undefined>();
+  const stableIds = new Map<string | undefined, { id: string | undefined; index: number }>();
   const corrected = loaded.map((message) => {
-    const index = historyIndex(message.id);
+    const index = historyIndex(message);
     if (index === null || shownIds.has(message.id) ||
       message.metadata?.custom?.historyToolFallback || !Array.isArray(message.content)) return message;
     let changed = false;
@@ -112,6 +144,7 @@ export function reconcileBoundaryToolResults<T extends Message>(
       const prior = group[0];
       changed = true;
       replaced.add(prior.message.id);
+      stableIds.set(message.id, { id: prior.message.id, index });
       const result = { ...call };
       for (const field of ["result", "isError", "timing"] as const) {
         if (field in prior.part) result[field] = prior.part[field];
@@ -121,7 +154,21 @@ export function reconcileBoundaryToolResults<T extends Message>(
     return changed ? { ...message, content } as T : message;
   });
   if (!replaced.size) return null;
-  return mergeMissingHistoryMessages(shown.filter((message) => !replaced.has(message.id)), corrected).messages;
+  const stable = corrected.map((message) => {
+    const source = stableIds.get(message.id);
+    if (!source) return message;
+    const custom: Record<string, unknown> = {
+      ...(message.metadata?.custom ?? {}),
+      historySourceIndex: source.index,
+    };
+    delete custom.historyToolFallback;
+    return {
+      ...message,
+      id: source.id,
+      metadata: { ...message.metadata, custom },
+    } as T;
+  });
+  return mergeMissingHistoryMessages(shown.filter((message) => !replaced.has(message.id)), stable).messages;
 }
 
 /**
@@ -135,15 +182,40 @@ export function reconcileBoundaryToolResults<T extends Message>(
  */
 export function shownMessagesChanged(shown: ReadonlyArray<Message>, loaded: ReadonlyArray<Message>): boolean {
   const shownById = new Map(shown.map((message) => [message.id, message]));
+  const shownAliases = new Map(shown.flatMap((message) => {
+    const index = historySourceIndex(message);
+    return index === null ? [] : [[index, message] as const];
+  }));
+  const shownBaseRows = new Map(shown.flatMap((message) => {
+    const index = historyBaseIdIndex(message);
+    return index === null ? [] : [[index, message] as const];
+  }));
   const loadedIds = new Set(loaded.map((message) => message.id));
+  const loadedAliases = new Map(loaded.flatMap((message) => {
+    const index = historySourceIndex(message);
+    return index === null ? [] : [[index, message] as const];
+  }));
+  const loadedBaseRows = new Set(loaded.flatMap((message) => {
+    const index = historyBaseIdIndex(message);
+    return index === null ? [] : [index];
+  }));
   // Rows before the loaded window are older pages, not gone.
-  const start = loaded.reduce((low, message) => Math.min(low, historyIndex(message.id) ?? low), Infinity);
+  const start = loaded.reduce((low, message) => Math.min(low, historyIndex(message) ?? low), Infinity);
   const gone = shown.some((message) => {
-    const index = historyIndex(message.id);
-    return index !== null && index >= start && !loadedIds.has(message.id);
+    const index = historyIndex(message);
+    const sourceIndex = historySourceIndex(message);
+    const baseIndex = historyBaseIdIndex(message);
+    const represented = loadedIds.has(message.id) ||
+      (sourceIndex !== null && loadedBaseRows.has(sourceIndex)) ||
+      (baseIndex !== null && loadedAliases.has(baseIndex));
+    return index !== null && index >= start && !represented;
   });
   return gone || loaded.some((message) => {
-    const old = shownById.get(message.id);
+    const baseIndex = historyBaseIdIndex(message);
+    const sourceIndex = historySourceIndex(message);
+    const old = shownById.get(message.id) ??
+      (baseIndex === null ? undefined : shownAliases.get(baseIndex)) ??
+      (sourceIndex === null ? undefined : shownBaseRows.get(sourceIndex));
     return old !== undefined && (
       JSON.stringify(old.content) !== JSON.stringify(message.content) ||
       old.convertConfig?.joinStrategy !== message.convertConfig?.joinStrategy
@@ -197,7 +269,7 @@ const compactionMarkerKey = (message: Message): string => {
 const historyOrder = (message: Message, tie: number): HistoryOrder => {
   const archived = compactionArchiveOrder(message);
   if (archived !== null) return { section: 0, index: archived, tie };
-  const index = historyIndex(message.id);
+  const index = historyIndex(message);
   if (index !== null) return { section: 1, index, tie };
   return { section: 2, index: 0, tie };
 };
@@ -304,12 +376,12 @@ export function mergeCompactionHistorySnapshot<T extends Message>(
   const key = compactionMarkerKey(marker);
 
   const transcript = shown.filter((message) =>
-    historyIndex(message.id) !== null || compactionArchiveOrder(message) !== null,
+    historyIndex(message) !== null || compactionArchiveOrder(message) !== null,
   );
   const nonHistory = shown.filter((message) =>
-    historyIndex(message.id) === null && compactionArchiveOrder(message) === null,
+    historyIndex(message) === null && compactionArchiveOrder(message) === null,
   );
-  const history = loaded.filter((message) => historyIndex(message.id) !== null);
+  const history = loaded.filter((message) => historyIndex(message) !== null);
   // The engine keeps its newest rows verbatim across a compaction, so they come
   // back in `history`. Archiving their displayed copies too would show them
   // twice. Each loaded row takes at most one shown row, matched from the newest.
@@ -319,14 +391,35 @@ export function mergeCompactionHistorySnapshot<T extends Message>(
     positions.set(fingerprint, [...(positions.get(fingerprint) ?? []), index]);
   });
   const carried = new Set<T>();
+  const carriedRows = new Map<number, T>();
   let lastCarried = -1;
   for (const message of [...transcript].reverse()) {
     const position = positions.get(rowFingerprint(message))?.pop();
     if (position !== undefined) {
       carried.add(message);
+      carriedRows.set(position, message);
       lastCarried = Math.max(lastCarried, position);
     }
   }
+  // Keep assistant-ui's keys for rows the compacted snapshot carried forward.
+  // A stable alias can point at a different history index after compaction, so
+  // refresh its source index while preserving the existing message id.
+  const rebasedHistory = history.map((message, position) => {
+    const previous = carriedRows.get(position);
+    if (!previous || previous.id === message.id) return message;
+    const sourceIndex = historyIndex(message);
+    return {
+      ...message,
+      id: previous.id,
+      metadata: {
+        ...(message.metadata ?? {}),
+        custom: {
+          ...(message.metadata?.custom ?? {}),
+          ...(sourceIndex === null ? {} : { historySourceIndex: sourceIndex }),
+        },
+      },
+    } as T;
+  });
   const archived = transcript
     .filter((message) => !carried.has(message))
     .map((message, index) => ({
@@ -344,12 +437,12 @@ export function mergeCompactionHistorySnapshot<T extends Message>(
   // The rows the snapshot brings after the last shown row it carried are the turn
   // a reload replays; its transient copies go as a sync drops them (#666). Live
   // rows sit at the end, outside that check.
-  const replayed = history.filter((message, index) =>
+  const replayed = rebasedHistory.filter((message, index) =>
     index > lastCarried && !isCompactionMarker(message));
   const live = nonHistory.filter((message) => isLive(message));
-  const settled = [...archived, ...history, ...nonHistory.filter((message) => !isLive(message))];
+  const settled = [...archived, ...rebasedHistory, ...nonHistory.filter((message) => !isLive(message))];
   const deduped = dropTransientTurnDuplicates(settled, replayed) ?? settled;
-  return { messages: [...deduped, ...live], history, key };
+  return { messages: [...deduped, ...live], history: rebasedHistory, key };
 }
 
 const TRANSIENT_ROW_ID = /^(?:user|assistant)-.+-(\d+)$/;

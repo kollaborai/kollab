@@ -1,7 +1,7 @@
 ---
 title: "Conversations and Storage"
 created: 2026-02-24
-modified: 2026-02-24
+modified: 2026-11-17
 status: active
 ---
 # Conversations and Storage
@@ -51,6 +51,10 @@ Use the `/resume` command to pick up where you left off:
 ```
 
 The resume system restores the full message history so the LLM has context from the previous session.
+
+### Reading History in the Web UI
+
+While reading a long conversation, loading older pages and reconciling compacted history preserves the visible messages and their scroll position.
 
 ## Saving Conversations
 

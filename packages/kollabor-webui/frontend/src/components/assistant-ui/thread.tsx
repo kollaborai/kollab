@@ -226,7 +226,7 @@ const ThreadRoot: FC<{
 }) => {
   const { Welcome = ThreadWelcome, ComposerLeading } = useContext(ThreadComponentsContext);
   const viewportRef = useRef<HTMLDivElement>(null);
-  const scrollAnchorRef = useRef<{ height: number; top: number; start: number } | null>(null);
+  const scrollAnchorRef = useRef<{ start: number } | null>(null);
 
   const userScrollRef = useRef(false);
   const touchStartYRef = useRef<number | null>(null);
@@ -254,11 +254,7 @@ const ThreadRoot: FC<{
     ) {
       return;
     }
-    const anchor = {
-      height: viewport.scrollHeight,
-      top: viewport.scrollTop,
-      start: historyStartIndex,
-    };
+    const anchor = { start: historyStartIndex };
     scrollAnchorRef.current = anchor;
     void onLoadOlder()
       .then((merged) => {
@@ -298,17 +294,7 @@ const ThreadRoot: FC<{
       scrollAnchorRef.current = null;
       return;
     }
-    if (historyStartIndex >= anchor.start) return;
-    const firstFrame = window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        const viewport = viewportRef.current;
-        if (viewport) {
-          viewport.scrollTop = anchor.top + viewport.scrollHeight - anchor.height;
-        }
-        scrollAnchorRef.current = null;
-      });
-    });
-    return () => window.cancelAnimationFrame(firstFrame);
+    if (historyStartIndex < anchor.start) scrollAnchorRef.current = null;
   }, [historyStartIndex, historyStatus?.kind]);
 
   return (
@@ -362,7 +348,7 @@ const ThreadRoot: FC<{
         turnAnchor="top"
         autoScroll={voiceLive || undefined}
         data-slot="aui_thread-viewport"
-        className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
+        className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll"
       >
         <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col px-4 pt-4">
           {historyStatus ? (
@@ -1229,11 +1215,13 @@ const AssistantMessage: FC = () => {
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
   const ACTION_BAR_HEIGHT = `min-h-7.5 ${ACTION_BAR_PT}`;
 
+  // Older-page tool reconciliation can update this row in place; keep its
+  // geometry in normal layout so the viewport can preserve its id anchor.
   return (
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
-      className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+      className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150"
     >
       <div
         data-slot="aui_assistant-message-content"
