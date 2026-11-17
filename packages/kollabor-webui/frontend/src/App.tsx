@@ -73,6 +73,7 @@ import {
 } from "@/components/ui/sidebar";
 import {
   EngineApi,
+  ApiError,
 
   HISTORY_PAGE_SIZE,
   type HistoryPage,
@@ -290,9 +291,15 @@ function RuntimeShell({
     }
     wasRunning.current = running;
   }, [running, lastPrompt, onHistoryCleared]);
-  const [commands, setCommands] = useState<SlashCommand[]>(
-    DEFAULT_SLASH_COMMANDS,
-  );
+  const [commandCatalog, setCommandCatalog] = useState<{
+    sessionId: string;
+    status: "loading" | "ready" | "empty" | "unavailable" | "fallback";
+    commands: SlashCommand[];
+  }>({ sessionId: "", status: "loading", commands: [] });
+  const [commandCatalogRetry, setCommandCatalogRetry] = useState(0);
+  const catalogIsCurrent = commandCatalog.sessionId === session.session_id;
+  const commandCatalogStatus = catalogIsCurrent ? commandCatalog.status : "loading";
+  const commands = catalogIsCurrent ? commandCatalog.commands : [];
   // `thread.extras` is absent on first render; runtime.tsx guards the hook, and
   // this optional chain keeps App.tsx safe even if that guard is ever removed.
   const transportError = runtimeState?.state?.error;
@@ -306,30 +313,43 @@ function RuntimeShell({
 
   useEffect(() => {
     let mounted = true;
-    setCommands(DEFAULT_SLASH_COMMANDS);
+    setCommandCatalog({ sessionId: session.session_id, status: "loading", commands: [] });
     void api
       .listCommands(session.session_id)
       .then((result) => {
         if (!mounted) return;
-        const source = result.commands?.length
-          ? result.commands
-          : DEFAULT_SLASH_COMMANDS;
+        const source = result.commands ?? [];
+        const hasCommands = source.length > 0;
         const welcome = DEFAULT_SLASH_COMMANDS.find(
           (command) => command.name === "welcome",
         );
-        setCommands([
-          ...source.filter((command) => command.name.toLowerCase() !== "welcome"),
-          ...(welcome ? [welcome] : []),
-        ]);
+        setCommandCatalog({
+          sessionId: session.session_id,
+          status: hasCommands ? "ready" : "empty",
+          commands: hasCommands
+            ? [
+                ...source.filter((command) => command.name.toLowerCase() !== "welcome"),
+                ...(welcome ? [welcome] : []),
+              ]
+            : [],
+        });
       })
-      .catch(() => {
-        // Keep the first-paint compatibility catalog when an older daemon does
-        // not expose the live registry yet.
+      .catch((error: unknown) => {
+        if (!mounted) return;
+        if (error instanceof ApiError && error.status === 404 && error.message === "Not Found") {
+          setCommandCatalog({
+            sessionId: session.session_id,
+            status: "fallback",
+            commands: DEFAULT_SLASH_COMMANDS,
+          });
+          return;
+        }
+        setCommandCatalog({ sessionId: session.session_id, status: "unavailable", commands: [] });
       });
     return () => {
       mounted = false;
     };
-  }, [session.session_id]);
+  }, [session.session_id, commandCatalogRetry]);
 
   return (
     <MediaSessionProvider api={api} sessionId={session.session_id}>
@@ -374,6 +394,8 @@ function RuntimeShell({
               <Thread
                 agents={targets.agents}
                 commands={commands}
+                commandCatalogStatus={commandCatalogStatus}
+                onRetryCommands={() => setCommandCatalogRetry((retry) => retry + 1)}
                 onOpenPanel={onOpenSettings}
                 onOpenWelcome={onOpenWelcome}
                 attachmentsEnabled={
