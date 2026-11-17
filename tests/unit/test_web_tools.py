@@ -11,6 +11,7 @@ Mocks aiohttp to avoid real network calls.
 import asyncio
 import gzip
 import os
+import re
 import sys
 import unittest
 from contextlib import contextmanager
@@ -22,6 +23,8 @@ import aiohttp
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from kollabor_agent.tool_registry import ToolRegistry
+from kollabor_agent.tool_generators.xml_regex import build_regex_for_tool
+from kollabor_ai.response_parser import ResponseParser
 
 
 def _run(coro):
@@ -295,6 +298,39 @@ class TestWebFetchExecution(unittest.TestCase):
                 )
                 self.assertFalse(result.success)
                 self.assertIn("max_chars", result.error)
+
+    def test_web_fetch_accepts_numeric_limit_from_text_tag(self):
+        """Nested XML extraction passes numeric fields as strings."""
+        ToolRegistry.reset()
+        tool = ToolRegistry.get_global().get("web-fetch")
+        parser = ResponseParser()
+        parser.register_plugin_tag(
+            "web-fetch",
+            re.compile(build_regex_for_tool(tool), re.IGNORECASE | re.DOTALL),
+            "web-fetch",
+            lambda match: {
+                parameter.name: value.group(1).strip()
+                for parameter in tool.parameters
+                if (value := re.search(
+                    rf"<{re.escape(parameter.name)}>(.*?)</{re.escape(parameter.name)}>",
+                    match.group(1),
+                    re.IGNORECASE | re.DOTALL,
+                ))
+            },
+        )
+        (tool_data,) = parser._extract_plugin_tools(
+            "<web-fetch><url>https://example.com</url>"
+            "<max_chars>5000</max_chars></web-fetch>"
+        )
+        response = _make_mock_aiohttp_response(
+            text="<html><body><p>Text form works</p></body></html>"
+        )
+
+        with _patch_aiohttp_session(mock_get=response):
+            result = _run(self.executor._execute_web_fetch(tool_data))
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn("Text form works", result.output)
 
     def test_web_fetch_local_http_redirect_chunked_and_compressed_limits(self):
         """Exercise redirects, unknown lengths and gzip expansion over real HTTP."""
