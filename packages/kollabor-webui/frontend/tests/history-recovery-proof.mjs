@@ -180,14 +180,46 @@ const messagePosition = async (page, text, remember = false) =>
     if (!viewport) throw new Error("message is outside the thread viewport");
     const rect = element.getBoundingClientRect();
     const view = viewport.getBoundingClientRect();
+    const row = element.closest("[data-message-id]");
+    const rowRect = row?.getBoundingClientRect();
     if (shouldRemember) window.__issue1142Anchor = element;
     return {
       offset: rect.top - view.top,
+      rowId: row?.getAttribute("data-message-id"),
+      rowOffset: rowRect ? rowRect.top - view.top : null,
       visible: rect.bottom > view.top && rect.top < view.bottom,
       sameNode: window.__issue1142Anchor === element,
       connected: window.__issue1142Anchor?.isConnected ?? false,
     };
   }, remember);
+
+const waitForViewportStable = async (page, stableSamples = 5, messageText) => {
+  const viewport = page.locator('[data-slot="aui_thread-viewport"]');
+  await viewport.waitFor({ timeout: 8000 });
+  let previous = null;
+  let stable = 0;
+  for (let attempt = 0; attempt < 80 && stable < stableSamples; attempt++) {
+    const current = await viewport.evaluate((node) => ({
+      top: node.scrollTop,
+      height: node.scrollHeight,
+      scrolls: window.__issue1142ProgrammaticScrolls?.length ?? 0,
+    }));
+    const position = messageText
+      ? await messagePosition(page, messageText).catch(() => null)
+      : null;
+    const positionStable = !messageText || (position?.visible && previous?.position?.visible &&
+      position.rowId === previous.position.rowId &&
+      Math.abs(position.offset - previous.position.offset) < 1 &&
+      Math.abs(position.rowOffset - previous.position.rowOffset) < 1);
+    stable = previous && Math.abs(current.top - previous.top) < 1 &&
+      current.height === previous.height && current.scrolls === previous.scrolls && positionStable
+      ? stable + 1
+      : 0;
+    previous = { ...current, position };
+    await page.waitForTimeout(50);
+  }
+  if (stable < stableSamples) throw new Error("thread viewport did not settle");
+};
 
 const waitForMessageInView = async (page, text) => {
   const viewport = page.locator('[data-slot="aui_thread-viewport"]');
@@ -195,7 +227,11 @@ const waitForMessageInView = async (page, text) => {
   await viewport.hover();
   for (let attempt = 0; attempt < 40; attempt++) {
     const position = await messagePosition(page, text).catch(() => null);
-    if (position?.visible) return position;
+    if (position?.visible) {
+      await waitForViewportStable(page, 5, text);
+      const settled = await messagePosition(page, text).catch(() => null);
+      if (settled?.visible) return settled;
+    }
     await page.mouse.wheel(0, -450);
     await page.waitForTimeout(35);
   }
@@ -247,6 +283,15 @@ const scenario = async (name, buildState, run, options = {}) => {
           log("scrollTo", { before: this.scrollTop, args });
         }
         return scrollTo.apply(this, args);
+      };
+    }
+    const scrollBy = Element.prototype.scrollBy;
+    if (scrollBy) {
+      Element.prototype.scrollBy = function (...args) {
+        if (this.getAttribute?.("data-slot") === "aui_thread-viewport") {
+          log("scrollBy", { before: this.scrollTop, args });
+        }
+        return scrollBy.apply(this, args);
       };
     }
     const scrollIntoView = Element.prototype.scrollIntoView;
@@ -1292,18 +1337,31 @@ try {
           await page.waitForTimeout(100);
         }
         if (!l.assistant.length || !l.events.length) throw new Error("local turn or event stream was not held");
+        await page.getByLabel("Assistant is working").waitFor({ timeout: 8000 });
+        await page.locator("[data-aui-top-anchor-reserve]").waitFor({ state: "attached", timeout: 8000 });
+        await waitForViewportStable(page, 8);
+        const scrollCountBeforeReaderMoves = await page.evaluate(() => window.__issue1142ProgrammaticScrolls?.length ?? 0);
         await waitForMessageInView(page, "message-90");
         const before = await messagePosition(page, "message-90", true);
+        const scrollCountBeforeRebase = await page.evaluate(() => window.__issue1142ProgrammaticScrolls?.length ?? 0);
+        if (scrollCountBeforeRebase !== scrollCountBeforeReaderMoves) {
+          fail("L-1142-compaction-rebase", `programmatic scrolls while reader moved up=${scrollCountBeforeRebase - scrollCountBeforeReaderMoves}`);
+        }
         const refreshBefore = l.refreshes;
         l.compact = true;
         l.events.splice(0).forEach((release) => release('data: {"type":"history_updated"}\n\n'));
         for (let n = 0; n < 100 && l.refreshes <= refreshBefore; n++) await page.waitForTimeout(100);
         if (l.refreshes <= refreshBefore) throw new Error("compaction refresh did not arrive during the running turn");
+        await waitForViewportStable(page, 5, "message-90");
         l.assistant.splice(0).forEach((release) => release());
         await page.getByText("LOCAL-COMPACTION-ANSWER", { exact: true }).waitFor({ timeout: 10000 });
         await page.getByText(/Context compacted/).waitFor({ timeout: 10000 });
-        await page.waitForTimeout(250);
+        await waitForViewportStable(page, 5, "message-90");
         const after = await messagePosition(page, "message-90");
+        const scrollCountAfterRebase = await page.evaluate(() => window.__issue1142ProgrammaticScrolls?.length ?? 0);
+        if (scrollCountAfterRebase !== scrollCountBeforeRebase) {
+          fail("L-1142-compaction-rebase", `programmatic scrolls during rebase=${scrollCountAfterRebase - scrollCountBeforeRebase}`);
+        }
         if (!after.sameNode || !after.connected || Math.abs(after.offset - before.offset) > 5) {
           fail("L-1142-compaction-rebase", `sameNode=${after.sameNode} before=${before.offset.toFixed(1)} after=${after.offset.toFixed(1)}`);
         } else {
@@ -1380,6 +1438,7 @@ try {
           }
           const pending = m.pending.find((entry) => entry.cursor === step.cursor);
           if (!pending) throw new Error(`user scroll did not request ${step.cursor}`);
+          await waitForViewportStable(page, 5, step.anchor);
           const before = await messagePosition(page, step.anchor, true);
           if (!before.visible) throw new Error(`${step.anchor} was not visible before ${step.cursor}`);
           m.start = pending.start;
@@ -1389,7 +1448,8 @@ try {
           m.refreshes.splice(0).forEach((resolve) => resolve({
             status: 200, body: mPage(m.start, 120),
           }));
-          await page.waitForTimeout(700); // include the two-frame manual restore in the baseline
+          await page.waitForTimeout(700);
+          await waitForViewportStable(page, 5, step.anchor);
           const after = await messagePosition(page, step.anchor);
           if (!after.sameNode || !after.connected || Math.abs(after.offset - before.offset) > 6) {
             fail(name, `${step.cursor} sameNode=${after.sameNode} before=${before.offset.toFixed(1)} after=${after.offset.toFixed(1)}`);
@@ -1404,6 +1464,7 @@ try {
               element.style.boxSizing = "border-box";
             });
             await page.waitForTimeout(500);
+            await waitForViewportStable(page, 5, step.anchor);
             const grown = await messagePosition(page, step.anchor);
             if (!grown.sameNode || Math.abs(grown.offset - before.offset) > 8) {
               fail(name, `rows grew after restore; anchor=${step.anchor} before=${before.offset.toFixed(1)} after=${grown.offset.toFixed(1)}`);
