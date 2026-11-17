@@ -263,7 +263,7 @@ class TestWebFetchExecution(unittest.TestCase):
 
         mock_resp = _make_mock_aiohttp_response(text=body.decode())
         mock_resp.content = BoundedContent()
-        mock_resp.headers = {}
+        mock_resp.headers = {"Content-Length": str(len(body))}
         tool_data = {
             "id": "web_fetch_bound",
             "url": "https://example.com/article?token=secret",
