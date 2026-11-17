@@ -90,6 +90,8 @@ To check the current state:
 
 When you send a voice note on Telegram, the bridge downloads the
 audio file and transcribes it locally using OpenAI's whisper CLI.
+The audio and transcript stay in a private temporary directory and are
+removed after transcription, failure, timeout, or cancellation.
 
 **Install whisper:**
 
@@ -99,6 +101,7 @@ pip install openai-whisper
 
 Voice messages appear in the hub as `[voice] transcribed text here`
 and are routed to agents like any other message.
+The transcript itself is not written to application logs.
 
 The bridge uses the `base` model by default for fast transcription.
 No API key or cloud service needed -- it runs entirely on your machine.
