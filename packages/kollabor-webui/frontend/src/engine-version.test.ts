@@ -28,10 +28,11 @@ describe("sameVersionBase", () => {
 // App.tsx mounts the banner check inside a large component, so the guard is
 // pinned at its source: it must call sameVersionBase, not compare strings.
 describe("App version-mismatch guard", () => {
-  it("flags a mismatch only after the base-version compare, not strict equality", () => {
+  it("requires a confirmed mismatch using the frontend bundle build SHA", () => {
     expect(appSource).toMatch(
-      /if \(!engine \|\| !bundle \|\| sameVersionBase\(engine, bundle\)\) return;/,
+      /compareBuildIdentity\(engine, bundle, __KOLLAB_BUILD_SHA__\)/,
     );
+    expect(appSource).toMatch(/if \(identity !== "mismatch"\) return;/);
     expect(appSource).not.toMatch(/engine === bundle/);
   });
 });
