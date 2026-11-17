@@ -1,59 +1,67 @@
-# Electric mist inside the Kollab logo
+# Glass K with electric mist in the Kollab logo
 
-Issue: #1125  
-Status: Implemented  
+Issue: #1246
+Status: Implemented
 Owner: Web UI
 
 ## Problem
-The Kollab Web UI uses a static K mark in prominent branding positions. This feature adds a subtle animated treatment while keeping the existing mark available as a fallback.
+The sidebar and welcome screen show Kollab's K mark. The earlier treatment drew electric mist inside a flat SVG; it did not make the mark itself glass. Issue #1246 requires a refracting, extruded glass K with the mist visible through it.
 
 ## Goal and non-goals
-Show slow-moving grey and white electric mist clipped to the K in the sidebar header and the Start a Session screen. Keep the plain mark visible when reduced motion is requested or WebGL cannot render the effect. This change does not add a WebGL dependency or change the logo artwork.
+Render the K as a 3D glass mark with the electric mist behind it, visible through the glass. Preserve a flat SVG mark when the 3D renderer cannot run. Load the Three.js scene lazily, honor reduced motion, and release GPU resources on unmount. Keep the existing K polygon artwork as the single source for both SVG and 3D geometry.
+
+This change does not alter the logo silhouette or introduce a second implementation for the sidebar and welcome screen.
 
 ## What people see
-- Sidebar header: the small K mark has slowly moving grey and white mist.
-- Start a Session screen: the larger K mark has the same effect.
-- With reduced motion enabled, WebGL unavailable, or shader linking unsuccessful, the plain K remains.
+- Sidebar header: a small glass K with the electric mist visible inside; it tilts toward pointer movement and briefly flares on hover.
+- Welcome screen: the same glass K component and treatment.
+- Before the glass draws, and whenever WebGL2 or renderer setup is unavailable, the flat K remains visible.
+- With reduced motion enabled, the glass remains still and does not tilt or animate.
 
 ## Contract
-- `KollabLogo` accepts optional `className` and `mist` props; `mist` defaults to `false`.
-- With `mist` disabled, it renders the existing SVG mark. With `mist` enabled, the SVG stays beneath a decorative canvas; the canvas is masked to the K silhouette and is hidden from assistive technology.
-- `startMist` skips animation for `prefers-reduced-motion: reduce`, unavailable WebGL, or an unsuccessful program link. On success it draws a full-canvas shader, updates canvas dimensions to its client dimensions, and returns cleanup that cancels the animation frame and releases the WebGL context.
-- The Web UI sidebar and Start a Session screen opt into the effect. No new package dependency is introduced.
-- Owning files: `packages/kollabor-webui/frontend/src/components/icons/kollab-logo.tsx`, `packages/kollabor-webui/frontend/src/components/shell/AppSidebar.tsx`, and `packages/kollabor-webui/frontend/src/App.tsx`.
+- `KollabLogo` accepts optional `className` and `glass` props; `glass` defaults to `false`.
+- `K_POLYS` defines the K points used to create both SVG paths and the extruded 3D shape.
+- When `glass` is enabled, the component lazily imports `kollab-logo-glass`. A failed chunk load or a `startGlass` result of `null` leaves the flat SVG visible. The SVG is hidden only after the glass scene starts successfully.
+- The renderer requires WebGL2. Missing WebGL2, software renderers (SwiftShader, llvmpipe, or Basic Render Driver), context creation errors, and Three.js setup errors all keep the flat SVG fallback.
+- The mist renders to a texture behind the glass and is visible through the glass surface; it is not drawn directly over the mark.
+- Reduced motion uses a still frame without animation. Pointer entry triggers the brief flare; pointer movement controls the tilt.
+- Unmount cancels animation and disposes renderer resources, render targets, geometry, and materials, then releases the WebGL context.
+- Owning files: `packages/kollabor-webui/frontend/src/components/icons/kollab-logo.tsx`, `packages/kollabor-webui/frontend/src/components/icons/kollab-logo-glass.ts`, `packages/kollabor-webui/frontend/src/components/shell/AppSidebar.tsx`, and `packages/kollabor-webui/frontend/src/App.tsx`.
 
 ## Scenarios
-- If the logo is rendered without `mist`, then the SVG mark renders without a canvas.
-- If `mist` is enabled and reduced motion is requested, then no WebGL animation starts and the SVG remains visible.
-- If `mist` is enabled and WebGL is unavailable, then the SVG remains visible without an animation.
-- If the shader program fails to link, then no draw loop starts and the SVG remains visible.
-- If the shader links successfully, then the mist draws only within the K silhouette while the SVG remains below it.
-- If the logo component unmounts after animation starts, then its animation frame is cancelled and the WebGL context is released.
-- If the logo's rendered dimensions change, then the canvas dimensions are updated before drawing at those dimensions.
+- If `glass` is omitted or false, then the component renders only the SVG mark.
+- If `glass` is true, then the SVG remains visible until the glass scene starts successfully.
+- If the lazy scene chunk fails to load, then the SVG remains visible.
+- If WebGL2 is missing, context creation throws, a software renderer is detected, or Three.js setup fails, then the SVG remains visible without an uncaught setup error.
+- If the scene starts successfully, then the mist is visible through the glass and the SVG is hidden.
+- If reduced motion is requested, then the rendered mark stays still without the animation loop.
+- If the pointer enters the mark, then the glass briefly flares; pointer movement controls its tilt.
+- If the component unmounts after the scene starts, then its animation and GPU resources are released.
+- If the same component is rendered in the sidebar or welcome screen, then both use the same geometry and fallback behavior.
 
 ## Failure modes
-- Reduced-motion preference: animation is skipped; the SVG fallback remains.
-- Missing WebGL context: animation is skipped; the SVG fallback remains.
-- Shader program link failure: drawing is skipped; the SVG fallback remains.
-- Mist disabled: the SVG renders on its own and no canvas is created.
-- Component cleanup: the outstanding animation frame is cancelled and the WebGL context is released.
-- Canvas resize: drawing uses the current client width and height after updating the backing canvas size.
+- Lazy chunk load failure: retain the flat SVG.
+- Missing WebGL2 context: retain the flat SVG.
+- Software GPU renderer: release the context and retain the flat SVG.
+- Renderer/context setup failure: catch the failure and retain the flat SVG.
+- Reduced-motion preference: skip animation and keep the glass still.
+- Component unmount: stop the animation and dispose GPU resources and context.
 
 ## Decisions
-- Keep the existing SVG beneath the canvas so a rendering fallback is present in the same component. Decision recorded by the implementation in PR #1126.
-- Use a CSS mask over a canvas for the effect, preserving the existing SVG silhouette. Decision recorded by the implementation in PR #1126.
-- Skip animation when reduced motion is requested. Decision recorded by the implementation and its regression tests in PR #1126.
-- Add no external WebGL dependency. Decision recorded by the implementation in PR #1126.
+- Keep one polygon list as the source for both the SVG and glass geometry, so the two silhouettes cannot drift. Decision recorded in PR #1247.
+- Keep the flat SVG visible until successful glass startup and on every setup failure. Decision recorded in issue #1246 and implemented in PR #1247.
+- Load the glass scene lazily; Three.js is already used elsewhere in the frontend. Decision recorded in PR #1247.
+- Reuse the same logo component in both display locations. Decision recorded in issue #1246 and implemented in PR #1247.
 
 ## Test plan
-- `packages/kollabor-webui/frontend/tests/kollab-logo.test.tsx`: cover plain SVG rendering, masked canvas rendering, reduced motion, unavailable WebGL, shader link failure, drawing/canvas sizing, and cleanup.
-- The PR description records `npx vitest run tests/kollab-logo.test.tsx` (21 passed), the full Vitest suite (44 files, 403 tests), TypeScript checking, and a production build.
-- The PR description records visual review at desktop, 390 px, and 820 px in dark and light themes. Reduced-motion fallback was covered by unit test only; browser observation of that fallback remains unverified.
-- Sweep both opt-in locations: sidebar header and Start a Session screen, including the 390 px layout where the sidebar collapses.
+- `packages/kollabor-webui/frontend/tests/kollab-logo.test.tsx`: verify SVG geometry comes from `K_POLYS`, the initial fallback remains visible, missing WebGL2 and setup failures retain the fallback, and software renderers release the context.
+- The PR description reports the frontend Vitest suite (49 files, 443 tests), TypeScript checking, and a production build.
+- The PR description reports browser observation of the sidebar glass K in dark and light themes, with no clipping or console errors. It also says the welcome-screen K was not visible in that stack because an agent gem replaced it; visual behavior there remains unverified in that run.
+- Sweep both locations: the sidebar header and welcome screen. The source implements reduced motion as a still frame, but the focused logo test file does not exercise that branch. The unmount cleanup and reduced-motion behavior need direct verification.
 
 ## Docs and changelog fragment
 - Feature specification: `docs/specs/webui-logo-mist.md`.
-- User-visible change fragment: `changes/1125.added.md`.
+- User-visible change fragment: `changes/1246.changed.md`.
 
 ## Open questions
 None.
