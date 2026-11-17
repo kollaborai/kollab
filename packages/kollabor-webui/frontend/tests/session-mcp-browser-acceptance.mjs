@@ -16,6 +16,23 @@ const frontendRoot = path.resolve(here, "..");
 const repoRoot = path.resolve(frontendRoot, "../../..");
 const screenshotDir = path.join(os.tmpdir(), "kollab-session-mcp");
 await mkdir(screenshotDir, { recursive: true });
+const sessionServer = (name) => ({
+  session_id: name,
+  servers: { "session-only": { status: "connected", tools: ["search"] } },
+});
+const sessionStates = {
+  "session-a": sessionServer("session-a"),
+  "session-b": { session_id: "session-b", servers: { "session-b-only": { status: "disconnected" } } },
+};
+let failSession = false;
+let failDefinitions = true;
+let definitions = { "global-server": { type: "stdio", command: "global-command", description: "Global fixture" } };
+let denyDisconnect = false;
+let heldSessionA = null;
+let releaseSessionA = null;
+let initialHold = null;
+let releaseInitial = null;
+const holdSessionA = () => new Promise((resolve) => { releaseSessionA = resolve; });
 const server = await createServer({
   configFile: path.join(frontendRoot, "vite.config.ts"),
   root: frontendRoot,
@@ -51,20 +68,24 @@ try {
     if (pathname === "/config") return route.fulfill({ status: 200, json: {} });
     if (pathname === "/hub/agents") return route.fulfill({ status: 200, json: { agents: [] } });
     if (pathname === "/sessions/session-a/mcp") {
-      return route.fulfill({
-        status: 200,
-        json: {
-          session_id: "session-a",
-          servers: { "session-only": { status: "connected", tools: ["search"] } },
-        },
-      });
+      if (initialHold) await initialHold;
+      if (heldSessionA) await heldSessionA;
+      if (failSession) return route.fulfill({ status: 503, json: { detail: "session state temporarily unavailable" } });
+      return route.fulfill({ status: 200, json: sessionStates["session-a"] });
     }
+    if (pathname === "/sessions/session-b/mcp") return route.fulfill({ status: 200, json: sessionStates["session-b"] });
     if (pathname === "/mcp/servers") {
-      return route.fulfill({ status: 503, json: { detail: "global config temporarily unavailable" } });
+      if (initialHold) await initialHold;
+      if (failDefinitions) return route.fulfill({ status: 503, json: { detail: "global config temporarily unavailable" } });
+      return route.fulfill({ status: 200, json: { servers: definitions } });
+    }
+    if (pathname === "/sessions/session-a/mcp/session-only/disconnect" && denyDisconnect) {
+      return route.fulfill({ status: 403, json: { detail: "permission denied by fixture" } });
     }
     return route.fulfill({ status: 200, json: {} });
   });
 
+  initialHold = new Promise((resolve) => { releaseInitial = resolve; });
   await page.goto(`${origin}/tests/acceptance/session-mcp.html`, { waitUntil: "domcontentloaded" });
   await page.getByRole("button", { name: "MCP Servers" }).waitFor({ timeout: 5000 }).catch(async () => {
     console.error(`FIXTURE_TEXT ${await page.locator("#root").innerText()}`);
@@ -72,6 +93,10 @@ try {
   });
   await page.getByRole("button", { name: "MCP Servers" }).click();
   const dialog = page.getByRole("dialog", { name: "MCP Servers" });
+  await dialog.getByText("Loading session MCP status…").waitFor();
+  await dialog.getByText("Loading global MCP definitions…").waitFor();
+  releaseInitial();
+  initialHold = null;
   await dialog.getByText("session-only", { exact: true }).waitFor();
   assert.ok(requests.includes("/sessions/session-a/mcp"), "session MCP state must use the API endpoint");
   assert.ok(requests.includes("/mcp/servers"), "global definitions must use the API endpoint");
@@ -83,10 +108,68 @@ try {
     "show why global definitions are unavailable",
   );
   assert.equal(await dialog.getByText("configured by agent", { exact: true }).count(), 0);
-  assert.equal(await dialog.getByRole("button", { name: "Edit session-only" }).count(), 0);
-  assert.equal(await dialog.getByRole("button", { name: "Delete session-only" }).count(), 0);
+  assert.equal(await dialog.getByRole("button", { name: "Edit session-only" }).isDisabled(), true);
+  assert.equal(await dialog.getByRole("button", { name: "Delete session-only" }).isDisabled(), true);
   await page.screenshot({ path: path.join(screenshotDir, "session-mcp-global-failure.png"), fullPage: true });
-  console.log("FAILURE_REPRODUCED session state rendered while global-definition API returned HTTP 503");
+
+  // Retry recovers the failed source, exposes known ownership, and leaves valid
+  // connection controls behind the same permission-checked API boundary.
+  failDefinitions = false;
+  await dialog.getByRole("button", { name: "Retry MCP data" }).click();
+  await dialog.getByText("global-server", { exact: true }).waitFor();
+  assert.ok((await dialog.innerText()).includes("1 connected · 1 global · 1 session-only"));
+  assert.equal(await dialog.getByRole("button", { name: "Edit global-server" }).isEnabled(), true);
+  assert.equal(await dialog.getByRole("button", { name: "Delete global-server" }).isEnabled(), true);
+  assert.equal(await dialog.getByRole("button", { name: "Disconnect" }).isEnabled(), true);
+  denyDisconnect = true;
+  await dialog.getByRole("button", { name: "Disconnect" }).click();
+  assert.ok(requests.includes("/sessions/session-a/mcp/session-only/disconnect"));
+  assert.equal(await dialog.getByRole("button", { name: "Disconnect" }).isEnabled(), true);
+
+  // Session-status failure leaves known global definitions visible and blocks
+  // connection actions while keeping known global edit authority usable.
+  failSession = true;
+  await dialog.getByRole("button", { name: "Refresh" }).click();
+  await dialog.getByText(/Session MCP status unavailable/).waitFor();
+  assert.equal(await dialog.getByRole("button", { name: "Connect" }).isDisabled(), true);
+  assert.equal(await dialog.getByRole("button", { name: "Edit global-server" }).isEnabled(), true);
+
+  // Both endpoints can fail together, then recover on the same clear retry.
+  failDefinitions = true;
+  await dialog.getByRole("button", { name: "Refresh" }).click();
+  await dialog.getByText(/Global MCP definitions unavailable/).waitFor();
+  await dialog.getByText(/Session MCP status unavailable/).waitFor();
+  failSession = false;
+  failDefinitions = false;
+  await dialog.getByRole("button", { name: "Retry MCP data" }).click();
+  await dialog.getByRole("button", { name: "Disconnect" }).waitFor();
+  assert.equal(await dialog.getByText(/MCP status unavailable/).count(), 0);
+
+  // A successful empty response from both sources is the only state that says
+  // there are no configured servers.
+  definitions = {};
+  sessionStates["session-a"] = { session_id: "session-a", servers: {} };
+  await dialog.getByRole("button", { name: "Refresh" }).click();
+  await dialog.getByText("No MCP servers configured.").waitFor();
+
+  // The panel reports loading, switches to the new session, and ignores an old
+  // response that arrives after the new session's data.
+  sessionStates["session-a"] = sessionServer("session-a");
+  heldSessionA = holdSessionA();
+  await dialog.getByRole("button", { name: "Refresh" }).click();
+  await dialog.getByText("Loading session MCP status…").waitFor();
+  await page.keyboard.press("Escape");
+  await page.getByTestId("switch-session").click();
+  await page.getByRole("button", { name: "MCP Servers" }).click();
+  const sessionBDialog = page.getByRole("dialog", { name: "MCP Servers" });
+  await sessionBDialog.getByText("session-b-only", { exact: true }).waitFor();
+  releaseSessionA();
+  heldSessionA = null;
+  await page.waitForTimeout(50);
+  assert.equal(await sessionBDialog.getByText("session-only", { exact: true }).count(), 0);
+  assert.ok(requests.includes("/sessions/session-b/mcp"));
+
+  console.log("PASS MCP source failures, empty success, retry, session switch, stale response, and permission boundary");
   console.log(`SCREENSHOT session-mcp-global-failure.png (${screenshotDir})`);
   console.log(`FRONTEND ${repoRoot}`);
 } finally {
