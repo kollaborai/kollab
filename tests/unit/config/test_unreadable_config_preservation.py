@@ -54,6 +54,24 @@ def _explicit_loader(path: Path) -> ConfigLoader:
     return loader
 
 
+def _patch_standard_save_paths(paths, monkeypatch):
+    monkeypatch.setattr(loader_module, "get_global_config_path", lambda: paths["global"])
+    monkeypatch.setattr(
+        loader_module,
+        "get_global_config_path_candidates",
+        lambda: [paths["global"]],
+    )
+    monkeypatch.setattr(loader_module, "get_local_config_path", lambda: paths["local"])
+    monkeypatch.setattr(
+        loader_module,
+        "get_local_config_path_candidates",
+        lambda: [paths["local"]],
+    )
+    monkeypatch.setattr(
+        loader_module, "get_project_data_dir", lambda: paths["project"].parent
+    )
+
+
 @pytest.mark.parametrize("layer", ["global", "project", "local"])
 @pytest.mark.parametrize("contents", [b'{"broken":', b"[]"])
 def test_layered_reader_distinguishes_malformed_files(layer, contents, tmp_path, monkeypatch):
@@ -205,6 +223,27 @@ def test_valid_layers_still_merge_and_save(tmp_path, monkeypatch):
     config["settings"]["after"] = 2
     assert loader.save_merged_config(config) is True
     assert json.loads(explicit_path.read_text(encoding="utf-8"))["settings"]["after"] == 2
+
+
+@pytest.mark.parametrize("target", ["global", "project", "local"])
+def test_valid_layered_save_targets_still_write_normally(target, tmp_path, monkeypatch):
+    paths = _layer_paths(tmp_path, monkeypatch)
+    _patch_standard_save_paths(paths, monkeypatch)
+    _write_bytes(paths[target], b'{"settings":{"before":true}}')
+    loader = ConfigLoader(ConfigManager(paths["global"]), fast_mode=True)
+    loader.get_base_config = lambda: {"settings": {}}
+    loader.get_plugin_configs = lambda: {}
+    config = loader.load_complete_config()
+    config["settings"]["after"] = target
+
+    save_target = "global" if target == "global" else None
+    assert loader.save_merged_config(config, save_target=save_target) is True
+    saved = json.loads(paths[target].read_text(encoding="utf-8"))
+    assert saved["settings"]["before"] is True
+    assert saved["settings"]["after"] == target
+    assert all(
+        not path.exists() for name, path in paths.items() if name != target
+    )
 
 
 def test_settings_panel_reports_and_preserves_an_unreadable_global_config(tmp_path, monkeypatch):
