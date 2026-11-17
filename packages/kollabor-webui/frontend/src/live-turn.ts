@@ -297,11 +297,15 @@ export function liveMessage(turn: LiveTurn): ThreadMessageLike | null {
     (part) => (part.type === "text" && part.text) || part.type === "tool-call",
   );
   if (!parts.length) return null;
+  const standaloneNotice = !turn.requestId && parts.every(
+    (part) => part.type === "text" &&
+      /^ℹ Conversation history not saved for this (message|reply)\.$/.test(part.text.trim()),
+  );
   return {
     id: turn.requestId ? `${LIVE_MESSAGE_ID}:${turn.requestId}` : LIVE_MESSAGE_ID,
     role: "assistant",
     content: parts,
-    status: SETTLED_STATUS[turn.settled ?? ""] ?? { type: "running" },
+    status: SETTLED_STATUS[turn.settled ?? ""] ?? (standaloneNotice ? SETTLED_STATUS.complete : { type: "running" }),
     metadata: { isOptimistic: true },
   };
 }
