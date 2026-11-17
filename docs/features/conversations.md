@@ -52,6 +52,10 @@ Use the `/resume` command to pick up where you left off:
 
 The resume system restores the full message history so the LLM has context from the previous session.
 
+In the Web UI, long assistant and user messages are restored in full when the
+chat reloads. Long tool results keep a preview and load the full result when
+expanded.
+
 ## Saving Conversations
 
 Use `/save` to export a conversation in different formats:
