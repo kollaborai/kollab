@@ -209,13 +209,23 @@ try_pipx() {
 # Resolve the scripts directory used by the interpreter behind pip. This keeps
 # system installs and --user installs tied to the executable pip just wrote.
 pip_scripts_dir() {
-    local pip_cmd="$1" scheme="$2" pip_path shebang python_cmd
+    local pip_cmd="$1" scheme="$2" pip_path shebang python_cmd env_args
     pip_path=$(command -v "$pip_cmd") || return 1
     IFS= read -r shebang < "$pip_path" || return 1
     shebang="${shebang#\#!}"
     read -r python_cmd _ <<< "$shebang"
     if [[ "$python_cmd" == */env ]]; then
-        read -r python_cmd _ <<< "${shebang#*env }"
+        env_args="${shebang#*env }"
+        read -r python_cmd _ <<< "$env_args"
+        if [[ "$python_cmd" == "-S" ]]; then
+            # env -S splits the remaining shebang into the interpreter and its args.
+            env_args="${env_args#-S }"
+            read -r python_cmd _ <<< "$env_args"
+            python_cmd="${python_cmd#\"}"
+            python_cmd="${python_cmd%\"}"
+            python_cmd="${python_cmd#\'}"
+            python_cmd="${python_cmd%\'}"
+        fi
         python_cmd=$(command -v "$python_cmd") || return 1
     fi
     [[ -x "$python_cmd" ]] || return 1
