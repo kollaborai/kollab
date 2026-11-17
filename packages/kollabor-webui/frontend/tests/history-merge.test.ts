@@ -70,7 +70,7 @@ test("new history stays before an existing pending permission", () => {
   assert.deepEqual(merged.messages.map((message) => message.id), ["history-0", "history-1", pending.id]);
 });
 
-test("a page-boundary tool result is replaced by its actual call", () => {
+test("a page-boundary tool result is corrected in place with its actual call", () => {
   const fallback = {
     id: "history-10", role: "assistant",
     metadata: { custom: { historyToolFallback: "tool-1" } },
@@ -82,7 +82,7 @@ test("a page-boundary tool result is replaced by its actual call", () => {
   };
   const later = { id: "history-11", role: "user", content: "next" };
   const result = reconcileBoundaryToolResults([fallback, later], [call, later], 0, 12);
-  assert.deepEqual(result?.map((message) => message.id), [call.id, later.id]);
+  assert.deepEqual(result?.map((message) => message.id), [fallback.id, later.id]);
 });
 
 test("a boundary correction keeps the shown id and matches its canonical history row later", () => {
@@ -128,7 +128,7 @@ test("a stale older window cannot overwrite the displayed tool result or other r
   const loaded = [{ id: "history-9", content: [{ type: "tool-call", toolCallId: "t1", result: "cached result" }] },
     { id: "history-11", content: "cached reply" }];
   const result = reconcileBoundaryToolResults([fallback, current], loaded, 9, 12);
-  assert.deepEqual(result?.map((message) => message.id), ["history-9", "history-11"]);
+  assert.deepEqual(result?.map((message) => message.id), ["history-10", "history-11"]);
   assert.equal((result?.[0].content as Array<{ result?: string }>)[0].result, "current result");
   assert.equal((result?.[0].content as Array<{ isError?: boolean }>)[0].isError, true);
   assert.equal(result?.[1], current);
@@ -163,7 +163,7 @@ test("separate fallback results with a reused ID retain their own calls", () => 
     { id: "history-11", content: [{ type: "tool-call", toolCallId: "same-id", result: "cached second" }] },
   ];
   const result = reconcileBoundaryToolResults([fallback(10, "first"), fallback(12, "second")], loaded, 9, 13);
-  assert.deepEqual(result?.map((message) => message.id), ["history-9", "history-11"]);
+  assert.deepEqual(result?.map((message) => message.id), ["history-10", "history-12"]);
   assert.equal((result?.[0].content as Array<{ result?: string }>)[0].result, "first");
   assert.equal((result?.[1].content as Array<{ result?: string }>)[0].result, "second");
 });
