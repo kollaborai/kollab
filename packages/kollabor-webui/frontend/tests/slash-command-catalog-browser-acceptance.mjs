@@ -125,7 +125,7 @@ async function runLegacyFallback(browser, baseUrl) {
   await view.page.route("**/sessions/learn-regression-session/commands", (route) => route.fulfill({
     status: 404,
     contentType: "application/json",
-    body: JSON.stringify({ detail: "unsupported endpoint" }),
+    body: JSON.stringify({ detail: "Not Found" }),
   }));
   try {
     const input = await openChat(view.page, baseUrl);
@@ -133,6 +133,26 @@ async function runLegacyFallback(browser, baseUrl) {
     await view.page.getByText("This engine does not provide a live command catalog", { exact: false }).waitFor({ state: "visible" });
     await view.page.getByText("Show available commands and usage", { exact: true }).waitFor({ state: "visible" });
     console.log("PASS: unsupported endpoint uses an explicitly labeled compatibility catalog");
+  } finally {
+    await view.context.close();
+  }
+}
+
+async function runMissingSession404(browser, baseUrl) {
+  const fixtures = makeFixtures();
+  const view = await openPage(browser, baseUrl, fixtures);
+  await view.page.route("**/sessions/learn-regression-session/commands", (route) => route.fulfill({
+    status: 404,
+    contentType: "application/json",
+    body: JSON.stringify({ detail: "Session not found" }),
+  }));
+  try {
+    const input = await openChat(view.page, baseUrl);
+    await input.fill("/");
+    await view.page.getByRole("status").filter({ hasText: "Commands couldn't be loaded for this session" }).waitFor({ state: "visible" });
+    assert.equal(await view.page.getByText("Show available commands and usage", { exact: true }).count(), 0,
+      "a missing session must not be mistaken for an older engine");
+    console.log("PASS: missing-session 404 stays unavailable");
   } finally {
     await view.context.close();
   }
@@ -217,6 +237,7 @@ async function main() {
     await runHealthySession(browser, baseUrl);
     await runEmptyCatalog(browser, baseUrl);
     await runLegacyFallback(browser, baseUrl);
+    await runMissingSession404(browser, baseUrl);
     await runSessionSwitchStaleResponse(browser, baseUrl);
   } finally {
     await browser?.close();
