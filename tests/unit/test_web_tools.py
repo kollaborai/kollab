@@ -9,6 +9,8 @@ Mocks aiohttp to avoid real network calls.
 """
 
 import asyncio
+import builtins
+import json
 import os
 import sys
 import unittest
@@ -207,6 +209,123 @@ class TestWebFetchExecution(unittest.TestCase):
             # HTML tags should be stripped
             self.assertNotIn("<html>", result.output)
             self.assertNotIn("<p>", result.output)
+
+    def test_web_fetch_extracts_json_ld_before_removing_scripts(self):
+        """JSON-LD is extracted before scripts are stripped on the real fetch path."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        article_body = "Structured article content. " * 12
+        cases = [
+            (
+                "JSON-LD article body",
+                (
+                    '<script type="application/ld+json">'
+                    + json.dumps({"articleBody": article_body})
+                    + "</script><p>ordinary fallback</p>"
+                ),
+                article_body,
+                "ordinary fallback",
+            ),
+            (
+                "multiple scripts and array",
+                (
+                    '<script type="application/ld+json">{bad json</script>'
+                    '<script type="application/ld+json">'
+                    + json.dumps([
+                        {"articleBody": ["not", "text"]},
+                        {"articleBody": article_body},
+                    ])
+                    + "</script><p>ordinary fallback</p>"
+                ),
+                article_body,
+                "ordinary fallback",
+            ),
+            (
+                "malformed and absent JSON-LD fallback",
+                (
+                    '<script type="application/ld+json">{bad json</script>'
+                    "<script>private script marker</script>"
+                    "<pre>code marker</pre><p>ordinary fallback</p>"
+                ),
+                "ordinary fallback",
+                "private script marker",
+            ),
+        ]
+
+        for label, html, expected, excluded in cases:
+            with self.subTest(label=label):
+                response = _make_mock_aiohttp_response(text=html)
+                with (
+                    _patch_aiohttp_session(mock_get=response),
+                    patch.object(
+                        ToolExecutor,
+                        "_playwright_fetch",
+                        new=AsyncMock(return_value=""),
+                    ),
+                ):
+                    result = _run(
+                        self.executor._execute_web_fetch(
+                            {"type": "web_fetch", "url": "https://example.com"}
+                        )
+                    )
+                self.assertTrue(result.success, result.error)
+                self.assertIn(expected, result.output)
+                self.assertNotIn(excluded, result.output)
+
+    def test_web_fetch_json_ld_does_not_require_lxml(self):
+        """A BeautifulSoup install without lxml can still parse web-fetch HTML."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        article_body = "Structured article content. " * 12
+        html = (
+            '<script type="application/ld+json">'
+            + json.dumps({"articleBody": article_body})
+            + "</script>"
+        )
+        response = _make_mock_aiohttp_response(text=html)
+        real_import = builtins.__import__
+
+        def import_without_lxml(name, *args, **kwargs):
+            if name == "lxml" or name.startswith("lxml."):
+                raise ImportError("lxml intentionally unavailable in this test")
+            return real_import(name, *args, **kwargs)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+            patch("builtins.__import__", side_effect=import_without_lxml),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+        self.assertTrue(result.success, result.error)
+        self.assertIn(article_body, result.output)
+
+    def test_web_fetch_regex_fallback_strips_script_content(self):
+        """The optional no-bs4 path strips script bodies before returning text."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        html = (
+            "<script>private script marker</script>"
+            "<pre>code marker</pre><p>ordinary fallback</p>"
+        )
+        real_import = builtins.__import__
+
+        def import_without_bs4(name, *args, **kwargs):
+            if name == "bs4" or name.startswith("bs4."):
+                raise ImportError("BeautifulSoup intentionally unavailable in this test")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=import_without_bs4):
+            text = ToolExecutor._extract_main_content(html)
+        self.assertIn("ordinary fallback", text)
+        self.assertNotIn("private script marker", text)
 
     def test_web_fetch_truncation(self):
         """Test that max_chars limit truncates output."""
