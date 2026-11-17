@@ -8,6 +8,7 @@ import { claimEditorWorkspace, invalidateEditorSession, setEditorOwner, setEdito
 import { codeFetch, setCodeRoot, setCodeSession, unwrapCodeData } from "@/lib/code-fetch";
 import { cn } from "@/lib/utils";
 import { GitPanel } from "@/components/code/git/GitPanel";
+import type { DaemonNoticeProps } from "@/components/code/DaemonNotice";
 import { openWorkspaceDiff } from "@/components/code/open-file";
 import { EditorConfigPanel } from "@/components/code/editor-config";
 import { isDirty, useEditorStore } from "@/components/code/editor-store";
@@ -25,6 +26,7 @@ export interface CodeEditorViewProps {
   workspace: string;
   /** "code" shows files, search and settings in the sidebar; "git" shows the git panel there. Same editor panes either way. */
   mode?: "code" | "git";
+  daemonNotice: DaemonNoticeProps;
 }
 
 /** Opens a file in the active pane (git panel's "open file"). */
@@ -95,8 +97,19 @@ export function CodeEditorView(props: CodeEditorViewProps) {
   </>;
 }
 
-function CodeEditorFolder({ sessionId, device = "", workspace, mode = "code", folders, onFolderChange, onBrowse }: CodeEditorViewProps & {
-  folders: { path: string; branch: string }[]; onFolderChange: (path: string) => void; onBrowse: () => void;
+function CodeEditorFolder({
+  sessionId,
+  device = "",
+  workspace,
+  mode = "code",
+  daemonNotice,
+  folders,
+  onFolderChange,
+  onBrowse,
+}: CodeEditorViewProps & {
+  folders: { path: string; branch: string }[];
+  onFolderChange: (path: string) => void;
+  onBrowse: () => void;
 }) {
   // Commit the context before passive effects in child views issue requests.
   useLayoutEffect(() => {
@@ -210,6 +223,7 @@ function CodeEditorFolder({ sessionId, device = "", workspace, mode = "code", fo
             <GitPanel
               sessionId={sessionId}
               workspace={workspace}
+              daemonNotice={daemonNotice}
               onOpenFile={(absPath) => void openFileInActivePane(workspace, absPath)}
               onOpenDiff={(absPath, headContent) => void openWorkspaceDiff(workspace, absPath, headContent)}
             />
@@ -232,6 +246,7 @@ function CodeEditorFolder({ sessionId, device = "", workspace, mode = "code", fo
 
               {sidebarView === "files" && <FileTree
                 workspace={workspace}
+                daemonNotice={daemonNotice}
                 filterOpen={fileFilterOpen}
                 onFileSelect={() => {
                   if (shouldHideSidebarAfterFileSelection(sidebar)) sidebar.hide();

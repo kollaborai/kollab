@@ -50,6 +50,7 @@ import {
 import { AppSidebar } from "@/components/shell/AppSidebar";
 import { networkOf, prepareRemoteOpen, targetsOn } from "@/components/shell/agent-network";
 import { AgentVersionNotice, agentVersionNotice } from "@/components/shell/AgentVersionNotice";
+import type { DaemonNoticeProps } from "@/components/code/DaemonNotice";
 import { liveAgentOf, poolSeenBy } from "@/components/shell/live-agent";
 import { PanelHost } from "@/components/panels/PanelHost";
 import { WaiterChat } from "@/components/shell/WaiterChat";
@@ -183,6 +184,7 @@ function RuntimeShell({
   agents,
   liveAgents,
   remoteAgents,
+  daemonNotice,
   onSessionUpdated,
   onOpenSettings,
   onOpenWelcome,
@@ -205,6 +207,7 @@ function RuntimeShell({
   agents: AgentPoolEntry[];
   /** Every running agent, one per process: the chat reads its own by its instance, never by name. */
   liveAgents: LiveAgent[];
+  daemonNotice: DaemonNoticeProps;
   /** Agents on the network's other computers (GET /sessions `network.remote`). */
   remoteAgents: NetworkAgent[];
   onSessionUpdated: (session: Session) => void;
@@ -407,6 +410,7 @@ function RuntimeShell({
                     sessionId={session.session_id}
                     device={session.device ?? ""}
                     workspace={workspace}
+                    daemonNotice={daemonNotice}
                     mode={shown === "git" ? "git" : "code"} />
                 </Suspense>
               </div>
@@ -419,6 +423,7 @@ function RuntimeShell({
                     sessionId={session.session_id}
                     device={session.device ?? ""}
                     workspace={workspace}
+                    daemonNotice={daemonNotice}
                   />
                 </Suspense>
               </div>
@@ -1364,6 +1369,15 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       setAgentRestart({ sessionId, waiting: false, failure: errorText(error), tooOld: isAgentTooOld(error) });
     }
   };
+  const daemonNotice: DaemonNoticeProps = {
+    notice: versionNotice,
+    fallbackName: activeAgent?.name ?? activeSession?.identity ?? "<agent name>",
+    busy: Boolean(restartHere) && !restartHere?.failure,
+    waiting: restartHere?.waiting ?? false,
+    failure: restartHere?.failure ?? "",
+    tooOld: restartHere?.tooOld ?? false,
+    onRestart: () => void restartActiveAgent(),
+  };
   // Once the agent runs the engine's version (or is gone from presence) the ask is over.
   useEffect(() => {
     if (!versionNotice && agentRestart) setAgentRestart(null);
@@ -2018,6 +2032,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                   profiles={profiles}
                   agents={agents}
                   liveAgents={liveAgents}
+                  daemonNotice={daemonNotice}
                   remoteAgents={network.remote}
                   refreshSignal={refreshSignal}
                   supervisorEvents={supervisorEvents}

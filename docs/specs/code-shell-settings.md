@@ -53,8 +53,10 @@ Names are looked up exactly; the env filters compare case-insensitively on the n
 - Terminal header: how many variables were hidden ("Env: 5 Hidden") with the names on hover, from the daemon op
   `terminal.env_report` (names only, never values), plus the shell name and the machine (`device:folder`).
 - A refusal says which setting caused it ("Read only is on for this agent. Setting: kollabor.code.read_only").
-- A daemon older than this feature (`RpcMethodNotFound` -> 502): a plain notice, "This agent runs older code. Restart it
-  to use Code, Git and Terminal."
+- A daemon older than this feature (`RpcMethodNotFound` -> 502 `daemon_outdated`): Terminal, Code and Git use the chat's
+  recovery notice. An agent with no published version gets the stop-and-start instruction; a versioned agent gets
+  Restart Agent when `kollabor.updates.restart_agents` is on or `/restart` when it is off. Terminal hides Retry for
+  `daemon_outdated` and keeps it for other errors.
 - The terminal view reconnects by itself and says "Reconnecting" while it does.
 
 ## Windows

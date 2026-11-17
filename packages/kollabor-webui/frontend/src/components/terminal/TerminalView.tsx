@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, PanelLeft, Plus, Terminal, X } from "lucide-react";
 
-import { DaemonNotice } from "@/components/code/DaemonNotice";
+import { DaemonNotice, type DaemonNoticeProps } from "@/components/code/DaemonNotice";
 import { FloatingFileSidebar, useFileSidebarVisibility } from "@/components/code/floating-sidebar";
 
 import { TerminalViewer } from "@/components/terminal/terminal-viewer";
@@ -24,6 +24,7 @@ export interface TerminalViewProps {
   /** The computer the session runs on; empty for this one. Shown before the folder so the machine is plain. */
   device?: string;
   workspace: string;
+  daemonNotice: DaemonNoticeProps;
 }
 
 interface TerminalTabState {
@@ -48,6 +49,7 @@ interface TerminalTabProps {
   /** Hands the panel the function that ends this tab's shell; null when the tab unmounts. */
   onRegister: (id: number, endSession: (() => void) | null) => void;
   onRetry: (id: number) => void;
+  daemonNotice: DaemonNoticeProps;
 }
 
 /**
@@ -55,7 +57,16 @@ interface TerminalTabProps {
  * disconnects: the shell keeps running on the server until the user closes the tab with its X.
  * Inactive tabs stay mounted so their sessions keep streaming while another tab is shown.
  */
-function TerminalTab({ id, sessionId, workspace, active, onReport, onRegister, onRetry }: TerminalTabProps) {
+function TerminalTab({
+  id,
+  sessionId,
+  workspace,
+  active,
+  onReport,
+  onRegister,
+  onRetry,
+  daemonNotice,
+}: TerminalTabProps) {
   const connection = useTerminalWsConnection({ sessionId, workspace });
   const { status, errorMessage, errorCode, reconnecting, refusal, close } = connection;
 
@@ -84,13 +95,13 @@ function TerminalTab({ id, sessionId, workspace, active, onReport, onRegister, o
           {status === "closed" && <p className="text-xs text-muted-foreground">Shell ended.</p>}
           {status === "error" &&
             (errorCode === DAEMON_OUTDATED_CODE ? (
-              <DaemonNotice />
+              <DaemonNotice {...daemonNotice} />
             ) : (
               <p className="text-xs text-muted-foreground">
                 {errorMessage ?? "Could not reach the terminal server."}
               </p>
             ))}
-          {(status === "closed" || status === "error") && (
+          {(status === "closed" || (status === "error" && errorCode !== DAEMON_OUTDATED_CODE)) && (
             <Button type="button" variant="ghost" size="sm" onClick={() => onRetry(id)}>
               Retry
             </Button>
@@ -130,7 +141,7 @@ async function readTerminalHeader(): Promise<{ shell: string; env: TerminalEnvRe
   return { shell: configured || env?.shell || "", env };
 }
 
-export function TerminalView({ sessionId, workspace, device }: TerminalViewProps) {
+export function TerminalView({ sessionId, workspace, device, daemonNotice }: TerminalViewProps) {
   const [tabs, setTabs] = useState<TerminalTabState[]>(() => [{ id: 1, generation: 0 }]);
   const [activeId, setActiveId] = useState(1);
   const [reports, setReports] = useState<Partial<Record<number, TerminalTabReport>>>({});
@@ -329,6 +340,7 @@ export function TerminalView({ sessionId, workspace, device }: TerminalViewProps
               onReport={reportTab}
               onRegister={registerTab}
               onRetry={retryTab}
+              daemonNotice={daemonNotice}
             />
           ))}
           {tabs.length === 0 && (

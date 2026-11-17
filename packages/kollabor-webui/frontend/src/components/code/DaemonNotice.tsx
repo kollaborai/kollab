@@ -1,7 +1,20 @@
-import { NoticeBar } from "@/components/shell/NoticeBar";
-import { OUTDATED_NOTICE } from "@/lib/code-fetch";
+import {
+  AgentVersionNotice,
+  type AgentVersionNoticeProps,
+  type AgentVersionNoticeState,
+} from "@/components/shell/AgentVersionNotice";
 
-/** The plain line shown where a daemon that predates Code, Git and Terminal would otherwise show its raw error. */
-export function DaemonNotice() {
-  return <NoticeBar>{OUTDATED_NOTICE}</NoticeBar>;
+export type DaemonNoticeProps = Omit<AgentVersionNoticeProps, "notice" | "onDismiss"> & {
+  notice: AgentVersionNoticeState | null;
+  fallbackName: string;
+};
+
+/** Reuses the chat's working recovery action where a daemon-outdated error appears in a panel. */
+export function DaemonNotice({ notice, fallbackName, ...props }: DaemonNoticeProps) {
+  return (
+    <AgentVersionNotice
+      {...props}
+      notice={notice ?? { kind: "unknown", detail: "Version information unavailable", name: fallbackName }}
+    />
+  );
 }

@@ -103,9 +103,11 @@ values. The same list comes from `GET /sessions/{id}/code/terminal/env`.
 
 ## An older daemon
 
-A daemon that started before this change has no code call. The engine answers 502 `daemon_outdated` with the text
-"This agent runs older code. Restart it to use Code, Git and Terminal." The Terminal view shows that text as a notice.
-Restart the agent to fix it. The Code Editor and Git views do not show the notice yet.
+A daemon started before Code, Git and Terminal were added has no `state.code_call` method, so the engine answers 502
+`daemon_outdated`. Terminal, Code and Git show the same recovery notice as the chat: an agent with no published version
+gets the `kollab --hub stop <name>` and Offline-row instruction; a versioned agent gets **Restart Agent** when that
+setting is on, or the `/restart` instruction when it is off. Terminal does not offer Retry for `daemon_outdated`, since
+the same daemon would refuse the request again.
 
 ## Behaviors worth knowing
 
