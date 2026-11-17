@@ -246,6 +246,27 @@ def test_valid_layered_save_targets_still_write_normally(target, tmp_path, monke
     )
 
 
+def test_valid_project_save_when_global_config_is_malformed(tmp_path, monkeypatch):
+    paths = _layer_paths(tmp_path, monkeypatch)
+    _patch_standard_save_paths(paths, monkeypatch)
+    original_global = b'{"api_key":"DO_NOT_ECHO",'
+    _write_bytes(paths["global"], original_global)
+    _write_bytes(paths["project"], b'{"settings":{"before":1}}')
+    loader = ConfigLoader(ConfigManager(paths["project"]), fast_mode=True)
+    loader.get_base_config = lambda: {"settings": {}}
+    loader.get_plugin_configs = lambda: {}
+
+    config = loader.load_complete_config()
+    config["settings"]["after"] = 2
+
+    assert loader.save_merged_config(config) is True
+    assert json.loads(paths["project"].read_text(encoding="utf-8"))["settings"] == {
+        "before": 1,
+        "after": 2,
+    }
+    assert paths["global"].read_bytes() == original_global
+
+
 def test_settings_panel_reports_and_preserves_an_unreadable_global_config(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     workspace = tmp_path / "workspace"
