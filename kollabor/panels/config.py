@@ -53,14 +53,12 @@ def read_managed_state() -> tuple[Optional[ManagedConfig], dict]:
         return managed, {}
     try:
         data = json.loads(get_global_config_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return managed, {}
     return managed, data if isinstance(data, dict) else {}
 
 
-def managed_value(
-    managed: Optional[ManagedConfig], global_settings: dict, config_path: str
-) -> Any:
+def managed_value(managed: Optional[ManagedConfig], global_settings: dict, config_path: str) -> Any:
     """A synced key's value as the primary last wrote it, straight from disk.
 
     In an attached window this process's config service can lag a sync by a
@@ -89,12 +87,7 @@ def _loadout_rows(config_service: Any, managed, global_settings) -> list[dict]:
 
     Change it with /llm; on a secondary it also says who manages it.
     """
-    active = (
-        _effective(
-            config_service, managed, global_settings, "kollabor.llm.active_profile"
-        )
-        or "default"
-    )
+    active = _effective(config_service, managed, global_settings, "kollabor.llm.active_profile") or "default"
     rows = [
         {
             "type": "label",
@@ -108,9 +101,7 @@ def _loadout_rows(config_service: Any, managed, global_settings) -> list[dict]:
     if managed_by(model_path, managed):
         model = managed_value(managed, global_settings, model_path)
     else:
-        profiles = (
-            config_service.get("kollabor.llm.profiles") if config_service else None
-        )
+        profiles = config_service.get("kollabor.llm.profiles") if config_service else None
         profile = profiles.get(active) if isinstance(profiles, dict) else None
         model = profile.get("model") if isinstance(profile, dict) else None
     if model:
@@ -150,10 +141,7 @@ def build_config_sections(
         built.append(
             {
                 **section,
-                "widgets": [
-                    {**w, "managed_by": managed_by(w.get("config_path", ""), managed)}
-                    for w in widgets
-                ],
+                "widgets": [{**w, "managed_by": managed_by(w.get("config_path", ""), managed)} for w in widgets],
             }
         )
     return built
@@ -162,9 +150,7 @@ def build_config_sections(
 # -- saving ---------------------------------------------------------------------
 
 
-def apply_config_changes(
-    config_service: Any, changes: Mapping[str, Any], target: str
-) -> bool:
+def apply_config_changes(config_service: Any, changes: Mapping[str, Any], target: str) -> bool:
     """Save ``{config_path: value}`` to ``target`` ("local" or "global").
 
     Every config save, from the terminal or the browser, goes through here: set
@@ -172,6 +158,15 @@ def apply_config_changes(
     LLM and plugins that cache config keys refresh. Other processes pick the
     change up from the file's mtime. Returns False if any write failed.
     """
+    if not changes:
+        return True
+    try:
+        from kollabor_plugins.settings import apply_config_changes as apply_plugin_changes
+
+        changes = apply_plugin_changes(dict(changes))
+    except Exception as exc:
+        logger.error("plugin settings save failed: %s", exc)
+        return False
     if not changes:
         return True
     for path, value in changes.items():
@@ -210,9 +205,7 @@ def _number_error(field: dict, value: Any) -> Optional[str]:
     return None
 
 
-def validate_config_changes(
-    fields: Mapping[str, dict], changes: Mapping[str, Any]
-) -> dict[str, str]:
+def validate_config_changes(fields: Mapping[str, dict], changes: Mapping[str, Any]) -> dict[str, str]:
     """Why each change is refused, ``{path: reason}`` (empty: all fine).
 
     ``fields`` is ``{path: field}`` from ``describe()``: only editable fields
@@ -288,6 +281,14 @@ def _field(row: dict, config_service: Any, managed, global_settings) -> dict:
         value = managed_value(managed, global_settings, path)
     elif wtype == "label":
         value = row.get("value")
+    elif path.startswith(("plugin-values.", "plugin-registry.", "plugin-service.")):
+        from kollabor_plugins.settings import config_value
+
+        try:
+            value = config_value(path, row.get("default"))
+        except (OSError, ValueError) as exc:
+            logger.warning("Cannot read plugin setting %s: %s", path, exc)
+            value = row.get("default")
     else:
         value = config_service.get(path)
         if value is None:
@@ -325,10 +326,7 @@ class ConfigPanel:
                 {
                     "id": f"s{index}",
                     "title": section.get("title", "Section"),
-                    "fields": [
-                        _field(row, service, managed, global_settings)
-                        for row in section["widgets"]
-                    ],
+                    "fields": [_field(row, service, managed, global_settings) for row in section["widgets"]],
                 }
                 for index, section in enumerate(sections)
             ],
@@ -339,9 +337,7 @@ class ConfigPanel:
             },
         }
 
-    async def act(
-        self, ctx: Any, action: str, payload: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def act(self, ctx: Any, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         if action != "save":
             raise unknown_action(self.name, action)
         changes, target = payload.get("changes"), payload.get("target")

@@ -48,11 +48,11 @@ phase 4: effective config analysis
 tools and commands:
 
 core files to read:
-  <read><file>kollabor/config/loader.py</file></read>
-  <read><file>kollabor/config/manager.py</file></read>
-  <read><file>kollabor/config/plugin_config_manager.py</file></read>
-  <read><file>kollabor/config/plugin_schema.py</file></read>
-  <read><file>kollabor/utils/config_utils.py</file></read>
+  <read><file>packages/kollabor-config/src/kollabor_config/loader.py</file></read>
+  <read><file>packages/kollabor-config/src/kollabor_config/manager.py</file></read>
+  <read><file>packages/kollabor-config/src/kollabor_config/plugin_schema.py</file></read>
+  <read><file>packages/kollabor-config/src/kollabor_config/config_utils.py</file></read>
+  <read><file>packages/kollabor-plugins/src/kollabor_plugins/settings.py</file></read>
 
 check config file existence:
   <terminal>ls -la .kollab/config.json 2>/dev/null || echo "no local config"</terminal>
@@ -88,7 +88,6 @@ config manager (kollabor/config/manager.py)
 config loader (kollabor/config/loader.py)
   - config_manager: base config manager instance
   - plugin_registry: plugin registry for plugin configs
-  - plugin_config_manager: dynamic schema manager
   - get_base_config(): returns application defaults
   - get_plugin_configs(): returns merged plugin configs
   - load_complete_config(): returns full merged config
@@ -101,12 +100,10 @@ config priority order (highest to lowest):
   4. plugin-provided defaults
   5. base application defaults
 
-plugin config manager (kollabor/config/plugin_config_manager.py)
-  - plugin_schemas: registered plugin config schemas
-  - widget_definitions: ui widget definitions
-  - discover_plugin_schemas(): find plugin get_config_schema() methods
-  - validate_plugin_config(): validate config against schema
-  - get_plugin_default_config(): get defaults for a plugin
+plugin configuration
+  - installed and development plugin settings are listed by kollabor_plugins.registry.plugin_entries()
+  - plugin values are validated and saved by kollabor_plugins.settings
+  - built-in plugin defaults are merged from the plugin registry by ConfigLoader
 
 
 phase 1: config file discovery and structure validation
