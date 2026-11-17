@@ -2,27 +2,27 @@
   "name": "customer-support",
   "description": "Customer support desk: support lead, tier-1 and tier-2 agents, knowledge-base writer and QA/insights. Triage, draft answers, escalate bugs, and keep the help center current; replies and refunds need approval.",
   "roster": "support-crew",
-  "lead": "dana",
+  "lead": "support-lead",
   "members": [
     {
-      "persona": "dana",
+      "persona": "support-lead",
       "reports_to": null
     },
     {
-      "persona": "kofi",
-      "reports_to": "dana"
+      "persona": "tier-1-support-specialist",
+      "reports_to": "support-lead"
     },
     {
-      "persona": "elena",
-      "reports_to": "dana"
+      "persona": "tier-2-technical-specialist",
+      "reports_to": "support-lead"
     },
     {
-      "persona": "jun",
-      "reports_to": "dana"
+      "persona": "knowledge-base-writer",
+      "reports_to": "support-lead"
     },
     {
-      "persona": "farah",
-      "reports_to": "dana"
+      "persona": "support-qa-insights-analyst",
+      "reports_to": "support-lead"
     }
   ]
 }

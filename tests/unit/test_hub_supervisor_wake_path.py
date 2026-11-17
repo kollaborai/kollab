@@ -155,6 +155,62 @@ def test_work_format_lists_open_cards(tmp_path):
     assert "visible work" in text
 
 
+class _UnavailableTaskLedger:
+    def get_open(self):
+        raise OSError("/private/synthetic-ledger-path")
+
+
+def test_hub_work_tool_marks_failed_empty_ledger_as_unavailable(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    plugin._task_ledger = _UnavailableTaskLedger()
+
+    result = _run(plugin._handle_hub_work_tool({"id": "work-1"}))
+
+    assert not result.success
+    assert "ledger unavailable" in result.output.lower()
+    assert "do not assume empty" in result.output.lower()
+    assert "/private/synthetic-ledger-path" not in result.output
+    assert "work queue: empty" not in result.output.lower()
+
+
+def test_hub_work_tool_keeps_queue_as_partial_on_ledger_failure(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    plugin._work_queue.add(task="visible queue task")
+    plugin._task_ledger = _UnavailableTaskLedger()
+
+    result = _run(plugin._handle_hub_work_tool({"id": "work-2"}))
+
+    assert not result.success
+    assert "visible queue task" in result.output
+    assert "partial" in result.output.lower()
+    assert "ledger unavailable" in result.output.lower()
+    assert "/private/synthetic-ledger-path" not in result.output
+
+
+def test_hub_work_tool_marks_missing_ledger_unavailable(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    plugin._task_ledger = None
+
+    result = _run(plugin._handle_hub_work_tool({"id": "work-3"}))
+
+    assert not result.success
+    assert "ledger unavailable" in result.output.lower()
+    assert "do not assume empty" in result.output.lower()
+
+
+def test_hub_work_tool_reports_successful_empty_and_nonempty_ledgers(tmp_path):
+    plugin = _make_plugin(tmp_path)
+
+    empty_result = _run(plugin._handle_hub_work_tool({"id": "work-4"}))
+    assert empty_result.success
+    assert "work queue: empty" in empty_result.output.lower()
+
+    plugin._task_ledger.enqueue(assigner="peridot", directive="durable task")
+    nonempty_result = _run(plugin._handle_hub_work_tool({"id": "work-5"}))
+    assert nonempty_result.success
+    assert "durable task" in nonempty_result.output
+
+
 # --- Wake efficacy and stall alerts (issue #283) -------------------------
 
 

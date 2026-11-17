@@ -44,6 +44,7 @@ from .network_members import METHOD as MEMBERS_METHOD
 from .network_members import MembershipSync
 from .relay_commands import RelayCommands
 from .relay_conversations import (
+    AGENT_ID,
     CONVERSATION_REJECTION_REASONS,
     EVENT_KINDS,
     MESSAGE_KINDS,
@@ -72,6 +73,8 @@ DIRECTORY_STALE_SECONDS = 45
 # A read that asks the peers reuses an answer at most this old. It was the 15 s beat, so a
 # reply to an agent that came online just after a refresh failed as unknown for up to 15 s.
 DIRECTORY_REFETCH_SECONDS = 2
+# Repeated peer directory failures stay visible without filling the log each refresh.
+DIRECTORY_WARNING_INTERVAL_SECONDS = 300
 # A peer whose agents are at work is read this often, so a tool a few seconds
 # long shows on this computer; a quiet one waits for the 15 s beat.
 BUSY_DIRECTORY_SECONDS = 3
@@ -261,6 +264,7 @@ class RelayAgentBridge:
         )
         self._local_pending = collections.deque(maxlen=64)
         self._cache = {}
+        self._directory_warning_times = collections.OrderedDict()
         self._loop_task = None
         self._resume_task = None
         self._arrivals_task = None
@@ -672,6 +676,9 @@ class RelayAgentBridge:
                         "agent_type": row.get("agent_type") or "",
                         # {name, type} while it runs a tool, else None (the gem acts it out).
                         "current_tool": row.get("current_tool") or None,
+                        # The kollab it runs ("" from a peer that does not say, #968).
+                        "version": row.get("version") or "",
+                        "build": row.get("build") or "",
                     }
                 )
             except (KeyError, TypeError):
@@ -2879,6 +2886,23 @@ class RelayAgentBridge:
         commands = await self._membership_commands(params.get("network") or None)
         return commands.client.status()
 
+    def _log_directory_warning(self, peer_key: str, reason: str) -> None:
+        key = (peer_key, reason)
+        now = time.monotonic()
+        previous = self._directory_warning_times.get(key)
+        if previous is not None and now - previous < DIRECTORY_WARNING_INTERVAL_SECONDS:
+            self._directory_warning_times.move_to_end(key)
+            return
+        self._directory_warning_times[key] = now
+        self._directory_warning_times.move_to_end(key)
+        if len(self._directory_warning_times) > 256:
+            self._directory_warning_times.popitem(last=False)
+        logger.warning(
+            "remote directory for peer %s: %s",
+            peer_key[:12],
+            reason[:200],
+        )
+
     async def _rpc_directory(self, params):
         if self.commands is None:
             raise RelayError("workspace relay owner changed; retry")
@@ -2965,40 +2989,107 @@ class RelayAgentBridge:
                         # older peer has none, and its agents fall back to a
                         # stable per-peer stand-in below.
                         optional_fields = {
-                            "device", "harness", "acp_waiting", "current_tool", "agent_type"
+                            "device", "harness", "acp_waiting", "current_tool", "agent_type",
+                            "version", "build",
                         }
-                        if (
-                            not isinstance(row, dict)
-                            or not fields <= set(row)
-                            or set(row) - fields - optional_fields
-                        ):
-                            raise RelayError("invalid remote agent descriptor")
+                        if not isinstance(row, dict):
+                            self._log_directory_warning(peer_key, "invalid remote agent descriptor: row")
+                            continue
+                        missing = fields - set(row)
+                        if missing:
+                            field = sorted(missing)[0]
+                            self._log_directory_warning(
+                                peer_key, f"invalid remote agent descriptor: {field}"
+                            )
+                            continue
                         if (
                             not isinstance(row["machine_id"], str)
                             or not ID.fullmatch(row["machine_id"])
-                            or not isinstance(row["name"], str)
+                        ):
+                            field = "machine_id"
+                        elif (
+                            not isinstance(row["name"], str)
                             or not 1 <= len(row["name"]) <= 128
                             or not row["name"].isprintable()
-                            or type(row["is_coordinator"]) is not bool
-                            or not isinstance(row["state"], str)
+                        ):
+                            field = "name"
+                        elif type(row["is_coordinator"]) is not bool:
+                            field = "is_coordinator"
+                        elif (
+                            not isinstance(row["state"], str)
                             or not row["state"].isalpha()
                             or len(row["state"]) > 20
                         ):
-                            raise RelayError("invalid remote agent descriptor")
+                            field = "state"
+                        else:
+                            field = None
+                        if field:
+                            self._log_directory_warning(
+                                peer_key, f"invalid remote agent descriptor: {field}"
+                            )
+                            continue
+                        if not isinstance(row["workspace_id"], str) or not ID.fullmatch(
+                            row["workspace_id"]
+                        ):
+                            self._log_directory_warning(
+                                peer_key, "invalid remote agent descriptor: workspace_id"
+                            )
+                            continue
+                        if not isinstance(row["agent_id"], str) or not AGENT_ID.fullmatch(
+                            row["agent_id"]
+                        ):
+                            self._log_directory_warning(
+                                peer_key, "invalid remote agent descriptor: agent_id"
+                            )
+                            continue
                         device = row.get("device")
                         if "harness" in row and (
-                            not isinstance(row["harness"], str) or len(row["harness"]) > 128
+                            not isinstance(row["harness"], str)
+                            or len(row["harness"]) > 128
                             or (row["harness"] and not row["harness"].isprintable())
                         ):
-                            raise RelayError("invalid remote harness descriptor")
+                            self._log_directory_warning(
+                                peer_key, "invalid remote agent descriptor: harness"
+                            )
+                            continue
                         if "acp_waiting" in row and type(row["acp_waiting"]) is not bool:
-                            raise RelayError("invalid remote harness waiting state")
+                            self._log_directory_warning(
+                                peer_key, "invalid remote agent descriptor: acp_waiting"
+                            )
+                            continue
                         if "agent_type" in row and (
                             not isinstance(row["agent_type"], str)
                             or len(row["agent_type"]) > 128
                             or not row["agent_type"].isprintable()
                         ):
-                            raise RelayError("invalid remote agent type")
+                            self._log_directory_warning(
+                                peer_key, "invalid remote agent descriptor: agent_type"
+                            )
+                            continue
+                        invalid_version = any(
+                            key in row
+                            and (
+                                not isinstance(row[key], str)
+                                or len(row[key]) > 128
+                                or not row[key].isprintable()
+                            )
+                            for key in ("version", "build")
+                        )
+                        if invalid_version:
+                            field = next(
+                                key
+                                for key in ("version", "build")
+                                if key in row
+                                and (
+                                    not isinstance(row[key], str)
+                                    or len(row[key]) > 128
+                                    or not row[key].isprintable()
+                                )
+                            )
+                            self._log_directory_warning(
+                                peer_key, f"invalid remote agent descriptor: {field}"
+                            )
+                            continue
                         tool = row.get("current_tool")
                         if "current_tool" in row and (
                             not isinstance(tool, dict)
@@ -3009,11 +3100,17 @@ class RelayAgentBridge:
                             )
                             or not tool["name"]
                         ):
-                            raise RelayError("invalid remote tool descriptor")
+                            self._log_directory_warning(
+                                peer_key, "invalid remote agent descriptor: current_tool"
+                            )
+                            continue
                         if device is not None and (
                             not isinstance(device, str) or not NAME_RE.fullmatch(device)
                         ):
-                            raise RelayError("invalid remote agent descriptor")
+                            self._log_directory_warning(
+                                peer_key, "invalid remote agent descriptor: device"
+                            )
+                            continue
                         # The recorded binding wins over the peer's self-report.
                         device = peer_devices.get(peer_key) or device or key_label(peer_key)
                         address = str(
@@ -3023,7 +3120,11 @@ class RelayAgentBridge:
                         )
                         safe.append(
                             {
-                                **row,
+                                **{
+                                    key: value
+                                    for key, value in row.items()
+                                    if key in fields | optional_fields
+                                },
                                 "address": address,
                                 "device": device,
                                 "handle": format_handle(row["name"], device),
@@ -3037,11 +3138,7 @@ class RelayAgentBridge:
                 # would be listed for as long as the mesh remembers its key.
                 if cached and time.monotonic() - cached[0] > DIRECTORY_STALE_SECONDS:
                     self._cache.pop(cache_key, None)
-                logger.warning(
-                    "remote directory for peer %s unavailable: %s",
-                    peer_key[:12],
-                    str(exc)[:200],
-                )
+                self._log_directory_warning(peer_key, str(exc)[:200])
                 continue
         valid_keys = {
             (status["session"], peer_key, peer_session)

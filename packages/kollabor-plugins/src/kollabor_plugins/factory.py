@@ -98,6 +98,18 @@ class PluginFactory:
         error_accumulator = ErrorAccumulator(logger)
 
         for plugin_name, plugin_class in plugin_classes.items():
+            clean_name = (
+                plugin_name[:-6].lower()
+                if plugin_name.endswith("Plugin")
+                else plugin_name
+            )
+            get_config = getattr(config, "get", None)
+            if callable(get_config) and get_config(
+                f"plugins.{clean_name}.enabled", True
+            ) is False:
+                logger.info("Skipping disabled plugin: %s", plugin_name)
+                continue
+
             instance = self.instantiate_plugin(
                 plugin_class, plugin_name, event_bus, renderer, config
             )

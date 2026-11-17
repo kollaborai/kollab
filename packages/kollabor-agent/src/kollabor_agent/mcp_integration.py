@@ -34,6 +34,26 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Keep large MCP tool results usable while bounding per-connection stdout memory.
+MAX_MCP_FRAME_BYTES = 16 * 1024 * 1024
+
+
+def _valid_json_rpc_id(value: Any) -> bool:
+    return isinstance(value, str) or type(value) is int
+
+
+def _valid_json_rpc_params(message: Dict[str, Any]) -> bool:
+    params = message.get("params")
+    return "params" not in message or isinstance(params, (dict, list))
+
+
+def _valid_json_rpc_error(error: Any) -> bool:
+    return (
+        isinstance(error, dict)
+        and type(error.get("code")) is int
+        and isinstance(error.get("message"), str)
+    )
+
 
 def split_command(command: str) -> list[str]:
     """Split a configured MCP command into the argv that starts it.
@@ -61,6 +81,10 @@ def split_command(command: str) -> list[str]:
 
 class MCPRequestTimeoutError(TimeoutError):
     """Raised when an MCP JSON-RPC request times out and closes the connection."""
+
+
+class MCPRequestInterruptedError(RuntimeError):
+    """Raised when a shared MCP session closes while a request is pending."""
 
 
 def _get_loop():
@@ -125,6 +149,7 @@ class MCPServerConnection:
 
     DEFAULT_REQUEST_TIMEOUT = 300.0
     DEFAULT_STARTUP_TIMEOUT = 15.0
+    MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 
     def __init__(
         self,
@@ -143,8 +168,10 @@ class MCPServerConnection:
         self.startup_timeout = startup_timeout
         self.process: Optional[asyncio.subprocess.Process] = None
         self.initialized = False
-        self._read_buffer = ""
+        self._closing = False
+        self._read_buffer = b""
         self._pending_requests: Dict[str, asyncio.Future] = {}
+        self._pending_request_written: Dict[str, bool] = {}
         self._reader_task: Optional[asyncio.Task] = None
         self._write_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
@@ -162,6 +189,7 @@ class MCPServerConnection:
                 cwd=str(self.cwd) if self.cwd else None,
                 env=env,
             )
+            self._closing = False
             logger.info(f"Started MCP server process: {self.server_name}")
             self._ensure_reader_task()
             return True
@@ -189,7 +217,7 @@ class MCPServerConnection:
         logger.debug(f"Sending initialize request to {self.server_name}")
         try:
             response = await self._send_request(request, timeout=self.startup_timeout)
-        except MCPRequestTimeoutError:
+        except (MCPRequestTimeoutError, MCPRequestInterruptedError):
             response = None
 
         if response is None:
@@ -263,7 +291,7 @@ class MCPServerConnection:
 
         try:
             response = await self._send_request(request, timeout=self.startup_timeout)
-        except MCPRequestTimeoutError:
+        except (MCPRequestTimeoutError, MCPRequestInterruptedError):
             return []
         if response and "result" in response:
             tools = response["result"].get("tools", [])
@@ -293,6 +321,8 @@ class MCPServerConnection:
             response = await self._send_request(request, timeout=timeout)
         except MCPRequestTimeoutError as e:
             return {"error": str(e)}
+        except MCPRequestInterruptedError as e:
+            return {"error": str(e)}
         if response:
             if "result" in response:
                 return response["result"]  # type: ignore[no-any-return]
@@ -319,21 +349,29 @@ class MCPServerConnection:
         loop = asyncio.get_running_loop()
         response_future = loop.create_future()
         self._pending_requests[request_id] = response_future
+        self._pending_request_written[request_id] = False
         self._ensure_reader_task()
+        effective_timeout = self.request_timeout if timeout is None else float(timeout)
 
         try:
             message = json.dumps(request) + "\n"
-            async with self._write_lock:
-                self.process.stdin.write(message.encode())
-                await self.process.stdin.drain()
-
-            effective_timeout = (
-                self.request_timeout if timeout is None else float(timeout)
-            )
-            return await asyncio.wait_for(
-                response_future,
-                timeout=effective_timeout,
-            )
+            async with asyncio.timeout(effective_timeout):
+                async with self._write_lock:
+                    stdin = self.process.stdin if self.process else None
+                    if (
+                        self._closing
+                        or request_id not in self._pending_requests
+                        or stdin is None
+                        or stdin.is_closing()
+                    ):
+                        raise MCPRequestInterruptedError(
+                            "MCP request interrupted because the shared MCP connection "
+                            "is closing; the request was not written"
+                        )
+                    self._pending_request_written[request_id] = True
+                    stdin.write(message.encode())
+                    await stdin.drain()
+                return await response_future
         except asyncio.TimeoutError:
             timeout_display = self._format_timeout(effective_timeout)
             logger.warning(
@@ -341,21 +379,36 @@ class MCPServerConnection:
                 timeout_display,
                 self.server_name,
             )
+            self._closing = True
+            if not response_future.done():
+                response_future.cancel()
+            was_written = self._pending_request_written.get(request_id, False)
+            detail = (
+                "the outcome may be unknown because the request was written"
+                if was_written
+                else "the request was not written"
+            )
             await self.close()
             raise MCPRequestTimeoutError(
-                f"MCP request timed out after {timeout_display} seconds"
+                f"MCP request timed out after {timeout_display} seconds; {detail}"
             )
         except asyncio.CancelledError:
             logger.warning(
                 f"MCP request cancelled for {self.server_name}; closing connection"
             )
+            self._closing = True
+            if not response_future.done():
+                response_future.cancel()
             await self.close()
+            raise
+        except MCPRequestInterruptedError:
             raise
         except Exception as e:
             logger.error(f"Error sending request to {self.server_name}: {e}")
             return None
         finally:
             self._pending_requests.pop(request_id, None)
+            self._pending_request_written.pop(request_id, None)
 
     @staticmethod
     def _format_timeout(timeout: float) -> str:
@@ -392,34 +445,74 @@ class MCPServerConnection:
 
         try:
             while True:
-                while "\n" in self._read_buffer:
-                    line, self._read_buffer = self._read_buffer.split("\n", 1)
+                oversized_frame = False
+                while b"\n" in self._read_buffer:
+                    line, self._read_buffer = self._read_buffer.split(b"\n", 1)
+                    if len(line) > MAX_MCP_FRAME_BYTES:
+                        oversized_frame = True
+                        break
                     if not line.strip():
                         continue
                     try:
-                        message = json.loads(line)
+                        message = json.loads(line.decode("utf-8", errors="replace"))
                     except json.JSONDecodeError:
                         logger.debug(
-                            "Ignoring invalid JSON from MCP server %s: %s",
+                            "Ignoring invalid JSON frame from MCP server %s",
                             self.server_name,
-                            line[:120],
                         )
                         continue
-                    self._dispatch_incoming_message(message)
+                    server_error_response = self._dispatch_incoming_message(message)
+                    if server_error_response is not None:
+                        async with self._write_lock:
+                            stdin = self.process.stdin if self.process else None
+                            if (
+                                self._closing
+                                or stdin is None
+                                or stdin.is_closing()
+                            ):
+                                continue
+                            stdin.write(
+                                (json.dumps(server_error_response) + "\n").encode()
+                            )
+                            await stdin.drain()
+                if len(self._read_buffer) > MAX_MCP_FRAME_BYTES:
+                    oversized_frame = True
+                if oversized_frame:
+                    error_message = (
+                        "MCP server frame exceeded the "
+                        f"{MAX_MCP_FRAME_BYTES}-byte limit"
+                    )
+                    logger.warning(
+                        "MCP server %s sent a frame over the %d-byte limit",
+                        self.server_name,
+                        MAX_MCP_FRAME_BYTES,
+                    )
+                    for request_id, future in list(self._pending_requests.items()):
+                        if not future.done():
+                            future.set_result(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": request_id,
+                                    "error": {"code": -32000, "message": error_message},
+                                }
+                            )
+                    break
 
-                chunk = await self.process.stdout.read(4096)
+                read_size = min(
+                    4096,
+                    MAX_MCP_FRAME_BYTES - len(self._read_buffer) + 1,
+                )
+                chunk = await self.process.stdout.read(read_size)
                 if not chunk:
                     break
-                self._read_buffer += chunk.decode()
+                self._read_buffer += chunk
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error(f"MCP reader failed for {self.server_name}: {e}")
         finally:
-            for request_id, future in list(self._pending_requests.items()):
-                if not future.done():
-                    future.set_result(None)
-                self._pending_requests.pop(request_id, None)
+            self._closing = True
+            self._interrupt_pending_requests("the MCP server closed its output stream")
             # EOF or a reader failure means the stdio process is no longer a
             # usable MCP session. Leave the process object for the normal
             # cleanup path, but make the integration's reconnect gate see the
@@ -430,29 +523,97 @@ class MCPServerConnection:
                     self.server_name,
                 )
             self.initialized = False
-            self._read_buffer = ""
+            self._read_buffer = b""
 
-    def _dispatch_incoming_message(self, message: Dict[str, Any]) -> None:
-        """Resolve matched responses and ignore notifications."""
+    def _interrupt_pending_requests(self, reason: str) -> None:
+        for request_id, future in list(self._pending_requests.items()):
+            if not future.done():
+                was_written = self._pending_request_written.get(request_id, False)
+                detail = (
+                    "the outcome may be unknown because the request was written"
+                    if was_written
+                    else "the request was not written"
+                )
+                future.set_exception(
+                    MCPRequestInterruptedError(
+                        f"MCP request interrupted because {reason}; {detail}"
+                    )
+                )
+            self._pending_requests.pop(request_id, None)
+            self._pending_request_written.pop(request_id, None)
+
+    def _dispatch_incoming_message(
+        self, message: Any
+    ) -> Optional[Dict[str, Any]]:
+        """Validate and dispatch JSON-RPC responses; reject unsupported requests."""
+        if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+            logger.debug("Ignoring malformed JSON-RPC frame from %s", self.server_name)
+            return None
+
+        if "method" in message:
+            method = message["method"]
+            if (
+                not isinstance(method, str)
+                or "result" in message
+                or "error" in message
+                or not _valid_json_rpc_params(message)
+            ):
+                logger.debug(
+                    "Ignoring malformed JSON-RPC request from %s", self.server_name
+                )
+                if "id" not in message:
+                    return None
+                response_id = message.get("id")
+                if not _valid_json_rpc_id(response_id):
+                    response_id = None
+                return {
+                    "jsonrpc": "2.0",
+                    "id": response_id,
+                    "error": {"code": -32600, "message": "Invalid Request"},
+                }
+            if "id" not in message:
+                logger.debug("Ignoring MCP notification from %s", self.server_name)
+                return None
+
+            response_id = message["id"]
+            if not _valid_json_rpc_id(response_id):
+                logger.debug(
+                    "Rejecting JSON-RPC request with malformed id from %s",
+                    self.server_name,
+                )
+                return {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32600, "message": "Invalid Request"},
+                }
+            return {
+                "jsonrpc": "2.0",
+                "id": response_id,
+                "error": {"code": -32601, "message": "Method not found"},
+            }
+
         response_id = message.get("id")
-        if response_id is None:
+        if (
+            not _valid_json_rpc_id(response_id)
+            or ("result" in message) == ("error" in message)
+            or ("error" in message and not _valid_json_rpc_error(message["error"]))
+            or "params" in message
+        ):
             logger.debug(
-                "Ignoring MCP notification from %s: %s",
-                self.server_name,
-                message.get("method", "<unknown>"),
+                "Ignoring malformed JSON-RPC response from %s", self.server_name
             )
-            return
+            return None
 
         future = self._pending_requests.get(str(response_id))
         if future is None:
             logger.debug(
-                "Ignoring unmatched MCP response from %s: id=%s",
+                "Ignoring unmatched MCP response from %s",
                 self.server_name,
-                response_id,
             )
-            return
+            return None
         if not future.done():
             future.set_result(message)
+        return None
 
     async def close(self) -> None:
         """Close the server connection.
@@ -465,7 +626,9 @@ class MCPServerConnection:
 
     async def _close_impl(self) -> None:
         """Close the connection; caller must hold ``_close_lock``."""
+        self._closing = True
         if self.process:
+            self._interrupt_pending_requests("the shared MCP connection was closed")
             if self._reader_task and not self._reader_task.done():
                 self._reader_task.cancel()
                 try:
@@ -475,10 +638,6 @@ class MCPServerConnection:
                 except Exception as e:
                     logger.debug("MCP reader shutdown failed for %s: %s", self.server_name, e)
             self._reader_task = None
-            for request_id, future in list(self._pending_requests.items()):
-                if not future.done():
-                    future.set_result(None)
-                self._pending_requests.pop(request_id, None)
 
             try:
                 # Close stdin first to signal server

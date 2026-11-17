@@ -390,7 +390,7 @@ async def test_voice_cleanup_restores_chat_after_an_oauth_rebuild_mid_turn(tmp_p
         service_module.ProviderRegistry, "get_provider", staticmethod(new_provider)
     )
 
-    async def refresh() -> None:
+    async def refresh(_expected_generation=None) -> None:
         fast.api_key = f"token-{len(built)}-{fast.api_key}"  # every refresh rotates the key
 
     monkeypatch.setattr(api, "_refresh_oauth_token", refresh)

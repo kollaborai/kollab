@@ -1,5 +1,5 @@
 import { codeFetch, unwrapCodeData } from "@/lib/code-fetch";
-import { useEditorStore } from "@/components/code/editor-store";
+import { isDirty, useEditorStore } from "@/components/code/editor-store";
 import { rememberMtime, rememberVersion } from "@/components/code/file-save";
 import { editorOwner, editorOwnerEpoch, releaseClosedBufferOwner } from "@/components/code/workspace-tabs";
 
@@ -34,6 +34,8 @@ export async function readFileContent(workspace: string, absPath: string, expect
   }
 }
 
+const pendingOpens = new Map<string, Promise<boolean>>();
+
 /**
  * Opens a file in a pane (the active one unless `paneId` is given). Returns whether the file is open.
  *
@@ -64,22 +66,45 @@ export async function openWorkspaceFile(
     if (options.pin) store.pinFile(absPath);
     return true;
   }
+  const owner = editorOwner();
+  const epoch = editorOwnerEpoch();
+  const existingId = cached?.bufferId;
+  const key = `${epoch}\0${workspace}\0${absPath}\0${existingId ?? "new"}`;
+  const pending = cached?.loading ? pendingOpens.get(key) : undefined;
+  if (pending) {
+    store.openFile(paneId, absPath, name, ext, cached!.content);
+    store.setFileLoading(absPath, true);
+    if (options.pin) store.pinFile(absPath);
+    const ok = await pending;
+    if (!ok && owner === editorOwner() && epoch === editorOwnerEpoch() &&
+        useEditorStore.getState().fileCache.get(absPath)?.bufferId === existingId) {
+      useEditorStore.getState().closeFile(paneId, absPath);
+    }
+    return ok;
+  }
   store.openFile(paneId, absPath, name, ext, "");
   if (options.pin) store.pinFile(absPath);
   store.setFileLoading(absPath, true);
-  const owner = editorOwner();
-  const epoch = editorOwnerEpoch();
   const bufferId = useEditorStore.getState().fileCache.get(absPath)?.bufferId;
-  const read = await readFileContent(workspace, absPath, bufferId);
-  if (owner !== editorOwner() || epoch !== editorOwnerEpoch() ||
-      bufferId !== useEditorStore.getState().fileCache.get(absPath)?.bufferId) return false;
-  if (read === null) {
-    useEditorStore.getState().closeFile(paneId, absPath);
-    return false;
-  }
-  rememberFileRead(absPath, read);
-  useEditorStore.getState().openFile(paneId, absPath, name, ext, read.content);
-  return true;
+  const pendingKey = `${epoch}\0${workspace}\0${absPath}\0${bufferId}`;
+  const loading = (async () => {
+    const read = await readFileContent(workspace, absPath, bufferId);
+    const current = useEditorStore.getState().fileCache.get(absPath);
+    if (!current || owner !== editorOwner() || epoch !== editorOwnerEpoch() || bufferId !== current.bufferId) return false;
+    if (read === null) {
+      useEditorStore.getState().closeFile(paneId, absPath);
+      return false;
+    }
+    if (!isDirty(current)) {
+      rememberFileRead(absPath, read);
+      useEditorStore.getState().openFile(paneId, absPath, name, ext, read.content);
+    } else {
+      useEditorStore.getState().setFileLoading(absPath, false);
+    }
+    return true;
+  })();
+  pendingOpens.set(pendingKey, loading);
+  try { return await loading; } finally { pendingOpens.delete(pendingKey); }
 }
 
 /** Opens a diff tab: working copy against the HEAD content the git panel passes (null = new file). */

@@ -360,10 +360,14 @@ async def test_firing_to_a_local_agent_is_unchanged(caplog):
         "[cron abc12345] run the tests",
         MessageScope.DIRECT.value,
     )
-    assert sent == [] and job.last_error == ""  # a local refusal stays quiet, as before
+    # the send itself is unchanged; a refusal is recorded, not counted (#870)
+    assert sent == []
+    assert job.last_error == "in waiting state"
     plugin._display_outgoing_message.assert_not_called()
     assert _notices(plugin) == []
-    assert _warnings(caplog) == []
+    assert _warnings(caplog) == [
+        "hub cron abc12345 not delivered to lapis: in waiting state"
+    ]
 
 
 @pytest.mark.asyncio

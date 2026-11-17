@@ -125,7 +125,9 @@ From stdin:
 With timeout:
   git diff | kollab "write commit message" -p --timeout 30s
 
-Timeout formats: 30s, 5min, 1h.
+Fractional seconds are supported, for example `--timeout 0.5s`.
+
+Timeout formats include 0.5s, 5min, and 1h.
 
 In pipe mode, stdin is context, query is instruction.
 

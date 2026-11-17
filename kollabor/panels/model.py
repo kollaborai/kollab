@@ -107,6 +107,7 @@ async def _effort_control(handler: Any, profile: Any) -> dict:
     return make_field(
         "level", "dropdown", "Reasoning Effort", action="effort",
         value=profile.get_effort() or "default", options=["default", *levels],
+        option_labels={"none": "none (no reasoning)"},
         help="Saved to the active provider profile. Default lets the model decide.",
     )
 

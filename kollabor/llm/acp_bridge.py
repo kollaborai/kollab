@@ -1025,10 +1025,13 @@ class ACPRunner:
             # existing owned-root traversal there so descendants remain
             # available to the direct process-handle cleanup path.
             for owner in tuple(self._owned_processes.values()):
+                children = []
                 with contextlib.suppress(psutil.Error):
                     if owner.ppid() in self._owned_processes:
                         continue
-                    for child in owner.children(recursive=True):
+                    children = owner.children(recursive=True)
+                for child in children:
+                    with contextlib.suppress(psutil.Error):
                         child.create_time()
                         self._owned_processes[child.pid] = child
 
@@ -1069,7 +1072,8 @@ class ACPRunner:
         return alive
 
     def _signal_owned_process_group(self, signum: int) -> bool:
-        """Signal only the POSIX group created with this adapter process."""
+        """Signal only the POSIX group created with this adapter process, and
+        only while its guard leader still holds the group id."""
         group_id = self._process_group_id
         if group_id is None or not hasattr(os, "killpg"):
             return False

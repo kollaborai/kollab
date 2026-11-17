@@ -2,27 +2,27 @@
   "name": "product-design",
   "description": "Product and design group: head of product, product manager, UX researcher, product designer and product analyst. Turns problems into evidence-backed specs and designs, and hands build work to engineering through koordinator.",
   "roster": "product-crew",
-  "lead": "julia",
+  "lead": "head-of-product",
   "members": [
     {
-      "persona": "julia",
+      "persona": "head-of-product",
       "reports_to": null
     },
     {
-      "persona": "arjun",
-      "reports_to": "julia"
+      "persona": "product-manager",
+      "reports_to": "head-of-product"
     },
     {
-      "persona": "nina",
-      "reports_to": "julia"
+      "persona": "ux-researcher",
+      "reports_to": "head-of-product"
     },
     {
-      "persona": "oscar",
-      "reports_to": "julia"
+      "persona": "product-designer",
+      "reports_to": "head-of-product"
     },
     {
-      "persona": "lucas",
-      "reports_to": "julia"
+      "persona": "product-analyst",
+      "reports_to": "head-of-product"
     }
   ]
 }

@@ -89,6 +89,9 @@ Native goal turns send their attached images to image-capable models.
 Control subcommands are daemon-side state operations: they work while a turn
 is processing (routed ahead of the `is_processing` gate), and pause/clear
 record a durable stop intent immediately, applied at the next safe boundary.
+If a driver stops while a storage error prevents saving its paused state, the
+goal may still be marked active; `/goal resume` schedules that stopped driver
+again once storage is available.
 Attach clients execute `/goal` daemon-side through the `state.goal_command`
 RPC — the daemon owns the conversation identity, store, and driver, and
 `goal.state_changed` events stream back over the attach socket.

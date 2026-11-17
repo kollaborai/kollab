@@ -408,6 +408,23 @@ class TestSaveMergedConfigModes:
 class TestConfigMigration:
     """Test configuration migration from v1 to v2."""
 
+    @pytest.mark.parametrize(
+        ("api_base", "expected"),
+        [
+            ("https://gateway.example/anthropic.com/v1", "auto"),
+            ("https://anthropic.com.mirror.example/v1", "auto"),
+            ("https://api.anthropic.com/v1?via=azure.com", "anthropic"),
+            ("api.anthropic.com/v1", "anthropic"),
+            ("api.anthropic.com:443/v1", "anthropic"),
+            ("azure.openai.com/v1", "azure_openai"),
+        ],
+    )
+    def test_migration_provider_detection_matches_endpoint_host(self, api_base, expected):
+        """Migration detects vendors from the endpoint host only."""
+        from kollabor_config.migration import detect_provider_from_profile
+
+        assert detect_provider_from_profile({"api_base": api_base}) == expected
+
     def test_migrate_current_version_no_change(self):
         """Test config at current version is not modified."""
         config = {VERSION_KEY: CONFIG_VERSION, "kollabor": {"llm": {}}}

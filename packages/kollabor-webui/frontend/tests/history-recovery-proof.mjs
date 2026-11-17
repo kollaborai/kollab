@@ -12,6 +12,7 @@
 //      prefix reachable from cache, no engine round trip       [history-cache]
 //   I: a tool call and result split across pages reunite without a branch
 //   J: a superseding refresh during a local send preserves the submitted row
+//   observed-hub-note: an observed note appears on its history event, dimmed
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -1159,6 +1160,146 @@ try {
         j.events.splice(0).forEach((release) => release(""));
         j.assistant.splice(0).forEach((release) => release());
       }
+    },
+  );
+
+  // K: another agent's message and reply land while this page owns a local
+  // turn. They must be appended after that turn settles, even when the
+  // engine refreshed history before the local reply reached the mirror.
+  const k = { events: [], assistant: [], external: false, refreshes: 0 };
+  await scenario(
+    "K-external-history-during-send",
+    () => ({
+      resolve(options) {
+        if (options.before) return { status: 200, body: iPage(0, 10) };
+        if (options.after) {
+          k.refreshes += 1;
+          return {
+            status: 200,
+            body: mkPage(10, k.external ? 62 : 60, k.external ? {
+              history: [
+                ...Array.from({ length: 50 }, (_, i) => ({ role: "user", content: `message-${i + 10}` })),
+                { role: "user", content: "PEER-ARRIVAL" },
+                { role: "assistant", content: "PEER-REPLY" },
+              ],
+            } : {}),
+          };
+        }
+        return { status: 200, body: iPage(10, 60) };
+      },
+      events(route) {
+        return new Promise((resolve) => k.events.push((body) =>
+          resolve(route.fulfill({ status: 200, contentType: "text/event-stream", body }).catch(() => {}))));
+      },
+      assistant(route) {
+        const state = route.request().postDataJSON().state;
+        return new Promise((resolve) => k.assistant.push(() => {
+          const messages = [...state.messages,
+            { id: `user-demo-session-${state.messages.length}`, role: "user", content: "CLIENT-TURN" },
+            { id: `assistant-demo-session-${state.messages.length + 1}`, role: "assistant", content: "CLIENT-REPLY",
+              status: { type: "complete", reason: "stop" } },
+          ];
+          const update = { type: "update-state", operations: [
+            { type: "set", path: ["messages"], value: messages },
+            { type: "set", path: ["synced"], value: { history: 60, messages: messages.length } },
+          ] };
+          const body = `data: ${JSON.stringify(update)}\n\ndata: ${JSON.stringify({ type: "message-finish", finishReason: "stop" })}\n\ndata: [DONE]\n\n`;
+          resolve(route.fulfill({ status: 200, contentType: "text/event-stream", body }).catch(() => {}));
+        }));
+      },
+    }),
+    async (page) => {
+      try {
+        await openThread(page, "message-59");
+        const composer = page.locator(".aui-composer-input");
+        await composer.fill("CLIENT-TURN");
+        await composer.press("Enter");
+        for (let n = 0; n < 100 && (!k.assistant.length || !k.events.length); n++) {
+          await page.waitForTimeout(100);
+        }
+        if (!k.assistant.length || !k.events.length) throw new Error("local send or event stream was not held");
+        k.external = true;
+        k.events.splice(0).forEach((release) => release('data: {"type":"hub_message"}\n\n'));
+        for (let n = 0; n < 100 && !k.refreshes; n++) await page.waitForTimeout(100);
+        if (!k.refreshes) throw new Error("external message did not refresh history");
+        for (let n = 0; n < 20; n++) {
+          const arrival = await page.getByText("PEER-ARRIVAL", { exact: true }).count();
+          const reply = await page.getByText("PEER-REPLY", { exact: true }).count();
+          if (arrival && reply) break;
+          await page.waitForTimeout(100);
+        }
+        const liveArrival = await page.getByText("PEER-ARRIVAL", { exact: true }).count();
+        const liveReply = await page.getByText("PEER-REPLY", { exact: true }).count();
+        if (liveArrival !== 1 || liveReply !== 1) {
+          fail("K-external-history-during-send", `during-send arrival=${liveArrival} reply=${liveReply}`);
+        }
+        k.assistant.splice(0).forEach((release) => release());
+        await page.getByText("CLIENT-REPLY", { exact: true }).waitFor({ timeout: 10000 });
+        const peerArrival = await page.getByText("PEER-ARRIVAL", { exact: true }).count();
+        const peerReply = await page.getByText("PEER-REPLY", { exact: true }).count();
+        if (peerArrival !== 1 || peerReply !== 1) {
+          fail("K-external-history-during-send", `arrival=${peerArrival} reply=${peerReply} refreshes=${k.refreshes}`);
+        } else {
+          ok("K-external-history-during-send", "peer message and reply appear after the local turn settles");
+        }
+      } finally {
+        k.events.splice(0).forEach((release) => release(""));
+        k.assistant.splice(0).forEach((release) => release());
+      }
+    },
+  );
+
+  // An observed note reaches an idle peer as a history record, without a turn.
+  // Its hub_message event must be enough to reload and draw the dimmed note.
+  const observed = { arrived: false, events: [], refreshes: 0 };
+  const observedHud =
+    "<agent_hud>\n[hub:user->lapis]\n+ [hub channel: user -> lapis]\n  OBSERVED-NOTE\n  (the human is typing in lapis's window. do NOT relay, repeat, or respond to lapis about this message — they already see it.)\n</agent_hud>";
+  await scenario(
+    "observed-hub-note",
+    () => ({
+      resolve(options) {
+        if (options.after) {
+          observed.refreshes += 1;
+          return {
+            status: 200,
+            body: mkPage(1, 2, {
+              history: observed.arrived ? [{ role: "user", content: observedHud }] : [],
+            }),
+          };
+        }
+        return {
+          status: 200,
+          body: mkPage(0, 1, { history: [{ role: "user", content: "THREAD-SEED" }] }),
+        };
+      },
+      events(route) {
+        return new Promise((resolve) => {
+          observed.events.push(() =>
+            resolve(route.fulfill({
+              status: 200,
+              contentType: "text/event-stream",
+              body: 'data: {"type":"hub_message"}\n\n',
+            }).catch(() => {})),
+          );
+        });
+      },
+    }),
+    async (page, _requests, capture) => {
+      await openThread(page, "THREAD-SEED");
+      for (let n = 0; n < 100 && !observed.events.length; n++) await page.waitForTimeout(100);
+      if (!observed.events.length) throw new Error("event stream was not held");
+      observed.arrived = true;
+      observed.events.splice(0).forEach((release) => release());
+      const note = page.locator('[data-slot="kollab_hub-message"]').filter({ hasText: "OBSERVED-NOTE" });
+      await note.first().waitFor({ timeout: 10000 });
+      if (!observed.refreshes) throw new Error("hub_message did not refresh history");
+      const className = await note.first().getAttribute("class");
+      if (!className?.includes("opacity-60")) {
+        fail("observed-hub-note", `note was not dimmed (class=${className})`);
+      } else {
+        ok("observed-hub-note", "history event draws the observed note immediately with dimmed styling");
+      }
+      await capture();
     },
   );
 

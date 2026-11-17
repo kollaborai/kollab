@@ -130,7 +130,11 @@ class ConfigAltView(AltView):
 
         # Read current value from config service
         current_value = None
-        if self.config_service and config_path:
+        if config_path.startswith(("plugin-values.", "plugin-registry.", "plugin-service.")):
+            from kollabor_plugins.settings import config_value
+
+            current_value = config_value(config_path, widget_config.get("default"))
+        elif self.config_service and config_path:
             current_value = self.config_service.get(config_path)
 
         cfg = widget_config.copy()
@@ -755,6 +759,11 @@ class ConfigAltView(AltView):
                             hasattr(w, "has_pending_changes")
                             and w.has_pending_changes()
                         ):
+                            value = w.get_pending_value()
+                            if "value" in w.config:
+                                w.config["value"] = value
+                            else:
+                                w.config["current_value"] = value
                             w._pending_value = None
         except Exception as e:
             logger.error("ConfigAltView: save failed: %s", e, exc_info=True)

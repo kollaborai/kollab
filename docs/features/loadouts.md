@@ -202,29 +202,27 @@ Precedence is explicit flag → loadout field → provider profile value.
 
 ## Fallback when a model can't serve
 
-`/llm fallback <name>` picks the loadout this agent switches to when a turn
-fails because its model can't serve it: a usage limit, a quota, a rate limit
-that outlasted the retries, or an expired login. The agent says so in one line
-in the chat, switches once and runs the turn again, in the same reply. It stays
-on the fallback until you switch back with `/llm`. Three cases are not run
-again, and the notice asks you to send the message again:
+`/llm fallback <name>` picks the loadout suggested when a turn fails because
+its model cannot serve it: a usage limit, a quota, a rate limit that outlasted
+the provider's retries, or an expired login.
 
-- the fallback is an ACP harness, which has its own conversation;
-- the failed turn was an ACP harness's, which has ended before the switch;
-- the failed model had already streamed part of its reply, which the new
-  answer would join as one.
+Automatic switching is disabled in both native and daemon-backed sessions.
+The notice gives an explicit `/llm <name>` selection to make before sending
+the message again. The failed turn is not retried on the configured fallback.
+Failure handling does not update provider profiles, change the active profile,
+reinitialize a provider, close an ACP harness, or schedule later restoration.
+The operator's explicit selection still uses the normal loadout activation path
+and its normal persistence behavior.
 
-An ACP harness still running or holding other messages is not switched yet:
-switching closes it, which would fail them too. It switches once the last of
-them ends, however that one ends. From then until the switch is done, a new
-message is refused with a line asking you to send it again. A message from
-another agent that the old harness never got, or got and failed, reaches the
-new one; a native fallback answers them in one turn. If you pick another
-profile before the switch, the switch is dropped, and that profile gets those
-messages. If nothing switches (the fallback is out of usage too), they wait
-for the agent's next prompt. If activation fails after closing ACP, those
-messages stay queued; no native turn starts until a successful switch can read
-them from conversation history.
+If the fallback resolves to the model that just failed, the notice says it uses
+the same model and makes no switch. A missing fallback also produces a notice.
+Native failures are reported inside the failed turn; ACP failures are reported
+once that turn completes. ACP prompts and peer messages remain with their
+existing owner, including when the harness is busy.
+
+Run-local automatic retry and automatic ACP handover were removed from this
+change: the activation path owns shared profile, provider, and harness state.
+Disabling disk persistence does not make that state private to the failed run.
 
 - `/llm fallback` shows the choice; `/llm fallback off` turns it off.
 - In the web UI: Settings → Loadouts → Fallback Model, a dropdown of every

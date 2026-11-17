@@ -20,6 +20,7 @@ from kollabor_ai import APICommunicationService, LLMProfile, ProfileManager
 from kollabor_ai.profile_manager import (
     EFFORT_LEVELS,
     effort_unsupported_reason,
+    model_effort_refusal,
     redact_profile_endpoint,
     resolve_effort_provider,
 )
@@ -587,13 +588,6 @@ async def create_profile(body: CreateProfileRequest):
             )
         if not model:
             raise HTTPException(status_code=422, detail="Model is required")
-        reason = effort_unsupported_reason(
-            resolve_effort_provider(provider, body.api_key or "", body.base_url or ""),
-            body.effort,
-        )
-        if reason:
-            raise HTTPException(status_code=422, detail=reason)
-
         profile = LLMProfile(
             name=name,
             provider=provider,
@@ -610,6 +604,14 @@ async def create_profile(body: CreateProfileRequest):
             supports_tools=body.supports_tools,
             extra_headers=body.extra_headers,
         )
+
+        effort_provider = profile.get_effort_provider(migrate_plaintext=False)
+        reason = effort_unsupported_reason(effort_provider, body.effort)
+        if reason:
+            raise HTTPException(status_code=422, detail=reason)
+        refusal = model_effort_refusal(effort_provider, model, body.effort)
+        if refusal:
+            raise HTTPException(status_code=422, detail=refusal)
 
         if not pm.add_profile(profile, save_to_config=True):
             if pm.get_profile(name) is not None:
@@ -649,18 +651,21 @@ async def update_profile(name: str, body: UpdateProfileRequest):
             detail="A model is required for non-ACP profiles",
         )
 
-    # A level the provider never sends is refused here, not stored and reported.
-    # Switching to Anthropic checks the level the profile already holds too.
-    reason = effort_unsupported_reason(
-        resolve_effort_provider(
-            target_provider,
-            body.api_key if body.api_key is not None else profile.get_api_key(),
-            body.base_url if body.base_url is not None else profile.get_endpoint(),
-        ),
-        body.effort if body.effort is not None else profile.effort,
+    # A level the provider or model never carries is refused here, not stored
+    # and reported. Switching to Anthropic or to a model the registry marks as
+    # non-reasoning checks the level the profile already holds too.
+    effort_provider = resolve_effort_provider(
+        target_provider,
+        body.api_key if body.api_key is not None else profile.get_api_key(),
+        body.base_url if body.base_url is not None else profile.get_endpoint(),
     )
+    effective_effort = body.effort if body.effort is not None else profile.effort
+    reason = effort_unsupported_reason(effort_provider, effective_effort)
     if reason:
         raise HTTPException(status_code=422, detail=reason)
+    refusal = model_effort_refusal(effort_provider, target_model, effective_effort)
+    if refusal:
+        raise HTTPException(status_code=422, detail=refusal)
 
     # Build kwargs for fields that were provided
     kwargs: Dict[str, Any] = {}
