@@ -93,4 +93,116 @@ describe("startGlass", () => {
     ).not.toThrow();
     expect(startGlass(fakeCanvas("Apple M3").canvas, K_POLYS)).toBeNull();
   });
+
+  it("draws one still frame without scheduling work for reduced motion", async () => {
+    vi.resetModules();
+    const setTimeout = vi.fn(() => 1);
+    vi.stubGlobal("window", {
+      devicePixelRatio: 1,
+      matchMedia: () => ({ matches: true }),
+      addEventListener() {},
+      removeEventListener() {},
+      setTimeout,
+      clearTimeout() {},
+    });
+    vi.stubGlobal("document", {
+      documentElement: { classList: { contains: () => true } },
+    });
+    vi.doMock("three", () => {
+      class Disposable { dispose() {} }
+      class Geometry extends Disposable {
+        scale() {}
+        rotateX() {}
+        center() {}
+        setDrawRange() {}
+      }
+      class Renderer {
+        private size = { x: 0, y: 0 };
+        setPixelRatio() {}
+        setRenderTarget() {}
+        setSize(x: number, y: number) { this.size = { x, y }; }
+        getSize(out: { x: number; y: number }) {
+          out.x = this.size.x;
+          out.y = this.size.y;
+          return out;
+        }
+        render() {}
+        dispose() {}
+        forceContextLoss() {}
+      }
+      class Material extends Disposable {
+        attenuationColor = { set() {} };
+        constructor(options: object = {}) {
+          super();
+          Object.assign(this, options);
+          this.attenuationColor = { set() {} };
+        }
+      }
+      class Scene { add() {} }
+      class Camera { position = { z: 0 }; updateProjectionMatrix() {} }
+      class Vector2 { constructor(public x = 0, public y = 0) {} }
+      class Vector3 { constructor(public x = 0, public y = 0, public z = 0) {} }
+      class Light { position = { set() {} }; intensity = 0; }
+      class Mesh { position = { z: 0 }; rotation = { x: 0, y: 0, z: 0 }; constructor(..._args: unknown[]) {} }
+      class PMREMGenerator {
+        fromScene() { return { texture: new Disposable() }; }
+        dispose() {}
+      }
+      return {
+        Camera,
+        DirectionalLight: Light,
+        ExtrudeGeometry: Geometry,
+        Mesh,
+        MeshBasicMaterial: Material,
+        MeshPhysicalMaterial: Material,
+        NeutralToneMapping: 0,
+        PerspectiveCamera: Camera,
+        PlaneGeometry: Geometry,
+        PMREMGenerator,
+        PointLight: Light,
+        Scene,
+        ShaderMaterial: Material,
+        Shape: class { constructor(..._args: unknown[]) {} },
+        Vector2,
+        Vector3,
+        WebGLRenderTarget: class extends Disposable {
+          texture = new Disposable();
+        },
+        WebGLRenderer: Renderer,
+      };
+    });
+    vi.doMock("three/addons/environments/RoomEnvironment.js", () => ({
+      RoomEnvironment: class { dispose() {} },
+    }));
+    vi.doMock("three/addons/utils/BufferGeometryUtils.js", () => ({
+      toCreasedNormals: (geometry: unknown) => geometry,
+    }));
+
+    try {
+      const { startGlass: startGlassWithMockRenderer } = await import(
+        "@/components/icons/kollab-logo-glass"
+      );
+      const context = {
+        RENDERER: 1,
+        getExtension: (name: string) =>
+          name === "WEBGL_debug_renderer_info"
+            ? { UNMASKED_RENDERER_WEBGL: 2 }
+            : null,
+        getParameter: () => "Apple M3",
+      };
+      const canvas = {
+        clientWidth: 80,
+        clientHeight: 80,
+        getContext: () => context,
+      } as unknown as HTMLCanvasElement;
+
+      expect(startGlassWithMockRenderer(canvas, K_POLYS)).not.toBeNull();
+      expect(setTimeout).not.toHaveBeenCalled();
+    } finally {
+      vi.doUnmock("three");
+      vi.doUnmock("three/addons/environments/RoomEnvironment.js");
+      vi.doUnmock("three/addons/utils/BufferGeometryUtils.js");
+      vi.resetModules();
+    }
+  });
 });
