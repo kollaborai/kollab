@@ -85,6 +85,27 @@ test("a page-boundary tool result is replaced by its actual call", () => {
   assert.deepEqual(result?.map((message) => message.id), [call.id, later.id]);
 });
 
+test("a boundary correction keeps the shown id and matches its canonical history row later", () => {
+  const fallback = {
+    id: "history-10", role: "assistant",
+    metadata: { custom: { historyToolFallback: "tool-1" } },
+    content: [{ type: "tool-call", toolCallId: "tool-1", toolName: "fallback" }],
+  };
+  const call = {
+    id: "history-9", role: "assistant",
+    content: [{ type: "tool-call", toolCallId: "tool-1", toolName: "actual", result: "done" }],
+  };
+  const later = { id: "history-11", role: "user", content: "next" };
+  const corrected = reconcileBoundaryToolResults([fallback, later], [call, later], 0, 12);
+  assert.deepEqual(corrected?.map((message) => message.id), [fallback.id, later.id]);
+  assert.equal(corrected?.[0].metadata?.custom?.historySourceIndex, 9);
+  assert.equal(corrected?.[0].metadata?.custom?.historyToolFallback, undefined);
+  assert.equal(shownMessagesChanged(corrected ?? [], [call, later]), false);
+  const next = mergeMissingHistoryMessages(corrected ?? [], [call, later]);
+  assert.deepEqual(next.messages.map((message) => message.id), [fallback.id, later.id]);
+  assert.deepEqual(next.added, []);
+});
+
 test("reconciling an older window preserves newer rows and pending/live state", () => {
   const row = (index: number) => ({ id: `history-${index}`, content: `message-${index}` });
   const fallback = { id: "history-10", metadata: { custom: { historyToolFallback: "t1" } },
