@@ -4117,36 +4117,27 @@ class ContextCompactionPlugin(BasePlugin):
                 if len(task_msg.content) > 200:
                     preview += "..."
                 task_id = self._message_task_id(task_msg)
+                is_excerpt = bool(
+                    getattr(task_msg, "metadata", {}).get(
+                        "context_compaction_task_excerpt"
+                    )
+                )
                 retrieval = (
                     " Use the `hub_msg` tool to ask the assigner to resend the "
                     "omitted instructions before continuing."
-                    if getattr(task_msg, "metadata", {}).get(
-                        "context_compaction_task_excerpt"
-                    )
-                    and task_id
+                    if is_excerpt and task_id
                     else ""
                 )
                 reminder_lines.append(
                     f"  {i}. From {sender}: {preview}{retrieval}"
                 )
-
-            reminder_lines.append("")
-            if any(
-                getattr(task_msg, "metadata", {}).get(
-                    "context_compaction_task_excerpt"
+                closing = (
+                    "Continue this task only with the excerpt or instructions "
+                    "resent by its assigner; do not infer omitted instructions."
+                    if is_excerpt
+                    else "Complete this task and report back as instructed."
                 )
-                for task_msg in preserved_tasks
-            ):
-                reminder_lines.append(
-                    "Continue only with instructions present in the excerpt or "
-                    "resent by the assigner. If the resend is unavailable, stop "
-                    "and do not infer omitted instructions."
-                )
-            else:
-                reminder_lines.append(
-                    "Complete these tasks and report back as instructed. "
-                    "The full task text is in the messages above."
-                )
+                reminder_lines.append(f"     {closing}")
 
             compacted.append(
                 ConversationMessage(
