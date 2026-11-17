@@ -166,6 +166,10 @@ def test_emergency_rollover_preserves_oversized_live_task_across_reload() -> Non
     assert "END_CANARY" in task_context
     assert "Immediately ask the assigner to resend" in task_context
     assert "hub_msg" in task_context
+    assert (
+        "If no reply is available, stop; do not infer omitted instructions."
+        in task_context
+    )
     assert "/hub tasks status" not in task_context
     reminder = next(
         message.content
