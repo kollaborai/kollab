@@ -103,7 +103,7 @@ export function WhatsNewDialog({
             <p className="text-xs text-muted-foreground">And {moreCount} more.</p>
           ) : null}
           {release.fixedCount > 0 ? (
-            <p className="text-xs text-muted-foreground">Plus {release.fixedCount} fixes.</p>
+            <p className="text-xs text-muted-foreground">Plus {release.fixedCount} {release.fixedCount === 1 ? "fix" : "fixes"}.</p>
           ) : null}
         </div>
         <footer className="flex shrink-0 items-center justify-between gap-2 px-6 pt-3 pb-4">
