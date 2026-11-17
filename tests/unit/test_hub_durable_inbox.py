@@ -74,6 +74,17 @@ async def _send(target: str, msg: HubMessage, msg_base: Path) -> None:
 # ---------------------------------------------------------------------------
 
 class TestInboxSizeBound:
+    @pytest.mark.asyncio
+    async def test_send_to_file_rejects_invalid_timestamp(self, tmp_path: Path) -> None:
+        message = _make_msg(content="invalid timestamp")
+        message.timestamp = float("nan")
+
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            with pytest.raises(ValueError, match="invalid timestamp"):
+                await AgentMessenger.send_to_file("lapis", message)
+
+        assert not (tmp_path / "lapis").exists()
+
     def test_prune_inbox_evicts_oldest_when_over_limit(self, tmp_path: Path) -> None:
         inbox = tmp_path / "lapis"
         inbox.mkdir()
