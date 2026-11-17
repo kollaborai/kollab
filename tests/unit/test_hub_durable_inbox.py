@@ -147,8 +147,9 @@ class TestInboxTTLExpiry:
             "<missing>",
         ],
     )
+    @pytest.mark.parametrize("bad_is_control", [False, True])
     def test_malformed_timestamp_does_not_abort_or_consume_neighboring_controls(
-        self, tmp_path: Path, bad_timestamp, caplog
+        self, tmp_path: Path, bad_timestamp, bad_is_control: bool, caplog
     ) -> None:
         inbox = tmp_path / "lapis"
         inbox.mkdir()
@@ -166,6 +167,8 @@ class TestInboxTTLExpiry:
         before.write_text(json.dumps(_make_msg(content="ordinary-before").to_dict()))
         control_before.write_text(json.dumps(control("control-before")))
         bad_data = _make_msg(content="SENSITIVE_CORRUPT_CONTENT").to_dict()
+        if bad_is_control:
+            bad_data["metadata"] = {"task_assignment": True}
         if bad_timestamp == "<missing>":
             bad_data.pop("timestamp")
         else:
