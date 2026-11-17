@@ -55,10 +55,18 @@ def _tool_names(payload: object) -> set[str]:
 def _kill_cli_group(process: asyncio.subprocess.Process) -> None:
     """Kill the pipe-mode CLI's private process group, which holds the MCP
     server it spawned, without a host-wide process scan. Signal only while the
-    CLI is unreaped, so the group id is still ours."""
-    if process.returncode is None and asyncio_child_signal_is_reap_serialized():
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(process.pid, signal.SIGKILL)
+    CLI is unreaped, so the group id is still ours. A CLI that already exited
+    shut its MCP server down itself (--no-daemon), and the server also exits
+    once its stdin closes, so a reaped CLI's group is never signaled."""
+    if process.returncode is not None or not asyncio_child_signal_is_reap_serialized():
+        return
+    if os.name == "nt":
+        # No POSIX process groups; the handle-based kill cannot hit a reused PID.
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        return
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)
 
 
 @pytest.mark.asyncio
