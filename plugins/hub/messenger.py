@@ -278,6 +278,24 @@ def _is_durable_control(data: Any) -> bool:
     )
 
 
+def _same_durable_payload(existing: Any, payload: dict[str, Any]) -> bool:
+    """Compare message content while ignoring mutable delivery evidence."""
+    if not isinstance(existing, dict):
+        return False
+
+    def without_delivery_metadata(data: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(data)
+        metadata = normalized.get("metadata")
+        if isinstance(metadata, dict):
+            metadata = dict(metadata)
+            for key in ("_queued_for", "_acked_by", "_socket_failed"):
+                metadata.pop(key, None)
+            normalized["metadata"] = metadata
+        return normalized
+
+    return without_delivery_metadata(existing) == without_delivery_metadata(payload)
+
+
 # Simple cache for control classification: filename -> (is_control, mtime)
 # Invalidated on file modification to avoid stale reads.
 _control_classification_cache: Dict[str, tuple[bool, float]] = {}
@@ -3355,7 +3373,7 @@ class AgentMessenger:
                     except (OSError, ValueError):
                         continue
                     if isinstance(existing, dict) and existing.get("id") == message.id:
-                        if existing != payload:
+                        if not _same_durable_payload(existing, payload):
                             raise InboxMessageIdConflictError(
                                 "durable message ID already exists with different content"
                             )
