@@ -121,6 +121,39 @@ async def test_a_refused_message_replayed_from_the_mailbox_stays_queued(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_cancelled_mailbox_batch_exposes_completed_deliveries(tmp_path):
+    messages = [
+        HubMessage(
+            action="message", from_agent="peer-id-1", from_identity="peer-1",
+            to="*", content=f"batch-{index}",
+        )
+        for index in range(2)
+    ]
+    plugin = HubPlugin.__new__(HubPlugin)
+    delivered = []
+
+    async def cancel_second(message):
+        if message.id == messages[1].id:
+            raise asyncio.CancelledError
+        delivered.append(message.id)
+
+    plugin._on_message_received = cancel_second
+    with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+        for message in messages:
+            await messenger_module.AgentMessenger.send_to_file("receiver", message)
+        batch = messenger_module.AgentMessenger.read_mailboxes(
+            ["receiver"], consume=False
+        )
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await plugin._deliver_inbox_batch(batch)
+
+    assert delivered == [messages[0].id]
+    assert getattr(cancelled.value, "acknowledged_message_ids", set()) == {
+        messages[0].id
+    }
+
+
+@pytest.mark.asyncio
 async def test_delivery_failure_leaves_message_for_replay_after_restart(
     tmp_path, caplog
 ):
