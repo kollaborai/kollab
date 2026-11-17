@@ -168,6 +168,62 @@ async def test_stale_oauth_refresh_does_not_mutate_later_profile(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stale_401_oauth_refresh_does_not_mutate_later_profile(monkeypatch):
+    oauth_profile = SimpleNamespace(
+        name="openai-oauth",
+        auth_type="oauth",
+        api_key="old-oauth-token",
+        extra_headers={},
+        model="gpt-5-codex",
+        to_dict=lambda: {"name": "openai-oauth", "api_key": "old-oauth-token"},
+    )
+    native_profile = _reinitialization_profile("native", "sk-native")
+    native_profile.extra_headers = {"X-Native": "preserved"}
+    native_provider = SimpleNamespace(provider_name="native", model="native-model")
+    service = _bare_reinitialization_service(oauth_profile, native_provider)
+    service._oauth_refresh_lock = asyncio.Lock()
+    token_load_started = asyncio.Event()
+    release_token_load = asyncio.Event()
+    provider_configs = []
+
+    class DelayedTokenStorage:
+        async def load_tokens(self, *_args, **_kwargs):
+            token_load_started.set()
+            await release_token_load.wait()
+            return SimpleNamespace(
+                access_token="oauth-token-from-stale-call",
+                account_id="stale-oauth-account",
+            )
+
+    class ControlledProviderRegistry:
+        @staticmethod
+        async def get_provider(config):
+            provider_configs.append(config)
+            return native_provider
+
+    monkeypatch.setattr(oauth_module, "OAuthTokenStorage", DelayedTokenStorage)
+    monkeypatch.setattr(api_module, "create_config_from_profile", lambda data: data)
+    monkeypatch.setattr(api_module, "ProviderRegistry", ControlledProviderRegistry)
+
+    stale_refresh = asyncio.create_task(
+        service._refresh_oauth_after_401("old-oauth-token")
+    )
+    await asyncio.wait_for(token_load_started.wait(), timeout=2)
+
+    assert await service.reinitialize_provider(native_profile) is True
+    assert service._profile is native_profile
+    assert service._provider is native_provider
+
+    release_token_load.set()
+    assert await stale_refresh is False
+
+    assert native_profile.api_key == "sk-native"
+    assert native_profile.extra_headers == {"X-Native": "preserved"}
+    assert "ChatGPT-Account-Id" not in native_profile.extra_headers
+    assert len(provider_configs) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("error_type", [ValueError, RuntimeError])
 async def test_reinitialize_provider_log_omits_provider_secret(
     error_type, monkeypatch, caplog
