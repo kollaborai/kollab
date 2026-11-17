@@ -57,7 +57,15 @@ test("Get Started opens Setup only while no provider is chosen", () => {
   assert.equal(getStartedOpensSetup(emptyFacts()), true);
 });
 
-test("progress saved while the provider card existed resumes at welcome", () => {
+// A browser that saved the old provider step had already engaged the guide.
+// Loading it as welcome would look like an untouched first run, so a first-run
+// check (#1101) would reopen the guide by itself. It resumes at the next card.
+test("progress saved at the removed provider card resumes at network", () => {
   const saved = JSON.stringify({ step: "provider", dismissed: false });
-  assert.equal(loadGuideState(saved).step, "welcome");
+  assert.equal(loadGuideState(saved).step, "network");
+});
+
+test("a dismissed guide saved at the removed provider card stays dismissed", () => {
+  const saved = JSON.stringify({ step: "provider", dismissed: true });
+  assert.deepEqual(loadGuideState(saved), { step: "network", dismissed: true });
 });
