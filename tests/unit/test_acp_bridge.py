@@ -427,12 +427,7 @@ async def test_close_recovers_fast_detached_orphan_and_preserves_other_session_p
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork and setsid")
 @pytest.mark.asyncio
-async def test_setsid_orphan_lost_before_a_tree_sample_is_the_documented_limit(tmp_path):
-    """#608 trade-off: without reading environments no portable signal links a
-    descendant that called setsid() and lost its parent between two 100 ms tree
-    samples to the adapter. Teardown cannot find it and reports clean. If a
-    portable signal is ever added, this test should flip to asserting recovery.
-    """
+async def test_setsid_orphan_lost_before_a_tree_sample_is_recovered(tmp_path):
     child_file = tmp_path / "child.json"
     runner = ACPRunner(ACPProfile("owned-orphan", (sys.executable, "-c", FAST_ORPHAN_ADAPTER), cwd=str(tmp_path), env={
         "ACP_OWNED_CHILD_FILE": str(child_file), "ACP_OWNED_CHILD_MODE": "prompt",
@@ -451,7 +446,7 @@ async def test_setsid_orphan_lost_before_a_tree_sample_is_the_documented_limit(t
         assert child.create_time() == identity["birth"]
         assert os.getsid(child.pid) != runner._adapter_pid
         await runner.close()
-        assert child.is_running() and child.status() != psutil.STATUS_ZOMBIE
+        assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
         assert not runner._owned_processes and runner._adapter_pid is None
     finally:
         with contextlib.suppress(Exception):
@@ -464,12 +459,7 @@ async def test_setsid_orphan_lost_before_a_tree_sample_is_the_documented_limit(t
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
 @pytest.mark.asyncio
-async def test_orphan_is_not_recovered_where_os_getsid_is_missing(tmp_path, monkeypatch):
-    """#608 Windows trade-off: os.getsid does not exist there, so the session
-    scan is skipped and a descendant that lost its parent between two 100 ms
-    tree samples survives teardown, which reports clean. A Job Object would
-    close it (#819); this test should then flip to asserting recovery.
-    """
+async def test_orphan_is_recovered_where_os_getsid_is_missing(tmp_path, monkeypatch):
     child_file = tmp_path / "child.json"
     runner = ACPRunner(ACPProfile("owned-orphan", (sys.executable, "-c", FAST_ORPHAN_ADAPTER), cwd=str(tmp_path), env={
         "ACP_OWNED_CHILD_FILE": str(child_file), "ACP_OWNED_CHILD_MODE": "prompt",
@@ -489,7 +479,7 @@ async def test_orphan_is_not_recovered_where_os_getsid_is_missing(tmp_path, monk
         monkeypatch.delattr(os, "getsid")
         await runner.close()
         monkeypatch.undo()
-        assert child.is_running() and child.status() != psutil.STATUS_ZOMBIE
+        assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
         assert not runner._owned_processes and runner._adapter_pid is None
     finally:
         monkeypatch.undo()
