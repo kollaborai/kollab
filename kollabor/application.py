@@ -236,13 +236,9 @@ class TerminalLLMChat:
                 __file__
             ).parent.parent  # Go up from core/ to package root
             plugins_dir = package_dir / "plugins"
-            if not plugins_dir.exists():
-                plugins_dir = Path.cwd() / "plugins"  # Fallback for development mode
-                logger.info(f"Using development plugins directory: {plugins_dir}")
-            else:
-                logger.info(f"Using installed package plugins directory: {plugins_dir}")
+            logger.info(f"Using installed package plugins directory: {plugins_dir}")
 
-            self.plugin_registry = PluginRegistry(plugins_dir)
+            self.plugin_registry = PluginRegistry(plugins_dir, no_plugins=getattr(args, "no_plugins", False))
             self.plugin_registry.load_all_plugins()
 
         # Initialize configuration service with plugin registry
@@ -1168,6 +1164,15 @@ class TerminalLLMChat:
                 continue
         return None
 
+    def _start_plugin_supervisor(self) -> None:
+        """Schedule the shared service sweep as an app-owned background task."""
+        args = getattr(self, "args", None)
+        if args is None or getattr(args, "no_plugins", False):
+            return
+        from kollabor_plugins.services import supervise_services
+
+        self.create_background_task(supervise_services(), "plugin_service_supervisor")
+
     async def start(self, initial_message: str | None = None) -> None:
         """Start the chat application with guaranteed cleanup.
 
@@ -1219,6 +1224,7 @@ class TerminalLLMChat:
                 return
 
         try:
+            self._start_plugin_supervisor()
             # Display banner for interactive/command mode
             await self._display_banner()
             self._needs_terminal_cleanup = True  # Now we need cleanup on exit
@@ -1505,7 +1511,25 @@ class TerminalLLMChat:
             try:
                 await orchestrator.close()
             except BaseException as cleanup_exc:
-                logger.warning("ACP startup cleanup failed: %s", cleanup_exc)
+                if isinstance(
+                    cleanup_exc,
+                    (
+                        asyncio.CancelledError,
+                        GeneratorExit,
+                        KeyboardInterrupt,
+                        SystemExit,
+                    ),
+                ):
+                    logger.info(
+                        "ACP startup cleanup interrupted (%s)",
+                        type(cleanup_exc).__name__,
+                    )
+                else:
+                    logger.warning(
+                        "ACP startup cleanup failed (%s): %s",
+                        type(cleanup_exc).__name__,
+                        cleanup_exc,
+                    )
             self.acp_orchestrator = None
             raise
         self.acp_orchestrator = orchestrator
@@ -1856,7 +1880,7 @@ class TerminalLLMChat:
                     "Startup ready set in finally (startup may be incomplete)"
                 )
 
-    async def start_pipe_mode(self, piped_input: str, timeout: int = 120) -> None:
+    async def start_pipe_mode(self, piped_input: str, timeout: float = 120) -> None:
         """Start in pipe mode: process input and exit after response.
 
         Args:
@@ -1871,6 +1895,7 @@ class TerminalLLMChat:
             self.renderer.message_renderer.pipe_mode = True
 
         try:
+            self._start_plugin_supervisor()
             # Config hooks (.kollab/hooks.json) load before LLM/MCP init, as in
             # _deferred_startup, so pipe runs fire them too
             await self._load_config_hooks()
@@ -3641,6 +3666,8 @@ class TerminalLLMChat:
 
     def _initialize_fullscreen_commands(self) -> None:
         """Initialize dynamic fullscreen plugin commands."""
+        if getattr(self.args, "no_plugins", False):
+            return
         try:
             from kollabor.fullscreen.command_integration import (
                 FullScreenCommandIntegrator,
@@ -3660,8 +3687,6 @@ class TerminalLLMChat:
             # Use same plugin directory resolution as main plugin registry
             package_dir = Path(__file__).parent.parent
             plugins_dir = package_dir / "plugins"
-            if not plugins_dir.exists():
-                plugins_dir = Path.cwd() / "plugins"
             registered_count = self.fullscreen_integrator.discover_and_register_plugins(
                 plugins_dir
             )
@@ -3684,6 +3709,8 @@ class TerminalLLMChat:
         period. Discovers plugins from plugins/altview/ and registers
         them as slash commands with CommandMode.ALTVIEW.
         """
+        if getattr(self.args, "no_plugins", False):
+            return
         try:
             from kollabor.altview.command_integration import (
                 AltViewCommandIntegrator,
@@ -3702,8 +3729,6 @@ class TerminalLLMChat:
             # Same plugin directory resolution as fullscreen integrator
             package_dir = Path(__file__).parent.parent
             plugins_dir = package_dir / "plugins"
-            if not plugins_dir.exists():
-                plugins_dir = Path.cwd() / "plugins"
             registered_count = self.altview_integrator.discover_and_register_plugins(
                 plugins_dir
             )
@@ -3979,7 +4004,20 @@ class TerminalLLMChat:
                 else:
                     await acp_orchestrator.close()
             except BaseException as exc:
-                logger.warning("ACP runner cleanup failed: %s", exc)
+                if isinstance(
+                    exc,
+                    (asyncio.CancelledError, GeneratorExit, KeyboardInterrupt, SystemExit),
+                ):
+                    logger.info(
+                        "ACP runner cleanup interrupted during shutdown (%s)",
+                        type(exc).__name__,
+                    )
+                else:
+                    logger.warning(
+                        "ACP runner cleanup failed (%s): %s",
+                        type(exc).__name__,
+                        exc,
+                    )
             self.acp_orchestrator = None
         self.running = False
         if hasattr(self, "input_handler"):
@@ -4306,6 +4344,15 @@ class TerminalLLMChat:
 
         # Stop input handler
         await self.input_handler.stop()
+
+        # Close hub intake before providers shut down. Late peer messages are
+        # put back in the mailbox by HubPlugin for the next process start.
+        hub_plugin = (
+            self.event_bus.get_service("hub_plugin") if self.event_bus else None
+        )
+        stop_message_intake = getattr(hub_plugin, "stop_message_intake", None)
+        if callable(stop_message_intake):
+            await stop_message_intake()
 
         # Shutdown LLM core service
         await self.llm_service.shutdown()

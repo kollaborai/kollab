@@ -168,7 +168,7 @@ cat document.txt | kollab "summarize this" -p
 # With timeout
 git diff | kollab "write commit message" -p --timeout 30s
 
-# Timeout formats: 30s, 5min, 1h
+# Timeout formats include fractional seconds, such as 0.5s, plus 5min and 1h.
 kollab --timeout 1h "long analysis task"
 ```
 
@@ -223,7 +223,7 @@ Common flags:
 | `--save` | Save auto-created profile |
 | `--local` | Save profile to local config |
 | `--simple` | Plain text output (no boxes/colors) |
-| `--timeout <duration>` | Pipe mode timeout (30s, 5min, 1h) |
+| `--timeout <duration>` | Pipe mode timeout (0.5s, 5min, 1h) |
 | `--reset-config` | Reset config to defaults |
 | `--font-dir` | Print usable local fonts directory path |
 

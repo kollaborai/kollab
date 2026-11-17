@@ -89,6 +89,8 @@ export type GemAppearance = {
   gems?: Record<string, GemLook>;
   /** The engine's own folder: a bare gem name is the agent there. */
   home?: string;
+  /** Persona names of every roster but the gem pool: born furry, with contrasting hair and no hat. */
+  crew?: string[];
 };
 
 export type UpdateRelease = { version: string; tag_name: string; name: string; url: string; is_prerelease: boolean };
@@ -107,6 +109,16 @@ export type HistoryMessage = {
   timestamp?: string | null;
   metadata?: Record<string, unknown>;
   thinking?: string | null;
+  /** Stored copies of the images this row sent (#1088), in [imageN] order. */
+  media?: Array<{ ref: string; mime: string }>;
+};
+
+/** The engine's stored copy of one image a session sent (#1088). */
+export type MediaEntry = {
+  ref: string;
+  mime: string;
+  /** A slot whose storage failed: binds nothing, renders as literal text. */
+  failed?: boolean;
 };
 
 /** Why the session's last turn failed; it goes after `history_length` messages. */
@@ -589,6 +601,7 @@ export const DEFAULT_SLASH_COMMANDS: SlashCommand[] = [
   { name: "skills", description: "List available agent skills" },
   { name: "config", description: "Open system configuration" },
   { name: "setup", description: "Run first-time setup" },
+  { name: "welcome", description: "Show the welcome guide again" },
   { name: "doctor", description: "Run a readiness check" },
   { name: "login", description: "Sign in to a provider" },
   { name: "connect", description: "Open this device's agent network" },
@@ -900,6 +913,9 @@ export function errorText(reason: unknown): string {
  */
 export const SESSIONLESS_PANELS = new Set(["connect-halt", "connect-halt-new"]);
 
+/** The panels the engine serves with no session at all: first-run setup (#1114/#1115). */
+export const SETUP_PANELS = new Set(["setup", "connect"]);
+
 export class EngineApi {
   /** The folder the session-less halt panels ask about (the open chat's, else the sidebar's). */
   haltFolder = "";
@@ -955,7 +971,7 @@ export class EngineApi {
         } catch {
           // Keep status text for non-JSON errors.
         }
-        throw new ApiError(`${response.status}: ${detail}`, response.status, body);
+        throw new ApiError(detail, response.status, body);
       }
       const config = (await response.json()) as EngineConfig;
       if (config.token && config.token !== this.token) {
@@ -989,7 +1005,7 @@ export class EngineApi {
       return this.request(path, init, false);
     }
     if (!response.ok) {
-      let detail = response.statusText;
+      let detail = response.statusText || `HTTP ${response.status}`;
       let body: unknown;
       try {
         body = await response.json();
@@ -998,7 +1014,7 @@ export class EngineApi {
       } catch {
         // Keep status text for non-JSON errors.
       }
-      throw new ApiError(`${response.status}: ${detail}`, response.status, body);
+      throw new ApiError(detail, response.status, body);
     }
     return response;
   }
@@ -1024,7 +1040,7 @@ export class EngineApi {
           } catch {
             // Keep status text for non-JSON errors.
           }
-          throw new ApiError(`${response.status}: ${detail}`, response.status, body);
+          throw new ApiError(detail, response.status, body);
         }
         const config = (await response.json()) as EngineConfig;
         if (config.engine_url) this.setBaseUrl(config.engine_url);
@@ -1169,20 +1185,28 @@ export class EngineApi {
     const query = new URLSearchParams(
       Object.entries(params).filter(([, value]) => value !== ""),
     ).toString();
+    const queryless = SESSIONLESS_PANELS.has(name) || (sessionId === "" && SETUP_PANELS.has(name));
     return this.json<PanelDescription>(
-      SESSIONLESS_PANELS.has(name)
-        ? this.panelPath(sessionId, name) // the halt panels take no filters
+      queryless
+        ? this.panelPath(sessionId, name) // the halt and setup panels take no filters
         : `${this.panelPath(sessionId, name)}${query ? `?${query}` : ""}`,
       { signal },
     );
   }
 
-  /** `/network/halt/{name}?folder=` for SESSIONLESS_PANELS, `/sessions/{id}/panels/{name}` for the rest. */
+  /**
+   * `/network/halt/{name}?folder=` for SESSIONLESS_PANELS, `/setup/panels/{name}`
+   * for the setup family with no session (#1114/#1115), and
+   * `/sessions/{id}/panels/{name}` for the rest.
+   */
   panelPath(sessionId: string, name: string, suffix = ""): string {
-    if (!SESSIONLESS_PANELS.has(name)) {
-      return `/sessions/${encodeURIComponent(sessionId)}/panels/${encodeURIComponent(name)}${suffix}`;
+    if (SESSIONLESS_PANELS.has(name)) {
+      return `/network/halt/${encodeURIComponent(name)}${suffix}?folder=${encodeURIComponent(this.haltFolder)}`;
     }
-    return `/network/halt/${encodeURIComponent(name)}${suffix}?folder=${encodeURIComponent(this.haltFolder)}`;
+    if (sessionId === "" && SETUP_PANELS.has(name)) {
+      return `/setup/panels/${encodeURIComponent(name)}${suffix}`;
+    }
+    return `/sessions/${encodeURIComponent(sessionId)}/panels/${encodeURIComponent(name)}${suffix}`;
   }
 
   /** The halt screen for one folder with no chat open (the sidebar's halted line). */
@@ -1246,6 +1270,32 @@ export class EngineApi {
     return this.json<{ ok: boolean }>(`/sessions/${encodeURIComponent(sessionId)}`, {
       method: "DELETE",
     });
+  }
+
+  /** The session's stored sent images, oldest first (#1088). */
+  listMedia(sessionId: string) {
+    return this.json<{ session_id: string; media: MediaEntry[] }>(
+      `/media?session_id=${encodeURIComponent(sessionId)}`,
+    );
+  }
+
+  /** The engine path that serves one stored image; the request adds the bearer token. */
+  mediaPath(ref: string) {
+    return `/media/${encodeURIComponent(ref)}`;
+  }
+
+  /** The session's spilled tool outputs (its Gallery artifacts), newest first. */
+  listArtifacts(sessionId: string) {
+    return this.json<{ session_id: string; artifacts: Array<{ ref: string; name: string; bytes: number; modified: string }> }>(
+      `/sessions/${encodeURIComponent(sessionId)}/artifacts`,
+    );
+  }
+
+  /** One spilled tool output's text (capped by the engine). */
+  readArtifact(sessionId: string, ref: string) {
+    return this.json<{ session_id: string; ref: string; truncated: boolean; content: string }>(
+      `/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(ref)}`,
+    );
   }
 
   getHistoryPage(sessionId: string, options: HistoryPageOptions = {}) {

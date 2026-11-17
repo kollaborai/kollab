@@ -31,6 +31,8 @@ import { SupervisorAlertBanner } from "@/components/SupervisorAlertBanner";
 import type { StreamEvent } from "@/supervisor-alerts";
 import { liveActivity, nextLiveActivity, NO_LIVE_ACTIVITY, useThreadActivity } from "@/components/gems/activity";
 import { Avatar, AvatarImageProvider } from "@/components/agents/Avatar";
+import { GalleryView } from "@/components/media/gallery-view";
+import { MediaImageProvider, MediaSessionProvider, MediaViewerProvider } from "@/components/media/media-view";
 import { AgentLibrary } from "@/components/agents/AgentLibrary";
 import { buildLaunchChoices, keepPick } from "@/components/agents/launch-choices";
 import { GemAppearanceProvider } from "@/components/gems/gem-appearance";
@@ -51,6 +53,7 @@ import { AgentVersionNotice, agentVersionNotice } from "@/components/shell/Agent
 import { liveAgentOf, poolSeenBy } from "@/components/shell/live-agent";
 import { PanelHost } from "@/components/panels/PanelHost";
 import { WaiterChat } from "@/components/shell/WaiterChat";
+import { panelHostMount } from "@/components/panels/panel-model";
 import type {
   PanelIntent,
   PanelOpenRequest,
@@ -58,6 +61,7 @@ import type {
 } from "@/components/panels/panel-model";
 import { ProfilesDialog } from "@/components/shell/ProfilesDialog";
 import { SetupGuide } from "@/setup/SetupGuide";
+import { WELCOME_GUIDE_DISMISSED_NOTICE } from "@/setup/guide-model";
 import { SessionPanel, type SessionView } from "@/components/shell/SessionPanel";
 import { latestTodoBlock } from "@/utils/todo-list";
 import { ShellHeader } from "@/components/shell/ShellHeader";
@@ -181,6 +185,7 @@ function RuntimeShell({
   remoteAgents,
   onSessionUpdated,
   onOpenSettings,
+  onOpenWelcome,
   onHistoryCleared,
   onActivity,
   eventActivity,
@@ -204,6 +209,7 @@ function RuntimeShell({
   remoteAgents: NetworkAgent[];
   onSessionUpdated: (session: Session) => void;
   onOpenSettings: (request?: PanelOpenRequest) => void;
+  onOpenWelcome: () => void;
   /** Reloads this session's conversation after the engine cleared it. */
   onHistoryCleared: () => Promise<void>;
   /** Reports what this session's gem should act out in the sidebar. */
@@ -305,9 +311,16 @@ function RuntimeShell({
       .listCommands(session.session_id)
       .then((result) => {
         if (!mounted) return;
-        setCommands(
-          result.commands?.length ? result.commands : DEFAULT_SLASH_COMMANDS,
+        const source = result.commands?.length
+          ? result.commands
+          : DEFAULT_SLASH_COMMANDS;
+        const welcome = DEFAULT_SLASH_COMMANDS.find(
+          (command) => command.name === "welcome",
         );
+        setCommands([
+          ...source.filter((command) => command.name.toLowerCase() !== "welcome"),
+          ...(welcome ? [welcome] : []),
+        ]);
       })
       .catch(() => {
         // Keep the first-paint compatibility catalog when an older daemon does
@@ -319,6 +332,7 @@ function RuntimeShell({
   }, [session.session_id]);
 
   return (
+    <MediaSessionProvider api={api} sessionId={session.session_id}>
     <>
       <ComposerKeeper sessionId={session.session_id} />
       {/* Below the shared sidebar breakpoint the sidebar and the session panel are sheets. */}
@@ -361,6 +375,7 @@ function RuntimeShell({
                 agents={targets.agents}
                 commands={commands}
                 onOpenPanel={onOpenSettings}
+                onOpenWelcome={onOpenWelcome}
                 attachmentsEnabled={
                   session.supports_vision ?? profile?.supports_vision ?? true
                 }
@@ -380,6 +395,8 @@ function RuntimeShell({
               />
             ) : shown === "trajectory" ? (
               <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
+            ) : shown === "gallery" ? (
+              <GalleryView api={api} sessionId={session.session_id} />
             ) : null}
             {/* Opened once, then kept mounted and hidden, so open files and shells survive a switch to Chat. */}
             {workspace && visited.editor ? (
@@ -428,6 +445,7 @@ function RuntimeShell({
         />
       </div>
     </>
+    </MediaSessionProvider>
   );
 }
 
@@ -476,6 +494,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [agentLibraryInitialTab, setAgentLibraryInitialTab] = useState<"rosters" | "teams">("rosters");
   const [setupGuideOpen, setSetupGuideOpen] = useState(false);
+  const [welcomeGuideNotice, setWelcomeGuideNotice] = useState(false);
+  const openWelcomeGuide = useCallback(() => {
+    setWelcomeGuideNotice(false);
+    setSetupGuideOpen(true);
+  }, []);
   // Settings (PanelHost): one open state for the sidebar button, the toolbar
   // button and the composer's /config-style commands.
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -613,6 +636,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     () => sessions.find((session) => session.session_id === activeId),
     [activeId, sessions],
   );
+  // Where the Settings host lives: a live session, the halt waiter, or sessionless setup.
+  const host = panelHostMount(activeSession, settingsOpen, api.haltFolder);
   const operationRef = useRef(0);
   // True once a chat is open or being opened, by the person or by the restore on load: the
   // restore never switches away from it, even when startup runs again (a saved edit's Fast Refresh).
@@ -1750,6 +1775,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   return (
     <GemAppearanceProvider api={api} refreshKey={aliveKey}>
       <AvatarImageProvider api={api}>
+      <MediaImageProvider api={api}>
+      <MediaViewerProvider>
       <SidebarProvider className={`bg-muted/40 dark:bg-black ${contained ? "h-full min-h-0" : ""}`}>
         <AppSidebar
           learnActive={learnRoute !== null}
@@ -1844,6 +1871,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           api={api}
           open={setupGuideOpen}
           onOpenChange={setSetupGuideOpen}
+          onDismiss={() => setWelcomeGuideNotice(true)}
           onOpenSettings={(tab) => openSettings({ tab })}
           onStartSession={() => void createSession()}
         />
@@ -1866,12 +1894,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
             await loadSessions();
           }}
         />
-        {(activeSession && !activeSession.halted) || (settingsOpen && api.haltFolder) ? (
+        {host.mount ? (
           <PanelHost
-            key={activeSession && !activeSession.halted ? activeSession.session_id : "halt"}
+            key={host.key}
             api={api}
-            // No chat open, or a halt waiter's: the session-less Halt and Resume screen for that folder.
-            session={activeSession && !activeSession.halted ? activeSession : { session_id: "", workspace: api.haltFolder }}
+            // A live session, a halt waiter, or sessionless setup (#1114/#1115).
+            session={host.session ?? { session_id: "", workspace: "" }}
             displayName={agents.find((agent) => agent.name === activeSession?.identity)?.display_name}
             profiles={profiles}
             open={settingsOpen}
@@ -1892,6 +1920,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         >
           {whatsNewActive ? <WhatsNewPage onExit={returnToChat} /> : null}
           <div className={whatsNewActive ? "hidden" : "contents"}>
+          {welcomeGuideNotice ? (
+            <NoticeBar onDismiss={() => setWelcomeGuideNotice(false)}>
+              {WELCOME_GUIDE_DISMISSED_NOTICE}
+            </NoticeBar>
+          ) : null}
           {versionMismatch ? (
             <NoticeBar
               detail={`Page v${versionMismatch.page} · engine v${versionMismatch.engine}`}
@@ -1991,6 +2024,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                   supervisorEvents={supervisorEvents}
                   onSessionUpdated={handleSessionUpdated}
                   onOpenSettings={openSettings}
+                  onOpenWelcome={openWelcomeGuide}
                   onHistoryCleared={() => resetThread(activeSession.session_id)}
                   onActivity={setActiveActivity}
                   eventActivity={eventActivity}
@@ -2032,7 +2066,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                     label={agentName(nextGem.name, nextGem.display_name)}
                   />
                 ) : (
-                  <KollabLogo className="text-foreground/80 mb-2 h-10 w-auto" />
+                  <KollabLogo mist className="text-foreground/80 mb-2 h-10 w-auto" />
                 )}
                 <h1 className="text-2xl font-semibold tracking-tight">
                   {nextGem ? agentName(nextGem.name, nextGem.display_name) : "Start a Session"}
@@ -2062,7 +2096,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                     type="button"
                     variant="outline"
                     data-testid="guided-setup-open"
-                    onClick={() => setSetupGuideOpen(true)}
+                    onClick={openWelcomeGuide}
                     disabled={busy}
                   >
                     <Waypoints className="size-4" />
@@ -2075,6 +2109,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           </div>
         </SidebarInset>
       </SidebarProvider>
+      </MediaViewerProvider>
+      </MediaImageProvider>
       </AvatarImageProvider>
     </GemAppearanceProvider>
   );
