@@ -39,10 +39,3 @@ export function compareBuildIdentity(
   if (!engineBuild || !bundleBuild) return "unknown";
   return sameBuild(engineBuild, bundleBuild) ? "same" : "mismatch";
 }
-
-/** Compare valid release portions for callers that do not have build provenance. */
-export function sameVersionBase(engine: string, bundle: string): boolean {
-  const parsedEngine = parseVersion(engine);
-  const parsedBundle = parseVersion(bundle);
-  return Boolean(parsedEngine && parsedBundle && parsedEngine.release === parsedBundle.release);
-}
