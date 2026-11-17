@@ -217,6 +217,20 @@ def test_normal_install_reports_matching_executable_and_version(tmp_path: Path) 
     assert "3.4.5" in result.stdout
 
 
+def test_version_output_must_identify_kollab(tmp_path: Path) -> None:
+    installed_dir = tmp_path / "install-bin"
+    result = _run_verification(
+        tmp_path,
+        installed_dir=installed_dir,
+        path_dirs=[installed_dir, Path("/usr/bin"), Path("/bin")],
+        installed_version="unrelated-tool 3.4.5",
+    )
+
+    assert result.returncode != 0
+    assert "Installation verified" not in result.stdout
+    assert "Could not parse the version" in result.stdout
+
+
 @pytest.mark.parametrize("manager", ["uv", "pipx"])
 def test_managed_installs_verify_the_manager_configured_bin_directory(
     tmp_path: Path, manager: str
