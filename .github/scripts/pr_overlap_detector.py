@@ -53,11 +53,17 @@ def _ranges_overlap(left: tuple[int, int], right: tuple[int, int]) -> bool:
 
 
 def _files(pull: dict[str, Any]) -> dict[str, str | None]:
-    return {
-        str(item.get("filename")): item.get("patch")
-        for item in pull.get("files", [])
-        if item.get("filename")
-    }
+    files: dict[str, str | None] = {}
+    for item in pull.get("files", []):
+        filename = item.get("filename")
+        if not filename:
+            continue
+        patch = item.get("patch")
+        files[str(filename)] = patch
+        previous_filename = item.get("previous_filename")
+        if previous_filename:
+            files[str(previous_filename)] = patch
+    return files
 
 
 def _same_branch(left: dict[str, Any], right: dict[str, Any]) -> bool:
