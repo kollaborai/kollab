@@ -523,7 +523,7 @@ class APICommunicationService:
         try:
             # Auto-refresh OAuth tokens before creating provider
             if self._profile.auth_type == "oauth":
-                await self._refresh_oauth_token()
+                await self._refresh_oauth_token(expected_generation)
 
             if expected_generation != getattr(self, "_provider_generation", 0):
                 return
@@ -577,7 +577,9 @@ class APICommunicationService:
                 type(e).__name__,
             )
 
-    async def _refresh_oauth_token(self) -> None:
+    async def _refresh_oauth_token(
+        self, expected_generation: Optional[int] = None
+    ) -> None:
         """Refresh expired OAuth token and update profile in-place.
 
         Called before provider creation for OAuth profiles and again after a
@@ -603,6 +605,12 @@ class APICommunicationService:
                 auto_refresh=True,
                 profile_name=profile_name,
             )
+            if (
+                expected_generation is not None
+                and expected_generation != getattr(self, "_provider_generation", 0)
+            ):
+                return
+
             if tokens:
                 if tokens.access_token != self._profile.api_key:
                     self._profile.api_key = tokens.access_token
@@ -1075,12 +1083,17 @@ class APICommunicationService:
         refreshed here or by a concurrent request that held the lock first.
         """
         async with self._oauth_refresh_lock:
+            expected_generation = getattr(self, "_provider_generation", 0)
             if self._profile.api_key == rejected_key:
-                await self._refresh_oauth_token()
+                await self._refresh_oauth_token(expected_generation)
+                if expected_generation != getattr(self, "_provider_generation", 0):
+                    return False
                 if self._profile.api_key == rejected_key:
                     return False  # refresh failed (logged there); a replay would 401 again
                 previous = (self._provider, self._provider_error)
-                await self._initialize_provider()
+                await self._initialize_provider(expected_generation)
+                if expected_generation != getattr(self, "_provider_generation", 0):
+                    return False
                 if self._provider is None:  # rebuild failed: keep the old provider
                     self._provider, self._provider_error = previous
                     return False

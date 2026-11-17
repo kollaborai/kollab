@@ -491,11 +491,7 @@ export function PromptsView(props: {
         data-testid="prompts-sidebar"
         className="bg-sidebar hidden w-52 shrink-0 overflow-y-auto rounded-lg px-2 py-3 lg:block"
       >
-        {props.loadError ? (
-          <p role="alert" className="text-destructive px-3 py-2 text-xs break-words">
-            {props.loadError}
-          </p>
-        ) : libraries === null ? (
+        {props.loadError ? null : libraries === null ? (
           <p className="text-muted-foreground px-3 py-2 text-xs">Loading…</p>
         ) : (
           <>
@@ -559,15 +555,22 @@ export function PromptsView(props: {
       >
         <div className="flex flex-col gap-2 px-4 pt-3 pb-2">
           {picker}
+          {props.loadError && (
+            <p role="alert" className="text-destructive px-1 py-2 text-sm break-words">
+              {props.loadError}
+            </p>
+          )}
           <div className="flex items-baseline justify-between gap-2">
             <h3 className="text-lg font-semibold" data-testid="target-title">
               {isRole ? bundleName(target.name) : libraryLabel(target.name)}
             </h3>
-            <span className="text-muted-foreground text-xs whitespace-nowrap" data-testid="target-total">
-              {isRole
-                ? `${totals.sections} Sections · ${tok(totals.tokens)}`
-                : `${library?.sections.length ?? 0} Sections`}
-            </span>
+            {!props.loadError && (
+              <span className="text-muted-foreground text-xs whitespace-nowrap" data-testid="target-total">
+                {isRole
+                  ? `${totals.sections} Sections · ${tok(totals.tokens)}`
+                  : `${library?.sections.length ?? 0} Sections`}
+              </span>
+            )}
           </div>
           <p className="text-muted-foreground text-xs">
             {isRole ? (
@@ -607,7 +610,7 @@ export function PromptsView(props: {
           </label>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
-          {shown.map((group) => {
+          {props.loadError ? null : shown.map((group) => {
             const open = !closed.has(group.id) || Boolean(needle);
             const checkable = group.rows.filter((r) => r.checkable);
             const meta = checkable.length

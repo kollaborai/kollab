@@ -37,6 +37,9 @@ Web voice also needs
 (`brew install uv`); a missing one is named at once. Kollab.app opened from the
 Dock finds them on your login shell's PATH, as a terminal does.
 
+Synthesized audio is clipped to the playable PCM range before it is sent to the
+voice worker. Non-finite samples still fail the speech stream.
+
 The local web UI joins the computer's voice room directly. PhoneLink carries
 the phone's microphone and speaker audio through its encrypted connection to
 the computer. Both LiveKit signaling and its UDP media socket stay on loopback;

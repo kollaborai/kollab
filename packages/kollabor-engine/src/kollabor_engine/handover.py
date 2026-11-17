@@ -116,6 +116,7 @@ class HandoverStore:
         if self._acquired:
             return [dict(row) for row in self._data["sessions"]]
 
+        previous_data = self._data
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
         if os.name != "nt":
@@ -152,6 +153,7 @@ class HandoverStore:
             self._acquired = True
             return [dict(row) for row in records]
         except BaseException:
+            self._data = previous_data
             self._release_file_lock()
             raise
 
@@ -209,9 +211,14 @@ class HandoverStore:
             logger.debug("could not add session-log path to handover metadata: %s", exc)
 
         sessions = self._data["sessions"]
-        sessions[:] = [row for row in sessions if row.get("session_id") != session_id]
-        sessions.append(record)
-        self._write()
+        updated = [row for row in sessions if row.get("session_id") != session_id]
+        updated.append(record)
+        self._data["sessions"] = updated
+        try:
+            self._write()
+        except BaseException:
+            self._data["sessions"] = sessions
+            raise
 
     def remove_session(self, session_id: str) -> None:
         """Remove a session only after its explicit stop has succeeded."""
@@ -220,8 +227,7 @@ class HandoverStore:
         retained = [row for row in sessions if row.get("session_id") != session_id]
         if len(retained) == len(sessions):
             return
-        # The durable file is the truth: swap the in-memory view only once the
-        # write succeeds, so a failed remove stays visible and retryable.
+        # A pre-replacement write failure keeps this row visible and retryable.
         self._data["sessions"] = retained
         try:
             self._write()
@@ -328,17 +334,22 @@ class HandoverStore:
         # this marker and is still detected through PID plus creation time.
         try:
             if graceful and self._acquired and self._data is not None:
+                previous_owner = dict(self._data["owner"])
                 self._data["owner"]["shutdown"] = True
                 self._data["owner"]["shutdown_at"] = time.time()
                 try:
                     self._write()
                 except OSError:
+                    self._data["owner"] = previous_owner
                     # The marker is an optimization; PID plus start time still
                     # detects this owner after exit. A failed marker write must
                     # never keep the lock or break engine shutdown.
                     logger.exception(
                         "could not write the shutdown marker for port %s", self.port
                     )
+                except BaseException:
+                    self._data["owner"] = previous_owner
+                    raise
         finally:
             self._release_file_lock()
             self._acquired = False
@@ -442,21 +453,46 @@ class HandoverStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.path)
-            if os.name != "nt":
-                self.path.chmod(0o600)
             try:
                 directory_fd = os.open(self.path.parent, os.O_RDONLY)
             except OSError:
+                logger.warning(
+                    "handover manifest was replaced but directory sync could not be "
+                    "confirmed for port %s; durability is uncertain",
+                    self.port,
+                    exc_info=True,
+                )
                 return
             try:
                 os.fsync(directory_fd)
+            except OSError:
+                logger.warning(
+                    "handover manifest was replaced but directory sync failed for "
+                    "port %s; durability is uncertain",
+                    self.port,
+                    exc_info=True,
+                )
             finally:
-                os.close(directory_fd)
+                try:
+                    os.close(directory_fd)
+                except OSError:
+                    logger.warning(
+                        "could not close the handover manifest directory descriptor "
+                        "for port %s",
+                        self.port,
+                        exc_info=True,
+                    )
         finally:
             try:
                 os.unlink(temporary)
             except FileNotFoundError:
                 pass
+            except OSError:
+                logger.warning(
+                    "could not remove temporary handover manifest for port %s",
+                    self.port,
+                    exc_info=True,
+                )
 
     def _require_acquired(self) -> None:
         if not self._acquired or self._data is None:

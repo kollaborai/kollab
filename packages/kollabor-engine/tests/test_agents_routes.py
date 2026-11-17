@@ -252,6 +252,43 @@ class TestAgentPoolFolders:
 
         assert bare["lapis"]["active"] and bare["koordinator"]["available"]
 
+    async def test_project_workspace_roster_and_inline_team_members_are_crew(self, folders, client, monkeypatch):
+        from plugins.hub import rosters
+
+        _, other = folders
+        roster = other / ".kollab" / "rosters" / "project-crew.json"
+        roster.parent.mkdir(parents=True)
+        roster.write_text(json.dumps({
+            "name": "project-crew",
+            "personas": [{"name": "release-captain", "display_name": "Release Captain"}],
+        }))
+        (other / ".kollab" / "config.json").write_text(json.dumps({
+            "plugins": {"hub": {"roster": "project-crew"}},
+        }))
+        team = other / ".kollab" / "teams" / "incident.json"
+        team.parent.mkdir(parents=True)
+        team.write_text(json.dumps({
+            "name": "incident",
+            "lead": "incident-commander",
+            "members": [{"persona": {"name": "incident-commander", "display_name": "Incident Commander"}}],
+        }))
+        monkeypatch.setattr(
+            agents_routes,
+            "pool_identities",
+            lambda _folder: rosters.load_library(other).rosters["project-crew"].personas,
+        )
+        monkeypatch.setattr(agents_routes, "_bridge", StubBridge([live("r1", "release-captain", project=str(other))]))
+        recorded = {}
+        monkeypatch.setattr(
+            agents_routes,
+            "record_births",
+            lambda names, crew=(): recorded.update(names=list(names), crew=set(crew)),
+        )
+
+        await client.get("/agents", params={"workspace": str(other)})
+
+        assert {"release-captain", "incident-commander"} <= recorded["crew"]
+
     async def test_the_computer_view_shows_an_agent_in_any_folder(self, client, folders, monkeypatch):
         home, other = folders
         rows = [live("g1", "lapis", "working", project=str(other)), live("g2", "ruby", project=str(home))]

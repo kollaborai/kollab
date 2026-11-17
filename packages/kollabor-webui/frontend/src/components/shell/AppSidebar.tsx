@@ -512,7 +512,7 @@ export function AppSidebar({
       {/* One row: the logo, then New Session and its options as icons. */}
       <SidebarHeader className="h-[var(--shell-header-height,3rem)] shrink-0 justify-center py-0">
         <div className="flex h-8 shrink-0 items-center gap-0.5 px-2">
-          <KollabLogo className="h-6 w-auto shrink-0" />
+          <KollabLogo mist className="h-6 w-auto shrink-0" />
           <span className="sr-only">kollab</span>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -647,7 +647,8 @@ export function AppSidebar({
                     size="sm"
                     onClick={() => {
                       setOptionsOpen(false);
-                      onManageProfiles();
+                      // Let the Popover restore focus before the Dialog takes focus.
+                      requestAnimationFrame(() => onManageProfiles());
                     }}
                   >
                     Manage Profiles

@@ -187,6 +187,8 @@ class TerminalRenderer:
 
     def exit_raw_mode(self) -> None:
         """Exit raw terminal mode and restore settings."""
+        if not self.terminal_state.is_terminal:
+            return
         success = self.terminal_state.exit_raw_mode()
         if not success:
             logger.warning("Failed to exit raw mode")

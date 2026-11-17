@@ -689,6 +689,8 @@ class HubPlugin(BasePlugin):
         self._startup_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._mailbox_task: Optional[asyncio.Task] = None
+        self._mailbox_stop_event = asyncio.Event()
+        self._accepting_messages = True
         self._dreaming_task: Optional[asyncio.Task] = None
         # The insight write of the dream in progress, which a cancelled dream
         # leaves running in its thread (#562); shutdown waits for it.
@@ -6529,6 +6531,8 @@ class HubPlugin(BasePlugin):
             self._heartbeat_task = asyncio.create_task(
                 self._heartbeat_loop(hb_interval)
             )
+            self._mailbox_stop_event = asyncio.Event()
+            self._accepting_messages = True
             self._mailbox_task = asyncio.create_task(self._mailbox_loop())
 
             # Start dreaming loop if enabled and vault is active
@@ -6921,9 +6925,18 @@ class HubPlugin(BasePlugin):
             poll_interval = self.config.get("plugins.hub.mailbox_poll_interval", 5)
         from .messenger import INBOX_MAX_REPLAY
 
-        while True:
+        stop_event = self._mailbox_stop_event
+        while not stop_event.is_set():
             try:
-                await asyncio.sleep(poll_interval)
+                try:
+                    await asyncio.wait_for(
+                        stop_event.wait(), timeout=poll_interval
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    pass
+                if stop_event.is_set():
+                    break
                 if self._identity:
                     messages = AgentMessenger.read_mailboxes(
                         [self._identity.agent_id, self._identity.identity],
@@ -6935,6 +6948,29 @@ class HubPlugin(BasePlugin):
                 break
             except Exception as e:
                 logger.debug(f"Mailbox check error: {e}")
+
+    async def stop_message_intake(self) -> None:
+        """Stop new Hub deliveries and finish the current mailbox batch."""
+        self._accepting_messages = False
+        stop_event = getattr(self, "_mailbox_stop_event", None)
+        if stop_event is not None:
+            stop_event.set()
+
+        # Stop accepting socket connections first. A message racing shutdown
+        # is persisted by _on_message_received, and failed peer connections
+        # use the same on-disk mailbox path.
+        socket_server = getattr(self, "_socket_server", None)
+        if socket_server is not None:
+            await socket_server.stop()
+
+        mailbox_task = getattr(self, "_mailbox_task", None)
+        current_task = asyncio.current_task()
+        if (
+            isinstance(mailbox_task, asyncio.Task)
+            and mailbox_task is not current_task
+            and not mailbox_task.done()
+        ):
+            await mailbox_task
 
     def _mailbox_replay_cap(self, cap: int) -> int:
         """Return the per-poll cap on ordinary mailbox replay (0 = no cap).
@@ -9493,6 +9529,11 @@ class HubPlugin(BasePlugin):
 
         Returns False when the message was refused and must not be acknowledged.
         """
+        if not getattr(self, "_accepting_messages", True):
+            if self._identity is None:
+                return False
+            await AgentMessenger.send_to_file(self._identity.identity, message)
+            return True
         if self._solo:
             # Peers cannot discover a solo agent; this covers direct sends by
             # name (`kollab --hub send`) so nothing reaches its conversation.
@@ -10236,13 +10277,14 @@ class HubPlugin(BasePlugin):
                                 metadata=msg_metadata,
                             )
                         )
-                        # The web UI reloads the history on this, so the message
-                        # shows before the reply it wakes (the terminal's box).
-                        from kollabor_tui.display_tap import publish_semantic
+                    # The web UI reloads history after the system record above
+                    # is written. Observed messages need this too: they do not
+                    # add a user turn or wake the model.
+                    from kollabor_tui.display_tap import publish_semantic
 
-                        publish_semantic(
-                            self.event_bus, "hub_message", message_id=message.id
-                        )
+                    publish_semantic(
+                        self.event_bus, "hub_message", message_id=message.id
+                    )
                 # Trigger LLM if this agent is the intended target (or broadcast).
                 # Skip departures to avoid feedback loops.
                 # Skip human-elsewhere (human typing in another agent's window).
@@ -18086,6 +18128,7 @@ class HubPlugin(BasePlugin):
         if getattr(self, "_shutdown_in_progress", False):
             return
         self._shutdown_in_progress = True
+        await self.stop_message_intake()
         runtime = getattr(self, "_acp_hub_tools", None)
         if runtime is not None:
             runtime.stop()

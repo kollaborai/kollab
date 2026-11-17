@@ -17,6 +17,7 @@ Allow the first-run guide to open the Provider setup wizard and Network connect 
 - Provider Open opens Settings on the setup wizard, including the available provider controls and the ChatGPT sign-in note.
 - Network Open opens Settings on the Network tab and shows the existing unavailable notice when no Hub is configured.
 - The guide remains at its Network step after opening Provider settings.
+- When saved provider state skips the Provider step, opening the resolved Network step advances to the Agent step.
 
 ## Contract
 

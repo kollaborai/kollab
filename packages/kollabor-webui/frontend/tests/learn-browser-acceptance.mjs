@@ -324,9 +324,10 @@ export async function openPage(browser, baseUrl, fixtures, options = {}) {
     isMobile: options.isMobile ?? false,
     hasTouch: options.isMobile ?? false,
   });
-  await context.addInitScript(() => {
-    localStorage.setItem("kollab.setup-guide.v1", "dismissed");
-  });
+  const initialGuideState = options.initialGuideState ?? "dismissed";
+  await context.addInitScript((state) => {
+    localStorage.setItem("kollab.setup-guide.v1", state);
+  }, initialGuideState);
 
   const page = await context.newPage();
   const pageErrors = [];
@@ -651,7 +652,7 @@ async function main() {
     console.log(`Mocked API requests: ${shell.fixture.requests.length}`);
     console.log("Learn browser acceptance passed; all API calls were mocked and no live engine was used.");
   } finally {
-    await browser.close();
+    await browser?.close();
     await server.close();
   }
 }
