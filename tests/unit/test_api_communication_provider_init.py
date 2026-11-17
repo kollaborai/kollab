@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import kollabor_ai.api_communication_service as api_module
+import kollabor_ai.oauth as oauth_module
 
 
 @pytest.mark.asyncio
@@ -47,6 +48,7 @@ def _reinitialization_profile(name, api_key="test-key-not-a-real-secret"):
     return SimpleNamespace(
         name=name,
         auth_type="api_key",
+        api_key=api_key,
         to_dict=lambda: {
             "name": name,
             "provider": "openai",
@@ -109,6 +111,60 @@ async def test_stale_failed_reinitialization_does_not_clear_later_provider(
     assert service._profile is later_profile
     assert service._provider is later_provider
     assert service._provider_error is None
+
+
+@pytest.mark.asyncio
+async def test_stale_oauth_refresh_does_not_mutate_later_profile(monkeypatch):
+    oauth_profile = SimpleNamespace(
+        name="openai-oauth",
+        auth_type="oauth",
+        api_key="old-oauth-token",
+        extra_headers={},
+        model="gpt-5-codex",
+        to_dict=lambda: {"name": "openai-oauth", "api_key": "old-oauth-token"},
+    )
+    native_profile = _reinitialization_profile("native", "sk-native")
+    native_profile.extra_headers = {"X-Native": "preserved"}
+    old_provider = SimpleNamespace(provider_name="old", model="old-model")
+    native_provider = SimpleNamespace(provider_name="native", model="native-model")
+    service = _bare_reinitialization_service(oauth_profile, old_provider)
+    token_load_started = asyncio.Event()
+    release_token_load = asyncio.Event()
+    provider_configs = []
+
+    class DelayedTokenStorage:
+        async def load_tokens(self, *_args, **_kwargs):
+            token_load_started.set()
+            await release_token_load.wait()
+            return SimpleNamespace(
+                access_token="oauth-token-from-stale-call",
+                account_id="stale-oauth-account",
+            )
+
+    class ControlledProviderRegistry:
+        @staticmethod
+        async def get_provider(config):
+            provider_configs.append(config)
+            return native_provider
+
+    monkeypatch.setattr(oauth_module, "OAuthTokenStorage", DelayedTokenStorage)
+    monkeypatch.setattr(api_module, "create_config_from_profile", lambda data: data)
+    monkeypatch.setattr(api_module, "ProviderRegistry", ControlledProviderRegistry)
+
+    stale_switch = asyncio.create_task(service.reinitialize_provider(oauth_profile))
+    await asyncio.wait_for(token_load_started.wait(), timeout=2)
+
+    assert await service.reinitialize_provider(native_profile) is True
+    assert service._profile is native_profile
+    assert service._provider is native_provider
+
+    release_token_load.set()
+    assert await stale_switch is False
+
+    assert native_profile.api_key == "sk-native"
+    assert native_profile.extra_headers == {"X-Native": "preserved"}
+    assert "ChatGPT-Account-Id" not in native_profile.extra_headers
+    assert len(provider_configs) == 1
 
 
 @pytest.mark.asyncio
