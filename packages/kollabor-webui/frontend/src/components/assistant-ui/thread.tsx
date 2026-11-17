@@ -43,6 +43,7 @@ import {
   collectImageAttachments,
   orphanImageNotice,
   stripImageTokens,
+  stripLeadingImageTokens,
 } from "@/composer-restore";
 import { useShallow } from "zustand/shallow";
 import type { ThreadUserMessagePart } from "@assistant-ui/core";
@@ -587,6 +588,16 @@ const Composer: FC<{
         orphanImageNotice(restored.tokenCount, attachmentsEnabled ? keptImages.length : 0),
       );
       if (keptImages.length === 0 || !attachmentsEnabled) return;
+
+      // The runtime can put its own copy of the text back after the strip
+      // above, and text typed next to a bare token shares its line. Let the
+      // runtime finish its swap, then take the stale tokens off the text as
+      // it is right now.
+      await Promise.resolve();
+      if (cancelled) return;
+      const live = stripImageTokens(aui.composer.getState().text);
+      const inline = stripLeadingImageTokens(live.text, keptImages.length - live.tokenCount);
+      if (live.tokenCount + inline.count > 0) aui.composer.setText(inline.text);
 
       // Re-add each kept image; the token synchronizer rewrites fresh
       // [imageN] tokens, so text and attachments never disagree.

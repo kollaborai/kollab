@@ -63,6 +63,28 @@ export function stripImageTokens(text: string): {
 }
 
 /**
+ * The synchronizer writes a bare `[imageN]` when the box is empty, so text
+ * typed next to it lands on the same line (`[image1]what is this`). Once the
+ * saved images are known, strip up to `max` leading tokens in that form too;
+ * `max` is how many images are saved minus the tokens already stripped, so a
+ * `[image1]` the person typed on purpose is not touched.
+ */
+export function stripLeadingImageTokens(
+  text: string,
+  max: number,
+): { text: string; count: number } {
+  let rest = text;
+  let count = 0;
+  while (count < max) {
+    const token = rest.match(/^\[image\d+\]\n?/)?.[0];
+    if (!token) break;
+    rest = rest.slice(token.length);
+    count += 1;
+  }
+  return { text: rest, count };
+}
+
+/**
  * Serialize the composer's image attachments for retention. Pending
  * attachments keep their File (the restore path feeds it back through the
  * adapter); complete attachments keep their content parts.

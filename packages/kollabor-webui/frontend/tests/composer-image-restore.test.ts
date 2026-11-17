@@ -10,6 +10,7 @@ import {
   collectImageAttachments,
   orphanImageNotice,
   stripImageTokens,
+  stripLeadingImageTokens,
 } from "@/composer-restore";
 
 describe("stripImageTokens", () => {
@@ -53,6 +54,29 @@ describe("stripImageTokens", () => {
       tokenCount: 0,
     });
     expect(stripImageTokens("")).toEqual({ text: "", tokenCount: 0 });
+  });
+});
+
+describe("stripLeadingImageTokens", () => {
+  it("strips a token with text typed right after it", () => {
+    expect(stripLeadingImageTokens("[image1]what is this", 1)).toEqual({
+      text: "what is this",
+      count: 1,
+    });
+  });
+
+  it("strips only as many tokens as there are saved images", () => {
+    expect(stripLeadingImageTokens("[image1][image2]hi", 1)).toEqual({
+      text: "[image2]hi",
+      count: 1,
+    });
+  });
+
+  it("leaves a typed token alone when no saved image is missing its token", () => {
+    expect(stripLeadingImageTokens("[image1] literal", 0)).toEqual({
+      text: "[image1] literal",
+      count: 0,
+    });
   });
 });
 
@@ -200,6 +224,10 @@ describe("composer restore wiring", () => {
     expect(threadSource).toContain(
       "orphanImageNotice(restored.tokenCount, attachmentsEnabled ? keptImages.length : 0)",
     );
+  });
+
+  it("strips stale leading tokens from the live text before re-adding images", () => {
+    expect(threadSource).toContain("stripLeadingImageTokens(live.text, keptImages.length - live.tokenCount)");
   });
 
   it("does not restore the same draft again when attachment capability changes", () => {
