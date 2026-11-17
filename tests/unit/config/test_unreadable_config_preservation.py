@@ -203,7 +203,7 @@ def test_settings_panel_reports_and_preserves_an_unreadable_global_config(tmp_pa
                 context,
                 "save",
                 {
-                    "changes": {"kollabor.updates.check_enabled": False},
+                    "changes": {"kollabor.updates.auto_update_enabled": True},
                     "target": "global",
                 },
             )
