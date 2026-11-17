@@ -105,6 +105,32 @@ def test_layered_reader_marks_a_partial_read_malformed(layer, tmp_path, monkeypa
     assert statuses[layer] == "malformed"
 
 
+def test_layered_reader_does_not_skip_an_unreadable_project_candidate(tmp_path, monkeypatch):
+    paths = _layer_paths(tmp_path, monkeypatch)
+    unreadable = tmp_path / "old-project" / "config.json"
+    later = tmp_path / "new-project" / "config.json"
+    _write_bytes(later, b'{"settings":{"later_candidate":true}}')
+    monkeypatch.setattr(
+        loader_module,
+        "get_project_data_dir_candidates",
+        lambda *args, **kwargs: [unreadable.parent, later.parent],
+    )
+    original_stat = Path.stat
+
+    def permission_error(path, *args, **kwargs):
+        if path == unreadable:
+            raise PermissionError("DO_NOT_ECHO")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", permission_error)
+    statuses = {}
+
+    merged = load_layered_user_config(tmp_path / "workspace", statuses=statuses)
+
+    assert statuses["project"] == "unreadable"
+    assert "later_candidate" not in merged.get("settings", {})
+
+
 @pytest.mark.parametrize(
     ("contents", "status"),
     [
