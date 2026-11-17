@@ -267,7 +267,7 @@ try_pip() {
 
 # Verify installation
 verify_install() {
-    local executable="$INSTALLED_DIR/$CMD_NAME" shown installed_version found
+    local executable="$INSTALLED_DIR/$CMD_NAME" shown version_line installed_version found
     if [[ -z "$INSTALLED_DIR" || ! -x "$executable" ]]; then
         if [[ -n "$INSTALLED_DIR" ]]; then
             error "The selected install method did not produce an executable at $executable."
@@ -287,14 +287,12 @@ verify_install() {
         error "The installed executable at $executable did not start: $shown"
         return 1
     fi
-    installed_version="${shown##*$'\n'}"
-    installed_version="${installed_version##* }"
-    installed_version="${installed_version%,}"
-    installed_version="${installed_version#v}"
-    if [[ ! "$installed_version" =~ ^[0-9][A-Za-z0-9.+!_-]*$ ]]; then
-        error "Could not parse the version reported by $executable: $shown"
+    version_line="${shown##*$'\n'}"
+    if [[ ! "$version_line" =~ ^kollab[[:space:]]([0-9][A-Za-z0-9.+!_-]*)$ ]]; then
+        error "Could not parse the version from the expected 'kollab <version>' output at $executable: $shown"
         return 1
     fi
+    installed_version="${BASH_REMATCH[1]}"
     if [[ -n "$VERSION" && "$installed_version" != "$VERSION" ]]; then
         error "Expected kollab $VERSION at $executable, but it reports $installed_version."
         return 1
