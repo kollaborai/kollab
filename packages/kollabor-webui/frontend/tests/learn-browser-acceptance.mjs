@@ -11,6 +11,7 @@ import { createServer } from "vite";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = path.resolve(scriptDir, "..");
 const repoRoot = path.resolve(frontendRoot, "../../..");
+const frontendVersion = JSON.parse(fs.readFileSync(path.join(frontendRoot, "package.json"), "utf8")).version;
 const screenshotDir = process.env.LEARN_SCREENSHOT_DIR ?? path.join(os.tmpdir(), "kollab-learn-renderer-screenshots");
 export function makeFixtures(options = {}) {
   let createdSession = null;
@@ -326,9 +327,10 @@ export async function openPage(browser, baseUrl, fixtures, options = {}) {
   });
   const initialGuideState =
     options.initialGuideState ?? JSON.stringify({ step: "done", dismissed: true });
-  await context.addInitScript((state) => {
+  await context.addInitScript(({ state, version }) => {
     localStorage.setItem("kollab.setup-guide.v1", state);
-  }, initialGuideState);
+    localStorage.setItem("kollab.whats-new.v1", JSON.stringify({ seenVersion: version }));
+  }, { state: initialGuideState, version: frontendVersion });
 
   const page = await context.newPage();
   const pageErrors = [];
