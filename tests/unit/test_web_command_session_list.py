@@ -96,8 +96,12 @@ async def test_web_resume_and_branch_lists_render_actionable_rows():
     assert "/resume session-2" in resume_sessions
 
     search_results = await _web_reply(plugin, "resume", ["search", "release"])
-    assert "Release - project" in search_results
+    assert "Find release notes" in search_results
     assert "/resume search-1" in search_results
+
+    filtered_sessions = await _web_reply(plugin, "resume", ["--limit", "3"])
+    assert "Prepare a handoff" in filtered_sessions
+    assert "/resume session-3" in filtered_sessions
 
     branch_points = await _web_reply(plugin, "branch", ["session-1"])
     assert "A release plan" in branch_points
