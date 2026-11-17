@@ -202,6 +202,45 @@ def test_remove_provider_profiles_preserves_all_configs_when_a_write_fails(
     assert "anthropic-cloud" in _read_config(global_path)["kollabor"]["llm"]["profiles"]
 
 
+def test_remove_provider_profiles_restores_config_when_rollback_replace_fails(
+    monkeypatch, tmp_path
+):
+    global_path = tmp_path / "home" / ".kollab" / "config.json"
+    local_path = tmp_path / "project" / ".kollab" / "config.json"
+    _write_config(
+        global_path,
+        {"anthropic-cloud": {"provider": "anthropic", "api_key": "global"}},
+        "anthropic-cloud",
+    )
+    _write_config(
+        local_path,
+        {"anthropic-local": {"provider": "anthropic", "api_key": "local"}},
+        "anthropic-local",
+    )
+    manager = _manager(monkeypatch, tmp_path, global_path, local_path)
+    import kollabor_ai.profile_manager as profile_manager
+
+    original_replace = profile_manager.os.replace
+    global_replacements = 0
+
+    def fail_local_and_global_rollback(source, destination):
+        nonlocal global_replacements
+        if str(destination) == str(local_path):
+            raise PermissionError("denied local write")
+        if str(destination) == str(global_path):
+            global_replacements += 1
+            if global_replacements > 1:
+                raise PermissionError("denied rollback replace")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(
+        profile_manager.os, "replace", fail_local_and_global_rollback
+    )
+
+    assert manager.remove_provider_profiles("anthropic") == []
+    assert "anthropic-cloud" in _read_config(global_path)["kollabor"]["llm"]["profiles"]
+
+
 def test_remove_provider_clears_active_profile_only_in_matching_config(
     monkeypatch, tmp_path
 ):
