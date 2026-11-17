@@ -3237,12 +3237,33 @@ class ContextCompactionPlugin(BasePlugin):
 
             task_id = (self._message_task_id(msg) or "unknown")[:128]
             prefix = f"[Active TaskLedger task {task_id}; latest assignment excerpt]\n"
-            suffix = "\n[Remaining assignment text is summarized below.]"
+            suffix = (
+                "\n[This assignment excerpt is incomplete. Retrieve the full "
+                f"current assignment with `/hub tasks status {task_id}`. If "
+                "retrieval fails, stop and ask the assigner to resend it; do "
+                "not infer omitted instructions.]"
+            )
+            excerpt_separator = "\n[... omitted assignment text ...]\n"
             excerpt_budget = max(
                 0, MAX_PRESERVED_HUB_TASK_CHARS - len(prefix) - len(suffix)
             )
+            section_budget = max(
+                1, (excerpt_budget - 2 * len(excerpt_separator)) // 3
+            )
+            middle_start = max(
+                section_budget,
+                (len(content) - section_budget) // 2,
+            )
+            middle_end = min(len(content) - section_budget, middle_start + section_budget)
+            excerpt = excerpt_separator.join(
+                (
+                    content[:section_budget],
+                    content[middle_start:middle_end],
+                    content[-section_budget:],
+                )
+            )
             truncated = copy.copy(msg)
-            truncated.content = f"{prefix}{content[:excerpt_budget]}{suffix}"
+            truncated.content = f"{prefix}{excerpt}{suffix}"
             truncated.metadata = {
                 **(getattr(msg, "metadata", None) or {}),
                 "context_compaction_task_excerpt": True,
@@ -4072,8 +4093,19 @@ class ContextCompactionPlugin(BasePlugin):
             # list of what it still needs to do after compaction.
             reminder_lines = [
                 "[Task Reminder after context compaction]",
-                "The following tasks from hub agents are still active "
-                "and were preserved verbatim above:",
+                (
+                    "The following active hub tasks were preserved above. "
+                    "An excerpt marked incomplete must be retrieved from its "
+                    "TaskLedger card before continuing."
+                    if any(
+                        getattr(task_msg, "metadata", {}).get(
+                            "context_compaction_task_excerpt"
+                        )
+                        for task_msg in preserved_tasks
+                    )
+                    else "The following tasks from hub agents are still active "
+                    "and were preserved verbatim above:"
+                ),
                 "",
             ]
             for i, task_msg in enumerate(preserved_tasks, 1):
@@ -4084,13 +4116,37 @@ class ContextCompactionPlugin(BasePlugin):
                 preview = task_msg.content[:200]
                 if len(task_msg.content) > 200:
                     preview += "..."
-                reminder_lines.append(f"  {i}. From {sender}: {preview}")
+                task_id = self._message_task_id(task_msg)
+                retrieval = (
+                    f" Use `/hub tasks status {task_id}` to retrieve the full "
+                    "assignment; if retrieval fails, ask the assigner to resend it."
+                    if getattr(task_msg, "metadata", {}).get(
+                        "context_compaction_task_excerpt"
+                    )
+                    and task_id
+                    else ""
+                )
+                reminder_lines.append(
+                    f"  {i}. From {sender}: {preview}{retrieval}"
+                )
 
             reminder_lines.append("")
-            reminder_lines.append(
-                "Complete these tasks and report back as instructed. "
-                "The full task text is in the messages above."
-            )
+            if any(
+                getattr(task_msg, "metadata", {}).get(
+                    "context_compaction_task_excerpt"
+                )
+                for task_msg in preserved_tasks
+            ):
+                reminder_lines.append(
+                    "Continue only with the instructions present in the excerpt "
+                    "or retrieved from TaskLedger. If retrieval is unavailable, "
+                    "ask the assigner to resend the missing text."
+                )
+            else:
+                reminder_lines.append(
+                    "Complete these tasks and report back as instructed. "
+                    "The full task text is in the messages above."
+                )
 
             compacted.append(
                 ConversationMessage(
