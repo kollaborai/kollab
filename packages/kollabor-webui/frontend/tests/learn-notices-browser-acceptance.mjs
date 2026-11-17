@@ -90,8 +90,8 @@ async function main() {
     const updating = await openPage(browser, baseUrl, makeFixtures({ update: { version: "999.2.0", url: "https://example.invalid/notes" } }));
     await updating.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
     const updateNotice = updating.page.getByRole("status").filter({ hasText: "999.2.0" });
-    await updateNotice.getByRole("button", { name: "Update now", exact: true }).waitFor({ state: "visible", timeout: 5_000 });
-    await updateNotice.getByRole("link", { name: "Release notes", exact: true }).waitFor({ state: "visible" });
+    await updateNotice.getByRole("button", { name: "Update Now", exact: true }).waitFor({ state: "visible", timeout: 5_000 });
+    await updateNotice.getByRole("link", { name: "Release Notes", exact: true }).waitFor({ state: "visible" });
     assert.ok((await updateNotice.boundingBox()).height <= 40, "the notice is one compact line at desktop width");
     await updateNotice.getByRole("button", { name: "Dismiss", exact: true }).click();
     await updateNotice.waitFor({ state: "hidden", timeout: 5_000 });
