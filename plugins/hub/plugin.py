@@ -93,6 +93,7 @@ from .rosters import (
     roster_personas,
     split_ref,
 )
+from .schedules import RunLog, ScheduleStore, ScheduleTimer
 from .scratchpad import Scratchpad
 from .session_state import SessionState, SessionStateManager
 from .startup_messages import HUB_NEW_FEATURES, choose_startup_tip
@@ -730,6 +731,10 @@ class HubPlugin(BasePlugin):
         self._bridge_polling: bool = False
         self._hub_cron_jobs: List[HubCronJob] = []
         self._recurring_jobs: Optional[RecurringJobs] = None
+        # Persistent schedules (#612): the coordinator process runs the grid
+        # timer; agents never run schedule timers of their own.
+        self._schedule_timer: Optional["ScheduleTimer"] = None
+        self._schedule_timer_task: Optional[asyncio.Task] = None
         self._recent_hub_msgs: Dict[str, float] = {}  # hash -> timestamp
         self._hub_wake_seen_ids: collections.OrderedDict[str, float] = (
             collections.OrderedDict()
@@ -6577,6 +6582,7 @@ class HubPlugin(BasePlugin):
             # Start presence sweep (coordinator only — cleans dead agent
             # presence files across ALL project dirs every 5 minutes)
             if is_coordinator:
+                self._start_schedule_timer()
                 self._presence_sweep_task = asyncio.create_task(
                     self._presence_sweep_loop()
                 )
@@ -8077,6 +8083,41 @@ class HubPlugin(BasePlugin):
         job.last_error = ""
         logger.info(f"hub cron fired: {job.id}" f" -> {job.target}")
         return False
+
+    def _start_schedule_timer(self) -> None:
+        """Run the persistent schedules grid timer (coordinator only, #612).
+
+        Schedules live in ``~/.kollab/schedules.json`` and their fires are
+        recorded in ``~/.kollab/schedules-runs.jsonl``; the timer sleeps until
+        the next grid point (see schedules.py). Firing reuses today's cron
+        delivery path: a hub message tagged with the schedule id. Stage 2
+        replaces the send with start/queue/new-instance delivery.
+        """
+        from kollabor_config.config_utils import get_config_directory
+
+        async def fire(row, agent: str, due: float, now: float):
+            job = HubCronJob(
+                id=row.id,
+                target=agent,
+                message=row.prompt,
+                interval_seconds=row.interval_seconds,
+                next_fire=due,
+            )
+            dropped = await self._fire_cron_job(job)
+            error = job.last_error or ("device gone" if dropped else "")
+            return (not error), error
+
+        root = get_config_directory()
+        self._schedule_timer = ScheduleTimer(
+            ScheduleStore(root / "schedules.json"),
+            RunLog(root / "schedules-runs.jsonl"),
+            fire,
+            device_name=lambda: self._relay_device_name() or "",
+        )
+        self._schedule_timer_task = asyncio.create_task(
+            self._schedule_timer.run()
+        )
+        logger.info("schedule timer started (coordinator)")
 
     async def _run_hub_jobs(self, now: Optional[float] = None) -> None:
         """Send the configured recurring hub jobs that are due (coordinator only).
@@ -18296,6 +18337,15 @@ class HubPlugin(BasePlugin):
             self._cron_task.cancel()
             try:
                 await self._cron_task
+            except asyncio.CancelledError:
+                pass
+
+        # Skeleton plugins (tests) skip __init__, so read defensively.
+        schedule_task = getattr(self, "_schedule_timer_task", None)
+        if schedule_task:
+            schedule_task.cancel()
+            try:
+                await schedule_task
             except asyncio.CancelledError:
                 pass
 
