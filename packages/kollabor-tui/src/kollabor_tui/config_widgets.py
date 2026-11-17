@@ -1,12 +1,7 @@
 """Configuration widget definitions for modal UI."""
 
-import importlib
-import importlib.util
 import json
 import logging
-import pkgutil
-import sys
-import types
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -28,269 +23,34 @@ class ConfigWidgetDefinitions:
         return None
 
     @staticmethod
-    def _module_is_from_plugins_dir(module: Any, plugins_dir: Path) -> bool:
-        try:
-            plugins_dir = plugins_dir.resolve()
-            module_file = getattr(module, "__file__", None)
-            if module_file:
-                return Path(module_file).resolve().is_relative_to(plugins_dir)
-
-            module_paths = getattr(module, "__path__", [])
-            for module_path in module_paths:
-                resolved_path = Path(module_path).resolve()
-                if resolved_path == plugins_dir or resolved_path.is_relative_to(
-                    plugins_dir
-                ):
-                    return True
-        except Exception as e:
-            logger.debug(f"Could not verify config plugin module root: {e}")
-
-        return False
-
-    @staticmethod
-    def _drop_stale_module_cache(plugins_dir: Path, module_path: str) -> None:
-        parts = ["plugins", *module_path.split(".")]
-        stale_roots: list[str] = []
-
-        for index in range(2, len(parts) + 1):
-            module_name = ".".join(parts[:index])
-            module = sys.modules.get(module_name)
-            if module and not ConfigWidgetDefinitions._module_is_from_plugins_dir(
-                module,
-                plugins_dir,
-            ):
-                stale_roots.append(module_name)
-
-        if not stale_roots:
-            return
-
-        for module_name in list(sys.modules):
-            if any(
-                module_name == stale_root or module_name.startswith(f"{stale_root}.")
-                for stale_root in stale_roots
-            ):
-                del sys.modules[module_name]
-
-    @staticmethod
-    def _prepare_plugins_import_root(
-        plugins_dir: Path,
-        module_path: str | None = None,
-    ) -> None:
-        try:
-            plugins_dir = plugins_dir.resolve()
-
-            current_plugins = sys.modules.get("plugins")
-            if current_plugins and hasattr(current_plugins, "__path__"):
-                root_path = str(plugins_dir)
-                search_paths = [
-                    str(Path(path).resolve())
-                    for path in getattr(current_plugins, "__path__", [])
-                    if Path(path).resolve() != plugins_dir
-                ]
-                current_plugins.__path__ = [root_path, *search_paths]  # type: ignore[attr-defined]
-                if module_path:
-                    ConfigWidgetDefinitions._drop_stale_module_cache(
-                        plugins_dir,
-                        module_path,
-                    )
-                importlib.invalidate_caches()
-                return
-
-            init_file = plugins_dir / "__init__.py"
-            if init_file.exists():
-                spec = importlib.util.spec_from_file_location(
-                    "plugins",
-                    init_file,
-                    submodule_search_locations=[str(plugins_dir)],
-                )
-                if spec and spec.loader:
-                    module = importlib.util.module_from_spec(spec)
-                    sys.modules["plugins"] = module
-                    spec.loader.exec_module(module)
-            else:
-                module = types.ModuleType("plugins")
-                module.__file__ = str(plugins_dir)
-                module.__path__ = [str(plugins_dir)]  # type: ignore[attr-defined]
-                sys.modules["plugins"] = module
-
-            if module_path:
-                ConfigWidgetDefinitions._drop_stale_module_cache(
-                    plugins_dir,
-                    module_path,
-                )
-            importlib.invalidate_caches()
-        except Exception as e:
-            logger.debug(f"Could not prepare config plugin import root: {e}")
-
-    @staticmethod
-    def _prepare_plugin_module_import(module_name: str) -> None:
-        plugins_dir = ConfigWidgetDefinitions._packaged_plugins_dir()
-        if plugins_dir is None or not module_name.startswith("plugins."):
-            return
-
-        ConfigWidgetDefinitions._prepare_plugins_import_root(
-            plugins_dir,
-            module_name.removeprefix("plugins."),
-        )
-
-    @staticmethod
-    def _discover_plugin_modules() -> List[tuple[str, str]]:
-        """Discover plugin modules from source checkouts and installed packages."""
-        targets: list[tuple[str, str]] = []
-
-        plugins_dir = ConfigWidgetDefinitions._packaged_plugins_dir()
-        if plugins_dir is not None:
-            ConfigWidgetDefinitions._prepare_plugins_import_root(plugins_dir)
-            covered_subdirs: set[str] = set()
-
-            for plugin_file in sorted(plugins_dir.glob("*_plugin.py")):
-                plugin_id = plugin_file.stem.replace("_plugin", "")
-                targets.append((plugin_id, f"plugins.{plugin_file.stem}"))
-                covered_subdirs.add(plugin_id)
-
-            for subdir in sorted(plugins_dir.iterdir()):
-                if not subdir.is_dir() or subdir.name.startswith(("_", ".")):
-                    continue
-                if subdir.name in covered_subdirs:
-                    continue
-                if (subdir / "plugin.py").exists():
-                    targets.append((subdir.name, f"plugins.{subdir.name}.plugin"))
-                    covered_subdirs.add(subdir.name)
-
-            return ConfigWidgetDefinitions._dedupe_plugin_targets(targets)
-
-        try:
-            import plugins as plugins_package
-        except ImportError as e:
-            logger.debug(f"Could not import plugins package: {e}")
-            return ConfigWidgetDefinitions._dedupe_plugin_targets(targets)
-
-        for module_info in pkgutil.iter_modules(plugins_package.__path__):
-            if module_info.name.startswith(("_", ".")):
-                continue
-
-            if module_info.name.endswith("_plugin"):
-                plugin_id = module_info.name.removesuffix("_plugin")
-                targets.append((plugin_id, f"plugins.{module_info.name}"))
-                continue
-
-            if module_info.ispkg:
-                plugin_module = f"plugins.{module_info.name}.plugin"
-                try:
-                    if importlib.util.find_spec(plugin_module) is not None:
-                        targets.append((module_info.name, plugin_module))
-                except (ImportError, ModuleNotFoundError, ValueError):
-                    logger.debug(f"Could not find plugin module {plugin_module}")
-
-        return ConfigWidgetDefinitions._dedupe_plugin_targets(targets)
-
-    @staticmethod
-    def _dedupe_plugin_targets(targets: List[tuple[str, str]]) -> List[tuple[str, str]]:
-        seen_plugin_ids: set[str] = set()
-        seen_modules: set[str] = set()
-        deduped: list[tuple[str, str]] = []
-
-        for plugin_id, module_name in targets:
-            if plugin_id in seen_plugin_ids or module_name in seen_modules:
-                continue
-            seen_plugin_ids.add(plugin_id)
-            seen_modules.add(module_name)
-            deduped.append((plugin_id, module_name))
-
-        return deduped
-
-    @staticmethod
-    def _find_plugin_class(
-        module: Any, require_config_widgets: bool = False
-    ) -> type | None:
-        for name in dir(module):
-            obj = getattr(module, name)
-            if (
-                isinstance(obj, type)
-                and name.endswith("Plugin")
-                and name not in ("Plugin", "BasePlugin")
-            ):
-                if require_config_widgets and not hasattr(obj, "get_config_widgets"):
-                    continue
-                return obj
-
-        return None
-
-    @staticmethod
     def get_available_plugins() -> List[Dict[str, Any]]:
-        """Dynamically discover available plugins for configuration.
+        """Build plugin rows from the same registry used by runtime loading."""
+        from kollabor_plugins.registry import plugin_entries
 
-        Scans the plugins package for plugin modules and extracts metadata
-        from each plugin class.
-
-        Returns:
-            List of plugin widget dictionaries.
-        """
-        plugins: list[dict[str, Any]] = []
-
-        for (
-            plugin_id,
-            module_name,
-        ) in ConfigWidgetDefinitions._discover_plugin_modules():
-            try:
-                try:
-                    ConfigWidgetDefinitions._prepare_plugin_module_import(module_name)
-                    module = importlib.import_module(module_name)
-                    plugin_class = ConfigWidgetDefinitions._find_plugin_class(module)
-
-                    if plugin_class:
-                        # Get name and description from class attributes
-                        instance_name = getattr(plugin_class, "name", None)
-                        if instance_name is None:
-                            # Try to get from a temporary instance or use default
-                            instance_name = plugin_id.replace("_", " ").title()
-
-                        description = getattr(plugin_class, "description", None)
-                        if description is None:
-                            description = f"{instance_name} plugin"
-
-                        # Use class-level name/description or instance defaults
-                        display_name = (
-                            instance_name
-                            if isinstance(instance_name, str)
-                            else plugin_id.replace("_", " ").title()
-                        )
-
-                        plugins.append(
-                            {
-                                "type": "checkbox",
-                                "label": (
-                                    display_name.replace("_", " ").title()
-                                    if display_name == plugin_id
-                                    else display_name
-                                ),
-                                "config_path": f"plugins.{plugin_id}.enabled",
-                                "help": (
-                                    description
-                                    if isinstance(description, str)
-                                    else f"{display_name} plugin"
-                                ),
-                            }
-                        )
-                        logger.debug(f"Discovered plugin: {plugin_id}")
-
-                except ImportError as e:
-                    logger.debug(f"Could not import plugin {module_name}: {e}")
-                    # Still add it with basic info
-                    plugins.append(
-                        {
-                            "type": "checkbox",
-                            "label": plugin_id.replace("_", " ").title(),
-                            "config_path": f"plugins.{plugin_id}.enabled",
-                            "help": f"{plugin_id.replace('_', ' ').title()} plugin",
-                        }
-                    )
-
-            except Exception as e:
-                logger.error(f"Error processing plugin {module_name}: {e}")
-
-        logger.info(f"Discovered {len(plugins)} plugins for configuration")
-        return plugins
+        rows = []
+        for entry in plugin_entries(ConfigWidgetDefinitions._packaged_plugins_dir()):
+            plugin_id = entry["id"]
+            name = entry.get("name") or plugin_id.replace("_", " ").title()
+            kind = entry.get("kind", "built-in")
+            path = f"plugin-registry.{plugin_id}.enabled" if kind == "installed" else f"plugins.{plugin_id}.enabled"
+            error = entry.get("error")
+            detail = f"; {error}" if isinstance(error, str) and error else ""
+            rows.append(
+                {
+                    "type": "label" if kind == "dev" else "checkbox",
+                    "label": name,
+                    "display_name": name,
+                    "plugin_kind": kind,
+                    "config_path": "" if kind == "dev" else path,
+                    "value": entry.get("state", "unknown"),
+                    "help": (
+                        f"{name} — use kollab plugin dev off {plugin_id.removesuffix('@dev')} to detach{detail}"
+                        if kind == "dev"
+                        else f"{name} — {entry.get('state', 'unknown')}{detail}"
+                    ),
+                }
+            )
+        return rows
 
     @staticmethod
     def get_available_themes() -> List[str]:
@@ -338,9 +98,7 @@ class ConfigWidgetDefinitions:
                     theme_name = theme_data.get("name")
                     if theme_name and theme_name not in theme_names:
                         theme_names.append(theme_name)
-                        logger.debug(
-                            f"Loaded custom theme: {theme_name} from {theme_file}"
-                        )
+                        logger.debug(f"Loaded custom theme: {theme_name} from {theme_file}")
                 except Exception as e:
                     logger.warning(f"Error loading theme file {theme_file}: {e}")
 
@@ -348,34 +106,34 @@ class ConfigWidgetDefinitions:
 
     @staticmethod
     def get_plugin_config_sections() -> List[Dict[str, Any]]:
-        """Dynamically collect config widget sections from plugins.
+        """Collect plugin settings from the common registry listing."""
+        from kollabor_plugins.registry import plugin_entries
 
-        Looks for get_config_widgets() method on each plugin class.
-
-        Returns:
-            List of section definitions from plugins.
-        """
-        sections: List[Dict[str, Any]] = []
-
-        for _, module_name in ConfigWidgetDefinitions._discover_plugin_modules():
-            try:
-                ConfigWidgetDefinitions._prepare_plugin_module_import(module_name)
-                module = importlib.import_module(module_name)
-                plugin_class = ConfigWidgetDefinitions._find_plugin_class(
-                    module,
-                    require_config_widgets=True,
-                )
-
-                if plugin_class is None:
-                    continue
-
-                widget_section = plugin_class.get_config_widgets()
-                if widget_section:
-                    sections.append(widget_section)
-                    logger.debug(f"Loaded config widgets from {plugin_class.__name__}")
-            except Exception as e:
-                logger.debug(f"Could not load config widgets from {module_name}: {e}")
-
+        sections = []
+        for entry in plugin_entries(ConfigWidgetDefinitions._packaged_plugins_dir()):
+            if entry.get("kind") in {"installed", "dev"}:
+                widgets = []
+                for service in entry.get("services", []):
+                    if isinstance(service, dict) and isinstance(service.get("name"), str):
+                        error = service.get("error")
+                        detail = f"; {error}" if isinstance(error, str) and error else ""
+                        widgets.append(
+                            {
+                                "type": "checkbox",
+                                "label": f"Background: {service['name']}",
+                                "config_path": f"plugin-service.{entry['id']}.{service['name']}",
+                                "help": f"State: {service.get('state', 'unknown')}{detail}; toggle to start or stop",
+                            }
+                        )
+                for widget in entry.get("settings", []):
+                    if isinstance(widget, dict) and isinstance(widget.get("config_path"), str):
+                        widgets.append(
+                            {**widget, "config_path": f"plugin-values.{entry['id']}.{widget['config_path']}"}
+                        )
+                if widgets:
+                    sections.append({"title": entry.get("name", entry["id"]), "widgets": widgets})
+            elif isinstance(entry.get("settings_section"), dict):
+                sections.append(entry["settings_section"])
         return sections
 
     @staticmethod
@@ -805,9 +563,7 @@ class ConfigWidgetDefinitions:
         }
 
     @staticmethod
-    def create_widgets_from_definition(
-        config_service, definition: Dict[str, Any]
-    ) -> List[Any]:
+    def create_widgets_from_definition(config_service, definition: Dict[str, Any]) -> List[Any]:
         """Create widget instances from modal definition.
 
         Args:
@@ -860,8 +616,7 @@ class ConfigWidgetDefinitions:
                         **{
                             k: v
                             for k, v in widget_def.items()
-                            if k
-                            not in ["type", "label", "config_path", "help", "value"]
+                            if k not in ["type", "label", "config_path", "help", "value"]
                         },
                     )
 
