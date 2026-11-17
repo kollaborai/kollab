@@ -473,6 +473,33 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertTrue(direct.success, direct.error)
         self.assertTrue(redirected.success, redirected.error)
 
+    def test_web_fetch_overflow_check_reads_at_most_one_extra_byte(self):
+        """Unknown-length oversized bodies stop after one overflow byte."""
+        body = b"x" * 1_000_000
+
+        class BoundedContent:
+            def __init__(self):
+                self.offset = 0
+
+            async def read(self, size):
+                chunk = body[self.offset : self.offset + size]
+                self.offset += len(chunk)
+                return chunk
+
+        response = _make_mock_aiohttp_response()
+        response.content = BoundedContent()
+        response.headers = {}
+        with _patch_aiohttp_session(mock_get=response):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"id": "web_fetch_overflow", "url": "https://example.com"}
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertIn("download limit", result.error)
+        self.assertEqual(response.content.offset, 500_001)
+
     def test_web_fetch_cancellation_closes_response(self):
         """Cancellation during streaming propagates and closes the response."""
 
