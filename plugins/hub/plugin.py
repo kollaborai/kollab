@@ -8101,21 +8101,37 @@ class HubPlugin(BasePlugin):
         """
         from kollabor_config.config_utils import get_config_directory
 
-        from .presence import find_live_socket, live_agents_on_machine
+        from .presence import get_hub_dir, live_agents_on_machine
         from .schedule_delivery import (
             ONLINE_TIMEOUT_SECONDS,
             DeliveryProbes,
             deliver,
         )
 
+        def _local_record(name: str):
+            """The newest live agent ``name`` in THIS hub, or None.
+
+            live_agents_on_machine spans every project on the machine; a
+            same-named agent in another folder must not receive this
+            project's fire (or mask a start).
+            """
+            hub = get_hub_dir()
+            best = None
+            for hub_dir, record in live_agents_on_machine():
+                if hub_dir != hub or record.get("identity") != name:
+                    continue
+                started = record.get("started_at") or 0
+                if best is None or started > best.get("started_at", 0):
+                    best = record
+            return best
+
         def find_socket(name: str):
-            return find_live_socket(name)
+            record = _local_record(name)
+            socket = (record or {}).get("socket_path") or ""
+            return socket or None
 
         def state_of(name: str) -> str:
-            for _hub_dir, record in live_agents_on_machine():
-                if record.get("identity") == name:
-                    return str(record.get("state") or "idle")
-            return "idle"
+            return str((_local_record(name) or {}).get("state") or "idle")
 
         def launch(spec) -> bool:
             import subprocess
@@ -8138,7 +8154,7 @@ class HubPlugin(BasePlugin):
             )
             deadline = time.monotonic() + ONLINE_TIMEOUT_SECONDS
             while time.monotonic() < deadline:
-                if find_live_socket(spec.identity):
+                if find_socket(spec.identity):
                     return True
                 time.sleep(0.5)
             return False

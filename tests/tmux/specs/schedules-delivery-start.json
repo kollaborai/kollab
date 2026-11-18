@@ -2,7 +2,7 @@
   "name": "schedules-delivery-start",
   "description": "Stage 2 of #612: a schedule whose agent is not running starts it. The coordinator boots, its timer fires the overdue schedule, a second kollab process comes online as the target agent (launched through kollab_argv, --detached --as), and the fire is recorded ok in schedules-runs.jsonl. Scratch HOME, --no-daemon, no keyring.",
   "config": {
-    "command": "sh -c 'R=$(pwd); exec \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "command": "sh -c 'R=$(pwd); cd \"$KOLLAB_PROJECT_ROOT\" && exec \"$R/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
     "app_init_sleep": 5,
     "show_captures": false
   },
