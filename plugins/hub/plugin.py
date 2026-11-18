@@ -4742,7 +4742,15 @@ class HubPlugin(BasePlugin):
             )
 
         content = tool_data.get("content", "")
-        self._scratchpad.write(content)
+        try:
+            self._scratchpad.write(content)
+        except (OSError, UnicodeError):
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="scratchpad",
+                success=False,
+                error="scratchpad write failed",
+            )
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="scratchpad",
@@ -4763,7 +4771,15 @@ class HubPlugin(BasePlugin):
             )
 
         content = tool_data.get("content", "")
-        self._scratchpad.append(content)
+        try:
+            self._scratchpad.append(content)
+        except (OSError, UnicodeError):
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="scratchpad_append",
+                success=False,
+                error="scratchpad append failed",
+            )
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="scratchpad_append",
@@ -4783,7 +4799,15 @@ class HubPlugin(BasePlugin):
                 error="scratchpad not initialized",
             )
 
-        self._scratchpad.clear()
+        try:
+            self._scratchpad.clear()
+        except OSError:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="scratchpad_clear",
+                success=False,
+                error="scratchpad clear failed",
+            )
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="scratchpad_clear",
@@ -4806,7 +4830,15 @@ class HubPlugin(BasePlugin):
         # Scratchpad files survive longer than their intended session scope.
         # Treat old reminder/task prose as archived evidence on read so a
         # fresh agent cannot revive it through the tool path.
-        content = sanitize_rebirth_text(self._scratchpad.get())
+        try:
+            content = sanitize_rebirth_text(self._scratchpad.get())
+        except (OSError, UnicodeError):
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="scratchpad_get",
+                success=False,
+                error="scratchpad read failed",
+            )
         preview = content[:200] if content else "(empty)"
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
