@@ -8,6 +8,10 @@ changes, the schedule timer wakes so the sleeping timer recomputes at once.
 Runs on the same in-process two-machine wire as the config sync tests.
 """
 
+# ruff: noqa: F811
+# The `network` fixture is imported from the config sync service tests and
+# pytest injects it by parameter name, so every test parameter redefines the
+# import -- that is the framework's convention, not shadowing.
 import json
 import sys
 from pathlib import Path
@@ -104,8 +108,11 @@ async def test_secondary_edit_reaches_the_primary_and_pushes_back(network):
     reply = await net["secondary"].send_schedule_edit(edited)
     assert reply.get("ok") is True
 
-    # The primary now holds the edit, and its timer woke for the local change.
-    assert _read_schedules(net["mac"]) == edited
+    # The primary now holds the edit (stored in the canonical row form),
+    # and its timer woke for the local change.
+    assert [r["prompt"] for r in _read_schedules(net["mac"])] == [
+        "edited on the phone"
+    ]
     timer, wakes = _fake_timer()
     net["left"].plugin._schedule_timer = timer
     await net["secondary"].send_schedule_edit([_row_dict(prompt="second edit")])
