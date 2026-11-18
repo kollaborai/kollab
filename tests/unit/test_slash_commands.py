@@ -95,6 +95,12 @@ class TestSlashCommandParser(unittest.TestCase):
                 self.assertIsNotNone(command)
                 self.assertEqual(command.args, expected_args)
 
+    def test_malformed_quote_fallback_keeps_original_windows_separators(self):
+        command = r'/open "C:\work\docs\notes.txt'
+        parsed = self.parser.parse_command(command)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.args, [r'"C:\work\docs\notes.txt'])
+
     def test_parse_command_with_parameters(self):
         """Test parameter extraction."""
         command = self.parser.parse_command("/config --theme=dark --verbose")
