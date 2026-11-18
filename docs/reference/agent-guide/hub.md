@@ -66,6 +66,8 @@ Peer-to-peer agent mesh with persistent identity.
 - `<scratchpad_append>content</scratchpad_append>` - Append
 - `<scratchpad_get/>` - Read back
 - `<scratchpad_clear/>` - Wipe
+- A missing note reads as `(empty)`; storage failures return a failed tool result.
+- Scratchpad notes survive compaction and remain available through `<scratchpad_get/>`; they are not automatically injected during rebirth.
 
 **CRITICAL: How `kollab --hub msg` actually works:**
 - `kollab --hub msg <name> <text>` BROADCASTS to ALL online agents, not just the named target
@@ -204,10 +206,11 @@ When a user reports a hub bug, do not guess. Run this loop:
    completed`, the task was delivered but the model never called a tool.
    That's a prompt/model issue, not a delivery bug.
 
-5. **Vault rebirth is not a bug.** Agents load
-   `~/.kollab/hub/vaults/<identity>/` (stream + working_memory +
-   crystallized + scratchpad) on startup. Spawning lapis after lapis has
-   3 prior sessions of work means lapis will reference that work in its
+5. **Vault rebirth is not a bug.** Startup context includes the stream,
+   working memory, and crystallized notes. Scratchpad notes persist across
+   compaction but are read explicitly through `<scratchpad_get/>`, not
+   automatically injected on startup. Spawning lapis after lapis has 3 prior
+   sessions of work means lapis will reference that rebirth context in its
    first reply. For clean smoke tests, use a gem with a thinner vault
    (`sapphire`, `peridot`) or `rm -rf ~/.kollab/hub/vaults/<name>`
    first (only with explicit user permission).
