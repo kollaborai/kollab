@@ -78,6 +78,23 @@ class TestSlashCommandParser(unittest.TestCase):
                 self.assertIsNotNone(command)
                 self.assertEqual(command.args, expected_args)
 
+    def test_parse_relative_directory_paths_with_trailing_separators_before_flags(self):
+        cases = [
+            ("/open folder\\ --mode=read", ["folder\\", "--mode=read"]),
+            ("/open .\\ --mode=read", [".\\", "--mode=read"]),
+            ("/open ..\\ --mode=read", ["..\\", "--mode=read"]),
+            (
+                "/open --path=folder\\ --mode=read",
+                ["--path=folder\\", "--mode=read"],
+            ),
+        ]
+
+        for input_text, expected_args in cases:
+            with self.subTest(input_text=input_text):
+                command = self.parser.parse_command(input_text)
+                self.assertIsNotNone(command)
+                self.assertEqual(command.args, expected_args)
+
     def test_parse_command_with_parameters(self):
         """Test parameter extraction."""
         command = self.parser.parse_command("/config --theme=dark --verbose")
