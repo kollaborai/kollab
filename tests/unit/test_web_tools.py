@@ -375,6 +375,26 @@ class TestWebFetchExecution(unittest.TestCase):
                 self.assertTrue(result.success, result.error)
                 self.assertIn("Deflate decoding works", result.output)
 
+    def test_web_fetch_decodes_concatenated_gzip_members(self):
+        """Valid gzip members concatenated in one response must all be decoded."""
+        body = gzip.compress(b"A" * 600) + gzip.compress(b"SECOND_MEMBER_SENTINEL")
+        response = _make_mock_aiohttp_response(text=body, url="https://example.com")
+        response.headers = {"Content-Encoding": "gzip"}
+
+        with _patch_aiohttp_session(mock_get=response):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {
+                        "id": "web_fetch_multi_member_gzip",
+                        "url": "https://example.com",
+                        "extract_main": False,
+                    }
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn("SECOND_MEMBER_SENTINEL", result.output)
+
     def test_web_fetch_local_http_redirect_chunked_and_compressed_limits(self):
         """Exercise redirects, unknown lengths and gzip expansion over real HTTP."""
 
