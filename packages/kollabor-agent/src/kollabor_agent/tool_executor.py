@@ -3301,28 +3301,56 @@ class ToolExecutor:
                                 decompressor = zlib.decompressobj(window_bits)
                                 chunk = bytes(deflate_prefix)
                                 deflate_prefix.clear()
+                            if (
+                                encoding == "gzip"
+                                and decompressor is not None
+                                and decompressor.eof
+                            ):
+                                # A gzip member can end exactly at a read boundary.
+                                decompressor = zlib.decompressobj(
+                                    16 + zlib.MAX_WBITS
+                                )
                             if decompressor is None:
                                 decoded = chunk
                             else:
-                                decoded = decompressor.decompress(
-                                    chunk, max_decoded_bytes - decoded_size + 1
-                                )
-                                if decompressor.unconsumed_tail:
+                                pending = chunk
+                                while True:
+                                    decoded = decompressor.decompress(
+                                        pending,
+                                        max_decoded_bytes - decoded_size + 1,
+                                    )
+                                    if decompressor.unconsumed_tail:
+                                        return ToolExecutionResult(
+                                            tool_id=tool_id,
+                                            tool_type="web_fetch",
+                                            success=False,
+                                            error="Response exceeded the 2000000-byte decoded limit",
+                                        )
+                                    decoded_size += len(decoded)
+                                    if decoded_size > max_decoded_bytes:
+                                        return ToolExecutionResult(
+                                            tool_id=tool_id,
+                                            tool_type="web_fetch",
+                                            success=False,
+                                            error="Response exceeded the 2000000-byte decoded limit",
+                                        )
+                                    decoded_parts.append(decoded)
+                                    if encoding != "gzip" or not decompressor.unused_data:
+                                        break
+                                    pending = decompressor.unused_data
+                                    decompressor = zlib.decompressobj(
+                                        16 + zlib.MAX_WBITS
+                                    )
+                            if decompressor is None:
+                                decoded_size += len(chunk)
+                                if decoded_size > max_decoded_bytes:
                                     return ToolExecutionResult(
                                         tool_id=tool_id,
                                         tool_type="web_fetch",
                                         success=False,
                                         error="Response exceeded the 2000000-byte decoded limit",
                                     )
-                            decoded_size += len(decoded)
-                            if decoded_size > max_decoded_bytes:
-                                return ToolExecutionResult(
-                                    tool_id=tool_id,
-                                    tool_type="web_fetch",
-                                    success=False,
-                                    error="Response exceeded the 2000000-byte decoded limit",
-                                )
-                            decoded_parts.append(decoded)
+                                decoded_parts.append(chunk)
 
                         if decompressor is not None:
                             tail = decompressor.flush()
