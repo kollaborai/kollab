@@ -59,6 +59,7 @@ class SlashCommandParser:
 
             # Split command and arguments using shell-like parsing
             # This handles quoted arguments properly: /save "my file.txt"
+            original_command_text = command_text
             try:
                 # POSIX shlex treats unquoted backslashes as escapes. Protect
                 # separators in unquoted Windows drive, UNC, rooted, and relative paths.
@@ -80,7 +81,7 @@ class SlashCommandParser:
             except ValueError as e:
                 # Handle malformed quotes gracefully
                 self.logger.warning(f"Quote parsing failed, using simple split: {e}")
-                parts = command_text.split()
+                parts = original_command_text.split()
 
             if not parts:
                 return None
