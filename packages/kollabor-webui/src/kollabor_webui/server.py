@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import ipaddress
 import logging
 import os
 import posixpath
+import re
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -43,6 +46,8 @@ _HOP_BY_HOP = {
     "trailer", "transfer-encoding", "upgrade", "host", "content-length", "date", "server",
 }
 logger = logging.getLogger(__name__)
+# The build writes exactly this tag (vite.config.ts, kollabPluginRuntime); no other inline script is allowed.
+_IMPORT_MAP = re.compile(rb'<script type="importmap">(.*?)</script>', re.S)
 NO_STORE_HEADERS = {
     "Cache-Control": "no-store",
     "Pragma": "no-cache",
@@ -365,7 +370,18 @@ def create_app(
     def page(directory: Path) -> FileResponse:
         # Always revalidated: a cached entry page keeps loading the previous
         # build's hashed assets after a rebuild. The assets themselves can cache.
-        return FileResponse(directory / "index.html", media_type="text/html", headers={"Cache-Control": "no-cache"})
+        index = directory / "index.html"
+        headers = {"Cache-Control": "no-cache"}
+        # The import map that gives web plugins the app's React is the page's one inline
+        # script; the policy allows exactly that text by its hash (#1028).
+        try:
+            found = _IMPORT_MAP.search(index.read_bytes())
+        except OSError:
+            found = None
+        if found:
+            digest = base64.b64encode(hashlib.sha256(found.group(1)).digest()).decode()
+            headers["Content-Security-Policy"] = f"script-src 'self' 'sha256-{digest}'"
+        return FileResponse(index, media_type="text/html", headers=headers)
 
     @app.get("/")
     async def index():
