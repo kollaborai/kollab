@@ -74,6 +74,28 @@ With working directory:
 <terminal cwd="/tmp">pwd</terminal>
 ```
 
+#### Kollab commands from agent terminals
+
+Agents may run Kollab commands from terminals by default, including background
+and informational ones such as `kollab --hub status`. An owner who wants agent
+terminals kept off the Kollab CLI can opt in:
+
+```json
+{"tools": {"block_kollab_terminal_spawn": true}}
+```
+
+The setting defaults to `false`. When it is `true`, agent terminals refuse:
+
+- agent launches (`--agent`, `--detached`), including through wrappers such as
+  `bash -c`, `env`, `nohup`, or `python -c`;
+- the stop-all command `kollab --hub stop all`;
+- any Kollab command started in the background, including informational ones.
+
+The refusal explains the alternative: run informational commands in the
+foreground, use `<hub_spawn>` to start peers, and use `/hub stop all` to stop
+agents owned by the current caller. The `kollab` CLI applies the same setting
+to agent launches started from a tool shell.
+
 Execution methods:
 - tmux sessions (preferred, supports background jobs)
 - direct subprocess (fallback)
