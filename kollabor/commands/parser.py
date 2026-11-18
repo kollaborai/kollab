@@ -62,8 +62,17 @@ class SlashCommandParser:
             try:
                 # POSIX shlex treats unquoted backslashes as escapes. Protect
                 # separators in unquoted Windows drive, UNC, rooted, and relative paths.
+                # A trailing relative separator before an option must not escape its boundary.
                 command_text = re.sub(
-                    r"(?<!\S)(?:--?[\w-]+=)?(?:[A-Za-z]:\\[^\s]*|\\\\[^\s]*|\\[^\s]+|[^\s\\]+\\[^\s]+)",
+                    r"(?<!\S)"
+                    r"(?:--?[\w-]+=)?"
+                    r"(?:"
+                    r"[A-Za-z]:\\[^\s]*"
+                    r"|\\\\[^\s]*"
+                    r"|\\[^\s]+"
+                    r"|[^\s\\]+\\(?=\s+--?[\w-]+(?:=|\s|$))"
+                    r"|[^\s\\]+\\[^\s]+"
+                    r")",
                     lambda match: match.group(0).replace("\\", "\\\\"),
                     command_text,
                 )
