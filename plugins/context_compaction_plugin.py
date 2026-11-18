@@ -980,7 +980,7 @@ class ContextCompactionPlugin(BasePlugin):
         split = self._find_split_point(history, keep_recent)
         remove_candidates = history[:split]
         to_keep = history[split:]
-        preserved, summarizable = self._extract_preservable_messages(
+        preserved, summarizable, _omitted_task_count = self._extract_preservable_messages(
             remove_candidates
         )
 
@@ -2582,12 +2582,16 @@ class ContextCompactionPlugin(BasePlugin):
             split_point = max(1, len(history) - keep_count)
         system_msg = history[0] if history and history[0].role == "system" else None
         live_task_ids = self._get_live_task_ids()
-        preserved_tasks, _summarizable_tasks = self._extract_preservable_messages(
-            history, live_task_ids=live_task_ids
-        )
+        (
+            preserved_tasks,
+            _summarizable_tasks,
+            omitted_task_count,
+        ) = self._extract_preservable_messages(history, live_task_ids=live_task_ids)
         recent = history[split_point:]
         safe_recent = [self._truncate_message_for_rollover(message) for message in recent]
-        fallback_summary = self._build_emergency_summary(history[1:split_point])
+        fallback_summary = self._build_emergency_summary(
+            history[1:split_point], omitted_task_count=omitted_task_count
+        )
         if not fallback_summary:
             fallback_summary = (
                 "Earlier conversation context was rolled over after automatic compaction "
@@ -2684,6 +2688,7 @@ class ContextCompactionPlugin(BasePlugin):
         self,
         messages: List[ConversationMessage],
         max_chars: int = MAX_EMERGENCY_SUMMARY_MESSAGE_CHARS,
+        omitted_task_count: int = 0,
     ) -> str:
         """Build a bounded recovery note, prioritizing the latest user request.
 
@@ -2699,10 +2704,17 @@ class ContextCompactionPlugin(BasePlugin):
         body_limit = max(0, max_chars - wrapper_chars)
         lines = [
             "Automatic context rollover: the summarization provider failed at "
-            "the hard prompt budget.",
-            "The transcript remains available in the session log; this note "
-            "preserves the latest user intent.",
+            "the hard prompt budget."
         ]
+        if omitted_task_count > 0:
+            lines.append(
+                f"{omitted_task_count} live task messages were omitted by the "
+                f"{MAX_PRESERVED_HUB_TASK_MESSAGES}-message preservation limit."
+            )
+        lines.append(
+            "The transcript remains available in the session log; this note "
+            "preserves the latest user intent."
+        )
         body_length = len("\n".join(lines))
         if body_length >= body_limit:
             return "\n".join(lines)[:body_limit]
@@ -3356,7 +3368,7 @@ class ContextCompactionPlugin(BasePlugin):
         messages: List[ConversationMessage],
         *,
         live_task_ids: Optional[set[str]] = None,
-    ) -> tuple:
+    ) -> tuple[List[ConversationMessage], List[ConversationMessage], int]:
         """Keep only bounded excerpts for the latest messages of live tasks.
 
         Historical and superseded task messages remain summarizable. Explicit
@@ -3381,17 +3393,38 @@ class ContextCompactionPlugin(BasePlugin):
         latest_tasks = sorted(
             latest_by_task.values(), key=lambda entry: entry[0]
         )[-MAX_PRESERVED_HUB_TASK_MESSAGES:]
+        omitted_task_count = len(latest_by_task) - len(latest_tasks)
         preserved_by_index: Dict[int, ConversationMessage] = {}
         oversized_indices: set[int] = set()
         for index, msg in latest_tasks:
             content = str(getattr(msg, "content", "") or "")
+            task_id = (self._message_task_id(msg) or "unknown")[:128]
+            prefix = f"[Active TaskLedger task {task_id}; latest assignment excerpt]\n"
+            suffix = "\n[Remaining assignment text is summarized below.]"
+            metadata = getattr(msg, "metadata", None)
+            is_marked_excerpt = (
+                isinstance(metadata, dict)
+                and metadata.get("context_compaction_task_excerpt") is True
+            )
+            is_legacy_excerpt = (
+                len(content) == MAX_PRESERVED_HUB_TASK_CHARS
+                and content.startswith(prefix)
+                and content.endswith(suffix)
+            )
+            if is_marked_excerpt or is_legacy_excerpt:
+                normalized_content = content.removesuffix(suffix)
+                if normalized_content != content or is_legacy_excerpt:
+                    msg = copy.copy(msg)
+                    msg.content = normalized_content
+                    msg.metadata = {
+                        **(metadata or {}),
+                        "context_compaction_task_excerpt": True,
+                    }
+                    content = normalized_content
             if len(content) <= MAX_PRESERVED_HUB_TASK_CHARS:
                 preserved_by_index[index] = msg
                 continue
 
-            task_id = (self._message_task_id(msg) or "unknown")[:128]
-            prefix = f"[Active TaskLedger task {task_id}; latest assignment excerpt]\n"
-            suffix = "\n[Remaining assignment text is summarized below.]"
             excerpt_budget = max(
                 0, MAX_PRESERVED_HUB_TASK_CHARS - len(prefix) - len(suffix)
             )
@@ -3421,7 +3454,7 @@ class ContextCompactionPlugin(BasePlugin):
                 len(preserved),
                 len(summarizable),
             )
-        return preserved, summarizable
+        return preserved, summarizable, omitted_task_count
 
     def _format_messages_for_summary(self, messages: List[ConversationMessage]) -> str:
         """Format messages into a text block for summarization.
@@ -3555,8 +3588,8 @@ class ContextCompactionPlugin(BasePlugin):
             # --- Task-aware extraction ---
             # Separate hub task messages (preserved verbatim) from
             # regular conversation (summarized by LLM).
-            preserved_tasks, summarizable = self._extract_preservable_messages(
-                untracked_msgs
+            preserved_tasks, summarizable, _omitted_task_count = (
+                self._extract_preservable_messages(untracked_msgs)
             )
 
             # --- Deterministic coordination block (no LLM discretion) -----
