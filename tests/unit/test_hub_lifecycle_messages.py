@@ -248,6 +248,46 @@ async def test_acp_join_notice_never_reports_the_profile_model_when_options_fail
     assert "profile: main\n" in content
 
 
+@pytest.mark.asyncio
+async def test_acp_join_notice_waits_through_a_failed_options_read():
+    profile = SimpleNamespace(
+        name="main",
+        get_provider=lambda: "acp",
+        get_model=lambda: "profile-model",
+        get_effort=lambda: "low",
+    )
+    reads = 0
+
+    def options_fail_once():
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise RuntimeError("adapter did not answer")
+        return [
+            {"id": "model", "category": "model", "currentValue": "haiku"},
+            {"id": "thought_level", "category": "thought_level", "currentValue": "max"},
+        ]
+
+    harness = SimpleNamespace(active=True, advertised_config_options=options_fail_once)
+    event_bus = _EventBus(
+        {
+            "profile_manager": SimpleNamespace(get_active_profile=lambda: profile),
+            "acp_orchestrator": harness,
+        }
+    )
+    plugin = HubPlugin(event_bus=event_bus)
+    plugin._identity = _runtime("lapis", "lapis-id")
+    peer = _runtime("koordinator", "koordinator-id", name="koordinator")
+    plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+    await plugin._announce_to_peers([peer])
+
+    content = plugin._deliver_to_agent.await_args.args[1].content
+    assert "model: haiku\n" in content
+    assert "effort: max\n" in content
+    assert reads >= 3  # failed read, successful wait poll, and final notice read
+
+
 class _LateHarness:
     """The live startup order: the hub plugin starts and announces while the
     ACP runner has not opened its session yet, so its options are unreadable
@@ -303,9 +343,12 @@ async def test_acp_join_notice_waits_for_the_harness_session_to_open():
 async def test_acp_join_notice_stops_waiting_at_the_cap_and_omits_model_lines(monkeypatch):
     """Options that never arrive must not block arrival: after the cap the
     notice goes out without model and effort."""
-    monkeypatch.setattr("plugins.hub.plugin.ACP_ARRIVAL_OPTIONS_WAIT", 0.2)
+    monkeypatch.setattr("plugins.hub.plugin.ACP_ARRIVAL_OPTIONS_WAIT", 0.05)
     profile = SimpleNamespace(
-        name="main", get_provider=lambda: "acp", get_model=lambda: "", get_effort=lambda: ""
+        name="main",
+        get_provider=lambda: "acp",
+        get_model=lambda: "profile-model",
+        get_effort=lambda: "low",
     )
     harness = _LateHarness()  # never becomes active
     event_bus = _EventBus(
@@ -325,6 +368,8 @@ async def test_acp_join_notice_stops_waiting_at_the_cap_and_omits_model_lines(mo
     await asyncio.wait_for(announcing, timeout=5)
 
     content = plugin._deliver_to_agent.await_args.args[1].content
+    assert "profile-model" not in content
+    assert "effort: low" not in content
     assert "model:" not in content
     assert "effort:" not in content
 
