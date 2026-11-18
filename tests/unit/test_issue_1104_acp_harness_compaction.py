@@ -215,17 +215,62 @@ class TestAutomaticCompactOnAcpChat(unittest.IsolatedAsyncioTestCase):
 
         acp.submit.assert_awaited_once()
 
-    async def test_automatic_trigger_retries_after_compaction_submission_fails(self):
+    async def test_failed_threshold_compaction_backs_off_and_manual_remains_available(self):
         plugin, _llm, acp = _plugin()
-        acp.submit = AsyncMock(side_effect=[RuntimeError("temporary disconnect"), {"text": "compacted"}])
+        now = [100.0]
+        plugin._acp_monotonic = lambda: now[0]
+        acp.submit = AsyncMock(
+            side_effect=[
+                RuntimeError("threshold failure"),
+                RuntimeError("second threshold failure"),
+                {"text": "compacted"},
+                RuntimeError("next threshold failure"),
+                RuntimeError("manual failure"),
+                {"text": "compacted"},
+            ]
+        )
 
         plugin.acp_usage_updated(300_000, 1_000_000)
         await _settle(plugin)
         self.assertTrue(plugin._acp_compact_armed)
+        self.assertEqual(acp.submit.await_count, 1)
+
+        now[0] += 60
+        plugin.acp_usage_updated(300_000, 1_000_000)
+        await _settle(plugin)
+        self.assertEqual(acp.submit.await_count, 2)
 
         plugin.acp_usage_updated(300_000, 1_000_000)
         await _settle(plugin)
         self.assertEqual(acp.submit.await_count, 2)
+
+        now[0] += 119
+        plugin.acp_usage_updated(300_000, 1_000_000)
+        await _settle(plugin)
+        self.assertEqual(acp.submit.await_count, 2)
+
+        now[0] += 1
+        plugin.acp_usage_updated(300_000, 1_000_000)
+        await _settle(plugin)
+        self.assertEqual(acp.submit.await_count, 3)
+
+        plugin.acp_usage_updated(100_000, 1_000_000)
+        plugin.acp_usage_updated(300_000, 1_000_000)
+        await _settle(plugin)
+        self.assertEqual(acp.submit.await_count, 4)
+
+        plugin._compact_acp_harness("requested by user", ask=False)
+        await _settle(plugin)
+        self.assertEqual(acp.submit.await_count, 5)
+
+        plugin.acp_usage_updated(300_000, 1_000_000)
+        await _settle(plugin)
+        self.assertEqual(acp.submit.await_count, 5)
+
+        now[0] += 60
+        plugin.acp_usage_updated(300_000, 1_000_000)
+        await _settle(plugin)
+        self.assertEqual(acp.submit.await_count, 6)
 
     async def test_successful_manual_compaction_consumes_armed_trigger(self):
         plugin, _llm, acp = _plugin()
