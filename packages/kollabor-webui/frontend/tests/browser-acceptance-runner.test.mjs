@@ -207,6 +207,7 @@ test("the browser suite list is pinned and every suite script exists", () => {
     { name: "team-launch", script: "tests/team-launch-browser-acceptance.mjs" },
     { name: "remote-chat-lifecycle", script: "tests/remote-chat-lifecycle-browser-acceptance.mjs" },
     { name: "setup-guide", script: "tests/setup-guide-browser-acceptance.mjs" },
+    { name: "whats-new", script: "tests/whats-new-browser-acceptance.mjs" },
   ];
   assert.deepEqual(
     browserSuites.map(({ name, script }) => ({ name, script })),

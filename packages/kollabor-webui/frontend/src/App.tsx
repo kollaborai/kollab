@@ -127,6 +127,13 @@ import { LearnDialog } from "@/components/learn/LearnDialog";
 import { WhatsNewPage } from "@/components/updates/WhatsNewPage";
 import { navigateToLearn } from "@/learn/catalog";
 import { navigateToWhatsNew, pagePath, readMainPageRoute } from "@/utils/page-route";
+import { loadCanonicalWhatsNew } from "@/learn/changelog";
+import { WhatsNewDialog } from "@/whats-new/WhatsNewDialog";
+import {
+  decideWhatsNew,
+  readWhatsNewSeenRaw,
+  type DialogRelease,
+} from "@/whats-new/whats-new-model";
 
 function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current: number | null }) {
   return new Promise<void>((resolve) => {
@@ -500,6 +507,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [agentLibraryInitialTab, setAgentLibraryInitialTab] = useState<"rosters" | "teams">("rosters");
   const [setupGuideOpen, setSetupGuideOpen] = useState(false);
+  const [firstRun] = useState(noGuideYet);
+  const [whatsNewDialogOpen, setWhatsNewDialogOpen] = useState(false);
+  const [whatsNewRelease, setWhatsNewRelease] = useState<DialogRelease | null>(null);
   const [welcomeGuideNotice, setWelcomeGuideNotice] = useState(false);
   const openWelcomeGuide = useCallback(() => {
     setWelcomeGuideNotice(false);
@@ -1438,6 +1448,21 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         // First run: nothing to restore and no dismissal on record.
         setSetupGuideOpen(true);
       }
+      // What's New never competes with a first run's setup guide.
+      if (!firstRun) {
+        void (async () => {
+          const decision = decideWhatsNew({
+            result: await loadCanonicalWhatsNew(),
+            seenRaw: readWhatsNewSeenRaw(),
+            firstRun,
+          });
+          if (!mounted || operation !== operationRef.current) return;
+          if (decision.show && decision.release) {
+            setWhatsNewRelease(decision.release);
+            setWhatsNewDialogOpen(true);
+          }
+        })();
+      }
       setError(null);
     })()
       .catch((reason) => {
@@ -1451,7 +1476,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     return () => {
       mounted = false;
     };
-  }, [guardHistoryOpen, loadSessions, loadState, recoverPendingTurn, refreshAgentPool]);
+  }, [firstRun, guardHistoryOpen, loadSessions, loadState, recoverPendingTurn, refreshAgentPool]);
 
   // A default loadout belongs to the folder a session starts in: that folder's own project and local config can
   // set one. Ask again when the Workspace field changes, unless a model was picked by hand (#957).
@@ -1880,6 +1905,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           onDismiss={() => setWelcomeGuideNotice(true)}
           onOpenSettings={(tab) => openSettings({ tab })}
           onStartSession={() => void createSession()}
+        />
+        <WhatsNewDialog
+          open={whatsNewDialogOpen}
+          release={whatsNewRelease}
+          onOpenChange={setWhatsNewDialogOpen}
+          onSeeAllChanges={navigateToWhatsNew}
         />
         <PrChainDialog api={api} open={prChainOpen} onOpenChange={setPrChainOpen} />
         {activeSession ? (

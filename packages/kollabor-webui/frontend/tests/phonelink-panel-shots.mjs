@@ -126,9 +126,10 @@ try {
     ["1280", 1280, 860],
   ]) {
     const context = await browser.newContext({ viewport: { width, height } });
-    await context.addInitScript(() =>
-      localStorage.setItem("kollab.setup-guide.v1", JSON.stringify({ step: "done", dismissed: true })),
-    );
+    await context.addInitScript(() => {
+      localStorage.setItem("kollab.setup-guide.v1", JSON.stringify({ step: "done", dismissed: true }));
+      localStorage.setItem("kollab.whats-new.v1", JSON.stringify({ seenVersion: "999.999.999" }));
+    });
     const page = await context.newPage();
     page.on("console", (message) => {
       if (message.type() === "error") {
