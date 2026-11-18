@@ -57,6 +57,9 @@ class TestSlashCommandParser(unittest.TestCase):
         cases = [
             (r"/open C:\work\docs\notes.txt", [r"C:\work\docs\notes.txt"]),
             (r"/open \\server\share\notes.txt", [r"\\server\share\notes.txt"]),
+            (r"/open ..\work\docs\notes.txt", [r"..\work\docs\notes.txt"]),
+            (r"/open \work\docs\notes.txt", [r"\work\docs\notes.txt"]),
+            (r"/open folder\notes.txt", [r"folder\notes.txt"]),
             (
                 r'/open "C:\work\docs and notes.txt"',
                 [r"C:\work\docs and notes.txt"],
