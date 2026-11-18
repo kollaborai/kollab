@@ -48,7 +48,10 @@ const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH 
 for (const [name, width, height] of [["390", 390, 844], ["820", 820, 1180], ["1280", 1280, 860]]) {
   const context = await browser.newContext({ viewport: { width, height } });
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: base });
-  await context.addInitScript(() => localStorage.setItem("kollab.setup-guide.v1", "dismissed"));
+  await context.addInitScript(() => {
+    localStorage.setItem("kollab.setup-guide.v1", JSON.stringify({ step: "done", dismissed: true }));
+    localStorage.setItem("kollab.whats-new.v1", JSON.stringify({ seenVersion: "999.999.999" }));
+  });
   const page = await context.newPage();
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(`${name}px: ${message.text()}`);

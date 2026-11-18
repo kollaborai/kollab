@@ -153,6 +153,10 @@ except ImportError as _dns_import_err:
 logger = logging.getLogger(__name__)
 
 
+# How long an ACP agent's arrival notice waits for its harness to report the
+# session's config options before announcing without model and effort.
+ACP_ARRIVAL_OPTIONS_WAIT = 15.0
+
 MAX_CRYSTAL_BODY_CHARS = 2000
 
 
@@ -6664,9 +6668,19 @@ class HubPlugin(BasePlugin):
             if is_coordinator:
                 await self._try_assign_work()
 
-            # Announce ourselves to all existing agents (triggers their LLM)
+            # Announce ourselves to all existing agents (triggers their LLM).
+            # An ACP harness opens its session after hub startup (application
+            # starts the runner once the hub socket answers), so its notice
+            # waits for the harness options in a background task; waiting
+            # inline would deadlock the runner behind this startup task.
+            # A native profile announces inline exactly as before.
             if existing:
-                await self._announce_to_peers(existing)
+                if self._active_profile_is_acp():
+                    self._arrival_announce_task = asyncio.create_task(
+                        self._announce_arrival_when_ready(existing)
+                    )
+                else:
+                    await self._announce_to_peers(existing)
 
             # Launch org if --org CLI flag was passed
             if self._cli_args and hasattr(self._cli_args, "org") and self._cli_args.org:
@@ -8641,6 +8655,20 @@ class HubPlugin(BasePlugin):
             )
             await AgentMessenger.send_to_agent(dial_target, msg, auth=dial_auth)
 
+    async def _announce_arrival_when_ready(self, peers: List[AgentRuntime]) -> None:
+        """Fire-and-forget arrival announce for an ACP-profile agent.
+
+        The hub startup task must not await this: application startup waits for
+        the hub to be ready before it starts the ACP runner whose options the
+        announce waits for. Errors land in the log, as the inline path's did.
+        """
+        try:
+            await self._announce_to_peers(peers)
+        except Exception:
+            logger.error("Deferred arrival announce failed", exc_info=True)
+        finally:
+            self._arrival_announce_task = None
+
     async def _announce_to_peers(self, peers: List[AgentRuntime]) -> None:
         """Announce this agent to all existing peers, triggering their LLM.
 
@@ -8652,7 +8680,28 @@ class HubPlugin(BasePlugin):
         if not self._identity:
             return
 
+        if self._active_profile_is_acp():
+            # Startup runs the hub mesh before the ACP runner opens its
+            # session, so the harness's model and effort are unreadable at the
+            # announce point. Wait for them (capped) so peers see what the
+            # harness actually runs; a native profile never waits.
+            await self._wait_for_acp_options()
+
         profile_name, provider, model, effort = self._active_model_details()
+        agent_name, agent_description = self._active_agent_details()
+        # Only the values this agent has go out; an unknown one is left out.
+        details = "".join(
+            f"{label}: {value}\n"
+            for label, value in (
+                ("agent", agent_name),
+                ("agent description", agent_description),
+                ("model", model),
+                ("effort", effort),
+                ("provider", provider),
+                ("profile", profile_name),
+            )
+            if value
+        )
 
         # Build a summary of everyone on the hub for the announcement
         roster_lines = []
@@ -8673,10 +8722,7 @@ class HubPlugin(BasePlugin):
                     f"agent '{self._identity.identity}' just came online "
                     f"in project {self._identity.project}.\n"
                     f"cwd: {os.getcwd()}\n"
-                    f"model: {model or 'unknown'}\n"
-                    f"effort: {effort or 'default'}\n"
-                    f"provider: {provider or 'unknown'}\n"
-                    f"profile: {profile_name or 'unknown'}\n"
+                    f"{details}"
                     f"current hub roster:\n{roster_summary}\n"
                     f"if you need help with anything, let them know.\n"
                     f"respond back using: "
@@ -8691,7 +8737,105 @@ class HubPlugin(BasePlugin):
             logger.info(f"Announced to {peer.identity}")
 
     def _active_model_details(self) -> Tuple[str, str, str, str]:
-        """Return the active profile name, provider, model, and effort for notices."""
+        """Return the active profile name, provider, model, and effort for notices.
+
+        A running ACP harness is authoritative for model and effort, as in the
+        state overlay: the profile's fields do not describe what it runs.
+        """
+        profile_name, provider, model, effort = self._profile_model_details()
+        if self._active_profile_is_acp():
+            harness = self._acp_harness_model_effort()
+            if harness is None:
+                model, effort = "", ""
+            else:
+                model, effort = harness
+        else:
+            harness = self._acp_harness_model_effort()
+            if harness is not None:
+                model, effort = harness
+        return profile_name, provider, model, effort
+
+    def _acp_harness_model_effort(self) -> Optional[Tuple[str, str]]:
+        """Return (model, effort) the active ACP harness runs, or None without one."""
+        if not self.event_bus or not hasattr(self.event_bus, "get_service"):
+            return None
+        try:
+            acp = self.event_bus.get_service("acp_orchestrator")
+        except Exception as exc:
+            logger.debug("ACP orchestrator lookup for hub notice failed: %s", exc)
+            return None
+        if acp is None or getattr(acp, "active", False) is not True:
+            return None
+        try:
+            from kollabor_ai.acp_options import find_option
+
+            options = acp.advertised_config_options()
+            model_option = find_option(options, "model") or {}
+            effort_option = (
+                find_option(options, "thought_level")
+                or find_option(options, "effort")
+                or {}
+            )
+            return (
+                str(model_option.get("currentValue") or ""),
+                str(effort_option.get("currentValue") or ""),
+            )
+        except Exception as exc:
+            # A harness is running, so the profile's model and effort would be
+            # stale. Report both as unknown; the notice leaves unknowns out.
+            logger.debug("ACP harness model for hub notice unavailable: %s", exc)
+            return "", ""
+
+    def _active_profile_is_acp(self) -> bool:
+        """Whether the active profile runs an ACP harness whose arrival waits."""
+        if not self.event_bus or not hasattr(self.event_bus, "get_service"):
+            return False
+        try:
+            manager = self.event_bus.get_service("profile_manager")
+            profile = manager.get_active_profile() if manager else None
+            return bool(profile) and str(profile.get_provider() or "") == "acp"
+        except Exception:
+            return False
+
+    async def _wait_for_acp_options(self, timeout: Optional[float] = None) -> None:
+        """Wait until the ACP harness reports its config options, then return.
+
+        Returns without waiting once the harness is authoritative for model and
+        effort, or at the cap when nothing arrives; the caller then announces
+        with whatever it knows, so a silent harness never blocks arrival.
+        """
+        if timeout is None:
+            timeout = ACP_ARRIVAL_OPTIONS_WAIT
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            options = self._acp_harness_model_effort()
+            if options is not None and any(options):
+                return
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(0.1, remaining))
+
+    def _active_agent_details(self) -> Tuple[str, str]:
+        """Return the active agent bundle's name and one-line description, or blanks."""
+        if not self.event_bus or not hasattr(self.event_bus, "get_service"):
+            return "", ""
+        try:
+            agent_mgr = self.event_bus.get_service("agent_manager")
+            agent = agent_mgr.get_active_agent() if agent_mgr else None
+        except Exception as exc:
+            logger.debug("active agent lookup for hub notice failed: %s", exc)
+            return "", ""
+        if agent is None:
+            return "", ""
+        return (
+            str(getattr(agent, "name", "") or ""),
+            " ".join(str(getattr(agent, "description", "") or "").split()),
+        )
+
+    def _profile_model_details(self) -> Tuple[str, str, str, str]:
+        """Return the active profile name, provider, model, and effort."""
         if not self.event_bus or not hasattr(self.event_bus, "get_service"):
             return "", "", "", ""
         try:
@@ -18232,6 +18376,11 @@ class HubPlugin(BasePlugin):
         if bound_task is not None and not bound_task.done():
             bound_task.cancel()
             await asyncio.gather(bound_task, return_exceptions=True)
+        # A pending ACP arrival announce may still be waiting for its harness.
+        arrival_task = getattr(self, "_arrival_announce_task", None)
+        if arrival_task is not None and not arrival_task.done():
+            arrival_task.cancel()
+            await asyncio.gather(arrival_task, return_exceptions=True)
 
         # Parked busy messages (#483) must not vanish with the agent.  An
         # in-flight ACP RPC may already be on the wire, so shutdown signals its

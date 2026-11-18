@@ -760,6 +760,9 @@ export type PanelRow = {
   badges?: string[] | null;
   /** If set, only these row action ids are offered for the row. */
   actions?: string[] | null;
+  /** Per-row labels and confirmation copy for picker actions. */
+  action_labels?: Record<string, string> | null;
+  action_confirmations?: Record<string, string> | null;
 };
 
 type PanelBase = {
@@ -787,7 +790,14 @@ export type PanelPicker = PanelBase & {
   row_actions?: PanelAction[];
   toolbar_actions?: PanelAction[];
   controls?: PanelField[];
-  empty_groups?: { group: string; reason: string }[];
+  empty_groups?: {
+    group: string;
+    reason: string;
+    id?: string;
+    actions?: string[];
+    action_labels?: Record<string, string>;
+    action_confirmations?: Record<string, string>;
+  }[];
 };
 
 
