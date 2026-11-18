@@ -32,10 +32,21 @@ import { agentStatus, bundleName } from "@/components/panels/panel-model";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
+  loadComposerAttachments,
   loadComposerDraft,
+  loadPersistedComposerAttachments,
   queueComposerDraftSubmission,
+  saveComposerAttachments,
   saveComposerDraft,
 } from "@/composer-draft";
+import {
+  collectImageAttachments,
+  orphanImageNotice,
+  stripImageTokens,
+  stripLeadingImageTokens,
+} from "@/composer-restore";
+import { useShallow } from "zustand/shallow";
+import type { ThreadUserMessagePart } from "@assistant-ui/core";
 import {
   useVoiceMode,
   type VoiceActivity,
@@ -452,7 +463,7 @@ const ThreadScrollToBottom: FC = () => {
       <TooltipIconButton
         tooltip="Scroll to Bottom"
         variant="outline"
-        className="aui-thread-scroll-to-bottom z-10 self-center rounded-full p-4 disabled:invisible"
+        className="aui-thread-scroll-to-bottom z-10 self-center rounded-md p-4 disabled:invisible"
       >
         <ArrowDownIcon />
       </TooltipIconButton>
@@ -525,17 +536,108 @@ const Composer: FC<{
   );
   const isRunning = useAuiState((s) => s.thread.isRunning);
   const composerText = useAuiState((s) => s.composer.text);
+  const composerImages = useAuiState(
+    useShallow((s) => s.composer.attachments),
+  );
+  const [orphanTokenNotice, setOrphanTokenNotice] = useState<string | null>(
+    null,
+  );
   const restoredDraft = useRef<{ key: string | null; text: string } | null>(null);
+  const lastRestoredDraftKey = useRef<string | null | undefined>(undefined);
   const skipEmptyDraftPersist = useRef(false);
   const [busySubmitError, setBusySubmitError] = useState<string | null>(null);
 
   useLayoutEffect(() => {
+    let cancelled = false;
     const key = draftKey ?? null;
-    const text = loadComposerDraft(key) ?? "";
-    restoredDraft.current = { key, text };
+    // Capability changes can rerun this effect after the attachment adapter
+    // has already rewritten the image tokens. Restore each key once so a
+    // single retained image cannot be attached twice.
+    if (lastRestoredDraftKey.current === key) return;
+    // Token lines belong to attachments, and attachments do not live in the
+    // text draft. Strip them first, then restore what the same tab kept.
+    const restored = stripImageTokens(loadComposerDraft(key) ?? "");
+    restoredDraft.current = { key, text: restored.text };
     skipEmptyDraftPersist.current = false;
-    if (aui.composer.getState().text !== text) aui.composer.setText(text);
-  }, [aui, draftKey]);
+    if (aui.composer.getState().text !== restored.text) {
+      aui.composer.setText(restored.text);
+    }
+    const restoreImages = async () => {
+      const keptImages = loadComposerAttachments(key);
+      if (keptImages.length === 0) {
+        keptImages.push(...(await loadPersistedComposerAttachments(key)));
+      }
+      if (cancelled) return;
+      if (attachmentsEnabled || keptImages.length === 0) {
+        lastRestoredDraftKey.current = key;
+      }
+      setOrphanTokenNotice(
+        orphanImageNotice(restored.tokenCount, attachmentsEnabled ? keptImages.length : 0),
+      );
+      if (keptImages.length === 0 || !attachmentsEnabled) return;
+
+      // The runtime can put its own copy of the text back after the strip
+      // above, and text typed next to a bare token shares its line. Let the
+      // runtime finish its swap, then take the stale tokens off the text as
+      // it is right now.
+      await Promise.resolve();
+      if (cancelled) return;
+      const live = stripImageTokens(aui.composer.getState().text);
+      const inline = stripLeadingImageTokens(live.text, keptImages.length - live.tokenCount);
+      if (live.tokenCount + inline.count > 0) aui.composer.setText(inline.text);
+
+      // Re-add each kept image; the token synchronizer rewrites fresh
+      // [imageN] tokens, so text and attachments never disagree.
+      let restoredImageCount = 0;
+      for (const image of keptImages) {
+        try {
+          // Pending attachments restore through the adapter exactly as a
+          // manual attach does; complete ones come back as descriptors.
+          if (image.file instanceof File) {
+            await aui.composer.addAttachment(image.file);
+          } else {
+            await aui.composer.addAttachment({
+              type: "image",
+              name: image.name,
+              contentType: image.contentType,
+              content: [...(image.content ?? [])] as ThreadUserMessagePart[],
+            });
+          }
+          restoredImageCount += 1;
+        } catch {
+          // Continue restoring the remaining images after one fails.
+        }
+      }
+      if (!cancelled) {
+        setOrphanTokenNotice(
+          orphanImageNotice(restored.tokenCount, restoredImageCount),
+        );
+      }
+    };
+    void restoreImages();
+    return () => {
+      cancelled = true;
+    };
+  }, [aui, draftKey, attachmentsEnabled]);
+
+  // Keep the per-key image retention in step with the composer; a session
+  // switch drops the runtime, the next mount reads this back.
+  useEffect(() => {
+    // Do not let the initial empty composer erase IndexedDB while restoration
+    // is still reading this draft's stored attachments.
+    if (restoredDraft.current?.key === (draftKey ?? null)) return;
+    void saveComposerAttachments(
+      draftKey ?? null,
+      collectImageAttachments(composerImages),
+    );
+  }, [composerImages, draftKey]);
+
+  // The orphan notice describes the restored draft; the first user edit or
+  // send after the restore retires it.
+  useEffect(() => {
+    if (restoredDraft.current !== null) return;
+    setOrphanTokenNotice(null);
+  }, [composerText]);
 
   useEffect(() => {
     const key = draftKey ?? null;
@@ -983,6 +1085,14 @@ const Composer: FC<{
             data-slot="aui_composer-shell"
             className="flex w-full flex-col gap-2 rounded-(--composer-radius) bg-(--composer-bg) focus-within:bg-[color-mix(in_oklab,var(--color-muted)_45%,var(--color-background))] p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[background-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
           >
+            {orphanTokenNotice ? (
+              <p
+                role="status"
+                className="aui-composer-orphan-notice text-muted-foreground/90 px-1 text-xs leading-4"
+              >
+                {orphanTokenNotice}
+              </p>
+            ) : null}
             <ComposerAttachments />
             {voiceAvailable && terminalVoice.on ? (
               <VoiceStatus activity={terminalVoice.activity} />

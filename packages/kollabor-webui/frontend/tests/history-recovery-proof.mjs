@@ -254,7 +254,8 @@ const scenario = async (name, buildState, run, options = {}) => {
     ...(options.isMobile ? { isMobile: true, hasTouch: true, deviceScaleFactor: 1 } : {}),
   });
   await context.addInitScript(() => {
-    localStorage.setItem("kollab.setup-guide.v1", "dismissed");
+    localStorage.setItem("kollab.setup-guide.v1", JSON.stringify({ step: "done", dismissed: true }));
+    localStorage.setItem("kollab.whats-new.v1", JSON.stringify({ seenVersion: "999.999.999" }));
     window.__issue1142ProgrammaticScrolls = [];
     const log = (method, details) => {
       window.__issue1142ProgrammaticScrolls.push({ method, time: performance.now(), ...details });
