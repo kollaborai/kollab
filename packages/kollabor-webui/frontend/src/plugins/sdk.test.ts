@@ -219,6 +219,20 @@ describe("k.events", () => {
     expect(deps.request).not.toHaveBeenCalled();
   });
 
+  it("after dispose it cannot write the clipboard", async () => {
+    const writeText = vi.fn(async (_text: string) => {});
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    try {
+      const { k, dispose } = harness();
+      await expect(k.copy("before")).resolves.toBe(true);
+      dispose();
+      await expect(k.copy("after")).resolves.toBe(false);
+      expect(writeText.mock.calls).toEqual([["before"]]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("dispose closes the stream and turns every later call into a no-op", () => {
     const { k, deps, dispose, current } = harness();
     k.events.on("chain", () => {});
