@@ -215,9 +215,10 @@ async def test_acp_join_notice_reports_the_model_and_effort_the_harness_runs():
 
 
 @pytest.mark.asyncio
-async def test_acp_join_notice_never_reports_the_profile_model_when_options_fail():
+async def test_acp_join_notice_never_reports_the_profile_model_when_options_fail(monkeypatch):
     """A running harness whose options cannot be read must not fall back to the
     profile's model and effort: the profile does not describe what it runs."""
+    monkeypatch.setattr("plugins.hub.plugin.ACP_ARRIVAL_OPTIONS_WAIT", 0.05)
     profile = SimpleNamespace(
         name="main",
         get_provider=lambda: "acp",
