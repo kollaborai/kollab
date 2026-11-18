@@ -502,7 +502,7 @@ export function createPluginApi(entry: PluginEntry, deps: PluginApiDeps): { k: P
       if (isOpenTarget(target)) deps.open(target);
       else invalid("navigate", "the target is one of {page}, {modal}, {view} or {url}");
     },
-    copy: (text) => copyText(globalThis.navigator?.clipboard, String(text)),
+    copy: async (text) => (disposed ? false : copyText(globalThis.navigator?.clipboard, String(text))),
     toast(text) {
       const dismiss = notice({ text });
       setTimeout(dismiss, TOAST_MS);
