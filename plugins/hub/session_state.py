@@ -74,6 +74,20 @@ class SessionState:
         if not isinstance(data, dict):
             raise ValueError("Session state must be an object")
 
+        allowed_fields = {
+            "identity",
+            "open_files",
+            "investigation_notes",
+            "claimed_lanes",
+            "pending_promises",
+            "last_command",
+            "focus_file",
+            "saved_at",
+            "saved_at_human",
+        }
+        if set(data).difference(allowed_fields):
+            raise ValueError("Session state has unknown fields")
+
         for key in (
             "identity",
             "investigation_notes",
