@@ -61,9 +61,9 @@ class SlashCommandParser:
             # This handles quoted arguments properly: /save "my file.txt"
             try:
                 # POSIX shlex treats unquoted backslashes as escapes. Protect
-                # separators in unquoted Windows drive and UNC path arguments.
+                # separators in unquoted Windows drive, UNC, rooted, and relative paths.
                 command_text = re.sub(
-                    r"(?<!\S)(?:--?[\w-]+=)?(?:[A-Za-z]:\\|\\\\)[^\s]+",
+                    r"(?<!\S)(?:--?[\w-]+=)?(?:[A-Za-z]:\\[^\s]*|\\\\[^\s]*|\\[^\s]+|[^\s\\]+\\[^\s]+)",
                     lambda match: match.group(0).replace("\\", "\\\\"),
                     command_text,
                 )
