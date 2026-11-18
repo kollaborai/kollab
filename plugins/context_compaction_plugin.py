@@ -396,6 +396,9 @@ class ContextCompactionPlugin(BasePlugin):
         self._acp_threshold_crossing_pending = False
         self._acp_meter_session_key: tuple[Any, Any] | None = None
         self._acp_compaction_session_key: tuple[Any, Any] | None = None
+        self._acp_monotonic = time.monotonic
+        self._acp_compaction_failures = 0
+        self._acp_compaction_retry_after = 0.0
         # "Can't shrink" stop (see _should_compact): the swap sets just_applied, the
         # next reported prompt is the compacted one, shrink_floor holds it when it
         # was still over the threshold, tokens_at_trigger is what fired the round.
@@ -1864,6 +1867,8 @@ class ContextCompactionPlugin(BasePlugin):
 
         Kollab's copy of the history is never rewritten for an ACP chat (#1104).
         """
+        if reason == "threshold" and self._acp_monotonic() < self._acp_compaction_retry_after:
+            return "threshold compaction is waiting for its retry backoff"
         acp = self._acp_orchestrator()
         lookup = getattr(acp, "advertised_command", None)
         command = lookup("compact") if callable(lookup) else None
@@ -1929,12 +1934,19 @@ class ContextCompactionPlugin(BasePlugin):
             self._acp_compaction_session_key = None
             if reason == "threshold" and not succeeded:
                 self._acp_compact_armed = True
-            elif reason != "threshold":
-                if self._acp_threshold_crossing_pending:
-                    self._acp_compact_armed = not succeeded
-                    self._acp_threshold_crossing_pending = False
-                elif succeeded:
-                    self._acp_compact_armed = False
+                self._acp_compaction_failures += 1
+                backoff = min(60 * 2 ** min(self._acp_compaction_failures - 1, 5), 30 * 60)
+                self._acp_compaction_retry_after = self._acp_monotonic() + backoff
+            else:
+                if succeeded:
+                    self._acp_compaction_failures = 0
+                    self._acp_compaction_retry_after = 0.0
+                if reason != "threshold":
+                    if self._acp_threshold_crossing_pending:
+                        self._acp_compact_armed = not succeeded
+                        self._acp_threshold_crossing_pending = False
+                    elif succeeded:
+                        self._acp_compact_armed = False
             if retry_new_session:
                 self._acp_threshold_crossing_pending = False
                 self._acp_compact_armed = True
