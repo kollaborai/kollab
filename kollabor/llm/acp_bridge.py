@@ -703,6 +703,7 @@ class ACPRunner:
         self.persist_profile_resolution = persist_profile_resolution
         self.stderr_callback: Callable[[bytes], None] | None = None
         self.generation = 0
+        self.available_commands: list[dict[str, Any]] = []
         self._next_turn_id = 0
         self._active_turn_id = 0
         self._active_future: asyncio.Future[ACPResult] | None = None
@@ -937,6 +938,7 @@ class ACPRunner:
         self.initialize_metadata = dict(wire.get("_meta") or {})
         self.state = "opening"
         self.config_options = []
+        self.available_commands = []
         self.resume_mode = "fresh"
         session_caps = self.capabilities.get("sessionCapabilities") or {}
         if binding is not None and (binding.matches(cwd, self.profile.name, tuple(command)) or managed_upgrade):
@@ -1539,10 +1541,15 @@ class ACPRunner:
         return "".join(str(item.get("text", "")) for item in text_updates)
 
     async def _session_update(self, session_id: str, update: Any) -> None:
-        if self._replaying or session_id != self.session_id or self._active_generation != self.generation:
-            return
         payload = update.model_dump(by_alias=True) if hasattr(update, "model_dump") else {}
         kind = payload.get("sessionUpdate", payload.get("session_update", payload.get("type", "unknown")))
+        if kind == "available_commands_update" and self.session_id in (None, session_id):
+            # Current session state, not history: an adapter can advertise while a resumed session replays.
+            self.available_commands = [
+                dict(command) for command in payload.get("availableCommands") or [] if isinstance(command, dict)
+            ]
+        if self._replaying or session_id != self.session_id or self._active_generation != self.generation:
+            return
         if (kind in {"agent_message_chunk", "agent_thought_chunk"}
                 and self._active_turn_id and self._active_turn_id == self._cancelled_turn_id):
             # Prose flushed after the cancel was accepted was never shown
