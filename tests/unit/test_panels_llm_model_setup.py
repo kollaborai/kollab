@@ -95,7 +95,13 @@ async def test_llm_describe_groups_current_default_and_empty_providers(llm_ctx):
     assert rows["claude-x"]["group"] == "Models — Anthropic" and rows["claude-x"]["current"]
     assert not rows["gpt-y"]["current"]
     assert [g["group"] for g in panel["empty_groups"]] == ["Models — OpenRouter"]
-    assert {a["id"] for a in panel["row_actions"]} == {"activate", "edit", "set_default", "delete"}
+    assert {a["id"] for a in panel["row_actions"]} == {
+        "activate",
+        "edit",
+        "set_default",
+        "delete",
+        "remove_provider",
+    }
     assert {a["payload_key"] for a in panel["row_actions"]} == {"name"}
 
 
