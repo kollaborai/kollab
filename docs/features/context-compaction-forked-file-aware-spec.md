@@ -165,6 +165,8 @@ These guards apply to both the basic and forked strategies:
   An untracked hub request is eligible as human intent only when direct-scope
   recipient metadata names this agent. Raw hub task assignments with IDs are
   excluded; active work is represented by TaskLedger-selected excerpts above.
+  The recovery summary reports how many live-task messages the 24-message cap
+  omitted.
 - `max_session_turns` is a visible/logged warning, not an automatic stop. Its
   default is `0` (disabled); a positive configured value enables the warning.
   Turn count and start time persist with session stats, restore on resume, and

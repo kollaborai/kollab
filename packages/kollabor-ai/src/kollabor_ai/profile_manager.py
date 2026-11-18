@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -432,6 +433,23 @@ def _keyring_set(key_name: str, value: str) -> bool:
     except Exception:
         pass
     return _vault_call(key_name, value) is not None
+
+
+def _delete_keyring_entry(key_name: str) -> None:
+    """Delete a profile's stored key from the keyring and encrypted vault."""
+    _vault_call(key_name, delete=True)
+    try:
+        import keyring
+
+        from kollabor_ai.providers.security import APIKeyManager, keyring_enabled
+
+        if keyring_enabled():
+            try:
+                keyring.delete_password(APIKeyManager.SERVICE_NAME, key_name)
+            except keyring.errors.PasswordDeleteError:
+                pass
+    except Exception as exc:
+        logger.debug("Could not remove keyring entry for a removed profile: %s", exc)
 
 
 @dataclass
@@ -2762,6 +2780,230 @@ class ProfileManager:
         logger.info(f"Removed profile: {name}")
         return True
 
+    def remove_provider_profiles(self, provider: str) -> List[str]:
+        """Remove configured profiles for one provider from their source files.
+
+        Global and folder profiles are stored in separate config files. Remove
+        only definitions whose configured provider matches, then clear a
+        persisted active profile when that config selected a removed profile.
+        """
+        provider_name = str(provider or "").strip().lower()
+        if not provider_name:
+            return []
+
+        global_config_path = get_existing_global_config_path()
+        paths = [global_config_path]
+        paths.extend(get_local_config_path_candidates(self._local_folder))
+        unique_paths: List[Path] = []
+        seen_paths: set[Path] = set()
+        for path in paths:
+            resolved = path.resolve()
+            if resolved not in seen_paths:
+                seen_paths.add(resolved)
+                unique_paths.append(path)
+
+        removed: set[str] = set()
+        updates: List[tuple[Path, dict, set[str]]] = []
+        scanned_configs: List[tuple[Path, dict]] = []
+        original_config_text: dict[Path, str] = {}
+        for path in unique_paths:
+            if not path.exists():
+                continue
+            try:
+                original_text = path.read_text(encoding="utf-8")
+                config_data = json.loads(original_text)
+                if not isinstance(config_data, dict):
+                    continue
+                llm = config_data.get("kollabor", {}).get("llm", {})
+                profiles = llm.get("profiles", {}) if isinstance(llm, dict) else {}
+                if not isinstance(profiles, dict):
+                    continue
+                scanned_configs.append((path, config_data))
+                original_config_text[path.resolve()] = original_text
+                matching = {
+                    name
+                    for name, value in profiles.items()
+                    if isinstance(value, dict)
+                    and str(value.get("provider") or "").strip().lower() == provider_name
+                    and name not in self.DEFAULT_PROFILES
+                }
+                if matching:
+                    updates.append((path, config_data, matching))
+                    removed.update(matching)
+            except Exception as exc:
+                logger.error("Could not read provider config %s: %s", path, exc)
+                return []
+        if not removed:
+            return []
+
+        retained_names: set[str] = set()
+        retained_profiles: dict[str, LLMProfile] = {}
+        for _, config_data in scanned_configs:
+            llm = config_data.get("kollabor", {}).get("llm", {})
+            profiles = llm.get("profiles", {}) if isinstance(llm, dict) else {}
+            if not isinstance(profiles, dict):
+                continue
+            for name, value in profiles.items():
+                if (
+                    not isinstance(value, dict)
+                    or str(value.get("provider") or "").strip().lower()
+                    == provider_name
+                ):
+                    continue
+                retained_names.add(name)
+                try:
+                    retained_profiles[name] = LLMProfile.from_dict(name, value)
+                except Exception:
+                    logger.debug("Could not reload retained profile %s", name)
+
+        def active_profile_is_removed(llm: dict) -> bool:
+            active_name = llm.get("active_profile")
+            if active_name not in removed:
+                return False
+            profiles = llm.get("profiles", {})
+            active_profile = profiles.get(active_name) if isinstance(profiles, dict) else None
+            return not (
+                isinstance(active_profile, dict)
+                and str(active_profile.get("provider") or "").strip().lower()
+                != provider_name
+            )
+
+        updated_paths = {path.resolve() for path, _, _ in updates}
+        for path, config_data in scanned_configs:
+            if path.resolve() in updated_paths:
+                continue
+            llm = config_data.get("kollabor", {}).get("llm", {})
+            if isinstance(llm, dict) and active_profile_is_removed(llm):
+                updates.append((path, config_data, set()))
+
+        if len(updates) > 1:
+            logger.error(
+                "Provider profile removal would update multiple configs; refusing "
+                "to avoid a partial removal"
+            )
+            return []
+
+        staged_updates: List[tuple[Path, Path]] = []
+        try:
+            for path, config_data, matching in updates:
+                llm = config_data["kollabor"]["llm"]
+                profiles = llm["profiles"]
+                for name in matching:
+                    profiles.pop(name, None)
+                if active_profile_is_removed(llm):
+                    llm.pop("active_profile", None)
+
+                target_path = Path(os.path.realpath(path))
+                descriptor, staged_name = tempfile.mkstemp(
+                    prefix=f".{target_path.name}.",
+                    suffix=".provider-removal.tmp",
+                    dir=target_path.parent,
+                )
+                os.close(descriptor)
+                os.unlink(staged_name)
+                staged_path = Path(staged_name)
+                write_text_atomic(
+                    staged_path,
+                    json.dumps(config_data, indent=2, ensure_ascii=False),
+                )
+                staged_updates.append((path, staged_path))
+        except Exception as exc:
+            for _, staged_path in staged_updates:
+                try:
+                    staged_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            logger.error("Could not stage provider profile removal: %s", exc)
+            return []
+
+        committed: List[Path] = []
+        preflight_stages: List[Path] = []
+        try:
+            for path, _, _ in updates:
+                target_path = Path(os.path.realpath(path))
+                original_text = original_config_text[path.resolve()]
+                if target_path.read_text(encoding="utf-8") != original_text:
+                    raise RuntimeError(f"Provider config changed during removal: {path}")
+
+                descriptor, staged_name = tempfile.mkstemp(
+                    prefix=f".{target_path.name}.",
+                    suffix=".provider-removal-check.tmp",
+                    dir=target_path.parent,
+                )
+                staged_path = Path(staged_name)
+                preflight_stages.append(staged_path)
+                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                    stream.write(original_text)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(staged_path, target_path)
+        except Exception as exc:
+            logger.error("Could not preflight provider profile removal: %s", exc)
+            for staged_path in preflight_stages:
+                try:
+                    staged_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            for _, staged_path in staged_updates:
+                try:
+                    staged_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return []
+
+        try:
+            for path, staged_path in staged_updates:
+                os.replace(staged_path, os.path.realpath(path))
+                committed.append(path)
+        except Exception as exc:
+            logger.error("Could not commit provider profile removal: %s", exc)
+            for path in reversed(committed):
+                try:
+                    write_text_atomic(
+                        path, original_config_text[path.resolve()]
+                    )
+                except Exception as rollback_exc:
+                    try:
+                        path.write_text(
+                            original_config_text[path.resolve()], encoding="utf-8"
+                        )
+                    except Exception as fallback_exc:
+                        try:
+                            with open(path, "w", encoding="utf-8") as stream:
+                                stream.write(original_config_text[path.resolve()])
+                                stream.flush()
+                                os.fsync(stream.fileno())
+                        except Exception as final_restore_exc:
+                            logger.critical(
+                                "Could not restore provider config %s after a failed removal "
+                                "(atomic restore: %s; direct restore: %s; final restore: %s)",
+                                path,
+                                rollback_exc,
+                                fallback_exc,
+                                final_restore_exc,
+                            )
+            for _, staged_path in staged_updates:
+                try:
+                    staged_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return []
+
+        for name in removed:
+            if name in retained_profiles:
+                self._profiles[name] = retained_profiles[name]
+            elif name not in retained_names:
+                self._profiles.pop(name, None)
+        if self._active_profile_name in removed:
+            if self._active_profile_name not in retained_names:
+                self._active_profile_name = "default"
+        if (
+            self._pending_active_profile in removed
+            and self._pending_active_profile not in retained_names
+        ):
+            self._pending_active_profile = None
+        return sorted(removed)
+
     def update_profile(
         self,
         original_name: str,
@@ -3000,6 +3242,15 @@ class ProfileManager:
             True if this is the active profile
         """
         return name == self._active_profile_name
+
+    @property
+    def active_loadout_name(self) -> Optional[str]:
+        """The loadout the session started on or switched to (#1104), or None."""
+        return getattr(self, "_active_loadout_name", None)
+
+    @active_loadout_name.setter
+    def active_loadout_name(self, name: Optional[str]) -> None:
+        self._active_loadout_name = name
 
     @property
     def active_profile_name(self) -> str:

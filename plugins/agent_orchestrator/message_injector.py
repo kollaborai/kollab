@@ -82,9 +82,21 @@ class MessageInjector:
 
         try:
             # Emit pre-injection event (plugins can modify/block)
-            context = await self.event_bus.emit_with_hooks(
+            results = await self.event_bus.emit_with_hooks(
                 EventType.PRE_MESSAGE_INJECT, context, "message_injector"
             )
+            # Keep our context and apply any hook modifications from final_data.
+            # emit_with_hooks returns phase results, not the (possibly mutated) data.
+            final_data = (
+                results.get("post", {}).get("final_data")
+                or results.get("main", {}).get("final_data")
+                or results.get("pre", {}).get("final_data")
+                or context
+            )
+            if isinstance(final_data, dict):
+                context.update(final_data)
+            if results.get("cancelled"):
+                context["blocked"] = True
         except Exception as e:
             logger.debug(f"Pre-injection event error: {e}")
 

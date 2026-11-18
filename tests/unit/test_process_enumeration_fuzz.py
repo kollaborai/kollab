@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import psutil
 
+from kollabor.llm import acp_bridge
 from kollabor.llm.acp_bridge import ACPRunner
 from plugins.hub import network_halt as nh
 
@@ -291,7 +292,11 @@ def test_recursive_children_generated_trees_survive_races_safely(monkeypatch) ->
         runner = object.__new__(ACPRunner)
         runner._owned_processes = {root.pid: root}
 
-        runner._refresh_process_tree()
+        with monkeypatch.context() as patch:
+            # The owned-root walk runs only on Windows; POSIX cleanup uses the
+            # private process group and never scans the host process table.
+            patch.setattr(acp_bridge.os, "name", "nt")
+            runner._refresh_process_tree()
 
         recorded = runner._owned_processes
         assert recorded[root.pid] is root
