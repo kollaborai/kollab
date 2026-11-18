@@ -69,7 +69,7 @@ def test_only_latest_bounded_messages_for_live_tasks_are_preserved() -> None:
         open_latest,
     ]
 
-    preserved, summarizable = _plugin()._extract_preservable_messages(
+    preserved, summarizable, omitted_count = _plugin()._extract_preservable_messages(
         messages, live_task_ids={"active-1", "open-1"}
     )
 
@@ -78,6 +78,7 @@ def test_only_latest_bounded_messages_for_live_tasks_are_preserved() -> None:
     assert active_earlier in summarizable
     assert open_earlier in summarizable
     assert all(message in summarizable for message in archive)
+    assert omitted_count == 0
 
 
 def test_preservation_has_a_hard_cap_even_if_many_tasks_are_live() -> None:
@@ -87,25 +88,27 @@ def test_preservation_has_a_hard_cap_even_if_many_tasks_are_live() -> None:
     ]
     live_ids = {message.metadata["task_id"] for message in messages}
 
-    preserved, summarizable = _plugin()._extract_preservable_messages(
+    preserved, summarizable, omitted_count = _plugin()._extract_preservable_messages(
         messages, live_task_ids=live_ids
     )
 
     assert len(preserved) == MAX_PRESERVED_HUB_TASK_MESSAGES
     assert preserved == messages[-MAX_PRESERVED_HUB_TASK_MESSAGES:]
     assert summarizable == messages[:-MAX_PRESERVED_HUB_TASK_MESSAGES]
+    assert omitted_count == len(messages) - MAX_PRESERVED_HUB_TASK_MESSAGES
 
 
 def test_oversized_live_task_is_bounded_and_left_for_summary() -> None:
     message = _task_message("large-task", "x" * 20_000)
 
-    preserved, summarizable = _plugin()._extract_preservable_messages(
+    preserved, summarizable, omitted_count = _plugin()._extract_preservable_messages(
         [message], live_task_ids={"large-task"}
     )
 
     assert len(preserved) == 1
     assert len(preserved[0].content) <= MAX_PRESERVED_HUB_TASK_CHARS
     assert summarizable == [message]
+    assert omitted_count == 0
 
 
 def test_live_task_ids_include_assigned_paused_and_targeted_open_cards() -> None:
@@ -357,7 +360,7 @@ def test_150_live_tasks_stay_bounded_across_repeated_compaction_rounds() -> None
             if message.metadata.get("task_id")
         }
 
-        preserved, _summarizable = plugin._extract_preservable_messages(
+        preserved, _summarizable, _omitted_task_count = plugin._extract_preservable_messages(
             history, live_task_ids=live_ids
         )
         assert len(preserved) == MAX_PRESERVED_HUB_TASK_MESSAGES
@@ -498,7 +501,7 @@ def test_emergency_rollover_empty_open_state_clears_prior_item() -> None:
     plugin._keep_recent_count = MagicMock(return_value=1)
     plugin._find_split_point = MagicMock(return_value=3)
     plugin._get_live_task_ids = MagicMock(return_value=set())
-    plugin._extract_preservable_messages = MagicMock(return_value=([], []))
+    plugin._extract_preservable_messages = MagicMock(return_value=([], [], 0))
     plugin._build_emergency_summary = MagicMock(return_value="Recovery summary without state.")
     plugin._build_compacted_history = MagicMock(return_value=[])
     plugin._get_current_session_id = MagicMock(return_value="session")
@@ -513,6 +516,43 @@ def test_emergency_rollover_empty_open_state_clears_prior_item() -> None:
     assert result is True
     plugin._build_compacted_history.assert_called_once()
     assert plugin._build_compacted_history.call_args.kwargs["open_state"] == ""
+
+
+def test_emergency_rollover_reports_live_tasks_omitted_by_hard_cap() -> None:
+    history = [Message(role="system", content="system instructions")]
+    history.extend(
+        _task_message(f"live-{index}", f"[{index:02d}] small assignment")
+        for index in range(30)
+    )
+    history.append(Message(role="user", content="current request"))
+    live_ids = {f"live-{index}" for index in range(30)}
+    plugin = _plugin()
+    plugin._get_conversation_history = MagicMock(return_value=history)
+    plugin._keep_recent_count = MagicMock(return_value=1)
+    plugin._find_split_point = MagicMock(return_value=31)
+    plugin._get_live_task_ids = MagicMock(return_value=live_ids)
+    plugin._get_current_session_id = MagicMock(return_value="synthetic-session")
+    plugin._apply_pending_compaction = AsyncMock()
+    plugin._log_compaction_event = AsyncMock()
+    plugin._effective_prompt_tokens = MagicMock(return_value=0)
+    plugin._compaction_round = 0
+    plugin._last_summarization_model = None
+
+    asyncio.run(plugin._rollover_with_summary({}, None, boundary="turn"))
+
+    compacted_text = "\n".join(
+        str(message.content) for message in plugin._pending_compaction
+    )
+    present = sum(
+        1 for index in range(30) if f"[{index:02d}] small assignment" in compacted_text
+    )
+    assert present == MAX_PRESERVED_HUB_TASK_MESSAGES
+    omitted_count = 30 - MAX_PRESERVED_HUB_TASK_MESSAGES
+    assert (
+        f"{omitted_count} live task messages were omitted by the "
+        f"{MAX_PRESERVED_HUB_TASK_MESSAGES}-message preservation limit"
+        in compacted_text
+    )
 
 
 def test_emergency_summary_prioritizes_request_and_filters_stale_tasks() -> None:
@@ -575,7 +615,7 @@ def test_emergency_summary_prioritizes_request_and_filters_stale_tasks() -> None
     assert "OLD_TASK_REMINDER_CANARY" not in recovery_text
 
     live_ids = {f"live-{index:02}" for index in range(22)} | {"live-22"}
-    preserved, _ = plugin._extract_preservable_messages(
+    preserved, _, _omitted_task_count = plugin._extract_preservable_messages(
         history, live_task_ids=live_ids
     )
     current_excerpt = next(
