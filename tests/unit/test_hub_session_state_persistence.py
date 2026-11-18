@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from plugins.hub.plugin import HubPlugin
-from plugins.hub.session_state import SessionStateManager
+from plugins.hub.session_state import SessionState, SessionStateManager
 
 
 class TestHubSessionStatePersistence(unittest.TestCase):
@@ -62,6 +62,18 @@ class TestHubSessionStatePersistence(unittest.TestCase):
                 self.vault_dir, {"last_command": "resume"}
             )
         )
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_save_state_preserves_invalid_existing_data(self):
+        path = self._state_path()
+        original = b'{"future_field":"keep this"}'
+        path.write_bytes(original)
+
+        saved = self.manager.save_state(
+            self.vault_dir, SessionState(focus_file="replacement.py")
+        )
+
+        self.assertFalse(saved)
         self.assertEqual(path.read_bytes(), original)
 
     def test_read_error_is_not_reported_as_absent(self):
