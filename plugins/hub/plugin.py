@@ -94,7 +94,7 @@ from .rosters import (
     split_ref,
 )
 from .scratchpad import Scratchpad
-from .session_state import SessionState, SessionStateManager
+from .session_state import SessionState, SessionStateError, SessionStateManager
 from .startup_messages import HUB_NEW_FEATURES, choose_startup_tip
 from .supervisor import (
     DEFAULT_ALERT_COOLDOWN,
@@ -4742,7 +4742,15 @@ class HubPlugin(BasePlugin):
             )
 
         content = tool_data.get("content", "")
-        self._scratchpad.write(content)
+        try:
+            self._scratchpad.write(content)
+        except (OSError, UnicodeError):
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="scratchpad",
+                success=False,
+                error="scratchpad write failed",
+            )
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="scratchpad",
@@ -4763,7 +4771,15 @@ class HubPlugin(BasePlugin):
             )
 
         content = tool_data.get("content", "")
-        self._scratchpad.append(content)
+        try:
+            self._scratchpad.append(content)
+        except (OSError, UnicodeError):
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="scratchpad_append",
+                success=False,
+                error="scratchpad append failed",
+            )
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="scratchpad_append",
@@ -4783,7 +4799,15 @@ class HubPlugin(BasePlugin):
                 error="scratchpad not initialized",
             )
 
-        self._scratchpad.clear()
+        try:
+            self._scratchpad.clear()
+        except OSError:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="scratchpad_clear",
+                success=False,
+                error="scratchpad clear failed",
+            )
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
             tool_type="scratchpad_clear",
@@ -4806,7 +4830,15 @@ class HubPlugin(BasePlugin):
         # Scratchpad files survive longer than their intended session scope.
         # Treat old reminder/task prose as archived evidence on read so a
         # fresh agent cannot revive it through the tool path.
-        content = sanitize_rebirth_text(self._scratchpad.get())
+        try:
+            content = sanitize_rebirth_text(self._scratchpad.get())
+        except (OSError, UnicodeError):
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="scratchpad_get",
+                success=False,
+                error="scratchpad read failed",
+            )
         preview = content[:200] if content else "(empty)"
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
@@ -4831,7 +4863,7 @@ class HubPlugin(BasePlugin):
         json_str = tool_data.get("json_str", "")
         try:
             if state is not None:
-                updates = {"state": state}
+                updates = {"investigation_notes": state}
             else:
                 updates = json.loads(json_str)
             self._session_state_mgr.update_state(self._vault._vault_dir, updates)
@@ -4841,12 +4873,19 @@ class HubPlugin(BasePlugin):
                 success=True,
                 output=f"saved: {list(updates.keys())}",
             )
-        except json.JSONDecodeError as e:
+        except SessionStateError as e:
             return ToolExecutionResult(
                 tool_id=tool_data.get("id", "unknown"),
                 tool_type="state_update",
                 success=False,
-                error=f"invalid json: {e}",
+                error=str(e)[:240],
+            )
+        except json.JSONDecodeError:
+            return ToolExecutionResult(
+                tool_id=tool_data.get("id", "unknown"),
+                tool_type="state_update",
+                success=False,
+                error="invalid json input",
             )
 
     async def _handle_task_checkpoint_tool(self, tool_data: dict):
@@ -18355,7 +18394,10 @@ class HubPlugin(BasePlugin):
                     last_command="",
                     focus_file=getattr(self._identity, "current_task", ""),
                 )
-                self._session_state_mgr.save_state(self._vault._vault_dir, state)
+                if not self._session_state_mgr.save_state(
+                    self._vault._vault_dir, state
+                ):
+                    logger.error("Session state save on shutdown failed")
             except Exception as e:
                 logger.error(f"Session state save on shutdown failed: {e}")
 
