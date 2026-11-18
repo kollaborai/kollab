@@ -18362,7 +18362,10 @@ class HubPlugin(BasePlugin):
                     last_command="",
                     focus_file=getattr(self._identity, "current_task", ""),
                 )
-                self._session_state_mgr.save_state(self._vault._vault_dir, state)
+                if not self._session_state_mgr.save_state(
+                    self._vault._vault_dir, state
+                ):
+                    logger.error("Session state save on shutdown failed")
             except Exception as e:
                 logger.error(f"Session state save on shutdown failed: {e}")
 

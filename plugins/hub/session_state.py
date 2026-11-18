@@ -343,6 +343,7 @@ class SessionStateManager:
             path = self._state_path(vault_dir)
             with self._write_lock:
                 with locked_file(self._state_lock_path(path), private=True):
+                    self._load_state_unlocked(path)
                     return self._save_state_unlocked(path, state)
         except Exception as e:
             logger.warning("Session state save error: %s", type(e).__name__)
