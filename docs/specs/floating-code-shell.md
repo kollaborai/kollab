@@ -22,7 +22,7 @@ browser  ->  engine  /sessions/{id}/code/*   ->  session.state.code_call(op, par
   resolved and must sit inside that folder (closed-prefix check, symlinks followed; anything else is 403).
 - RPC: `state.code_call` (`kollabor/state/handlers.py`), answered like every other state call, local or remote.
 - A daemon older than this change answers `RpcMethodNotFound`; the engine turns that into 502 `daemon_outdated` (never
-  exception text). Terminal, Code and Git use the chat's recovery notice: an agent with no published version gets the
+  exception text). Terminal, Code and Git use the chat's recovery notice (also when the folder-list request that opens Code and Git is the one refused): an agent with no published version gets the
   stop-and-start instruction; a versioned agent gets Restart Agent when `kollabor.updates.restart_agents` is on or
   `/restart` when it is off. Terminal hides Retry for `daemon_outdated` because retrying the same daemon cannot work.
 

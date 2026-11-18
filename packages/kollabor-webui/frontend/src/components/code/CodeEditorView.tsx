@@ -8,7 +8,8 @@ import { claimEditorWorkspace, invalidateEditorSession, setEditorOwner, setEdito
 import { codeFetch, setCodeRoot, setCodeSession, unwrapCodeData } from "@/lib/code-fetch";
 import { cn } from "@/lib/utils";
 import { GitPanel } from "@/components/code/git/GitPanel";
-import type { DaemonNoticeProps } from "@/components/code/DaemonNotice";
+import { DaemonNotice, type DaemonNoticeProps } from "@/components/code/DaemonNotice";
+import { isDaemonOutdated } from "@/components/terminal/terminal-env";
 import { openWorkspaceDiff } from "@/components/code/open-file";
 import { EditorConfigPanel } from "@/components/code/editor-config";
 import { isDirty, useEditorStore } from "@/components/code/editor-store";
@@ -68,6 +69,7 @@ export function CodeEditorView(props: CodeEditorViewProps) {
   const [selected, setSelected] = useState("");
   const [browsing, setBrowsing] = useState(false);
   const [error, setError] = useState("");
+  const [outdated, setOutdated] = useState(false);
   const requestContext = JSON.stringify([props.device ?? "", props.sessionId]);
   useLayoutEffect(() => {
     setCodeSession(props.sessionId);
@@ -80,14 +82,24 @@ export function CodeEditorView(props: CodeEditorViewProps) {
     setLoadedContext("");
     setBrowsing(false);
     setError("");
+    setOutdated(false);
     void codeFetch("/code/folders", {}, { sessionId: props.sessionId, root: "" }).then(async (response) => {
-      if (!response.ok) throw new Error("Could not load folders from this agent.");
+      if (!response.ok) {
+        // An agent started before 0.22.0 answers 502 daemon_outdated: show the restart notice, not the generic dead end.
+        const raw: unknown = await response.json().catch(() => null);
+        if (isDaemonOutdated(raw)) {
+          if (!cancelled) setOutdated(true);
+          return;
+        }
+        throw new Error("Could not load folders from this agent.");
+      }
       const data = unwrapCodeData<{ folders: { path: string; branch: string }[]; default: string }>(await response.json());
       if (!cancelled) { setFolders(data.folders); setSelected(data.default); setLoadedContext(requestContext); }
     }).catch(() => { if (!cancelled) setError("Could not load folders from this agent. Restart it and try again."); });
     return () => { cancelled = true; };
   }, [props.sessionId, requestContext]);
   if (loadedContext && loadedContext !== requestContext) return <div className="p-3 text-sm text-muted-foreground">Loading folders…</div>;
+  if (outdated) return <DaemonNotice {...props.daemonNotice} />;
   if (error) return <div role="alert" className="p-3 text-sm text-destructive">{error}</div>;
   if (!folders || !selected) return <div className="p-3 text-sm text-muted-foreground">Loading folders…</div>;
   const choices = folders.some((folder) => folder.path === selected) ? folders : [...folders, { path: selected, branch: "" }];
