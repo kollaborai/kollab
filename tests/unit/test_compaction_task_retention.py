@@ -53,6 +53,29 @@ def _plugin(identity: str | None = None) -> ContextCompactionPlugin:
     return plugin
 
 
+def test_unmarked_task_body_that_resembles_legacy_excerpt_is_preserved() -> None:
+    task_id = "live-task-literal"
+    content = (
+        f"[Active TaskLedger task {task_id}; latest assignment excerpt]\n"
+        "Literal assignment text.\n"
+        "[Remaining assignment text is summarized below.]"
+    )
+    message = Message(
+        content=content,
+        metadata={
+            "hub_message": True,
+            "hub_is_intended": True,
+            "task_id": task_id,
+        },
+    )
+    preserved, _summarizable, _omitted = _plugin()._extract_preservable_messages(
+        [message], live_task_ids={task_id}
+    )
+
+    assert preserved[0].content == content
+    assert preserved[0].metadata.get("context_compaction_task_excerpt") is not True
+
+
 def test_only_latest_bounded_messages_for_live_tasks_are_preserved() -> None:
     archive = [
         _task_message(f"closed-{index}", f"archived task {index}")
@@ -436,7 +459,29 @@ def test_run_compaction_preserves_bounded_active_taskledger_messages() -> None:
     )
     history = [Message(role="system", content="Synthetic system prompt")]
     history.extend(
-        _task_message(task_id, "assignment body " + "x" * 6_000) for task_id in task_ids
+        _task_message(task_id, "assignment body " + "x" * 6_000)
+        for task_id in task_ids[:-1]
+    )
+    legacy_task_id = task_ids[-1]
+    legacy_prefix = (
+        f"[Active TaskLedger task {legacy_task_id}; latest assignment excerpt]\n"
+    )
+    legacy_suffix = "\n[Remaining assignment text is summarized below.]"
+    legacy_budget = (
+        MAX_PRESERVED_HUB_TASK_CHARS - len(legacy_prefix) - len(legacy_suffix)
+    )
+    legacy_assignment = "Historical assignment text. " + "x" * (legacy_budget + 100)
+    legacy_excerpt = legacy_prefix + legacy_assignment[:legacy_budget] + legacy_suffix
+    assert len(legacy_excerpt) == MAX_PRESERVED_HUB_TASK_CHARS
+    history.append(
+        Message(
+            content=legacy_excerpt,
+            metadata={
+                "hub_message": True,
+                "hub_is_intended": True,
+                "task_id": legacy_task_id,
+            },
+        )
     )
     history.extend(
         [
@@ -459,13 +504,24 @@ def test_run_compaction_preserves_bounded_active_taskledger_messages() -> None:
     preserved = [
         message
         for message in compacted
-        if message.metadata.get("context_compaction_task_excerpt")
+        if message.metadata.get("task_id") in task_ids
     ]
+    legacy_excerpt = next(
+        message for message in preserved if message.metadata["task_id"] == legacy_task_id
+    )
+    assert "summarized below" not in legacy_excerpt.content, (
+        "summarized below is still present in the legacy excerpt"
+    )
     assert len(preserved) == MAX_PRESERVED_HUB_TASK_MESSAGES
     assert [message.metadata["task_id"] for message in preserved] == task_ids[-24:]
     assert all(
         len(message.content) <= MAX_PRESERVED_HUB_TASK_CHARS for message in preserved
     )
+    assert all(
+        message.metadata.get("context_compaction_task_excerpt") is True
+        for message in preserved
+    )
+    assert "Historical assignment text." in legacy_excerpt.content
     assert plugin._estimate_history_tokens(compacted) < 272_000
     assert plugin._call_summarization_llm.await_count == 1
     assert plugin._log_compaction_event.await_args.kwargs["tasks_preserved"] == 24

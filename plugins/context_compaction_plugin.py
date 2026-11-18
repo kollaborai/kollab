@@ -3398,13 +3398,33 @@ class ContextCompactionPlugin(BasePlugin):
         oversized_indices: set[int] = set()
         for index, msg in latest_tasks:
             content = str(getattr(msg, "content", "") or "")
+            task_id = (self._message_task_id(msg) or "unknown")[:128]
+            prefix = f"[Active TaskLedger task {task_id}; latest assignment excerpt]\n"
+            suffix = "\n[Remaining assignment text is summarized below.]"
+            metadata = getattr(msg, "metadata", None)
+            is_marked_excerpt = (
+                isinstance(metadata, dict)
+                and metadata.get("context_compaction_task_excerpt") is True
+            )
+            is_legacy_excerpt = (
+                len(content) == MAX_PRESERVED_HUB_TASK_CHARS
+                and content.startswith(prefix)
+                and content.endswith(suffix)
+            )
+            if is_marked_excerpt or is_legacy_excerpt:
+                normalized_content = content.removesuffix(suffix)
+                if normalized_content != content or is_legacy_excerpt:
+                    msg = copy.copy(msg)
+                    msg.content = normalized_content
+                    msg.metadata = {
+                        **(metadata or {}),
+                        "context_compaction_task_excerpt": True,
+                    }
+                    content = normalized_content
             if len(content) <= MAX_PRESERVED_HUB_TASK_CHARS:
                 preserved_by_index[index] = msg
                 continue
 
-            task_id = (self._message_task_id(msg) or "unknown")[:128]
-            prefix = f"[Active TaskLedger task {task_id}; latest assignment excerpt]\n"
-            suffix = "\n[Remaining assignment text is summarized below.]"
             excerpt_budget = max(
                 0, MAX_PRESERVED_HUB_TASK_CHARS - len(prefix) - len(suffix)
             )
