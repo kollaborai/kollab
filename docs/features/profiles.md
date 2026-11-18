@@ -411,6 +411,17 @@ kollab --llm openai-auto --save --local
 
 Profiles are stored in `config.json`:
 
+To remove a provider and its saved profiles, open `/llm`, select any model in
+that provider's section, and press `d` twice. The first press names the
+profiles and loadouts that use them; any other key cancels. The same provider
+removal action is available in web Settings → Loadouts. Removal deletes profile
+definitions from the global or folder config files that define them and clears
+`active_profile` when it selected one of those profiles. Saved keys are
+retained because another project's config may reference the same key. To avoid
+partial removal if a later config write fails, the operation refuses to proceed
+when it would need to update more than one config file; in that case, no profile
+definitions or active selections are changed.
+
 ```json
 {
   "kollabor": {
