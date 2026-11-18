@@ -31,6 +31,11 @@ class BundledAgentIdentityTest(unittest.TestCase):
                     for line in prompt.splitlines()
                     if line.strip().lower().startswith("i am ")
                 ]
+                self.assertEqual(
+                    len(identities),
+                    1,
+                    f"expected exactly one identity line, got {identities!r}",
+                )
                 header = (agent_dir / "sections" / "00-header.md").read_text(
                     encoding="utf-8"
                 )
