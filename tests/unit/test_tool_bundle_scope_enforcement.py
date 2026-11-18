@@ -2,7 +2,7 @@
 
 import asyncio
 
-from kollabor_agent.tool_executor import ToolExecutor
+from kollabor_agent.tool_executor import ToolExecutionResult, ToolExecutor
 
 
 def _run_async(coro):
@@ -25,6 +25,20 @@ def _make_executor() -> ToolExecutor:
         terminal_timeout=30,
         mcp_timeout=30,
     )
+
+
+class _FakeEventBus:
+    async def emit_with_hooks(self, *args, **kwargs):
+        return {}
+
+
+class _FakeMCPIntegration:
+    tool_registry = {
+        "allowed_tool": {"server": "demo-server", "enabled": True},
+    }
+
+    async def call_mcp_tool(self, tool_name, arguments, timeout=None):
+        return {"output": f"called {tool_name}"}
 
 
 class TestBundleScopeEnforcement:
@@ -229,16 +243,20 @@ class TestInternalTypeBypass:
             terminal_timeout=30,
             mcp_timeout=30,
         )
-        executor.set_bundle_scope(["terminal"])  # Only terminal, not sub-types
+        executor.set_bundle_scope(["file-read"])  # No terminal access
         return executor
 
-    def test_terminal_status_bypasses_scope(self):
+    def test_terminal_status_requires_terminal_scope(self):
         executor = self._make_scoped_executor()
-        assert executor._check_bundle_scope("terminal_status") is None
+        error = executor._check_bundle_scope("terminal_status")
+        assert error is not None
+        assert "terminal" in error
 
-    def test_terminal_output_bypasses_scope(self):
+    def test_terminal_output_requires_terminal_scope(self):
         executor = self._make_scoped_executor()
-        assert executor._check_bundle_scope("terminal_output") is None
+        error = executor._check_bundle_scope("terminal_output")
+        assert error is not None
+        assert "terminal" in error
 
     def test_terminal_send_requires_an_explicit_bundle_grant(self):
         executor = self._make_scoped_executor()
@@ -247,9 +265,50 @@ class TestInternalTypeBypass:
         executor.set_bundle_scope(["terminal", "terminal-send"])
         assert executor._check_bundle_scope("terminal_send") is None
 
-    def test_terminal_kill_bypasses_scope(self):
+    def test_terminal_kill_requires_terminal_scope(self):
         executor = self._make_scoped_executor()
-        assert executor._check_bundle_scope("terminal_kill") is None
+        error = executor._check_bundle_scope("terminal_kill")
+        assert error is not None
+        assert "terminal" in error
+
+    def test_scoped_agent_cannot_access_operator_started_session(self):
+        async def run_attempt(tool_type):
+            executor = self._make_scoped_executor()
+            dispatched = False
+
+            class EventBus:
+                async def emit_with_hooks(self, *args, **kwargs):
+                    return {}
+
+            executor.event_bus = EventBus()
+
+            async def terminal_dispatch(tool_data):
+                nonlocal dispatched
+                dispatched = True
+                return ToolExecutionResult(
+                    tool_id=tool_data["id"],
+                    tool_type=tool_data["type"],
+                    success=True,
+                )
+
+            executor._execute_terminal_command = terminal_dispatch
+            result = await executor._execute_tool_inner(
+                {
+                    "id": f"operator-session-{tool_type}",
+                    "type": tool_type,
+                    "name": tool_type,
+                    "session_id": "operator-session",
+                    "session_name": "operator-session",
+                }
+            )
+
+            assert result.success is False
+            assert result.metadata["scope_denied"] is True
+            assert "terminal" in result.error
+            assert dispatched is False
+
+        for tool_type in ("terminal_status", "terminal_output", "terminal_kill"):
+            _run_async(run_attempt(tool_type))
 
     def test_mcp_tool_is_denied_without_mcp_grant(self):
         executor = self._make_scoped_executor()
@@ -261,6 +320,80 @@ class TestInternalTypeBypass:
         executor = self._make_scoped_executor()
         executor.set_bundle_scope(["terminal", "mcp-tool"])
         assert executor._check_bundle_scope("mcp_tool") is None
+
+    def test_mcp_tool_is_allowed_by_concrete_tool_name(self):
+        executor = self._make_scoped_executor()
+        executor.set_bundle_scope(["terminal", "allowed_tool"])
+        assert (
+            executor._check_bundle_scope("mcp_tool", tool_name="allowed_tool") is None
+        )
+
+    def test_mcp_tool_is_allowed_by_server_qualified_name(self):
+        executor = ToolExecutor(
+            mcp_integration=_FakeMCPIntegration(),
+            event_bus=None,
+            terminal_timeout=30,
+            mcp_timeout=30,
+        )
+        executor.set_bundle_scope(["mcp:demo-server:allowed_tool"])
+        assert (
+            executor._check_bundle_scope("mcp_tool", tool_name="allowed_tool") is None
+        )
+
+    def test_execute_tool_uses_concrete_mcp_scope(self):
+        executor = ToolExecutor(
+            mcp_integration=_FakeMCPIntegration(),
+            event_bus=_FakeEventBus(),
+            terminal_timeout=30,
+            mcp_timeout=30,
+        )
+        executor.set_bundle_scope(["allowed_tool"])
+
+        result = _run_async(
+            executor.execute_tool(
+                {
+                    "id": "mcp-1",
+                    "type": "mcp_tool",
+                    "name": "allowed_tool",
+                    "arguments": {},
+                }
+            )
+        )
+
+        assert result.success is True
+        assert result.output == "called allowed_tool"
+        assert result.metadata.get("scope_denied") is None
+
+    def test_execute_tool_uses_server_qualified_mcp_scope(self):
+        executor = ToolExecutor(
+            mcp_integration=_FakeMCPIntegration(),
+            event_bus=_FakeEventBus(),
+            terminal_timeout=30,
+            mcp_timeout=30,
+        )
+        executor.set_bundle_scope(["mcp:demo-server:allowed_tool"])
+
+        result = _run_async(
+            executor.execute_tool(
+                {
+                    "id": "mcp-2",
+                    "type": "mcp_tool",
+                    "name": "allowed_tool",
+                    "arguments": {},
+                }
+            )
+        )
+
+        assert result.success is True
+        assert result.output == "called allowed_tool"
+        assert result.metadata.get("scope_denied") is None
+
+    def test_mcp_tool_rejects_unlisted_concrete_tool_name(self):
+        executor = self._make_scoped_executor()
+        executor.set_bundle_scope(["terminal", "other_tool"])
+        error = executor._check_bundle_scope("mcp_tool", tool_name="allowed_tool")
+        assert error is not None
+        assert "mcp-tool" in error
 
     def test_mcp_tool_is_allowed_with_explicit_tool_name_grant(self):
         executor = self._make_scoped_executor()

@@ -322,6 +322,8 @@ Use `/llm` to switch without restarting:
 ```
 
 Profile switch takes effect immediately for the next message.
+An OAuth refresh already in progress stays bound to the profile that started
+it, so a later switch keeps its own API key and account headers.
 
 ## Complete Example: Three Profiles
 

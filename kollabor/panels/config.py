@@ -150,7 +150,10 @@ def build_config_sections(
 # -- saving ---------------------------------------------------------------------
 
 
-def apply_config_changes(config_service: Any, changes: Mapping[str, Any], target: str) -> bool:
+def apply_config_changes(
+    config_service: Any, changes: Mapping[str, Any], target: str, *,
+    route_builtin: bool = True, atomic: bool = False,
+) -> bool:
     """Save ``{config_path: value}`` to ``target`` ("local" or "global").
 
     Every config save, from the terminal or the browser, goes through here: set
@@ -160,21 +163,60 @@ def apply_config_changes(config_service: Any, changes: Mapping[str, Any], target
     """
     if not changes:
         return True
+    builtin_changes = {}
     try:
         from kollabor_plugins.settings import apply_config_changes as apply_plugin_changes
 
         changes = apply_plugin_changes(dict(changes))
+        if route_builtin and any(key.startswith("plugins.") for key in changes):
+            from kollabor_plugins.registry import plugin_entries
+            from kollabor_plugins.settings import save, set_enabled
+
+            paths = {}
+            for entry in plugin_entries():
+                if entry.get("kind") != "built-in" or not isinstance(entry.get("id"), str):
+                    continue
+                plugin_id = entry["id"]
+                prefix = f"plugins.{plugin_id}."
+                paths[f"{prefix}enabled"] = plugin_id
+                for field in entry.get("settings", []):
+                    path = field.get("path") if isinstance(field, dict) else None
+                    if isinstance(path, str) and path.startswith(prefix):
+                        paths[path] = plugin_id
+            builtin_values: dict[str, dict[str, Any]] = {}
+            enabled = {}
+            for key in list(changes):
+                plugin_id = paths.get(key)
+                if plugin_id is None:
+                    continue
+                value = changes.pop(key)
+                builtin_changes[key] = value
+                if key == f"plugins.{plugin_id}.enabled":
+                    enabled[plugin_id] = value
+                else:
+                    builtin_values.setdefault(plugin_id, {})[key] = value
+            for plugin_id, values in builtin_values.items():
+                save(
+                    plugin_id, values, allow_secrets=True,
+                    config_service=config_service, save_target=target,
+                )
+            for plugin_id, value in enabled.items():
+                set_enabled(plugin_id, value, config_service=config_service, save_target=target)
     except Exception as exc:
         logger.error("plugin settings save failed: %s", exc)
         return False
-    if not changes:
+    if not changes and not builtin_changes:
         return True
-    for path, value in changes.items():
-        config_service.set(path, value)
+    if not atomic:
+        for path, value in {**changes, **builtin_changes}.items():
+            config_service.set(path, value)
     ok = True
-    for path, value in changes.items():
-        if not config_service.save_key(path, value, save_target=target):
-            ok = False
+    if atomic and changes:
+        ok = config_service.save_keys(changes, save_target=target, strict=True)
+    else:
+        for path, value in changes.items():
+            if not config_service.save_key(path, value, save_target=target):
+                ok = False
     if not ok:
         logger.error("config save to %s failed for at least one key", target)
         return False

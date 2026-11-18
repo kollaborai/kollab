@@ -392,6 +392,10 @@ def test_f7_the_listener_gives_the_sweep_the_live_tree(tmp_path, monkeypatch):
         h: {"hash": h, "kind": "halt", "machine": "m" * 64, "issued_at": 1}}}}})
     monkeypatch.setattr(hr, "sweep", fake_sweep)
     monkeypatch.setattr(hr, "process_tree", lambda: {1: (0, 1, 1)})
+
+    # The listener also tries to build fallback process metadata; this test is
+    # about wiring the process tree into the sweep, not enumerating host PIDs.
+    monkeypatch.setattr(hr, "process_info", lambda: {})
     monkeypatch.setattr(hr, "_read_candidates", lambda: [])
     monkeypatch.setattr(hr.HaltListener, "open_links", no_links)
     listener = hr.HaltListener(tmp_path, agents=lambda: [], stop=None)

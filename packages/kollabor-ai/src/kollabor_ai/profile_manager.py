@@ -3244,6 +3244,15 @@ class ProfileManager:
         return name == self._active_profile_name
 
     @property
+    def active_loadout_name(self) -> Optional[str]:
+        """The loadout the session started on or switched to (#1104), or None."""
+        return getattr(self, "_active_loadout_name", None)
+
+    @active_loadout_name.setter
+    def active_loadout_name(self, name: Optional[str]) -> None:
+        self._active_loadout_name = name
+
+    @property
     def active_profile_name(self) -> str:
         """Get the name of the active profile."""
         return self._active_profile_name
