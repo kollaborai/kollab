@@ -3406,7 +3406,11 @@ class ContextCompactionPlugin(BasePlugin):
                 isinstance(metadata, dict)
                 and metadata.get("context_compaction_task_excerpt") is True
             )
-            is_legacy_excerpt = content.startswith(prefix) and content.endswith(suffix)
+            is_legacy_excerpt = (
+                len(content) == MAX_PRESERVED_HUB_TASK_CHARS
+                and content.startswith(prefix)
+                and content.endswith(suffix)
+            )
             if is_marked_excerpt or is_legacy_excerpt:
                 normalized_content = content.removesuffix(suffix)
                 if normalized_content != content or is_legacy_excerpt:
