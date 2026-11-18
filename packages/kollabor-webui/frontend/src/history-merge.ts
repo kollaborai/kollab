@@ -6,22 +6,36 @@ type Message = {
   convertConfig?: { joinStrategy?: string };
 };
 
-const historySourceIndex = (message: Message): number | null => {
-  const index = message.metadata?.custom?.historySourceIndex;
-  return typeof index === "number" && Number.isInteger(index) && index >= 0 ? index : null;
-};
-
-const historyBaseIdIndex = (message: Message): number | null => {
-  const index = /^history-(\d+)$/.exec(String(message.id ?? ""))?.[1];
-  return index === undefined ? null : Number(index);
+/** Canonical row identity is scoped to the current history snapshot. Display IDs survive a rebase. */
+const sourceId = (message: Message): string | null => {
+  const custom = message.metadata?.custom;
+  if (compactionArchiveOrder(message) !== null) return null;
+  if (typeof custom?.historySourceId === "string") return custom.historySourceId;
+  const index = custom?.historySourceIndex;
+  if (typeof index === "number" && Number.isInteger(index) && index >= 0) return `history-${index}`;
+  return message.id && /^history-\d+(?:-|$)/.test(message.id) ? message.id : null;
 };
 
 const historyIndex = (message: Message): number | null => {
-  const sourceIndex = historySourceIndex(message);
-  if (sourceIndex !== null) return sourceIndex;
-  const index = /^history-(\d+)/.exec(String(message.id ?? ""))?.[1];
+  const index = /^history-(\d+)/.exec(sourceId(message) ?? "")?.[1];
   return index === undefined ? null : Number(index);
 };
+
+function displayRow<T extends Message>(row: T, id: string | undefined): T {
+  if (!id || row.id === id) return row;
+  return {
+    ...row, id, metadata: { ...row.metadata, custom: {
+      ...row.metadata?.custom, historySourceId: sourceId(row), historySourceIndex: historyIndex(row),
+    } },
+  };
+}
+
+function reserveRow<T extends Message>(row: T, used: Set<string | undefined>): T {
+  let id = row.id;
+  for (let n = 1; used.has(id); n++) id = `history-view-${row.id}-${n}`;
+  used.add(id);
+  return displayRow(row, id);
+}
 
 /** The source history row for a displayed message, including stable-id aliases. */
 export function historyMessageIndex(message: Message): number | null {
@@ -33,28 +47,22 @@ export function mergeMissingHistoryMessages<T extends Message>(
   shown: ReadonlyArray<T>,
   loaded: ReadonlyArray<T>,
 ): { messages: T[]; added: T[] } {
-  const present = new Set(shown.map((message) => message.id));
-  const representedRows = new Set(shown.flatMap((message) => {
-    const index = historySourceIndex(message) ?? historyBaseIdIndex(message);
-    return index === null ? [] : [index];
-  }));
-  const order = new Map(loaded.map((message, index) => [message.id, index]));
-  const added = loaded.filter((message) => {
-    const index = historyIndex(message);
-    const baseIndex = historyBaseIdIndex(message);
-    if (index === null || present.has(message.id) ||
-      (baseIndex !== null && representedRows.has(baseIndex)) ||
-      (historySourceIndex(message) !== null && representedRows.has(index))) return false;
-    present.add(message.id);
-    return true;
+  const used = new Set(shown.map((message) => message.id));
+  const represented = new Set(shown.map(sourceId));
+  const order = new Map(loaded.map((message, index) => [sourceId(message), index]));
+  const added = loaded.flatMap((message) => {
+    const key = sourceId(message);
+    if (!key || represented.has(key)) return [];
+    represented.add(key);
+    return [reserveRow(message, used)];
   });
   const messages: T[] = [];
   let nextAdded = 0;
   for (const existing of shown) {
-    const existingOrder = historyOrder(existing, order.get(existing.id) ?? Infinity);
+    const existingOrder = historyOrder(existing, order.get(sourceId(existing)) ?? Infinity);
     while (nextAdded < added.length) {
       const candidate = added[nextAdded];
-      const candidateOrder = historyOrder(candidate, order.get(candidate.id) ?? Infinity);
+      const candidateOrder = historyOrder(candidate, order.get(sourceId(candidate)) ?? Infinity);
       if (compareHistoryOrder(candidateOrder, existingOrder) > 0) break;
       messages.push(candidate);
       nextAdded += 1;
@@ -80,11 +88,7 @@ export function reconcileBoundaryToolResults<T extends Message>(
   type Fallback = { callId: string; message: T; part: Record<string, unknown>; index: number };
   type Call = { messageId: string | undefined; index: number; partIndex: number };
   const pending: Fallback[] = [];
-  const shownIds = new Set(shown.map((message) => message.id));
-  const shownRows = new Set(shown.flatMap((message) => {
-    const index = historySourceIndex(message) ?? historyBaseIdIndex(message);
-    return index === null ? [] : [index];
-  }));
+  const represented = new Set(shown.map(sourceId));
   for (const message of shown) {
     const index = historyIndex(message);
     const callId = message.metadata?.custom?.historyToolFallback;
@@ -121,8 +125,7 @@ export function reconcileBoundaryToolResults<T extends Message>(
       else high = middle;
     }
     const call = rows[low - 1];
-    if (!call || shownIds.has(call.messageId) ||
-      (call.messageId === `history-${call.index}` && shownRows.has(call.index)) ||
+    if (!call || represented.has(call.messageId ?? null) ||
       (low > 1 && rows[low - 2].index === call.index)) continue;
     const key = `${call.messageId}:${call.partIndex}`;
     const group = matches.get(key) ?? [];
@@ -133,7 +136,7 @@ export function reconcileBoundaryToolResults<T extends Message>(
   const stableIds = new Map<string | undefined, { id: string | undefined; index: number }>();
   const corrected = loaded.map((message) => {
     const index = historyIndex(message);
-    if (index === null || shownIds.has(message.id) ||
+    if (index === null || represented.has(sourceId(message)) ||
       message.metadata?.custom?.historyToolFallback || !Array.isArray(message.content)) return message;
     let changed = false;
     const content = message.content.map((part: unknown, partIndex: number) => {
@@ -160,6 +163,7 @@ export function reconcileBoundaryToolResults<T extends Message>(
     const custom: Record<string, unknown> = {
       ...(message.metadata?.custom ?? {}),
       historySourceIndex: source.index,
+      historySourceId: sourceId(message),
     };
     delete custom.historyToolFallback;
     return {
@@ -181,41 +185,20 @@ export function reconcileBoundaryToolResults<T extends Message>(
  * keeps every message it was given, so re-importing one by id would branch it.
  */
 export function shownMessagesChanged(shown: ReadonlyArray<Message>, loaded: ReadonlyArray<Message>): boolean {
-  const shownById = new Map(shown.map((message) => [message.id, message]));
-  const shownAliases = new Map(shown.flatMap((message) => {
-    const index = historySourceIndex(message);
-    return index === null ? [] : [[index, message] as const];
+  const bySource = new Map(shown.flatMap((message) => {
+    const key = sourceId(message);
+    return key ? [[key, message] as const] : [];
   }));
-  const shownBaseRows = new Map(shown.flatMap((message) => {
-    const index = historyBaseIdIndex(message);
-    return index === null ? [] : [[index, message] as const];
-  }));
-  const loadedIds = new Set(loaded.map((message) => message.id));
-  const loadedAliases = new Map(loaded.flatMap((message) => {
-    const index = historySourceIndex(message);
-    return index === null ? [] : [[index, message] as const];
-  }));
-  const loadedBaseRows = new Set(loaded.flatMap((message) => {
-    const index = historyBaseIdIndex(message);
-    return index === null ? [] : [index];
-  }));
+  const loadedIds = new Set(loaded.map(sourceId));
   // Rows before the loaded window are older pages, not gone.
   const start = loaded.reduce((low, message) => Math.min(low, historyIndex(message) ?? low), Infinity);
   const gone = shown.some((message) => {
     const index = historyIndex(message);
-    const sourceIndex = historySourceIndex(message);
-    const baseIndex = historyBaseIdIndex(message);
-    const represented = loadedIds.has(message.id) ||
-      (sourceIndex !== null && loadedBaseRows.has(sourceIndex)) ||
-      (baseIndex !== null && loadedAliases.has(baseIndex));
-    return index !== null && index >= start && !represented;
+    return index !== null && index >= start && !loadedIds.has(sourceId(message));
   });
   return gone || loaded.some((message) => {
-    const baseIndex = historyBaseIdIndex(message);
-    const sourceIndex = historySourceIndex(message);
-    const old = shownById.get(message.id) ??
-      (baseIndex === null ? undefined : shownAliases.get(baseIndex)) ??
-      (sourceIndex === null ? undefined : shownBaseRows.get(sourceIndex));
+    const key = sourceId(message);
+    const old = key ? bySource.get(key) : undefined;
     return old !== undefined && (
       JSON.stringify(old.content) !== JSON.stringify(message.content) ||
       old.convertConfig?.joinStrategy !== message.convertConfig?.joinStrategy
@@ -394,6 +377,7 @@ export function mergeCompactionHistorySnapshot<T extends Message>(
   const carriedRows = new Map<number, T>();
   let lastCarried = -1;
   for (const message of [...transcript].reverse()) {
+    if (compactionArchiveOrder(message) !== null) continue;
     const position = positions.get(rowFingerprint(message))?.pop();
     if (position !== undefined) {
       carried.add(message);
@@ -404,36 +388,19 @@ export function mergeCompactionHistorySnapshot<T extends Message>(
   // Keep assistant-ui's keys for rows the compacted snapshot carried forward.
   // A stable alias can point at a different history index after compaction, so
   // refresh its source index while preserving the existing message id.
+  const used = new Set(shown.map((message) => message.id));
   const rebasedHistory = history.map((message, position) => {
     const previous = carriedRows.get(position);
-    if (!previous || previous.id === message.id) return message;
-    const sourceIndex = historyIndex(message);
-    return {
-      ...message,
-      id: previous.id,
-      metadata: {
-        ...(message.metadata ?? {}),
-        custom: {
-          ...(message.metadata?.custom ?? {}),
-          ...(sourceIndex === null ? {} : { historySourceIndex: sourceIndex }),
-        },
-      },
-    } as T;
+    return previous ? displayRow(message, previous.id) : reserveRow(message, used);
   });
-  const archived = transcript
-    .filter((message) => !carried.has(message))
-    .map((message, index) => ({
-      ...message,
-      id: `compaction-archive-${key}-${index}`,
-      metadata: {
-        ...(message.metadata ?? {}),
-        custom: {
-          ...(message.metadata?.custom ?? {}),
-          compactionArchiveOrder: index,
-          compactionArchiveKey: key,
-        },
-      },
-    }) as T);
+  const archived = transcript.filter((message) => !carried.has(message)).map((message, index) => {
+    const custom = { ...message.metadata?.custom };
+    delete custom.historySourceIndex;
+    delete custom.historySourceId;
+    return { ...message, metadata: { ...message.metadata, custom: {
+      ...custom, compactionArchiveOrder: index, compactionArchiveKey: key,
+    } } } as T;
+  });
   // The rows the snapshot brings after the last shown row it carried are the turn
   // a reload replays; its transient copies go as a sync drops them (#666). Live
   // rows sit at the end, outside that check.

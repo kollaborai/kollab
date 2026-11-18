@@ -219,7 +219,8 @@ test("compaction archives shown history and imports the compacted snapshot once"
     "retained prompt",
     "answer during compaction",
   ]);
-  assert.match(rebased.messages[0].id ?? "", /^compaction-archive-/);
+  assert.equal(rebased.messages[0].id, old[0].id);
+  assert.equal(historyMessageIndex(rebased.messages[0]), null);
   assert.equal(shownMessagesChanged(rebased.messages, [marker, recent, appended]), false);
   assert.equal(mergeCompactionHistorySnapshot(rebased.messages, [marker, recent, appended]), null);
 });
@@ -683,4 +684,26 @@ test("a placeholder picture turn is replaced by its stored copy when both rows c
   const deduped = dropTransientTurnDuplicates(shown, tail);
   assert.ok(deduped);
   assert.equal(deduped.some((message) => message.id === "user-ws1-11"), false);
+});
+
+test("compaction keeps visible display IDs unique and releases archived source positions", () => {
+  const shown = [
+    { id: "user-demo-7", role: "user", content: "archived", metadata: { custom: { historySourceIndex: 3 } } },
+    { id: "history-2", role: "assistant", content: "carried" },
+  ];
+  const marker = { id: "history-4", role: "assistant", content: "marker",
+    metadata: { custom: { contextCompaction: true, compactionRound: 1 } } };
+  const loaded = [
+    { id: "history-1", role: "assistant", content: "carried" },
+    { id: "history-2", role: "user", content: "new row" }, marker,
+  ];
+  const result = mergeCompactionHistorySnapshot(shown, loaded)!;
+  assert.equal(result.messages[0].id, shown[0].id);
+  assert.equal(historyMessageIndex(result.messages[0]), null);
+  assert.equal(result.messages[1].id, shown[1].id);
+  assert.equal(new Set(result.messages.map(m => m.id)).size, result.messages.length);
+  assert.equal(shownMessagesChanged(result.messages, loaded), false);
+  const older = { id: "history-3", role: "user", content: "different at three" };
+  const merged = mergeMissingHistoryMessages(result.messages, [...loaded, older]);
+  assert.deepEqual(merged.added.map(m => m.content), [older.content]);
 });

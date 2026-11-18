@@ -813,6 +813,14 @@ def _assistant_align_streamed_ids(
             continue
         metadata = message.get("metadata")
         custom = metadata.get("custom") if isinstance(metadata, dict) else None
+        if isinstance(custom, dict) and "compactionArchiveOrder" in custom:
+            # These rows retain their display IDs but belong to a superseded snapshot.
+            continue
+        source_id = custom.get("historySourceId") if isinstance(custom, dict) else None
+        if isinstance(source_id, str) and re.fullmatch(r"history-\d+", source_id) is None:
+            # Derived display rows (error, Hub note, etc.) share the position
+            # of their source. They cannot prove the canonical row was shown.
+            continue
         source_index = custom.get("historySourceIndex") if isinstance(custom, dict) else None
         if isinstance(source_index, int) and not isinstance(source_index, bool):
             if (
@@ -822,6 +830,9 @@ def _assistant_align_streamed_ids(
             ):
                 shown.add(source_index)
                 continue
+            if source_id is not None:
+                # An aliased row's display ID can name an obsolete position.
+                return False
             if isinstance(custom, dict):
                 custom.pop("historySourceIndex", None)
         if message_id.startswith("history-"):

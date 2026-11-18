@@ -1454,6 +1454,26 @@ def test_align_helper_preserves_streamed_ids_for_matching_content():
     assert [m["id"] for m in other] == ["user-y", "assistant-y"]
 
 
+def test_archive_and_synthetic_alias_cannot_claim_the_new_turns_history_row():
+    previous = [
+        {
+            "id": "history-1", "role": "assistant", "content": "old reply",
+            "metadata": {"custom": {"compactionArchiveOrder": 0}},
+        },
+        {
+            "id": "history-view-history-1-error-1", "role": "assistant", "content": "same",
+            "metadata": {"custom": {"historySourceId": "history-1-error", "historySourceIndex": 1}},
+        },
+    ]
+    turn = [
+        {"id": "user-new", "role": "user", "content": "question"},
+        {"id": "assistant-new", "role": "assistant", "content": "same"},
+    ]
+    stored = [{"role": row["role"], "content": row["content"]} for row in turn]
+    assert messages._assistant_align_streamed_ids([*previous, *turn], stored)
+    assert [row["metadata"]["custom"]["historySourceIndex"] for row in turn] == [0, 1]
+
+
 def test_align_helper_tolerates_split_tool_round_with_call_identity():
     """Stored [user, assistant(calls), tool, assistant(final)] still aligns:
     the calls row is proven rendered inside the streamed row by call id."""

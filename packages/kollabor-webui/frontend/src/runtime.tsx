@@ -970,6 +970,7 @@ export function EngineRuntimeProvider({
   // assistant-ui keeps every message it was given, so swapping in reloaded
   // copies of turns already on screen would show those turns twice.
   const reloaded = useRef(initialState.messages);
+  const reloadedWindowStart = useRef(initialState.synced?.start ?? 0);
   const latestInitial = useRef(initialState);
   latestInitial.current = initialState;
   const [historySyncRevision, setHistorySyncRevision] = useState(0);
@@ -1033,9 +1034,7 @@ export function EngineRuntimeProvider({
         const priorReloaded = reloaded.current;
         const runAtRebase = runVersion.current;
         reloaded.current = snapshot.messages;
-        // Publish the rebased snapshot once. The external-store runtime
-        // reconciles removed rows against this snapshot; an intermediate empty
-        // list would reset the viewport's first-load behavior.
+        // Keep existing display IDs and publish once so the viewport anchor stays mounted.
         flushSync(() => {
           if (!mounted.current) return;
           const busy = ownsPendingInput(runtime.thread.getState());
@@ -1126,8 +1125,27 @@ export function EngineRuntimeProvider({
     }
     const shown = (thread.extras as { state?: EngineState } | undefined)?.state;
     const from = shown?.synced;
-    // A run that ended without a sync point (an older engine, a dropped
-    // stream) leaves the thread to its next full load.
+    if (from?.start !== undefined) reloadedWindowStart.current = from.start;
+    // A failed alignment leaves the local tail unproven. A cursor-validated
+    // older page can still extend the prefix strictly before the known window.
+    // Preserve every local row and leave the sync watermark unclaimed.
+    if (shown && !from && (deferred || initialState.synced?.olderWindow)) {
+      const page = deferred && pendingOlder ? pendingOlder : initialState;
+      if (!page.synced || shown.sessionId !== page.sessionId ||
+          (shown.conversationUid && page.conversationUid && shown.conversationUid !== page.conversationUid)) return;
+      const firstShown = shown.messages.reduce((first, row) =>
+        Math.min(first, historyMessageIndex(row) ?? Infinity), Infinity);
+      const end = Number.isFinite(firstShown) ? firstShown : reloadedWindowStart.current;
+      const prefix = page.messages.filter((row) => {
+        const index = historyMessageIndex(row);
+        return index !== null && index < end;
+      });
+      const { messages, added } = mergeMissingHistoryMessages(shown.messages, prefix);
+      deferredOlderWindow.current = null;
+      if (page.messages === initialState.messages) reloaded.current = page.messages;
+      if (added.length) runtime.thread.importExternalState({ ...shown, messages });
+      return;
+    }
     if (!shown || !from || shown.messages.length !== from.messages || !initialState.synced) {
       deferredOlderWindow.current = null;
       reloaded.current = initialState.messages;
