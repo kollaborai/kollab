@@ -8608,9 +8608,16 @@ class HubPlugin(BasePlugin):
         state overlay: the profile's fields do not describe what it runs.
         """
         profile_name, provider, model, effort = self._profile_model_details()
-        harness = self._acp_harness_model_effort()
-        if harness is not None:
-            model, effort = harness
+        if self._active_profile_is_acp():
+            harness = self._acp_harness_model_effort()
+            if harness is None:
+                model, effort = "", ""
+            else:
+                model, effort = harness
+        else:
+            harness = self._acp_harness_model_effort()
+            if harness is not None:
+                model, effort = harness
         return profile_name, provider, model, effort
 
     def _acp_harness_model_effort(self) -> Optional[Tuple[str, str]]:
@@ -8666,10 +8673,14 @@ class HubPlugin(BasePlugin):
             timeout = ACP_ARRIVAL_OPTIONS_WAIT
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
-        while self._acp_harness_model_effort() is None:
-            if loop.time() >= deadline:
+        while True:
+            options = self._acp_harness_model_effort()
+            if options is not None and any(options):
                 return
-            await asyncio.sleep(0.1)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(0.1, remaining))
 
     def _active_agent_details(self) -> Tuple[str, str]:
         """Return the active agent bundle's name and one-line description, or blanks."""
