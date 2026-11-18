@@ -1,3 +1,4 @@
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -19,10 +20,14 @@ def test_is_text_file_returns_false_for_directory_and_os_errors():
     executor = FileOperationsExecutor()
 
     with TemporaryDirectory() as directory:
+        unreadable_file = Path(directory) / "unreadable.txt"
+        unreadable_file.write_text("text", encoding="utf-8")
+        with patch("builtins.open", side_effect=PermissionError("denied")) as opened:
+            assert executor.is_text_file(str(unreadable_file)) is False
+        opened.assert_called_once_with(
+            str(unreadable_file), "r", encoding="utf-8"
+        )
         assert executor.is_text_file(directory) is False
-
-    with patch("builtins.open", side_effect=PermissionError("denied")):
-        assert executor.is_text_file("unreadable.txt") is False
 
 
 def test_text_operations_identify_directory_inputs_as_directories():
