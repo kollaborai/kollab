@@ -4,6 +4,7 @@ import asyncio
 import json
 import tempfile
 import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -50,6 +51,18 @@ class TestHubSessionStatePersistence(unittest.TestCase):
                     )
                 )
                 self.assertEqual(path.read_bytes(), original)
+
+    def test_unrecognized_persisted_field_is_preserved(self):
+        path = self._state_path()
+        original = b'{"focus_file":"kept.py","future_field":{"payload":"keep"}}'
+        path.write_bytes(original)
+
+        self._assert_state_error(
+            lambda: self.manager.update_state(
+                self.vault_dir, {"last_command": "resume"}
+            )
+        )
+        self.assertEqual(path.read_bytes(), original)
 
     def test_read_error_is_not_reported_as_absent(self):
         path = self._state_path()
@@ -102,30 +115,61 @@ class TestHubSessionStatePersistence(unittest.TestCase):
         self.assertEqual(path.read_bytes(), original)
 
     def test_concurrent_partial_updates_do_not_drop_either_writer(self):
-        barrier = threading.Barrier(2)
-        original_load_state = SessionStateManager.load_state
+        start_barrier = threading.Barrier(2)
+        counter_lock = threading.Lock()
+        active_loaders = 0
+        max_active_loaders = 0
 
-        def synchronized_load(manager, vault_dir):
-            state = original_load_state(manager, vault_dir)
-            barrier.wait(timeout=5)
-            return state
+        def tracked_loader(loader):
+            def track(manager, *args):
+                nonlocal active_loaders, max_active_loaders
+                with counter_lock:
+                    active_loaders += 1
+                    max_active_loaders = max(max_active_loaders, active_loaders)
+                try:
+                    time.sleep(0.05)
+                    if loader is None:
+                        return None
+                    return loader(manager, *args)
+                finally:
+                    with counter_lock:
+                        active_loaders -= 1
+
+            return track
+
+        original_load_state = SessionStateManager.load_state
+        original_unlocked_load = getattr(
+            SessionStateManager, "_load_state_unlocked", None
+        )
+
+        def start_update(manager, updates):
+            start_barrier.wait(timeout=5)
+            return manager.update_state(self.vault_dir, updates)
 
         first_manager = SessionStateManager()
         second_manager = SessionStateManager()
-        with patch.object(SessionStateManager, "load_state", synchronized_load):
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                first = executor.submit(
-                    first_manager.update_state,
-                    self.vault_dir,
-                    {"focus_file": "first.py"},
-                )
-                second = executor.submit(
-                    second_manager.update_state,
-                    self.vault_dir,
-                    {"investigation_notes": "second writer"},
-                )
-                first.result(timeout=10)
-                second.result(timeout=10)
+        with patch.object(
+            SessionStateManager, "load_state", tracked_loader(original_load_state)
+        ):
+            with patch.object(
+                SessionStateManager,
+                "_load_state_unlocked",
+                tracked_loader(original_unlocked_load),
+                create=True,
+            ):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    first = executor.submit(
+                        start_update, first_manager, {"focus_file": "first.py"}
+                    )
+                    second = executor.submit(
+                        start_update,
+                        second_manager,
+                        {"investigation_notes": "second writer"},
+                    )
+                    first.result(timeout=10)
+                    second.result(timeout=10)
+
+        self.assertEqual(max_active_loaders, 1)
 
         saved = SessionStateManager().load_state(self.vault_dir)
         self.assertEqual(saved.focus_file, "first.py")
