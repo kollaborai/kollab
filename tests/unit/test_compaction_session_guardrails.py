@@ -301,12 +301,13 @@ class TestHardCapToolBoundary(IsolatedAsyncioTestCase):
             f"[Dropped {dropped} oldest preserved task", drop_notes[0].content
         )
 
-    def test_manual_threshold_cannot_exceed_model_percentage(self):
+    def test_manual_threshold_wins_over_model_percentage_but_not_the_window(self):
         plugin, _event_bus, llm_service = _plugin(prompt_tokens=410_000)
         plugin.config.values["plugins.context_compaction.token_threshold_k"] = 272
         llm_service.api_service._provider.config.context_window = 272_000
 
-        self.assertEqual(plugin._get_token_threshold(), 204_000)
+        # An explicit threshold beats the 0.75 percentage; it is never above the window (#1104).
+        self.assertEqual(plugin._get_token_threshold(), 272_000)
 
     def test_summarization_model_precedence(self):
         plugin, _event_bus, llm_service = _plugin(prompt_tokens=10_000)
