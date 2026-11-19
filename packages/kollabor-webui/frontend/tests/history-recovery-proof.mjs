@@ -182,9 +182,10 @@ const scenario = async (name, buildState, run) => {
   if (onlyScenarios.size && !onlyScenarios.has(name)) return;
   console.log(`scenario ${name}`);
   const context = await browser.newContext({ viewport: { width: 820, height: 1180 } });
-  await context.addInitScript(() =>
-    localStorage.setItem("kollab.setup-guide.v1", "dismissed"),
-  );
+  await context.addInitScript(() => {
+    localStorage.setItem("kollab.setup-guide.v1", JSON.stringify({ step: "done", dismissed: true }));
+    localStorage.setItem("kollab.whats-new.v1", JSON.stringify({ seenVersion: "999.999.999" }));
+  });
   const page = await context.newPage();
   const requests = [];
   const consoleNotes = [];
