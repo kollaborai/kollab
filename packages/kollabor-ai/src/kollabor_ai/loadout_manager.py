@@ -79,6 +79,7 @@ class Loadout:
     max_tokens: Optional[int] = None
     description: str = ""
     implicit: bool = False  # synthesized from model registry, not saved in config
+    compaction_threshold_k: Optional[int] = None  # explicit trigger, thousands of tokens; None = unset (#1104)
 
 
 class InvalidACPLoadoutError(ValueError):
@@ -247,6 +248,7 @@ class LoadoutManager:
                 max_tokens=data.get("max_tokens"),
                 description=data.get("description", ""),
                 implicit=False,
+                compaction_threshold_k=data.get("compaction_threshold_k"),
             )
         return result
 
@@ -499,6 +501,7 @@ class LoadoutManager:
         effort: str,
         max_tokens: Optional[int],
         description: str,
+        compaction_threshold_k: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Non-default fields only -- provider_profile + model are always kept."""
         data: Dict[str, Any] = {"provider_profile": provider_profile, "model": model}
@@ -510,7 +513,26 @@ class LoadoutManager:
             data["max_tokens"] = max_tokens
         if description:
             data["description"] = description
+        if compaction_threshold_k is not None and compaction_threshold_k > 0:
+            data["compaction_threshold_k"] = compaction_threshold_k
         return data
+
+    def active_compaction_threshold_k(self) -> int:
+        """The session's loadout explicit compaction threshold in thousands of tokens, 0 when unset.
+
+        The session's loadout is the one recorded on the profile manager when
+        the session started on it or switched to it. It counts only while its
+        provider profile is the active one. Reads only stored config, so a
+        usage-update check never resolves the model catalog (#1104).
+        """
+        profiles = self.profile_manager
+        name = getattr(profiles, "active_loadout_name", None)
+        if not isinstance(name, str) or not name:
+            return 0
+        loadout = self._explicit_loadouts().get(name)
+        if loadout is None or loadout.provider_profile != profiles.active_profile_name:
+            return 0
+        return int(loadout.compaction_threshold_k or 0)
 
     def create(
         self,
@@ -521,6 +543,7 @@ class LoadoutManager:
         effort: str = "",
         max_tokens: Optional[int] = None,
         description: str = "",
+        compaction_threshold_k: Optional[int] = None,
     ) -> bool:
         """Create a new explicit loadout.
 
@@ -550,7 +573,8 @@ class LoadoutManager:
         # are stored as a literal key instead of being split into nested
         # dicts by dot-path traversal.
         raw[name] = self._build_loadout_dict(
-            provider_profile, model, temperature, effort, max_tokens, description
+            provider_profile, model, temperature, effort, max_tokens, description,
+            compaction_threshold_k,
         )
         return bool(self.config.save_key(self.CONFIG_KEY, raw))
 
@@ -568,6 +592,7 @@ class LoadoutManager:
             "effort",
             "max_tokens",
             "description",
+            "compaction_threshold_k",
         }
         unknown = set(fields) - allowed
         if unknown:
@@ -593,6 +618,7 @@ class LoadoutManager:
             fields.get("effort", existing.effort),
             fields.get("max_tokens", existing.max_tokens),
             fields.get("description", existing.description),
+            fields.get("compaction_threshold_k", existing.compaction_threshold_k),
         )
         return bool(self.config.save_key(self.CONFIG_KEY, raw))
 
@@ -816,6 +842,7 @@ class LoadoutManager:
                 if not isinstance(exc, Exception):
                     raise
                 return None
+            self.profile_manager.active_loadout_name = loadout.name
             await self._announce_model_switch(event_bus, loadout, None)
             return loadout
 
@@ -903,5 +930,6 @@ class LoadoutManager:
                         type(exc).__name__,
                     )
 
+        self.profile_manager.active_loadout_name = loadout.name
         await self._announce_model_switch(event_bus, loadout, previous_model)
         return loadout
