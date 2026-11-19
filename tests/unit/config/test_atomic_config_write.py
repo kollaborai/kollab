@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from kollabor_config.atomic_write import write_bytes_atomic, write_text_atomic
+from kollabor_config.atomic_write import write_text_atomic
 from kollabor_config.config_utils import set_default_agent
 from kollabor_config.manager import ConfigManager
 from kollabor_config.service import ConfigService
@@ -57,6 +57,8 @@ def test_the_target_is_never_half_written(tmp_path, replaced):
 
 
 def test_binary_atomic_write_preserves_exact_bytes(tmp_path):
+    from kollabor_config.atomic_write import write_bytes_atomic
+
     target = tmp_path / "config.json"
     target.write_bytes(b"old")
     contents = b'{"key":"value"}\r\n\xff'

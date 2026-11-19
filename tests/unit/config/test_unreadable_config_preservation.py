@@ -330,6 +330,41 @@ def test_settings_panel_reports_and_preserves_an_unreadable_global_config(tmp_pa
         service.shutdown()
 
 
+def test_settings_panel_description_includes_actionable_config_error(tmp_path, monkeypatch):
+    paths = _layer_paths(tmp_path, monkeypatch)
+    _patch_standard_save_paths(paths, monkeypatch)
+    _write_bytes(paths["global"], b'{"api_key":"DO_NOT_ECHO",')
+    service = ConfigService(paths["global"], fast_mode=True)
+    context = SimpleNamespace(_llm_service=SimpleNamespace(config=service))
+
+    try:
+        error = service.get_config_error()
+        description = asyncio.run(ConfigPanel().describe(context, {}))
+
+        assert error and "repair" in error.lower()
+        assert description.get("notice") == error
+        assert "DO_NOT_ECHO" not in description["notice"]
+    finally:
+        service.shutdown()
+
+
+def test_successful_project_save_keeps_malformed_global_config_error(tmp_path, monkeypatch):
+    paths = _layer_paths(tmp_path, monkeypatch)
+    _patch_standard_save_paths(paths, monkeypatch)
+    malformed_global = b'{"api_key":"DO_NOT_ECHO",'
+    _write_bytes(paths["global"], malformed_global)
+    _write_bytes(paths["project"], b'{"settings":{"before":1}}')
+    service = ConfigService(paths["global"], fast_mode=True)
+
+    try:
+        assert service.get_config_error()
+        assert service.save_config() is True
+        assert "repair" in (service.get_config_error() or "").lower()
+        assert paths["global"].read_bytes() == malformed_global
+    finally:
+        service.shutdown()
+
+
 def test_plugin_update_does_not_replace_an_unreadable_explicit_config(tmp_path):
     path = tmp_path / "explicit.json"
     original = b'{"api_key":"DO_NOT_ECHO",'
