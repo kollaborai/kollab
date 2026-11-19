@@ -136,6 +136,13 @@ the FileOperationsExecutor with safety features:
 - Binary file detection
 - Size limits
 
+Text operations (`file_read`, `file_grep`, `file_edit`, `file_append`,
+`file_insert_after`, and `file_insert_before`) require a regular file. They
+report directories and other non-regular files as tool errors before checking
+size or probing content. Filesystem errors retain their reason; only decoding
+failures are classified as binary. Symlinks follow the normal path-access rules.
+`file_grep` searches a single file and does not recurse into directories.
+
 XML tag syntax:
 
 Read file:
