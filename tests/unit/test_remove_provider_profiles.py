@@ -1,0 +1,265 @@
+import json
+
+from kollabor_ai.profile_manager import LLMProfile, ProfileManager
+
+
+def _manager(monkeypatch, tmp_path, global_path, local_path=None):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ProfileManager, "_detect_oauth_provider", lambda self: None)
+    monkeypatch.setattr(
+        "kollabor_ai.profile_manager.get_existing_global_config_path",
+        lambda: global_path,
+    )
+    monkeypatch.setattr(
+        "kollabor_ai.profile_manager.get_global_config_path", lambda: global_path
+    )
+    monkeypatch.setattr(
+        "kollabor_ai.profile_manager.get_local_config_path_candidates",
+        lambda folder=None: [local_path] if local_path else [],
+    )
+    manager = ProfileManager()
+    manager._profiles.update(
+        {
+            "anthropic-cloud": LLMProfile(
+                name="anthropic-cloud", provider="anthropic", model="claude"
+            ),
+            "openai": LLMProfile(name="openai", provider="openai", model="gpt"),
+        }
+    )
+    if local_path:
+        manager._profiles["anthropic-local"] = LLMProfile(
+            name="anthropic-local", provider="anthropic", model="claude-local"
+        )
+    manager._active_profile_name = "anthropic-cloud"
+    return manager
+
+
+def _write_config(path, profiles, active):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "other": {"kept": True},
+                "kollabor": {
+                    "llm": {"profiles": profiles, "active_profile": active}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _read_config(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_remove_provider_profiles_deletes_global_profiles_and_clears_active(
+    monkeypatch, tmp_path
+):
+    global_path = tmp_path / "home" / ".kollab" / "config.json"
+    _write_config(
+        global_path,
+        {
+            "anthropic-cloud": {"provider": "anthropic", "api_key": "secret"},
+            "openai": {"provider": "openai", "api_key": "keep"},
+        },
+        "anthropic-cloud",
+    )
+    manager = _manager(monkeypatch, tmp_path, global_path)
+
+    removed = manager.remove_provider_profiles("anthropic")
+
+    assert removed == ["anthropic-cloud"]
+    config = _read_config(global_path)
+    assert config["other"] == {"kept": True}
+    llm = config["kollabor"]["llm"]
+    assert llm["profiles"] == {
+        "openai": {"provider": "openai", "api_key": "keep"}
+    }
+    assert "active_profile" not in llm
+    assert manager.active_profile_name != "anthropic-cloud"
+    assert manager.get_profile("anthropic-cloud") is None
+
+
+def test_remove_provider_profiles_refuses_to_update_multiple_configs(
+    monkeypatch, tmp_path
+):
+    global_path = tmp_path / "home" / ".kollab" / "config.json"
+    local_path = tmp_path / "project" / ".kollab" / "config.json"
+    _write_config(
+        global_path,
+        {"anthropic-cloud": {"provider": "anthropic", "api_key": "global"}},
+        "openai",
+    )
+    _write_config(
+        local_path,
+        {
+            "anthropic-local": {"provider": "anthropic", "api_key": "folder"},
+            "openai": {"provider": "openai", "api_key": "keep"},
+        },
+        "anthropic-local",
+    )
+    manager = _manager(monkeypatch, tmp_path, global_path, local_path)
+
+    global_before = _read_config(global_path)
+    local_before = _read_config(local_path)
+
+    assert manager.remove_provider_profiles("anthropic") == []
+
+    assert _read_config(global_path) == global_before
+    assert _read_config(local_path) == local_before
+
+
+def test_remove_folder_profile_refuses_cross_config_active_profile_cleanup(
+    monkeypatch, tmp_path
+):
+    global_path = tmp_path / "home" / ".kollab" / "config.json"
+    local_path = tmp_path / "project" / ".kollab" / "config.json"
+    _write_config(
+        global_path,
+        {"openai": {"provider": "openai", "api_key": "keep"}},
+        "anthropic-local",
+    )
+    _write_config(
+        local_path,
+        {"anthropic-local": {"provider": "anthropic", "api_key": "folder"}},
+        "anthropic-local",
+    )
+    manager = _manager(monkeypatch, tmp_path, global_path, local_path)
+
+    global_before = _read_config(global_path)
+    local_before = _read_config(local_path)
+
+    assert manager.remove_provider_profiles("anthropic") == []
+
+    assert _read_config(global_path) == global_before
+    assert _read_config(local_path) == local_before
+
+
+def test_remove_provider_preserves_same_name_profile_from_other_provider(
+    monkeypatch, tmp_path
+):
+    global_path = tmp_path / "home" / ".kollab" / "config.json"
+    local_path = tmp_path / "project" / ".kollab" / "config.json"
+    _write_config(
+        global_path,
+        {"shared": {"provider": "anthropic", "api_key": "global"}},
+        "openai",
+    )
+    _write_config(
+        local_path,
+        {"shared": {"provider": "openai", "api_key": "folder"}},
+        "shared",
+    )
+    manager = _manager(monkeypatch, tmp_path, global_path, local_path)
+    manager._profiles["shared"] = LLMProfile(
+        name="shared", provider="openai", model="gpt"
+    )
+    manager._active_profile_name = "shared"
+
+    assert manager.remove_provider_profiles("anthropic") == ["shared"]
+
+    global_llm = _read_config(global_path)["kollabor"]["llm"]
+    assert "shared" not in global_llm["profiles"]
+    local_llm = _read_config(local_path)["kollabor"]["llm"]
+    assert local_llm["profiles"]["shared"]["provider"] == "openai"
+    assert local_llm["active_profile"] == "shared"
+    assert manager.get_profile("shared").provider == "openai"
+
+
+def test_remove_provider_profiles_preserves_all_configs_when_a_write_fails(
+    monkeypatch, tmp_path
+):
+    global_path = tmp_path / "home" / ".kollab" / "config.json"
+    local_path = tmp_path / "project" / ".kollab" / "config.json"
+    _write_config(
+        global_path,
+        {"anthropic-cloud": {"provider": "anthropic", "api_key": "global"}},
+        "anthropic-cloud",
+    )
+    _write_config(
+        local_path,
+        {"anthropic-local": {"provider": "anthropic", "api_key": "local"}},
+        "anthropic-local",
+    )
+    manager = _manager(monkeypatch, tmp_path, global_path, local_path)
+    import kollabor_ai.profile_manager as profile_manager
+
+    original_replace = profile_manager.os.replace
+
+    def fail_local_replace(source, destination):
+        if str(destination) == str(local_path):
+            raise PermissionError("denied local write")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(profile_manager.os, "replace", fail_local_replace)
+
+    assert manager.remove_provider_profiles("anthropic") == []
+    assert "anthropic-cloud" in _read_config(global_path)["kollabor"]["llm"]["profiles"]
+
+
+def test_remove_provider_profiles_restores_config_when_rollback_replace_fails(
+    monkeypatch, tmp_path
+):
+    global_path = tmp_path / "home" / ".kollab" / "config.json"
+    local_path = tmp_path / "project" / ".kollab" / "config.json"
+    _write_config(
+        global_path,
+        {"anthropic-cloud": {"provider": "anthropic", "api_key": "global"}},
+        "anthropic-cloud",
+    )
+    _write_config(
+        local_path,
+        {"anthropic-local": {"provider": "anthropic", "api_key": "local"}},
+        "anthropic-local",
+    )
+    manager = _manager(monkeypatch, tmp_path, global_path, local_path)
+    import kollabor_ai.profile_manager as profile_manager
+
+    original_replace = profile_manager.os.replace
+    global_replacements = 0
+
+    def fail_local_and_global_rollback(source, destination):
+        nonlocal global_replacements
+        if str(destination) == str(local_path):
+            raise PermissionError("denied local write")
+        if str(destination) == str(global_path):
+            global_replacements += 1
+            if global_replacements > 1:
+                raise PermissionError("denied rollback replace")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(
+        profile_manager.os, "replace", fail_local_and_global_rollback
+    )
+
+    assert manager.remove_provider_profiles("anthropic") == []
+    assert "anthropic-cloud" in _read_config(global_path)["kollabor"]["llm"]["profiles"]
+
+
+def test_remove_provider_clears_active_profile_only_in_matching_config(
+    monkeypatch, tmp_path
+):
+    global_path = tmp_path / "home" / ".kollab" / "config.json"
+    local_path = tmp_path / "project" / ".kollab" / "config.json"
+    _write_config(
+        global_path,
+        {"shared": {"provider": "anthropic", "api_key": "global"}},
+        "shared",
+    )
+    _write_config(
+        local_path,
+        {"shared": {"provider": "openai", "api_key": "folder"}},
+        "shared",
+    )
+    manager = _manager(monkeypatch, tmp_path, global_path, local_path)
+
+    assert manager.remove_provider_profiles("anthropic") == ["shared"]
+
+    global_llm = _read_config(global_path)["kollabor"]["llm"]
+    local_llm = _read_config(local_path)["kollabor"]["llm"]
+    assert "shared" not in global_llm["profiles"]
+    assert "active_profile" not in global_llm
+    assert local_llm["profiles"]["shared"]["provider"] == "openai"
+    assert local_llm["active_profile"] == "shared"
