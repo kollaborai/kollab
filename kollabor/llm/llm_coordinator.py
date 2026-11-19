@@ -545,6 +545,7 @@ class LLMService:
             event_bus=event_bus,
             terminal_timeout=config.get("kollabor.llm.terminal_timeout", 120),
             mcp_timeout=config.get("kollabor.llm.mcp_timeout", 120),
+            config=config,  # Tool guards read tools.block_kollab_terminal_spawn (#1147)
             renderer=renderer,  # Pass renderer for tool execution state
         )
         # Wire up cancellation callback so tool executor can check for user cancellation

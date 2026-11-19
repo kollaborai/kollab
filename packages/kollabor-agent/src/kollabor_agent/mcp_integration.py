@@ -38,6 +38,23 @@ logger = logging.getLogger(__name__)
 MAX_MCP_FRAME_BYTES = 16 * 1024 * 1024
 
 
+def _valid_json_rpc_id(value: Any) -> bool:
+    return isinstance(value, str) or type(value) is int
+
+
+def _valid_json_rpc_params(message: Dict[str, Any]) -> bool:
+    params = message.get("params")
+    return "params" not in message or isinstance(params, (dict, list))
+
+
+def _valid_json_rpc_error(error: Any) -> bool:
+    return (
+        isinstance(error, dict)
+        and type(error.get("code")) is int
+        and isinstance(error.get("message"), str)
+    )
+
+
 def split_command(command: str) -> list[str]:
     """Split a configured MCP command into the argv that starts it.
 
@@ -156,6 +173,8 @@ class MCPServerConnection:
         self._pending_requests: Dict[str, asyncio.Future] = {}
         self._pending_request_written: Dict[str, bool] = {}
         self._reader_task: Optional[asyncio.Task] = None
+        self._stderr_task: Optional[asyncio.Task] = None
+        self._stderr_bytes = 0
         self._write_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
 
@@ -174,6 +193,12 @@ class MCPServerConnection:
             )
             self._closing = False
             logger.info(f"Started MCP server process: {self.server_name}")
+            self._stderr_bytes = 0
+            if self.process.stderr:
+                self._stderr_task = asyncio.create_task(
+                    self._drain_stderr(self.process.stderr),
+                    name=f"mcp_stderr:{self.server_name}",
+                )
             self._ensure_reader_task()
             return True
         except Exception as e:
@@ -214,22 +239,16 @@ class MCPServerConnection:
                     f"MCP server {self.server_name} process exited with code {self.process.returncode}. "
                     f"Check if the server command is correct and the MCP server binary exists."
                 )
-                # Try to read stderr for more details
-                if self.process.stderr:
+                if self._stderr_task:
                     try:
-                        stderr_output = await asyncio.wait_for(
-                            self.process.stderr.read(), timeout=1
-                        )
-                        if stderr_output:
-                            logger.error(
-                                f"MCP server {self.server_name} stderr: {stderr_output.decode()}"
-                            )
-                    except Exception as exc:
-                        logger.debug(
-                            "Could not read shutdown stderr from MCP server %s: %s",
-                            self.server_name,
-                            exc,
-                        )
+                        await asyncio.wait_for(asyncio.shield(self._stderr_task), timeout=1)
+                    except asyncio.TimeoutError:
+                        pass
+                logger.error(
+                    "MCP server %s emitted %d diagnostic bytes (content omitted)",
+                    self.server_name,
+                    self._stderr_bytes,
+                )
             return False
 
         # Check for error response
@@ -421,6 +440,16 @@ class MCPServerConnection:
             self._reader_loop(), name=f"mcp_reader:{self.server_name}"
         )
 
+    async def _drain_stderr(self, stream: asyncio.StreamReader) -> None:
+        """Prevent pipe backpressure without retaining untrusted diagnostics."""
+        try:
+            while chunk := await stream.read(4096):
+                self._stderr_bytes = min(self._stderr_bytes + len(chunk), 2**63 - 1)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Could not read MCP server %s diagnostics", self.server_name)
+
     async def _reader_loop(self) -> None:
         """Read JSON-RPC messages and resolve pending request futures by id."""
         if not self.process or not self.process.stdout:
@@ -440,12 +469,24 @@ class MCPServerConnection:
                         message = json.loads(line.decode("utf-8", errors="replace"))
                     except json.JSONDecodeError:
                         logger.debug(
-                            "Ignoring invalid JSON from MCP server %s: %s",
+                            "Ignoring invalid JSON frame from MCP server %s",
                             self.server_name,
-                            line[:120].decode("utf-8", errors="replace"),
                         )
                         continue
-                    self._dispatch_incoming_message(message)
+                    server_error_response = self._dispatch_incoming_message(message)
+                    if server_error_response is not None:
+                        async with self._write_lock:
+                            stdin = self.process.stdin if self.process else None
+                            if (
+                                self._closing
+                                or stdin is None
+                                or stdin.is_closing()
+                            ):
+                                continue
+                            stdin.write(
+                                (json.dumps(server_error_response) + "\n").encode()
+                            )
+                            await stdin.drain()
                 if len(self._read_buffer) > MAX_MCP_FRAME_BYTES:
                     oversized_frame = True
                 if oversized_frame:
@@ -513,27 +554,78 @@ class MCPServerConnection:
             self._pending_requests.pop(request_id, None)
             self._pending_request_written.pop(request_id, None)
 
-    def _dispatch_incoming_message(self, message: Dict[str, Any]) -> None:
-        """Resolve matched responses and ignore notifications."""
+    def _dispatch_incoming_message(
+        self, message: Any
+    ) -> Optional[Dict[str, Any]]:
+        """Validate and dispatch JSON-RPC responses; reject unsupported requests."""
+        if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+            logger.debug("Ignoring malformed JSON-RPC frame from %s", self.server_name)
+            return None
+
+        if "method" in message:
+            method = message["method"]
+            if (
+                not isinstance(method, str)
+                or "result" in message
+                or "error" in message
+                or not _valid_json_rpc_params(message)
+            ):
+                logger.debug(
+                    "Ignoring malformed JSON-RPC request from %s", self.server_name
+                )
+                if "id" not in message:
+                    return None
+                response_id = message.get("id")
+                if not _valid_json_rpc_id(response_id):
+                    response_id = None
+                return {
+                    "jsonrpc": "2.0",
+                    "id": response_id,
+                    "error": {"code": -32600, "message": "Invalid Request"},
+                }
+            if "id" not in message:
+                logger.debug("Ignoring MCP notification from %s", self.server_name)
+                return None
+
+            response_id = message["id"]
+            if not _valid_json_rpc_id(response_id):
+                logger.debug(
+                    "Rejecting JSON-RPC request with malformed id from %s",
+                    self.server_name,
+                )
+                return {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32600, "message": "Invalid Request"},
+                }
+            return {
+                "jsonrpc": "2.0",
+                "id": response_id,
+                "error": {"code": -32601, "message": "Method not found"},
+            }
+
         response_id = message.get("id")
-        if response_id is None:
+        if (
+            not _valid_json_rpc_id(response_id)
+            or ("result" in message) == ("error" in message)
+            or ("error" in message and not _valid_json_rpc_error(message["error"]))
+            or "params" in message
+        ):
             logger.debug(
-                "Ignoring MCP notification from %s: %s",
-                self.server_name,
-                message.get("method", "<unknown>"),
+                "Ignoring malformed JSON-RPC response from %s", self.server_name
             )
-            return
+            return None
 
         future = self._pending_requests.get(str(response_id))
         if future is None:
             logger.debug(
-                "Ignoring unmatched MCP response from %s: id=%s",
+                "Ignoring unmatched MCP response from %s",
                 self.server_name,
-                response_id,
             )
-            return
+            return None
         if not future.done():
             future.set_result(message)
+        return None
 
     async def close(self) -> None:
         """Close the server connection.
@@ -586,6 +678,14 @@ class MCPServerConnection:
             except Exception as e:
                 logger.warning(f"Error closing MCP server {self.server_name}: {e}")
             finally:
+                if self._stderr_task:
+                    if not self._stderr_task.done():
+                        self._stderr_task.cancel()
+                    try:
+                        await self._stderr_task
+                    except asyncio.CancelledError:
+                        pass
+                    self._stderr_task = None
                 # Explicitly close transports to prevent __del__ gc warnings
                 for transport in (
                     self.process.stdin,
