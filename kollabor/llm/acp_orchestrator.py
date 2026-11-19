@@ -1486,9 +1486,13 @@ class ACPOrchestrator:
                 if display is not None:
                     display.display_system_message("Conversation history not saved for this reply.")
 
-    async def submit(self, text: str, *, source: str = "rpc", thread_id: str | None = None) -> dict[str, Any]:
+    async def submit(
+        self, text: str, *, source: str = "rpc", thread_id: str | None = None, record: bool = True,
+    ) -> dict[str, Any]:
         request_id = f"request-{uuid.uuid4().hex}"
-        admission = self.admit(text, request_id=request_id, source=source, thread_id=thread_id)
+        admission = self.admit(
+            text, request_id=request_id, source=source, thread_id=thread_id, record=record,
+        )
         result: ACPResult = await admission.future
         return {"text": result.text, "session_id": result.session_id,
                 "generation": result.generation, "turn_id": result.turn_id,
@@ -1605,6 +1609,8 @@ class ACPOrchestrator:
                 if cost.get("amount") is not None:
                     label += f" · {cost['amount']} {cost.get('currency', '')}"
                 display.show_loading(label)
+        if kind == "usage_update":
+            self._notify_context_meter(payload)
         if kind == "plan":
             self.event_bus.register_service("acp_plan", dict(payload))
         if kind in {"tool_call", "tool_call_update", "agent_thought_chunk", "plan", "usage_update"}:
@@ -1643,6 +1649,28 @@ class ACPOrchestrator:
             acp_passthrough=kind in {"tool_call", "tool_call_update", "agent_thought_chunk", "plan", "usage_update"},
         )
 
+
+    def advertised_command(self, name: str) -> str | None:
+        """The "/name" spelling when the harness advertises that command, else None."""
+        for command in getattr(self._runner, "available_commands", None) or []:
+            if isinstance(command, dict) and str(command.get("name") or "").lstrip("/") == name:
+                return f"/{name}"
+        return None
+
+    def _notify_context_meter(self, payload: dict[str, Any]) -> None:
+        """Hand the harness's context meter to the compaction plugin (#1104)."""
+        notify = getattr(self.event_bus.get_service("context_compaction"), "acp_usage_updated", None)
+        if not callable(notify):
+            return
+        try:
+            used, size = int(payload.get("used") or 0), int(payload.get("size") or 0)
+        except (TypeError, ValueError):
+            return
+        runner = self._runner
+        session_id = getattr(runner, "session_id", None)
+        generation = getattr(runner, "generation", None)
+        session_key = (session_id, generation) if session_id is not None or generation is not None else None
+        notify(used, size, session_key=session_key)
 
     def prepare_cancel(
         self,

@@ -56,7 +56,7 @@ class TestHubNativeParamCompat(unittest.TestCase):
         self.assertTrue(result.success)
         plugin._session_state_mgr.update_state.assert_called_once()
         args = plugin._session_state_mgr.update_state.call_args[0]
-        self.assertEqual(args[1], {"state": "working on bugfix"})
+        self.assertEqual(args[1], {"investigation_notes": "working on bugfix"})
 
     def test_hub_claim_does_not_use_tool_call_id_as_slot_id(self):
         plugin = _make_plugin()

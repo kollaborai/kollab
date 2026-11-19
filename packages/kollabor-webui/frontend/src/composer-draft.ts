@@ -6,7 +6,150 @@ export type ComposerDraftSubmission = Readonly<{
   revision: number;
 }>;
 
+import type { StoredComposerAttachment } from "@/composer-restore";
+
 const DRAFT_PREFIX = "kollab:webui:composer-draft:v1";
+
+export type ComposerAttachmentStorage = Readonly<{
+  get(key: string): readonly StoredComposerAttachment[] | undefined | Promise<readonly StoredComposerAttachment[] | undefined>;
+  set(key: string, value: readonly StoredComposerAttachment[]): unknown | Promise<unknown>;
+  delete(key: string): unknown | Promise<unknown>;
+}>;
+
+const ATTACHMENT_DATABASE = "kollab:webui:composer-attachments:v1";
+const ATTACHMENT_STORE = "drafts";
+
+/** Keep same-tab restores synchronous while IndexedDB supplies reload durability. */
+const attachmentsByKey = new Map<string, readonly StoredComposerAttachment[]>();
+let attachmentDatabase: Promise<IDBDatabase | null> | null = null;
+
+function openAttachmentDatabase(): Promise<IDBDatabase | null> {
+  if (attachmentDatabase) return attachmentDatabase;
+  attachmentDatabase = new Promise((resolve) => {
+    if (typeof indexedDB === "undefined") {
+      resolve(null);
+      return;
+    }
+    try {
+      const request = indexedDB.open(ATTACHMENT_DATABASE, 1);
+      request.onupgradeneeded = () => {
+        const database = request.result;
+        if (!database.objectStoreNames.contains(ATTACHMENT_STORE)) {
+          database.createObjectStore(ATTACHMENT_STORE);
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+      request.onblocked = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+  return attachmentDatabase;
+}
+
+const indexedDbAttachmentStorage: ComposerAttachmentStorage = {
+  async get(key) {
+    const database = await openAttachmentDatabase();
+    if (!database) return undefined;
+    return new Promise((resolve) => {
+      try {
+        const request = database
+          .transaction(ATTACHMENT_STORE, "readonly")
+          .objectStore(ATTACHMENT_STORE)
+          .get(key);
+        request.onsuccess = () => resolve(request.result ?? undefined);
+        request.onerror = () => resolve(undefined);
+      } catch {
+        resolve(undefined);
+      }
+    });
+  },
+  async set(key, value) {
+    const database = await openAttachmentDatabase();
+    if (!database) return;
+    await new Promise<void>((resolve) => {
+      try {
+        const transaction = database.transaction(ATTACHMENT_STORE, "readwrite");
+        transaction.objectStore(ATTACHMENT_STORE).put(value, key);
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => resolve();
+        transaction.onabort = () => resolve();
+      } catch {
+        resolve();
+      }
+    });
+  },
+  async delete(key) {
+    const database = await openAttachmentDatabase();
+    if (!database) return;
+    await new Promise<void>((resolve) => {
+      try {
+        const transaction = database.transaction(ATTACHMENT_STORE, "readwrite");
+        transaction.objectStore(ATTACHMENT_STORE).delete(key);
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => resolve();
+        transaction.onabort = () => resolve();
+      } catch {
+        resolve();
+      }
+    });
+  },
+};
+
+export function saveComposerAttachments(
+  key: string | null | undefined,
+  attachments: readonly StoredComposerAttachment[],
+  storage?: ComposerAttachmentStorage,
+): void | Promise<void> {
+  if (!key) return;
+  if (attachments.length === 0) {
+    attachmentsByKey.delete(key);
+    if (storage) return Promise.resolve(storage.delete(key)).then(() => undefined);
+    void indexedDbAttachmentStorage.delete(key);
+    return;
+  }
+  attachmentsByKey.set(key, attachments);
+  if (storage) return Promise.resolve(storage.set(key, attachments)).then(() => undefined);
+  void indexedDbAttachmentStorage.set(key, attachments);
+}
+
+export function loadComposerAttachments(
+  key: string | null | undefined,
+): StoredComposerAttachment[];
+export function loadComposerAttachments(
+  key: string | null | undefined,
+  storage: ComposerAttachmentStorage,
+): Promise<readonly StoredComposerAttachment[]>;
+export function loadComposerAttachments(
+  key: string | null | undefined,
+  storage?: ComposerAttachmentStorage,
+): StoredComposerAttachment[] | Promise<readonly StoredComposerAttachment[]> {
+  if (!key) return [];
+  const retained = attachmentsByKey.get(key);
+  if (retained) return [...retained];
+  if (!storage) return [];
+  return Promise.resolve(storage.get(key)).then((attachments) => {
+    if (!attachments || attachments.length === 0) return [];
+    attachmentsByKey.set(key, attachments);
+    return attachments;
+  }).catch(() => []);
+}
+
+export async function loadPersistedComposerAttachments(
+  key: string | null | undefined,
+  storage?: ComposerAttachmentStorage,
+): Promise<readonly StoredComposerAttachment[]> {
+  if (!key) return [];
+  const retained = attachmentsByKey.get(key);
+  if (retained) return retained;
+  const target = storage ?? indexedDbAttachmentStorage;
+  return Promise.resolve(target.get(key)).then((attachments) => {
+    if (!attachments || attachments.length === 0) return [];
+    attachmentsByKey.set(key, attachments);
+    return attachments;
+  }).catch(() => []);
+}
 const revisions = new Map<string, number>();
 const pendingSubmissions = new Map<string, ComposerDraftSubmission[]>();
 // Keep failed requests' tickets until a newer edit or a successful response.

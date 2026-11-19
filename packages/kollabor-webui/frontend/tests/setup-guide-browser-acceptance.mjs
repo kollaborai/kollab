@@ -12,6 +12,21 @@ async function main() {
   let browser;
   try {
     browser = await launchAcceptanceBrowser();
+
+    const firstRun = await openPage(browser, baseUrl, makeFixtures());
+    await firstRun.context.addInitScript(() => localStorage.removeItem("kollab.setup-guide.v1"));
+    await firstRun.page.route("**/sessions*", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ sessions: [], network: { live: false, remote: [], networks: [] } }),
+      }),
+    );
+    await firstRun.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await firstRun.page.getByRole("heading", { name: "Welcome to Kollab", exact: true }).waitFor({ state: "visible", timeout: 8000 });
+    assert.deepEqual(firstRun.pageErrors, [], "the setup guide should open on a clean first run without errors");
+    await firstRun.context.close();
+
     const view = await openPage(browser, baseUrl, makeFixtures(), {
       viewport: { width: 390, height: 844 },
       isMobile: true,
