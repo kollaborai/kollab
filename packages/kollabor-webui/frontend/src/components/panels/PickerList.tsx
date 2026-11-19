@@ -178,71 +178,134 @@ export function PickerList({
             </h3>
           ) : null}
           <ul className="flex min-w-0 flex-col gap-2">
-            {groupRows.map((row) => (
+            {groupRows.map((row) => {
+              const armedAction = rowActions.find((action) => armed === `${row.id}:${action.id}`);
+              const confirmation = armedAction
+                ? row.action_confirmations?.[armedAction.id]
+                : undefined;
+              return (
               <li
                 key={row.id}
                 data-current={row.current ? "true" : undefined}
-                className="flex min-w-0 flex-col gap-2 rounded-lg bg-muted/30 p-3 data-[current=true]:bg-accent/60 sm:flex-row sm:items-center sm:justify-between"
+                className="flex min-w-0 flex-col gap-2 rounded-lg bg-muted/30 p-3 data-[current=true]:bg-accent/60"
               >
-                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                    <span className="min-w-0 text-sm font-medium break-words">
-                      {row.label}
-                    </span>
-                    {row.current ? (
-                      <Badge>
-                        <Check />
-                        Current
-                      </Badge>
+                <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                      <span className="min-w-0 text-sm font-medium break-words">
+                        {row.label}
+                      </span>
+                      {row.current ? (
+                        <Badge>
+                          <Check />
+                          Current
+                        </Badge>
+                      ) : null}
+                      {(row.badges ?? []).map((badge) => (
+                        <Badge key={badge} variant="secondary" className="capitalize">
+                          {badge}
+                        </Badge>
+                      ))}
+                    </div>
+                    {row.detail ? (
+                      <span className="text-muted-foreground font-mono text-xs break-words">
+                        {row.detail}
+                      </span>
                     ) : null}
-                    {(row.badges ?? []).map((badge) => (
-                      <Badge key={badge} variant="secondary" className="capitalize">
-                        {badge}
-                      </Badge>
-                    ))}
                   </div>
-                  {row.detail ? (
-                    <span className="text-muted-foreground font-mono text-xs break-words">
-                      {row.detail}
-                    </span>
-                  ) : null}
+                  <div className="flex flex-wrap gap-1.5">
+                    {rowActions
+                      .filter((action) => !row.actions || row.actions.includes(action.id))
+                      .map((action) => {
+                        const isArmed = armed === `${row.id}:${action.id}`;
+                        const label = row.action_labels?.[action.id] || actionLabel(action);
+                        return (
+                          <span key={action.id} className="inline-flex min-w-0 flex-wrap items-center gap-1.5">
+                            <Button
+                              type="button"
+                              size="xs"
+                              variant={isArmed ? "destructive" : "outline"}
+                              disabled={busy}
+                              aria-label={`${isArmed ? "Confirm" : label} ${row.label}`}
+                              onClick={() => fire(action, row)}
+                            >
+                              {isArmed ? "Confirm" : label}
+                            </Button>
+                          </span>
+                        );
+                      })}
+                  </div>
                 </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {rowActions
-                    .filter((action) => !row.actions || row.actions.includes(action.id))
-                    .map((action) => {
-                      const isArmed = armed === `${row.id}:${action.id}`;
-                      return (
-                        <Button
-                          key={action.id}
-                          type="button"
-                          size="xs"
-                          variant={isArmed ? "destructive" : "outline"}
-                          disabled={busy}
-                          aria-label={`${actionLabel(action)} ${row.label}`}
-                          onClick={() => fire(action, row)}
-                        >
-                          {isArmed ? "Confirm" : actionLabel(action)}
-                        </Button>
-                      );
-                    })}
-                </div>
+                {confirmation ? (
+                  <span role="status" className="text-muted-foreground max-w-72 text-xs break-words">
+                    {confirmation}
+                  </span>
+                ) : null}
               </li>
-            ))}
+              );
+            })}
           </ul>
         </section>
       ))}
 
-      {emptyGroups.map((entry) => (
+      {emptyGroups.map((entry) => {
+        const confirmation = entry.actions?.find(
+          (actionId) => armed === `empty:${entry.group}:${actionId}`,
+        );
+        return (
         <section key={`empty-${entry.group}`} className="flex flex-col gap-1">
           <h3 className="text-muted-foreground text-xs font-semibold tracking-wide capitalize">
             {entry.group}
           </h3>
-          <p className="text-muted-foreground rounded-lg bg-muted/30 px-3 py-2 text-sm break-words">
-            {entry.reason}
-          </p>
+          <div className="flex min-w-0 flex-col gap-2 rounded-lg bg-muted/30 px-3 py-2">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <p className="text-muted-foreground min-w-0 flex-1 text-sm break-words">
+                {entry.reason}
+              </p>
+              {entry.actions?.map((actionId) => {
+                const action = rowActions.find((candidate) => candidate.id === actionId);
+                if (!action || !entry.id) return null;
+                const key = `empty:${entry.group}:${action.id}`;
+                const isArmed = armed === key;
+                const label = entry.action_labels?.[action.id] || actionLabel(action);
+                const emptyRow: PanelRow = {
+                  id: entry.id,
+                  label: entry.group,
+                  group: entry.group,
+                };
+                return (
+                  <span key={action.id} className="inline-flex min-w-0 flex-wrap items-center gap-1.5">
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant={isArmed ? "destructive" : "outline"}
+                      disabled={busy}
+                      aria-label={`${isArmed ? "Confirm" : label} ${entry.group}`}
+                      onClick={() => {
+                        if (action.confirm && armed !== key) {
+                          setArmed(key);
+                          window.setTimeout(() => setArmed((now) => (now === key ? null : now)), 4000);
+                          return;
+                        }
+                        setArmed(null);
+                        onRowAction(action, emptyRow);
+                      }}
+                    >
+                      {isArmed ? "Confirm" : label}
+                    </Button>
+                  </span>
+                );
+              })}
+            </div>
+            {confirmation ? (
+              <span role="status" className="text-muted-foreground max-w-72 text-xs break-words">
+                {entry.action_confirmations?.[confirmation]}
+              </span>
+            ) : null}
+          </div>
         </section>
-      ))}
+        );
+      })}
 
       {!groups.length && !emptyGroups.length && (q || emptyText || !panel.notice) ? (
         <p className="text-muted-foreground rounded-lg bg-muted/30 px-3 py-6 text-center text-sm">
