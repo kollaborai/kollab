@@ -11,6 +11,7 @@ import { createServer } from "vite";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = path.resolve(scriptDir, "..");
 const repoRoot = path.resolve(frontendRoot, "../../..");
+const frontendVersion = JSON.parse(fs.readFileSync(path.join(frontendRoot, "package.json"), "utf8")).version;
 const screenshotDir = process.env.LEARN_SCREENSHOT_DIR ?? path.join(os.tmpdir(), "kollab-learn-renderer-screenshots");
 export function makeFixtures(options = {}) {
   let createdSession = null;
@@ -324,10 +325,12 @@ export async function openPage(browser, baseUrl, fixtures, options = {}) {
     isMobile: options.isMobile ?? false,
     hasTouch: options.isMobile ?? false,
   });
-  const initialGuideState = options.initialGuideState ?? "dismissed";
-  await context.addInitScript((state) => {
+  const initialGuideState =
+    options.initialGuideState ?? JSON.stringify({ step: "done", dismissed: true });
+  await context.addInitScript(({ state, version }) => {
     localStorage.setItem("kollab.setup-guide.v1", state);
-  }, initialGuideState);
+    localStorage.setItem("kollab.whats-new.v1", JSON.stringify({ seenVersion: version }));
+  }, { state: initialGuideState, version: frontendVersion });
 
   const page = await context.newPage();
   const pageErrors = [];
@@ -652,7 +655,7 @@ async function main() {
     console.log(`Mocked API requests: ${shell.fixture.requests.length}`);
     console.log("Learn browser acceptance passed; all API calls were mocked and no live engine was used.");
   } finally {
-    await browser.close();
+    await browser?.close();
     await server.close();
   }
 }

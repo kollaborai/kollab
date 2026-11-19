@@ -175,7 +175,10 @@ async function main() {
       args: process.platform === "linux" ? ["--no-sandbox"] : [],
     });
     context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
-    await context.addInitScript(() => localStorage.setItem("kollab.setup-guide.v1", "dismissed"));
+    await context.addInitScript(() => {
+      localStorage.setItem("kollab.setup-guide.v1", JSON.stringify({ step: "done", dismissed: true }));
+      localStorage.setItem("kollab.whats-new.v1", JSON.stringify({ seenVersion: "999.999.999" }));
+    });
     const page = await context.newPage();
     const pageErrors = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
