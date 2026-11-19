@@ -7,14 +7,16 @@ ownership, including blocked startup, without calling an account/provider.
 import asyncio
 import contextlib
 import json
+import math
 import os
-import signal
 import sys
 import time
 from pathlib import Path
 
 import psutil
 import pytest
+
+from tests.unit._owned_processes import asyncio_child_signal_is_reap_serialized
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -67,7 +69,20 @@ async def main():
     workspace = root / "owned"
     session = EngineSession("owner-lifetime-proof", "owned-" + phase,
                             workspace=str(workspace), solo=True, stop_on_owner_exit=True)
-    initialization = asyncio.create_task(session.initialize())
+
+    async def record_daemon_started(started_session, started_workspace):
+        daemon = started_session.daemon
+        if daemon is None:
+            raise AssertionError("EngineSession on_spawned callback ran without a daemon handle")
+        identity_path = started_workspace / "owned-daemon-identity.json"
+        temporary = identity_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(identity(daemon.pid, started_workspace)))
+        os.replace(temporary, identity_path)
+
+    async def record_owned_daemon(started_session):
+        await record_daemon_started(started_session, workspace)
+
+    initialization = asyncio.create_task(session.initialize(on_spawned=record_owned_daemon))
     if phase == "ready":
         await asyncio.wait_for(initialization, 45)
     else:
@@ -95,7 +110,13 @@ async def main():
         sibling_workspace = root / "detached"
         sibling = EngineSession("independent-lifetime-proof", "owned-ready",
                                 workspace=str(sibling_workspace), solo=True)
-        sibling_initialization = asyncio.create_task(sibling.initialize())
+
+        async def record_detached_daemon(started_session):
+            await record_daemon_started(started_session, sibling_workspace)
+
+        sibling_initialization = asyncio.create_task(
+            sibling.initialize(on_spawned=record_detached_daemon)
+        )
         async with asyncio.timeout(45):
             while sibling.daemon is None:
                 if sibling_initialization.done():
@@ -128,15 +149,29 @@ asyncio.run(main())
 
 
 def same_birth_alive(identity):
+    if not isinstance(identity, dict):
+        return False
+    pid = identity.get("pid")
+    birth = identity.get("create_time")
+    if (
+        type(pid) is not int
+        or pid <= 1
+        or isinstance(birth, bool)
+        or not isinstance(birth, (int, float))
+        or not math.isfinite(birth)
+    ):
+        return False
     try:
-        process = psutil.Process(identity["pid"])
+        process = psutil.Process(pid)
         return (
             process.is_running()
-            and process.create_time() == identity["create_time"]
+            and process.create_time() == birth
             and process.status() != psutil.STATUS_ZOMBIE
         )
     except psutil.NoSuchProcess:
         return False
+    except psutil.Error as exc:
+        raise RuntimeError(f"could not verify test-owned process {pid}") from exc
 
 
 def read_sdk_identity(workspace):
@@ -151,60 +186,123 @@ async def wait_dead(*identities):
             await asyncio.sleep(0.05)
 
 
-async def cleanup_test_daemon(identity, root):
-    """Ordinary SIGTERM only, to the exact birth and private workspace we own."""
-    if not same_birth_alive(identity):
-        return
-    process = psutil.Process(identity["pid"])
-    workspace = Path(identity["workspace"])
-    assert workspace.parent == root
-    assert Path(process.cwd()).resolve() == workspace.resolve()
-    assert "--detached" in process.cmdline()
-    assert process.create_time() == identity["create_time"]
-    process.send_signal(signal.SIGTERM)
-    await wait_dead(identity)
+async def observe_test_owned_processes(root, report):
+    """Observe recorded children without sending signals through recycled PIDs.
 
-
-def _test_spawned_process(process, root, adapter):
-    """This test's stray: a daemon running in one of its folders, or an SDK
-    running its adapter script. Both live under this run's tmp_path, so a
-    concurrent run of the same test is never touched."""
-    try:
-        cmdline = process.cmdline()
-        if not cmdline:
-            return False
-        if str(adapter) in cmdline:
-            return True
-        if "--detached" not in cmdline:
-            return False
-        return os.path.realpath(process.cwd()).startswith(os.path.realpath(root) + os.sep)
-    except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
-        return False
-
-
-async def stop_stray_test_processes(root, adapter):
-    """Final net: stop every daemon/SDK this test spawned, pass or fail.
-
-    The detached sibling has no owner watchdog, and the identity-based
-    cleanup above only knows processes the owner managed to report. An
-    owner that dies before writing its report (crash, interrupted run)
-    otherwise leaks its daemons for good.
+    Daemons are detached, so the test runner has no retained direct-child
+    handle for them. Their only safe shutdown path is their own owner/watchdog.
+    Owned children get a bounded 20-second exit observation; missing or stale
+    receipts are reported. Survivors without safe signal authority are deferred
+    to the ephemeral CI runner instead of being signalled by numeric PID.
     """
-    strays = [
-        process
-        for process in psutil.process_iter(["pid"])
-        if _test_spawned_process(process, root, adapter)
-    ]
-    for process in strays:
-        with contextlib.suppress(psutil.NoSuchProcess):
-            process.terminate()
-    _, alive = psutil.wait_procs(strays, timeout=10) if strays else ([], [])
-    for process in alive:
-        with contextlib.suppress(psutil.NoSuchProcess):
-            process.kill()
-    if alive:
-        _, alive = psutil.wait_procs(alive, timeout=10)
-    assert not alive, f"test processes survived teardown: {[p.pid for p in alive]}"
+    problems = []
+    deferred = []
+    entries = (
+        (root / "owned", "daemon", "owned-daemon-identity.json", True),
+        (root / "owned", "sdk", "owned-sdk-identity.json", True),
+        (root / "detached", "detached_daemon", "owned-daemon-identity.json", False),
+        (root / "detached", "detached_sdk", "owned-sdk-identity.json", False),
+    )
+    for workspace, key, filename, should_exit in entries:
+        path = workspace / filename
+        if key.startswith("detached_") and report.get("phase") != "ready":
+            try:
+                path.stat()
+            except FileNotFoundError:
+                continue
+        identity = report.get(key)
+        if identity is None:
+            try:
+                identity = json.loads(path.read_text())
+            except FileNotFoundError:
+                problems.append(f"missing {key} identity receipt: {path}")
+                continue
+            except (OSError, ValueError) as error:
+                problems.append(f"unreadable {key} identity receipt {path}: {error}")
+                continue
+        if (
+            not isinstance(identity, dict)
+            or type(identity.get("pid")) is not int
+            or identity["pid"] <= 1
+            or isinstance(identity.get("create_time"), bool)
+            or not isinstance(identity.get("create_time"), (int, float))
+            or not math.isfinite(identity["create_time"])
+        ):
+            problems.append(f"invalid {key} process identity; no signal attempted: {path}")
+            continue
+        if Path(str(identity.get("workspace", ""))).resolve() != workspace.resolve():
+            problems.append(f"{key} identity escaped its test workspace; no signal attempted: {path}")
+            continue
+
+        if should_exit:
+            try:
+                await wait_dead(identity)
+            except (asyncio.TimeoutError, RuntimeError) as error:
+                problems.append(
+                    f"{key} process {identity['pid']} may remain; no safe signal authority; "
+                    f"deferred to ephemeral CI runner: {error}"
+                )
+        else:
+            try:
+                if same_birth_alive(identity):
+                    deferred.append(
+                        {
+                            "identity": key,
+                            "pid": identity["pid"],
+                            "reason": (
+                                "detached test child has no retained direct handle or verified watchdog; "
+                                "deferred to ephemeral CI runner"
+                            ),
+                        }
+                    )
+            except RuntimeError as error:
+                problems.append(
+                    f"could not verify detached {key} process {identity['pid']}; "
+                    f"no safe signal authority; deferred to ephemeral CI runner: {error}"
+                )
+    return problems, deferred
+
+
+async def observe_test_owned_processes_after_owner_shutdown(root, report):
+    """Recover owner evidence when possible, then always observe cleanup state."""
+    problems = []
+    if not isinstance(report, dict):
+        problems.append("owner report was not a JSON object")
+        report = {}
+
+    if not report:
+        try:
+            owner_report = (root / "owner-report.json").read_text()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            problems.append(f"unreadable owner report: {type(error).__name__}: {error}")
+        else:
+            try:
+                recovered = json.loads(owner_report)
+            except ValueError as error:
+                problems.append(f"unreadable owner report: {type(error).__name__}: {error}")
+            else:
+                if isinstance(recovered, dict):
+                    report = recovered
+                else:
+                    problems.append("owner report was not a JSON object")
+
+    try:
+        if "detached_daemon" in report and "detached_sdk" not in report:
+            sdk = read_sdk_identity(root / "detached")
+            if sdk is not None:
+                report["detached_sdk"] = sdk
+    except BaseException as error:
+        problems.append(f"detached SDK identity observation: {type(error).__name__}: {error}")
+
+    try:
+        cleanup_problems, deferred = await observe_test_owned_processes(root, report)
+        problems.extend(cleanup_problems)
+    except BaseException as error:
+        deferred = []
+        problems.append(f"identity observation: {type(error).__name__}: {error}")
+    return report, problems, deferred
 
 
 @pytest.mark.asyncio
@@ -240,7 +338,6 @@ async def test_owner_drop_retires_daemon_and_sdk_without_affecting_detached_agen
         sys.executable, "-u", str(bootstrap), str(root), phase, cwd=root, env=env,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
-    owner_identity = {"pid": process.pid, "create_time": psutil.Process(process.pid).create_time()}
     stderr_task = asyncio.create_task(process.stderr.read())
     report = {}
     observation = {"backend": "isolated deterministic SDK, no provider call", "phase": phase}
@@ -271,43 +368,42 @@ async def test_owner_drop_retires_daemon_and_sdk_without_affecting_detached_agen
     finally:
         problems: list[str] = []
         try:
+            safe_signal = asyncio_child_signal_is_reap_serialized()
             if process.returncode is None:
-                # This is the exact process created here; ordinary termination only.
-                if same_birth_alive(owner_identity):
+                if safe_signal:
+                    # Use the retained asyncio child owner, with no separate
+                    # PID lookup. POSIX methods remain numeric signals, enabled
+                    # only where Python's watcher serializes reaping on loop.
                     process.terminate()
-                await asyncio.wait_for(process.wait(), 10)
+                try:
+                    await asyncio.wait_for(process.wait(), 10)
+                except asyncio.TimeoutError as error:
+                    if not safe_signal:
+                        raise RuntimeError(
+                            "asyncio child did not exit and this runtime has no safe signal path; "
+                            "defer cleanup to the ephemeral CI runner"
+                        ) from error
+                    process.kill()
+                    await asyncio.wait_for(process.wait(), 5)
             stderr = await asyncio.wait_for(stderr_task, 10)
             (root / "owner-stderr.txt").write_bytes(stderr)
         except BaseException as error:
             problems.append(f"owner shutdown: {type(error).__name__}: {error}")
         # Retain all identity/evidence files, even when the qualification fails.
-        if not report and (root / "owner-report.json").exists():
-            report = json.loads((root / "owner-report.json").read_text())
-        if "detached_daemon" in report and "detached_sdk" not in report:
-            sdk = read_sdk_identity(root / "detached")
-            if sdk is not None:
-                report["detached_sdk"] = sdk
-        try:
-            for key in ("daemon", "detached_daemon"):
-                if key in report:
-                    await cleanup_test_daemon(report[key], root)
-            for key in ("sdk", "detached_sdk"):
-                if key in report:
-                    await wait_dead(report[key])
-        except BaseException as error:
-            # A failed precise cleanup must not skip the sweep below.
-            problems.append(f"identity cleanup: {type(error).__name__}: {error}")
-        try:
-            # Last net, pass or fail: never leave a daemon or SDK behind,
-            # even when the owner died before reporting any identity.
-            await stop_stray_test_processes(root, adapter)
-        except BaseException as error:
-            problems.append(f"stray sweep: {type(error).__name__}: {error}")
+        report, identity_problems, deferred = await observe_test_owned_processes_after_owner_shutdown(root, report)
+        problems.extend(identity_problems)
         observation["identities"] = report
-        observation["remaining_same_births_after_owned_teardown"] = [
-            key for key, value in report.items()
-            if isinstance(value, dict) and "pid" in value and same_birth_alive(value)
-        ]
+        observation["deferred_cleanup_no_safe_signal_authority"] = deferred
+        remaining = []
+        for key, value in report.items():
+            if not isinstance(value, dict) or "pid" not in value:
+                continue
+            try:
+                if same_birth_alive(value):
+                    remaining.append(key)
+            except RuntimeError as error:
+                remaining.append(f"{key}: unverified ({error})")
+        observation["remaining_same_births_after_owned_teardown"] = remaining
         observation["teardown_problems"] = problems
         (root / "lifetime-observation.json").write_text(json.dumps(observation, indent=2))
         if problems:
