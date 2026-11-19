@@ -496,6 +496,12 @@ class ConfigLoader:
                 "validation_timeout_seconds": 600,
                 "audit_log": "",
             },
+            # Agent terminal policy (#1147): Kollab commands run freely by
+            # default; this opt-in refuses agent launches and background
+            # Kollab commands from agent terminals.
+            "tools": {
+                "block_kollab_terminal_spawn": False,
+            },
             "terminal": {
                 "render_fps": 20,
                 "spinner_frames": ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"],

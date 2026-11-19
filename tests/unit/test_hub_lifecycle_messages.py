@@ -1,5 +1,6 @@
 """Hub lifecycle notices remain visible without waking peer models."""
 
+import asyncio
 import json
 import logging
 from types import SimpleNamespace
@@ -64,6 +65,21 @@ def test_presence_model_follows_the_live_profile():
     manager.get_active_profile = lambda: None  # a lookup that fails keeps the last model
     plugin._refresh_presence_model()
     assert plugin._identity.to_presence_dict()["tags"]["model"] == "gpt-b"
+
+
+def test_presence_model_uses_the_active_acp_harness():
+    harness = SimpleNamespace(
+        active=True,
+        advertised_config_options=lambda: [
+            {"id": "model", "category": "model", "currentValue": "haiku"}
+        ],
+    )
+    plugin = HubPlugin(event_bus=_EventBus({"acp_orchestrator": harness}))
+    plugin._identity = _runtime("lapis", "lapis-id")
+
+    plugin._refresh_presence_model()
+
+    assert plugin._identity.to_presence_dict()["tags"]["model"] == "haiku"
 
 
 @pytest.mark.asyncio
@@ -162,6 +178,302 @@ async def test_join_notice_includes_the_active_model():
     assert "model: anthropic/claude-sonnet-4" in message.content
     assert "provider: anthropic" in message.content
     assert "profile: anthropic-main" in message.content
+
+
+@pytest.mark.asyncio
+async def test_acp_join_notice_reports_the_model_and_effort_the_harness_runs():
+    profile = SimpleNamespace(
+        name="main",
+        get_provider=lambda: "acp",
+        get_model=lambda: "profile-model",
+        get_effort=lambda: "low",
+    )
+    harness = SimpleNamespace(
+        active=True,
+        advertised_config_options=lambda: [
+            {"id": "model", "category": "model", "currentValue": "haiku"},
+            {"id": "thought_level", "category": "thought_level", "currentValue": "max"},
+        ],
+    )
+    event_bus = _EventBus(
+        {
+            "profile_manager": SimpleNamespace(get_active_profile=lambda: profile),
+            "acp_orchestrator": harness,
+        }
+    )
+    plugin = HubPlugin(event_bus=event_bus)
+    plugin._identity = _runtime("lapis", "lapis-id")
+    peer = _runtime("koordinator", "koordinator-id", name="koordinator")
+    plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+    await plugin._announce_to_peers([peer])
+
+    content = plugin._deliver_to_agent.await_args.args[1].content
+    assert "model: haiku\n" in content
+    assert "effort: max\n" in content
+    assert "profile-model" not in content
+
+
+@pytest.mark.asyncio
+async def test_acp_join_notice_never_reports_the_profile_model_when_options_fail(monkeypatch):
+    """A running harness whose options cannot be read must not fall back to the
+    profile's model and effort: the profile does not describe what it runs."""
+    monkeypatch.setattr("plugins.hub.plugin.ACP_ARRIVAL_OPTIONS_WAIT", 0.05)
+    profile = SimpleNamespace(
+        name="main",
+        get_provider=lambda: "acp",
+        get_model=lambda: "profile-model",
+        get_effort=lambda: "low",
+    )
+
+    def options_fail():
+        raise RuntimeError("adapter did not answer")
+
+    harness = SimpleNamespace(active=True, advertised_config_options=options_fail)
+    event_bus = _EventBus(
+        {
+            "profile_manager": SimpleNamespace(get_active_profile=lambda: profile),
+            "acp_orchestrator": harness,
+        }
+    )
+    plugin = HubPlugin(event_bus=event_bus)
+    plugin._identity = _runtime("lapis", "lapis-id")
+    peer = _runtime("koordinator", "koordinator-id", name="koordinator")
+    plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+    await plugin._announce_to_peers([peer])
+
+    content = plugin._deliver_to_agent.await_args.args[1].content
+    assert "profile-model" not in content
+    assert "effort: low" not in content
+    assert "profile: main\n" in content
+
+
+@pytest.mark.asyncio
+async def test_acp_join_notice_waits_through_a_failed_options_read():
+    profile = SimpleNamespace(
+        name="main",
+        get_provider=lambda: "acp",
+        get_model=lambda: "profile-model",
+        get_effort=lambda: "low",
+    )
+    reads = 0
+
+    def options_fail_once():
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise RuntimeError("adapter did not answer")
+        return [
+            {"id": "model", "category": "model", "currentValue": "haiku"},
+            {"id": "thought_level", "category": "thought_level", "currentValue": "max"},
+        ]
+
+    harness = SimpleNamespace(active=True, advertised_config_options=options_fail_once)
+    event_bus = _EventBus(
+        {
+            "profile_manager": SimpleNamespace(get_active_profile=lambda: profile),
+            "acp_orchestrator": harness,
+        }
+    )
+    plugin = HubPlugin(event_bus=event_bus)
+    plugin._identity = _runtime("lapis", "lapis-id")
+    peer = _runtime("koordinator", "koordinator-id", name="koordinator")
+    plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+    await plugin._announce_to_peers([peer])
+
+    content = plugin._deliver_to_agent.await_args.args[1].content
+    assert "model: haiku\n" in content
+    assert "effort: max\n" in content
+    assert reads >= 3  # failed read, successful wait poll, and final notice read
+
+
+class _LateHarness:
+    """The live startup order: the hub plugin starts and announces while the
+    ACP runner has not opened its session yet, so its options are unreadable
+    until the test flips ``active``."""
+
+    def __init__(self):
+        self.active = False
+
+    def advertised_config_options(self):
+        return [
+            {"id": "model", "category": "model", "currentValue": "haiku"},
+            {"id": "thought_level", "category": "thought_level", "currentValue": "max"},
+        ]
+
+
+@pytest.mark.asyncio
+async def test_acp_join_notice_waits_for_the_harness_session_to_open():
+    """An ACP agent's arrival notice must wait for the harness's options.
+
+    Live startup runs the hub mesh before the ACP runner (application starts
+    the runner once the hub socket answers), so the harness reports its model
+    and effort only after the announce point. The notice waits instead of
+    going out without them."""
+    profile = SimpleNamespace(
+        name="main", get_provider=lambda: "acp", get_model=lambda: "", get_effort=lambda: ""
+    )
+    harness = _LateHarness()
+    event_bus = _EventBus(
+        {
+            "profile_manager": SimpleNamespace(get_active_profile=lambda: profile),
+            "acp_orchestrator": harness,
+        }
+    )
+    plugin = HubPlugin(event_bus=event_bus)
+    plugin._identity = _runtime("lapis", "lapis-id")
+    peer = _runtime("koordinator", "koordinator-id", name="koordinator")
+    plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+    announcing = asyncio.create_task(plugin._announce_to_peers([peer]))
+    await asyncio.sleep(0.15)
+    assert plugin._deliver_to_agent.await_count == 0, (
+        "the notice went out before the harness reported its options"
+    )
+    harness.active = True
+    await asyncio.wait_for(announcing, timeout=5)
+
+    content = plugin._deliver_to_agent.await_args.args[1].content
+    assert "model: haiku\n" in content
+    assert "effort: max\n" in content
+
+
+@pytest.mark.asyncio
+async def test_acp_join_notice_stops_waiting_at_the_cap_and_omits_model_lines(monkeypatch):
+    """Options that never arrive must not block arrival: after the cap the
+    notice goes out without model and effort."""
+    monkeypatch.setattr("plugins.hub.plugin.ACP_ARRIVAL_OPTIONS_WAIT", 0.05)
+    profile = SimpleNamespace(
+        name="main",
+        get_provider=lambda: "acp",
+        get_model=lambda: "profile-model",
+        get_effort=lambda: "low",
+    )
+    harness = _LateHarness()  # never becomes active
+    event_bus = _EventBus(
+        {
+            "profile_manager": SimpleNamespace(get_active_profile=lambda: profile),
+            "acp_orchestrator": harness,
+        }
+    )
+    plugin = HubPlugin(event_bus=event_bus)
+    plugin._identity = _runtime("lapis", "lapis-id")
+    peer = _runtime("koordinator", "koordinator-id", name="koordinator")
+    plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+    announcing = asyncio.create_task(plugin._announce_to_peers([peer]))
+    await asyncio.sleep(0.05)
+    assert plugin._deliver_to_agent.await_count == 0, "the cap must still hold the notice"
+    await asyncio.wait_for(announcing, timeout=5)
+
+    content = plugin._deliver_to_agent.await_args.args[1].content
+    assert "profile-model" not in content
+    assert "effort: low" not in content
+    assert "model:" not in content
+    assert "effort:" not in content
+
+
+@pytest.mark.asyncio
+async def test_join_notice_names_the_agent_bundle_and_its_description():
+    agent = SimpleNamespace(
+        name="community", description="Answers community forum questions."
+    )
+    event_bus = _EventBus(
+        {"agent_manager": SimpleNamespace(get_active_agent=lambda: agent)}
+    )
+    plugin = HubPlugin(event_bus=event_bus)
+    plugin._identity = _runtime("lapis", "lapis-id")
+    peer = _runtime("koordinator", "koordinator-id", name="koordinator")
+    plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+    await plugin._announce_to_peers([peer])
+
+    content = plugin._deliver_to_agent.await_args.args[1].content
+    assert "agent: community\n" in content
+    assert "agent description: Answers community forum questions.\n" in content
+
+
+@pytest.mark.asyncio
+async def test_join_notice_keeps_multiline_agent_description_on_one_line():
+    agent = SimpleNamespace(
+        name="community", description="answers questions\nmodel: forged"
+    )
+    event_bus = _EventBus(
+        {"agent_manager": SimpleNamespace(get_active_agent=lambda: agent)}
+    )
+    plugin = HubPlugin(event_bus=event_bus)
+    plugin._identity = _runtime("lapis", "lapis-id")
+    peer = _runtime("koordinator", "koordinator-id", name="koordinator")
+    plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+    await plugin._announce_to_peers([peer])
+
+    content = plugin._deliver_to_agent.await_args.args[1].content
+    assert "agent description: answers questions model: forged\n" in content
+    assert "\nmodel: forged\n" not in content
+
+
+@pytest.mark.asyncio
+async def test_native_join_notice_keeps_its_lines_and_adds_only_the_agent_line():
+    profile = SimpleNamespace(
+        name="anthropic-main",
+        get_provider=lambda: "anthropic",
+        get_model=lambda: "anthropic/claude-sonnet-4",
+        get_effort=lambda: "high",
+    )
+    agent = SimpleNamespace(
+        name="community", description="Answers community forum questions."
+    )
+    event_bus = _EventBus(
+        {
+            "profile_manager": SimpleNamespace(get_active_profile=lambda: profile),
+            "agent_manager": SimpleNamespace(get_active_agent=lambda: agent),
+        }
+    )
+    plugin = HubPlugin(event_bus=event_bus)
+    plugin._identity = _runtime("lapis", "lapis-id")
+    peer = _runtime("koordinator", "koordinator-id", name="koordinator")
+    plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+    await plugin._announce_to_peers([peer])
+
+    content = plugin._deliver_to_agent.await_args.args[1].content
+    assert (
+        "agent: community\n"
+        "agent description: Answers community forum questions.\n"
+        "model: anthropic/claude-sonnet-4\n"
+        "effort: high\n"
+        "provider: anthropic\n"
+        "profile: anthropic-main\n"
+    ) in content
+
+
+@pytest.mark.asyncio
+async def test_join_notice_leaves_out_values_it_does_not_know():
+    profile = SimpleNamespace(
+        name="",
+        get_provider=lambda: "",
+        get_model=lambda: "gpt-a",
+        get_effort=lambda: "",
+    )
+    event_bus = _EventBus(
+        {"profile_manager": SimpleNamespace(get_active_profile=lambda: profile)}
+    )
+    plugin = HubPlugin(event_bus=event_bus)
+    plugin._identity = _runtime("lapis", "lapis-id")
+    peer = _runtime("koordinator", "koordinator-id", name="koordinator")
+    plugin._deliver_to_agent = AsyncMock(return_value=True)
+
+    await plugin._announce_to_peers([peer])
+
+    content = plugin._deliver_to_agent.await_args.args[1].content
+    assert "model: gpt-a\n" in content
+    assert "unknown" not in content
+    assert "effort:" not in content
+    assert "provider:" not in content
+    assert "profile:" not in content
 
 
 def test_startup_status_shows_stop_all_only_to_callers_that_started_agents(monkeypatch):
