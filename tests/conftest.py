@@ -1,12 +1,26 @@
 """Shared pytest lifecycle safeguards for the test suite."""
 
 import asyncio
+import os
+import subprocess
 import threading
 import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
+from pathlib import Path
 
+import psutil
 import pytest
+
+from tests.process_scan_guard import (
+    HOST_PROCESS_SCAN_MARKER,
+    HOST_PROCESS_SCAN_OPTION,
+    HOST_PROCESS_SCAN_SKIP_REASON,
+    HOST_PROCESS_SCAN_TESTS,
+    host_process_scan_environment_errors,
+    host_process_scans_allowed,
+    install_test_process_scan_guard,
+)
 
 
 @contextmanager
@@ -22,7 +36,62 @@ def _policy_api():
         warnings.simplefilter("ignore", DeprecationWarning)
         yield asyncio
 
+
 _state = threading.local()
+
+
+def pytest_addoption(parser) -> None:
+    parser.addoption(
+        HOST_PROCESS_SCAN_OPTION,
+        action="store_true",
+        default=False,
+        help="allow marked host-wide process tests only in the approved CI job",
+    )
+
+
+def _host_process_scan_option_enabled(config) -> bool:
+    return config.getoption("allow_host_process_enumeration", default=False)
+
+
+def _host_process_scans_allowed(config) -> bool:
+    return host_process_scans_allowed(_host_process_scan_option_enabled(config), os.environ)
+
+
+def pytest_configure(config) -> None:
+    """Reject an attempted opt-in unless every sanctioned CI identity matches."""
+    if not _host_process_scan_option_enabled(config):
+        return
+    errors = host_process_scan_environment_errors(os.environ)
+    if errors:
+        raise pytest.UsageError(
+            f"{HOST_PROCESS_SCAN_OPTION} requires the GitHub-hosted CI/tests job; "
+            f"mismatched metadata: {', '.join(errors)}"
+        )
+
+
+def pytest_collection_modifyitems(config, items) -> None:
+    """Skip approved live tests locally and reject known tests if unmarked."""
+    allowed = _host_process_scans_allowed(config)
+    tests_root = Path(__file__).resolve().parent
+    for item in items:
+        module_path = Path(str(item.path)).resolve().relative_to(tests_root).as_posix()
+        original_name = getattr(item, "originalname", item.name)
+        required_tests = HOST_PROCESS_SCAN_TESTS.get(module_path, frozenset())
+        if original_name in required_tests and item.get_closest_marker(HOST_PROCESS_SCAN_MARKER) is None:
+            item.add_marker(getattr(pytest.mark, HOST_PROCESS_SCAN_MARKER))
+        if item.get_closest_marker(HOST_PROCESS_SCAN_MARKER) is not None and not allowed:
+            item.add_marker(pytest.mark.skip(reason=HOST_PROCESS_SCAN_SKIP_REASON))
+
+
+@pytest.fixture(autouse=True)
+def _block_unmarked_host_process_enumeration(request, monkeypatch):
+    """Block process discovery unless this marked test has CI authorization."""
+    is_authorized_live_test = request.node.get_closest_marker(
+        HOST_PROCESS_SCAN_MARKER
+    ) is not None and _host_process_scans_allowed(request.config)
+    if is_authorized_live_test:
+        return
+    install_test_process_scan_guard(psutil, subprocess, monkeypatch)
 
 
 @pytest.fixture(autouse=True)

@@ -66,6 +66,8 @@ Peer-to-peer agent mesh with persistent identity.
 - `<scratchpad_append>content</scratchpad_append>` - Append
 - `<scratchpad_get/>` - Read back
 - `<scratchpad_clear/>` - Wipe
+- A missing note reads as `(empty)`; storage failures return a failed tool result.
+- Scratchpad notes survive compaction and remain available through `<scratchpad_get/>`; they are not automatically injected during rebirth.
 
 **CRITICAL: How `kollab --hub msg` actually works:**
 - `kollab --hub msg <name> <text>` BROADCASTS to ALL online agents, not just the named target
@@ -138,6 +140,9 @@ that do not wake the receiving agent.
 - response_parser runs on ALL responses regardless of native tool presence
 - Plugin tags (hub_msg, scratchpad, etc) are registered via `register_plugin_tag()` and executed via `register_plugin_handler()` -- real tools, not regex hacks on LLM_RESPONSE_POST
 - 43 hub pipeline tags registered (hub_msg, hub_broadcast, hub_stop, hub_status, scratchpad*, state_update, task_*, change feed, agent ops, vault_write, hub_ask_ctx)
+- `state_update` preserves malformed or unreadable saved state and reports
+  persistence failures. Back up and explicitly repair or remove invalid state
+  before retrying.
 - A native call the model writes into its reply as text (`<functions.NAME>{json}</functions.NAME>`, `<tool_call>{"name": ...}</tool_call>`) parses as an MCP call by name; `resolve_text_tool_call` (`kollabor_agent/tool_call_contract.py`) sends it to the built-in or plugin tool it names before scope and permission checks, as `normalize_native_tool_call` does for real native calls. Its result returns in the XML batch, never as a provider tool result (the provider never issued that call id). Beside real native calls such a block only echoes them and never runs (`is_text_written_call`); a `<tool_call>` with no name is a `malformed_tool`, never a tool named "unknown"
 - See `docs/specs/unified-tool-pipeline.md` for full design
 
@@ -207,10 +212,11 @@ When a user reports a hub bug, do not guess. Run this loop:
    completed`, the task was delivered but the model never called a tool.
    That's a prompt/model issue, not a delivery bug.
 
-5. **Vault rebirth is not a bug.** Agents load
-   `~/.kollab/hub/vaults/<identity>/` (stream + working_memory +
-   crystallized + scratchpad) on startup. Spawning lapis after lapis has
-   3 prior sessions of work means lapis will reference that work in its
+5. **Vault rebirth is not a bug.** Startup context includes the stream,
+   working memory, and crystallized notes. Scratchpad notes persist across
+   compaction but are read explicitly through `<scratchpad_get/>`, not
+   automatically injected on startup. Spawning lapis after lapis has 3 prior
+   sessions of work means lapis will reference that rebirth context in its
    first reply. For clean smoke tests, use a gem with a thinner vault
    (`sapphire`, `peridot`) or `rm -rf ~/.kollab/hub/vaults/<name>`
    first (only with explicit user permission).
