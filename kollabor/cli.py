@@ -3477,13 +3477,41 @@ def _wait_for_detached_child_startup(read_fd: int, child_pid: int) -> str | None
     return wait_for_detached_startup(read_fd, child_pid)
 
 
+def _block_kollab_terminal_spawn_enabled() -> bool:
+    """Return whether tools.block_kollab_terminal_spawn is on in the user config.
+
+    Agent terminals may launch Kollab by default; any failure to read the
+    setting keeps that default.
+    """
+    try:
+        from kollabor_config import ConfigService
+        from kollabor_config.config_utils import get_config_directory
+
+        config = ConfigService(
+            get_config_directory() / "config.json", None, fast_mode=True
+        )
+        return config.get("tools.block_kollab_terminal_spawn", False) is True
+    except Exception:
+        return False
+
+
 def _is_tool_shell_agent_launch(argv: list[str]) -> bool:
-    """Return whether a marked tool child is trying to launch an agent."""
+    """Return whether a marked tool child is trying to launch an agent.
+
+    Only applies when the owner opted in with tools.block_kollab_terminal_spawn.
+    """
     if not any(
         marker in os.environ for marker in ("KOLLAB_TOOL_SHELL", "KOLLAB_AGENT_PID")
     ):
         return False
 
+    if _is_agent_launch_argv(argv) and _block_kollab_terminal_spawn_enabled():
+        return True
+    return False
+
+
+def _is_agent_launch_argv(argv: list[str]) -> bool:
+    """Return whether argv selects an agent launch (-a/--agent or -d/--detached)."""
     for argument in argv[1:]:
         if argument == "--":
             break
@@ -3513,8 +3541,9 @@ def cli_main() -> None:
         return
     if _is_tool_shell_agent_launch(sys.argv):
         sys.stderr.write(
-            "error: nested --agent launches are blocked in tool/agent contexts; "
-            "use hub_spawn instead.\n"
+            "error: nested --agent launches are blocked in tool/agent contexts "
+            "because tools.block_kollab_terminal_spawn is on; use hub_spawn "
+            "instead or turn the setting off.\n"
         )
         raise SystemExit(2)
 

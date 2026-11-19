@@ -140,6 +140,9 @@ The base config is divided into sections:
     "thinking_effect": "shimmer",
     "interactive_shell": true
   },
+  "tools": {
+    "block_kollab_terminal_spawn": false
+  },
   "input": {
     "ctrl_c_exit": true,
     "history_limit": 100,
