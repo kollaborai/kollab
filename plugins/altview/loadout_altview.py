@@ -132,6 +132,7 @@ class LoadoutListAltView(AltView):
         self._query: str = ""
         self._note: str = ""
         self._delete_armed: Optional[str] = None
+        self._delete_provider_armed = False
         self._activating: bool = False
         self._activate_error: str = ""
 
@@ -298,9 +299,13 @@ class LoadoutListAltView(AltView):
                 and item is not None
                 and item.name == self._delete_armed
             ):
-                self._confirm_delete(item)
+                if self._delete_provider_armed:
+                    await self._confirm_remove_provider(item)
+                else:
+                    self._confirm_delete(item)
             else:
                 self._delete_armed = None
+                self._delete_provider_armed = False
                 self._note = ""
             return False
 
@@ -416,14 +421,38 @@ class LoadoutListAltView(AltView):
         if item is None:
             return
         if item.implicit:
-            self._note = (
-                "catalog models can't be deleted — press N to save a customized copy."
-            )
+            self._trigger_remove_provider(item)
             return
+        self._delete_provider_armed = False
         self._delete_armed = item.name
         self._note = f"press D again to delete '{item.name}', any other key cancels."
 
+    def _trigger_remove_provider(self, item: Any) -> None:
+        provider = _resolve_provider_type(self._profile_manager, item.provider_profile)
+        profiles = [
+            profile.name
+            for profile in self._manager.provider_profiles()
+            if _resolve_provider_type(self._profile_manager, profile.name).lower()
+            == provider.lower()
+        ]
+        names = ", ".join(profiles) or item.provider_profile
+        loadouts = [
+            loadout.name
+            for loadout in self._manager.list_loadouts()
+            if not loadout.implicit and loadout.provider_profile in profiles
+        ]
+        self._delete_provider_armed = True
+        self._delete_armed = item.name
+        self._note = (
+            f"press D again to remove the {_provider_display(provider)} provider "
+            f"(profiles {names}; saved keys are retained because another project may reference them); "
+            "any other key or action cancels."
+        )
+        if loadouts:
+            self._note += " saved loadouts: " + ", ".join(loadouts) + "."
+
     def _confirm_delete(self, item: Any) -> None:
+        self._delete_provider_armed = False
         try:
             ok = bool(self._manager.delete(item.name))
         except Exception as exc:
@@ -435,6 +464,45 @@ class LoadoutListAltView(AltView):
             self._refresh()
         else:
             self._note = f"could not delete '{item.name}'."
+
+    async def _confirm_remove_provider(self, item: Any) -> None:
+        provider = _resolve_provider_type(self._profile_manager, item.provider_profile)
+        active = None
+        try:
+            active = self._profile_manager.get_active_profile()
+        except Exception:
+            pass
+        active_provider = (
+            _resolve_provider_type(self._profile_manager, active.name) if active else ""
+        )
+        try:
+            removed = self._profile_manager.remove_provider_profiles(provider)
+        except Exception as exc:  # noqa: BLE001 - keep the picker usable
+            logger.error("loadout: remove provider '%s' failed: %s", provider, exc)
+            removed = []
+        self._delete_armed = None
+        self._delete_provider_armed = False
+        if not removed:
+            self._note = f"could not remove the {_provider_display(provider)} provider."
+            return
+        switch_warning = ""
+        if active_provider.lower() == provider.lower():
+            get_service = getattr(self._event_bus, "get_service", None)
+            llm_service = get_service("llm_service") if callable(get_service) else None
+            switch_profile = getattr(llm_service, "switch_profile", None)
+            switched = False
+            if callable(switch_profile):
+                try:
+                    switched = await switch_profile("default", persist=False)
+                except Exception as exc:  # noqa: BLE001 - provider transitions are user visible
+                    logger.error("loadout: switch away from provider '%s' failed: %s", provider, exc)
+            if not switched:
+                switch_warning = " active session may need restart to finish switching."
+        self._note = (
+            f"removed {_provider_display(provider)} provider profiles: {', '.join(removed)}."
+            f"{switch_warning}"
+        )
+        self._refresh()
 
     async def _run_activate(self, loadout: Any) -> None:
         try:
@@ -861,6 +929,16 @@ class LoadoutFormAltView(AltView):
                 value="backend default (ChatGPT OAuth)",
                 help_text="This endpoint does not accept an output-token override.",
             )
+        self._compaction_widget = TextInputWidget(
+            {
+                "label": "Compaction Threshold (K tokens)",
+                "value": str(getattr(base, "compaction_threshold_k", None) or "")
+                if base else "",
+                "validation": "integer",
+                "placeholder": "automatic",
+            },
+            "",
+        )
         self._description_widget = TextInputWidget(
             {"label": "Description", "value": description, "placeholder": "optional"},
             "",
@@ -874,6 +952,7 @@ class LoadoutFormAltView(AltView):
                 self._temperature_widget,
                 self._effort_widget,
                 self._max_tokens_widget,
+                self._compaction_widget,
                 self._description_widget,
             ]
         )
@@ -989,6 +1068,19 @@ class LoadoutFormAltView(AltView):
                         self._stage = "edit"
                         return
 
+            compaction_raw = str(self._compaction_widget.get_pending_value() or "").strip()
+            compaction_threshold_k = None
+            if compaction_raw:
+                try:
+                    threshold_k = int(compaction_raw)
+                except ValueError:
+                    threshold_k = 0
+                if threshold_k < 1:
+                    self._error = "Compaction Threshold must be a whole number of at least 1."
+                    self._stage = "edit"
+                    return
+                compaction_threshold_k = threshold_k
+
             description = str(
                 self._description_widget.get_pending_value() or ""
             ).strip()
@@ -1005,6 +1097,7 @@ class LoadoutFormAltView(AltView):
                         effort=effort,
                         max_tokens=max_tokens,
                         description=description,
+                        compaction_threshold_k=compaction_threshold_k,
                     )
                 )
             else:
@@ -1017,6 +1110,7 @@ class LoadoutFormAltView(AltView):
                         effort=effort,
                         max_tokens=max_tokens,
                         description=description,
+                        compaction_threshold_k=compaction_threshold_k,
                     )
                 )
 
@@ -1044,6 +1138,7 @@ class LoadoutFormAltView(AltView):
                     effort=effort,
                     max_tokens=max_tokens,
                     description=description,
+                    compaction_threshold_k=compaction_threshold_k,
                 )
 
             activated = None
