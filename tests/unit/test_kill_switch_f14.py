@@ -3,29 +3,41 @@ scope, a malformed scope list holds the machine, revocations judged as a pure fu
 record set (F15a: both sides of a crossing apply, a lone signature never completes), a directory named
 halt.json is recoverable.
 
-The real-process tests run commands through the real ShellExecutor and signal only what they started.
+The real-process tests run commands through the real ShellExecutor. A private
+watchdog stops each workload group; if that watchdog is missing, teardown waits
+briefly for exact recorded identities and defers survivors to CI.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import time
 
+import psutil
 import pytest
 
 from kollabor_agent import shell_executor as se
 from plugins.hub import halt_runtime as hr
 from plugins.hub import network_halt as nh
+from tests.unit._owned_processes import (
+    bounded_child_command,
+    cleanup_group,
+    wait_for_recorded_identities,
+    watchdog_command,
+)
 from tests.unit.test_kill_switch_f12 import _four, _recount
 from tests.unit.test_kill_switch_f13 import KOLLAB_ARGV, P1, _book, _no_link
 
-posix_only = pytest.mark.skipif(sys.platform != "darwin" and not sys.platform.startswith("linux"),
-                                reason="needs real process groups")
+posix_only = pytest.mark.skipif(
+    sys.platform != "darwin" and not sys.platform.startswith("linux"), reason="needs real process groups"
+)
 
 
 def _ps() -> dict[int, str]:
@@ -33,60 +45,311 @@ def _ps() -> dict[int, str]:
     return {int(a): b for a, b in (line.strip().split(None, 1) for line in out.splitlines() if line.strip())}
 
 
+def _record_last_background_pid(command: str, pids_file) -> str:
+    """Record the exact PID started by one controlled shell command."""
+    path = shlex.quote(str(pids_file))
+    return f'{command}\n_test_owned_pid=$!; printf "%s\\n" "$_test_owned_pid" >> {path}'
+
+
+def _live_private_group_anchor(ready, pgid):
+    try:
+        data = json.loads(ready.read_text())
+        if data.get("pgid") != pgid:
+            return None
+        # While the watchdog is live it pins this private PGID, so discard a
+        # recycled workload PID before asking psutil for process details.
+        if os.getpgid(data["pid"]) != pgid:
+            return None
+        guard = psutil.Process(data["pid"])
+        birth = data["birth"]
+        if (
+            not guard.is_running()
+            or guard.status() == psutil.STATUS_ZOMBIE
+            or guard.create_time() != birth
+            or os.getpgid(guard.pid) != pgid
+            or guard.create_time() != birth
+        ):
+            return None
+        return guard, birth
+    except FileNotFoundError, psutil.NoSuchProcess, ProcessLookupError, ValueError:
+        return None
+
+
+def _remember_owned_members(pgid, ready, pids_file, owned_members):
+    """Retain only PIDs reported by this test's shell and verified in its private group."""
+    if _live_private_group_anchor(ready, pgid) is None:
+        return
+    try:
+        pids = [int(line) for line in pids_file.read_text().splitlines() if line.isdigit()]
+        candidates = owned_members.setdefault(pgid, {})
+        for pid in pids:
+            if pid <= 1:
+                continue
+            try:
+                if os.getpgid(pid) != pgid:
+                    continue
+                process = psutil.Process(pid)
+                birth = process.create_time()
+                if os.getpgid(pid) != pgid or process.create_time() != birth:
+                    continue
+                if _live_private_group_anchor(ready, pgid) is None:
+                    return
+                candidates[(pid, birth)] = (process, birth)
+            except psutil.NoSuchProcess, ProcessLookupError:
+                continue
+    except FileNotFoundError, psutil.NoSuchProcess, ProcessLookupError, ValueError:
+        return
+
+
+def _owned_process_snapshot(owned_members):
+    """Build a test-owned sweep input with runtime process start epochs."""
+    tree, info, known = {}, {}, {}
+    runtime_info = hr.process_info()
+    current = psutil.Process()
+    current_birth = current.create_time()
+    current_info = runtime_info.get(current.pid)
+    if current_info is None:
+        raise AssertionError(f"test process {current.pid} missing from runtime process info")
+    info[current.pid] = (current_info[0], current.name(), "")
+    tree[current.pid] = (current.ppid(), os.getpgrp(), os.getsid(0))
+
+    for pgid, members in owned_members.items():
+        for (pid, birth), (process, _) in members.items():
+            try:
+                if process.create_time() != birth or os.getpgid(pid) != pgid:
+                    continue
+                runtime_row = runtime_info.get(pid)
+                if runtime_row is None:
+                    raise AssertionError(f"owned process {pid} missing from runtime process info")
+                ppid = process.ppid()
+                name = process.name()
+                executable = process.exe()
+                sid = os.getsid(pid)
+                if process.create_time() != birth or os.getpgid(pid) != pgid:
+                    continue
+                tree[pid] = (ppid, pgid, sid)
+                info[pid] = (runtime_row[0], name, "")
+                known[pid] = nh.Proc(pid, ppid, [name], {}, "", executable)
+            except psutil.NoSuchProcess, ProcessLookupError:
+                continue
+    if current.create_time() != current_birth:
+        raise AssertionError("the test process identity changed while building its owned snapshot")
+    return tree, info, known
+
+
+@posix_only
+def test_owned_process_snapshot_uses_runtime_start_epochs(monkeypatch):
+    class FakeProcess:
+        def __init__(self, pid, birth, parent, process_name, executable):
+            self.pid = pid
+            self.birth = birth
+            self.parent = parent
+            self.process_name = process_name
+            self.executable = executable
+
+        def create_time(self):
+            return self.birth
+
+        def ppid(self):
+            return self.parent
+
+        def name(self):
+            return self.process_name
+
+        def exe(self):
+            return self.executable
+
+    current = FakeProcess(101, 10.25, 1, "python", "/usr/bin/python")
+    workload = FakeProcess(202, 20.25, 101, "sleep", "/usr/bin/sleep")
+    runtime_info = {
+        101: (1000.75, "runtime-python", ""),
+        202: (2000.75, "runtime-sleep", ""),
+    }
+    monkeypatch.setattr(psutil, "Process", lambda: current)
+    monkeypatch.setattr(hr, "process_info", lambda: runtime_info)
+    monkeypatch.setattr(os, "getpgid", lambda pid: 202 if pid == 202 else 101)
+    monkeypatch.setattr(os, "getpgrp", lambda: 101)
+    monkeypatch.setattr(os, "getsid", lambda pid: 202 if pid == 202 else 101)
+
+    _, info, _ = _owned_process_snapshot({202: {(202, workload.birth): (workload, workload.birth)}})
+
+    assert info == {
+        101: (1000.75, "python", ""),
+        202: (2000.75, "sleep", ""),
+    }
+
+
 # ------------------------------------------------------------------ 1. the overnight orphan, for real
 
 
 @posix_only
 def test_real_shell_executor_leftovers_are_swept_even_with_hidden_env(tmp_path):
-    """Round 11's dry run: every one of these survived F13 on macOS (env of /bin/* hidden, parent is pid 1)."""
-    mark = f"7{os.getpid():07d}"  # unique to this run: other runs on the machine never match
+    """The real background shapes are selected from exact private-group handles."""
     log = tmp_path / "log"
     log.touch()
-    cmds = [
-        f"nohup sleep {mark}1 >/dev/null 2>&1 &",
-        f"( sleep {mark}2 ) >/dev/null 2>&1 &",
-        f"sleep {mark}3 >/dev/null 2>&1 & disown",
-        f"sh -c 'sleep {mark}4; :' >/dev/null 2>&1 &",
-        f"nohup tail -f {log} >/dev/null 2>&1 &",
-        f"while true; do sleep {mark}6; done >/dev/null 2>&1 &",  # a runaway loop
+    commands = [
+        "nohup sleep 45 >/dev/null 2>&1 &",
+        "( sleep 45 ) >/dev/null 2>&1 &",
+        "sleep 45 >/dev/null 2>&1 & disown",
+        "sh -c 'sleep 45; :' >/dev/null 2>&1 &",
+        f"nohup tail -f {shlex.quote(str(log))} >/dev/null 2>&1 &",
+        "while true; do sleep 45; done >/dev/null 2>&1 &",
     ]
     if shutil.which("caffeinate"):
-        cmds.append(f"nohup caffeinate -i -t {mark}7 >/dev/null 2>&1 &")
-    se.TOOL_SHELLS.clear()
+        commands.append("nohup caffeinate -i -t 45 >/dev/null 2>&1 &")
+    # Capture the actual subprocess handles rather than trusting TOOL_SHELLS,
+    # which is part of the behavior under test and may itself be broken.
+    shells = []
+    owned_members = {}
+
+    class CapturingExecutor(se.ShellExecutor):
+        ready = None
+        pids_file = None
+
+        async def _create_unix_process(self, *args, **kwargs):
+            process = await super()._create_unix_process(*args, **kwargs)
+            # Retain the handle before attempting any fallible PID lookup.
+            shells.append([process.pid, process, None, self.ready, self.pids_file])
+            try:
+                leader = psutil.Process(process.pid)
+                shells[-1][2] = (leader, leader.create_time())
+            except psutil.NoSuchProcess:
+                pass
+            return process
 
     async def run_all():
-        ex = se.ShellExecutor()
-        for cmd in cmds:
-            await ex.run(cmd, timeout=5)
+        ex = CapturingExecutor()
+        for index, command in enumerate(commands):
+            ex.ready = tmp_path / f"watchdog-{index}.json"
+            ex.pids_file = tmp_path / f"owned-{index}.pids"
+            try:
+                cmd = _record_last_background_pid(command, ex.pids_file)
+                result = await ex.run(watchdog_command(ex.ready) + cmd, timeout=5)
+                assert result.success, result
+            finally:
+                if shells and shells[-1][3] == ex.ready:
+                    _remember_owned_members(shells[-1][0], ex.ready, ex.pids_file, owned_members)
 
-    asyncio.run(run_all())
-    time.sleep(0.5)
-
-    def ours() -> set[int]:
-        return {p for p, c in _ps().items() if mark in c or str(log) in c} - {os.getpid()}
-
-    left = ours()
+    se.TOOL_SHELLS.clear()
     try:
-        assert len(left) >= len(cmds)
-        tree, info = hr.process_tree(), hr.process_info()
-        protect = nh.ancestors(os.getpid()) | {os.getpid()}
-        known = {p.pid: p for p in (nh.read_process(x, with_cwd=False) for x in left) if p is not None}
+        asyncio.run(run_all())
+        time.sleep(0.5)
+        for pgid, _, _, ready, pids_file in shells:
+            _remember_owned_members(pgid, ready, pids_file, owned_members)
+        groups = {pgid for pgid, _, _, _, _ in shells}
+        workloads = {pid for members in owned_members.values() for pid, _ in members}
+        assert len(groups) == len(commands)
+        assert all(owned_members.get(group) for group in groups)
+        tree, info, known = _owned_process_snapshot(owned_members)
+        protect = {os.getpid()}
         rows = nh.shell_rows([list(r) for r in se.TOOL_SHELLS], os.getpid())
-        assert len(rows) == len(cmds)
+        assert len(rows) == len(commands)
         picked = nh._backgrounded({os.getpid()}, tree, info, protect, rows, known)
-        assert left <= picked, sorted(left - picked)
+        assert workloads <= picked, sorted(workloads - picked)
         assert not picked & protect
         # a forged row naming the caller's own group or session takes nothing of it (it is protected)
         for key in (os.getpgrp(), os.getsid(0)):
             forged = [(key, info.get(key, (0.0,))[0], os.getpid())]
             assert not nh._backgrounded({os.getpid()}, tree, info, protect, forged, known) & protect
     finally:
-        for pid in ours() | left:
+        cleanup_errors = []
+        cleanup_deadline = time.monotonic() + 5
+        for pgid, _, leader, ready, _ in reversed(shells):
             try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
+                # Do not signal by PID or PGID after the event loop closes.
+                # A live watchdog is the only group-signal authority.
+                deadline = time.monotonic() + 1
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                cleanup_group(pgid, ready)
+
+                identities = set(owned_members.get(pgid, {}))
+                if leader is not None:
+                    identities.add((leader[0].pid, leader[1]))
+                try:
+                    data = json.loads(ready.read_text())
+                    identities.add((data["pid"], data["birth"]))
+                except FileNotFoundError:
+                    pass  # No workload starts before the watchdog handshake.
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    cleanup_errors.append(RuntimeError(f"could not verify cleanup identities for group {pgid}: {exc}"))
+
+                remaining = max(0, cleanup_deadline - time.monotonic())
+                wait_for_recorded_identities(identities, timeout=remaining)
+            except Exception as exc:
+                cleanup_errors.append(exc)
         se.TOOL_SHELLS.clear()
+        if cleanup_errors:
+            raise ExceptionGroup("shell test cleanup failed", cleanup_errors)
+
+
+@posix_only
+@pytest.mark.parametrize("failure_stage", ["launch", "sweep"])
+def test_shell_fixture_cleans_up_if_launch_or_sweep_raises(tmp_path, monkeypatch, failure_stage):
+    """Failures during setup or the sweep still stop only this test's processes."""
+    original_run = se.ShellExecutor.run
+    spawned = []
+    outsider = subprocess.Popen(bounded_child_command())
+
+    def remember_processes():
+        for ready in tmp_path.glob("watchdog-*.json"):
+            try:
+                data = json.loads(ready.read_text())
+                pgid = data["pgid"]
+                anchor = _live_private_group_anchor(ready, pgid)
+                if anchor is not None:
+                    spawned.append(anchor[0])
+                index = ready.stem.split("-")[-1]
+                pids_file = tmp_path / f"owned-{index}.pids"
+                for line in pids_file.read_text().splitlines():
+                    if not line.isdigit():
+                        continue
+                    process = psutil.Process(int(line))
+                    birth = process.create_time()
+                    if (
+                        process.is_running()
+                        and process.status() != psutil.STATUS_ZOMBIE
+                        and os.getpgid(process.pid) == pgid
+                        and process.create_time() == birth
+                    ):
+                        spawned.append(process)
+            except FileNotFoundError, psutil.NoSuchProcess, ProcessLookupError, ValueError:
+                continue
+
+    async def fail_after_first_launch(executor, *args, **kwargs):
+        result = await original_run(executor, *args, **kwargs)
+        assert result.success
+        remember_processes()
+        raise RuntimeError("injected fixture failure")
+
+    def fail_sweep(*args, **kwargs):
+        remember_processes()
+        raise RuntimeError("injected fixture failure")
+
+    try:
+        if failure_stage == "launch":
+            monkeypatch.setattr(se.ShellExecutor, "run", fail_after_first_launch)
+        else:
+            monkeypatch.setattr(nh, "_backgrounded", fail_sweep)
+        with pytest.raises(RuntimeError, match="injected fixture failure"):
+            test_real_shell_executor_leftovers_are_swept_even_with_hidden_env(tmp_path)
+        assert len(spawned) >= 2  # exact watchdog and workload identities from private files
+
+        def alive(process):
+            try:
+                return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+            except psutil.NoSuchProcess:
+                return False
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and any(alive(p) for p in spawned):
+            time.sleep(0.02)
+        assert not any(alive(p) for p in spawned)
+        assert outsider.poll() is None
+    finally:
+        if outsider.poll() is None:
+            outsider.kill()
+        outsider.wait(timeout=5)
 
 
 @posix_only
@@ -152,8 +415,9 @@ def test_fallback_scope_comes_from_the_process_not_presence(tmp_path):
     me = nh.Proc(other.pid, os.getpid(), KOLLAB_ARGV, {}, "/elsewhere")
     forged = [{"identity": "lapis", "pid": other.pid, "project": "/in-scope"}]
     try:
-        got = asyncio.run(hr.fallback_stop([["/in-scope"]], forged, [me], set(), grace=0.2,
-                                           identify=lambda pid: 1000.0))
+        got = asyncio.run(
+            hr.fallback_stop([["/in-scope"]], forged, [me], set(), grace=0.2, identify=lambda pid: 1000.0)
+        )
         time.sleep(0.2)
         assert got == [] and other.poll() is None
     finally:
