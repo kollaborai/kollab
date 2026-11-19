@@ -3173,7 +3173,8 @@ class ProfileManager:
             if not self._disable_provisioned_profile(name):
                 return False
         else:
-            self._delete_profile_from_config(name)
+            if not self._delete_profile_from_config(name):
+                return False
 
         # Remove from memory
         del self._profiles[name]
