@@ -155,6 +155,8 @@ These guards apply to both the basic and forked strategies:
   summarization still fails, roll the old prefix into a deterministic recovery
   summary while preserving the system message, complete tool-call groups,
   recent turns, and at most 24 active-task excerpts of 4,000 characters each.
+  Previously saved excerpts without the current metadata marker are recognized
+  by their legacy prefix, and their obsolete summary suffix is removed before reuse.
   If even that cannot fit, cancel the tool/request with a visible recovery
   action instead of sending an oversized prompt. The 8,000-character limit
   includes the complete injected recovery message and its framing. The latest
@@ -163,6 +165,8 @@ These guards apply to both the basic and forked strategies:
   An untracked hub request is eligible as human intent only when direct-scope
   recipient metadata names this agent. Raw hub task assignments with IDs are
   excluded; active work is represented by TaskLedger-selected excerpts above.
+  The recovery summary reports how many live-task messages the 24-message cap
+  omitted.
 - `max_session_turns` is a visible/logged warning, not an automatic stop. Its
   default is `0` (disabled); a positive configured value enables the warning.
   Turn count and start time persist with session stats, restore on resume, and
