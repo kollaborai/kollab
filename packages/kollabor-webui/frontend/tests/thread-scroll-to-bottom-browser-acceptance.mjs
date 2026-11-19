@@ -64,6 +64,7 @@ try {
       const finalTextRect = lineRects.at(-1);
       return {
         button: { top: buttonRect.top, right: buttonRect.right, bottom: buttonRect.bottom, left: buttonRect.left },
+        buttonClass: button.className,
         finalLine: { top: finalTextRect.top, right: finalTextRect.right, bottom: finalTextRect.bottom, left: finalTextRect.left },
         overlap: buttonRect.left < finalTextRect.right && buttonRect.right > finalTextRect.left && buttonRect.top < finalTextRect.bottom && buttonRect.bottom > finalTextRect.top,
         viewport: { width: innerWidth, height: innerHeight },
@@ -75,6 +76,8 @@ try {
     await view.page.screenshot({ path: screenshotPath, animations: "disabled" });
     console.log(`Screenshot ${size.width}x${size.height}: ${path.basename(screenshotPath)}`);
     console.log(`Scroll-control geometry: ${JSON.stringify(layout)}`);
+    assert.match(layout.buttonClass, /(?:^|\s)rounded-md(?:\s|$)/, "scroll-to-bottom control uses the standard button radius");
+    assert.doesNotMatch(layout.buttonClass, /(?:^|\s)rounded-full(?:\s|$)/, "scroll-to-bottom control is not fully rounded");
     assert.equal(layout.overlap, false, `scroll-to-bottom control covers the final message line at ${size.width}px`);
     assert.deepEqual(view.pageErrors, []);
     assert.deepEqual(view.consoleErrors, []);
