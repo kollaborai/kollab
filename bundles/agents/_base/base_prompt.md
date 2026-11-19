@@ -1,4 +1,3 @@
-<trender type="include" path="sections/00-header.md" />
 <trender type="include" path="sections/01-session-context.md" />
 
 
