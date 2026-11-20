@@ -316,6 +316,10 @@ Removed. Each prints its redirect for one release instead of running:
   `used   press c for a new code`, and when it expires it reads
   `expired   press c for a new code`; `c` creates a new one. If the relay is
   unreachable the line says so and the rest still renders.
+- If authorization blocks code creation, the screen explains whether this
+  local Connect session is not authorized or the relay rejected it, and gives
+  the matching next step. Relay health alone does not prove that the session
+  can create an offer.
 - Requests and the roster refresh about every two seconds. With more than one
   request, Up and Down select a row; `a` accepts and `r` rejects it. Accepting
   prints what it queued for the device: the request's profile settings and one
