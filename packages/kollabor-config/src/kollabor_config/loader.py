@@ -31,7 +31,7 @@ from .manager import ConfigManager
 # Configuration version tracking
 CONFIG_VERSION = 2  # Current version
 VERSION_KEY = "_config_version"
-ConfigFileSnapshot = tuple[int, int, int, int, int, str]
+ConfigFileSnapshot = tuple[int, int, int, int, int, int, Optional[str]]
 _UNTRACKED = object()
 
 
@@ -252,6 +252,26 @@ def _read_config_file(
 
     try:
         contents = path.read_bytes()
+    except OSError:
+        try:
+            after = path.stat()
+        except OSError:
+            return {}, "unreadable", None
+        return (
+            {},
+            "unreadable",
+            (
+                after.st_dev,
+                after.st_ino,
+                after.st_mode,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+                None,
+            ),
+        )
+
+    try:
         after = path.stat()
     except OSError:
         return {}, "unreadable", None
@@ -262,12 +282,27 @@ def _read_config_file(
         after.st_mode,
         after.st_size,
         after.st_mtime_ns,
+        after.st_ctime_ns,
         hashlib.sha256(contents).hexdigest(),
     )
     if (
         len(contents) != after.st_size
-        or (before.st_dev, before.st_ino, before.st_mode, before.st_size, before.st_mtime_ns)
-        != (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns)
+        or (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
     ):
         return {}, "malformed", snapshot
 
@@ -960,6 +995,14 @@ class ConfigLoader:
             return False, {}
 
         if status == "unreadable":
+            if (
+                allow_unreadable_current
+                and expected is not _UNTRACKED
+                and snapshot is not None
+                and snapshot == expected
+            ):
+                self._config_file_snapshots[key] = snapshot
+                return True, {}
             self.config_load_status["target"] = status
             self.config_load_error = _config_error_message(self.config_load_status)
             return False, {}
