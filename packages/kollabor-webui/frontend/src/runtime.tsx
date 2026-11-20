@@ -41,6 +41,7 @@ import { GoalCancellationTracker } from "./utils/goal-cancel";
 import {
   dropTransientTurnDuplicates,
   historyHasAssistantRequestId,
+  historyMessageIndex,
   mergeCompactionHistorySnapshot,
   mergeMissingHistoryMessages,
   reconcileBoundaryToolResults,
@@ -609,6 +610,7 @@ const converter = (
       ? { ...message, metadata: { ...message.metadata, timing } }
       : message;
   });
+  let optimisticIndex = state.messages.length;
   const optimistic = metadata.pendingCommands.flatMap((command) => {
     if (command.type !== "add-message") return [];
     const parts: Array<TextMessagePart | ImageMessagePart> = command.message.parts.map(
@@ -617,8 +619,12 @@ const converter = (
           ? { type: "text" as const, text: part.text }
           : { type: "image" as const, image: part.image },
     );
+    // Match the id the engine uses for this provisional row. Keeping the
+    // anchor id through the first streamed state update prevents assistant-ui
+    // from treating the same turn as a new top-anchored message.
     return [
       {
+        id: `user-${state.sessionId}-${optimisticIndex++}`,
         role: "user" as const,
         content: parts,
         metadata: { isOptimistic: true },
@@ -966,6 +972,7 @@ export function EngineRuntimeProvider({
   // assistant-ui keeps every message it was given, so swapping in reloaded
   // copies of turns already on screen would show those turns twice.
   const reloaded = useRef(initialState.messages);
+  const reloadedWindowStart = useRef(initialState.synced?.start ?? 0);
   const latestInitial = useRef(initialState);
   latestInitial.current = initialState;
   const [historySyncRevision, setHistorySyncRevision] = useState(0);
@@ -1029,33 +1036,24 @@ export function EngineRuntimeProvider({
         const priorReloaded = reloaded.current;
         const runAtRebase = runVersion.current;
         reloaded.current = snapshot.messages;
-        try {
-          // assistant-ui can retain removed rows as branches. Clear and restore
-          // in one browser turn while keeping this provider and its live owner.
-          flushSync(() => runtime.thread.importExternalState({
-            ...current,
-            messages: [],
-            synced: current.synced ? { ...current.synced, messages: 0 } : undefined,
-          }));
-        } finally {
-          if (mounted.current) {
-            const afterClear = runtime.thread.getState();
-            const busy = ownsPendingInput(afterClear);
-            const stillCurrent = latestInitial.current.messages === snapshot.messages &&
-              runVersion.current === runAtRebase && liveTurn.current === liveBefore && !busy;
-            if (!stillCurrent) {
-              reloaded.current = priorReloaded;
-              deferredHistorySync.current = busy;
-              if (!busy) window.setTimeout(() => {
-                if (mounted.current) setHistorySyncRevision((revision) => revision + 1);
-              }, 0);
-            } else {
-              if (exactLiveReply) liveTurn.current = nextLive;
-              deferredOlderWindow.current = null;
-            }
-            flushSync(() => runtime.thread.importExternalState(stillCurrent ? replacement : current));
+        // Keep existing display IDs and publish once so the viewport anchor stays mounted.
+        flushSync(() => {
+          if (!mounted.current) return;
+          const busy = ownsPendingInput(runtime.thread.getState());
+          const stillCurrent = latestInitial.current.messages === snapshot.messages &&
+            runVersion.current === runAtRebase && liveTurn.current === liveBefore && !busy;
+          if (!stillCurrent) {
+            reloaded.current = priorReloaded;
+            deferredHistorySync.current = busy;
+            if (!busy) window.setTimeout(() => {
+              if (mounted.current) setHistorySyncRevision((revision) => revision + 1);
+            }, 0);
+          } else {
+            if (exactLiveReply) liveTurn.current = nextLive;
+            deferredOlderWindow.current = null;
           }
-        }
+          runtime.thread.importExternalState(stillCurrent ? replacement : current);
+        });
       }, 0);
       return () => window.clearTimeout(timer);
     }
@@ -1083,12 +1081,8 @@ export function EngineRuntimeProvider({
         // Publish only newly arrived canonical history rows while this page's
         // turn is active. Preserve its in-flight messages and defer any full
         // reconciliation until settlement, when the engine mirror has caught up.
-        const historyIndex = (message: ThreadMessageLike) => {
-          const index = /^history-(\d+)/.exec(String(message.id ?? ""))?.[1];
-          return index === undefined ? null : Number(index);
-        };
         const tail = initialState.messages.filter((message) => {
-          const index = historyIndex(message);
+          const index = historyMessageIndex(message);
           return index !== null && index >= from.history;
         });
         const merged = mergeMissingHistoryMessages(shown.messages, tail);
@@ -1133,8 +1127,27 @@ export function EngineRuntimeProvider({
     }
     const shown = (thread.extras as { state?: EngineState } | undefined)?.state;
     const from = shown?.synced;
-    // A run that ended without a sync point (an older engine, a dropped
-    // stream) leaves the thread to its next full load.
+    if (from?.start !== undefined) reloadedWindowStart.current = from.start;
+    // A failed alignment leaves the local tail unproven. A cursor-validated
+    // older page can still extend the prefix strictly before the known window.
+    // Preserve every local row and leave the sync watermark unclaimed.
+    if (shown && !from && (deferred || initialState.synced?.olderWindow)) {
+      const page = deferred && pendingOlder ? pendingOlder : initialState;
+      if (!page.synced || shown.sessionId !== page.sessionId ||
+          (shown.conversationUid && page.conversationUid && shown.conversationUid !== page.conversationUid)) return;
+      const firstShown = shown.messages.reduce((first, row) =>
+        Math.min(first, historyMessageIndex(row) ?? Infinity), Infinity);
+      const end = Number.isFinite(firstShown) ? firstShown : reloadedWindowStart.current;
+      const prefix = page.messages.filter((row) => {
+        const index = historyMessageIndex(row);
+        return index !== null && index < end;
+      });
+      const { messages, added } = mergeMissingHistoryMessages(shown.messages, prefix);
+      deferredOlderWindow.current = null;
+      if (page.messages === initialState.messages) reloaded.current = page.messages;
+      if (added.length) runtime.thread.importExternalState({ ...shown, messages });
+      return;
+    }
     if (!shown || !from || shown.messages.length !== from.messages || !initialState.synced) {
       deferredOlderWindow.current = null;
       reloaded.current = initialState.messages;
@@ -1143,10 +1156,9 @@ export function EngineRuntimeProvider({
     if ((initialState.synced.olderWindow || deferred) && reconcileBoundaryToolResults(
       shown.messages, initialState.messages, initialState.synced.start ?? 0, initialState.synced.history,
     )) {
-      // assistant-ui retains removed messages as branches when a nonempty
-      // external snapshot is imported. Clear and restore the repository in
-      // one browser turn, keeping this provider (and its live-turn owner).
-      // The timer runs outside React's effect before using flushSync.
+      // Boundary correction retains the shown fallback id. Publish the older
+      // rows and corrected content together so assistant-ui can keep its
+      // existing viewport anchor and message instances.
       const timer = window.setTimeout(() => {
         if (!mounted.current || latestInitial.current.messages !== initialState.messages) return;
         const currentThread = runtime.thread.getState();
@@ -1172,8 +1184,8 @@ export function EngineRuntimeProvider({
         }
         const shownIds = new Set(current.messages.map((message) => message.id));
         const tail = initialState.messages.filter((message) => {
-          const index = /^history-(\d+)/.exec(String(message.id ?? ""))?.[1];
-          return index !== undefined && Number(index) >= currentSync.history && !shownIds.has(message.id);
+          const index = historyMessageIndex(message);
+          return index !== null && index >= currentSync.history && !shownIds.has(message.id);
         });
         const liveBefore = liveTurn.current;
         const replaced = historyReplacesLiveTurn(liveBefore, tail);
@@ -1193,29 +1205,21 @@ export function EngineRuntimeProvider({
         };
         const previousReloaded = reloaded.current;
         const version = runVersion.current;
-        reloaded.current = initialState.messages;
-        try {
-          flushSync(() => runtime.thread.importExternalState({
-            ...current, messages: [], synced: { ...currentSync, messages: 0 },
-          }));
-        } finally {
-          if (mounted.current) {
-            const busy = ownsPendingInput(runtime.thread.getState());
-            const stillCurrent = latestInitial.current.messages === initialState.messages &&
-              runVersion.current === version && liveTurn.current === liveBefore && !busy;
-            if (!stillCurrent) {
-              reloaded.current = previousReloaded;
-              deferredHistorySync.current = busy;
-              if (!busy) window.setTimeout(() => {
-                if (mounted.current) setHistorySyncRevision((revision) => revision + 1);
-              }, 0);
-            } else if (replaced) {
-              liveTurn.current = nextLive;
-            }
-            flushSync(() => runtime.thread.importExternalState(stillCurrent ? replacement : current));
-            if (stillCurrent) deferredOlderWindow.current = null;
-          }
+        const busy = ownsPendingInput(runtime.thread.getState());
+        const stillCurrent = latestInitial.current.messages === initialState.messages &&
+          runVersion.current === version && liveTurn.current === liveBefore && !busy;
+        if (!stillCurrent) {
+          reloaded.current = previousReloaded;
+          deferredHistorySync.current = busy;
+          if (!busy) window.setTimeout(() => {
+            if (mounted.current) setHistorySyncRevision((revision) => revision + 1);
+          }, 0);
+        } else {
+          reloaded.current = initialState.messages;
+          if (replaced) liveTurn.current = nextLive;
+          deferredOlderWindow.current = null;
         }
+        flushSync(() => runtime.thread.importExternalState(stillCurrent ? replacement : current));
       }, 0);
       return () => window.clearTimeout(timer);
     }
@@ -1236,14 +1240,10 @@ export function EngineRuntimeProvider({
     reloaded.current = initialState.messages;
     const currentStart = from.start ?? 0;
     const nextStart = initialState.synced.start ?? currentStart;
-    const historyIndex = (message: ThreadMessageLike) => {
-      const index = /^history-(\d+)/.exec(String(message.id ?? ""))?.[1];
-      return index === undefined ? null : Number(index);
-    };
     const kept = shown.messages.filter((message) => !isLiveMessage(message));
     const merged = mergeMissingHistoryMessages(kept, initialState.messages);
     const tail = merged.added.filter((message) => {
-      const index = historyIndex(message);
+      const index = historyMessageIndex(message);
       return index !== null && index >= from.history;
     });
     if (!merged.added.length && nextStart >= currentStart) return;

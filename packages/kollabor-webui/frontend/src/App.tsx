@@ -1,4 +1,4 @@
-import { sameVersionBase } from "./engine-version";
+import { compareBuildIdentity } from "./engine-version";
 import { refreshesOnEvent, tracksStreamedRequest } from "./live-follow";
 import type { SessionEvent } from "./api";
 import { createHistoryReconciliation } from "./history-reconciliation";
@@ -1334,7 +1334,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
 
   // A page served from an older (or newer) bundle than the running engine can
   // hit renamed API fields. Warn instead of failing; reload clears it.
-  const [versionMismatch, setVersionMismatch] = useState<{ page: string; engine: string } | null>(null);
+  const [versionMismatch, setVersionMismatch] = useState<{ page: string; pageBuild: string; engine: string } | null>(null);
   const [updateInfo, setUpdateInfo] = useState<Awaited<ReturnType<EngineApi["checkForUpdate"]>> | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateCheckBusy, setUpdateCheckBusy] = useState(false);
@@ -1453,11 +1453,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         const bundle = __APP_VERSION__;
         const engine = (config?.engine_version || "").trim();
         setEngineVersion(engine);
-        // Source checkouts report a PEP 440 local version segment (+<sha8>, or
-        // +unknown without git metadata); compare base versions so a matching
-        // build does not flag a mismatch (#684).
-        if (!engine || !bundle || sameVersionBase(engine, bundle)) return;
-        setVersionMismatch({ page: bundle, engine });
+        const identity = compareBuildIdentity(engine, bundle, __KOLLAB_BUILD_SHA__);
+        if (identity !== "mismatch") return;
+        const buildSha = __KOLLAB_BUILD_SHA__;
+        const pageBuild = /^[0-9a-f]{8,}$/i.test(buildSha) ? buildSha.slice(0, 8) : "unknown";
+        setVersionMismatch({ page: bundle, pageBuild, engine: engine.slice(0, 80) });
       } catch {
         // The session bootstrap effect surfaces WebUI host/origin denials.
       }
@@ -2024,11 +2024,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           ) : null}
           {versionMismatch ? (
             <NoticeBar
-              detail={`Page v${versionMismatch.page} · engine v${versionMismatch.engine}`}
+              detail={`Page v${versionMismatch.page} · build ${versionMismatch.pageBuild} · engine v${versionMismatch.engine}`}
               actions={<NoticeAction onClick={() => window.location.reload()}>Reload</NoticeAction>}
               onDismiss={() => setVersionMismatch(null)}
             >
-              This page and Kollab are on different versions. Reload once the update finishes.
+              This page does not match the running build. Reload to use the current Web UI.
             </NoticeBar>
           ) : null}
           {versionNotice && !dismissedVersionNotices.has(versionNoticeKey) ? (
