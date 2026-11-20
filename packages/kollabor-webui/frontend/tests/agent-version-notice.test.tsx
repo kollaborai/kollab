@@ -216,6 +216,30 @@ describe("daemon outdated notices", () => {
     expect(html).not.toMatch(/>Retry<\/button>/);
   });
 
+  it("restores Retry after the agent runs the engine version", () => {
+    const html = renderToStaticMarkup(
+      <TerminalView
+        sessionId="s1"
+        workspace="/workspace"
+        agentIsCurrent
+        daemonNotice={panelNoticeProps("0.22.0+aaaa1111", true)}
+      />,
+    );
+    expect(html).toMatch(/>Retry<\/button>/);
+  });
+
+  it("removes the stale stop instruction after the agent runs the engine version", () => {
+    const html = renderToStaticMarkup(
+      <TerminalView
+        sessionId="s1"
+        workspace="/workspace"
+        agentIsCurrent
+        daemonNotice={panelNoticeProps("0.22.0+aaaa1111", true)}
+      />,
+    );
+    expect(visibleText(html)).not.toContain("kollab --hub stop lapis");
+  });
+
   it("keeps Retry for other Terminal errors", () => {
     terminalMock.errorCode = "request_failed";
     const html = renderToStaticMarkup(
