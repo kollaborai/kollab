@@ -39,12 +39,18 @@ export type AgentVersionNoticeState = {
 };
 
 /** The stop-and-start action shared by too-old and unknown-version notices. */
-function stopAndStartLine(name: string): string {
-  return `Run kollab --hub stop ${name} in a terminal, then select its Offline row in the sidebar to start it again.`;
+function stopAndStartLine(name: string) {
+  return (
+    <>
+      Run{" "}
+      <code className="whitespace-nowrap">kollab --hub stop {name}</code>{" "}
+      in a terminal, then select its Offline row in the sidebar to start it again.
+    </>
+  );
 }
 
-function tooOldLine(name: string): string {
-  return `This agent started before Restart Agent existed. ${stopAndStartLine(name)}`;
+function tooOldLine(name: string) {
+  return <>This agent started before Restart Agent existed. {stopAndStartLine(name)}</>;
 }
 
 /**
@@ -136,7 +142,7 @@ export function AgentVersionNotice({
   if (notice.kind === "unknown") {
     return (
       <NoticeBar detail={notice.detail} details={<VersionDetails detail={notice.detail} />}>
-        {`This agent runs older code. ${stopAndStartLine(notice.name)}`}
+        <>This agent runs older code. {stopAndStartLine(notice.name)}</>
       </NoticeBar>
     );
   }
