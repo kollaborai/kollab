@@ -11,6 +11,7 @@ import { createServer } from "vite";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = path.resolve(scriptDir, "..");
 const repoRoot = path.resolve(frontendRoot, "../../..");
+const frontendVersion = JSON.parse(fs.readFileSync(path.join(frontendRoot, "package.json"), "utf8")).version;
 const screenshotDir = process.env.LEARN_SCREENSHOT_DIR ?? path.join(os.tmpdir(), "kollab-learn-renderer-screenshots");
 export function makeFixtures(options = {}) {
   let createdSession = null;
@@ -20,6 +21,7 @@ export function makeFixtures(options = {}) {
     resolveCreate = resolve;
   });
   const requests = [];
+  let stagedEvents = [...(options.events ?? [])];
   // The engine learns each harness in the background (#953): a harness stays "loading" (more) until it is learned,
   // and one that failed stays incomplete until its own retry or the picker's Retry (`?refresh=true`).
   let discoveryFailurePending = options.discoveryFailureOnce ?? false;
@@ -226,7 +228,11 @@ export function makeFixtures(options = {}) {
     }
     if (endpoint.endsWith("/permissions")) return json(route, { pending_prompts: [], approval_mode: "trust_all" });
     if (endpoint.endsWith("/events")) {
-      return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
+      const body = stagedEvents
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join("");
+      stagedEvents = [];
+      return route.fulfill({ status: 200, contentType: "text/event-stream", body });
     }
     if (method === "POST" && endpoint.endsWith("/profile")) {
       if (pickHold) await pickHold.promise;
@@ -324,10 +330,12 @@ export async function openPage(browser, baseUrl, fixtures, options = {}) {
     isMobile: options.isMobile ?? false,
     hasTouch: options.isMobile ?? false,
   });
-  const initialGuideState = options.initialGuideState ?? "dismissed";
-  await context.addInitScript((state) => {
+  const initialGuideState =
+    options.initialGuideState ?? JSON.stringify({ step: "done", dismissed: true });
+  await context.addInitScript(({ state, version }) => {
     localStorage.setItem("kollab.setup-guide.v1", state);
-  }, initialGuideState);
+    localStorage.setItem("kollab.whats-new.v1", JSON.stringify({ seenVersion: version }));
+  }, { state: initialGuideState, version: frontendVersion });
 
   const page = await context.newPage();
   const pageErrors = [];
@@ -652,7 +660,7 @@ async function main() {
     console.log(`Mocked API requests: ${shell.fixture.requests.length}`);
     console.log("Learn browser acceptance passed; all API calls were mocked and no live engine was used.");
   } finally {
-    await browser.close();
+    await browser?.close();
     await server.close();
   }
 }

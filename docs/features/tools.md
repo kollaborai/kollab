@@ -74,15 +74,44 @@ With working directory:
 <terminal cwd="/tmp">pwd</terminal>
 ```
 
-The terminal tool blocks direct Kollab agent launches and the CLI commands that
-stop or kill all hub agents. Use `<hub_spawn>` for peers and `/hub stop all` for
-agents owned by this caller. Quoted command and process-substitution examples
-are treated as text; shell-executed substitutions remain checked. The guard is
-a shell-text heuristic, not an OS sandbox.
+#### Kollab commands from agent terminals
+
+Agents may run Kollab commands from terminals by default, including background
+and informational ones such as `kollab --hub status`. An owner who wants agent
+terminals kept off the Kollab CLI can opt in:
+
+```json
+{"tools": {"block_kollab_terminal_spawn": true}}
+```
+
+The setting defaults to `false`. When it is `true`, agent terminals refuse:
+
+- agent launches (`--agent`, `--detached`), including through wrappers such as
+  `bash -c`, `env`, `nohup`, or `python -c`;
+- the stop-all command `kollab --hub stop all`;
+- any Kollab command started in the background, including informational ones.
+
+The refusal explains the alternative: run informational commands in the
+foreground, use `<hub_spawn>` to start peers, and use `/hub stop all` to stop
+agents owned by the current caller. The `kollab` CLI applies the same setting
+to agent launches started from a tool shell.
+
+When this setting is enabled, the terminal tool's shell-text guard scans
+commands before quote context is lost. Quoted command and process-substitution
+examples are treated as literal text; shell-executed substitutions remain
+checked for blocked launches. This guard is a shell-text heuristic, not an OS
+sandbox.
 
 Execution methods:
 - tmux sessions (preferred, supports background jobs)
 - direct subprocess (fallback)
+
+The `timeout` attribute sets a foreground command's maximum runtime. It can
+shorten but cannot exceed the configured terminal timeout; excessive and invalid
+values are rejected before execution. Voice-origin commands may have a stricter
+policy limit. Durations use seconds, minutes, or hours (`30s`, `5m`, `1h`). For a
+background session, `timeout` schedules an auto-kill. Without it, the session has
+no automatic timeout.
 
 Agent bundles that need terminal inspection without shell writes can grant the
 `terminal-read` tool alongside `file-read` and `file-grep`:
@@ -119,6 +148,13 @@ the FileOperationsExecutor with safety features:
 - Protected path checking
 - Binary file detection
 - Size limits
+
+Text operations (`file_read`, `file_grep`, `file_edit`, `file_append`,
+`file_insert_after`, and `file_insert_before`) require a regular file. They
+report directories and other non-regular files as tool errors before checking
+size or probing content. Filesystem errors retain their reason; only decoding
+failures are classified as binary. Symlinks follow the normal path-access rules.
+`file_grep` searches a single file and does not recurse into directories.
 
 XML tag syntax:
 
@@ -264,7 +300,10 @@ combining built-ins with enabled external MCP tools.
 Built-ins do not require an MCP server. In the current source, `--no-mcp` skips
 external discovery and schemas while retaining permitted built-in tools, including
 file and Hub tools. An external discovery error also leaves built-in loading
-available. The active agent's tool scope, `kollabor.llm.native_tool_calling`, and
+available. Built-in schemas are loaded before background discovery begins, so a
+slow server does not leave the first request without them; discovered MCP schemas
+are added after discovery finishes. The active agent's tool scope,
+`kollabor.llm.native_tool_calling`, and
 the active profile's tool support still apply. Exposing a schema does not bypass
 the workspace's tool permission policy.
 
