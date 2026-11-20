@@ -100,6 +100,13 @@ Execution methods:
 - tmux sessions (preferred, supports background jobs)
 - direct subprocess (fallback)
 
+The `timeout` attribute sets a foreground command's maximum runtime. It can
+shorten but cannot exceed the configured terminal timeout; excessive and invalid
+values are rejected before execution. Voice-origin commands may have a stricter
+policy limit. Durations use seconds, minutes, or hours (`30s`, `5m`, `1h`). For a
+background session, `timeout` schedules an auto-kill. Without it, the session has
+no automatic timeout.
+
 Agent bundles that need terminal inspection without shell writes can grant the
 `terminal-read` tool alongside `file-read` and `file-grep`:
 
