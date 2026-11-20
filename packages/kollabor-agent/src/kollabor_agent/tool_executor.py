@@ -3438,9 +3438,22 @@ class ToolExecutor:
                         return text
 
             # Code samples are useful in full-text mode but usually overwhelm
-            # the readability fallback for main-content extraction.
+            # the readability fallback for main-content extraction. Malformed
+            # inline code wrappers with block children should not hide the page.
+            block_tags = [
+                "p", "div", "section", "article", "main", "h1", "h2", "h3",
+                "h4", "h5", "h6", "ul", "ol", "li", "table", "blockquote",
+            ]
             for tag in soup.find_all(["pre", "code"]):
-                tag.decompose()
+                if tag.find(block_tags):
+                    for child in list(tag.contents):
+                        if isinstance(child, str):
+                            child.extract()
+                        elif child.name not in block_tags and child.find(block_tags) is None:
+                            child.decompose()
+                    tag.unwrap()
+                else:
+                    tag.decompose()
 
             # Priority 3: Readability heuristic — find densest content block
             text = ToolExecutor._readability_extract(soup)
@@ -3448,9 +3461,6 @@ class ToolExecutor:
                 return text
 
         # Priority 4: Fallback — extract all remaining text
-        if extract_main:
-            for tag in soup.find_all(["pre", "code"]):
-                tag.decompose()
         return ToolExecutor._soup_to_text(soup)
 
     @staticmethod
@@ -3549,16 +3559,23 @@ class ToolExecutor:
         import html as html_mod
         import re
 
-        # Unterminated raw-content tags can safely consume the rest of the
-        # document; other malformed non-content tags should not erase the page.
-        raw_content_tags = "script|style"
-        if extract_main:
-            raw_content_tags += "|pre|code"
+        # Unterminated script/style content runs to the end; other malformed
+        # non-content tags should not erase the rest of the page.
         raw_content = re.compile(
-            rf"<({raw_content_tags})\b[^>]*>.*?(?:</\1\s*>|$)",
+            r"<(script|style)\b[^>]*>.*?(?:</\1\s*>|$)",
             re.DOTALL | re.IGNORECASE,
         )
         html = raw_content.sub("", html)
+
+        if extract_main:
+            # If pre/code is unclosed, stop at the next block boundary so
+            # malformed inline markup cannot hide following page text.
+            block_start = r"(?=<\s*(?:p|div|section|article|main|h[1-6]|li|ul|ol|table|blockquote)\b)"
+            code_blocks = re.compile(
+                r"<(pre|code)\b[^>]*>.*?(?:</\1\s*>|" + block_start + r"|$)",
+                re.DOTALL | re.IGNORECASE,
+            )
+            html = code_blocks.sub("", html)
 
         # Remove structural non-content elements only when their closing tag
         # is present, so a malformed navigation tag cannot consume the page.
