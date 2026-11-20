@@ -189,6 +189,11 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
                 "find . -follow -name marker.txt -print",
                 f'env -C "{outside_home}" find . -name marker.txt -print',
                 f"sh -c 'find \"{outside_home}\" -name marker.txt -print'",
+                f"eval 'find \"{outside_home}\" -name marker.txt -print'",
+                f'timeout 2 find "{outside_home}" -name marker.txt -print',
+                f'env -S "find {outside_home} -name marker.txt -print"',
+                f'env --split-string="find {outside_home} -name marker.txt -print"',
+                f'/usr/bin/env -S "find {outside_home} -name marker.txt -print"',
             ]
             with patch.dict(os.environ, {"HOME": str(outside_home)}):
                 for command in commands:
@@ -201,6 +206,28 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
                         self.assertIn("search paths must stay inside the active workspace", result.error)
 
             self.executor.shell_executor.run.assert_not_awaited()
+
+    async def test_terminal_find_mention_in_echo_is_not_executed_as_find(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "project"
+            workspace.mkdir()
+            self.executor.workspace = workspace
+            self.executor.shell_executor.run = AsyncMock(
+                return_value=ShellResult(
+                    success=True, stdout="find ../outside -print\n", stderr="", exit_code=0
+                )
+            )
+
+            result = await self.executor._execute_terminal_command(
+                {
+                    "type": "terminal",
+                    "id": "find-mention",
+                    "command": "echo 'find ../outside -print'",
+                }
+            )
+
+            self.assertTrue(result.success)
+            self.executor.shell_executor.run.assert_awaited_once()
 
     async def test_terminal_find_refuses_symlinked_root_outside_project(self):
         with tempfile.TemporaryDirectory() as temp_dir:
