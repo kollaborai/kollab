@@ -207,6 +207,62 @@ def test_emergency_rollover_preserves_oversized_live_task_across_reload() -> Non
     assert "Remaining assignment text is summarized below." not in task_context
 
 
+def test_emergency_rollover_rewrites_legacy_excerpt_in_recent_window() -> None:
+    task_id = "live-942-legacy-recent"
+    prefix = f"[Active TaskLedger task {task_id}; latest assignment excerpt]\n"
+    legacy_suffix = "\n[Remaining assignment text is summarized below.]"
+    legacy_budget = MAX_PRESERVED_HUB_TASK_CHARS - len(prefix) - len(legacy_suffix)
+    payload = "BEGIN_LEGACY " + "x" * (legacy_budget - len("BEGIN_LEGACY "))
+    legacy_message = Message(
+        content=f"{prefix}{payload}{legacy_suffix}",
+        metadata={
+            "hub_message": True,
+            "hub_is_intended": True,
+            "hub_from": "koordinator",
+            "task_id": task_id,
+        },
+    )
+    assert len(legacy_message.content) == MAX_PRESERVED_HUB_TASK_CHARS
+    history = [
+        Message(role="system", content="system instructions"),
+        Message(role="user", content="earlier request"),
+        legacy_message,
+        Message(role="user", content="current request"),
+    ]
+    plugin = _plugin()
+    plugin._get_conversation_history = MagicMock(side_effect=lambda: history)
+    plugin._keep_recent_count = MagicMock(return_value=1)
+    plugin._find_split_point = MagicMock(return_value=2)
+    plugin._get_live_task_ids = MagicMock(return_value={task_id})
+    plugin._get_current_session_id = MagicMock(return_value="synthetic-session")
+    plugin._apply_pending_compaction = AsyncMock()
+    plugin._log_compaction_event = AsyncMock()
+    plugin._effective_prompt_tokens = MagicMock(return_value=0)
+    plugin._compaction_round = 0
+    plugin._last_summarization_model = None
+
+    async def rollover() -> list[Message]:
+        assert await plugin._rollover_with_summary({}, None, boundary="turn")
+        compacted = plugin._pending_compaction
+        assert compacted is not None
+        return compacted
+
+    compacted = asyncio.run(rollover())
+    task_messages = [
+        message
+        for message in compacted
+        if message.metadata.get("task_id") == task_id
+    ]
+
+    assert len(task_messages) == 2
+    assert all(
+        "Remaining assignment text is summarized below." not in message.content
+        for message in task_messages
+    )
+    assert all("hub_msg" in message.content for message in task_messages)
+    assert any(message.content == "current request" for message in compacted)
+
+
 def test_mixed_task_reminder_does_not_apply_excerpt_stop_rule_to_complete_task() -> None:
     task_id = "live-942-long"
     assignment = (
