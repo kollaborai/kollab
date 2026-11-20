@@ -31,6 +31,15 @@ const HISTORY = [
   { role: "assistant", content: "Got the first." },
   { role: "user", content: "second [image1]", media: [MEDIA[1]] },
   { role: "assistant", content: "Got the second." },
+  {
+    role: "user",
+    content: "failed [image1], saved [image2]",
+    media: [
+      { ref: "", mime: "", failed: true },
+      MEDIA[1],
+    ],
+  },
+  { role: "assistant", content: "The saved image stays in slot two." },
   // The live daemon-mirror shape (koordinator's live gate, #1124): the text
   // carries no token and the picture is a bytes-less image part. The engine
   // binds media refs onto such rows by part count; the thread must render
@@ -129,10 +138,14 @@ async function waitForThumbnails(page) {
   );
 }
 
-async function assertNoRawTokens(page) {
+async function assertMixedFailureRendering(page) {
   const chat = await page.locator("main").innerText();
-  assert.ok(!chat.includes("[image1]"), "the chat still shows the raw [image1] token");
-  assert.ok(!chat.includes("[image2]"), "the chat still shows the raw [image2] token");
+  assert.ok(
+    chat.includes("failed [image1], saved "),
+    "the failed image token should stay literal beside the surviving thumbnail",
+  );
+  assert.equal((chat.match(/\[image1\]/g) ?? []).length, 1);
+  assert.ok(!chat.includes("[image2]"), "the stored [image2] token should become a thumbnail");
 }
 
 async function openSessionPage(browser, baseUrl, options = {}, width = 0) {
@@ -165,10 +178,10 @@ async function openSessionPage(browser, baseUrl, options = {}, width = 0) {
 async function verifyViewer(shell) {
   const { page } = shell;
   const thumbs = page.getByRole("button", { name: "Open image" });
-  // Two token thumbs from the first row plus the mirror-shaped row's part
-  // thumbnail (#1124 live gate).
-  assert.equal(await waitForThumbnails(page), 3, "expected three sent-image thumbnails");
-  await assertNoRawTokens(page);
+  // Two first-slot token thumbs, the surviving mixed-failure slot, and the
+  // mirror-shaped row's part thumbnail (#1124 live gate, #1148 slot parity).
+  assert.equal(await waitForThumbnails(page), 4, "expected four sent-image thumbnails");
+  await assertMixedFailureRendering(page);
 
   await thumbs.first().click();
   const viewer = page.getByRole("dialog", { name: "Sent image", exact: true });
