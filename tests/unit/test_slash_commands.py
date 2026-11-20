@@ -166,6 +166,13 @@ class TestSlashCommandParser(unittest.TestCase):
                     ["reportsarchivefile" + character + "draft.txt"],
                 )
 
+    def test_escaped_punctuation_before_later_path_segment_keeps_shlex_behavior(self):
+        parsed = self.parser.parse_command(
+            r"/open reports\archive\file\%draft\notes.txt"
+        )
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.args, ["reportsarchivefile%draftnotes.txt"])
+
     def test_parse_relative_directory_paths_with_trailing_separators_before_flags(self):
         cases = [
             ("/open folder\\ --mode=read", ["folder\\", "--mode=read"]),
