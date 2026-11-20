@@ -112,6 +112,11 @@ async function main() {
       });
       await pending.page.getByTestId("guided-setup-open").click();
       await pending.page.getByRole("heading", { name: "Welcome to Kollab", exact: true }).waitFor({ state: "visible" });
+      assert.equal(
+        await pending.page.getByRole("button", { name: "Open provider setup", exact: true }).isVisible(),
+        true,
+        "provider setup should remain directly reachable while /profiles is pending",
+      );
       const start = pending.page.getByTestId("setup-guide-next");
       assert.equal(await start.isDisabled(), false, "Get Started should remain available while /profiles is pending");
       let setupPanelRequests = 0;
@@ -230,6 +235,15 @@ async function main() {
       await failedProfiles.page.waitForTimeout(200);
       assert.equal(setupPanelRequests, 0, "a failed profile check must not be treated as an unconfigured profile");
       assert.equal(await failedProfiles.page.getByTestId("setup-step-network").getAttribute("aria-current"), "step");
+      const recovery = failedProfiles.page.getByRole("button", { name: "Open provider setup", exact: true });
+      assert.equal(await recovery.isVisible(), true, "provider setup should remain directly reachable after /profiles fails");
+      const setupPanelRequest = failedProfiles.page.waitForRequest(
+        (request) => new URL(request.url()).pathname === "/setup/panels/setup",
+        { timeout: 5000 },
+      );
+      await recovery.click();
+      await setupPanelRequest;
+      assert.equal(setupPanelRequests, 1, "the recovery action should open Settings > Setup");
     } finally {
       await failedProfiles.context.close();
     }
