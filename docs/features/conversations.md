@@ -1,7 +1,7 @@
 ---
 title: "Conversations and Storage"
 created: 2026-02-24
-modified: 2026-02-24
+modified: 2026-11-16
 status: active
 ---
 # Conversations and Storage
@@ -53,6 +53,10 @@ Use the `/resume` command to pick up where you left off:
 The resume system restores the full message history so the LLM has context from the previous session.
 
 ## Saving Conversations
+
+If saving a user message or assistant reply fails, Kollab keeps processing the
+turn and shows a notice in the terminal and web UI so the unsaved message is
+clear.
 
 Use `/save` to export a conversation in different formats:
 
