@@ -18,6 +18,7 @@ const viewports = [
   { width: 390, height: 844, isMobile: true },
   { width: 820, height: 1180, isMobile: false },
   { width: 1280, height: 800, isMobile: false },
+  { width: 1280, height: 800, isMobile: false, savedSidebarWidth: 220 },
 ];
 
 async function main() {
@@ -40,6 +41,9 @@ async function main() {
         isMobile: viewport.isMobile,
       });
       try {
+        if (viewport.savedSidebarWidth) {
+          await view.page.addInitScript(() => localStorage.setItem("kollab.sidebar.width", "220"));
+        }
         await view.page.goto(`${baseUrl}/`, { waitUntil: "domcontentloaded" });
         if (viewport.width < 1024) {
           await view.page.locator('[data-sidebar="trigger"]').click();
@@ -80,10 +84,14 @@ async function main() {
           };
         });
 
-        const screenshot = `sidebar-footer-touch-targets-${viewport.width}.png`;
+        const sidebarWidthSuffix = viewport.savedSidebarWidth ? `-sidebar-${viewport.savedSidebarWidth}` : "";
+        const screenshot = `sidebar-footer-touch-targets-${viewport.width}${sidebarWidthSuffix}.png`;
         await view.page.screenshot({ path: path.join(screenshotDir, screenshot), animations: "disabled" });
         const sizes = layout.buttons.map((button) => `${button.width}x${button.height}`).join(", ");
-        console.log(`${viewport.width}px footer buttons: ${sizes}; screenshot=${screenshot}`);
+        const scenario = viewport.savedSidebarWidth
+          ? `${viewport.width}px saved sidebar ${viewport.savedSidebarWidth}px`
+          : `${viewport.width}px`;
+        console.log(`${scenario} footer buttons: ${sizes}; screenshot=${screenshot}`);
 
         assert.equal(layout.buttons.length, 8, `expected eight visible footer buttons at ${viewport.width}px`);
         for (const button of layout.buttons) {
@@ -91,16 +99,16 @@ async function main() {
             failures.push(`${viewport.width}px button ${button.index + 1} is ${button.width}x${button.height}px`);
           }
           assert.ok(button.left >= -1 && button.right <= layout.actionWidth + 1,
-            `footer button ${button.index + 1} extends beyond the action row at ${viewport.width}px`);
+            `footer button ${button.index + 1} extends beyond the action row at ${scenario}`);
           assert.ok(button.top >= -1 && button.bottom <= layout.actionHeight + 1,
-            `footer button ${button.index + 1} extends beyond the action row vertically at ${viewport.width}px`);
+            `footer button ${button.index + 1} extends beyond the action row vertically at ${scenario}`);
         }
         assert.ok(layout.actionScrollWidth <= layout.actionWidth + 1,
-          `footer actions overflow horizontally at ${viewport.width}px`);
+          `footer actions overflow horizontally at ${scenario}`);
         assert.ok(layout.documentWidth <= layout.viewportWidth + 1,
-          `the page overflows horizontally at ${viewport.width}px`);
+          `the page overflows horizontally at ${scenario}`);
         assert.ok(layout.footerTop >= -1 && layout.footerBottom <= layout.viewportHeight + 1,
-          `sidebar footer does not fit in the viewport at ${viewport.width}px`);
+          `sidebar footer does not fit in the viewport at ${scenario}`);
         assert.deepEqual(view.pageErrors, [], view.pageErrors.join(" | "));
         assert.deepEqual(view.consoleErrors, [], view.consoleErrors.join(" | "));
         assert.equal(view.externalRequests.length, 0, "browser attempted an external request");
