@@ -214,6 +214,10 @@
   width: 0;
   height: 0;
 }
+/* xterm 6 draws its scrollback thumb as a separate custom scrollbar. */
+.xterm .xterm-scrollable-element > .scrollbar {
+  display: none !important;
+}
 /* Monaco sets the minimap slider's display inline, outside its editor scrollbars. */
 .monaco-editor .minimap-slider {
   display: none !important;
