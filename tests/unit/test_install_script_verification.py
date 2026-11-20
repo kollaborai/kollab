@@ -117,6 +117,43 @@ def _run_installer_method(
     )
 
 
+def _run_pip_scripts_dir(
+    tmp_path: Path,
+    *,
+    pip_executable: Path,
+    path_dirs: list[Path],
+    user_scripts: Path,
+) -> subprocess.CompletedProcess[str]:
+    functions = tmp_path / "installer-functions.sh"
+    functions.write_text(
+        INSTALL_SCRIPT.read_text().split('\nmain "$@"')[0] + "\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(tmp_path / "home"),
+            "PATH": os.pathsep.join(str(path) for path in path_dirs),
+            "USER_SCRIPTS": str(user_scripts),
+            "WRONG_USER_SCRIPTS": str(tmp_path / "Wrong Python User Scripts"),
+        }
+    )
+    return subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            'source "$1"; pip_scripts_dir "$2" posix_user',
+            "installer-test",
+            str(functions),
+            str(pip_executable),
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 def test_stale_path_command_does_not_verify_missing_install(tmp_path: Path) -> None:
     stale_dir = tmp_path / "stale-bin"
     _fake_executable(stale_dir, "0.1.0")
@@ -607,15 +644,22 @@ def test_windows_pip_prefix_uses_scripts_directory(tmp_path: Path) -> None:
 
 def test_windows_pip_user_install_uses_user_scripts_directory(tmp_path: Path) -> None:
     tools_dir = tmp_path / "tools"
+    python_313_dir = tmp_path / "Python 3.13 Scripts"
+    python_314_dir = tmp_path / "Python 3.14"
     scripts_dir = tmp_path / "Python User Scripts"
+    wrong_scripts_dir = tmp_path / "Wrong Python User Scripts"
     _write_executable(tools_dir / "uname", "#!/bin/sh\necho MINGW64_NT-10.0\n")
     _write_executable(
-        tools_dir / "python3",
-        '#!/bin/sh\n[ "$1" = -c ] && echo "$USER_SCRIPTS"\n',
+        python_313_dir / "python3",
+        '#!/bin/sh\n[ "$1" = -c ] && echo "$WRONG_USER_SCRIPTS"\n',
+    )
+    pip_python = _write_executable(
+        python_314_dir / "python.exe",
+        '#!/bin/sh\nif [ "$1" = -c ]; then echo "$USER_SCRIPTS"; elif [ "$2" = install ] && [ "$3" = --help ]; then echo --user; fi\nexit 0\n',
     )
     _write_executable(
         tools_dir / "pip3",
-        '#!/bin/sh\nif [ "$1" = install ] && [ "$2" = --help ]; then echo --user; fi\nexit 0\n',
+        f'#!/bin/sh\n\'\'\'exec\' "{pip_python}" "$0" "$@"\n\' \'\'\'\n',
     )
     _write_executable(
         scripts_dir / "kollab.exe", "#!/bin/sh\necho 'kollab 4.5.6'\n"
@@ -624,12 +668,53 @@ def test_windows_pip_user_install_uses_user_scripts_directory(tmp_path: Path) ->
     result = _run_installer_method(
         tmp_path,
         method="pip",
-        path_dirs=[tools_dir, scripts_dir, Path("/usr/bin"), Path("/bin")],
-        extra_env={"PIP_USER": "1", "USER_SCRIPTS": str(scripts_dir)},
+        path_dirs=[tools_dir, python_313_dir, scripts_dir, Path("/usr/bin"), Path("/bin")],
+        extra_env={
+            "PIP_USER": "1",
+            "USER_SCRIPTS": str(scripts_dir),
+            "WRONG_USER_SCRIPTS": str(wrong_scripts_dir),
+        },
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert str(scripts_dir / "kollab.exe") in result.stdout
+
+
+def test_windows_pip_exe_uses_embedded_interpreter_for_user_scripts(
+    tmp_path: Path,
+) -> None:
+    tools_dir = tmp_path / "tools"
+    python_313_dir = tmp_path / "Python 3.13 Scripts"
+    python_314_dir = tmp_path / "Python 3.14"
+    scripts_dir = tmp_path / "Python User Scripts"
+    wrong_scripts_dir = tmp_path / "Wrong Python User Scripts"
+    _write_executable(tools_dir / "uname", "#!/bin/sh\necho MINGW64_NT-10.0\n")
+    _write_executable(
+        python_313_dir / "python",
+        '#!/bin/sh\n[ "$1" = -c ] && echo "$WRONG_USER_SCRIPTS"\n',
+    )
+    pip_python = _write_executable(
+        python_314_dir / "python.exe",
+        '#!/bin/sh\n[ "$1" = -c ] && echo "$USER_SCRIPTS"\n',
+    )
+    pip_launcher = tmp_path / "Python 3.14 Scripts" / "pip3.exe"
+    pip_launcher.parent.mkdir(parents=True)
+    pip_launcher.write_bytes(
+        b"MZ fake console launcher\n#!\""
+        + str(pip_python).encode()
+        + b"\"\nPK fake archive"
+    )
+    pip_launcher.chmod(0o755)
+
+    result = _run_pip_scripts_dir(
+        tmp_path,
+        pip_executable=pip_launcher,
+        path_dirs=[tools_dir, python_313_dir, Path("/usr/bin"), Path("/bin")],
+        user_scripts=scripts_dir,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == str(scripts_dir)
 
 
 def test_timeout_kills_a_version_command_that_ignores_term(tmp_path: Path) -> None:
