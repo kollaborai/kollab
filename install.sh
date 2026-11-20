@@ -23,6 +23,8 @@ RELEASES_URL="${KOLLAB_RELEASES_URL:-$REPO_URL/releases}"
 ORIGINAL_PATH="$PATH"
 INSTALLED_DIR="$HOME/.local/bin"
 DIR_ADDED_TO_PATH=0
+VERSION_CHECK_TIMEOUT_SECONDS=30
+VERSION_CHECK_TERM_GRACE_SECONDS=1
 
 # Colors
 RED='\033[0;31m'
@@ -39,6 +41,31 @@ error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 # Detect command availability
 command_exists() {
     command -v "$1" &>/dev/null
+}
+
+is_windows_shell() {
+    case "$(uname -s)" in
+        MINGW*|MSYS*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+normalize_install_dir() {
+    local directory="$1"
+    if is_windows_shell && [[ "$directory" =~ ^[A-Za-z]: ]]; then
+        command_exists cygpath || return 1
+        cygpath -u "$directory"
+    else
+        printf '%s\n' "$directory"
+    fi
+}
+
+installed_executable_name() {
+    if is_windows_shell; then
+        printf '%s.exe\n' "$CMD_NAME"
+    else
+        printf '%s\n' "$CMD_NAME"
+    fi
 }
 
 prepend_to_path() {
@@ -167,6 +194,7 @@ try_binary() {
 
 # Try uv tool (fastest, most modern)
 try_uv() {
+    local bin_dir
     if ! command_exists uv; then
         return 1
     fi
@@ -174,11 +202,20 @@ try_uv() {
     info "Installing with uv tool (recommended - fastest, isolated)..."
 
     uv tool install --force "$PKG_SPEC" || return 1
-    prepend_to_path "$HOME/.local/bin"
+    bin_dir=$(uv tool dir --bin 2>/dev/null) || bin_dir=""
+    if [[ -n "$bin_dir" ]]; then
+        bin_dir=$(normalize_install_dir "$bin_dir") || bin_dir=""
+    fi
+    INSTALLED_DIR="$bin_dir"
+    if [[ -n "$bin_dir" ]]; then
+        prepend_to_path "$bin_dir"
+    fi
+    return 0
 }
 
 # Try pipx (isolated, clean)
 try_pipx() {
+    local bin_dir
     if ! command_exists pipx; then
         return 1
     fi
@@ -191,11 +228,186 @@ try_pipx() {
     else
         pipx install --force "$PKG_SPEC" || return 1
     fi
-    prepend_to_path "$HOME/.local/bin"
+    bin_dir=$(pipx environment --value PIPX_BIN_DIR 2>/dev/null) || bin_dir=""
+    if [[ -n "$bin_dir" ]]; then
+        bin_dir=$(normalize_install_dir "$bin_dir") || bin_dir=""
+    fi
+    INSTALLED_DIR="$bin_dir"
+    if [[ -n "$bin_dir" ]]; then
+        prepend_to_path "$bin_dir"
+    fi
+    return 0
+}
+
+# Resolve the interpreter that owns pip so user installs use that interpreter's
+# Scripts directory, even when another Python version appears first on PATH.
+pip_windows_interpreter() {
+    local pip_path="$1" shebang python_cmd env_args
+    if [[ "$pip_path" == *.exe || "$pip_path" == *.EXE ]]; then
+        # pip's Windows console launcher appends its interpreter shebang to the PE file.
+        shebang=$(LC_ALL=C grep -a -oE '#![^[:cntrl:]]*' "$pip_path" | tail -n 1) || return 1
+        [[ -n "$shebang" ]] || return 1
+    else
+        IFS= read -r shebang < "$pip_path" || return 1
+    fi
+    shebang="${shebang%$'\r'}"
+    [[ "$shebang" == '#!'* ]] || return 1
+    shebang="${shebang#\#!}"
+    while [[ "$shebang" == [[:space:]]* ]]; do
+        shebang="${shebang:1}"
+    done
+    if [[ "$shebang" == \"* ]]; then
+        python_cmd="${shebang#\"}"
+        python_cmd="${python_cmd%%\"*}"
+    elif [[ "$shebang" == \'* ]]; then
+        python_cmd="${shebang#\'}"
+        python_cmd="${python_cmd%%\'*}"
+    else
+        read -r python_cmd _ <<< "$shebang"
+    fi
+    if [[ "$python_cmd" == */sh ]]; then
+        IFS= read -r env_args < <(sed -n '2p' "$pip_path") || return 1
+        [[ "$env_args" == *exec* ]] || return 1
+        env_args="${env_args#*exec}"
+        env_args="${env_args#\'}"
+        env_args="${env_args# }"
+        if [[ "$env_args" == \"* ]]; then
+            python_cmd="${env_args#\"}"
+            python_cmd="${python_cmd%%\"*}"
+        elif [[ "$env_args" == \'* ]]; then
+            python_cmd="${env_args#\'}"
+            python_cmd="${python_cmd%%\'*}"
+        else
+            read -r python_cmd _ <<< "$env_args"
+        fi
+    elif [[ "$python_cmd" == */env ]]; then
+        env_args="${shebang#*env }"
+        read -r python_cmd _ <<< "$env_args"
+        if [[ "$python_cmd" == "-S" ]]; then
+            env_args="${env_args#-S }"
+            read -r python_cmd _ <<< "$env_args"
+            python_cmd="${python_cmd#\"}"
+            python_cmd="${python_cmd%\"}"
+            python_cmd="${python_cmd#\'}"
+            python_cmd="${python_cmd%\'}"
+        fi
+    fi
+    python_cmd=$(normalize_install_dir "$python_cmd") || return 1
+    if [[ "$python_cmd" != */* ]]; then
+        python_cmd=$(command -v "$python_cmd") || return 1
+    fi
+    [[ -x "$python_cmd" ]] || return 1
+    printf '%s\n' "$python_cmd"
+}
+
+# Resolve the scripts directory used by the interpreter behind pip. This keeps
+# system installs and --user installs tied to the executable pip just wrote.
+pip_scripts_dir() {
+    local pip_cmd="$1" scheme="$2" pip_path shebang python_cmd env_args scripts_subdir scripts_dir
+    if [[ -n "${PIP_PREFIX:-}" ]]; then
+        scripts_subdir=bin
+        if is_windows_shell; then
+            scripts_subdir=Scripts
+        fi
+        normalize_install_dir "${PIP_PREFIX%/}/$scripts_subdir" || return 1
+        return 0
+    fi
+    pip_path=$(command -v "$pip_cmd") || return 1
+    if is_windows_shell; then
+        if [[ "$scheme" == "posix_user" ]]; then
+            python_cmd=$(pip_windows_interpreter "$pip_path") || return 1
+            scheme=nt_user
+            scripts_dir=$(KOLLAB_NO_KEYRING=1 "$python_cmd" -c \
+                'import sysconfig; import sys; print(sysconfig.get_path("scripts", scheme=sys.argv[1]))' \
+                "$scheme") || return 1
+        else
+            scripts_dir="${pip_path%/*}"
+        fi
+        normalize_install_dir "$scripts_dir"
+        return $?
+    fi
+    IFS= read -r shebang < "$pip_path" || return 1
+    shebang="${shebang#\#!}"
+    read -r python_cmd _ <<< "$shebang"
+    if [[ "$python_cmd" == */sh ]]; then
+        IFS= read -r env_args < <(sed -n '2p' "$pip_path") || return 1
+        [[ "$env_args" == *exec* ]] || return 1
+        env_args="${env_args#*exec}"
+        env_args="${env_args#\'}"
+        env_args="${env_args# }"
+        if [[ "$env_args" == \"* ]]; then
+            python_cmd="${env_args#\"}"
+            python_cmd="${python_cmd%%\"*}"
+        elif [[ "$env_args" == \'* ]]; then
+            python_cmd="${env_args#\'}"
+            python_cmd="${python_cmd%%\'*}"
+        else
+            read -r python_cmd _ <<< "$env_args"
+        fi
+        if [[ "$python_cmd" != */* ]]; then
+            python_cmd=$(command -v "$python_cmd") || return 1
+        fi
+    elif [[ "$python_cmd" == */env ]]; then
+        env_args="${shebang#*env }"
+        read -r python_cmd _ <<< "$env_args"
+        if [[ "$python_cmd" == "-S" ]]; then
+            # env -S splits the remaining shebang into the interpreter and its args.
+            env_args="${env_args#-S }"
+            read -r python_cmd _ <<< "$env_args"
+            python_cmd="${python_cmd#\"}"
+            python_cmd="${python_cmd%\"}"
+            python_cmd="${python_cmd#\'}"
+            python_cmd="${python_cmd%\'}"
+        fi
+        python_cmd=$(command -v "$python_cmd") || return 1
+    fi
+    [[ -x "$python_cmd" ]] || return 1
+    KOLLAB_NO_KEYRING=1 "$python_cmd" -c \
+        'import sysconfig; import sys; scheme = sys.argv[1]; print(sysconfig.get_path("scripts", scheme=scheme) if scheme else sysconfig.get_path("scripts"))' \
+        "$scheme"
+}
+
+# Keep a broken installed command from blocking the installer forever.
+run_version_check() {
+    local executable="$1" output_file pid elapsed grace status
+    output_file=$(mktemp) || return 1
+    env -u SCIE -u SCIE_ARGV0 -u PEX "$executable" --version >"$output_file" 2>&1 &
+    pid=$!
+    for ((elapsed = 0; elapsed < VERSION_CHECK_TIMEOUT_SECONDS * 10; elapsed++)); do
+        if [[ " $(jobs -pr) " != *" $pid "* ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+    if [[ " $(jobs -pr) " == *" $pid "* ]]; then
+        kill "$pid" 2>/dev/null || true
+        for ((grace = 0; grace < VERSION_CHECK_TERM_GRACE_SECONDS * 10; grace++)); do
+            if [[ " $(jobs -pr) " != *" $pid "* ]]; then
+                break
+            fi
+            sleep 0.1
+        done
+        if [[ " $(jobs -pr) " == *" $pid "* ]]; then
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+        wait "$pid" 2>/dev/null || true
+        printf 'timed out after %s seconds' "$VERSION_CHECK_TIMEOUT_SECONDS"
+        rm -f "$output_file"
+        return 124
+    fi
+    if wait "$pid"; then
+        status=0
+    else
+        status=$?
+    fi
+    cat "$output_file"
+    rm -f "$output_file"
+    return "$status"
 }
 
 # Try pip (standard)
 try_pip() {
+    local install_scheme="" scripts_dir configured_user user_setting
     if ! command_exists pip && ! command_exists pip3; then
         return 1
     fi
@@ -205,56 +417,104 @@ try_pip() {
 
     info "Installing with $pip_cmd (system-wide)..."
 
+    user_setting=$(printf '%s' "${PIP_USER:-}" | tr '[:upper:]' '[:lower:]')
+    case "$user_setting" in
+        1|true|yes|on)
+            install_scheme="posix_user"
+            ;;
+        0|false|no|off)
+            ;;
+        *)
+            configured_user=$("$pip_cmd" config get install.user 2>/dev/null || true)
+            user_setting=$(printf '%s' "$configured_user" | tr '[:upper:]' '[:lower:]')
+            case "$user_setting" in
+                1|true|yes|on) install_scheme="posix_user" ;;
+            esac
+            ;;
+    esac
+
     # Check if we need --user flag
     if "$pip_cmd" install --help 2>&1 | grep -q -- --user; then
         # Try without --user first, fall back if permission denied
         if ! "$pip_cmd" install "$PKG_SPEC" 2>/dev/null; then
             warn "Trying with --user flag..."
             "$pip_cmd" install --user "$PKG_SPEC" || return 1
-            prepend_to_path "$HOME/.local/bin"
+            install_scheme="posix_user"
         fi
     else
         "$pip_cmd" install "$PKG_SPEC" || return 1
     fi
+    scripts_dir=$(pip_scripts_dir "$pip_cmd" "$install_scheme") || scripts_dir=""
+    INSTALLED_DIR="$scripts_dir"
+    if [[ -n "$scripts_dir" ]]; then
+        prepend_to_path "$scripts_dir"
+    fi
+    return 0
 }
 
 # Verify installation
 verify_install() {
-    local found
-    if ! command_exists "$CMD_NAME" && [[ -x "$INSTALLED_DIR/$CMD_NAME" ]]; then
-        prepend_to_path "$INSTALLED_DIR"
-    fi
-
-    if command_exists "$CMD_NAME"; then
-        # The PATH the installer started with is the one new shells get.
-        found=$(PATH="$ORIGINAL_PATH"; command -v "$CMD_NAME" || true)
-        if [[ -n "$found" && -x "$INSTALLED_DIR/$CMD_NAME" && "$found" != "$INSTALLED_DIR/$CMD_NAME" ]]; then
-            warn "Another $CMD_NAME comes first on your PATH: $found"
-            info "Remove it, or put $INSTALLED_DIR before it in PATH."
-        fi
-        if [[ "$DIR_ADDED_TO_PATH" == "1" ]]; then
-            success "Installation verified at $INSTALLED_DIR/$CMD_NAME."
-            warn "$INSTALLED_DIR was not in PATH when the installer started."
-            info "Run: export PATH=\"$INSTALLED_DIR:\$PATH\""
+    local command_name executable shown version_line installed_version found
+    command_name=$(installed_executable_name)
+    executable="$INSTALLED_DIR/$command_name"
+    if [[ -z "$INSTALLED_DIR" || ! -x "$executable" ]]; then
+        if [[ -n "$INSTALLED_DIR" ]]; then
+            error "The selected install method did not produce an executable at $executable."
         else
-            success "Installation verified! '$CMD_NAME' is available."
+            error "Could not identify the executable produced by the selected install method."
         fi
-        echo
-        info "Run '$CMD_NAME' to start using Kollab."
-        info "For configuration, see: $REPO_URL"
-        return 0
-    fi
-
-    # Check if in PATH
-    if [[ ":$PATH:" == *":$INSTALLED_DIR:"* ]]; then
-        error "'$CMD_NAME' not found in PATH after installation."
-        info "You may need to restart your shell or run: export PATH=\"$INSTALLED_DIR:\$PATH\""
+        found=$(PATH="$ORIGINAL_PATH" command -v "$command_name" || true)
+        if [[ -n "$found" ]]; then
+            info "PATH resolves to $found; install Kollab with the selected method or check its install location."
+        else
+            info "Check the install method's output and install Kollab again."
+        fi
         return 1
     fi
 
-    warn "'$CMD_NAME' installed but may not be in PATH."
-    info "Try: export PATH=\"$INSTALLED_DIR:\$PATH\""
-    return 1
+    if shown=$(run_version_check "$executable"); then
+        :
+    else
+        local version_status=$?
+        if [[ "$version_status" -eq 124 ]]; then
+            error "The installed executable at $executable timed out on --version: $shown"
+        else
+            error "The installed executable at $executable did not start: $shown"
+        fi
+        return 1
+    fi
+    version_line="${shown##*$'\n'}"
+    if [[ "$version_line" =~ ^kollab[[:space:]]([0-9][A-Za-z0-9.+!_-]*)$ ]]; then
+        installed_version="${BASH_REMATCH[1]}"
+    elif [[ "$command_name" == *.exe && "$version_line" =~ ^kollab\.exe[[:space:]]([0-9][A-Za-z0-9.+!_-]*)$ ]]; then
+        installed_version="${BASH_REMATCH[1]}"
+    else
+        error "Could not parse the version from Kollab's expected --version output at $executable: $shown"
+        return 1
+    fi
+    if [[ -n "$VERSION" && "$installed_version" != "$VERSION" ]]; then
+        error "Expected kollab $VERSION at $executable, but it reports $installed_version."
+        return 1
+    fi
+
+    # ORIGINAL_PATH is the environment a newly opened shell inherits.
+    found=$(PATH="$ORIGINAL_PATH" command -v "$command_name" || true)
+    if [[ ! "$found" -ef "$executable" ]]; then
+        if [[ -n "$found" ]]; then
+            warn "Another $CMD_NAME comes first on PATH: $found"
+            info "The installed executable is $executable. Put $INSTALLED_DIR before it in PATH, then open a new shell."
+        else
+            warn "Kollab $installed_version is installed at $executable but is not discoverable in a new shell."
+            info "Add $INSTALLED_DIR to PATH, then open a new shell."
+        fi
+        return 1
+    fi
+
+    success "Installation verified: kollab $installed_version at $executable."
+    echo
+    info "Run '$CMD_NAME' to start using Kollab."
+    info "For configuration, see: $REPO_URL"
+    return 0
 }
 
 # Main installation flow. Each try_* runs inside an `if`, where set -e is off,
@@ -279,7 +539,7 @@ main() {
     for method in "${methods[@]}"; do
         if "try_$method"; then
             verify_install
-            exit 0
+            exit $?
         fi
         if [[ "$method" == binary && ${#methods[@]} -gt 1 ]]; then
             info "Installing the Python package instead..."
