@@ -3677,15 +3677,21 @@ class ToolExecutor:
         3. Readability heuristic (highest text-to-tag ratio element)
         4. Fallback: strip non-content tags, extract remaining text
 
-        Uses beautifulsoup4 with lxml parser. Falls back to regex-based
-        extraction if bs4 is not available.
+        Uses beautifulsoup4 with lxml when available and Python's built-in
+        html.parser otherwise. Falls back to regex-based extraction if bs4 is
+        not available.
         """
         try:
             from bs4 import BeautifulSoup
-            soup = BeautifulSoup(html, "lxml")
+            from bs4.exceptions import FeatureNotFound
         except ImportError:
             # bs4 not available — fall back to regex-based extraction
             return ToolExecutor._html_to_text_regex(html)
+
+        try:
+            soup = BeautifulSoup(html, "lxml")
+        except FeatureNotFound:
+            soup = BeautifulSoup(html, "html.parser")
 
         # Remove non-content elements entirely
         for tag in soup.find_all(["script", "style", "nav", "footer", "aside",
