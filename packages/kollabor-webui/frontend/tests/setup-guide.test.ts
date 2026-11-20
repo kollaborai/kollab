@@ -186,6 +186,12 @@ test("shouldAutoOpenGuide: engaged or dismissed records never reopen", { skip: !
   assert.equal(guideModel.shouldAutoOpenGuide('{"step":"welcome","dismissed":true}'), false);
 });
 
+test("shouldAutoOpenGuide: removed provider progress resumes at welcome without reopening", { skip: !guidePolicyAvailable }, () => {
+  const saved = '{"step":"provider","dismissed":false}';
+  assert.deepEqual(loadGuideState(saved), { step: "welcome", dismissed: false });
+  assert.equal(guideModel.shouldAutoOpenGuide(saved), false);
+});
+
 test("shouldPersistGuide: the untouched initial state writes nothing", { skip: !guidePolicyAvailable }, () => {
   const initial = initialGuideState();
   assert.equal(guideModel.shouldPersistGuide(initial, initial), false);
