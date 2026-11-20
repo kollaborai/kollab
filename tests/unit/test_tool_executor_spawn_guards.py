@@ -439,6 +439,18 @@ SUBSTITUTION_GUARD_CASES = [
         id="process-substitution-in-shell-comment",
     ),
     pytest.param(
+        "cat <<EOF\n'$(kollab --agent coder)'\nEOF",
+        True,
+        False,
+        id="single-quoted-substitution-in-unquoted-heredoc",
+    ),
+    pytest.param(
+        "cat <<EOF\nplain\nEOF\necho safe # $(kollab --agent coder)",
+        False,
+        False,
+        id="comment-after-heredoc-body",
+    ),
+    pytest.param(
         "echo '<(kollab --agent coder)'",
         False,
         False,
