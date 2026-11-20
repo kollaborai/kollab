@@ -201,6 +201,15 @@ export function isInitialGuideState(state: GuideState): boolean {
  * person engaged the tour or dismissed it, and neither reopens on its own.
  */
 export function shouldAutoOpenGuide(raw: string | null): boolean {
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as { step?: unknown } | null;
+      // The removed provider card was already engaged progress before it mapped to welcome.
+      if (parsed?.step === "provider") return false;
+    } catch {
+      // Keep malformed storage on the existing fresh-state recovery path.
+    }
+  }
   return isInitialGuideState(loadGuideState(raw));
 }
 
