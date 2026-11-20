@@ -24,6 +24,8 @@ export interface TerminalViewProps {
   /** The computer the session runs on; empty for this one. Shown before the folder so the machine is plain. */
   device?: string;
   workspace: string;
+  /** True when the agent now runs the engine version after a daemon_outdated response. */
+  agentIsCurrent?: boolean;
   daemonNotice: DaemonNoticeProps;
 }
 
@@ -49,6 +51,7 @@ interface TerminalTabProps {
   /** Hands the panel the function that ends this tab's shell; null when the tab unmounts. */
   onRegister: (id: number, endSession: (() => void) | null) => void;
   onRetry: (id: number) => void;
+  agentIsCurrent: boolean;
   daemonNotice: DaemonNoticeProps;
 }
 
@@ -65,6 +68,7 @@ function TerminalTab({
   onReport,
   onRegister,
   onRetry,
+  agentIsCurrent,
   daemonNotice,
 }: TerminalTabProps) {
   const connection = useTerminalWsConnection({ sessionId, workspace });
@@ -94,14 +98,17 @@ function TerminalTab({
           )}
           {status === "closed" && <p className="text-xs text-muted-foreground">Shell ended.</p>}
           {status === "error" &&
-            (errorCode === DAEMON_OUTDATED_CODE ? (
+            (errorCode === DAEMON_OUTDATED_CODE && !agentIsCurrent ? (
               <DaemonNotice {...daemonNotice} />
             ) : (
               <p className="text-xs text-muted-foreground">
-                {errorMessage ?? "Could not reach the terminal server."}
+                {errorCode === DAEMON_OUTDATED_CODE
+                  ? "The agent is running the engine version. Retry to reconnect."
+                  : errorMessage ?? "Could not reach the terminal server."}
               </p>
             ))}
-          {(status === "closed" || (status === "error" && errorCode !== DAEMON_OUTDATED_CODE)) && (
+          {(status === "closed" ||
+            (status === "error" && (errorCode !== DAEMON_OUTDATED_CODE || agentIsCurrent))) && (
             <Button type="button" variant="ghost" size="sm" onClick={() => onRetry(id)}>
               Retry
             </Button>
@@ -141,7 +148,13 @@ async function readTerminalHeader(): Promise<{ shell: string; env: TerminalEnvRe
   return { shell: configured || env?.shell || "", env };
 }
 
-export function TerminalView({ sessionId, workspace, device, daemonNotice }: TerminalViewProps) {
+export function TerminalView({
+  sessionId,
+  workspace,
+  device,
+  agentIsCurrent = false,
+  daemonNotice,
+}: TerminalViewProps) {
   const [tabs, setTabs] = useState<TerminalTabState[]>(() => [{ id: 1, generation: 0 }]);
   const [activeId, setActiveId] = useState(1);
   const [reports, setReports] = useState<Partial<Record<number, TerminalTabReport>>>({});
@@ -340,6 +353,7 @@ export function TerminalView({ sessionId, workspace, device, daemonNotice }: Ter
               onReport={reportTab}
               onRegister={registerTab}
               onRetry={retryTab}
+              agentIsCurrent={agentIsCurrent}
               daemonNotice={daemonNotice}
             />
           ))}

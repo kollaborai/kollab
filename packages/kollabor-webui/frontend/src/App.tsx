@@ -197,6 +197,7 @@ function RuntimeShell({
   agents,
   liveAgents,
   remoteAgents,
+  agentIsCurrent,
   daemonNotice,
   onSessionUpdated,
   onOpenSettings,
@@ -220,6 +221,7 @@ function RuntimeShell({
   agents: AgentPoolEntry[];
   /** Every running agent, one per process: the chat reads its own by its instance, never by name. */
   liveAgents: LiveAgent[];
+  agentIsCurrent: boolean;
   daemonNotice: DaemonNoticeProps;
   /** Agents on the network's other computers (GET /sessions `network.remote`). */
   remoteAgents: NetworkAgent[];
@@ -436,6 +438,7 @@ function RuntimeShell({
                     sessionId={session.session_id}
                     device={session.device ?? ""}
                     workspace={workspace}
+                    agentIsCurrent={agentIsCurrent}
                     daemonNotice={daemonNotice}
                   />
                 </Suspense>
@@ -1372,6 +1375,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   // The open chat's agent against the engine: older code gets a line above the chat (#968).
   const activeAgent = activeSession ? liveAgentOf(activeSession, liveAgents) : undefined;
   const versionNotice = agentVersionNotice({ engineVersion, agent: activeAgent, restartAgents });
+  const agentIsCurrent = Boolean(activeAgent && engineVersion && activeAgent.version === engineVersion);
   const versionNoticeKey = activeSession && activeAgent ? `${activeSession.session_id}|${activeAgent.agent_id}` : "";
   const restartHere = agentRestart && agentRestart.sessionId === activeId ? agentRestart : null;
   const restartActiveAgent = async () => {
@@ -2070,6 +2074,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                   profiles={profiles}
                   agents={agents}
                   liveAgents={liveAgents}
+                  agentIsCurrent={agentIsCurrent}
                   daemonNotice={daemonNotice}
                   remoteAgents={network.remote}
                   refreshSignal={refreshSignal}
