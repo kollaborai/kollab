@@ -78,6 +78,31 @@ class TestSlashCommandParser(unittest.TestCase):
                 self.assertIsNotNone(command)
                 self.assertEqual(command.args, expected_args)
 
+    def test_single_quoted_windows_paths_preserve_backslashes(self):
+        cases = [
+            (r"/open 'C:\my docs\notes.txt'", [r"C:\my docs\notes.txt"]),
+            (r"/open 'C:\work\notes.txt'", [r"C:\work\notes.txt"]),
+        ]
+
+        for input_text, expected_args in cases:
+            with self.subTest(input_text=input_text):
+                command = self.parser.parse_command(input_text)
+                self.assertIsNotNone(command)
+                self.assertEqual(command.args, expected_args)
+
+    def test_escaped_wildcards_keep_shlex_behavior(self):
+        cases = [
+            (r"/open \*", ["*"]),
+            (r"/open folder\*", ["folder*"]),
+            (r"/open --path=\*", ["--path=*"]),
+        ]
+
+        for input_text, expected_args in cases:
+            with self.subTest(input_text=input_text):
+                command = self.parser.parse_command(input_text)
+                self.assertIsNotNone(command)
+                self.assertEqual(command.args, expected_args)
+
     def test_parse_relative_directory_paths_with_trailing_separators_before_flags(self):
         cases = [
             ("/open folder\\ --mode=read", ["folder\\", "--mode=read"]),
