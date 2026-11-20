@@ -363,7 +363,7 @@ pip_scripts_dir() {
     fi
     [[ -x "$python_cmd" ]] || return 1
     KOLLAB_NO_KEYRING=1 "$python_cmd" -c \
-        'import sysconfig; import sys; print(sysconfig.get_path("scripts", scheme=sys.argv[1] or None))' \
+        'import sysconfig; import sys; scheme = sys.argv[1]; print(sysconfig.get_path("scripts", scheme=scheme) if scheme else sysconfig.get_path("scripts"))' \
         "$scheme"
 }
 
