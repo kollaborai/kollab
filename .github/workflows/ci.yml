@@ -346,6 +346,10 @@ jobs:
         working-directory: packages/kollabor-webui/frontend
         run: npx playwright-core install --with-deps chromium
 
+      - name: Install virtual display for headed browser acceptance
+        if: matrix.lane == 'core'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb xauth
+
       # The runner supports 1-4 workers and every suite gets an isolated
       # HOME/TMPDIR and its own Chromium. KOLLAB_BROWSER_SUITES names this
       # lane's slice; the runner fails fast on an unknown name.
@@ -362,7 +366,12 @@ jobs:
             npm run test:e2e:runner
             npm run inventory:controls -- "$KOLLAB_BROWSER_RESULTS_DIR/control-candidates.json"
           fi
-          npm run test:e2e:parallel
+          if [ "${{ matrix.lane }}" = "core" ]; then
+            KOLLAB_BROWSER_XVFB=1 xvfb-run -a --server-args="-screen 0 1920x1080x24" \
+              sh -c 'test -n "$DISPLAY" && test -s "$XAUTHORITY" || { echo "xvfb-run did not provide DISPLAY/XAUTHORITY" >&2; exit 1; }; npm run test:e2e:parallel'
+          else
+            npm run test:e2e:parallel
+          fi
 
       - name: Upload browser acceptance evidence
         if: always()
