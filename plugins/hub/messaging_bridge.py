@@ -42,6 +42,34 @@ from kollabor_config.file_lock import try_lock, unlock
 logger = logging.getLogger(__name__)
 
 
+_voice_artifact_cleanup_tasks: set[asyncio.Task] = set()
+
+
+async def _remove_voice_artifacts_after_communication(
+    temp_dir: str, communication_task: asyncio.Task
+) -> None:
+    """Remove a run directory only after every process closes its inherited pipes."""
+    import shutil
+
+    try:
+        await asyncio.gather(communication_task, return_exceptions=True)
+        await asyncio.to_thread(shutil.rmtree, temp_dir)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        logger.error("Voice artifact cleanup failed (%s)", type(exc).__name__)
+
+
+def _defer_voice_artifact_cleanup(
+    temp_dir: str, communication_task: asyncio.Task
+) -> None:
+    cleanup_task = asyncio.create_task(
+        _remove_voice_artifacts_after_communication(temp_dir, communication_task)
+    )
+    _voice_artifact_cleanup_tasks.add(cleanup_task)
+    cleanup_task.add_done_callback(_voice_artifact_cleanup_tasks.discard)
+
+
 async def _await_shielded_task(task: asyncio.Task):
     """Finish an owned task despite repeated cancellation of its caller."""
     interrupted = False
@@ -55,7 +83,7 @@ async def _await_shielded_task(task: asyncio.Task):
 
 
 async def _stop_transcriber(proc, communication_task: asyncio.Task) -> None:
-    """End the isolated whisper process tree, then drain and reap its leader."""
+    """Stop the process group, reap its leader, and briefly allow pipe EOF."""
     import os
 
     from kollabor_config import proc_ctl
@@ -72,7 +100,8 @@ async def _stop_transcriber(proc, communication_task: asyncio.Task) -> None:
             except ProcessLookupError:
                 pass
     await proc.wait()
-    await asyncio.gather(communication_task, return_exceptions=True)
+    if not communication_task.done():
+        await asyncio.wait({communication_task}, timeout=0.1)
 
 # Seconds to back off after an inbound poll conflict (e.g. Telegram HTTP 409).
 # The poll inbox is a singleton per token; on conflict we yield hard rather
@@ -343,6 +372,7 @@ class TelegramBridge(MessagingBridge):
     async def _transcribe_voice(self, file_id: str) -> str:
         """Download voice file from telegram and transcribe with local whisper."""
         import os
+        import shutil
         import tempfile
 
         if not self._client:
@@ -369,7 +399,9 @@ class TelegramBridge(MessagingBridge):
 
             # Keep both the downloaded audio and whisper output in one private
             # directory so every exit path can remove the complete artifact set.
-            with tempfile.TemporaryDirectory(prefix="kollab-telegram-voice-") as temp_dir:
+            temp_dir = tempfile.mkdtemp(prefix="kollab-telegram-voice-")
+            communication_task = None
+            try:
                 suffix = Path(file_path).suffix or ".ogg"
                 audio_path = Path(temp_dir) / f"voice{suffix}"
                 audio_path.write_bytes(audio_resp.content)
@@ -460,6 +492,11 @@ class TelegramBridge(MessagingBridge):
                             break
                 if not transcription:
                     transcription = "[voice message - whisper returned empty]"
+            finally:
+                if communication_task is not None and not communication_task.done():
+                    _defer_voice_artifact_cleanup(temp_dir, communication_task)
+                else:
+                    shutil.rmtree(temp_dir)
 
             logger.info("Telegram voice transcription completed")
             return f"[voice] {transcription}"
@@ -469,7 +506,13 @@ class TelegramBridge(MessagingBridge):
             return "[voice message - transcription timed out]"
         except Exception as e:
             # Exception messages can include Telegram URLs with the bot token.
-            logger.error("Voice transcription failed (%s)", type(e).__name__)
+            if isinstance(e, FileNotFoundError) and e.filename == "whisper":
+                logger.error(
+                    "Voice transcription failed (%s: whisper executable not found)",
+                    type(e).__name__,
+                )
+            else:
+                logger.error("Voice transcription failed (%s)", type(e).__name__)
             return "[voice message - transcription failed]"
 
 
