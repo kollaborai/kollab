@@ -268,7 +268,7 @@ promise project-wide discovery before project-wide ownership semantics exist.
 /goal                           show the active goal and next action
 /goal show                     show the active goal in full
 /goal pause                    stop continuation at the next safe boundary
-/goal resume [--budget N]      resume after pause/block/quota/budget stop
+/goal resume [--budget N] [--turns N] [--time N]  resume after a stop
 /goal clear                    stop and preserve the goal as cleared history
 /goal history [N]              list recent completed/cleared goals (default 10)
 ```
@@ -720,6 +720,10 @@ absence of an obvious error, or a provider's final prose alone.
 - Budgets are total ceilings across pause/resume. `/goal resume --budget N`
   replaces the ceiling and is rejected when `N <= tokens_used`; resume
   without `--budget` keeps the remaining original ceiling.
+- The active-time ceiling is also a total across pause/resume.
+  `/goal resume --time N` replaces it in seconds and is rejected when
+  `N <= time_used_seconds`. A goal at its existing time ceiling cannot resume
+  without `--time` greater than the time already used.
 - `tokens_used` is nullable when a provider does not report usage. The service
   must not display an invented zero. A configured hard budget with unavailable
   usage pauses safely as `usage_limited` rather than over-running silently.
