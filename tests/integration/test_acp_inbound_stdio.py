@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import psutil
 import pytest
@@ -321,9 +322,19 @@ def configure_acp(home, workspace, scenario="normal"):
     (directory / "config.json").write_text(json.dumps(config))
 
 
-def owned_daemons(home):
+def owned_daemons(home, workspace):
+    if os.name == "nt":
+        presence_paths = home.glob(".kollab/**/presence/*.json")
+    else:
+        # POSIX presence is colocated with the project-scoped socket runtime,
+        # not stored under HOME.
+        from kollabor_config.hub_paths import hub_project_socket_key, hub_socket_root
+
+        presence_dir = hub_socket_root() / hub_project_socket_key(workspace)
+        presence_paths = presence_dir.glob("*.json")
+
     result = []
-    for path in home.glob(".kollab/**/presence/*.json"):
+    for path in presence_paths:
         try:
             record = json.loads(path.read_text())
         except FileNotFoundError:
@@ -342,9 +353,9 @@ def process_alive(pid):
         return False
 
 
-async def wait_no_daemons(home):
+async def wait_no_daemons(home, workspace):
     async def wait():
-        while owned_daemons(home):
+        while owned_daemons(home, workspace):
             await asyncio.sleep(0.05)
     await asyncio.wait_for(wait(), 15)
 
@@ -399,7 +410,7 @@ async def test_real_stdio_mixed_initialize_and_unknown_method_have_v1_shape(tmp_
         assert failure.value.error["code"] == -32601
     assert connection.process.returncode == 0
     assert connection.bad_lines == []
-    assert owned_daemons(home) == []
+    assert owned_daemons(home, workspace) == []
 
 
 @pytest.mark.asyncio
@@ -419,8 +430,46 @@ async def test_real_stdio_invalid_session_and_workspace_never_spawn_daemon(tmp_p
         with pytest.raises(ProtocolFailure) as failure:
             await connection.rpc("session/prompt", {"sessionId": "not-owned", "prompt": [{"type": "text", "text": "refuse"}]})
         assert failure.value.error["code"] == -32602
-    assert owned_daemons(home) == []
+    assert owned_daemons(home, workspace) == []
     assert connection.bad_lines == [] and connection.process.returncode == 0
+
+
+@pytest.mark.asyncio
+async def test_new_session_registers_live_owned_daemon_in_project_scope(tmp_path):
+    home = tmp_path / "home"
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    async with local_provider() as (endpoint, _calls):
+        configure(home, endpoint)
+        async with client(workspace, home, "owned-native") as connection:
+            await connection.rpc(
+                "initialize", {"protocolVersion": 1, "clientCapabilities": {}}
+            )
+            session_id = (
+                await connection.rpc(
+                    "session/new", {"cwd": str(workspace), "mcpServers": []}
+                )
+            )["sessionId"]
+            await connection.rpc(
+                "session/set_mode",
+                {"sessionId": session_id, "modeId": "trust_all"},
+            )
+            records = owned_daemons(home, workspace)
+            assert len(records) == 1
+            assert process_alive(records[0]["pid"])
+            assert Path(records[0]["socket_path"]).exists()
+
+
+def test_windows_owned_daemon_lookup_finds_project_scoped_presence(tmp_path, monkeypatch):
+    home, workspace = tmp_path / "home", tmp_path / "project"
+    workspace.mkdir()
+    presence = home / ".kollab" / "projects" / "encoded-project" / "hub" / "presence"
+    presence.mkdir(parents=True)
+    record = {"pid": 12345, "identity": "probe"}
+    (presence / "probe.json").write_text(json.dumps(record))
+    monkeypatch.setattr(sys.modules[__name__], "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(sys.modules[__name__], "process_alive", lambda _pid: True)
+    assert owned_daemons(home, workspace) == [record]
 
 
 @pytest.mark.asyncio
@@ -434,8 +483,8 @@ async def test_real_owned_native_prompt_permission_tools_restore_and_eof(tmp_pat
             await connection.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
             opened = await connection.rpc("session/new", {"cwd": str(workspace), "mcpServers": []})
             session_id = opened["sessionId"]
-            assert len(owned_daemons(home)) == 1
-            daemon_pid = owned_daemons(home)[0]["pid"]
+            assert len(owned_daemons(home, workspace)) == 1
+            daemon_pid = owned_daemons(home, workspace)[0]["pid"]
             result = await connection.rpc("session/prompt", {"sessionId": session_id,
                 "prompt": [{"type": "text", "text": "Write owned.txt and report the result."}]})
             assert result["stopReason"] == "end_turn"
@@ -449,11 +498,11 @@ async def test_real_owned_native_prompt_permission_tools_restore_and_eof(tmp_pat
             assert any(update["update"].get("content", {}).get("text") == "OWNED NATIVE ANSWER"
                        for update in connection.updates if update["update"]["sessionUpdate"] == "agent_message_chunk")
             await connection.rpc("session/close", {"sessionId": session_id})
-            await wait_no_daemons(home)
+            await wait_no_daemons(home, workspace)
             assert not process_alive(daemon_pid)
             before = len(connection.updates)
             await connection.rpc("session/resume", {"sessionId": session_id, "cwd": str(workspace), "mcpServers": []})
-            resumed_pid = owned_daemons(home)[0]["pid"]
+            resumed_pid = owned_daemons(home, workspace)[0]["pid"]
             assert len(connection.updates) == before
             await connection.rpc("session/load", {"sessionId": session_id, "cwd": str(workspace), "mcpServers": []})
             assert len(connection.updates) > before
@@ -464,13 +513,13 @@ async def test_real_owned_native_prompt_permission_tools_restore_and_eof(tmp_pat
             assert result["toolCallId"] == start["toolCallId"] != "owned-write" and result["status"] == "completed"
             replay_tool_id = start["toolCallId"]
             await connection.rpc("session/close", {"sessionId": session_id})
-            await wait_no_daemons(home)
+            await wait_no_daemons(home, workspace)
             assert not process_alive(resumed_pid)
-        await wait_no_daemons(home)
+        await wait_no_daemons(home, workspace)
         async with client(workspace, home, "owned-native") as restored:
             await restored.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
             await restored.rpc("session/load", {"sessionId": session_id, "cwd": str(workspace), "mcpServers": []})
-            restored_pid = owned_daemons(home)[0]["pid"]
+            restored_pid = owned_daemons(home, workspace)[0]["pid"]
             restored_tools = [entry["update"] for entry in restored.updates
                               if entry["update"]["sessionUpdate"] in {"tool_call", "tool_call_update"}]
             assert [entry["sessionUpdate"] for entry in restored_tools] == ["tool_call", "tool_call_update"]
@@ -489,12 +538,12 @@ async def test_real_owned_native_prompt_permission_tools_restore_and_eof(tmp_pat
                          if entry["update"]["sessionUpdate"] in {"tool_call", "tool_call_update"}]
             assert new_tools[0]["toolCallId"] == new_tools[1]["toolCallId"] != replay_tool_id
             assert restored.permissions[0]["toolCall"]["toolCallId"] == new_tools[0]["toolCallId"]
-        await wait_no_daemons(home)
+        await wait_no_daemons(home, workspace)
         assert not process_alive(restored_pid)
         async with client(workspace, home, "owned-native") as continued:
             await continued.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
             await continued.rpc("session/load", {"sessionId": session_id, "cwd": str(workspace), "mcpServers": []})
-            continued_pid = owned_daemons(home)[0]["pid"]
+            continued_pid = owned_daemons(home, workspace)[0]["pid"]
             assert sum(entry["update"]["sessionUpdate"] == "tool_call" for entry in continued.updates) == 2
             assert sum(entry["update"]["sessionUpdate"] == "tool_call_update" for entry in continued.updates) == 2
             replayed_ids = [entry["update"]["toolCallId"] for entry in continued.updates
@@ -502,7 +551,7 @@ async def test_real_owned_native_prompt_permission_tools_restore_and_eof(tmp_pat
             assert len(set(replayed_ids)) == 2 and replayed_ids[0] == replay_tool_id
             assert sum(entry["update"].get("content", {}).get("text") == "OWNED NATIVE ANSWER" for entry in continued.updates
                        if entry["update"]["sessionUpdate"] == "agent_message_chunk") == 2
-        await wait_no_daemons(home)
+        await wait_no_daemons(home, workspace)
         assert not process_alive(continued_pid) and len(calls) == 4
     assert connection.process.returncode == 0
     assert restored.process.returncode == 0 and continued.process.returncode == 0
@@ -519,7 +568,7 @@ async def test_real_xml_terminal_source_id_reuse_is_unique_on_wire_and_unchanged
         async with client(workspace, home, "owned-native") as connection:
             await connection.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
             session_id = (await connection.rpc("session/new", {"cwd": str(workspace), "mcpServers": []}))["sessionId"]
-            daemon_pid = owned_daemons(home)[0]["pid"]
+            daemon_pid = owned_daemons(home, workspace)[0]["pid"]
             for _ in range(2):
                 result = await connection.rpc("session/prompt", {"sessionId": session_id,
                     "prompt": [{"type": "text", "text": "Run the owned XML terminal fixture."}]})
@@ -532,12 +581,12 @@ async def test_real_xml_terminal_source_id_reuse_is_unique_on_wire_and_unchanged
             assert [permission["toolCall"]["toolCallId"] for permission in connection.permissions] == live_ids
             assert (workspace / "owned.txt").read_text() == "owned output"
             await connection.rpc("session/close", {"sessionId": session_id})
-            await wait_no_daemons(home)
+            await wait_no_daemons(home, workspace)
             assert not process_alive(daemon_pid)
         async with client(workspace, home, "owned-native") as restored:
             await restored.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
             await restored.rpc("session/load", {"sessionId": session_id, "cwd": str(workspace), "mcpServers": []})
-            record = owned_daemons(home)[0]
+            record = owned_daemons(home, workspace)[0]
             replayed = [row["update"] for row in restored.updates
                         if row["update"]["sessionUpdate"] in {"tool_call", "tool_call_update"}]
             replayed_ids = [card["toolCallId"] for card in replayed if card["sessionUpdate"] == "tool_call"]
@@ -565,7 +614,7 @@ async def test_real_xml_terminal_source_id_reuse_is_unique_on_wire_and_unchanged
             (tmp_path / "xml-source-id-proof.json").write_text(json.dumps({
                 "source_ids": source_ids, "live_ids": live_ids, "replayed_ids": replayed_ids,
                 "new_id": new[0]["toolCallId"], "native_conversation_id": snapshot["session_id"]}, indent=2))
-        await wait_no_daemons(home)
+        await wait_no_daemons(home, workspace)
         assert not process_alive(record["pid"]) and len(calls) == 6
     assert connection.bad_lines == [] and restored.bad_lines == []
     assert connection.process.returncode == restored.process.returncode == 0
@@ -593,14 +642,14 @@ async def test_real_native_file_edit_diff_is_retained_after_restore(tmp_path):
             assert cards[0]["kind"] == "edit"
             assert expected in cards[1]["content"]
             await connection.rpc("session/close", {"sessionId": session_id})
-            await wait_no_daemons(home)
+            await wait_no_daemons(home, workspace)
             before = len(connection.updates)
             await connection.rpc("session/load", {"sessionId": session_id, "cwd": str(workspace), "mcpServers": []})
             restored_cards = [entry["update"] for entry in connection.updates[before:]
                               if entry["update"]["sessionUpdate"] in {"tool_call", "tool_call_update"}]
             assert restored_cards[0]["kind"] == "edit" and restored_cards[0]["rawInput"] == arguments
             assert expected in restored_cards[1]["content"] and restored_cards[1]["status"] == "completed"
-        await wait_no_daemons(home)
+        await wait_no_daemons(home, workspace)
     assert connection.bad_lines == [] and connection.process.returncode == 0
 
 
@@ -622,7 +671,7 @@ async def test_attached_queued_cancel_and_eof_preserve_the_other_client_turn(tmp
                 while len(calls) < 2:
                     await asyncio.sleep(0.01)
             await asyncio.wait_for(second_request(), 10)
-            daemon_pid = owned_daemons(home)[0]["pid"]
+            daemon_pid = owned_daemons(home, workspace)[0]["pid"]
             async with client(workspace, home, attach=f"acp-{own_id[:8]}") as attached:
                 initialized = await attached.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
                 assert initialized["agentCapabilities"]["loadSession"] is False
@@ -642,7 +691,7 @@ async def test_attached_queued_cancel_and_eof_preserve_the_other_client_turn(tmp
             release.set()
             assert (await own_prompt)["stopReason"] == "end_turn"
             assert (workspace / "owned.txt").read_text() == "owned output"
-        await wait_no_daemons(home)
+        await wait_no_daemons(home, workspace)
     assert owner.bad_lines == [] and attached.bad_lines == []
 
 
@@ -658,7 +707,7 @@ async def test_queued_acp_cancel_preserves_native_state_rpc_owner(tmp_path):
             await owner.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
             own_id = (await owner.rpc("session/new", {"cwd": str(workspace), "mcpServers": []}))["sessionId"]
             await owner.rpc("session/set_mode", {"sessionId": own_id, "modeId": "trust_all"})
-            record = owned_daemons(home)[0]
+            record = owned_daemons(home, workspace)[0]
             async with daemon_rpc(record, tmp_path / "native-rpc-events.json") as (rpc, events):
                 admission = await rpc.call("state.send_message", {"message": "Run the owned native turn.",
                     "request_id": "owned-native-input"})
@@ -692,7 +741,7 @@ async def test_queued_acp_cancel_preserves_native_state_rpc_owner(tmp_path):
                 queued_completions = [event for event in events if event.get("type") == "turn_complete" and event.get("queued")]
                 assert len(queued_completions) == 1 and queued_completions[0]["input_source"] == "acp_client"
                 assert len(calls) == 2 and (workspace / "owned.txt").read_text() == "owned output"
-        await wait_no_daemons(home)
+        await wait_no_daemons(home, workspace)
     assert owner.bad_lines == [] and attached.bad_lines == []
 
 
@@ -706,7 +755,7 @@ async def test_attached_native_permission_never_offers_always_and_eof_preserves_
         async with client(workspace, home, "owned-native") as owner:
             await owner.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
             own_id = (await owner.rpc("session/new", {"cwd": str(workspace), "mcpServers": []}))["sessionId"]
-            daemon_pid = owned_daemons(home)[0]["pid"]
+            daemon_pid = owned_daemons(home, workspace)[0]["pid"]
             sibling = tmp_path / "sibling"
             sibling.mkdir()
             async with client(sibling, home, attach=f"acp-{own_id[:8]}") as wrong_folder:
@@ -729,7 +778,7 @@ async def test_attached_native_permission_never_offers_always_and_eof_preserves_
                 assert {option["kind"] for prompt in attached.permissions for option in prompt["options"]} == {
                     "allow_once", "reject_once"}
             assert psutil.pid_exists(daemon_pid)
-        await wait_no_daemons(home)
+        await wait_no_daemons(home, workspace)
     assert owner.bad_lines == [] and attached.bad_lines == []
     assert "owned-ignored-server" in attached.stderr.result().decode()
 
@@ -752,7 +801,7 @@ async def test_active_native_cancel_stops_owned_tool_children(tmp_path, terminat
                 while not (workspace / "owned-started").exists():
                     await asyncio.sleep(0.01)
             await asyncio.wait_for(started(), 10)
-            daemon_pid = owned_daemons(home)[0]["pid"]
+            daemon_pid = owned_daemons(home, workspace)[0]["pid"]
             tool_processes = []
             for proc in psutil.Process(daemon_pid).children(recursive=True):
                 with contextlib.suppress(psutil.NoSuchProcess):
@@ -774,7 +823,7 @@ async def test_active_native_cancel_stops_owned_tool_children(tmp_path, terminat
                     await asyncio.sleep(0.05)
             await asyncio.wait_for(stopped(), 10)
             assert not (workspace / "forbidden-after-cancel.txt").exists()
-        await wait_no_daemons(home)
+        await wait_no_daemons(home, workspace)
     assert connection.bad_lines == [] and connection.process.returncode == 0
 
 
@@ -807,7 +856,7 @@ async def test_real_sdk_harness_opaque_permission_diff_cards_and_restore(tmp_pat
         assert connection.permissions[0]["options"][0]["optionId"] == "vendor-once"
         cards = [entry["update"] for entry in connection.updates
                  if entry["update"]["sessionUpdate"] in {"tool_call", "tool_call_update"}]
-        record = owned_daemons(home)[0]
+        record = owned_daemons(home, workspace)[0]
         async with daemon_rpc(record, tmp_path / "initial-sdk-source-events.json") as (rpc, _):
             snapshot = await rpc.call("state.get_conversation")
         original_ids = [tool["id"] for message in snapshot["messages"]
@@ -823,7 +872,7 @@ async def test_real_sdk_harness_opaque_permission_diff_cards_and_restore(tmp_pat
         assert cards[1]["content"][1] == {"type": "diff", "path": str((workspace / "vendor.txt").resolve()),
                                          "oldText": "before", "newText": "after"}
         await connection.rpc("session/close", {"sessionId": session_id})
-        await wait_no_daemons(home)
+        await wait_no_daemons(home, workspace)
         assert not process_alive(adapter_pid)
         before = len(connection.updates)
         await connection.rpc("session/resume", {"sessionId": session_id, "cwd": str(workspace), "mcpServers": []})
@@ -848,7 +897,7 @@ async def test_real_sdk_harness_opaque_permission_diff_cards_and_restore(tmp_pat
         assert len(new_cards) == 2 and new_cards[0]["toolCallId"] == new_cards[1]["toolCallId"]
         assert new_cards[0]["toolCallId"] not in {card["toolCallId"] for card in cards + restored}
         assert connection.permissions[-1]["toolCall"]["toolCallId"] == new_cards[0]["toolCallId"]
-        record = owned_daemons(home)[0]
+        record = owned_daemons(home, workspace)[0]
         async with daemon_rpc(record, tmp_path / "continued-sdk-source-events.json") as (rpc, _):
             snapshot = await rpc.call("state.get_conversation")
         continued_ids = [tool["id"] for message in snapshot["messages"]
@@ -864,7 +913,7 @@ async def test_real_sdk_harness_opaque_permission_diff_cards_and_restore(tmp_pat
             "scenario": scenario, "original_ids": continued_ids,
             "live_id": cards[0]["toolCallId"], "replay_id": restored[0]["toolCallId"],
             "new_live_id": new_cards[0]["toolCallId"]}, indent=2))
-    await wait_no_daemons(home)
+    await wait_no_daemons(home, workspace)
     assert not process_alive(resumed_pid)
     assert "resume" in (workspace / "owned-session-methods.txt").read_text().splitlines()
     assert connection.bad_lines == [] and connection.process.returncode == 0
@@ -879,7 +928,7 @@ async def test_real_sdk_active_cancel_partial_history_survives_close_and_reopen(
     async with client(workspace, home, "owned-acp") as connection:
         await connection.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
         session_id = (await connection.rpc("session/new", {"cwd": str(workspace), "mcpServers": []}))["sessionId"]
-        daemon_pid = owned_daemons(home)[0]["pid"]
+        daemon_pid = owned_daemons(home, workspace)[0]["pid"]
         adapter_pid = int((workspace / "owned-adapter-pid.txt").read_text())
         prompt = asyncio.create_task(connection.rpc("session/prompt", {"sessionId": session_id,
             "prompt": [{"type": "text", "text": "Start the owned SDK tool and wait for cancellation."}]}))
@@ -899,7 +948,7 @@ async def test_real_sdk_active_cancel_partial_history_survives_close_and_reopen(
         assert (workspace / "owned-observed-sdk-cancel.txt").read_text() == "cancelled"
         assert not (workspace / "vendor.txt").exists()
         await connection.rpc("session/close", {"sessionId": session_id})
-        await wait_no_daemons(home)
+        await wait_no_daemons(home, workspace)
         assert not process_alive(daemon_pid) and not process_alive(adapter_pid)
         assert all(not process_alive(int(pid)) for pid in (workspace / "owned-adapter-pids.txt").read_text().splitlines())
 
@@ -912,7 +961,7 @@ async def test_real_sdk_active_cancel_partial_history_survives_close_and_reopen(
         assert len({card["toolCallId"] for card in restored_cards}) == 1
         assert [entry["update"]["content"]["text"] for entry in restored.updates
                 if entry["update"]["sessionUpdate"] == "agent_message_chunk"] == ["OWNED SDK PARTIAL"]
-        record = owned_daemons(home)[0]
+        record = owned_daemons(home, workspace)[0]
         async with daemon_rpc(record, tmp_path / "stopped-rpc-events.json") as (rpc, _):
             snapshot = await rpc.call("state.get_conversation")
         stopped = [message for message in snapshot["messages"] if message["role"] == "assistant"
@@ -930,7 +979,7 @@ async def test_real_sdk_active_cancel_partial_history_survives_close_and_reopen(
         assert original_id != live_cards[0]["toolCallId"]
         assert metadata["tool_calls"][0]["metadata"]["acp"]["status"] == "in_progress"
         (tmp_path / "stopped-parent.json").write_text(json.dumps(metadata, indent=2))
-    await wait_no_daemons(home)
+    await wait_no_daemons(home, workspace)
     assert not process_alive(record["pid"])
     assert all(not process_alive(int(pid)) for pid in (workspace / "owned-adapter-pids.txt").read_text().splitlines())
     assert connection.bad_lines == [] and restored.bad_lines == []
@@ -946,7 +995,7 @@ async def test_real_sdk_attached_harness_permission_filters_always_and_detaches(
     async with client(workspace, home, "owned-acp") as owner:
         await owner.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
         own_id = (await owner.rpc("session/new", {"cwd": str(workspace), "mcpServers": []}))["sessionId"]
-        daemon_pid = owned_daemons(home)[0]["pid"]
+        daemon_pid = owned_daemons(home, workspace)[0]["pid"]
         adapter_pid = int((workspace / "owned-adapter-pid.txt").read_text())
         async with client(workspace, home, attach=f"acp-{own_id[:8]}") as attached:
             await attached.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
@@ -958,7 +1007,7 @@ async def test_real_sdk_attached_harness_permission_filters_always_and_detaches(
                 "vendor-once", "vendor-deny"}
         assert process_alive(daemon_pid) and process_alive(adapter_pid)
         assert (workspace / "vendor.txt").read_text() == "after"
-    await wait_no_daemons(home)
+    await wait_no_daemons(home, workspace)
     assert not process_alive(adapter_pid)
     assert owner.bad_lines == [] and attached.bad_lines == []
 
@@ -978,7 +1027,7 @@ async def test_real_sdk_harness_denied_or_nonoffered_choice_never_writes(tmp_pat
         assert response["stopReason"] == stop_reason
         assert not (workspace / "vendor.txt").exists()
         assert connection.permissions
-    await wait_no_daemons(home)
+    await wait_no_daemons(home, workspace)
     assert connection.bad_lines == [] and connection.process.returncode == 0
 
 
@@ -996,7 +1045,7 @@ async def test_real_stdio_startup_error_has_guidance_and_no_owned_daemon(tmp_pat
             await connection.rpc("session/new", {"cwd": str(workspace), "mcpServers": []}, timeout=15)
         assert failure.value.error["code"] == -32603
         assert guidance.lower() in json.dumps(failure.value.error).lower()
-        await wait_no_daemons(home)
+        await wait_no_daemons(home, workspace)
         if scenario == "startup-auth":
             assert not process_alive(int((workspace / "owned-adapter-pid.txt").read_text()))
         else:
@@ -1019,5 +1068,5 @@ async def test_real_sdk_harness_expired_login_fails_prompt_without_output(tmp_pa
         assert failure.value.error["code"] == -32603
         assert "authentication required" in json.dumps(failure.value.error).lower()
         assert not (workspace / "vendor.txt").exists()
-    await wait_no_daemons(home)
+    await wait_no_daemons(home, workspace)
     assert connection.bad_lines == [] and connection.process.returncode == 0

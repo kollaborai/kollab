@@ -1,7 +1,7 @@
 ---
 title: "Conversations and Storage"
 created: 2026-02-24
-modified: 2026-02-24
+modified: 2026-11-16
 status: active
 ---
 # Conversations and Storage
@@ -59,6 +59,10 @@ Use `/branch current <message-index>` to continue the live conversation from a m
 Use `/branch <session-id> <message-index>` to branch from a saved conversation.
 
 ## Saving Conversations
+
+If saving a user message or assistant reply fails, Kollab keeps processing the
+turn and shows a notice in the terminal and web UI so the unsaved message is
+clear.
 
 Use `/save` to export a conversation in different formats:
 

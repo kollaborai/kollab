@@ -1285,12 +1285,17 @@ these run shell commands in managed terminal sessions.
 
   with options:
     <terminal background="true" name="session-name">long running command</terminal>
-    <terminal timeout="5m" cwd="/path/to/dir">command</terminal>
+    <terminal timeout="30s" cwd="/path/to/dir">command</terminal>
 
   how it works:
     - runs the command in a managed subprocess session
     - background="true" runs it detached with a name for later capture
-    - timeout sets max execution time (default varies)
+    - timeout sets the maximum runtime (30s, 5m, 1h); foreground requests may
+      shorten but cannot exceed the configured terminal timeout, and excessive
+      or invalid values are rejected before execution. Voice calls may have a
+      stricter policy limit. For background sessions, timeout schedules an
+      auto-kill. Without it, foreground uses the configured limit and background
+      sessions have no automatic timeout.
     - cwd sets working directory for the command
 
 #### <terminal-status> - check session status
