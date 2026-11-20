@@ -626,6 +626,59 @@ class TestWebFetchExecution(unittest.TestCase):
 
         self.assertEqual(_run(run_case()), 1)
 
+    def test_web_fetch_redirects_share_total_timeout(self):
+        """The timeout covers the complete redirect chain, not each hop."""
+        import aiohttp
+
+        async def run_case():
+            body = b"<html><body>done " + b"x" * 600 + b"</body></html>"
+
+            async def handle(reader, writer):
+                request = await reader.readuntil(b"\r\n\r\n")
+                path = request.split(b" ", 2)[1]
+                await asyncio.sleep(0.06)
+                if path == b"/one":
+                    response = (
+                        b"HTTP/1.1 302 Found\r\nLocation: /two\r\n"
+                        b"Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                elif path == b"/two":
+                    response = (
+                        b"HTTP/1.1 302 Found\r\nLocation: /three\r\n"
+                        b"Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                else:
+                    response = (
+                        b"HTTP/1.1 200 OK\r\nContent-Length: "
+                        + str(len(body)).encode()
+                        + b"\r\nConnection: close\r\n\r\n"
+                        + body
+                    )
+                writer.write(response)
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+
+            server = await asyncio.start_server(handle, "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+            timeout = aiohttp.ClientTimeout(total=0.15)
+            try:
+                with patch("aiohttp.ClientTimeout", return_value=timeout):
+                    return await self.executor._execute_web_fetch(
+                        {
+                            "id": "web_fetch_redirect_timeout",
+                            "url": f"http://127.0.0.1:{port}/one",
+                            "extract_main": False,
+                        }
+                    )
+            finally:
+                server.close()
+                await server.wait_closed()
+
+        result = _run(run_case())
+        self.assertFalse(result.success, result.output)
+        self.assertIn("timeout", result.error.lower())
+
     def test_web_fetch_invalid_url(self):
         """Test error handling for invalid URLs."""
         tool_data = {
