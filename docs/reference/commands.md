@@ -523,7 +523,7 @@ client-only in attach mode (safe):
   /hub feed /hub console          altview modals, ui-only
   /hub on/off/user               config preferences
   /hub notify /hub bridge         local task mgmt
-  /fork modal                     ui-only (modal picker)
+  /sessions (no args)             ui-only conversation picker
 
 deferred or client-local:
   /hub stop/spawn/org             orchestrator control is not a StateService RPC
@@ -642,12 +642,14 @@ type / in the input box to open the command menu.
 
     phase 4.5: one-shot /resume <id> migrated through state_service
 
-  /fork                           browse and fork conversations
-    aliases: /history, /conversations
-    modal picker, client-only (deferred to 4.6)
+  /sessions [search <query>]      browse, search, and resume conversations
+    alias: /history
+    (no args)                     show the conversation picker
 
-  /branch <session_id> <msg_idx>  fork a saved conversation
-  /branch current <msg_idx>       fork the live conversation into a new session
+  /branch [session_id [msg_idx]]  fork from specific message
+    (no args)                     select a conversation and message to branch from
+    <session_id> <msg_idx>        fork a saved conversation
+    current <msg_idx>             fork the live conversation into a new session
 
   /compact [now|status|preview]   context compaction
     (no args)                     ask the model what to keep; it answers with

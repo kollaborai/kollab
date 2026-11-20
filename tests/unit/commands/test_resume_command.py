@@ -371,6 +371,96 @@ class TestResumeCommand:
         )  # resume and sessions commands
 
     @pytest.mark.asyncio
+    async def test_conversation_browser_command_names_match_behavior(self):
+        from plugins.resume_conversation_plugin import ResumeConversationPlugin
+
+        plugin = ResumeConversationPlugin()
+        command_registry = Mock()
+
+        await plugin.initialize(
+            event_bus=Mock(),
+            config=Mock(),
+            command_registry=command_registry,
+            conversation_manager=Mock(),
+            conversation_logger=Mock(),
+        )
+
+        commands = {
+            call.args[0].name: call.args[0]
+            for call in command_registry.register_command.call_args_list
+        }
+        assert "sessions" in commands
+        sessions = commands["sessions"]
+        assert sessions.handler == plugin.handle_sessions
+        assert sessions.description == "Browse, search, and resume conversations"
+        assert sessions.aliases == ["history"]
+        aliases = {alias for command in commands.values() for alias in command.aliases}
+        assert "fork" not in commands and "fork" not in aliases
+        assert "forks" not in aliases
+        assert commands["resume"].handler == plugin.handle_resume
+
+        result = await plugin.handle_sessions(
+            SlashCommand(
+                name="sessions",
+                args=["invalid"],
+                raw_input="/sessions invalid",
+            )
+        )
+        assert result.message == "Usage: /sessions [search <query>]"
+
+    def test_sessions_command_is_reachable_from_cli(self):
+        import argparse
+
+        from kollabor.altview.command_integration import AltViewCommandIntegrator
+        from kollabor.cli import process_cli_command
+        from kollabor.commands.registry import SlashCommandRegistry
+        from plugins.altview.conversations_altview import ConversationsAltView
+        from plugins.resume_conversation_plugin import ResumeConversationPlugin
+
+        command_registry = SlashCommandRegistry()
+        AltViewCommandIntegrator(command_registry, None, None)._register_plugin_commands(
+            ConversationsAltView
+        )
+        ResumeConversationPlugin()._register_resume_commands(command_registry)
+
+        sessions_command = process_cli_command(
+            argparse.Namespace(_unknown_args=["--sessions"], cli_command=None),
+            command_registry,
+        )
+        conversations_command = process_cli_command(
+            argparse.Namespace(_unknown_args=["--conversations"], cli_command=None),
+            command_registry,
+        )
+
+        assert sessions_command["name"] == "sessions"
+        assert conversations_command["name"] == "conversations"
+
+    def test_sessions_search_does_not_duplicate_conversation_browser_alias(self):
+        from kollabor.altview.command_integration import AltViewCommandIntegrator
+        from kollabor.commands.registry import SlashCommandRegistry
+        from plugins.altview.conversations_altview import ConversationsAltView
+        from plugins.fullscreen.conversations_plugin import ConversationsPlugin
+        from plugins.resume_conversation_plugin import ResumeConversationPlugin
+
+        command_registry = SlashCommandRegistry()
+        altview = AltViewCommandIntegrator(command_registry, None, None)
+        assert altview._register_plugin_commands(ConversationsAltView)
+
+        plugin = ResumeConversationPlugin()
+        plugin._register_resume_commands(command_registry)
+
+        sessions = command_registry.get_command("sessions")
+        conversations = command_registry.get_command("conversations")
+        assert sessions is not None
+        assert conversations is not None
+        assert command_registry.get_command("convos") is conversations
+        assert command_registry.get_command("history") is sessions
+        assert [cmd.name for cmd in command_registry.search_commands("sessions")] == [
+            "sessions"
+        ]
+        assert ConversationsPlugin().metadata.aliases == ["convos"]
+
+    @pytest.mark.asyncio
     async def test_resume_plugin_handle_resume(self):
         """Test resume plugin handle_resume method."""
         from plugins.resume_conversation_plugin import ResumeConversationPlugin
