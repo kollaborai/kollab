@@ -151,6 +151,33 @@ def loadout_note(loadout: Any) -> str:
     return " • ".join(p for p in parts if p)
 
 
+def provider_removal_prompt(
+    manager: Any, profile_manager: Any, provider: str, fallback_profile: str
+) -> tuple[list[str], str]:
+    """Names the provider profiles, stored keys, and saved loadouts affected."""
+    profiles = [
+        name
+        for entry in manager.provider_profiles()
+        for name, entry_provider in [resolve_profile_entry(profile_manager, entry)]
+        if entry_provider.lower() == provider.lower()
+    ]
+    names = ", ".join(profiles) or fallback_profile
+    dependent_loadouts = [
+        loadout.name
+        for loadout in manager.list_loadouts()
+        if not loadout.implicit and loadout.provider_profile in profiles
+    ]
+    display = provider_display(provider)
+    prompt = (
+        f"Press Confirm to remove the {display} provider "
+        f"(profiles {names}; saved keys are retained because another project may reference them); "
+        "any other key or action cancels."
+    )
+    if dependent_loadouts:
+        prompt += " Saved loadouts using it: " + ", ".join(dependent_loadouts) + "."
+    return profiles, prompt
+
+
 def default_max_tokens(model: str) -> int:
     info = model_registry_info(model)
     value = info.get("default_output") or info.get("max_output")
@@ -309,6 +336,7 @@ _ROW_ACTIONS = [
     {"id": "edit", "label": "Edit", "payload_key": "name"},
     {"id": "set_default", "label": "Set As Default", "payload_key": "name"},
     {"id": "delete", "label": "Delete", "confirm": True, "payload_key": "name"},
+    {"id": "remove_provider", "label": "Remove Provider", "confirm": True, "payload_key": "name"},
 ]
 _TOOLBAR_ACTIONS = [
     {"id": "new", "label": "New Loadout"},
@@ -422,6 +450,11 @@ def _form(ctx: Any, manager: Any, base: Any, mode: str, style: str) -> dict:
                 if codex else f"Empty uses the provider default ({default_max_tokens(base.model):,})."
             ),
         ),
+        make_field(
+            "compaction_threshold_k", "text_input", "Compaction Threshold (K tokens)",
+            value=str(base.compaction_threshold_k) if base.compaction_threshold_k else "",
+            help="Empty compacts automatically.",
+        ),
         make_field("description", "text_input", "Description", value=base.description or ""),
     ]
     return {
@@ -480,6 +513,17 @@ def _loadout_values(
                 values["max_tokens"] = tokens
         except ValueError:
             errors["max_tokens"] = "Max Output Tokens must be a whole number."
+    raw_threshold = str(payload.get("compaction_threshold_k") or "").strip()
+    values["compaction_threshold_k"] = None
+    if raw_threshold:
+        try:
+            threshold_k = int(raw_threshold)
+        except ValueError:
+            threshold_k = 0
+        if threshold_k >= 1:
+            values["compaction_threshold_k"] = threshold_k
+        else:
+            errors["compaction_threshold_k"] = "Compaction Threshold must be a whole number of at least 1."
     description = str(payload.get("description") or "").strip()
     if len(description) > 500:
         errors["description"] = "Keep the description under 500 characters."
@@ -503,14 +547,15 @@ class LlmPanel:
         default = manager.get_default()
         rows: list = []
         empty: list = []
+        provider_removal_actions: set[str] = set()
         for title, items in build_sections(manager, pm):
+            provider_section = title.startswith("Models —")
             if not items and title.startswith("Models"):
                 empty.append(
                     {"group": title, "reason": empty_note(title, retry="use Refresh Catalog to retry")}
                 )
             for entry in items:
-                rows.append(
-                    {
+                row = {
                         "id": entry.name,
                         "label": entry.name,
                         "detail": loadout_note(entry),
@@ -518,7 +563,46 @@ class LlmPanel:
                         "current": (entry.provider_profile, entry.model) == current,
                         "badges": ["default"] if entry.name == default else [],
                     }
+                if entry.implicit:
+                    row["actions"] = ["activate", "edit", "set_default"]
+                    provider = resolve_provider_type(pm, entry.provider_profile).lower()
+                    if provider_section and provider not in provider_removal_actions:
+                        _, prompt = provider_removal_prompt(
+                            manager, pm, provider, entry.provider_profile
+                        )
+                        row["actions"].append("remove_provider")
+                        row["action_labels"] = {
+                            "remove_provider": f"Remove {provider_display(provider)} provider"
+                        }
+                        row["action_confirmations"] = {"remove_provider": prompt}
+                        provider_removal_actions.add(provider)
+                else:
+                    row["actions"] = ["activate", "edit", "set_default", "delete"]
+                rows.append(row)
+        for empty_group in empty:
+            title = empty_group["group"]
+            if not title.startswith("Models —"):
+                continue
+            for entry in manager.provider_profiles():
+                name, provider = resolve_profile_entry(pm, entry)
+                if title != f"Models — {provider_display(provider or name)}":
+                    continue
+                provider_key = provider.lower()
+                if provider_key in provider_removal_actions:
+                    break
+                _, prompt = provider_removal_prompt(manager, pm, provider, name)
+                empty_group.update(
+                    {
+                        "id": name,
+                        "actions": ["remove_provider"],
+                        "action_labels": {
+                            "remove_provider": f"Remove {provider_display(provider)} provider"
+                        },
+                        "action_confirmations": {"remove_provider": prompt},
+                    }
                 )
+                provider_removal_actions.add(provider_key)
+                break
         return {
             "panel": self.name,
             "kind": self.kind,
@@ -579,6 +663,45 @@ class LlmPanel:
             if not manager.delete(loadout.name):
                 return error_result(f"Could not delete '{loadout.name}'.")
             return ok_result(f"Deleted '{loadout.name}'.", panel=await self.describe(ctx, {}))
+        if action == "remove_provider":
+            profile = ctx._profile_manager.get_profile(name)
+            profile_name = name
+            if profile is None:
+                loadout = _find(manager, name)
+                profile_name = loadout.provider_profile
+            provider = resolve_provider_type(ctx._profile_manager, profile_name)
+            try:
+                active = ctx._profile_manager.get_active_profile()
+            except Exception:
+                active = None
+            active_provider = (
+                resolve_provider_type(ctx._profile_manager, active.name) if active else ""
+            )
+            removed = ctx._profile_manager.remove_provider_profiles(provider)
+            if not removed:
+                return error_result(f"Could not remove the {provider_display(provider)} provider.")
+            switch_warning = ""
+            if active_provider.lower() == provider.lower():
+                switch_profile = getattr(
+                    getattr(ctx, "_llm_service", None), "switch_profile", None
+                )
+                switched = False
+                if callable(switch_profile):
+                    try:
+                        switched = await switch_profile("default", persist=False)
+                    except Exception as exc:  # noqa: BLE001 - shown in the panel result
+                        logger.error(
+                            "loadout: switch away from provider '%s' failed: %s",
+                            provider,
+                            exc,
+                        )
+                if not switched:
+                    switch_warning = " Restart this session to finish switching away from it."
+            return ok_result(
+                f"Removed {provider_display(provider)} provider profiles: {', '.join(removed)}."
+                f"{switch_warning}",
+                panel=await self.describe(ctx, {}),
+            )
         if action == "set_default":
             loadout = _find(manager, name)
             level = str(payload.get("level") or "global")
