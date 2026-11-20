@@ -804,6 +804,27 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.success)
         self.assertIn("configured", result.error.lower())
 
+    async def test_concurrent_terminal_timeouts_do_not_interrupt_sibling(self):
+        short = {
+            "type": "terminal",
+            "id": "short-timeout",
+            "command": "sleep 2",
+            "timeout": "1s",
+        }
+        long = {
+            "type": "terminal",
+            "id": "long-timeout",
+            "command": "sleep 1",
+            "timeout": "4s",
+        }
+
+        _, long_result = await asyncio.gather(
+            self.executor.execute_tool(short), self.executor.execute_tool(long)
+        )
+        await asyncio.sleep(2)
+
+        self.assertTrue(long_result.success, long_result.error)
+
     async def test_execute_tool_rejects_invalid_terminal_timeout_before_running(self):
         self.executor.shell_executor.run = AsyncMock(
             return_value=ShellResult(success=True, stdout="", stderr="", exit_code=0)
