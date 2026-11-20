@@ -707,8 +707,11 @@ def _is_blocked_kollab_spawn(
 
 
 def _terminal_find_escapes_workspace(command: str, cwd: Path, workspace: Path) -> bool:
-    """Return whether a find command starts outside the active workspace."""
-    if "`" in command and re.search(r"\b(?:find|gfind)\b", command):
+    """Return whether a find command can escape or cannot be scoped safely."""
+    find_names = {"find", "gfind"}
+    if not re.search(r"\b(?:find|gfind)\b", command):
+        return False
+    if any(marker in command for marker in ("`", "$(", "<(")):
         return True
 
     try:
@@ -721,58 +724,200 @@ def _terminal_find_escapes_workspace(command: str, cwd: Path, workspace: Path) -
         root = workspace.resolve()
         canonical_cwd = cwd.resolve()
     except (OSError, RuntimeError, ValueError):
-        return False
+        return True
 
     commands: list[list[str]] = [[]]
+    has_shell_operators = False
     for token in tokens:
         if token and all(char in ";&|()" for char in token):
+            has_shell_operators = True
             commands.append([])
         else:
             commands[-1].append(token)
 
+    wrappers = {
+        "bash",
+        "busybox",
+        "dash",
+        "doas",
+        "fish",
+        "ksh",
+        "nice",
+        "sh",
+        "stdbuf",
+        "sudo",
+        "xargs",
+        "zsh",
+    }
+    find_commands: list[tuple[list[str], int, bool]] = []
     for words in commands:
         index = 0
+        first_name = Path(words[0]).name.lower() if words else ""
+        if first_name in wrappers and re.search(
+            r"\b(?:find|gfind)\b", " ".join(words[1:])
+        ):
+            return True
+        for prefix_index, word in enumerate(words):
+            if word not in {"env", "command", "exec", "time", "nohup"}:
+                continue
+            find_match = next(
+                (
+                    position
+                    for position in range(prefix_index + 1, len(words))
+                    if Path(words[position]).name.lower() in find_names
+                ),
+                None,
+            )
+            if find_match is not None and any(
+                argument.startswith("-")
+                for argument in words[prefix_index + 1 : find_match]
+            ):
+                return True
+
+        has_inline_assignment = False
         while index < len(words):
             word = words[index]
             if word in {"if", "then", "else", "elif", "do", "!"}:
                 index += 1
             elif word in {"env", "command", "exec", "time", "nohup"}:
                 index += 1
+            elif Path(word).name.lower() in wrappers:
+                if re.search(r"\b(?:find|gfind)\b", " ".join(words[index + 1 :])):
+                    return True
+                break
             elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word):
+                has_inline_assignment = True
                 index += 1
             else:
                 break
 
-        if index >= len(words) or Path(words[index]).name not in {"find", "gfind"}:
+        if index >= len(words) or Path(words[index]).name.lower() not in find_names:
             continue
-        if not canonical_cwd.is_relative_to(root):
-            return True
+        find_commands.append((words, index, has_inline_assignment))
 
-        roots: list[str] = []
-        for word in words[index + 1 :]:
-            if word in {"-H", "-L", "-P", "--"} and not roots:
-                continue
-            if word.startswith("-") or word in {"!", "(", ")"}:
+    if not find_commands:
+        return False
+    if has_shell_operators or len(find_commands) != 1:
+        return True
+
+    words, index, has_inline_assignment = find_commands[0]
+    command_arguments = words[index + 1 :]
+    if any(
+        argument in {"-f", "-files0-from"} or argument.startswith("--files0-from=")
+        for argument in command_arguments
+    ):
+        return True
+    exec_marker = re.search(r"\b-exec(?:dir)?\b", command)
+    if exec_marker and re.search(
+        r"\b(?:find|gfind)\b", command[exec_marker.end() :]
+    ):
+        return True
+    if any(argument in {"-L", "-follow"} for argument in command_arguments):
+        return True
+
+    if not canonical_cwd.is_relative_to(root):
+        return True
+
+    roots: list[str] = []
+    end_options = False
+    expression_options = {
+        "-amin",
+        "-atime",
+        "-cmin",
+        "-ctime",
+        "-depth",
+        "-empty",
+        "-executable",
+        "-false",
+        "-fstype",
+        "-gid",
+        "-group",
+        "-ilname",
+        "-iname",
+        "-inum",
+        "-ipath",
+        "-iregex",
+        "-links",
+        "-lname",
+        "-maxdepth",
+        "-mindepth",
+        "-mmin",
+        "-mtime",
+        "-name",
+        "-newer",
+        "-nogroup",
+        "-nouser",
+        "-path",
+        "-perm",
+        "-print",
+        "-print0",
+        "-printf",
+        "-prune",
+        "-quit",
+        "-readable",
+        "-regex",
+        "-samefile",
+        "-size",
+        "-true",
+        "-type",
+        "-uid",
+        "-user",
+        "-used",
+        "-wholename",
+        "-writable",
+        "-xdev",
+    }
+    pending = command_arguments
+    position = 0
+    while position < len(pending):
+        word = pending[position]
+        if word == "--" and not roots:
+            end_options = True
+            position += 1
+            continue
+        if not roots and not end_options and word in {"-H", "-P", "-E", "-X", "-d", "-s"}:
+            position += 1
+            continue
+        if not roots and not end_options and word == "-D":
+            if position + 1 >= len(pending):
+                return True
+            position += 2
+            continue
+        if not roots and not end_options and re.fullmatch(r"-O\d*", word):
+            # GNU find's optimizer option does not consume a root path.
+            if word == "-O" and position + 1 < len(pending) and pending[position + 1].isdigit():
+                position += 2
+            else:
+                position += 1
+            continue
+        if not roots and not end_options and word.startswith("-"):
+            if word in expression_options:
                 break
-            roots.append(word)
-        if not roots:
-            roots = ["."]
+            return True
+        if not end_options and word.startswith("-"):
+            break
+        if re.search(r"\{[^{}]*(?:,|\.\.)[^{}]*\}", word):
+            return True
+        roots.append(word)
+        position += 1
+    if not roots:
+        roots = ["."]
+    if has_inline_assignment and any("$" in search_root for search_root in roots):
+        return True
 
-        for search_root in roots:
-            if "$(" in search_root or "`" in search_root:
-                return True
-            expanded_root = os.path.expandvars(search_root)
-            if "$" in expanded_root:
-                return True
-            try:
-                candidate = Path(expanded_root).expanduser()
-                if not candidate.is_absolute():
-                    candidate = canonical_cwd / candidate
-                resolved = candidate.resolve(strict=False)
-            except (OSError, RuntimeError):
-                return True
-            if not resolved.is_relative_to(root):
-                return True
+    for search_root in roots:
+        expanded_root = os.path.expandvars(search_root)
+        if "$" in expanded_root:
+            return True
+        try:
+            candidate = Path(expanded_root).expanduser()
+            if not candidate.is_absolute():
+                candidate = canonical_cwd / candidate
+            resolved = candidate.resolve(strict=False)
+        except (OSError, RuntimeError):
+            return True
+        if not resolved.is_relative_to(root):
+            return True
 
     return False
 

@@ -71,8 +71,11 @@ for foreground terminal commands.
 
 Agent `find` searches must start inside the active workspace. Searches rooted at
 the home directory, `/Users`, `/`, a parent folder, or a symlink that leaves the
-workspace are refused before the command runs. Switch workspaces before
-searching another folder.
+workspace are refused before the command runs. Run `find` as a standalone
+command; shell-composed searches and wrappers the guard cannot inspect are
+refused. Symlink-following searches (`-L` or `-follow`) are refused because
+their traversal cannot be bounded safely. Switch workspaces before searching
+another folder.
 
 With working directory:
 ```
