@@ -18,8 +18,8 @@ npm run inventory:controls -- /tmp/kollab-control-candidates.json
 npm run test:e2e:parallel
 ```
 
-The runner executes ten independent browser suites; locally it defaults to
-two workers, and CI fans the suites out across four parallel webui lane jobs
+The runner registers independent browser suites; locally it defaults to two
+workers, and CI fans selected suites out across four parallel webui lane jobs
 (core, learn, topics, notices) selected with `KOLLAB_BROWSER_SUITES` (#1022). Each has its own scratch home, temporary directory, browser context,
 and dynamically allocated local listener. It does not inherit unrelated
 environment variables. `KOLLAB_BROWSER_WORKERS` accepts 1–4
@@ -39,6 +39,14 @@ limitation rather than an orphan-free guarantee. On Windows, the runner cannot
 gracefully signal and verify a whole process tree with its current Node-only
 mechanism. It reports cleanup as unverified and does not count that suite as
 passed.
+
+The `scrollbar-chrome` suite launches headed Chromium on Linux to measure
+classic scrollbars. The CI core lane installs `xvfb` and `xauth` and runs the
+suite under `xvfb-run`. The runner forwards `DISPLAY` and `XAUTHORITY` only to
+suites marked `requiresXvfb`, and only when CI opts in with
+`KOLLAB_BROWSER_XVFB=1`. Keep that opt-in on the `xvfb-run` invocation; do not
+point it at a desktop X session. For local interactive checks, run the single
+`npm run test:e2e:scrollbar-chrome` script directly.
 
 CI prepares the artifact directory before build and test commands and uploads
 it with `if: always()`. A parallel run must not connect to a real user's

@@ -151,6 +151,22 @@
   html, body, #root {
     height: 100%;
   }
+  /* #1174: scrolling stays native everywhere, the scrollbar chrome does not
+     render. scrollbar-width: none covers Firefox and newer WebKit; the
+     zero-size ::-webkit-scrollbar covers Blink and older WebKit. Content
+     stays reachable by wheel, trackpad, touch, keyboard and script. */
+  * {
+    scrollbar-width: none;
+  }
+  *::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+  *::-webkit-scrollbar-thumb,
+  *::-webkit-scrollbar-track,
+  *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
   /* Density follows the input, as design systems do: mouse-and-keyboard
      screens get a denser UI a step under the browser default, touch screens
      keep 16px for comfortable targets (and iOS zooms into smaller inputs).
@@ -179,4 +195,30 @@
   .aui-edit-composer-root [contenteditable="true"] {
     font-size: 16px !important;
   }
+}
+
+/* Unlayered on purpose: Tailwind utilities (e.g. .flex on the Radix
+   scrollbar) live in the utilities layer and would beat a base-layer rule.
+   Radix ScrollArea must keep its scrollbar MOUNTED: Radix only gives the
+   viewport scrolling overflow while a scrollbar exists, so deleting the
+   component would silently disable scrolling. Hiding the chrome via CSS
+   keeps the mount, the context, and the scrolling. */
+[data-slot="scroll-area-scrollbar"] {
+  display: none;
+}
+/* xterm renders its scrollback in a native-scrolled viewport element. */
+.xterm .xterm-viewport {
+  scrollbar-width: none;
+}
+.xterm .xterm-viewport::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+/* xterm 6 draws its scrollback thumb as a separate custom scrollbar. */
+.xterm .xterm-scrollable-element > .scrollbar {
+  display: none !important;
+}
+/* Monaco sets the minimap slider's display inline, outside its editor scrollbars. */
+.monaco-editor .minimap-slider {
+  display: none !important;
 }

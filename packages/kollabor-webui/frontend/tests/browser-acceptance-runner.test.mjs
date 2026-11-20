@@ -16,14 +16,28 @@ async function fixture(name, source) {
   return { root, script };
 }
 
-test("continues after a failure and does not pass unrelated secrets to workers", async () => {
+test("continues after a failure and isolates X11 credentials outside CI Xvfb mode", async () => {
   const { root, script } = await fixture("isolation", `
-    console.log(JSON.stringify({ secret: process.env.KOLLAB_TEST_SECRET ?? null, home: process.env.HOME }));
+    console.log(JSON.stringify({
+      secret: process.env.KOLLAB_TEST_SECRET ?? null,
+      home: process.env.HOME,
+      display: process.env.DISPLAY ?? null,
+      xauthority: process.env.XAUTHORITY ?? null,
+    }));
     if (process.env.HOME.includes('bad-')) process.exitCode = 3;
   `);
+  const names = ["KOLLAB_TEST_SECRET", "DISPLAY", "XAUTHORITY", "KOLLAB_BROWSER_XVFB", "CI"];
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   process.env.KOLLAB_TEST_SECRET = "test-only-secret";
+  process.env.DISPLAY = ":99";
+  process.env.XAUTHORITY = "/tmp/kollab-runner-test.Xauthority";
+  process.env.KOLLAB_BROWSER_XVFB = "1";
+  process.env.CI = "false";
   try {
-    const suites = [{ name: "bad", script }, { name: "good", script }];
+    const suites = [
+      { name: "bad", script, requiresXvfb: true },
+      { name: "good", script, requiresXvfb: true },
+    ];
     const results = await runBrowserSuites({ suites, workers: 2, timeoutMs: 3000, root, artifacts: root });
     assert.deepEqual(results.map((result) => result.ok), [false, true]);
     assert.notEqual(results[0].artifacts, results[1].artifacts);
@@ -31,9 +45,83 @@ test("continues after a failure and does not pass unrelated secrets to workers",
     assert.equal(output.secret, null);
     assert.notEqual(output.home, results[1].artifacts);
     assert.match(output.home, /kb-good-/);
+    assert.equal(output.display, null, "local X11 display must stay outside the worker environment by default");
+    assert.equal(output.xauthority, null, "local Xauthority credentials must stay outside the worker environment by default");
     assert.equal(JSON.parse(await readFile(path.join(root, "results.json"), "utf8")).length, 2);
   } finally {
-    delete process.env.KOLLAB_TEST_SECRET;
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test("forwards X11 credentials only to headed suites in CI Xvfb mode", async () => {
+  const { root, script } = await fixture("xvfb-env", `
+    console.log(JSON.stringify({
+      secret: process.env.KOLLAB_TEST_SECRET ?? null,
+      display: process.env.DISPLAY ?? null,
+      xauthority: process.env.XAUTHORITY ?? null,
+    }));
+  `);
+  const names = ["KOLLAB_TEST_SECRET", "DISPLAY", "XAUTHORITY", "KOLLAB_BROWSER_XVFB", "CI"];
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  process.env.KOLLAB_TEST_SECRET = "test-only-secret";
+  process.env.DISPLAY = ":98";
+  process.env.XAUTHORITY = "/tmp/xvfb-run-test.Xauthority";
+  process.env.KOLLAB_BROWSER_XVFB = "1";
+  process.env.CI = "true";
+  try {
+    const results = await runBrowserSuites({
+      suites: [
+        { name: "xvfb", script, requiresXvfb: true },
+        { name: "headless", script },
+      ],
+      workers: 2,
+      timeoutMs: 3000,
+      root,
+      artifacts: root,
+    });
+    const [headed, plain] = await Promise.all(results.map(async (result) => {
+      assert.equal(result.ok, true);
+      return JSON.parse(await readFile(path.join(result.artifacts, "output.log"), "utf8"));
+    }));
+    assert.equal(headed.display, ":98");
+    assert.equal(headed.xauthority, "/tmp/xvfb-run-test.Xauthority");
+    assert.equal(plain.display, null, "headless suites must not receive X11 credentials");
+    assert.equal(plain.xauthority, null, "headless suites must not receive Xauthority");
+    assert.equal(headed.secret, null, "Xvfb support must not widen general environment inheritance");
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test("fails fast when the CI Xvfb wrapper has no Xauthority file", async () => {
+  const { root, script } = await fixture("xvfb-missing-auth", "process.exit(0);");
+  const names = ["DISPLAY", "XAUTHORITY", "KOLLAB_BROWSER_XVFB", "CI"];
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  process.env.DISPLAY = ":98";
+  delete process.env.XAUTHORITY;
+  process.env.KOLLAB_BROWSER_XVFB = "1";
+  process.env.CI = "true";
+  try {
+    const [result] = await runBrowserSuites({
+      suites: [{ name: "xvfb", script, requiresXvfb: true }],
+      workers: 1,
+      timeoutMs: 3000,
+      root,
+      artifacts: root,
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /xvfb-run did not provide DISPLAY and XAUTHORITY/);
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   }
 });
 
@@ -203,6 +291,7 @@ test("the browser suite list is pinned and every suite script exists", () => {
     { name: "profile-rows", script: "tests/acceptance/profile-rows.browser.mjs" },
     { name: "profile-copy", script: "tests/acceptance/profile-copy.browser.mjs" },
     { name: "gallery", script: "tests/gallery-browser-acceptance.mjs" },
+    { name: "scrollbar-chrome", script: "tests/scrollbar-chrome-browser-acceptance.mjs" },
     { name: "agent-sidebar", script: "tests/agent-sidebar-glyph-browser-acceptance.mjs" },
     { name: "team-launch", script: "tests/team-launch-browser-acceptance.mjs" },
     { name: "remote-chat-lifecycle", script: "tests/remote-chat-lifecycle-browser-acceptance.mjs" },
@@ -218,6 +307,51 @@ test("the browser suite list is pinned and every suite script exists", () => {
   for (const suite of browserSuites) {
     assert.ok(existsSync(path.join(frontendRoot, suite.script)), `${suite.name} script is missing: ${suite.script}`);
   }
+  assert.deepEqual(
+    browserSuites.filter((suite) => suite.requiresXvfb).map((suite) => suite.name),
+    ["scrollbar-chrome"],
+    "headed Linux suites must be explicitly marked for Xvfb",
+  );
+});
+
+test("the scrollbar chrome browser proof runs in an explicit headed CI lane", async () => {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+  const workflow = await readFile(path.join(repoRoot, ".github/workflows/ci.yml"), "utf8");
+  assert.ok(
+    /lane: core\s*\n\s*suites:[^\n]*\bscrollbar-chrome\b/.test(workflow),
+    "scrollbar-chrome must run in an explicit support_webui_tests CI lane",
+  );
+  const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const headedSuites = [];
+  for (const suite of browserSuites) {
+    const source = await readFile(path.join(frontendRoot, suite.script), "utf8");
+    if (/headless\s*:\s*false/.test(source)) headedSuites.push(suite.name);
+  }
+  const xvfbSuites = browserSuites.filter((suite) => suite.requiresXvfb).map((suite) => suite.name);
+  assert.deepEqual(xvfbSuites, headedSuites, "every headed suite must be marked for Xvfb");
+  const coreSuites = /lane: core\s*\n\s*suites:([^\n]+)/.exec(workflow)?.[1]
+    .split(",")
+    .map((name) => name.trim());
+  assert.ok(coreSuites, "the core browser lane must declare its suite list");
+  for (const name of xvfbSuites) {
+    assert.ok(coreSuites.includes(name), `${name} requires Xvfb and must stay in the core lane`);
+  }
+
+  const installStep = workflow.match(/- name: Install virtual display for headed browser acceptance([\s\S]*?)(?=\n      - name:)/)?.[1];
+  assert.ok(installStep, "the core lane must install Xvfb and Xauthority support");
+  assert.match(
+    installStep,
+    /if: matrix\.lane == 'core'[\s\S]*sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb xauth/,
+    "only the core lane should install its virtual display and Xauthority helper",
+  );
+  const browserStep = workflow.match(/- name: Run web UI browser acceptance([\s\S]*?)(?=\n      - name: Upload browser acceptance evidence)/)?.[1];
+  assert.ok(browserStep, "the browser acceptance step must exist");
+  const xvfbBranch = [...browserStep.matchAll(/if \[ "\$\{\{ matrix\.lane \}\}" = "core" \]; then([\s\S]*?)\n\s*else([\s\S]*?)\n\s*fi/g)]
+    .find((match) => match[1].includes("KOLLAB_BROWSER_XVFB=1"));
+  assert.ok(xvfbBranch, "the Xvfb wrapper must stay inside the core-only shell branch");
+  assert.match(xvfbBranch[1], /KOLLAB_BROWSER_XVFB=1 xvfb-run -a/);
+  assert.match(xvfbBranch[1], /test -n "\$DISPLAY" && test -s "\$XAUTHORITY"/);
+  assert.match(xvfbBranch[2], /npm run test:e2e:parallel/);
 });
 
 test("the default suite timeout leaves headroom over the slowest observed CI run", () => {

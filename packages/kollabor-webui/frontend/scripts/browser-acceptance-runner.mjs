@@ -13,6 +13,7 @@ export const browserSuites = Object.freeze([
   { name: "profile-rows", script: "tests/acceptance/profile-rows.browser.mjs" },
   { name: "profile-copy", script: "tests/acceptance/profile-copy.browser.mjs" },
   { name: "gallery", script: "tests/gallery-browser-acceptance.mjs" },
+  { name: "scrollbar-chrome", script: "tests/scrollbar-chrome-browser-acceptance.mjs", requiresXvfb: true },
   { name: "agent-sidebar", script: "tests/agent-sidebar-glyph-browser-acceptance.mjs" },
   { name: "team-launch", script: "tests/team-launch-browser-acceptance.mjs" },
   { name: "remote-chat-lifecycle", script: "tests/remote-chat-lifecycle-browser-acceptance.mjs" },
@@ -22,8 +23,18 @@ export const browserSuites = Object.freeze([
 
 const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-function cleanEnvironment(home, chromePath, artifacts) {
+function cleanEnvironment(home, chromePath, artifacts, suite) {
   const inherited = ["PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "LANG", "LC_ALL", "CI"];
+  if (suite.requiresXvfb && process.env.CI === "true") {
+    if (process.env.KOLLAB_BROWSER_XVFB !== "1") {
+      throw new Error(`${suite.name} requires the CI xvfb-run wrapper`);
+    }
+    if (!process.env.DISPLAY || !process.env.XAUTHORITY) {
+      throw new Error("xvfb-run did not provide DISPLAY and XAUTHORITY");
+    }
+    // Only the declared headed suite receives credentials from the CI xvfb-run wrapper.
+    inherited.push("DISPLAY", "XAUTHORITY");
+  }
   const env = Object.fromEntries(inherited.filter((name) => process.env[name]).map((name) => [name, process.env[name]]));
   return {
     ...env,
@@ -159,7 +170,7 @@ export async function runBrowserSuites({
     try {
       child = spawnChild(process.execPath, [suite.script], {
         cwd: root,
-        env: cleanEnvironment(home, chromePath, suiteArtifacts),
+        env: cleanEnvironment(home, chromePath, suiteArtifacts, suite),
         detached: process.platform !== "win32",
         stdio: ["ignore", "pipe", "pipe"],
       });
