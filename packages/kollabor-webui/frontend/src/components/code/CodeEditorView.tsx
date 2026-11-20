@@ -27,6 +27,8 @@ export interface CodeEditorViewProps {
   workspace: string;
   /** "code" shows files, search and settings in the sidebar; "git" shows the git panel there. Same editor panes either way. */
   mode?: "code" | "git";
+  /** True when the agent now runs the engine version after a daemon_outdated response. */
+  agentIsCurrent?: boolean;
   daemonNotice: DaemonNoticeProps;
 }
 
@@ -97,7 +99,7 @@ export function CodeEditorView(props: CodeEditorViewProps) {
       if (!cancelled) { setFolders(data.folders); setSelected(data.default); setLoadedContext(requestContext); }
     }).catch(() => { if (!cancelled) setError("Could not load folders from this agent. Restart it and try again."); });
     return () => { cancelled = true; };
-  }, [props.sessionId, requestContext]);
+  }, [props.sessionId, requestContext, props.agentIsCurrent]);
   if (loadedContext && loadedContext !== requestContext) return <div className="p-3 text-sm text-muted-foreground">Loading folders…</div>;
   if (outdated) return <DaemonNotice {...props.daemonNotice} />;
   if (error) return <div role="alert" className="p-3 text-sm text-destructive">{error}</div>;

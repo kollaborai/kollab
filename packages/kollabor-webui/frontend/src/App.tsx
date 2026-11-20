@@ -425,6 +425,7 @@ function RuntimeShell({
                     sessionId={session.session_id}
                     device={session.device ?? ""}
                     workspace={workspace}
+                    agentIsCurrent={agentIsCurrent}
                     daemonNotice={daemonNotice}
                     mode={shown === "git" ? "git" : "code"} />
                 </Suspense>
