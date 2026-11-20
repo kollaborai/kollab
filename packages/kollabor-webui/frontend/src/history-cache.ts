@@ -626,18 +626,36 @@ export interface HistoryMetadataClient {
   ): Promise<{ metadata: Record<string, unknown> }>;
 }
 
+export interface HistoryOutputClient {
+  getHistoryOutput(
+    sessionId: string,
+    reference: string,
+  ): Promise<{ content: unknown }>;
+}
+
+/** Restore omitted metadata and full assistant/user content for history rows. */
 export async function restoreSlimmedHistoryMetadata(
   sessionId: string,
-  api: HistoryMetadataClient,
+  api: HistoryMetadataClient & Partial<HistoryOutputClient>,
   history: HistoryMessage[],
 ): Promise<HistoryMessage[]> {
   const targets: number[] = [];
+  const outputTargets: number[] = [];
   for (let index = 0; index < history.length; index += 1) {
     const metadata = history[index]?.metadata;
     if (!metadata) {
       continue;
     }
     const reference = metadata.history_output_ref;
+    if (
+      api.getHistoryOutput &&
+      (history[index].role === "assistant" || history[index].role === "user") &&
+      metadata.history_output_truncated === true &&
+      typeof reference === "string" &&
+      reference.length > 0
+    ) {
+      outputTargets.push(index);
+    }
     if (
       typeof reference === "string" &&
       reference.length > 0 &&
@@ -646,18 +664,30 @@ export async function restoreSlimmedHistoryMetadata(
       targets.push(index);
     }
   }
-  if (targets.length === 0) {
+  if (targets.length === 0 && outputTargets.length === 0) {
     return history;
   }
 
-  const results = await Promise.allSettled(
-    targets.map((index) =>
-      api.getHistoryMetadata(
-        sessionId,
-        history[index].metadata?.history_output_ref as string,
+  const [results, outputResults] = await Promise.all([
+    Promise.allSettled(
+      targets.map((index) =>
+        api.getHistoryMetadata(
+          sessionId,
+          history[index].metadata?.history_output_ref as string,
+        ),
       ),
     ),
-  );
+    api.getHistoryOutput
+      ? Promise.allSettled(
+          outputTargets.map((index) =>
+            api.getHistoryOutput!(
+              sessionId,
+              history[index].metadata?.history_output_ref as string,
+            ),
+          ),
+        )
+      : Promise.resolve([]),
+  ]);
   const restored = [...history];
   results.forEach((result, position) => {
     if (result.status !== "fulfilled") {
@@ -681,6 +711,20 @@ export async function restoreSlimmedHistoryMetadata(
       }
     }
     restored[index] = { ...restored[index], metadata };
+  });
+  outputResults.forEach((result, position) => {
+    if (result.status !== "fulfilled") {
+      return;
+    }
+    const index = outputTargets[position];
+    const metadata = { ...restored[index].metadata };
+    delete metadata.history_output_truncated;
+    delete metadata.history_output_bytes;
+    restored[index] = {
+      ...restored[index],
+      content: result.value.content,
+      metadata,
+    };
   });
   return restored;
 }

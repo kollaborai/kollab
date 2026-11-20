@@ -664,3 +664,54 @@ describe("restoreSlimmedHistoryMetadata", () => {
     expect("acp_updates" in metadata).toBe(false);
   });
 });
+
+describe("restore truncated text messages", () => {
+  it("renders full assistant and user text while leaving tool output deferred", async () => {
+    const marker = "[Showing the first 4 KB of this message.]";
+    const preview = `${"x".repeat(4_096)}\n\n${marker}`;
+    const assistantText = `${"a".repeat(4_096)}\nassistant reply tail 🌵`;
+    const userText = `${"u".repeat(4_096)}\nuser message tail 🌵`;
+    const outputByReference = new Map([
+      ["assistant-ref", assistantText],
+      ["user-ref", userText],
+    ]);
+    const api = {
+      getHistoryMetadata: vi.fn(),
+      getHistoryOutput: vi.fn(async (sessionId: string, reference: string) => ({
+        session_id: sessionId,
+        content: outputByReference.get(reference),
+      })),
+    };
+    const truncatedMessage = (
+      role: "assistant" | "user" | "tool",
+      reference: string,
+    ): HistoryMessage => ({
+      role,
+      content: preview,
+      metadata: {
+        history_output_truncated: true,
+        history_output_bytes: 8_200,
+        history_output_ref: reference,
+      },
+    });
+    const history: HistoryMessage[] = [
+      truncatedMessage("assistant", "assistant-ref"),
+      truncatedMessage("user", "user-ref"),
+      truncatedMessage("tool", "tool-ref"),
+    ];
+
+    const restored = await restoreSlimmedHistoryMetadata("session-1", api, history);
+    const messages = buildInitialState("session-1", [], restored).messages;
+
+    expect(messages.find((message) => message.role === "assistant")?.content)
+      .toContain("assistant reply tail 🌵");
+    expect(messages.find((message) => message.role === "user")?.content)
+      .toContain("user message tail 🌵");
+    expect(messages.filter((message) => message.role === "assistant")[0]?.content)
+      .not.toContain(marker);
+    expect(restored[2].content).toBe(preview);
+    expect(api.getHistoryOutput).toHaveBeenCalledTimes(2);
+    expect(api.getHistoryOutput).toHaveBeenNthCalledWith(1, "session-1", "assistant-ref");
+    expect(api.getHistoryOutput).toHaveBeenNthCalledWith(2, "session-1", "user-ref");
+  });
+});
