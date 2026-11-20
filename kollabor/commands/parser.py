@@ -65,10 +65,12 @@ class SlashCommandParser:
                 # POSIX shlex treats unquoted backslashes as escapes. Protect separators
                 # only in unquoted Windows path candidates with valid path segments.
                 # A trailing relative separator before another argument must not escape its boundary.
+                # Leave tokens with explicit shell-metacharacter escapes to shlex.
                 command_text = re.sub(
                     r"(?P<single_quoted>'[^']*')|"
                     r"(?<!\S)(?<!\\[ \t])"
                     r"(?:--?[\w-]+=)?"
+                    r"(?!(?:[^\s]|\\\s)*\\(?:[&;#{}!~\x60()$]|\[|\]))"
                     r"(?!['\"])"
                     r"(?:"
                     r"[A-Za-z]:\\(?:[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*\\?)?"
