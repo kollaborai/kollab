@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
@@ -123,6 +125,7 @@ def _run_pip_scripts_dir(
     pip_executable: Path,
     path_dirs: list[Path],
     user_scripts: Path,
+    scheme: str = "posix_user",
 ) -> subprocess.CompletedProcess[str]:
     functions = tmp_path / "installer-functions.sh"
     functions.write_text(
@@ -142,10 +145,11 @@ def _run_pip_scripts_dir(
         [
             "/bin/bash",
             "-c",
-            'source "$1"; pip_scripts_dir "$2" posix_user',
+            'source "$1"; pip_scripts_dir "$2" "$3"',
             "installer-test",
             str(functions),
             str(pip_executable),
+            scheme,
         ],
         env=env,
         text=True,
@@ -341,6 +345,26 @@ def test_main_fails_when_install_is_missing_from_a_fresh_shell_path(
     assert result.returncode != 0
     assert "not discoverable in a new shell" in result.stdout
     assert "Add " + str(bin_dir) + " to PATH" in result.stdout
+
+
+def test_default_pip_scheme_uses_the_interpreters_default_scripts_dir(
+    tmp_path: Path,
+) -> None:
+    tools_dir = tmp_path / "tools"
+    pip_executable = _write_executable(
+        tools_dir / "pip", f"#!{sys.executable}\n"
+    )
+
+    result = _run_pip_scripts_dir(
+        tmp_path,
+        pip_executable=pip_executable,
+        path_dirs=[tools_dir, Path("/usr/bin"), Path("/bin")],
+        user_scripts=tmp_path / "unused user scripts",
+        scheme="",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == sysconfig.get_path("scripts")
 
 
 @pytest.mark.parametrize("user_install", [False, True])
