@@ -13,10 +13,10 @@ import gzip
 import os
 import re
 import sys
-from types import ModuleType
 import unittest
 import zlib
 from contextlib import contextmanager
+from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -536,7 +536,7 @@ class TestWebFetchExecution(unittest.TestCase):
             requests = []
             page_body = (
                 b'<html><body><div id="app"></div>'
-                b'<script src="/bundle.js"></script></body></html>'
+                b'<script src="/redirect.js"></script></body></html>'
             )
             large_page_prefix = (
                 b'<html><body><div id="app"></div>'
@@ -548,11 +548,21 @@ class TestWebFetchExecution(unittest.TestCase):
                 + b" " * (499_900 - len(large_page_prefix) - len(large_page_suffix))
                 + large_page_suffix
             )
+            decoded_page_prefix = (
+                b'<html><body><div id="app"></div>'
+                b'<script src="/compressed.js"></script>'
+            )
+            decoded_page_body = (
+                decoded_page_prefix
+                + b" " * (400_000 - len(decoded_page_prefix) - len(large_page_suffix))
+                + large_page_suffix
+            )
             script_body = (
                 b'document.getElementById("app").textContent = '
                 b'"BUNDLE RENDERED TEXT";'
             )
             oversized_script_body = script_body + b" " * 2_000
+            compressed_script_body = gzip.compress(script_body + b" " * 1_700_000)
 
             async def handle(reader, writer):
                 request = await reader.readuntil(b"\r\n\r\n")
@@ -564,19 +574,57 @@ class TestWebFetchExecution(unittest.TestCase):
                 elif path == "/large":
                     body = large_page_body
                     content_type = "text/html; charset=utf-8"
+                elif path == "/decoded":
+                    body = decoded_page_body
+                    content_type = "text/html; charset=utf-8"
                 elif path == "/bundle.js":
                     body = script_body
+                    content_type = "application/javascript"
+                elif path == "/redirect.js":
+                    body = b"redirect body"
+                    content_type = "application/javascript"
+                elif path == "/compressed.js":
+                    body = compressed_script_body
                     content_type = "application/javascript"
                 else:
                     body = oversized_script_body
                     content_type = "application/javascript"
-                response = (
-                    b"HTTP/1.1 200 OK\r\n"
-                    + f"Content-Length: {len(body)}\r\n".encode()
-                    + f"Content-Type: {content_type}\r\n".encode()
-                    + b"Connection: close\r\n\r\n"
-                    + body
-                )
+                if path == "/redirect.js":
+                    response = (
+                        b"HTTP/1.1 302 Found\r\n"
+                        b"Location: /bundle.js\r\n"
+                        + f"Content-Length: {len(body)}\r\n".encode()
+                        + f"Content-Type: {content_type}\r\n".encode()
+                        + b"Connection: close\r\n\r\n"
+                        + body
+                    )
+                elif path == "/oversized.js":
+                    response = (
+                        b"HTTP/1.1 200 OK\r\n"
+                        b"Transfer-Encoding: chunked\r\n"
+                        b"Content-Type: application/javascript\r\n"
+                        b"Connection: close\r\n\r\n"
+                        + f"{len(body):X}\r\n".encode()
+                        + body
+                        + b"\r\n0\r\n\r\n"
+                    )
+                elif path == "/compressed.js":
+                    response = (
+                        b"HTTP/1.1 200 OK\r\n"
+                        + f"Content-Length: {len(body)}\r\n".encode()
+                        + f"Content-Type: {content_type}\r\n".encode()
+                        + b"Content-Encoding: gzip\r\n"
+                        + b"Connection: close\r\n\r\n"
+                        + body
+                    )
+                else:
+                    response = (
+                        b"HTTP/1.1 200 OK\r\n"
+                        + f"Content-Length: {len(body)}\r\n".encode()
+                        + f"Content-Type: {content_type}\r\n".encode()
+                        + b"Connection: close\r\n\r\n"
+                        + body
+                    )
                 writer.write(response)
                 await writer.drain()
                 writer.close()
@@ -632,6 +680,13 @@ class TestWebFetchExecution(unittest.TestCase):
                                 body = body.encode()
                             if b"BUNDLE RENDERED TEXT" in body:
                                 self.rendered_text = "BUNDLE RENDERED TEXT"
+                    image_route = FakeRoute(
+                        FakeRequest(
+                            f"http://127.0.0.1:{port}/pixel.png", "image"
+                        )
+                    )
+                    await self.route_handler(image_route)
+                    self.image_request_aborted = image_route.aborted
 
                 async def set_content(self, html, **_kwargs):
                     await self._load_external_script(html)
@@ -709,20 +764,32 @@ class TestWebFetchExecution(unittest.TestCase):
                             "url": f"http://127.0.0.1:{port}/large",
                         }
                     )
+                    decoded = await self.executor._execute_web_fetch(
+                        {
+                            "id": "web_fetch_script_decoded_over_budget",
+                            "url": f"http://127.0.0.1:{port}/decoded",
+                        }
+                    )
             finally:
                 server.close()
                 await server.wait_closed()
 
-            return normal, large, requests, pages
+            return normal, large, decoded, requests, pages
 
-        normal, large, requests, pages = _run(run_case())
+        normal, large, decoded, requests, pages = _run(run_case())
         self.assertTrue(normal.success)
         self.assertIn("BUNDLE RENDERED TEXT", normal.output)
         self.assertTrue(large.success)
         self.assertNotIn("BUNDLE RENDERED TEXT", large.output)
+        self.assertTrue(decoded.success)
+        self.assertNotIn("BUNDLE RENDERED TEXT", decoded.output)
+        self.assertEqual(requests.count("/redirect.js"), 1)
         self.assertEqual(requests.count("/bundle.js"), 1)
         self.assertEqual(requests.count("/oversized.js"), 1)
+        self.assertEqual(requests.count("/compressed.js"), 1)
+        self.assertTrue(pages[0].image_request_aborted)
         self.assertEqual(pages[1].rendered_text, "")
+        self.assertEqual(pages[2].rendered_text, "")
 
     def test_web_fetch_accepts_exact_download_limit_without_content_length(self):
         """A body exactly at the download cap is allowed without a length header."""
