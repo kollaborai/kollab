@@ -303,10 +303,10 @@ _control_classification_cache: Dict[str, tuple[bool, float]] = {}
 
 def _is_control_cached(path: Path) -> bool:
     """Check if a message file is a durable control, with mtime-based caching."""
+    key = str(path)
     try:
         stat = path.stat()
         mtime = stat.st_mtime
-        key = str(path)
         cached = _control_classification_cache.get(key)
         if cached and cached[1] == mtime:
             return cached[0]
@@ -316,9 +316,22 @@ def _is_control_cached(path: Path) -> bool:
         is_control = _is_durable_control(data)
         _control_classification_cache[key] = (is_control, mtime)
         return is_control
-    except Exception:
-        # On any error, treat as ordinary (safe default)
+    except FileNotFoundError:
+        _control_classification_cache.pop(key, None)
         return False
+    except json.JSONDecodeError:
+        # A malformed record is not an accepted control and remains eligible
+        # for ordinary pruning, keeping that independent bound effective.
+        return False
+    except Exception as exc:
+        # Unknown files must stay out of ordinary pruning. Treat them as
+        # controls so a read or parse failure cannot evict an accepted one.
+        logger.warning(
+            "Could not classify inbox file %r; preserving it from pruning (%s)",
+            path.name,
+            type(exc).__name__,
+        )
+        return True
 
 
 class InboxCapacityError(RuntimeError):
