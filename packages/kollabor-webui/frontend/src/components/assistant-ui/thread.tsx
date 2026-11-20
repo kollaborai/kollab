@@ -237,7 +237,7 @@ const ThreadRoot: FC<{
 }) => {
   const { Welcome = ThreadWelcome, ComposerLeading } = useContext(ThreadComponentsContext);
   const viewportRef = useRef<HTMLDivElement>(null);
-  const scrollAnchorRef = useRef<{ height: number; top: number; start: number } | null>(null);
+  const scrollAnchorRef = useRef<{ start: number } | null>(null);
 
   const userScrollRef = useRef(false);
   const touchStartYRef = useRef<number | null>(null);
@@ -265,11 +265,7 @@ const ThreadRoot: FC<{
     ) {
       return;
     }
-    const anchor = {
-      height: viewport.scrollHeight,
-      top: viewport.scrollTop,
-      start: historyStartIndex,
-    };
+    const anchor = { start: historyStartIndex };
     scrollAnchorRef.current = anchor;
     void onLoadOlder()
       .then((merged) => {
@@ -309,17 +305,7 @@ const ThreadRoot: FC<{
       scrollAnchorRef.current = null;
       return;
     }
-    if (historyStartIndex >= anchor.start) return;
-    const firstFrame = window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        const viewport = viewportRef.current;
-        if (viewport) {
-          viewport.scrollTop = anchor.top + viewport.scrollHeight - anchor.height;
-        }
-        scrollAnchorRef.current = null;
-      });
-    });
-    return () => window.cancelAnimationFrame(firstFrame);
+    if (historyStartIndex < anchor.start) scrollAnchorRef.current = null;
   }, [historyStartIndex, historyStatus?.kind]);
 
   return (
@@ -373,30 +359,9 @@ const ThreadRoot: FC<{
         turnAnchor="top"
         autoScroll={voiceLive || undefined}
         data-slot="aui_thread-viewport"
-        className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
+        className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll"
       >
         <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col px-4 pt-4">
-          {historyStatus ? (
-            <div
-              data-slot="history-status"
-              role={historyStatus.kind === "error" ? "alert" : "status"}
-              aria-live={historyStatus.kind === "error" ? "assertive" : "polite"}
-              className={cn(
-                "mx-auto mb-3 flex w-full max-w-(--thread-max-width) items-center justify-between gap-3 rounded-md px-3 py-2 text-xs",
-                historyStatus.kind === "error"
-                  ? "bg-destructive/10 text-destructive"
-                  : "text-muted-foreground bg-muted/50",
-              )}
-            >
-              <span>{historyStatus.message}</span>
-              {historyStatus.kind === "error" && onRetryHistory ? (
-                <Button type="button" size="sm" variant="outline" onClick={onRetryHistory}>
-                  Retry
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
-
           {/* Auto margins on the welcome and the footer center them together
               while the thread is empty, and unlike justify-center they never
               push the top out of reach when a tall hero overflows. */}
@@ -423,6 +388,28 @@ const ThreadRoot: FC<{
                 : "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
             )}
           >
+            {/* Keep transient status in the sticky footer so its mount/unmount
+                does not change the positions of transcript rows above it. */}
+            {historyStatus ? (
+              <div
+                data-slot="history-status"
+                role={historyStatus.kind === "error" ? "alert" : "status"}
+                aria-live={historyStatus.kind === "error" ? "assertive" : "polite"}
+                className={cn(
+                  "mx-auto flex w-full max-w-(--thread-max-width) items-center justify-between gap-3 rounded-md px-3 py-2 text-xs",
+                  historyStatus.kind === "error"
+                    ? "bg-destructive/10 text-destructive"
+                    : "text-muted-foreground bg-muted/50",
+                )}
+              >
+                <span>{historyStatus.message}</span>
+                {historyStatus.kind === "error" && onRetryHistory ? (
+                  <Button type="button" size="sm" variant="outline" onClick={onRetryHistory}>
+                    Retry
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
             <div data-slot="aui_composer-dock" className="flex min-w-0 items-end gap-2 sm:gap-3">
@@ -1339,11 +1326,13 @@ const AssistantMessage: FC = () => {
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
   const ACTION_BAR_HEIGHT = `min-h-7.5 ${ACTION_BAR_PT}`;
 
+  // Older-page tool reconciliation can update this row in place; keep its
+  // geometry in normal layout so the viewport can preserve its id anchor.
   return (
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
-      className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+      className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150"
     >
       <div
         data-slot="aui_assistant-message-content"

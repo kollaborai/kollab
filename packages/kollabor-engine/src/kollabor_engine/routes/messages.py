@@ -693,14 +693,14 @@ def _assistant_update_message_state(
 def _assistant_align_streamed_ids(
     messages: List[Dict[str, Any]], history: List[Dict[str, Any]]
 ) -> bool:
-    """Rename this turn's streamed row ids to the snapshot's history ids.
+    """Record this turn's history positions without replacing its row ids.
 
     Only a strict one-to-one match between the trailing stored rows and the
-    provisional rows justifies a rename, and the complete role/content
+    provisional rows justifies a source-index mapping, and the complete role/content
     alignment must be unique across refreshed history. Anything else (a
     refresh that missed the turn, ambiguous duplicate content, a content
-    mismatch, or an unexpected role) keeps the provisional ids for the next
-    full reload.
+    mismatch, or an unexpected role) keeps the provisional ids without a
+    synchronized claim, for the next full reload.
 
     Role order alone is not evidence: a stale [user, assistant] pair looks
     identical to this turn's rows by role. Every paired row must also match
@@ -709,12 +709,13 @@ def _assistant_align_streamed_ids(
     calls row may sit between pairs only when its call ids all appear in the
     streamed row's call cards, proving it was rendered inside this turn.
 
-    Returns whether the rename happened. ``True`` means every provisional
-    row now carries this snapshot's history id, so the caller may claim
-    incremental sync against exactly this snapshot. ``False`` means the
-    snapshot could not be reconciled (it missed the turn, or rows the
-    page already shows collide with it): the caller must claim nothing
-    and let the page take its next full load."""
+    Returns whether the mapping happened. ``True`` means every provisional
+    row now carries this snapshot's ``historySourceIndex`` metadata, so the
+    caller may claim incremental sync against exactly this snapshot while
+    keeping the row ids stable for the viewport. ``False`` means the snapshot
+    could not be reconciled (it missed the turn, or rows the page already shows
+    collide with it): the caller must claim nothing and let the page take its
+    next full load."""
 
     def _text(content: Any) -> str:
         """Comparable plain text of a content field (string or parts)."""
@@ -810,6 +811,30 @@ def _assistant_align_streamed_ids(
         message_id = message.get("id")
         if role not in ("user", "assistant") or not isinstance(message_id, str):
             continue
+        metadata = message.get("metadata")
+        custom = metadata.get("custom") if isinstance(metadata, dict) else None
+        if isinstance(custom, dict) and "compactionArchiveOrder" in custom:
+            # These rows retain their display IDs but belong to a superseded snapshot.
+            continue
+        source_id = custom.get("historySourceId") if isinstance(custom, dict) else None
+        if isinstance(source_id, str) and re.fullmatch(r"history-\d+", source_id) is None:
+            # Derived display rows (error, Hub note, etc.) share the position
+            # of their source. They cannot prove the canonical row was shown.
+            continue
+        source_index = custom.get("historySourceIndex") if isinstance(custom, dict) else None
+        if isinstance(source_index, int) and not isinstance(source_index, bool):
+            if (
+                0 <= source_index < len(history)
+                and history[source_index].get("role") == role
+                and _pairs_by_content(history[source_index], message)
+            ):
+                shown.add(source_index)
+                continue
+            if source_id is not None:
+                # An aliased row's display ID can name an obsolete position.
+                return False
+            if isinstance(custom, dict):
+                custom.pop("historySourceIndex", None)
         if message_id.startswith("history-"):
             # Synthetic rows (``history-<n>-error``) are state-only; they
             # never carry a stored counterpart and are left untouched.
@@ -939,7 +964,16 @@ def _assistant_align_streamed_ids(
         return False
 
     for message_index, history_index in zip(provisional, stored):
-        messages[message_index]["id"] = f"history-{history_index}"
+        message = messages[message_index]
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+            message["metadata"] = metadata
+        custom = metadata.get("custom")
+        if not isinstance(custom, dict):
+            custom = {}
+            metadata["custom"] = custom
+        custom["historySourceIndex"] = history_index
 
     return True
 
@@ -1758,12 +1792,12 @@ async def assistant_transport(
                             # worst case) to see the completed status — that
                             # spun the completion spinner on a slow daemon.
                             # Provisional ids are fine for this publish; the
-                            # refresh below aligns them and republishes the
-                            # aligned rows before any synced claim (#666:
-                            # never claim synced for rows the page has not
-                            # been shown). The snapshot only decides the sync
-                            # claim; alignment mutates these published rows
-                            # in place (#675).
+                            # refresh below records source indexes and
+                            # republishes the aligned rows before any synced
+                            # claim (#666: never claim synced for rows the page
+                            # has not been shown). The snapshot only decides
+                            # the sync claim; alignment mutates these published
+                            # rows in place (#675).
                             _assistant_set_messages(controller, state_messages)
                             refreshed = None
                             for _attempt in (0, 1):
@@ -1785,13 +1819,10 @@ async def assistant_transport(
                                     state_messages, refreshed
                                 )
                             if aligned:
-                                # The streamed ids were reconciled against
-                                # exactly this snapshot, so the page may
-                                # append canonical rows past it by id.
-                                # The early publish is JSON-encoded with
-                                # provisional ids; the synced chunk carries
-                                # no messages update, so republish the
-                                # aligned rows for the client before the
+                                # Each streamed row carries its source index
+                                # in exactly this snapshot, so the page can
+                                # recognize canonical rows without replacing
+                                # their ids. Republish the metadata before the
                                 # watermark is claimed (#767/#666).
                                 _assistant_set_messages(
                                     controller, state_messages
