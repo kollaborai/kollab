@@ -636,19 +636,25 @@ anchor, status = int(sys.argv[1]), int(sys.argv[2])
 pid = os.fork()
 if pid == 0:
     os.close(status)
-    os.environ.pop("KOLLAB_ACP_OWNER_TOKEN", None)
-    os.setpgid(0, 0)
-    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(signum, signal.SIG_IGN)
-    null = os.open(os.devnull, os.O_RDWR)
-    for fd in (0, 1, 2):
-        os.dup2(null, fd)
-    try:
-        while os.read(anchor, 1):
-            pass
-    except OSError:
+    anchor_env = dict(os.environ)
+    anchor_env.pop("KOLLAB_ACP_OWNER_TOKEN", None)
+    anchor_script = '''
+import os, signal, sys
+anchor = int(sys.argv[1])
+os.setpgid(0, 0)
+for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(signum, signal.SIG_IGN)
+null = os.open(os.devnull, os.O_RDWR)
+for fd in (0, 1, 2):
+    os.dup2(null, fd)
+try:
+    while os.read(anchor, 1):
         pass
-    os._exit(0)
+except OSError:
+    pass
+os._exit(0)
+'''
+    os.execve(sys.executable, [sys.executable, "-c", anchor_script, str(anchor)], anchor_env)
 try:
     os.setpgid(pid, pid)
 except OSError:
