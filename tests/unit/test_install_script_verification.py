@@ -521,6 +521,60 @@ def test_windows_console_launcher_is_verified(tmp_path: Path) -> None:
     assert str(installed_dir / "kollab.exe") in result.stdout
 
 
+def test_windows_uv_bin_directory_is_converted_for_bash(tmp_path: Path) -> None:
+    tools_dir = tmp_path / "tools"
+    installed_dir = tmp_path / "uv bin"
+    _write_executable(tools_dir / "uname", "#!/bin/sh\necho MINGW64_NT-10.0\n")
+    _write_executable(
+        tools_dir / "cygpath",
+        '#!/bin/sh\n[ "$1" = -u ] && echo "$POSIX_BIN"\n',
+    )
+    _write_executable(
+        tools_dir / "uv",
+        '#!/bin/sh\nif [ "$1" = tool ] && [ "$2" = dir ]; then echo "$WINDOWS_BIN"; fi\nexit 0\n',
+    )
+    _write_executable(
+        installed_dir / "kollab.exe", "#!/bin/sh\necho 'kollab 4.5.6'\n"
+    )
+
+    result = _run_installer_method(
+        tmp_path,
+        method="uv",
+        path_dirs=[tools_dir, installed_dir, Path("/usr/bin"), Path("/bin")],
+        extra_env={
+            "WINDOWS_BIN": r"C:\Users\fixture\AppData\Local\bin",
+            "POSIX_BIN": str(installed_dir),
+        },
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert str(installed_dir / "kollab.exe") in result.stdout
+
+
+def test_windows_pip_prefix_uses_scripts_directory(tmp_path: Path) -> None:
+    tools_dir = tmp_path / "tools"
+    prefix = tmp_path / "custom prefix"
+    scripts_dir = prefix / "Scripts"
+    _write_executable(tools_dir / "uname", "#!/bin/sh\necho MINGW64_NT-10.0\n")
+    _write_executable(
+        tools_dir / "pip3",
+        '#!/bin/sh\nif [ "$1" = install ] && [ "$2" = --help ]; then echo --user; fi\nexit 0\n',
+    )
+    _write_executable(
+        scripts_dir / "kollab.exe", "#!/bin/sh\necho 'kollab 4.5.6'\n"
+    )
+
+    result = _run_installer_method(
+        tmp_path,
+        method="pip",
+        path_dirs=[tools_dir, scripts_dir, Path("/usr/bin"), Path("/bin")],
+        extra_env={"PIP_PREFIX": str(prefix)},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert str(scripts_dir / "kollab.exe") in result.stdout
+
+
 def test_timeout_kills_a_version_command_that_ignores_term(tmp_path: Path) -> None:
     functions = tmp_path / "installer-functions.sh"
     functions.write_text(
