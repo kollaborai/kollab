@@ -642,7 +642,10 @@ def test_windows_pip_prefix_uses_scripts_directory(tmp_path: Path) -> None:
     assert str(scripts_dir / "kollab.exe") in result.stdout
 
 
-def test_windows_pip_user_install_uses_user_scripts_directory(tmp_path: Path) -> None:
+@pytest.mark.parametrize("user_setting", ["environment", "config"])
+def test_windows_pip_user_install_uses_user_scripts_directory(
+    tmp_path: Path, user_setting: str
+) -> None:
     tools_dir = tmp_path / "tools"
     python_313_dir = tmp_path / "Python 3.13 Scripts"
     python_314_dir = tmp_path / "Python 3.14"
@@ -655,25 +658,37 @@ def test_windows_pip_user_install_uses_user_scripts_directory(tmp_path: Path) ->
     )
     pip_python = _write_executable(
         python_314_dir / "python.exe",
-        '#!/bin/sh\nif [ "$1" = -c ]; then echo "$USER_SCRIPTS"; elif [ "$2" = install ] && [ "$3" = --help ]; then echo --user; fi\nexit 0\n',
+        '''#!/bin/sh
+if [ "$1" = -c ]; then
+    echo "$USER_SCRIPTS"
+elif [ "$2" = config ] && [ "$3" = get ] && [ "$4" = install.user ]; then
+    echo true
+elif [ "$2" = install ] && [ "$3" = --help ]; then
+    echo --user
+fi
+exit 0
+''',
     )
-    _write_executable(
-        tools_dir / "pip3",
-        f'#!/bin/sh\n\'\'\'exec\' "{pip_python}" "$0" "$@"\n\' \'\'\'\n',
-    )
+    pip_script = "#!/bin/sh\n" + f'''\'\'\'exec\' "{pip_python}" "$0" "$@"
+\' \'\'\'
+'''
+    _write_executable(tools_dir / "pip3", pip_script)
     _write_executable(
         scripts_dir / "kollab.exe", "#!/bin/sh\necho 'kollab 4.5.6'\n"
     )
+
+    extra_env = {
+        "USER_SCRIPTS": str(scripts_dir),
+        "WRONG_USER_SCRIPTS": str(wrong_scripts_dir),
+    }
+    if user_setting == "environment":
+        extra_env["PIP_USER"] = "1"
 
     result = _run_installer_method(
         tmp_path,
         method="pip",
         path_dirs=[tools_dir, python_313_dir, scripts_dir, Path("/usr/bin"), Path("/bin")],
-        extra_env={
-            "PIP_USER": "1",
-            "USER_SCRIPTS": str(scripts_dir),
-            "WRONG_USER_SCRIPTS": str(wrong_scripts_dir),
-        },
+        extra_env=extra_env,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -687,7 +702,6 @@ def test_windows_pip_exe_uses_embedded_interpreter_for_user_scripts(
     python_313_dir = tmp_path / "Python 3.13 Scripts"
     python_314_dir = tmp_path / "Python 3.14"
     scripts_dir = tmp_path / "Python User Scripts"
-    wrong_scripts_dir = tmp_path / "Wrong Python User Scripts"
     _write_executable(tools_dir / "uname", "#!/bin/sh\necho MINGW64_NT-10.0\n")
     _write_executable(
         python_313_dir / "python",
@@ -700,7 +714,7 @@ def test_windows_pip_exe_uses_embedded_interpreter_for_user_scripts(
     pip_launcher = tmp_path / "Python 3.14 Scripts" / "pip3.exe"
     pip_launcher.parent.mkdir(parents=True)
     pip_launcher.write_bytes(
-        b"MZ fake console launcher\n#!\""
+        b"MZ fake console launcher\n#! \""
         + str(pip_python).encode()
         + b"\"\nPK fake archive"
     )

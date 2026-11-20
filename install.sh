@@ -239,6 +239,67 @@ try_pipx() {
     return 0
 }
 
+# Resolve the interpreter that owns pip so user installs use that interpreter's
+# Scripts directory, even when another Python version appears first on PATH.
+pip_windows_interpreter() {
+    local pip_path="$1" shebang python_cmd env_args
+    if [[ "$pip_path" == *.exe || "$pip_path" == *.EXE ]]; then
+        # pip's Windows console launcher appends its interpreter shebang to the PE file.
+        shebang=$(LC_ALL=C grep -a -oE '#![^[:cntrl:]]*' "$pip_path" | tail -n 1) || return 1
+        [[ -n "$shebang" ]] || return 1
+    else
+        IFS= read -r shebang < "$pip_path" || return 1
+    fi
+    shebang="${shebang%$'\r'}"
+    [[ "$shebang" == '#!'* ]] || return 1
+    shebang="${shebang#\#!}"
+    while [[ "$shebang" == [[:space:]]* ]]; do
+        shebang="${shebang:1}"
+    done
+    if [[ "$shebang" == \"* ]]; then
+        python_cmd="${shebang#\"}"
+        python_cmd="${python_cmd%%\"*}"
+    elif [[ "$shebang" == \'* ]]; then
+        python_cmd="${shebang#\'}"
+        python_cmd="${python_cmd%%\'*}"
+    else
+        read -r python_cmd _ <<< "$shebang"
+    fi
+    if [[ "$python_cmd" == */sh ]]; then
+        IFS= read -r env_args < <(sed -n '2p' "$pip_path") || return 1
+        [[ "$env_args" == *exec* ]] || return 1
+        env_args="${env_args#*exec}"
+        env_args="${env_args#\'}"
+        env_args="${env_args# }"
+        if [[ "$env_args" == \"* ]]; then
+            python_cmd="${env_args#\"}"
+            python_cmd="${python_cmd%%\"*}"
+        elif [[ "$env_args" == \'* ]]; then
+            python_cmd="${env_args#\'}"
+            python_cmd="${python_cmd%%\'*}"
+        else
+            read -r python_cmd _ <<< "$env_args"
+        fi
+    elif [[ "$python_cmd" == */env ]]; then
+        env_args="${shebang#*env }"
+        read -r python_cmd _ <<< "$env_args"
+        if [[ "$python_cmd" == "-S" ]]; then
+            env_args="${env_args#-S }"
+            read -r python_cmd _ <<< "$env_args"
+            python_cmd="${python_cmd#\"}"
+            python_cmd="${python_cmd%\"}"
+            python_cmd="${python_cmd#\'}"
+            python_cmd="${python_cmd%\'}"
+        fi
+    fi
+    python_cmd=$(normalize_install_dir "$python_cmd") || return 1
+    if [[ "$python_cmd" != */* ]]; then
+        python_cmd=$(command -v "$python_cmd") || return 1
+    fi
+    [[ -x "$python_cmd" ]] || return 1
+    printf '%s\n' "$python_cmd"
+}
+
 # Resolve the scripts directory used by the interpreter behind pip. This keeps
 # system installs and --user installs tied to the executable pip just wrote.
 pip_scripts_dir() {
@@ -254,8 +315,7 @@ pip_scripts_dir() {
     pip_path=$(command -v "$pip_cmd") || return 1
     if is_windows_shell; then
         if [[ "$scheme" == "posix_user" ]]; then
-            python_cmd=$(command -v "${pip_cmd/pip/python}") || \
-                python_cmd=$(command -v python) || return 1
+            python_cmd=$(pip_windows_interpreter "$pip_path") || return 1
             scheme=nt_user
             scripts_dir=$(KOLLAB_NO_KEYRING=1 "$python_cmd" -c \
                 'import sysconfig; import sys; print(sysconfig.get_path("scripts", scheme=sys.argv[1]))' \
