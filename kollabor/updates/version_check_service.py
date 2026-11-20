@@ -481,6 +481,9 @@ class VersionCheckService:
             name = release_json.get("name", tag_name)
             url = release_json["html_url"]
             is_prerelease = release_json.get("prerelease", False)
+            if not isinstance(is_prerelease, bool):
+                logger.warning("Invalid release data: prerelease must be a boolean")
+                return None
 
             # Strip 'v' prefix from tag to get version
             version = tag_name.lstrip("v")
