@@ -134,6 +134,15 @@ class TestSlashCommandParser(unittest.TestCase):
             (r"/open file\]name.txt", ["file]name.txt"]),
             (r"/open file\!name.txt", ["file!name.txt"]),
             (r"/open file\~name.txt", ["file~name.txt"]),
+            (r"/open file\%name.txt", ["file%name.txt"]),
+            (r"/open file\:name.txt", ["file:name.txt"]),
+            (r"/open file\=name.txt", ["file=name.txt"]),
+            (r"/open file\+name.txt", ["file+name.txt"]),
+            (r"/open file\,name.txt", ["file,name.txt"]),
+            (r"/open file\^name.txt", ["file^name.txt"]),
+            (r"/open file\@name.txt", ["file@name.txt"]),
+            (r"/open file\.name.txt", ["file.name.txt"]),
+            (r"/open file\_name.txt", ["file_name.txt"]),
             ("/open file\\" + chr(96) + "name.txt", ["file" + chr(96) + "name.txt"]),
         ]
 
