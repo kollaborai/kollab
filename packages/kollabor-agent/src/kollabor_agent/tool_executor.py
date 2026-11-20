@@ -6,6 +6,7 @@ file operations with proper error handling, logging, and result processing.
 
 import asyncio
 import logging
+import math
 import os
 import re
 import shlex
@@ -823,6 +824,9 @@ class ToolExecutor:
 
         # Track active shell executor so ESC can cancel running subprocesses
         self._active_shell_executor: Optional[ShellExecutor] = None
+        # Serialize only calls that share mutable subprocess state; independent
+        # session-management operations must remain available while they run.
+        self._terminal_execution_lock = asyncio.Lock()
 
         logger.info(
             "Tool executor initialized with terminal, MCP, and file operations support"
@@ -1288,6 +1292,7 @@ class ToolExecutor:
             tool_type = "terminal"
 
         voice_terminal_plan: VoiceTerminalPlan | None = None
+        voice_terminal_timeout = self.terminal_timeout
         if is_voice_origin(execution_context) and not self.trust_all:
             decision = voice_decision or self._voice_tool_guard.evaluate(
                 tool_data,
@@ -1308,6 +1313,23 @@ class ToolExecutor:
                     },
                 )
             voice_terminal_plan = decision.plan
+            if voice_terminal_plan is not None:
+                requested_timeout = tool_data.get("timeout")
+                if requested_timeout is not None:
+                    try:
+                        voice_terminal_timeout = self._parse_terminal_timeout(
+                            requested_timeout
+                        )
+                    except ValueError:
+                        return ToolExecutionResult(
+                            tool_id=tool_id,
+                            tool_type=tool_type,
+                            success=False,
+                            error=(
+                                "Invalid terminal timeout. Use a positive duration "
+                                "such as 30s, 5m, or 1h."
+                            ),
+                        )
 
         # Check for cancellation before starting
         if self.is_cancelled():
@@ -1431,6 +1453,7 @@ class ToolExecutor:
                             result = await self._execute_voice_terminal_plan(
                                 tool_data,
                                 voice_terminal_plan,
+                                voice_terminal_timeout,
                             )
                         else:
                             result = await self._execute_terminal_command(tool_data)
@@ -1651,18 +1674,24 @@ class ToolExecutor:
         self,
         tool_data: Dict[str, Any],
         plan: VoiceTerminalPlan,
+        timeout_seconds: int,
     ) -> ToolExecutionResult:
         """Run a canonical voice plan with argv, never through a command shell."""
-        self._active_shell_executor = self.shell_executor
-        try:
-            result = await self.shell_executor.run_argv(
-                plan.argv,
-                timeout=min(self.terminal_timeout, MAX_VOICE_COMMAND_SECONDS),
-                cwd=plan.canonical_cwd,
-                max_output_bytes=MAX_VOICE_OUTPUT_BYTES,
-            )
-        finally:
-            self._active_shell_executor = None
+        async with self._terminal_execution_lock:
+            self._active_shell_executor = self.shell_executor
+            try:
+                result = await self.shell_executor.run_argv(
+                    plan.argv,
+                    timeout=min(
+                        timeout_seconds,
+                        self.terminal_timeout,
+                        MAX_VOICE_COMMAND_SECONDS,
+                    ),
+                    cwd=plan.canonical_cwd,
+                    max_output_bytes=MAX_VOICE_OUTPUT_BYTES,
+                )
+            finally:
+                self._active_shell_executor = None
 
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
@@ -1681,6 +1710,26 @@ class ToolExecutor:
                 "classification": plan.classification,
             },
         )
+
+    def _parse_terminal_timeout(self, timeout: Any) -> int:
+        """Parse the terminal tool's duration and reject values we cannot enforce."""
+        if not isinstance(timeout, str):
+            raise ValueError("Invalid terminal timeout")
+
+        match = re.fullmatch(r"(\d+)([smh]?)", timeout.strip().lower())
+        if not match:
+            raise ValueError("Invalid terminal timeout")
+
+        value = int(match.group(1))
+        multiplier = {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2)]
+        timeout_seconds = value * multiplier
+        try:
+            finite_timeout = math.isfinite(timeout_seconds)
+        except OverflowError:
+            finite_timeout = False
+        if timeout_seconds <= 0 or not finite_timeout:
+            raise ValueError("Invalid terminal timeout")
+        return timeout_seconds
 
     async def _execute_terminal_command(
         self, tool_data: Dict[str, Any]
@@ -1727,6 +1776,39 @@ class ToolExecutor:
                 error="Empty command",
             )
 
+        requested_timeout = tool_data.get("timeout")
+        if requested_timeout is None:
+            timeout_seconds = self.terminal_timeout
+            background_timeout = None
+        else:
+            try:
+                timeout_seconds = self._parse_terminal_timeout(requested_timeout)
+            except ValueError:
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type=tool_type,
+                    success=False,
+                    error=(
+                        "Invalid terminal timeout. Use a positive duration such as "
+                        "30s, 5m, or 1h."
+                    ),
+                )
+            if not background and timeout_seconds > self.terminal_timeout:
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type=tool_type,
+                    success=False,
+                    error=(
+                        "Terminal timeout exceeds the configured limit of "
+                        f"{self.terminal_timeout}s."
+                    ),
+                )
+            background_timeout = requested_timeout.strip().lower()
+
+        # Shell fallback is synchronous, including when a background request
+        # cannot use the persistent-session runner.
+        fallback_timeout_seconds = min(timeout_seconds, self.terminal_timeout)
+
         # Kollab commands run freely from agent terminals by default (#1147).
         # When the owner opts in with tools.block_kollab_terminal_spawn, agent
         # launches, stop-all, and background Kollab commands are refused so
@@ -1755,7 +1837,7 @@ class ToolExecutor:
                     result = await self.tmux_plugin.execute_background(
                         command=command,
                         name=tool_data.get("name"),
-                        timeout=tool_data.get("timeout"),
+                        timeout=background_timeout,
                         cwd=str(cwd) if cwd else None,
                     )
                     return ToolExecutionResult(
@@ -1772,11 +1854,12 @@ class ToolExecutor:
                     )
                 else:
                     # Foreground execution via temporary subprocess
-                    result = await self.tmux_plugin.execute_foreground(
-                        command=command,
-                        timeout=self.terminal_timeout,
-                        cwd=str(cwd) if cwd else None,
-                    )
+                    async with self._terminal_execution_lock:
+                        result = await self.tmux_plugin.execute_foreground(
+                            command=command,
+                            timeout=timeout_seconds,
+                            cwd=str(cwd) if cwd else None,
+                        )
                     return ToolExecutionResult(
                         tool_id=tool_id,
                         tool_type=tool_type,
@@ -1791,15 +1874,16 @@ class ToolExecutor:
                 logger.debug("Falling back to ShellExecutor for command execution")
 
         # Fallback: Use ShellExecutor (no terminal plugin available or it failed)
-        self._active_shell_executor = self.shell_executor
-        try:
-            result = await self.shell_executor.run(
-                command,
-                timeout=self.terminal_timeout,
-                cwd=cwd,
-            )
-        finally:
-            self._active_shell_executor = None
+        async with self._terminal_execution_lock:
+            self._active_shell_executor = self.shell_executor
+            try:
+                result = await self.shell_executor.run(
+                    command,
+                    timeout=fallback_timeout_seconds,
+                    cwd=cwd,
+                )
+            finally:
+                self._active_shell_executor = None
 
         if result.error:
             return ToolExecutionResult(
@@ -1914,17 +1998,18 @@ class ToolExecutor:
                 if not name.upper().startswith("GIT_")
             }
 
-        self._active_shell_executor = self.shell_executor
-        try:
-            result = await self.shell_executor.run_argv(
-                argv,
-                timeout=min(self.terminal_timeout, MAX_VOICE_COMMAND_SECONDS),
-                cwd=cwd,
-                env=command_env,
-                max_output_bytes=MAX_VOICE_OUTPUT_BYTES,
-            )
-        finally:
-            self._active_shell_executor = None
+        async with self._terminal_execution_lock:
+            self._active_shell_executor = self.shell_executor
+            try:
+                result = await self.shell_executor.run_argv(
+                    argv,
+                    timeout=min(self.terminal_timeout, MAX_VOICE_COMMAND_SECONDS),
+                    cwd=cwd,
+                    env=command_env,
+                    max_output_bytes=MAX_VOICE_OUTPUT_BYTES,
+                )
+            finally:
+                self._active_shell_executor = None
 
         return ToolExecutionResult(
             tool_id=tool_id,

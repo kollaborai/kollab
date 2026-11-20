@@ -932,10 +932,12 @@ export function EngineRuntimeProvider({
         // This page's own submission is pending (a held steering admission, a
         // queued send), so the thread takes no import now. A turn already on
         // screen goes on: fold only its own request's events into the live
-        // state and show them when the run ends. Events of any other request
-        // are dropped, as the run's own stream is not ours to mirror.
+        // state and show them when the run ends. Save notices are accepted
+        // before the streamed reply has established its request id.
         const visible = liveTurn.current;
-        if (!visible.requestId || event.request_id !== visible.requestId) return;
+        if (event.type !== "notice" && (!visible.requestId || event.request_id !== visible.requestId)) return;
+        if (event.type === "notice" && visible.requestId && event.request_id
+            && event.request_id !== visible.requestId) return;
         const folded = applyLiveEvent(visible, event);
         if (folded === visible) return;
         liveTurn.current = folded;

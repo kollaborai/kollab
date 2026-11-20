@@ -3398,9 +3398,16 @@ class ContextCompactionPlugin(BasePlugin):
         oversized_indices: set[int] = set()
         for index, msg in latest_tasks:
             content = str(getattr(msg, "content", "") or "")
+            needs_reexcerpt = False
             task_id = (self._message_task_id(msg) or "unknown")[:128]
             prefix = f"[Active TaskLedger task {task_id}; latest assignment excerpt]\n"
-            suffix = "\n[Remaining assignment text is summarized below.]"
+            legacy_suffix = "\n[Remaining assignment text is summarized below.]"
+            suffix = (
+                "\n[This assignment excerpt is incomplete. Immediately ask the "
+                "assigner to resend the omitted instructions with the `hub_msg` "
+                "tool before continuing. If no reply is available, stop; do "
+                "not infer omitted instructions.]"
+            )
             metadata = getattr(msg, "metadata", None)
             is_marked_excerpt = (
                 isinstance(metadata, dict)
@@ -3409,27 +3416,50 @@ class ContextCompactionPlugin(BasePlugin):
             is_legacy_excerpt = (
                 len(content) == MAX_PRESERVED_HUB_TASK_CHARS
                 and content.startswith(prefix)
-                and content.endswith(suffix)
+                and content.endswith(legacy_suffix)
             )
-            if is_marked_excerpt or is_legacy_excerpt:
-                normalized_content = content.removesuffix(suffix)
-                if normalized_content != content or is_legacy_excerpt:
-                    msg = copy.copy(msg)
-                    msg.content = normalized_content
-                    msg.metadata = {
-                        **(metadata or {}),
-                        "context_compaction_task_excerpt": True,
-                    }
-                    content = normalized_content
-            if len(content) <= MAX_PRESERVED_HUB_TASK_CHARS:
+            if is_legacy_excerpt or (
+                is_marked_excerpt and content.endswith(legacy_suffix)
+            ):
+                normalized_content = content.removesuffix(legacy_suffix)
+                if normalized_content.startswith(prefix):
+                    normalized_content = normalized_content[len(prefix) :]
+                msg = copy.copy(msg)
+                msg.content = normalized_content
+                msg.metadata = {
+                    **(metadata or {}),
+                    "context_compaction_task_excerpt": True,
+                }
+                content = normalized_content
+                needs_reexcerpt = True
+            if (
+                len(content) <= MAX_PRESERVED_HUB_TASK_CHARS
+                and not needs_reexcerpt
+            ):
                 preserved_by_index[index] = msg
                 continue
 
+            excerpt_separator = "\n[... omitted assignment text ...]\n"
             excerpt_budget = max(
                 0, MAX_PRESERVED_HUB_TASK_CHARS - len(prefix) - len(suffix)
             )
+            section_budget = max(
+                1, (excerpt_budget - 2 * len(excerpt_separator)) // 3
+            )
+            middle_start = max(
+                section_budget,
+                (len(content) - section_budget) // 2,
+            )
+            middle_end = min(len(content) - section_budget, middle_start + section_budget)
+            excerpt = excerpt_separator.join(
+                (
+                    content[:section_budget],
+                    content[middle_start:middle_end],
+                    content[-section_budget:],
+                )
+            )
             truncated = copy.copy(msg)
-            truncated.content = f"{prefix}{content[:excerpt_budget]}{suffix}"
+            truncated.content = f"{prefix}{excerpt}{suffix}"
             truncated.metadata = {
                 **(getattr(msg, "metadata", None) or {}),
                 "context_compaction_task_excerpt": True,
@@ -4183,6 +4213,31 @@ class ContextCompactionPlugin(BasePlugin):
           [task reminder]        -- synthetic system note listing active tasks
           [to_keep messages]     -- recent messages kept intact
         """
+        # The same active legacy excerpt can be both pinned and kept in the
+        # recent window. Rewrite that recent copy too, or it still claims the
+        # omitted assignment text was summarized.
+        active_task_ids = self._get_live_task_ids()
+        for task_msg in preserved_tasks or ():
+            task_id = self._message_task_id(task_msg)
+            if task_id:
+                active_task_ids.add(task_id)
+        legacy_suffix = "\n[Remaining assignment text is summarized below.]"
+        to_keep = list(to_keep)
+        for index, task_msg in enumerate(to_keep):
+            task_id = self._message_task_id(task_msg)
+            content = str(getattr(task_msg, "content", "") or "")
+            if (
+                task_id
+                and task_id in active_task_ids
+                and content.endswith(legacy_suffix)
+                and self._is_hub_task(task_msg)
+            ):
+                rewritten, _, _ = self._extract_preservable_messages(
+                    [task_msg], live_task_ids={task_id}
+                )
+                if rewritten:
+                    to_keep[index] = rewritten[0]
+
         base_summary = summary_text  # each drop retry starts from this, so one note
         if _dropped_preserved:
             # Issue #279: say what was dropped so the model knows the
@@ -4259,8 +4314,19 @@ class ContextCompactionPlugin(BasePlugin):
             # list of what it still needs to do after compaction.
             reminder_lines = [
                 "[Task Reminder after context compaction]",
-                "The following tasks from hub agents are still active "
-                "and were preserved verbatim above:",
+                (
+                    "The following active hub tasks were preserved above. "
+                    "For any incomplete excerpt, first use the `hub_msg` tool "
+                    "to ask its assigner to resend the omitted instructions."
+                    if any(
+                        getattr(task_msg, "metadata", {}).get(
+                            "context_compaction_task_excerpt"
+                        )
+                        for task_msg in preserved_tasks
+                    )
+                    else "The following tasks from hub agents are still active "
+                    "and were preserved verbatim above:"
+                ),
                 "",
             ]
             for i, task_msg in enumerate(preserved_tasks, 1):
@@ -4271,13 +4337,28 @@ class ContextCompactionPlugin(BasePlugin):
                 preview = task_msg.content[:200]
                 if len(task_msg.content) > 200:
                     preview += "..."
-                reminder_lines.append(f"  {i}. From {sender}: {preview}")
-
-            reminder_lines.append("")
-            reminder_lines.append(
-                "Complete these tasks and report back as instructed. "
-                "The full task text is in the messages above."
-            )
+                task_id = self._message_task_id(task_msg)
+                is_excerpt = bool(
+                    getattr(task_msg, "metadata", {}).get(
+                        "context_compaction_task_excerpt"
+                    )
+                )
+                retrieval = (
+                    " Use the `hub_msg` tool to ask the assigner to resend the "
+                    "omitted instructions before continuing."
+                    if is_excerpt and task_id
+                    else ""
+                )
+                reminder_lines.append(
+                    f"  {i}. From {sender}: {preview}{retrieval}"
+                )
+                closing = (
+                    "Continue this task only with the excerpt or instructions "
+                    "resent by its assigner; do not infer omitted instructions."
+                    if is_excerpt
+                    else "Complete this task and report back as instructed."
+                )
+                reminder_lines.append(f"     {closing}")
 
             compacted.append(
                 ConversationMessage(
