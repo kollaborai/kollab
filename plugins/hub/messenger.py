@@ -319,13 +319,10 @@ def _is_control_cached(path: Path) -> bool:
     except FileNotFoundError:
         _control_classification_cache.pop(key, None)
         return False
-    except json.JSONDecodeError:
-        # A malformed record is not an accepted control and remains eligible
-        # for ordinary pruning, keeping that independent bound effective.
-        return False
     except Exception as exc:
-        # Unknown files must stay out of ordinary pruning. Treat them as
-        # controls so a read or parse failure cannot evict an accepted one.
+        # Unknown files and records with invalid JSON must stay out of ordinary
+        # pruning. Treat them as controls so a read or parse failure cannot
+        # evict an accepted one before receive classification can recover it.
         logger.warning(
             "Could not classify inbox file %r; preserving it from pruning (%s)",
             path.name,
@@ -346,8 +343,8 @@ def _prune_inbox(msg_dir: Path, max_size: int = INBOX_MAX_SIZE) -> None:
     """Evict oldest ordinary messages while preserving durable controls.
 
     ``max_size`` bounds ordinary chatter, not task controls that still require
-    normal receive classification or an explicit stale ACK. Malformed files
-    are treated as ordinary and remain eligible for eviction.
+    normal receive classification or an explicit stale ACK. Unreadable or
+    undecodable files are treated as controls until they can be classified.
 
     Durable controls are admitted separately by ``send_to_file``. This helper
     never evicts them; capacity exhaustion rejects the new control instead.

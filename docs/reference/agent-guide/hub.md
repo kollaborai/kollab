@@ -125,6 +125,8 @@ an earlier accepted control. Ordinary offline messages use a separate limit
 and may be evicted oldest-first when that limit is exceeded.
 If receive refuses a durable control, it stays on disk and continues to count
 against control capacity until a later receive classifies it.
+Unreadable or invalid-JSON mailbox records also stay out of ordinary pruning and
+consume control capacity until they can be recovered or classified.
 
 The web UI reloads stored Hub notes when they arrive, including observed notes
 that do not wake the receiving agent.

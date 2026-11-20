@@ -351,6 +351,8 @@ there are TWO separate dedup systems:
     ordinary messages may be evicted when that limit is exceeded
     durable task assignments and task-cron controls are bounded by
     INBOX_MAX_CONTROLS and are never evicted before receive classification
+    unreadable or undecodable records are preserved as unknown controls and
+    consume control capacity until they can be recovered or classified
     when that control cap is full, the new write is rejected with explicit
     backpressure; the sender may retry after the receiver drains its mailbox
     admission is serialized per mailbox, and retrying an existing message ID
