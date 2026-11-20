@@ -521,6 +521,44 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertTrue(result.success, result.error)
         self.assertNotIn("private code marker", result.output)
 
+    def test_web_fetch_filters_closed_blocks_with_block_children(self):
+        """Closed pre/code blocks are omitted even when they contain block tags."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        html = (
+            "<p>intro words</p>"
+            "<pre><div>PRE_BLOCK_MARK</div></pre>"
+            "<code><div>CODE_BLOCK_MARK</div></code>"
+        )
+        text = ToolExecutor._extract_main_content(html)
+
+        self.assertIn("intro words", text)
+        self.assertNotIn("PRE_BLOCK_MARK", text)
+        self.assertNotIn("CODE_BLOCK_MARK", text)
+
+    def test_web_fetch_regex_fallback_filters_closed_blocks_with_block_children(self):
+        """The regex fallback removes closed pre/code blocks with block tags."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        real_import = builtins.__import__
+
+        def import_without_bs4(name, *args, **kwargs):
+            if name == "bs4" or name.startswith("bs4."):
+                raise ImportError("BeautifulSoup intentionally unavailable in this test")
+            return real_import(name, *args, **kwargs)
+
+        html = (
+            "<p>intro words</p>"
+            "<pre><div>PRE_BLOCK_MARK</div></pre>"
+            "<code><div>CODE_BLOCK_MARK</div></code>"
+        )
+        with patch("builtins.__import__", side_effect=import_without_bs4):
+            text = ToolExecutor._extract_main_content(html)
+
+        self.assertIn("intro words", text)
+        self.assertNotIn("PRE_BLOCK_MARK", text)
+        self.assertNotIn("CODE_BLOCK_MARK", text)
+
     def test_web_fetch_preserves_block_text_inside_malformed_code(self):
         """An unclosed code wrapper cannot hide following block content."""
         from kollabor_agent.tool_executor import ToolExecutor
