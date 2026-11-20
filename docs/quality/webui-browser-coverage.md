@@ -43,10 +43,12 @@ passed.
 The sidebar footer proof opens the mocked shell at 390px and 820px, checks all
 eight controls are at least 44x44 CSS pixels, and checks that the footer and
 page fit without horizontal overflow. At 1280px it checks that all eight
-controls stay inside the desktop row without horizontal overflow. It saves
+controls stay inside the desktop row without horizontal overflow at the default
+sidebar width and at the minimum saved sidebar width. It saves
 `sidebar-footer-touch-targets-390.png` and
 `sidebar-footer-touch-targets-820.png` and
-`sidebar-footer-touch-targets-1280.png`. Run it from the frontend directory with
+`sidebar-footer-touch-targets-1280.png` and
+`sidebar-footer-touch-targets-1280-sidebar-220.png`. Run it from the frontend directory with
 `node tests/sidebar-footer-touch-target-browser-acceptance.mjs <artifact-dir>`.
 
 CI prepares the artifact directory before build and test commands and uploads
