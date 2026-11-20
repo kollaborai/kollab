@@ -185,7 +185,7 @@ describe("daemon outdated notices", () => {
   it.each(["Terminal", "Code", "Git"])("shows the working stop-and-start instruction in %s for an unversioned agent", (panel) => {
     const html = renderToStaticMarkup(<DaemonNotice {...panelNoticeProps("", false)} />);
     expect(visibleText(html), panel).toContain(stopAndStart);
-    expect(html).toMatch(/<code class="[^\"]*whitespace-nowrap[^\"]*">kollab --hub stop lapis<\/code>/);
+    expect(html).toContain('<code class="whitespace-normal">kollab <span class="whitespace-nowrap">--hub</span> stop lapis</code>');
     expect(html).not.toContain("Retry");
   });
 
@@ -204,7 +204,7 @@ describe("daemon outdated notices", () => {
       <DaemonNotice notice={null} fallbackName="lapis" busy={false} onRestart={() => {}} />,
     );
     expect(visibleText(html)).toContain("This agent runs older code. Run kollab --hub stop lapis in a terminal");
-    expect(html).toMatch(/<code class="[^\"]*whitespace-nowrap[^\"]*">kollab --hub stop lapis<\/code>/);
+    expect(html).toContain('<code class="whitespace-normal">kollab <span class="whitespace-nowrap">--hub</span> stop lapis</code>');
   });
 
   it("the Terminal does not offer Retry for daemon_outdated", () => {
@@ -212,7 +212,7 @@ describe("daemon outdated notices", () => {
       <TerminalView sessionId="s1" workspace="/workspace" daemonNotice={panelNoticeProps("", false)} />,
     );
     expect(visibleText(html)).toContain(stopAndStart);
-    expect(html).toMatch(/<code class="[^\"]*whitespace-nowrap[^\"]*">kollab --hub stop lapis<\/code>/);
+    expect(html).toContain('<code class="whitespace-normal">kollab <span class="whitespace-nowrap">--hub</span> stop lapis</code>');
     expect(html).not.toMatch(/>Retry<\/button>/);
   });
 
