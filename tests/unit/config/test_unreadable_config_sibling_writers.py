@@ -20,6 +20,24 @@ def test_hub_off_preserves_malformed_global_config(tmp_path, monkeypatch):
     assert path.read_bytes() == original
 
 
+def test_hub_off_saves_valid_config_without_dropping_other_settings(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "global.json"
+    path.write_bytes(b'{"keep":{"value":1},"plugins":{"hub":{"enabled":true}}}')
+    monkeypatch.setattr(config_utils, "get_existing_global_config_path", lambda: path)
+    monkeypatch.setattr(cli, "_apply_hub_project_scope_from_config", lambda: None)
+
+    asyncio.run(cli._handle_cli_hub(["off"]))
+
+    output = capsys.readouterr()
+    assert json.loads(path.read_bytes()) == {
+        "keep": {"value": 1},
+        "plugins": {"hub": {"enabled": False}},
+    }
+    assert "hub disabled" in output.out.lower()
+
+
 def test_config_manager_refuses_to_replace_malformed_config(tmp_path):
     path = tmp_path / "config.json"
     original = b'{"api_key":"SYNTH_KEY_123",'
