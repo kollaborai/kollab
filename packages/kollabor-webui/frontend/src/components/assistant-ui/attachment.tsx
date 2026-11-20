@@ -269,7 +269,7 @@ export const UserMessageAttachments: FC = () => {
   );
 };
 
-const ComposerImageTokenSynchronizer: FC = () => {
+const ComposerImageTokenSynchronizer: FC<{ draftKey?: string | null }> = ({ draftKey }) => {
   const aui = useAui();
   const imageAttachmentKey = useAuiState(
     useShallow((s) =>
@@ -279,24 +279,22 @@ const ComposerImageTokenSynchronizer: FC = () => {
         .join("\u0000"),
     ),
   );
-  const composerText = useAuiState((s) => s.composer.text);
-
-  // Draft restoration can change text after the attachment list settles.
-  // Observe both; canonical text is unchanged by the synchronizer.
+  // Sync when the draft or attachment set changes. Text edits are user-owned;
+  // normalizing on each edit can erase newlines and typed token literals.
   useEffect(() => {
     const imageIds = imageAttachmentKey ? imageAttachmentKey.split("\u0000") : [];
     const text = aui.composer.getState().text;
     const nextText = synchronizeComposerImageTokens(text, imageIds.length);
     if (nextText !== text) aui.composer.setText(nextText);
-  }, [aui, composerText, imageAttachmentKey]);
+  }, [aui, draftKey, imageAttachmentKey]);
 
   return null;
 };
 
-export const ComposerAttachments: FC = () => {
+export const ComposerAttachments: FC<{ draftKey?: string | null }> = ({ draftKey }) => {
   return (
     <>
-      <ComposerImageTokenSynchronizer />
+      <ComposerImageTokenSynchronizer draftKey={draftKey} />
       <div className="aui-composer-attachments flex w-full flex-row items-center gap-2 overflow-x-auto empty:hidden">
         <ComposerPrimitive.Attachments>
           {() => <AttachmentUI />}

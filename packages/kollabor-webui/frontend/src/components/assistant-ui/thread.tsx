@@ -1106,7 +1106,7 @@ const Composer: FC<{
                 {orphanTokenNotice}
               </p>
             ) : null}
-            <ComposerAttachments />
+            <ComposerAttachments draftKey={draftKey} />
             {voiceAvailable && terminalVoice.on ? (
               <VoiceStatus activity={terminalVoice.activity} />
             ) : null}
