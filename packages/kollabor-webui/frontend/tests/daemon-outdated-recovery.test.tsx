@@ -210,7 +210,9 @@ describe("daemon_outdated from a Code descendant", () => {
 
     engine.deferTree = false;
     engine.succeedTree = true;
-    await codeFetch("/code/fs/tree", {}, { sessionId: "s1", root: "/w" });
+    await act(async () => {
+      await codeFetch("/code/fs/tree", {}, { sessionId: "s1", root: "/w" });
+    });
 
     expect(host.textContent).not.toContain(stopAndStart);
   });
