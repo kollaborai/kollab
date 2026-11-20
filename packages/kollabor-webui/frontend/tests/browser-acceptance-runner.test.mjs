@@ -204,6 +204,7 @@ test("the browser suite list is pinned and every suite script exists", () => {
     { name: "profile-copy", script: "tests/acceptance/profile-copy.browser.mjs" },
     { name: "gallery", script: "tests/gallery-browser-acceptance.mjs" },
     { name: "agent-sidebar", script: "tests/agent-sidebar-glyph-browser-acceptance.mjs" },
+    { name: "sidebar-footer", script: "tests/sidebar-footer-touch-target-browser-acceptance.mjs" },
     { name: "team-launch", script: "tests/team-launch-browser-acceptance.mjs" },
     { name: "remote-chat-lifecycle", script: "tests/remote-chat-lifecycle-browser-acceptance.mjs" },
     { name: "setup-guide", script: "tests/setup-guide-browser-acceptance.mjs" },
