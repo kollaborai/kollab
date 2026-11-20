@@ -7,6 +7,7 @@ check; only running the command does.
 
 import json
 import re
+import sys
 import time
 import uuid
 
@@ -555,7 +556,13 @@ async def test_job_liveness_does_not_count_a_zombie():
 
 @pytest.mark.parametrize("mode", ["close", "idle", "shutdown"])
 @pytest.mark.parametrize("delay", [0.0, 0.01, 0.04, 0.06])
-@pytest.mark.parametrize("close_fds", [False, True])
+@pytest.mark.parametrize("close_fds", [
+    False,
+    pytest.param(True, marks=pytest.mark.skipif(
+        sys.platform == "darwin",
+        reason="macOS cannot guarantee discovery after a job detaches and closes every inherited PTY descriptor",
+    )),
+])
 async def test_teardown_stops_fast_detached_descendant(tmp_path, mode, delay, close_fds):
     import asyncio
     import contextlib

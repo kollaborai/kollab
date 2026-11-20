@@ -622,33 +622,13 @@ def env_report(settings: CodeSettings = DEFAULTS) -> dict[str, Any]:
 # deadlock before exec). os.login_tty makes the PTY (fd 0) the controlling terminal, so Ctrl-C reaches the shell's
 # foreground job. Python ignores SIGPIPE and SIGXFSZ and exec keeps ignored signals, so both are reset first.
 # -I ignores PYTHON* variables and never puts the working directory on sys.path.
-# Keep a PTY handle outside ordinary descriptor cleanup so Darwin scans can still identify detached jobs.
-_DARWIN_PTY_TRACK_FD = 256
+# Inherited descriptors cannot establish ownership: a detached job can close any of them. Leave the shell's
+# descriptor table and resource limits alone; Darwin discovery remains bounded by the evidence it can inspect.
 _SHELL_LAUNCHER = (
     "import os, signal, sys\n"
     "os.login_tty(0)\n"
     "signal.signal(signal.SIGPIPE, signal.SIG_DFL)\n"
     "signal.signal(signal.SIGXFSZ, signal.SIG_DFL)\n"
-    "if sys.platform == 'darwin':\n"
-    "    import resource\n"
-    f"    pty_fd = {_DARWIN_PTY_TRACK_FD}\n"
-    "    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)\n"
-    "    if soft != resource.RLIM_INFINITY and soft <= pty_fd:\n"
-    "        if hard == resource.RLIM_INFINITY or hard > pty_fd:\n"
-    "            try:\n"
-    "                resource.setrlimit(resource.RLIMIT_NOFILE, (pty_fd + 1, hard))\n"
-    "            except (OSError, ValueError):\n"
-    "                pass\n"
-    "        soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)\n"
-    "    warning = (b'Kollab: terminal process tracking is limited by the file descriptor limit; '\n"
-    "               b'detached jobs may survive terminal close.\\n')\n"
-    "    if soft == resource.RLIM_INFINITY or soft > pty_fd:\n"
-    "        try:\n"
-    "            os.dup2(0, pty_fd, inheritable=True)\n"
-    "        except OSError:\n"
-    "            os.write(2, warning)\n"
-    "    else:\n"
-    "        os.write(2, warning)\n"
     "os.execv(sys.argv[1], [sys.argv[1]] + sys.argv[2:])\n"
 )
 

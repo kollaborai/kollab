@@ -54,10 +54,11 @@ Mentiko's request and response shapes are kept, so its callers port unchanged.
   (default 10) after its last link detaches; a reconnecting client resumes it with the `sessionId` from `ready`.
   Closing, idle reaping, or daemon shutdown signals terminal jobs and escalates survivors after a bounded grace period.
   On Linux, a per-terminal subreaper owns and reaps descendants even when they detach. On macOS, captured descendants
-  and processes holding the terminal slave are tracked by process identity. When the file limit permits, the launcher
-  keeps an inheritable slave descriptor at fd 256 so closing descriptors 0 through 255 does not break discovery. A job
-  that also closes fd 256, or runs where it cannot be reserved, can still escape. Process inspection permissions are
-  required to discover macOS jobs.
+  and processes holding the terminal slave are tracked by process identity; a job that detaches and closes all PTY
+  descriptors between scans can escape. Reserving an inherited descriptor cannot guarantee ownership because a job
+  can close it too. The launcher reserves no extra descriptor and preserves inherited file-descriptor limits.
+  Process inspection permissions are required to discover macOS jobs. Guaranteed teardown of macOS jobs that lose
+  both ancestry and PTY evidence is outside this contract and remains unresolved in #1025.
   Teardown waits are bounded; if inspection or reaping times out, jobs can survive and the daemon logs a warning.
   `enabled` refuses every call, `terminal.enabled` opens no shells, `read_only` refuses terminal input
   (`code-shell-settings.md`).
