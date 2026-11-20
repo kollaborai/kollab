@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
 import sys
-
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INBOX_TEST = REPO_ROOT / "tests" / "unit" / "test_hub_durable_inbox.py"
