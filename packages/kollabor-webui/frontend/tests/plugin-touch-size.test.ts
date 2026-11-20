@@ -7,7 +7,17 @@ import { describe, expect, it } from "vitest";
 const css = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/styles.css"), "utf8");
 const block = /@media \(pointer: coarse\) \{\s*(\[data-plugin\][^{]+)\{\s*min-height: 44px;/.exec(css);
 
+const escapeRegexText = (text: string): string => text.replace(/[[\]"]/g, "\\$&");
+
 describe("touch size inside [data-plugin]", () => {
+  it("escapes backslashes before adding selector text to a regex", () => {
+    const selector = "[data\\plugin]";
+    const pattern = new RegExp(`^${escapeRegexText(selector)}$`);
+
+    expect(pattern.test(selector)).toBe(true);
+    expect(pattern.test("[dataplugin]")).toBe(false);
+  });
+
   it("covers buttons, tabs, links, selects and text fields", () => {
     expect(block, "the coarse-pointer [data-plugin] rule").not.toBeNull();
     for (const control of ["button", '[role="button"]', '[role="tab"]', "a[href]", "select", "input", "textarea"])
