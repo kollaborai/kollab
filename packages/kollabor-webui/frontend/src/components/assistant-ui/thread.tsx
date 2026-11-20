@@ -555,6 +555,10 @@ const Composer: FC<{
   const [orphanTokenNotice, setOrphanTokenNotice] = useState<string | null>(
     null,
   );
+  const [draftRestoreSnapshot, setDraftRestoreSnapshot] = useState<{
+    key: string | null;
+    text: string;
+  } | null>(null);
   const restoredDraft = useRef<{ key: string | null; text: string } | null>(null);
   const lastRestoredDraftKey = useRef<string | null | undefined>(undefined);
   const skipEmptyDraftPersist = useRef(false);
@@ -569,7 +573,9 @@ const Composer: FC<{
     if (lastRestoredDraftKey.current === key) return;
     // Token lines belong to attachments, and attachments do not live in the
     // text draft. Strip them first, then restore what the same tab kept.
-    const restored = stripImageTokens(loadComposerDraft(key) ?? "");
+    const draftText = loadComposerDraft(key) ?? "";
+    const restored = stripImageTokens(draftText);
+    setDraftRestoreSnapshot({ key, text: draftText });
     restoredDraft.current = { key, text: restored.text };
     skipEmptyDraftPersist.current = false;
     if (aui.composer.getState().text !== restored.text) {
@@ -1106,7 +1112,7 @@ const Composer: FC<{
                 {orphanTokenNotice}
               </p>
             ) : null}
-            <ComposerAttachments draftKey={draftKey} />
+            <ComposerAttachments draftRestoreSnapshot={draftRestoreSnapshot} />
             {voiceAvailable && terminalVoice.on ? (
               <VoiceStatus activity={terminalVoice.activity} />
             ) : null}

@@ -3,6 +3,7 @@
 import {
   type PropsWithChildren,
   useEffect,
+  useRef,
   useState,
   type FC,
 } from "react";
@@ -269,7 +270,9 @@ export const UserMessageAttachments: FC = () => {
   );
 };
 
-const ComposerImageTokenSynchronizer: FC<{ draftKey?: string | null }> = ({ draftKey }) => {
+const ComposerImageTokenSynchronizer: FC<{
+  draftRestoreSnapshot: { key: string | null; text: string } | null;
+}> = ({ draftRestoreSnapshot }) => {
   const aui = useAui();
   const imageAttachmentKey = useAuiState(
     useShallow((s) =>
@@ -279,22 +282,46 @@ const ComposerImageTokenSynchronizer: FC<{ draftKey?: string | null }> = ({ draf
         .join("\u0000"),
     ),
   );
-  // Sync when the draft or attachment set changes. Text edits are user-owned;
-  // normalizing on each edit can erase newlines and typed token literals.
+  const composerText = useAuiState((s) => s.composer.text);
+  const previousImageAttachmentKey = useRef(imageAttachmentKey);
+  const lastRestoredDraft = useRef<{ key: string | null; text: string } | null>(null);
+
+  // Attachment changes own token changes; ordinary text edits do not.
   useEffect(() => {
+    if (previousImageAttachmentKey.current === imageAttachmentKey) return;
+    previousImageAttachmentKey.current = imageAttachmentKey;
     const imageIds = imageAttachmentKey ? imageAttachmentKey.split("\u0000") : [];
     const text = aui.composer.getState().text;
     const nextText = synchronizeComposerImageTokens(text, imageIds.length);
     if (nextText !== text) aui.composer.setText(nextText);
-  }, [aui, draftKey, imageAttachmentKey]);
+  }, [aui, imageAttachmentKey]);
+
+  // The runtime can publish its own restored copy after the parent stripped
+  // stale tokens. Only normalize that exact saved snapshot, once per draft.
+  useEffect(() => {
+    if (!draftRestoreSnapshot || composerText !== draftRestoreSnapshot.text) return;
+    if (
+      lastRestoredDraft.current?.key === draftRestoreSnapshot.key &&
+      lastRestoredDraft.current.text === draftRestoreSnapshot.text
+    ) {
+      return;
+    }
+    lastRestoredDraft.current = draftRestoreSnapshot;
+    const imageIds = imageAttachmentKey ? imageAttachmentKey.split("\u0000") : [];
+    const text = aui.composer.getState().text;
+    const nextText = synchronizeComposerImageTokens(text, imageIds.length);
+    if (nextText !== text) aui.composer.setText(nextText);
+  }, [aui, composerText, draftRestoreSnapshot, imageAttachmentKey]);
 
   return null;
 };
 
-export const ComposerAttachments: FC<{ draftKey?: string | null }> = ({ draftKey }) => {
+export const ComposerAttachments: FC<{
+  draftRestoreSnapshot: { key: string | null; text: string } | null;
+}> = ({ draftRestoreSnapshot }) => {
   return (
     <>
-      <ComposerImageTokenSynchronizer draftKey={draftKey} />
+      <ComposerImageTokenSynchronizer draftRestoreSnapshot={draftRestoreSnapshot} />
       <div className="aui-composer-attachments flex w-full flex-row items-center gap-2 overflow-x-auto empty:hidden">
         <ComposerPrimitive.Attachments>
           {() => <AttachmentUI />}
