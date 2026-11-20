@@ -263,6 +263,12 @@ and works for oauth profiles like `openai-oauth` (phase 4.5 fix).
 log example when persisted profile is activated:
   Activated persisted profile: openai-oauth
 
+### Removing a saved profile
+
+If Kollab cannot write the config change while deleting a saved profile, deletion
+fails and the profile remains registered. Resolve the config write problem before
+retrying so the in-memory profile list stays aligned with the saved config.
+
 ## OpenAI OAuth
 
 Use your ChatGPT Plus/Pro subscription without an API key:
@@ -322,6 +328,8 @@ Use `/llm` to switch without restarting:
 ```
 
 Profile switch takes effect immediately for the next message.
+An OAuth refresh already in progress stays bound to the profile that started
+it, so a later switch keeps its own API key and account headers.
 
 ## Complete Example: Three Profiles
 
@@ -408,6 +416,17 @@ kollab --llm openai-auto --save --local
 ## Configuration Structure
 
 Profiles are stored in `config.json`:
+
+To remove a provider and its saved profiles, open `/llm`, select any model in
+that provider's section, and press `d` twice. The first press names the
+profiles and loadouts that use them; any other key cancels. The same provider
+removal action is available in web Settings → Loadouts. Removal deletes profile
+definitions from the global or folder config files that define them and clears
+`active_profile` when it selected one of those profiles. Saved keys are
+retained because another project's config may reference the same key. To avoid
+partial removal if a later config write fails, the operation refuses to proceed
+when it would need to update more than one config file; in that case, no profile
+definitions or active selections are changed.
 
 ```json
 {

@@ -155,6 +155,8 @@ These guards apply to both the basic and forked strategies:
   summarization still fails, roll the old prefix into a deterministic recovery
   summary while preserving the system message, complete tool-call groups,
   recent turns, and at most 24 active-task excerpts of 4,000 characters each.
+  Previously saved excerpts without the current metadata marker are recognized
+  by their legacy prefix, and their obsolete summary suffix is removed before reuse.
   If even that cannot fit, cancel the tool/request with a visible recovery
   action instead of sending an oversized prompt. The 8,000-character limit
   includes the complete injected recovery message and its framing. The latest
@@ -163,6 +165,12 @@ These guards apply to both the basic and forked strategies:
   An untracked hub request is eligible as human intent only when direct-scope
   recipient metadata names this agent. Raw hub task assignments with IDs are
   excluded; active work is represented by TaskLedger-selected excerpts above.
+  Oversized active assignments retain bounded beginning, middle, and ending
+  text. The excerpt says when text is omitted and immediately directs the agent
+  to ask its assigner to resend the missing instructions with the `hub_msg` tool.
+  If no reply is available, the agent must stop instead of guessing.
+  The recovery summary reports how many live-task messages the 24-message cap
+  omitted.
 - `max_session_turns` is a visible/logged warning, not an automatic stop. Its
   default is `0` (disabled); a positive configured value enables the warning.
   Turn count and start time persist with session stats, restore on resume, and
@@ -225,6 +233,10 @@ Unit:
 - failed forced compaction retries and then rolls over with a recovery summary
 - 180 live tasks across 3 rounds remain bounded to 24 excerpts of 4,000
   characters
+- emergency rollover preserves beginning, middle, and ending canaries from an
+  oversized active assignment across repeated rollover and persisted reload
+- omitted assignment text directs the agent to ask its assigner through
+  `hub_msg`, and requires it to stop if no reply is available
 - the compacted task prompt estimate stays below 272K
 - summarization-model precedence and per-agent model/duration log fields
 
