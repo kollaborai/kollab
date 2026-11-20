@@ -3157,9 +3157,10 @@ class ToolExecutor:
     async def _execute_web_fetch(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
         """Fetch a URL and return cleaned text content.
 
-        Uses aiohttp with a 30-second timeout. Content extraction follows
-        a priority chain: JSON-LD → meta tags → semantic HTML5 → readability
-        heuristic. If the extracted text is suspiciously sparse (<500 chars
+        Uses aiohttp with a 30-second timeout. Content extraction prioritizes
+        JSON-LD article bodies, semantic HTML5, and readability. JSON-LD
+        descriptions supplement the result only when longer than page text.
+        If the extracted text is suspiciously sparse (<500 chars
         from a 200 OK), retries with Playwright headless browser (if installed)
         to handle JS-rendered pages.
 
@@ -3401,13 +3402,14 @@ class ToolExecutor:
         """Extract main content from HTML using a priority chain.
 
         Priority order:
-        1. JSON-LD structured data (articleBody / description)
+        1. JSON-LD articleBody
         2. Semantic HTML5 (<article>, <main>, <section>)
         3. Readability heuristic (highest text-to-tag ratio element)
-        4. Fallback: strip non-content tags, extract remaining text
+        4. Longer JSON-LD description, then stripped page text
 
         Uses beautifulsoup4 with Python's built-in HTML parser. Falls back to
-        regex-based extraction if bs4 is not available.
+        regex-based extraction if bs4 is not available; that fallback cannot
+        inspect JSON-LD before stripping scripts.
         """
         try:
             from bs4 import BeautifulSoup
@@ -3418,9 +3420,9 @@ class ToolExecutor:
 
         if extract_main:
             # JSON-LD lives in script tags, so read it before removing scripts.
-            text = ToolExecutor._extract_json_ld(soup)
-            if text and len(text) > 100:
-                return text
+            article_body, description = ToolExecutor._extract_json_ld(soup)
+            if len(article_body) > 200:
+                return article_body
 
         # Remove non-content elements entirely
         for tag in soup.find_all(["script", "style", "nav", "footer",
@@ -3460,12 +3462,19 @@ class ToolExecutor:
             if text and len(text) > 200:
                 return text
 
-        # Priority 4: Fallback — extract all remaining text
-        return ToolExecutor._soup_to_text(soup)
+        # Prefer shorter structured candidates only when they add more than
+        # the semantic, readability, and plain-text fallbacks already found.
+        text = ToolExecutor._soup_to_text(soup)
+        if extract_main:
+            if len(article_body) > len(text):
+                return article_body
+            if len(description) > len(text):
+                return description
+        return text
 
     @staticmethod
-    def _extract_json_ld(soup) -> str:
-        """Extract articleBody or description from JSON-LD script tags."""
+    def _extract_json_ld(soup) -> tuple[str, str]:
+        """Return the longest articleBody and description from JSON-LD tags."""
         import json
 
         article_body = ""
@@ -3486,18 +3495,21 @@ class ToolExecutor:
                         # Collapse whitespace
                         lines = [ln.strip() for ln in body.split("\n") if ln.strip()]
                         normalized_body = "\n".join(lines)
-                        if len(normalized_body) > 200:
-                            return normalized_body
-                        if not article_body and len(normalized_body) > 100:
+                        if len(normalized_body) > len(article_body) and len(normalized_body) > 100:
                             article_body = normalized_body
-                    # Keep the first usable description, but inspect later
-                    # items first in case they contain the article body.
+                    # Keep the longest usable description while examining all
+                    # scripts for an article body.
                     desc = item.get("description")
-                    if not description and isinstance(desc, str) and len(desc.strip()) > 100:
-                        description = desc.strip()
+                    if isinstance(desc, str):
+                        normalized_description = desc.strip()
+                        if (
+                            len(normalized_description) > len(description)
+                            and len(normalized_description) > 100
+                        ):
+                            description = normalized_description
             except (json.JSONDecodeError, TypeError):
                 continue
-        return article_body or description
+        return article_body, description
 
     @staticmethod
     def _readability_extract(soup) -> str:
