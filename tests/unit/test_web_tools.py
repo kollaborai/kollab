@@ -557,6 +557,23 @@ class TestWebFetchExecution(unittest.TestCase):
                     text = ToolExecutor._extract_main_content(html)
                 self.assertNotIn("private script marker", text)
 
+    def test_web_fetch_regex_fallback_keeps_text_after_unclosed_nav(self):
+        """An unclosed navigation tag cannot erase the rest of the page."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        real_import = builtins.__import__
+
+        def import_without_bs4(name, *args, **kwargs):
+            if name == "bs4" or name.startswith("bs4."):
+                raise ImportError("BeautifulSoup intentionally unavailable in this test")
+            return real_import(name, *args, **kwargs)
+
+        html = "<nav>menu</nav><nav>broken<p>visible article text</p>"
+        with patch("builtins.__import__", side_effect=import_without_bs4):
+            text = ToolExecutor._extract_main_content(html)
+
+        self.assertIn("visible article text", text)
+
     def test_web_fetch_truncation(self):
         """Test that max_chars limit truncates output."""
         long_text = "A" * 50000
