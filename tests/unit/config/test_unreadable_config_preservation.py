@@ -11,6 +11,7 @@ import pytest
 
 from kollabor.panels.config import ConfigPanel
 from kollabor_config import loader as loader_module
+from kollabor_config import service as service_module
 from kollabor_config.config_utils import get_global_config_path
 from kollabor_config.loader import ConfigLoader, load_layered_user_config
 from kollabor_config.manager import ConfigManager
@@ -56,6 +57,12 @@ def _explicit_loader(path: Path) -> ConfigLoader:
 
 def _patch_standard_save_paths(paths, monkeypatch):
     monkeypatch.setattr(loader_module, "get_global_config_path", lambda: paths["global"])
+    monkeypatch.setattr(
+        service_module, "get_global_config_path", lambda: paths["global"]
+    )
+    monkeypatch.setattr(
+        service_module, "get_local_config_path", lambda: paths["local"]
+    )
     monkeypatch.setattr(
         loader_module,
         "get_global_config_path_candidates",
