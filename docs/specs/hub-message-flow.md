@@ -341,7 +341,10 @@ there are TWO separate dedup systems:
     path: ~/.kollab/hub/messages/<agent_id>/
     atomic file write (timestamp-uuid.json)
     polled every 5 seconds by _mailbox_loop
-    consumed (deleted) after read
+    ordinary messages are consumed after read
+    durable task controls stay on disk and count against capacity until
+    normal receive classification succeeds; a refusal leaves the control
+    queued for the next poll
 
   mailbox admission:
     ordinary messages are bounded independently by INBOX_MAX_SIZE; oldest

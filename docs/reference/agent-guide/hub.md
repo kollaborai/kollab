@@ -123,6 +123,8 @@ mailbox until receive classification. If its control capacity is full, Hub
 rejects the new control with a retryable delivery failure instead of deleting
 an earlier accepted control. Ordinary offline messages use a separate limit
 and may be evicted oldest-first when that limit is exceeded.
+If receive refuses a durable control, it stays on disk and continues to count
+against control capacity until a later receive classifies it.
 
 The web UI reloads stored Hub notes when they arrive, including observed notes
 that do not wake the receiving agent.

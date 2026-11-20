@@ -6996,6 +6996,7 @@ class HubPlugin(BasePlugin):
                     messages = AgentMessenger.read_mailboxes(
                         [self._identity.agent_id, self._identity.identity],
                         max_replay=self._mailbox_replay_cap(INBOX_MAX_REPLAY),
+                        retain_controls=True,
                     )
                     if messages:
                         await self._deliver_inbox_batch(messages)
@@ -7063,13 +7064,27 @@ class HubPlugin(BasePlugin):
                 await self._deliver_inbox_message(msg)
 
     async def _deliver_inbox_message(self, msg: HubMessage) -> None:
-        """Deliver one mailbox message; a refusal puts its file back (#581).
+        """Deliver one mailbox message and retain refused durable controls.
 
-        The mailbox read already deleted the file, so a message the ACP retry
-        queue refused would be lost here. It goes back for the next poll, and
-        the mailbox's own age and size limits still apply to it.
+        Ordinary messages are consumed on read and put back after a refusal.
+        Durable controls stay on disk until receive classification succeeds,
+        keeping their admission slot occupied while a refusal is retried.
         """
-        if await self._on_message_received(msg) is False and self._identity:
+        is_control = _is_durable_control(msg.to_dict())
+        if is_control and not getattr(self, "_accepting_messages", True):
+            return
+
+        accepted = await self._on_message_received(msg)
+        if is_control:
+            if accepted is False:
+                return
+            if self._identity:
+                AgentMessenger.acknowledge_mailbox_message(
+                    [self._identity.agent_id, self._identity.identity], msg
+                )
+            return
+
+        if accepted is False and self._identity:
             await AgentMessenger.send_to_file(self._identity.identity, msg)
 
     async def _inject_inbox_replay(self, messages: List[HubMessage]) -> None:
@@ -12522,9 +12537,26 @@ class HubPlugin(BasePlugin):
             )
             return [("mesh", decision.reason)]
         if decision.mode == "quarantine":
-            self._trace_delivery(message, "quarantined", detail=decision.reason)
-            await self._quarantine_hub_message(message, decision.reason)
-            return [("mesh", decision.reason)]
+            try:
+                await self._quarantine_hub_message(message, decision.reason)
+            except InboxCapacityError:
+                reason = f"{decision.reason}; quarantine mailbox capacity reached"
+            except InboxMessageIdConflictError:
+                reason = (
+                    f"{decision.reason}; quarantine message ID conflicts with "
+                    "existing content"
+                )
+            except OSError as exc:
+                reason = (
+                    f"{decision.reason}; quarantine mailbox write failed "
+                    f"({type(exc).__name__})"
+                )
+            else:
+                self._trace_delivery(message, "quarantined", detail=decision.reason)
+                return [("mesh", decision.reason)]
+
+            self._trace_delivery(message, "rejected", detail=reason)
+            return [("mesh", reason)]
         if decision.trace_level == "warning":
             logger.warning(
                 "Message from %s allowed with warning: %s",

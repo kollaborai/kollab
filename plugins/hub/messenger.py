@@ -3414,8 +3414,12 @@ class AgentMessenger:
         agent_id: str,
         max_replay: int = 0,
         restart_boundary: Optional[float] = None,
+        retain_controls: bool = False,
     ) -> List[HubMessage]:
-        """Read and consume messages from filesystem mailbox.
+        """Read messages from filesystem mailbox.
+
+        Ordinary messages are consumed after parsing. Set ``retain_controls``
+        to keep durable controls counted until receive classification.
 
         Args:
             agent_id: Agent identity or agent_id to read from.
@@ -3430,6 +3434,8 @@ class AgentMessenger:
                 clock-skew grace) are pre-reboot: they are dropped with a log
                 line and never delivered as current instructions, but durable
                 task controls are preserved for TaskLedger classification.
+            retain_controls: Keep parsed durable controls on disk until the
+                normal receive path classifies and acknowledges them.
         """
         msg_dir = get_messages_dir() / agent_id
         if not msg_dir.exists():
@@ -3491,11 +3497,15 @@ class AgentMessenger:
                     pass
                 continue
 
-            # Delete after successful parse
-            try:
-                f.unlink()
-            except Exception:
-                pass
+            # Ordinary messages are consumed after parsing. The live delivery
+            # path keeps controls counted until receive classification so a
+            # concurrent admission cannot take the slot needed by a refusal
+            # retry.
+            if not (retain_controls and is_control):
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
 
             # Issue #639: reconcile pre-restart messages against the boot
             # boundary. Ordinary chatter written by a previous process
@@ -3620,30 +3630,74 @@ class AgentMessenger:
         agent_keys: List[str],
         max_replay: int = 0,
         restart_boundary: Optional[float] = None,
+        retain_controls: bool = True,
     ) -> List[HubMessage]:
-        """Read and consume mailboxes for all durable addresses.
+        """Read mailboxes for all durable addresses.
 
         Agents get a fresh agent_id on restart, but their hub identity
         stays stable. Reading both prevents offline messages from being
-        stranded in the old session's mailbox.
+        stranded in the old session's mailbox. Ordinary messages are consumed
+        on read; durable controls remain counted until receive classification
+        acknowledges them.
 
         Args:
             agent_keys: List of agent_id and identity strings to drain.
             max_replay: Forwarded to read_mailbox — caps per-inbox replay.
             restart_boundary: Forwarded to read_mailbox — pre-reboot
                 reconciliation boundary (defaults to process boot).
+            retain_controls: Keep durable controls on disk until acknowledged.
         """
         messages: List[HubMessage] = []
         seen: set[str] = set()
         for key in dict.fromkeys(k for k in agent_keys if k):
             for msg in AgentMessenger.read_mailbox(
-                key, max_replay=max_replay, restart_boundary=restart_boundary
+                key,
+                max_replay=max_replay,
+                restart_boundary=restart_boundary,
+                retain_controls=retain_controls,
             ):
                 if msg.id in seen:
                     continue
                 seen.add(msg.id)
                 messages.append(msg)
         return sorted(messages, key=lambda msg: msg.timestamp)
+
+    @staticmethod
+    def acknowledge_mailbox_message(
+        agent_keys: List[str], message: HubMessage
+    ) -> int:
+        """Remove a durable control after the normal receive path classifies it."""
+        payload = message.to_dict()
+        message_id = payload.get("id")
+        if not message_id or not _is_durable_control(payload):
+            return 0
+
+        removed = 0
+        messages_dir = get_messages_dir()
+        for key in dict.fromkeys(agent_key for agent_key in agent_keys if agent_key):
+            mailbox_dir = messages_dir / key
+            if not mailbox_dir.is_dir():
+                continue
+            with locked_file(mailbox_dir / ".admission.lock", private=True):
+                for path in mailbox_dir.glob("*.json"):
+                    try:
+                        with path.open(encoding="utf-8") as stream:
+                            existing = json.load(stream)
+                    except (OSError, ValueError):
+                        continue
+                    if (
+                        not isinstance(existing, dict)
+                        or existing.get("id") != message_id
+                        or not _is_durable_control(existing)
+                        or not _same_durable_payload(existing, payload)
+                    ):
+                        continue
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        continue
+                    removed += 1
+        return removed
 
     @staticmethod
     def get_inbox_count(identity: str) -> int:
