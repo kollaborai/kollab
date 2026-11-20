@@ -801,10 +801,10 @@ Source inspection and scoped diffs are the evidence for this ledger. The
 - R8 source fixed: `c1b38e2f`; fallback scans earlier nonempty text segments.
 - R9 source fixed: `e69262da`, `4c457ee3`; retained PID/birth identities, descendant
   refresh during shutdown, bounded grace/termination and explicit survivor
-  errors; failed teardown owners remain reachable for retry. Capture of a child
-  born, detached and orphaned wholly between polling observations remains
-  unverified; this is not proof of complete
-  live process containment.
+  errors; failed teardown owners remain reachable for retry. The #1044 follow-up
+  adds a per-run inherited marker with source tests for descendants that detach
+  and orphan before a tree sample. Process containment remains unverified for
+  children that remove the marker, change user identity or cannot be inspected.
 - #602: the orchestrator bounds a runner close at `RUNNER_CLOSE_TIMEOUT` (30 s). A close
   still running then is set aside: the orchestrator stops owning that runner so the
   transition releases and a successor can start, the close finishes on its own task, and
