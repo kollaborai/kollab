@@ -98,7 +98,7 @@ MAX_AGE_SECONDS = 24 * 60 * 60
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _DOMAIN = b"kollab-config-sync/1\0"
 _MAGIC = b"KCS1"
-_KINDS = frozenset({"core", "sync", "put"})
+_KINDS = frozenset({"core", "sync", "put", "schedules", "schedule_edit"})
 
 
 class ConfigSyncError(ValueError):
@@ -193,6 +193,9 @@ class Snapshot:
     files_digest: str
     skipped: int
     keep: tuple[tuple[str, ...], ...] = ()  # secrets the keyring would not give up
+    # The schedules part (#612): parsed rows of ~/.kollab/schedules.json.
+    schedules: tuple = ()
+    schedules_digest: str = ""
 
     def __repr__(self) -> str:
         return (
@@ -236,6 +239,30 @@ def core_blob(snapshot: Snapshot, primary_name: str) -> bytes:
             "primary_name": primary_name,
         }
     )
+
+
+def schedules_blob(rows) -> bytes:
+    """What a schedules push seals: the rows of schedules.json (#612)."""
+    return pack_json({"schedules": list(rows)})
+
+
+def _valid_schedule_rows(value: Any) -> list | None:
+    """The value as schedule rows, or None when any row is unusable.
+
+    Shared by the push apply (which skips broken rows) and the change request
+    (which refuses them): both ends parse with the same rules the timer uses.
+    """
+    from .schedules import ScheduleRow
+
+    if not isinstance(value, list):
+        return None
+    rows = []
+    for item in value:
+        try:
+            rows.append(ScheduleRow.from_dict(item).to_dict())
+        except (TypeError, ValueError):
+            return None
+    return rows
 
 
 def _read_object(path: Path) -> dict:
@@ -398,6 +425,8 @@ class SnapshotBuilder:
         self._resolved: dict[str, str] = {}
         self._core_signature: tuple | None = None
         self._core: tuple[dict, dict, tuple] = ({}, {}, ())
+        self._schedules_signature: tuple | None = None
+        self._schedules_cache: list = []
         self._missing: set[str] = set()  # keyring names the last pass could not read
         self._retry: set[str] | None = None  # the names the next pass reads again
 
@@ -416,13 +445,53 @@ class SnapshotBuilder:
     def build(self) -> Snapshot:
         config, mcp, keep = self._core_parts()
         files, skipped = _fit_manifest(*self._scan_files())
+        schedules = self._schedules_rows()
         files_digest = hashlib.sha256(_canonical_json(manifest_rows(files))).hexdigest()
         digest = hashlib.sha256(
             _canonical_json(
-                {"config": config, "mcp": mcp, "keep": keep, "files": files_digest}
+                {
+                    "config": config,
+                    "mcp": mcp,
+                    "keep": keep,
+                    "files": files_digest,
+                    "schedules": schedules,
+                }
             )
         ).hexdigest()
-        return Snapshot(config, mcp, tuple(files), digest, files_digest, skipped, keep)
+        return Snapshot(
+            config,
+            mcp,
+            tuple(files),
+            digest,
+            files_digest,
+            skipped,
+            keep,
+            tuple(schedules),
+            hashlib.sha256(_canonical_json(schedules)).hexdigest(),
+        )
+
+    def _schedules_rows(self) -> list:
+        """The parsed rows of ``schedules.json``; [] when absent, cached by stat.
+
+        A file damaged mid-write keeps the last good rows: sending nothing is
+        the safe answer, an empty list would erase every device's schedules.
+        """
+        path = kollab_root(self._root) / "schedules.json"
+        signature = _stat_signature(path)
+        if signature == self._schedules_signature:
+            return self._schedules_cache
+        rows: list = []
+        if signature is not None:
+            try:
+                parsed = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                parsed = None
+            if isinstance(parsed, list):
+                rows = [
+                    dict(item) for item in parsed if isinstance(item, dict)
+                ]
+        self._schedules_signature, self._schedules_cache = signature, rows
+        return rows
 
     def _core_parts(self) -> tuple[dict, dict, tuple]:
         config_path = kollab_root(self._root) / "config.json"
@@ -776,6 +845,8 @@ class Applied:
     config_changed: bool = False
     profiles_changed: bool = False
     mcp_changed: bool = False
+    schedules_changed: bool = False
+    mcp_touched: bool = False  # this apply judged MCP servers (skipped_mcp means something)
     skipped_mcp: tuple[str, ...] = ()  # enabled servers whose command is not installed here
 
 
@@ -1155,6 +1226,7 @@ class Receiver:
                     merged[name] = copy.deepcopy(server)
         # a server the primary switched off is skipped all the same, but nothing missed
         applied.skipped_mcp = tuple(sorted(n for n in skipped if servers[n].get("enabled", True)))
+        applied.mcp_touched = True
         if merged != existing:
             settings["servers"] = merged
             _write_json(base, MCP_PARTS, settings)
@@ -1250,6 +1322,87 @@ class Receiver:
             return {"ok": written}
         except ConfigSyncError as error:
             return {"error": error.code, **error.extra}
+
+    def schedules(self, sealed: bytes, *, primary_key: str) -> tuple[dict, Applied | None]:
+        """Apply the primary's schedules.json rows (#612, stage 3).
+
+        Broken rows are skipped and counted, not fatal: one bad row on the
+        primary must not keep every device from receiving the rest.
+        """
+        try:
+            body, blob, revision = open_sealed(
+                sealed,
+                recipient_key=self._key,
+                issuer_public_key=bytes.fromhex(primary_key),
+                kind="schedules",
+            )
+            digest = body.get("digest")
+            if not isinstance(digest, str) or not _SHA.fullmatch(digest):
+                raise ConfigSyncError("invalid")
+            record = read_managed_config(record_path(self._root))
+            self._check(
+                record,
+                primary_key,
+                revision,
+                digest,
+                None if record else read_join_floor(self._root),
+            )
+            value = unpack_json(blob, limit=MAX_CORE_BYTES)
+            rows = value.get("schedules") if isinstance(value, dict) else None
+            if not isinstance(rows, list):
+                raise ConfigSyncError("invalid")
+            from .schedules import ScheduleRow
+
+            clean: list = []
+            for item in rows:
+                try:
+                    clean.append(ScheduleRow.from_dict(item).to_dict())
+                except (TypeError, ValueError):
+                    continue
+            return (
+                {"ok": True, "skipped": len(rows) - len(clean)},
+                self._write_schedules(clean),
+            )
+        except ConfigSyncError as error:
+            return {"error": error.code, **error.extra}, None
+
+    def schedule_edit(self, sealed: bytes, *, issuer_key: str) -> tuple[dict, Applied | None]:
+        """Apply a secondary's change request on the primary (#612, stage 3).
+
+        The whole list arrives signed by the editing device; the primary is
+        the only writer, so it takes the rows as-is (any unusable row refuses
+        the request -- a half-applied edit would silently drop schedules) and
+        the normal push carries the result to every device.
+        """
+        try:
+            _body, blob, _revision = open_sealed(
+                sealed,
+                recipient_key=self._key,
+                issuer_public_key=bytes.fromhex(issuer_key),
+                kind="schedule_edit",
+            )
+            value = unpack_json(blob, limit=MAX_CORE_BYTES)
+            rows = value.get("schedules") if isinstance(value, dict) else None
+            rows = _valid_schedule_rows(rows)
+            if rows is None:
+                raise ConfigSyncError("invalid")
+            return {"ok": True}, self._write_schedules(rows)
+        except ConfigSyncError as error:
+            return {"error": error.code, **error.extra}, None
+
+    def _write_schedules(self, rows: list) -> Applied | None:
+        """Write the rows when they differ; Applied tells the app to wake."""
+        from .schedules import ScheduleRow, ScheduleStore
+
+        path = kollab_root(self._root) / "schedules.json"
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            current = None
+        if current == rows:
+            return None
+        ScheduleStore(path).save([ScheduleRow.from_dict(r) for r in rows])
+        return Applied(schedules_changed=True)
 
     def _finish(
         self,

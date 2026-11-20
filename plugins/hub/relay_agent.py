@@ -3324,6 +3324,12 @@ class RelayAgentBridge:
         config = getattr(self.plugin, "config", None)
         if applied.config_changed and hasattr(config, "reload"):
             config.reload()
+        if applied.schedules_changed:
+            # The schedules file changed under the sleeping grid timer: wake
+            # it so the next due time is recomputed at once (#612).
+            timer = getattr(self.plugin, "_schedule_timer", None)
+            if timer is not None:
+                timer.wake()
         bus = self.plugin.event_bus
         state_service = bus.get_service("state_service") if bus else None
         if state_service is None:

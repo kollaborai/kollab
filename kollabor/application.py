@@ -1543,6 +1543,38 @@ class TerminalLLMChat:
             message, source=UserInputSource.CLI_INITIAL
         )
 
+    async def _exit_after_turn_settles(
+        self, turn_grace_seconds: float = 120.0
+    ) -> None:
+        """Exit the app once the initial turn is done (schedule run instance).
+
+        Watches ``is_processing`` flip up (the run started) and back down
+        (the run finished), then ends the main loop the ordinary way. A turn
+        that never starts within the grace period also exits: the run cannot
+        do more here (a provider failure says so on its own channel).
+        """
+        deadline = time.monotonic() + turn_grace_seconds
+        started = False
+        while self.running:
+            busy = bool(getattr(self.llm_service, "is_processing", False))
+            if busy:
+                started = True
+            elif started:
+                logger.info(
+                    "initial turn settled; exiting (schedule run instance)"
+                )
+                self.running = False
+                return
+            elif time.monotonic() >= deadline:
+                logger.warning(
+                    "initial turn never started within %.0fs; exiting "
+                    "(schedule run instance)",
+                    turn_grace_seconds,
+                )
+                self.running = False
+                return
+            await asyncio.sleep(1.0)
+
     def _get_startup_status(self) -> tuple[str, str]:
         error = getattr(self, "_startup_error", "")
         if error:
@@ -1848,6 +1880,14 @@ class TerminalLLMChat:
                 logger.info(f"Sending initial message: {initial_message[:50]}...")
                 await asyncio.sleep(0.1)
                 await self._submit_cli_initial_message(initial_message)
+                if os.environ.get("KOLLAB_EXIT_AFTER_INITIAL_TURN") == "1":
+                    # A schedule's run instance (hub schedule_delivery,
+                    # when_busy=new_instance): this process exists only for
+                    # this run, so it leaves once the turn settles.
+                    self.create_background_task(
+                        self._exit_after_turn_settles(),
+                        "schedule_run_exit",
+                    )
 
         except asyncio.CancelledError:
             self._startup_error = "Startup cancelled"

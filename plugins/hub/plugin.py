@@ -81,7 +81,13 @@ from .models import (
 from .notifier import HubNotifier, NtfyNotifier, load_ntfy_settings
 from .nudge_engine import NudgeEngine
 from .presence import PresenceManager, get_messages_dir, pid_alive, wait_until_socket_answers
-from .recurring_jobs import RecurringJobs, default_job_config
+from .recurring_jobs import (
+    SEND_TIMEOUT_SECONDS as SCHEDULE_SEND_TIMEOUT_SECONDS,
+)
+from .recurring_jobs import (
+    RecurringJobs,
+    default_job_config,
+)
 from .rosters import (
     DEFAULT_ROSTER,
     attach_persona_skills,
@@ -93,6 +99,7 @@ from .rosters import (
     roster_personas,
     split_ref,
 )
+from .schedules import RunLog, ScheduleStore, ScheduleTimer
 from .scratchpad import Scratchpad
 from .session_state import SessionState, SessionStateError, SessionStateManager
 from .startup_messages import HUB_NEW_FEATURES, choose_startup_tip
@@ -734,6 +741,10 @@ class HubPlugin(BasePlugin):
         self._bridge_polling: bool = False
         self._hub_cron_jobs: List[HubCronJob] = []
         self._recurring_jobs: Optional[RecurringJobs] = None
+        # Persistent schedules (#612): the coordinator process runs the grid
+        # timer; agents never run schedule timers of their own.
+        self._schedule_timer: Optional["ScheduleTimer"] = None
+        self._schedule_timer_task: Optional[asyncio.Task] = None
         self._recent_hub_msgs: Dict[str, float] = {}  # hash -> timestamp
         self._hub_wake_seen_ids: collections.OrderedDict[str, float] = (
             collections.OrderedDict()
@@ -6175,6 +6186,7 @@ class HubPlugin(BasePlugin):
                 on_connect_proxy=self._handle_connect_proxy,
                 on_acp_hub_status=self._handle_acp_hub_status,
                 on_acp_hub_call=self._handle_acp_hub_call,
+                on_cron_jobs=self._cron_jobs_payload,
                 socket_name=self._identity.identity,
             )
             self._socket_server._display_tap = self._display_tap  # type: ignore[assignment]
@@ -6619,6 +6631,7 @@ class HubPlugin(BasePlugin):
             # Start presence sweep (coordinator only — cleans dead agent
             # presence files across ALL project dirs every 5 minutes)
             if is_coordinator:
+                self._start_schedule_timer()
                 self._presence_sweep_task = asyncio.create_task(
                     self._presence_sweep_loop()
                 )
@@ -8129,6 +8142,128 @@ class HubPlugin(BasePlugin):
         job.last_error = ""
         logger.info(f"hub cron fired: {job.id}" f" -> {job.target}")
         return False
+
+    def _start_schedule_timer(self) -> None:
+        """Run the persistent schedules grid timer (coordinator only, #612).
+
+        Schedules live in ``~/.kollab/schedules.json`` and their fires are
+        recorded in ``~/.kollab/schedules-runs.jsonl``; the timer sleeps until
+        the next grid point (see schedules.py). Delivery (stage 2) starts a
+        stopped agent, queues behind a busy one or runs a second instance:
+        see schedule_delivery.py.
+        """
+        from kollabor_config.config_utils import get_config_directory
+
+        from .presence import get_hub_dir, live_agents_on_machine
+        from .schedule_delivery import (
+            ONLINE_TIMEOUT_SECONDS,
+            DeliveryProbes,
+            deliver,
+        )
+
+        def _local_record(name: str):
+            """The newest live agent ``name`` in THIS hub, or None.
+
+            live_agents_on_machine spans every project on the machine; a
+            same-named agent in another folder must not receive this
+            project's fire (or mask a start).
+            """
+            hub = get_hub_dir()
+            best = None
+            for hub_dir, record in live_agents_on_machine():
+                if hub_dir != hub or record.get("identity") != name:
+                    continue
+                started = record.get("started_at") or 0
+                if best is None or started > best.get("started_at", 0):
+                    best = record
+            return best
+
+        def find_socket(name: str):
+            record = _local_record(name)
+            socket = (record or {}).get("socket_path") or ""
+            return socket or None
+
+        def state_of(name: str) -> str:
+            return str((_local_record(name) or {}).get("state") or "idle")
+
+        def launch(spec) -> bool:
+            import subprocess
+
+            env = {**os.environ, **spec.env}
+            proc = subprocess.Popen(
+                spec.argv,
+                cwd=spec.cwd or None,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            logger.info(
+                "schedules: launched %s (pid %s, exit_after_turn=%s)",
+                spec.identity,
+                proc.pid,
+                spec.exit_after_turn,
+            )
+            deadline = time.monotonic() + ONLINE_TIMEOUT_SECONDS
+            while time.monotonic() < deadline:
+                if find_socket(spec.identity):
+                    return True
+                time.sleep(0.5)
+            return False
+
+        async def send(name: str, socket, content: str, metadata: dict) -> bool:
+            msg = HubMessage(
+                action="message",
+                from_agent=self._identity.agent_id if self._identity else "",
+                from_identity="schedule",
+                to=name,
+                content=content,
+                scope=MessageScope.DIRECT.value,
+                metadata=metadata,
+            )
+            try:
+                rejections = await self._route_message(msg)
+            except Exception as exc:
+                logger.warning(
+                    "schedules: send to %s failed (%s)", name, type(exc).__name__
+                )
+                return False
+            if rejections:
+                logger.warning(
+                    "schedules: send to %s refused: %s", name, rejections[0][1]
+                )
+                return False
+            return True
+
+        probes = DeliveryProbes(
+            find_socket=find_socket, state_of=state_of, launch=launch, send=send
+        )
+
+        async def fire(row, agent: str, due: float, now: float):
+            # A start can wait for the agent to come online, so the fire is
+            # bounded by the online timeout, not the plain send timeout. A
+            # delivery that never returns must not wedge the timer.
+            try:
+                return await asyncio.wait_for(
+                    deliver(row, agent, due, now, probes),
+                    ONLINE_TIMEOUT_SECONDS + 2 * SCHEDULE_SEND_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("schedules: %s delivery timed out", row.id)
+                return False, "delivery timed out"
+
+        root = get_config_directory()
+        self._schedule_timer = ScheduleTimer(
+            ScheduleStore(root / "schedules.json"),
+            RunLog(root / "schedules-runs.jsonl"),
+            fire,
+            device_name=lambda: self._relay_device_name() or "",
+        )
+        self._schedule_timer_task = asyncio.create_task(
+            self._schedule_timer.run()
+        )
+        logger.info("schedule timer started (coordinator)")
 
     async def _run_hub_jobs(self, now: Optional[float] = None) -> None:
         """Send the configured recurring hub jobs that are due (coordinator only).
@@ -15951,6 +16086,32 @@ class HubPlugin(BasePlugin):
         logger.info(f"hub cron cleared: {count} job(s) removed")
         return f"hub cron cleared: {count} job(s) removed"
 
+    def _cron_jobs_payload(self) -> List[Dict[str, Any]]:
+        """Cron jobs as plain dicts for the read-only socket view (#612).
+
+        Times are epoch seconds; the renderer formats them. Same data
+        `/hub cron list` shows, minus terminal formatting.
+        """
+        now = time.time()
+        jobs: List[Dict[str, Any]] = []
+        for job in self._hub_cron_jobs:
+            jobs.append(
+                {
+                    "id": job.id,
+                    "target": job.target,
+                    "message": job.message,
+                    "interval_seconds": job.interval_seconds,
+                    "interval": self._format_seconds(job.interval_seconds),
+                    "next_fire": job.next_fire,
+                    "next_in_seconds": max(0, job.next_fire - now),
+                    "recurring": job.recurring,
+                    "mode": "recurring" if job.recurring else "one-shot",
+                    "created_at": job.created_at,
+                    "last_error": job.last_error,
+                }
+            )
+        return jobs
+
     # -- Task commands --
 
     async def _handle_tasks_command(self, args: str) -> str:
@@ -18488,6 +18649,15 @@ class HubPlugin(BasePlugin):
             self._cron_task.cancel()
             try:
                 await self._cron_task
+            except asyncio.CancelledError:
+                pass
+
+        # Skeleton plugins (tests) skip __init__, so read defensively.
+        schedule_task = getattr(self, "_schedule_timer_task", None)
+        if schedule_task:
+            schedule_task.cancel()
+            try:
+                await schedule_task
             except asyncio.CancelledError:
                 pass
 

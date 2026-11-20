@@ -9,8 +9,9 @@ export type SettingsTab =
   | "network"
   | "phonelink"
   | "voice"
-  | "prompts";
-export type PanelTab = Exclude<SettingsTab, "session" | "phonelink">;
+  | "prompts"
+  | "cron";
+export type PanelTab = Exclude<SettingsTab, "session" | "phonelink" | "cron">;
 
 /** A step to run once the tab is ready: `/connect code`, `/connect knocks`. */
 export type PanelIntent = "new_code" | "knocks" | "halt";
@@ -51,6 +52,11 @@ export const SETTINGS_TABS: readonly {
     id: "prompts",
     label: "Prompts",
     scope: "Shared libraries and each role's picks, saved in ~/.kollab",
+  },
+  {
+    id: "cron",
+    label: "Cron Jobs",
+    scope: "Every live agent's scheduled hub jobs; read-only",
   },
 ];
 

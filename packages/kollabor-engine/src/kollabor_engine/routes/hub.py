@@ -7,6 +7,7 @@ agent unix sockets via HubBridge.
 All endpoints require bearer token auth (server-level middleware).
 """
 
+import asyncio
 import logging
 from typing import Any, Dict
 
@@ -199,3 +200,61 @@ async def hub_feed():
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/cron-jobs")
+async def list_cron_jobs(
+    refresh: bool = Query(False, description="Bypass cache, re-read presence"),
+    timeout: float = Query(3.0, gt=0, le=15),
+):
+    """Aggregate scheduled hub cron jobs across live agents (issue #612).
+
+    Read-only: every job stays owned by the agent process that scheduled
+    it; each live agent's unix socket answers a local-only `cron_jobs`
+    action. An agent that does not answer (offline, socket gone) is
+    reported separately and never blocks the others.
+    """
+    agents = _bridge.get_agents(use_cache=not refresh)
+    jobs: list = []
+    responded: list = []
+    unavailable: list = []
+    errors: dict = {}
+
+    # Ask everyone at once: each socket gets its own timeout budget, so a
+    # serialized loop would spend N x timeout on a dead roster.
+    replies = await asyncio.gather(
+        *[
+            _bridge.query_socket(
+                str(agent.get("agent_id") or ""), "cron_jobs", timeout=timeout
+            )
+            for agent in agents
+        ]
+    )
+    for agent, reply in zip(agents, replies):
+        identity = str(agent.get("identity") or agent.get("agent_id") or "")
+        if not isinstance(reply, dict) or reply.get("type") != "cron_jobs":
+            unavailable.append(identity)
+            # Surface the dispatcher's operator-gate rejection and any other
+            # framed refusal verbatim; transport failures have no frame.
+            if isinstance(reply, dict):
+                reason = reply.get("msg") or reply.get("error")
+                if reason:
+                    errors[identity] = str(reason)
+            continue
+        responded.append(identity)
+        # A cron_jobs frame whose callback failed still answers with `error`
+        # set; keep its rows but surface the failure too.
+        if reply.get("error"):
+            errors[identity] = str(reply["error"])
+        for job in reply.get("jobs") or []:
+            row = dict(job)
+            row["agent"] = identity
+            jobs.append(row)
+
+    return {
+        "jobs": jobs,
+        "count": len(jobs),
+        "agents_responded": responded,
+        "agents_unavailable": unavailable,
+        "agents_errors": errors,
+    }
