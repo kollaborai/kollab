@@ -152,6 +152,34 @@ def test_unparseable_release_version_is_unknown_and_not_cached(monkeypatch):
     assert app.state.update_check_config.values == {}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prerelease", ["false", None, 0])
+async def test_malformed_prerelease_flag_is_unknown_and_not_cached(
+    monkeypatch, prerelease
+):
+    config = _StoredConfig()
+
+    async def latest(self):
+        return {
+            "tag_name": "v999.0.0",
+            "name": "Stable release",
+            "html_url": "https://example.invalid/stable",
+            "prerelease": prerelease,
+        }
+
+    monkeypatch.setattr(VersionCheckService, "_fetch_latest_release", latest)
+
+    web_result = await VersionCheckService(config, __version__).check_status()
+
+    assert web_result.status == "failed"
+    assert config.values == {}
+
+    desktop_config = _StoredConfig()
+    desktop_service = VersionCheckService(desktop_config, __version__)
+    assert await desktop_service.check_for_updates() is None
+    assert desktop_config.values == {}
+
+
 def test_filtered_prerelease_is_a_successful_current_result(monkeypatch):
     async def latest(self):
         return {
