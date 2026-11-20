@@ -92,9 +92,11 @@ When you send a voice note on Telegram, the bridge downloads the
 audio file and transcribes it locally using OpenAI's whisper CLI.
 The audio and transcript stay in a private temporary directory. Cleanup removes
 it after transcription finishes and communication reaches EOF. After a timeout
-or cancellation, an escaped descendant that still holds stdout or stderr open
-keeps the directory on disk until that pipe closes; if it never closes, cleanup
-remains pending.
+or cancellation, the bridge also waits for descendants it observed while the
+transcriber was still running. A descendant keeps the directory on disk until it
+exits, even if it closed stdout and stderr. If a descendant never exits, cleanup
+remains pending. If the bridge cannot verify descendant status, it retains the
+directory and logs the cleanup failure.
 
 **Install whisper:**
 
