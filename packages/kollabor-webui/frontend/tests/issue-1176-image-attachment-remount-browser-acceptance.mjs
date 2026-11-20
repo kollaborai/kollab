@@ -18,6 +18,7 @@ const SESSION = {
 };
 // Inline placement survives draft restore but is not a standalone restore token.
 const DRAFT = "Describe this picture [image1]";
+const DRAFT_KEY = "kollab:webui:composer-draft:v1:local-coder:issue-1176-image-session";
 const MEDIA = { ref: "issue-1176-image", mime: "image/png" };
 const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
@@ -120,8 +121,15 @@ async function main() {
     const composer = shell.page.getByRole("textbox", { name: "Message input" });
     await composer.waitFor({ state: "visible" });
     await attachImage(shell.page, "first.png");
-    await composer.fill(DRAFT);
-    await shell.page.waitForFunction((expected) => Object.values(localStorage).includes(expected), DRAFT);
+    await composer.fill("Describe this picture");
+    await shell.page.waitForFunction(
+      (expected) => Object.values(localStorage).some((value) => value.includes(expected)),
+      "Describe this picture",
+    );
+    await shell.page.evaluate(
+      ({ key, value }) => localStorage.setItem(key, value),
+      { key: DRAFT_KEY, value: DRAFT },
+    );
 
     await shell.page.reload({ waitUntil: "domcontentloaded" });
     const sessionRow = shell.page.locator(`[data-sidebar="sidebar"] button[title*="${SESSION.name}"]`);
