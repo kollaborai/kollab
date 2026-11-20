@@ -61,10 +61,12 @@ class SlashCommandParser:
             # This handles quoted arguments properly: /save "my file.txt"
             original_command_text = command_text
             try:
+                    # Single-quoted backslashes are literal; leave those spans unchanged.
                 # POSIX shlex treats unquoted backslashes as escapes. Protect separators
                 # only in unquoted Windows path candidates with valid path segments.
                 # A trailing relative separator before an option must not escape its boundary.
                 command_text = re.sub(
+                    r"(?P<single_quoted>'[^']*')|"
                     r"(?<!\S)(?<!\\[ \t])"
                     r"(?:--?[\w-]+=)?"
                     r"(?!['\"])"
@@ -75,7 +77,11 @@ class SlashCommandParser:
                     r"|(?!(?:[^\s]|\\\s)*\\[()$])[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*\\(?=\s+--?[\w-]+(?:=|\s|$))"
                     r"|(?!(?:[^\s]|\\\s)*\\[()$])[^\s\\\"'<>|?*]+\\[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*"
                     r")(?=\s|$)",
-                    lambda match: match.group(0).replace("\\", "\\\\"),
+                    lambda match: (
+                        match.group("single_quoted")
+                        if match.group("single_quoted") is not None
+                        else match.group(0).replace("\\", "\\\\")
+                    ),
                     command_text,
                 )
                 parts = shlex.split(command_text)
