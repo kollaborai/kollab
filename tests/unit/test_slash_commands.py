@@ -82,6 +82,12 @@ class TestSlashCommandParser(unittest.TestCase):
         cases = [
             (r"/open 'C:\my docs\notes.txt'", [r"C:\my docs\notes.txt"]),
             (r"/open 'C:\work\notes.txt'", [r"C:\work\notes.txt"]),
+            (r"/open 'C:\Program Files\x y.txt'", [r"C:\Program Files\x y.txt"]),
+            (
+                r"/open 'C:\Program Files\Microsoft Office\x.exe'",
+                [r"C:\Program Files\Microsoft Office\x.exe"],
+            ),
+            (r"/say 'use dir\sub now'", [r"use dir\sub now"]),
         ]
 
         for input_text, expected_args in cases:
