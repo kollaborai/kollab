@@ -201,6 +201,9 @@ async def test_deferred_startup_orders_plugins_hub_ready_then_acp(monkeypatch):
         input_handler = None
         _startup_ready = asyncio.Event()
 
+        def _boot_projects_sweep(self):
+            return None
+
         def create_background_task(self, coro, name):
             coro.close()
 
