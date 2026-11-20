@@ -20,6 +20,10 @@ Design and deviations: [`docs/specs/webui-unified-config.md`](../specs/webui-uni
 
 A change that is not saved yet is marked "changed" on its field; closing the dialog with unsaved changes asks first.
 
+## Version and build identity
+
+Settings → Session → Versions shows the engine, frontend bundle, and frontend build ID. The Web UI asks for a reload only when the engine release differs from the bundle or their known build IDs differ. A source build's short engine SHA is compared with the frontend build SHA; missing or malformed build IDs do not claim the builds match and do not trigger a reload by themselves. The notice includes the page release and build ID alongside the engine version.
+
 ## Network sections
 
 The Network tab has three compact sections:

@@ -8,7 +8,7 @@ import pytest
 
 from kollabor.commands.system_commands.handlers.goal import GoalCommandHandler
 from kollabor.goals.driver import GoalTurnDriver
-from kollabor.goals.service import GoalService
+from kollabor.goals.service import BoundaryContext, GoalService, TurnOutcome
 from kollabor.llm.agent_hud import AgentHudEntry
 from kollabor.state.goal_store import GoalStore
 from kollabor_ai.api_communication_service import APICommunicationService
@@ -304,6 +304,97 @@ def test_native_profile_still_creates_and_resumes_goals(goal_runtime):
     result = asyncio.run(goal_runtime.handler.handle_goal(SlashCommand(name="goal", raw_input="/goal resume")))
     assert result.success
     goal_runtime.driver.schedule.assert_called_once_with(record.goal_id)
+
+
+def _goal_stopped_by_time_limit(runtime):
+    record = runtime.service.create_goal("conversation-1", "objective", "/repo")
+    runtime.store.update_fields(
+        record.goal_id,
+        record.record_version,
+        time_used_seconds=record.auto_time_limit_s,
+    )
+    attempt = runtime.service.maybe_continue(
+        record.goal_id,
+        TurnOutcome(
+            turn_id="time-limit",
+            origin="goal",
+            status="ok",
+            goal_id=record.goal_id,
+        ),
+        BoundaryContext(),
+    )
+    assert attempt is None
+    return runtime.store.get(record.goal_id)
+
+
+def test_time_limited_goal_resume_requires_a_new_time_ceiling(goal_runtime):
+    goal_runtime.profile.provider = "openai"
+    record = _goal_stopped_by_time_limit(goal_runtime)
+    previous_generation = record.execution_generation
+
+    result = asyncio.run(
+        goal_runtime.handler.handle_goal(
+            SlashCommand(name="goal", raw_input="/goal resume")
+        )
+    )
+
+    resumed = goal_runtime.store.get(record.goal_id)
+    assert not result.success
+    assert "--time" in result.message
+    assert resumed.status == "budget_limited"
+    assert resumed.execution_generation == previous_generation
+    goal_runtime.driver.schedule.assert_not_called()
+
+
+def test_time_limited_goal_resume_dispatches_with_a_new_time_ceiling(goal_runtime):
+    goal_runtime.profile.provider = "openai"
+    record = _goal_stopped_by_time_limit(goal_runtime)
+
+    result = asyncio.run(
+        goal_runtime.handler.handle_goal(
+            SlashCommand(name="goal", raw_input="/goal resume --time 10800")
+        )
+    )
+
+    assert result.success, result.message
+    resumed = goal_runtime.store.get(record.goal_id)
+    assert resumed.status == "active"
+    assert resumed.auto_time_limit_s == 10800
+    goal_runtime.driver.schedule.assert_called_once_with(record.goal_id)
+
+    attempt = goal_runtime.service.maybe_continue(
+        record.goal_id,
+        TurnOutcome(
+            turn_id="after-resume",
+            origin="goal",
+            status="ok",
+            goal_id=record.goal_id,
+        ),
+        BoundaryContext(),
+    )
+    assert attempt is not None
+    assert goal_runtime.store.get(record.goal_id).status == "active"
+
+
+@pytest.mark.parametrize("time_limit", [7200, 7199])
+def test_time_limited_goal_resume_requires_time_above_usage(goal_runtime, time_limit):
+    goal_runtime.profile.provider = "openai"
+    record = _goal_stopped_by_time_limit(goal_runtime)
+
+    result = asyncio.run(
+        goal_runtime.handler.handle_goal(
+            SlashCommand(
+                name="goal", raw_input=f"/goal resume --time {time_limit}"
+            )
+        )
+    )
+
+    resumed = goal_runtime.store.get(record.goal_id)
+    assert not result.success
+    assert "must exceed" in result.message
+    assert resumed.status == "budget_limited"
+    assert resumed.execution_generation == record.execution_generation
+    goal_runtime.driver.schedule.assert_not_called()
 
 
 def test_profile_switch_during_goal_context_injection_never_calls_native_provider(goal_runtime):
