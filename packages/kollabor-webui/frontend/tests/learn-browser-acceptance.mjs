@@ -21,6 +21,7 @@ export function makeFixtures(options = {}) {
     resolveCreate = resolve;
   });
   const requests = [];
+  let stagedEvents = [...(options.events ?? [])];
   // The engine learns each harness in the background (#953): a harness stays "loading" (more) until it is learned,
   // and one that failed stays incomplete until its own retry or the picker's Retry (`?refresh=true`).
   let discoveryFailurePending = options.discoveryFailureOnce ?? false;
@@ -227,7 +228,11 @@ export function makeFixtures(options = {}) {
     }
     if (endpoint.endsWith("/permissions")) return json(route, { pending_prompts: [], approval_mode: "trust_all" });
     if (endpoint.endsWith("/events")) {
-      return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
+      const body = stagedEvents
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join("");
+      stagedEvents = [];
+      return route.fulfill({ status: 200, contentType: "text/event-stream", body });
     }
     if (method === "POST" && endpoint.endsWith("/profile")) {
       if (pickHold) await pickHold.promise;
