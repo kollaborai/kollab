@@ -53,3 +53,25 @@ async def test_refused_control_keeps_capacity_until_receive_classifies_it(
     remaining = AgentMessenger.read_mailbox("receiver", restart_boundary=0)
     assert [message.id for message in remaining] == ["accepted"]
     assert concurrent_admission == [False]
+
+
+@pytest.mark.asyncio
+async def test_accepted_control_is_removed_only_after_receive_classification(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(messenger, "get_messages_dir", lambda: tmp_path)
+    await AgentMessenger.send_to_file("receiver", _control("accepted"))
+
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver-id", identity="receiver")
+    files_during_receive = []
+
+    async def accept(_message: HubMessage) -> None:
+        files_during_receive.append(len(list((tmp_path / "receiver").glob("*.json"))))
+
+    plugin._on_message_received = accept
+    replay = AgentMessenger.read_mailboxes(["receiver-id", "receiver"])
+    await plugin._deliver_inbox_batch(replay)
+
+    assert files_during_receive == [1]
+    assert list((tmp_path / "receiver").glob("*.json")) == []
