@@ -57,6 +57,7 @@ export function SetupGuide({
   });
   const [facts, setFacts] = useState<SetupFacts>(emptyFacts);
   const [factsLoaded, setFactsLoaded] = useState(false);
+  const pendingProviderHandoffRef = useRef(false);
 
   // Persist every transition; a reload resumes where the user left off.
   // The persist decision itself is pure (guide-model shouldPersistGuide):
@@ -75,24 +76,30 @@ export function SetupGuide({
   useEffect(() => {
     if (!open) {
       setFactsLoaded(false);
+      pendingProviderHandoffRef.current = false;
       return;
     }
     let mounted = true;
     setFactsLoaded(false);
     (async () => {
-      const profilesRequest = api
-        .listProfiles()
-        .catch(() => ({ profiles: [], active: undefined }));
-      void profilesRequest.then((profiles) => {
+      const profilesRequest = api.listProfiles().then(
+        (profiles) => ({ profiles, loaded: true }),
+        () => ({
+          profiles: { profiles: [], active: undefined },
+          loaded: false,
+        }),
+      );
+      void profilesRequest.then(({ profiles, loaded }) => {
         if (!mounted) return;
+        if (!loaded) pendingProviderHandoffRef.current = false;
         setFacts((prev) => ({
           ...prev,
           providerChosen: hasChosenProvider(profiles.profiles || [], profiles.active),
           activeProfile: profiles.active ?? null,
         }));
-        setFactsLoaded(true);
+        setFactsLoaded(loaded);
       });
-      const [profiles, sessions, agents] = await Promise.all([
+      const [profileResult, sessions, agents] = await Promise.all([
         profilesRequest,
         api
           .listSessions()
@@ -101,6 +108,7 @@ export function SetupGuide({
         api.listAgentPool().catch(() => ({ agents: [] })),
       ]);
       if (!mounted) return;
+      const { profiles } = profileResult;
       setFacts({
         providerChosen: hasChosenProvider(profiles.profiles || [], profiles.active),
         activeProfile: profiles.active ?? null,
@@ -119,6 +127,15 @@ export function SetupGuide({
     };
   }, [api, open]);
 
+  // A click made before /profiles settles stays actionable. Defer the provider
+  // handoff until the active profile is known so existing setups are not opened
+  // into Settings > Setup just because the response is slow.
+  useEffect(() => {
+    if (!open || !factsLoaded || !pendingProviderHandoffRef.current) return;
+    pendingProviderHandoffRef.current = false;
+    if (getStartedOpensSetup(facts)) onOpenSettings("setup");
+  }, [facts, factsLoaded, onOpenSettings, open]);
+
   const { step, skipped } = useMemo(
     () => resolveStep(state, facts),
     [state, facts],
@@ -133,7 +150,8 @@ export function SetupGuide({
   // Welcome's "Get Started": Settings > Setup is the one provider screen, so open it
   // there until a provider is chosen, then carry on to what is left (#1217).
   const getStarted = useCallback(() => {
-    if (!factsLoaded || getStartedOpensSetup(facts)) onOpenSettings("setup");
+    if (!factsLoaded) pendingProviderHandoffRef.current = true;
+    else if (getStartedOpensSetup(facts)) onOpenSettings("setup");
     advance();
   }, [factsLoaded, facts, onOpenSettings, advance]);
 
