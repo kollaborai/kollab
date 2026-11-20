@@ -484,11 +484,14 @@ verify_install() {
         return 1
     fi
     version_line="${shown##*$'\n'}"
-    if [[ ! "$version_line" =~ ^kollab[[:space:]]([0-9][A-Za-z0-9.+!_-]*)$ ]]; then
-        error "Could not parse the version from the expected 'kollab <version>' output at $executable: $shown"
+    if [[ "$version_line" =~ ^kollab[[:space:]]([0-9][A-Za-z0-9.+!_-]*)$ ]]; then
+        installed_version="${BASH_REMATCH[1]}"
+    elif [[ "$command_name" == *.exe && "$version_line" =~ ^kollab\.exe[[:space:]]([0-9][A-Za-z0-9.+!_-]*)$ ]]; then
+        installed_version="${BASH_REMATCH[1]}"
+    else
+        error "Could not parse the version from Kollab's expected --version output at $executable: $shown"
         return 1
     fi
-    installed_version="${BASH_REMATCH[1]}"
     if [[ -n "$VERSION" && "$installed_version" != "$VERSION" ]]; then
         error "Expected kollab $VERSION at $executable, but it reports $installed_version."
         return 1
