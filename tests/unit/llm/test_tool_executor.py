@@ -181,6 +181,12 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
                 "find / -maxdepth 2 -type f -print",
                 "find ../../ -maxdepth 2 -type f -print",
                 "echo ready; find / -maxdepth 2 -type f -print",
+                f'find -E "{outside_home}" -name marker.txt -print',
+                f'printf "%s\\n" "$(find "{outside_home}" -name marker.txt -print)"',
+                rf'find . -maxdepth 1 -exec find "{outside_home}" -name marker.txt -print \;',
+                f'cd "{outside_home}" && find . -name marker.txt -print',
+                f'find {{{workspace},{outside_home}}} -name marker.txt -print',
+                "find . -follow -name marker.txt -print",
             ]
             with patch.dict(os.environ, {"HOME": str(outside_home)}):
                 for command in commands:
@@ -211,6 +217,36 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
                     "type": "terminal",
                     "id": "find-symlink-outside",
                     "command": f'find -L "{outside_link}" -maxdepth 2 -type f -print',
+                }
+            )
+
+            self.assertFalse(result.success)
+            self.assertIn("search paths must stay inside the active workspace", result.error)
+            self.executor.shell_executor.run.assert_not_awaited()
+
+    async def test_terminal_find_refuses_following_workspace_symlinks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "project"
+            outside = root / "outside"
+            workspace.mkdir()
+            outside.mkdir()
+            (workspace / "outside-link").symlink_to(outside, target_is_directory=True)
+            self.executor.workspace = workspace
+            self.executor.shell_executor.run = AsyncMock(
+                return_value=ShellResult(
+                    success=True,
+                    stdout="outside fixture\n",
+                    stderr="",
+                    exit_code=0,
+                )
+            )
+
+            result = await self.executor._execute_terminal_command(
+                {
+                    "type": "terminal",
+                    "id": "find-follow-workspace-symlink",
+                    "command": "find -L . -name marker.txt -print",
                 }
             )
 
