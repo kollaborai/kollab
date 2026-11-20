@@ -66,11 +66,13 @@ class SlashCommandParser:
                 # only in unquoted Windows path candidates with valid path segments.
                 # A trailing relative separator before another argument must not escape its boundary.
                 # Leave tokens with explicit shell-metacharacter escapes to shlex.
+                # For a single-separator punctuation escape, let shlex consume the escape.
                 command_text = re.sub(
                     r"(?P<single_quoted>'[^']*')|"
                     r"(?<!\S)(?<!\\[ \t])"
                     r"(?:--?[\w-]+=)?"
                     r"(?!(?:[^\s]|\\\s)*\\(?:[&;#{}!~\x60()$]|\[|\]))"
+                    r"(?!(?:[^\s\\]|\\\s)*\\(?:[^\w\s\\]|_)[^\s\\]*(?=\s|$))"
                     r"(?!['\"])"
                     r"(?:"
                     r"[A-Za-z]:\\(?:[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*\\?)?"
