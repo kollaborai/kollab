@@ -402,6 +402,74 @@ async def test_cancellation_kills_pipe_holder_after_transcriber_exits(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group lifecycle")
+async def test_cancellation_does_not_remove_artifacts_from_closed_pipe_descendant(
+    tmp_path, monkeypatch
+):
+    private = tmp_path / "private"
+    private.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(private))
+    whisper = tmp_path / "whisper"
+    writer_script = tmp_path / "writer.py"
+    writer_started = tmp_path / "writer.started"
+    writer_pid = tmp_path / "writer.pid"
+    outcome = tmp_path / "writer.outcome"
+    writer_script.write_text(
+        textwrap.dedent(
+            f"""\
+            import pathlib, sys, time
+            pathlib.Path({str(writer_started)!r}).write_text("ready")
+            time.sleep(0.3)
+            target = pathlib.Path(sys.argv[1])
+            try:
+                target.write_text("late output")
+            except OSError as exc:
+                pathlib.Path({str(outcome)!r}).write_text(type(exc).__name__)
+            else:
+                pathlib.Path({str(outcome)!r}).write_text("written")
+            """
+        )
+    )
+    whisper.write_text(
+        "#!/usr/bin/env python3\n"
+        + textwrap.dedent(
+            f"""\
+            import pathlib, subprocess, sys, time
+            audio = pathlib.Path(sys.argv[1])
+            child = subprocess.Popen(
+                [sys.executable, {str(writer_script)!r},
+                 str(audio.parent / "late.txt")],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            pathlib.Path({str(writer_pid)!r}).write_text(str(child.pid))
+            time.sleep(0.5)
+            """
+        )
+    )
+    whisper.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+    task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
+    deadline = time.monotonic() + 5
+    while not writer_started.exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+    assert writer_started.exists(), "detached writer did not start"
+    assert writer_pid.exists(), "transcriber did not record detached writer"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+
+    await asyncio.sleep(0.45)
+    assert not outcome.exists() or outcome.read_text() == "written", (
+        "cleanup raced detached writer"
+    )
+    assert list(private.iterdir()) == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process group lifecycle")
 async def test_timeout_kills_pipe_holder_after_transcriber_exits(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
