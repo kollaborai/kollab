@@ -545,7 +545,7 @@ def test_windows_console_launcher_is_verified(tmp_path: Path) -> None:
     installed_dir = tmp_path / "Python Scripts"
     _write_executable(tools_dir / "uname", "#!/bin/sh\necho MINGW64_NT-10.0\n")
     _write_executable(
-        installed_dir / "kollab.exe", "#!/bin/sh\necho 'kollab 4.5.6'\n"
+        installed_dir / "kollab.exe", "#!/bin/sh\necho 'kollab.exe 4.5.6'\n"
     )
 
     result = _run_verification(
