@@ -146,6 +146,7 @@ class ResumeConversationPlugin:
                 ui_config=UIConfig(
                     type="modal", title="Conversation History", height=20, width=80
                 ),
+                cli_hidden=False,
             )
             command_registry.register_command(sessions_command)
 
