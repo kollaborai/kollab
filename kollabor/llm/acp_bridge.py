@@ -7,12 +7,14 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, ClassVar
@@ -32,6 +34,8 @@ from acp.schema import (
 from kollabor.version import __version__
 
 from .acp_state import ACPBinding
+
+_ACP_OWNER_TOKEN_ENV = "KOLLAB_ACP_OWNER_TOKEN"
 
 
 class ACPError(RuntimeError):
@@ -632,18 +636,25 @@ anchor, status = int(sys.argv[1]), int(sys.argv[2])
 pid = os.fork()
 if pid == 0:
     os.close(status)
-    os.setpgid(0, 0)
-    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(signum, signal.SIG_IGN)
-    null = os.open(os.devnull, os.O_RDWR)
-    for fd in (0, 1, 2):
-        os.dup2(null, fd)
-    try:
-        while os.read(anchor, 1):
-            pass
-    except OSError:
+    anchor_env = dict(os.environ)
+    anchor_env.pop("KOLLAB_ACP_OWNER_TOKEN", None)
+    anchor_script = '''
+import os, signal, sys
+anchor = int(sys.argv[1])
+os.setpgid(0, 0)
+for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(signum, signal.SIG_IGN)
+null = os.open(os.devnull, os.O_RDWR)
+for fd in (0, 1, 2):
+    os.dup2(null, fd)
+try:
+    while os.read(anchor, 1):
         pass
-    os._exit(0)
+except OSError:
+    pass
+os._exit(0)
+'''
+    os.execve(sys.executable, [sys.executable, "-c", anchor_script, str(anchor)], anchor_env)
 try:
     os.setpgid(pid, pid)
 except OSError:
@@ -733,6 +744,10 @@ class ACPRunner:
         self._process_tracker: asyncio.Task[None] | None = None
         self._owned_processes: dict[int, psutil.Process] = {}
         self._adapter_pid: int | None = None
+        self._process_started_at: float | None = None
+        self._process_username: str | None = None
+        self._process_owner_token: str | None = None
+        self._checked_process_owner_markers: set[tuple[int, float]] = set()
         self._process_group_id: int | None = None
         self._teardown_lock = asyncio.Lock()
         self._queue: asyncio.Queue[ACPAdmission | None] = asyncio.Queue(maxsize=10)
@@ -823,9 +838,11 @@ class ACPRunner:
         return self.advertised_config_options()
 
     async def _start_process(self) -> str:
+        self._recover_session_processes()
         if self._live_owned_processes() or self._owned_process_group_exists():
             raise ACPError("previous ACP process group still requires cleanup")
         self._owned_processes.clear()
+        self._checked_process_owner_markers.clear()
         self.state = "starting"
         if self.lifecycle_callback is not None:
             await self.lifecycle_callback("starting", self)
@@ -845,6 +862,13 @@ class ACPRunner:
                 "The selected Codex adapter could not be identified for this saved session. "
                 "The existing binding was kept; select the previous adapter or start a new session."
             )
+        self._process_username = psutil.Process(os.getpid()).username()
+        owner_token = secrets.token_urlsafe(32)
+        self._process_owner_token = owner_token
+        child_env = {**env, _ACP_OWNER_TOKEN_ENV: owner_token}
+        # A rapidly exiting root may disappear before psutil can read it.
+        # Allow one second of kernel birth-time rounding in that fallback.
+        self._process_started_at = time.time() - 1
         if os.name == "posix":
             self._release_group_anchor()
             ours, theirs = socket.socketpair()
@@ -864,7 +888,7 @@ class ACPRunner:
                     str(status_write),
                     *command,
                     cwd=cwd,
-                    env=env,
+                    env=child_env,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -901,7 +925,7 @@ class ACPRunner:
             self._process = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=cwd,
-                env=env,
+                env=child_env,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -912,11 +936,12 @@ class ACPRunner:
             self._process_group_id = self._process.pid
         with contextlib.suppress(psutil.Error):
             owner = psutil.Process(self._process.pid)
-            owner.create_time()
+            birth = owner.create_time()
             if (
                 owner.ppid() == os.getpid() and self._process.returncode is None
                 and owner.is_running()
             ):
+                self._process_started_at = birth
                 self._owned_processes[owner.pid] = owner
         self._refresh_process_tree()
         self._process_tracker = asyncio.create_task(self._track_process_tree())
@@ -1112,6 +1137,90 @@ class ACPRunner:
                 self._signal_owned_process_group(getattr(signal, "SIGKILL", signal.SIGTERM))
                 return
             await asyncio.sleep(0.1)
+
+    def _recover_session_processes(self) -> None:
+        """Recover same-user descendants by session or their per-run marker.
+
+        The adapter starts as a session leader, so descendants that lose
+        their parent usually keep its pid as their session id. A descendant
+        that calls setsid() before a tree sample is instead matched by the
+        opaque marker inherited from this adapter. Marker lookup is limited to
+        same-user processes born during this run and never logs their env.
+        """
+        if self._adapter_pid is None or self._process_started_at is None:
+            return
+        adapter_pid = self._adapter_pid
+        adapter = self._owned_processes.get(adapter_pid)
+
+        def session_is_ours() -> bool:
+            # A live process at the adapter's pid that is not the recorded
+            # adapter means the number was reused: that session is not ours.
+            try:
+                return psutil.Process(adapter_pid) == adapter
+            except psutil.NoSuchProcess:
+                return True
+            except psutil.Error:
+                return False
+
+        session_lookup_available = hasattr(os, "getsid") and session_is_ours()
+        owner_token = self._process_owner_token
+        if not session_lookup_available and owner_token is None:
+            return
+        found: list[tuple[psutil.Process, bool]] = []
+        active_marker_candidates: set[tuple[int, float]] = set()
+        for owner in psutil.process_iter(("pid", "create_time", "username")):
+            with contextlib.suppress(psutil.Error, OSError):
+                birth = owner.info.get("create_time")
+                if (
+                    owner.info.get("username") != self._process_username
+                    or birth is None or birth < self._process_started_at
+                ):
+                    continue
+                if self._owned_processes.get(owner.pid) == owner:
+                    continue
+                in_owned_session = False
+                if session_lookup_available:
+                    if not owner.is_running():
+                        continue
+                    in_owned_session = os.getsid(owner.pid) == adapter_pid
+                    if in_owned_session and not owner.is_running():
+                        continue
+
+                # The anchored group owns same-group cleanup. Requiring the
+                # marker for any process outside it also keeps the private
+                # launcher anchor out of the adapter's direct-child set.
+                if self._process_group_id is not None and hasattr(os, "getpgid"):
+                    if not owner.is_running():
+                        continue
+                    if os.getpgid(owner.pid) == self._process_group_id:
+                        continue
+                needs_owner_marker = self._process_group_id is not None or not in_owned_session
+                if needs_owner_marker:
+                    identity = (owner.pid, birth)
+                    active_marker_candidates.add(identity)
+                    if owner_token is None or identity in self._checked_process_owner_markers:
+                        continue
+                    self._checked_process_owner_markers.add(identity)
+                    environment = getattr(owner, "environ", None)
+                    if not callable(environment):
+                        continue
+                    try:
+                        marker_matches = environment().get(_ACP_OWNER_TOKEN_ENV) == owner_token
+                    except (psutil.Error, OSError, AttributeError):
+                        # An unreadable process environment is not proof of ownership.
+                        continue
+                    if not marker_matches:
+                        continue
+                if not owner.is_running():
+                    continue
+                owner.create_time()
+                found.append((owner, in_owned_session))
+        self._checked_process_owner_markers.intersection_update(active_marker_candidates)
+        adapter_session_still_ours = session_lookup_available and session_is_ours()
+        for owner, in_owned_session in found:
+            if in_owned_session and not adapter_session_still_ours:
+                continue
+            self._owned_processes[owner.pid] = owner
 
     def _live_owned_processes(self) -> list[psutil.Process]:
         self._refresh_process_tree()
@@ -1857,6 +1966,7 @@ class ACPRunner:
 
     async def _terminate_process(self) -> None:
         async with self._teardown_lock:
+            self._recover_session_processes()
             connection, process, stderr_task = self._connection, self._process, self._stderr_task
             tracker = self._process_tracker
             self._connection = None
@@ -1930,6 +2040,7 @@ class ACPRunner:
                 if process is not None:
                     with contextlib.suppress(asyncio.TimeoutError):
                         await asyncio.wait_for(process.wait(), timeout=1)
+                self._recover_session_processes()
                 deadline = asyncio.get_running_loop().time() + 1
                 while alive := self._live_owned_processes():
                     for owner in reversed(alive):
@@ -1963,6 +2074,10 @@ class ACPRunner:
                 ):
                     self._owned_processes.clear()
                     self._adapter_pid = None
+                    self._process_started_at = None
+                    self._process_username = None
+                    self._process_owner_token = None
+                    self._checked_process_owner_markers.clear()
                     self._process_group_id = None
                     # The group is empty; the anchor may now release its id.
                     self._release_group_anchor()
