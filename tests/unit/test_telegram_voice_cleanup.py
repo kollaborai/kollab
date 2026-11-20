@@ -319,17 +319,20 @@ async def test_timeout_defers_cleanup_for_detached_pipe_writer(tmp_path, monkeyp
     monkeypatch.setattr(tempfile, "tempdir", str(temp_root))
     descendant_started = _install_detached_whisper(tmp_path, temp_root, monkeypatch)
     original_wait_for = asyncio.wait_for
+    timeout_requested = asyncio.Event()
 
     async def short_timeout(awaitable, timeout):
         if timeout == 60:
             deadline = time.monotonic() + 5
             while not descendant_started.exists() and time.monotonic() < deadline:
                 await asyncio.sleep(0.02)
+            timeout_requested.set()
             raise asyncio.TimeoutError
         return await original_wait_for(awaitable, timeout)
 
     monkeypatch.setattr(asyncio, "wait_for", short_timeout)
     task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
+    await timeout_requested.wait()
     _, pending = await asyncio.wait({task}, timeout=0.25)
     try:
         assert await task == "[voice message - transcription timed out]"
