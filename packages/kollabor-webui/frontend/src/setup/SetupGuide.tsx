@@ -133,9 +133,9 @@ export function SetupGuide({
   // Welcome's "Get Started": Settings > Setup is the one provider screen, so open it
   // there until a provider is chosen, then carry on to what is left (#1217).
   const getStarted = useCallback(() => {
-    if (getStartedOpensSetup(facts)) onOpenSettings("setup");
+    if (!factsLoaded || getStartedOpensSetup(facts)) onOpenSettings("setup");
     advance();
-  }, [facts, onOpenSettings, advance]);
+  }, [factsLoaded, facts, onOpenSettings, advance]);
 
   const dismiss = useCallback(() => {
     setState((prev) => ({ ...prev, dismissed: true }));
@@ -234,7 +234,6 @@ export function SetupGuide({
             type="button"
             data-testid="setup-guide-next"
             className="ml-auto"
-            disabled={step === "welcome" && !factsLoaded}
             onClick={target ? runTarget : step === "done" ? () => onOpenChange(false) : getStarted}
           >
             {target ? "Open" : step === "done" ? "Finish" : "Get Started"}
