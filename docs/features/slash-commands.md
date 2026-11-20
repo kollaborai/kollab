@@ -147,7 +147,8 @@ command_registry.register_command(command_def)
 
 `kollabor/commands/parser.py` - Parses slash command input into structured commands.
 Unquoted Windows drive, UNC, rooted, and relative path arguments retain their
-backslashes; quote a Windows path that contains spaces.
+backslashes, including a trailing separator before another token. Quote paths
+that contain spaces or shell-escaped characters.
 
 ## Plugin Commands
 
