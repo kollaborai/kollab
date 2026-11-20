@@ -258,7 +258,7 @@ class ConfigService:
             self.config_manager.config, save_target=save_target
         )
         if success:
-            self._config_error = None
+            self._config_error = self.config_loader.config_load_error
             if self._mtimes:
                 self._mtimes = self._stat_mtimes()  # our write is not news
             logger.debug("Configuration saved to disk")
@@ -342,7 +342,7 @@ class ConfigService:
                 for key_path, value in changes.items():
                     safe_set(self.config_manager.config, key_path, value)
                 self._note_own_write(save_path)
-            self._config_error = None
+            self._config_error = self.config_loader.config_load_error
             logger.info("Saved %d config key(s) to %s", len(changes), save_path)
             return True
         except Exception as e:
@@ -404,10 +404,10 @@ class ConfigService:
             True if update successful, False otherwise.
         """
         updated = self.config_loader.update_with_plugins()
-        if updated:
-            self._config_error = None
-        elif self.config_loader.config_load_error:
+        if self.config_loader.config_load_error:
             self._config_error = self.config_loader.config_load_error
+        elif updated:
+            self._config_error = None
         if self._mtimes:
             self._mtimes = self._stat_mtimes()  # our write is not news
         return updated

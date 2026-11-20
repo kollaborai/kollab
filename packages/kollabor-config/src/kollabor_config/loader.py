@@ -983,11 +983,8 @@ class ConfigLoader:
         key = _config_path_key(path)
         self._config_file_snapshots[key] = snapshot
         self.config_load_status["target"] = status
-        if status != "valid":
-            self.config_load_error = _config_error_message(self.config_load_status)
-            return False
-        self.config_load_error = None
-        return isinstance(config, dict)
+        self.config_load_error = _config_error_message(self.config_load_status)
+        return status == "valid" and isinstance(config, dict)
 
     @staticmethod
     def _diff_from_defaults(

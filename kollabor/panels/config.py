@@ -364,6 +364,7 @@ class ConfigPanel:
             "panel": self.name,
             "kind": self.kind,
             "title": TITLE,
+            "notice": getattr(service, "get_config_error", lambda: None)(),
             "sections": [
                 {
                     "id": f"s{index}",
