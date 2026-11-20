@@ -11,6 +11,12 @@ on every turn, so they survive compaction. Use these for long-running
 multi-agent coordination where you need task state to persist across
 turns.
 
+Unreadable cards are skipped while readable cards remain available. Active-task
+context and `/hub tasks list` or `/hub tasks mine` show a warning when a read
+skips cards, so a partial view is not presented as complete. The cron scanner
+continues processing readable due cards and logs unreadable cards at warning
+level.
+
 Tools (registered in plugins/hub/plugin.py):
 
 - task_checkpoint — report progress on a task
