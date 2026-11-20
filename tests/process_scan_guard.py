@@ -29,7 +29,6 @@ HOST_PROCESS_SCAN_TESTS = {
         {
             "test_group_anchor_keeps_group_identity_after_adapter_exits",
             "test_close_recovers_fast_detached_orphan_and_preserves_other_session_process",
-            "test_setsid_orphan_lost_before_a_tree_sample_is_the_documented_limit",
             "test_setsid_orphan_lost_before_a_tree_sample_is_recovered",
             "test_orphan_is_recovered_where_os_getsid_is_missing",
             "test_startup_refusal_preserves_public_message_code_and_cleans_process",
