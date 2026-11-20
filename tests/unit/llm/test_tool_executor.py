@@ -271,6 +271,35 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result.success)
             self.executor.shell_executor.run.assert_awaited_once()
 
+    async def test_terminal_find_refuses_uninspectable_interpreter_command(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "project"
+            workspace.mkdir()
+            self.executor.workspace = workspace
+            self.executor.shell_executor.run = AsyncMock(
+                return_value=ShellResult(
+                    success=True,
+                    stdout="../outside/marker.txt\n",
+                    stderr="",
+                    exit_code=0,
+                )
+            )
+            command = (
+                "python3 -c 'import subprocess; "
+                "subprocess.run([\"find\", \"../outside\", \"-name\", "
+                "\"marker.txt\", \"-print\"], check=True)'"
+            )
+
+            result = await self.executor._execute_terminal_command(
+                {"type": "terminal", "id": "find-interpreter", "command": command}
+            )
+
+            self.executor.shell_executor.run.assert_not_awaited()
+            self.assertFalse(result.success)
+            self.assertIn(
+                "search paths must stay inside the active workspace", result.error
+            )
+
     async def test_terminal_find_refuses_symlinked_root_outside_project(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
