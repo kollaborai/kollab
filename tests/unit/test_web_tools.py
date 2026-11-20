@@ -1032,6 +1032,42 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertNotIn("color:red", text)
         self.assertNotIn("Copyright", text)
 
+    def test_html_extraction_falls_back_when_lxml_is_unavailable(self):
+        """HTML extraction should work without the optional lxml parser."""
+        class FeatureNotFound(Exception):
+            pass
+
+        class ParsedHtml:
+            def find_all(self, *_args):
+                return []
+
+            def get_text(self):
+                return "Parser fallback works"
+
+        parser_calls = []
+
+        def without_lxml(markup, features):
+            parser_calls.append(features)
+            if features == "lxml":
+                raise FeatureNotFound("lxml parser is unavailable")
+            return ParsedHtml()
+
+        fake_bs4 = ModuleType("bs4")
+        fake_bs4.BeautifulSoup = without_lxml
+        fake_exceptions = ModuleType("bs4.exceptions")
+        fake_exceptions.FeatureNotFound = FeatureNotFound
+        fake_bs4.exceptions = fake_exceptions
+
+        html = "<html><body><main>Parser fallback works</main></body></html>"
+        with patch.dict(
+            sys.modules,
+            {"bs4": fake_bs4, "bs4.exceptions": fake_exceptions},
+        ):
+            text = self.executor._html_to_text(html)
+
+        self.assertEqual(text, "Parser fallback works")
+        self.assertEqual(parser_calls, ["lxml", "html.parser"])
+
 
 class TestWebSearchExecution(unittest.TestCase):
     """Tests for web-search tool execution via ToolExecutor."""
