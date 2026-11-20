@@ -825,6 +825,72 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(long_result.success, long_result.error)
 
+    async def test_terminal_status_does_not_wait_for_foreground_execution(self):
+        foreground_started = asyncio.Event()
+        release_foreground = asyncio.Event()
+        status_called = asyncio.Event()
+
+        async def execute_foreground(**kwargs):
+            foreground_started.set()
+            await release_foreground.wait()
+            return {"success": True, "output": "done", "error": "", "exit_code": 0}
+
+        async def get_session_status(session_name):
+            status_called.set()
+            return {
+                "success": True,
+                "status": "running",
+                "command": session_name,
+            }
+
+        self.executor.tmux_plugin = MagicMock()
+        self.executor.tmux_plugin.execute_foreground = AsyncMock(
+            side_effect=execute_foreground
+        )
+        self.executor.tmux_plugin.get_session_status = AsyncMock(
+            side_effect=get_session_status
+        )
+
+        foreground_task = asyncio.create_task(
+            self.executor.execute_tool(
+                {
+                    "type": "terminal",
+                    "id": "foreground",
+                    "command": "build",
+                    "timeout": "4s",
+                }
+            )
+        )
+        await foreground_started.wait()
+        status_task = asyncio.create_task(
+            self.executor.execute_tool(
+                {
+                    "type": "terminal_status",
+                    "id": "status",
+                    "session_name": "build",
+                }
+            )
+        )
+
+        status_was_available = False
+        try:
+            await asyncio.wait_for(status_called.wait(), timeout=0.25)
+            status_was_available = True
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            release_foreground.set()
+
+        foreground_result = await foreground_task
+        status_result = await status_task
+
+        self.assertTrue(foreground_result.success, foreground_result.error)
+        self.assertTrue(status_result.success, status_result.error)
+        self.assertTrue(
+            status_was_available,
+            "terminal_status waited for unrelated foreground execution",
+        )
+
     async def test_execute_tool_rejects_invalid_terminal_timeout_before_running(self):
         self.executor.shell_executor.run = AsyncMock(
             return_value=ShellResult(success=True, stdout="", stderr="", exit_code=0)
