@@ -498,7 +498,9 @@ class TestWebFetchExecution(unittest.TestCase):
 
     def test_web_fetch_bounds_playwright_fallback_output(self):
         """Fallback text is subject to the same total output budget."""
-        response = _make_mock_aiohttp_response(text="<html><body>x</body></html>")
+        response = _make_mock_aiohttp_response(
+            text="<html><body>x</body></html>", url="https://example.com/page"
+        )
         tool_data = {
             "id": "web_fetch_fallback",
             "url": "https://example.com/page",
