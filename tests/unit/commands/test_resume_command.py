@@ -408,6 +408,33 @@ class TestResumeCommand:
         )
         assert result.message == "Usage: /sessions [search <query>]"
 
+    def test_sessions_command_is_reachable_from_cli(self):
+        import argparse
+
+        from kollabor.altview.command_integration import AltViewCommandIntegrator
+        from kollabor.cli import process_cli_command
+        from kollabor.commands.registry import SlashCommandRegistry
+        from plugins.altview.conversations_altview import ConversationsAltView
+        from plugins.resume_conversation_plugin import ResumeConversationPlugin
+
+        command_registry = SlashCommandRegistry()
+        AltViewCommandIntegrator(command_registry, None, None)._register_plugin_commands(
+            ConversationsAltView
+        )
+        ResumeConversationPlugin()._register_resume_commands(command_registry)
+
+        sessions_command = process_cli_command(
+            argparse.Namespace(_unknown_args=["--sessions"], cli_command=None),
+            command_registry,
+        )
+        conversations_command = process_cli_command(
+            argparse.Namespace(_unknown_args=["--conversations"], cli_command=None),
+            command_registry,
+        )
+
+        assert sessions_command["name"] == "sessions"
+        assert conversations_command["name"] == "conversations"
+
     def test_sessions_search_does_not_duplicate_conversation_browser_alias(self):
         from kollabor.altview.command_integration import AltViewCommandIntegrator
         from kollabor.commands.registry import SlashCommandRegistry
