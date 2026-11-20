@@ -35,8 +35,6 @@ from plugins.hub.messenger import (
     INBOX_TTL_SECS,
     AgentMessenger,
     _prune_inbox,
-    get_restart_boundary,
-    set_restart_boundary,
 )
 from plugins.hub.models import HubMessage, MessageScope
 from plugins.hub.task_ledger import TaskLedger
