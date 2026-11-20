@@ -50,6 +50,7 @@ import {
 import { AppSidebar } from "@/components/shell/AppSidebar";
 import { networkOf, prepareRemoteOpen, targetsOn } from "@/components/shell/agent-network";
 import { AgentVersionNotice, agentVersionNotice } from "@/components/shell/AgentVersionNotice";
+import type { DaemonNoticeProps } from "@/components/code/DaemonNotice";
 import { liveAgentOf, poolSeenBy } from "@/components/shell/live-agent";
 import { PanelHost } from "@/components/panels/PanelHost";
 import { WaiterChat } from "@/components/shell/WaiterChat";
@@ -196,6 +197,8 @@ function RuntimeShell({
   agents,
   liveAgents,
   remoteAgents,
+  agentIsCurrent,
+  daemonNotice,
   onSessionUpdated,
   onOpenSettings,
   onOpenWelcome,
@@ -218,6 +221,8 @@ function RuntimeShell({
   agents: AgentPoolEntry[];
   /** Every running agent, one per process: the chat reads its own by its instance, never by name. */
   liveAgents: LiveAgent[];
+  agentIsCurrent: boolean;
+  daemonNotice: DaemonNoticeProps;
   /** Agents on the network's other computers (GET /sessions `network.remote`). */
   remoteAgents: NetworkAgent[];
   onSessionUpdated: (session: Session) => void;
@@ -420,6 +425,8 @@ function RuntimeShell({
                     sessionId={session.session_id}
                     device={session.device ?? ""}
                     workspace={workspace}
+                    agentIsCurrent={agentIsCurrent}
+                    daemonNotice={daemonNotice}
                     mode={shown === "git" ? "git" : "code"} />
                 </Suspense>
               </div>
@@ -432,6 +439,8 @@ function RuntimeShell({
                     sessionId={session.session_id}
                     device={session.device ?? ""}
                     workspace={workspace}
+                    agentIsCurrent={agentIsCurrent}
+                    daemonNotice={daemonNotice}
                   />
                 </Suspense>
               </div>
@@ -1367,6 +1376,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   // The open chat's agent against the engine: older code gets a line above the chat (#968).
   const activeAgent = activeSession ? liveAgentOf(activeSession, liveAgents) : undefined;
   const versionNotice = agentVersionNotice({ engineVersion, agent: activeAgent, restartAgents });
+  const agentIsCurrent = Boolean(activeAgent && engineVersion && activeAgent.version === engineVersion);
   const versionNoticeKey = activeSession && activeAgent ? `${activeSession.session_id}|${activeAgent.agent_id}` : "";
   const restartHere = agentRestart && agentRestart.sessionId === activeId ? agentRestart : null;
   const restartActiveAgent = async () => {
@@ -1379,6 +1389,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     } catch (error) {
       setAgentRestart({ sessionId, waiting: false, failure: errorText(error), tooOld: isAgentTooOld(error) });
     }
+  };
+  const daemonNotice: DaemonNoticeProps = {
+    notice: versionNotice,
+    busy: Boolean(restartHere) && !restartHere?.failure,
+    waiting: restartHere?.waiting ?? false,
+    failure: restartHere?.failure ?? "",
+    tooOld: restartHere?.tooOld ?? false,
+    onRestart: () => void restartActiveAgent(),
   };
   // Once the agent runs the engine's version (or is gone from presence) the ask is over.
   useEffect(() => {
@@ -2056,6 +2074,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                   profiles={profiles}
                   agents={agents}
                   liveAgents={liveAgents}
+                  agentIsCurrent={agentIsCurrent}
+                  daemonNotice={daemonNotice}
                   remoteAgents={network.remote}
                   refreshSignal={refreshSignal}
                   supervisorEvents={supervisorEvents}

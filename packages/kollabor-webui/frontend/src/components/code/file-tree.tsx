@@ -16,7 +16,7 @@ import {
 import { ChevronsDownUp, FilePlus, Folder, FolderOpen, FolderPlus, Loader2, LocateFixed } from "lucide-react";
 import { useEditorStore } from "@/components/code/editor-store";
 import { codeFetch, OUTDATED_NOTICE, unwrapCodeData } from "@/lib/code-fetch";
-import { DaemonNotice } from "@/components/code/DaemonNotice";
+import { DaemonNotice, type DaemonNoticeProps } from "@/components/code/DaemonNotice";
 import { cn } from "@/lib/utils";
 import {
   ContextMenu,
@@ -39,6 +39,7 @@ interface FileNode {
 
 interface FileTreeProps {
   workspace: string;
+  daemonNotice: DaemonNoticeProps;
   filterOpen?: boolean;
   onFileSelect?: () => void;
 }
@@ -161,7 +162,12 @@ function useTreeActions(): TreeActions {
   return actions;
 }
 
-export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSelect }: FileTreeProps) {
+export function FileTree({
+  workspace,
+  daemonNotice,
+  filterOpen: externalFilterOpen,
+  onFileSelect,
+}: FileTreeProps) {
   const [tree, setTree] = useState<FileNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -562,7 +568,7 @@ export function FileTree({ workspace, filterOpen: externalFilterOpen, onFileSele
   if (error) {
     return (
       error === OUTDATED_NOTICE ? (
-        <DaemonNotice />
+        <DaemonNotice {...daemonNotice} />
       ) : (
         <div className="px-3 py-3 text-xs text-muted-foreground">{error}</div>
       )

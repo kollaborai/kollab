@@ -5,9 +5,11 @@ import { Button } from "@/components/ui/button";
 import { openWorkspaceFile, readFileContent, rememberFileRead, fileNameOf, extensionOf } from "@/components/code/open-file";
 import { FolderBrowser } from "@/components/code/folder-browser";
 import { claimEditorWorkspace, invalidateEditorSession, setEditorOwner, setEditorSession } from "@/components/code/workspace-tabs";
-import { codeFetch, setCodeRoot, setCodeSession, unwrapCodeData } from "@/lib/code-fetch";
+import { codeFetch, CODE_REQUEST_SUCCEEDED_EVENT, DAEMON_OUTDATED_EVENT, getCodeSessionGeneration, isCurrentCodeSessionGeneration, setCodeRoot, setCodeSession, unwrapCodeData } from "@/lib/code-fetch";
 import { cn } from "@/lib/utils";
 import { GitPanel } from "@/components/code/git/GitPanel";
+import { DaemonNotice, type DaemonNoticeProps } from "@/components/code/DaemonNotice";
+import { isDaemonOutdated } from "@/components/terminal/terminal-env";
 import { openWorkspaceDiff } from "@/components/code/open-file";
 import { EditorConfigPanel } from "@/components/code/editor-config";
 import { isDirty, useEditorStore } from "@/components/code/editor-store";
@@ -25,6 +27,9 @@ export interface CodeEditorViewProps {
   workspace: string;
   /** "code" shows files, search and settings in the sidebar; "git" shows the git panel there. Same editor panes either way. */
   mode?: "code" | "git";
+  /** True when the agent now runs the engine version after a daemon_outdated response. */
+  agentIsCurrent?: boolean;
+  daemonNotice: DaemonNoticeProps;
 }
 
 /** Opens a file in the active pane (git panel's "open file"). */
@@ -66,26 +71,64 @@ export function CodeEditorView(props: CodeEditorViewProps) {
   const [selected, setSelected] = useState("");
   const [browsing, setBrowsing] = useState(false);
   const [error, setError] = useState("");
+  const [outdated, setOutdated] = useState(false);
   const requestContext = JSON.stringify([props.device ?? "", props.sessionId]);
   useLayoutEffect(() => {
-    setCodeSession(props.sessionId);
     setEditorSession(requestContext);
     return () => invalidateEditorSession(requestContext);
   }, [props.sessionId, requestContext]);
+  useLayoutEffect(() => {
+    setCodeSession(props.sessionId, true);
+  }, [props.sessionId, requestContext, props.agentIsCurrent]);
+  useEffect(() => {
+    const onDaemonOutdated = (event: Event) => {
+      const detail: unknown = (event as CustomEvent<unknown>).detail;
+      if (!detail || typeof detail !== "object") return;
+      const eventDetail = detail as { sessionId?: unknown; generation?: unknown };
+      if (eventDetail.sessionId === props.sessionId && isCurrentCodeSessionGeneration(props.sessionId, eventDetail.generation)) {
+        setOutdated(true);
+      }
+    };
+    const onCodeRequestSucceeded = (event: Event) => {
+      const detail: unknown = (event as CustomEvent<unknown>).detail;
+      if (!detail || typeof detail !== "object") return;
+      const eventDetail = detail as { sessionId?: unknown; generation?: unknown };
+      if (eventDetail.sessionId === props.sessionId && isCurrentCodeSessionGeneration(props.sessionId, eventDetail.generation)) {
+        setOutdated(false);
+      }
+    };
+    window.addEventListener(DAEMON_OUTDATED_EVENT, onDaemonOutdated);
+    window.addEventListener(CODE_REQUEST_SUCCEEDED_EVENT, onCodeRequestSucceeded);
+    return () => {
+      window.removeEventListener(DAEMON_OUTDATED_EVENT, onDaemonOutdated);
+      window.removeEventListener(CODE_REQUEST_SUCCEEDED_EVENT, onCodeRequestSucceeded);
+    };
+  }, [props.sessionId]);
   useEffect(() => {
     let cancelled = false;
+    const requestGeneration = getCodeSessionGeneration(props.sessionId);
     setFolders(null);
     setLoadedContext("");
     setBrowsing(false);
     setError("");
+    setOutdated(false);
     void codeFetch("/code/folders", {}, { sessionId: props.sessionId, root: "" }).then(async (response) => {
-      if (!response.ok) throw new Error("Could not load folders from this agent.");
+      if (!response.ok) {
+        // An agent started before 0.22.0 answers 502 daemon_outdated: show the restart notice, not the generic dead end.
+        const raw: unknown = await response.json().catch(() => null);
+        if (isDaemonOutdated(raw)) {
+          if (!cancelled && isCurrentCodeSessionGeneration(props.sessionId, requestGeneration)) setOutdated(true);
+          return;
+        }
+        throw new Error("Could not load folders from this agent.");
+      }
       const data = unwrapCodeData<{ folders: { path: string; branch: string }[]; default: string }>(await response.json());
       if (!cancelled) { setFolders(data.folders); setSelected(data.default); setLoadedContext(requestContext); }
     }).catch(() => { if (!cancelled) setError("Could not load folders from this agent. Restart it and try again."); });
     return () => { cancelled = true; };
-  }, [props.sessionId, requestContext]);
+  }, [props.sessionId, requestContext, props.agentIsCurrent]);
   if (loadedContext && loadedContext !== requestContext) return <div className="p-3 text-sm text-muted-foreground">Loading folders…</div>;
+  if (outdated) return <DaemonNotice {...props.daemonNotice} />;
   if (error) return <div role="alert" className="p-3 text-sm text-destructive">{error}</div>;
   if (!folders || !selected) return <div className="p-3 text-sm text-muted-foreground">Loading folders…</div>;
   const choices = folders.some((folder) => folder.path === selected) ? folders : [...folders, { path: selected, branch: "" }];
@@ -95,8 +138,19 @@ export function CodeEditorView(props: CodeEditorViewProps) {
   </>;
 }
 
-function CodeEditorFolder({ sessionId, device = "", workspace, mode = "code", folders, onFolderChange, onBrowse }: CodeEditorViewProps & {
-  folders: { path: string; branch: string }[]; onFolderChange: (path: string) => void; onBrowse: () => void;
+function CodeEditorFolder({
+  sessionId,
+  device = "",
+  workspace,
+  mode = "code",
+  daemonNotice,
+  folders,
+  onFolderChange,
+  onBrowse,
+}: CodeEditorViewProps & {
+  folders: { path: string; branch: string }[];
+  onFolderChange: (path: string) => void;
+  onBrowse: () => void;
 }) {
   // Commit the context before passive effects in child views issue requests.
   useLayoutEffect(() => {
@@ -210,6 +264,7 @@ function CodeEditorFolder({ sessionId, device = "", workspace, mode = "code", fo
             <GitPanel
               sessionId={sessionId}
               workspace={workspace}
+              daemonNotice={daemonNotice}
               onOpenFile={(absPath) => void openFileInActivePane(workspace, absPath)}
               onOpenDiff={(absPath, headContent) => void openWorkspaceDiff(workspace, absPath, headContent)}
             />
@@ -232,6 +287,7 @@ function CodeEditorFolder({ sessionId, device = "", workspace, mode = "code", fo
 
               {sidebarView === "files" && <FileTree
                 workspace={workspace}
+                daemonNotice={daemonNotice}
                 filterOpen={fileFilterOpen}
                 onFileSelect={() => {
                   if (shouldHideSidebarAfterFileSelection(sidebar)) sidebar.hide();
