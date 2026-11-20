@@ -8,6 +8,7 @@ import textwrap
 import time
 from unittest.mock import AsyncMock
 
+import psutil
 import pytest
 
 from kollabor_config import proc_ctl
@@ -411,13 +412,15 @@ async def test_cancellation_does_not_remove_artifacts_from_closed_pipe_descendan
     monkeypatch.setattr(tempfile, "tempdir", str(private))
     whisper = tmp_path / "whisper"
     writer_script = tmp_path / "writer.py"
+    whisper_pid = tmp_path / "whisper.pid"
     writer_started = tmp_path / "writer.started"
     writer_pid = tmp_path / "writer.pid"
     outcome = tmp_path / "writer.outcome"
     writer_script.write_text(
         textwrap.dedent(
             f"""\
-            import pathlib, sys, time
+            import os, pathlib, sys, time
+            pathlib.Path({str(whisper_pid)!r}).write_text(str(os.getppid()))
             pathlib.Path({str(writer_started)!r}).write_text("ready")
             time.sleep(0.3)
             target = pathlib.Path(sys.argv[1])
@@ -458,6 +461,15 @@ async def test_cancellation_does_not_remove_artifacts_from_closed_pipe_descendan
         await asyncio.sleep(0.02)
     assert writer_started.exists(), "detached writer did not start"
     assert writer_pid.exists(), "transcriber did not record detached writer"
+    root_pid = int(whisper_pid.read_text())
+    child_pid = int(writer_pid.read_text())
+
+    def children(process, recursive=False):
+        if process.pid == root_pid:
+            return [psutil.Process(child_pid)]
+        return []
+
+    monkeypatch.setattr(psutil.Process, "children", children)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, 2)
