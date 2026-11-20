@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const engine = vi.hoisted(() => ({
   calls: [] as string[],
+  deferFolders: false,
+  rejectFolders: null as ((error: unknown) => void) | null,
   deferTree: false,
   succeedTree: false,
   rejectTree: null as ((error: unknown) => void) | null,
@@ -18,6 +20,9 @@ vi.mock("@/api", async (importOriginal) => {
       async request(url: string) {
         engine.calls.push(url);
         if (url.endsWith("/code/folders")) {
+          if (engine.deferFolders) {
+            return new Promise((_resolve, reject) => { engine.rejectFolders = reject; });
+          }
           return new Response(JSON.stringify({
             success: true,
             data: { default: "/w", folders: [{ path: "/w", branch: "main" }] },
@@ -59,12 +64,26 @@ const notice = agentVersionNotice({ engineVersion: "0.22.0+aaaa1111", agent, res
 const daemonNotice = { notice, fallbackName: "lapis", busy: false, onRestart: () => {} };
 const stopAndStart = "This agent started before Restart Agent existed. Run kollab --hub stop lapis in a terminal, then select its Offline row in the sidebar to start it again.";
 
+function daemonOutdatedError() {
+  const error = new Error("This agent runs older code. Restart it to use Code, Git and Terminal.");
+  Object.assign(error, {
+    status: 502,
+    body: {
+      success: false,
+      error: { code: "daemon_outdated", message: error.message },
+    },
+  });
+  return error;
+}
+
 let host: HTMLDivElement;
 let root: Root;
 
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   engine.calls = [];
+  engine.deferFolders = false;
+  engine.rejectFolders = null;
   engine.deferTree = false;
   engine.succeedTree = false;
   engine.rejectTree = null;
@@ -158,6 +177,40 @@ describe("daemon_outdated from a Code descendant", () => {
     });
     engine.rejectTree?.(error);
     await act(async () => { await staleRequest; });
+
+    expect(host.textContent).not.toContain(stopAndStart);
+  });
+
+  it("ignores a late folder-list refusal after a newer same-session code request succeeds", async () => {
+    engine.deferFolders = true;
+    await act(async () => {
+      root.render(<CodeEditorView sessionId="s1" workspace="/w" mode="code" daemonNotice={daemonNotice} />);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    engine.succeedTree = true;
+    await codeFetch("/code/fs/tree", {}, { sessionId: "s1", root: "/w" });
+    engine.rejectFolders?.(daemonOutdatedError());
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+
+    expect(host.textContent).not.toContain(stopAndStart);
+  });
+
+  it("clears the recovery notice when a later same-session code request succeeds", async () => {
+    await act(async () => {
+      root.render(<CodeEditorView sessionId="s1" workspace="/w" mode="code" daemonNotice={daemonNotice} />);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    engine.deferTree = true;
+    const outdatedRequest = codeFetch("/code/fs/tree", {}, { sessionId: "s1", root: "/w" });
+    engine.rejectTree?.(daemonOutdatedError());
+    await act(async () => { await outdatedRequest; });
+    expect(host.textContent).toContain(stopAndStart);
+
+    engine.deferTree = false;
+    engine.succeedTree = true;
+    await codeFetch("/code/fs/tree", {}, { sessionId: "s1", root: "/w" });
 
     expect(host.textContent).not.toContain(stopAndStart);
   });
