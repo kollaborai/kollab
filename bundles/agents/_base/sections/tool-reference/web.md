@@ -16,7 +16,7 @@ web-fetch — retrieve a URL and return clean text:
     - output never exceeds max_chars; header and truncation marker count toward the limit
     - retains at most 500000 downloaded bytes, with a one-byte overflow check
     - stops after 2000000 decompressed bytes
-    - optional browser fallback renders only that bounded source; external requests are blocked
+    - optional browser fallback renders the bounded source; script resources use the remaining byte limits and other requests are blocked
     - 30-second timeout
     - follows redirects
 

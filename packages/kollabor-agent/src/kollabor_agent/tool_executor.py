@@ -3408,9 +3408,17 @@ class ToolExecutor:
             text = self._extract_main_content(raw, extract_main)
 
             # Playwright fallback: if aiohttp got suspiciously little text
-            # from a valid response, render the bounded source for inline JS.
+            # from a valid response, render the bounded source and its
+            # byte-budgeted script subresources.
             if len(text) < 500:
-                pw_text = await self._playwright_fetch(raw, max_chars=2_000_000)
+                pw_text = await self._playwright_fetch(
+                    raw,
+                    page_url=final_url,
+                    max_chars=2_000_000,
+                    max_download_bytes=max_download_bytes - downloaded,
+                    max_decoded_bytes=max_decoded_bytes - decoded_size,
+                    deadline=deadline,
+                )
                 if pw_text and len(pw_text) > len(text):
                     text = pw_text
                     logger.info("web_fetch: used Playwright fallback")
@@ -3738,36 +3746,242 @@ class ToolExecutor:
 
         return "\n".join(lines)
 
-    async def _playwright_fetch(self, html: str, *, max_chars: int = 2_000_000) -> str:
-        """Render bounded HTML for inline JavaScript when extraction is sparse.
+    async def _playwright_fetch(
+        self,
+        html: str,
+        *,
+        page_url: str,
+        max_chars: int = 2_000_000,
+        max_download_bytes: int = 500_000,
+        max_decoded_bytes: int = 2_000_000,
+        deadline: float | None = None,
+    ) -> str:
+        """Render sparse HTML with script resources under the remaining budgets.
 
-        External requests are blocked so the browser cannot bypass the HTTP
-        byte limits enforced by web-fetch.
+        The main document is served from the already-bounded response. Script
+        resources are fetched through the remaining byte limits; other browser
+        requests are blocked.
         """
         try:
+            import zlib
+            from urllib.parse import urljoin, urlparse
+
+            import aiohttp
             from playwright.async_api import async_playwright
         except ImportError:
             return ""
 
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
+            downloaded_bytes = 0
+            decoded_bytes = 0
+            resource_lock = asyncio.Lock()
+            document_served = False
+            redirect_statuses = {301, 302, 303, 307, 308}
+            request_headers = {
+                "Accept-Encoding": "identity, gzip, deflate",
+                "User-Agent": (
+                    "Mozilla/5.0 (compatible; KollabAgent/1.0; "
+                    "+https://github.com/kollaborai/kollab)"
+                ),
+            }
+
+            def decode_resource(body: bytes, encoding: str, limit: int):
+                if encoding in ("", "identity"):
+                    return body if len(body) <= limit else None
+                if encoding == "gzip":
+                    window_bits = 16 + zlib.MAX_WBITS
+                elif encoding == "deflate":
+                    has_zlib_header = False
+                    if len(body) >= 2:
+                        cmf, flg = body[:2]
+                        has_zlib_header = (
+                            cmf & 0x0F == 8
+                            and cmf >> 4 <= 7
+                            and ((cmf << 8) | flg) % 31 == 0
+                        )
+                    window_bits = (
+                        zlib.MAX_WBITS if has_zlib_header else -zlib.MAX_WBITS
+                    )
+                else:
+                    return None
+
+                output = bytearray()
+                decoder = zlib.decompressobj(window_bits)
+                pending = body
                 try:
-                    page = await browser.new_page()
+                    while pending:
+                        decoded = decoder.decompress(
+                            pending, limit - len(output) + 1
+                        )
+                        output.extend(decoded)
+                        if len(output) > limit:
+                            return None
+                        if decoder.unconsumed_tail:
+                            pending = decoder.unconsumed_tail
+                            continue
+                        if encoding == "gzip" and decoder.eof and decoder.unused_data:
+                            pending = decoder.unused_data
+                            decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                            continue
+                        pending = b""
 
-                    async def block_external_request(route):
-                        await route.abort()
+                    if not decoder.eof:
+                        return None
+                    output.extend(decoder.flush())
+                except zlib.error:
+                    return None
+                return bytes(output) if len(output) <= limit else None
 
-                    await page.route("**/*", block_external_request)
-                    await page.set_content(
-                        html, wait_until="domcontentloaded", timeout=20_000
+            async def read_bounded_body(response):
+                nonlocal downloaded_bytes
+                remaining = max_download_bytes - downloaded_bytes
+                if remaining < 0:
+                    return None
+                try:
+                    declared_length = int(response.headers.get("Content-Length", ""))
+                except (ValueError, TypeError):
+                    declared_length = None
+                if declared_length is not None and declared_length < 0:
+                    declared_length = None
+                if declared_length is not None and declared_length > remaining:
+                    downloaded_bytes = max_download_bytes
+                    return None
+
+                parts = []
+                body_size = 0
+                while True:
+                    chunk = await response.content.read(
+                        min(64 * 1024, remaining - body_size + 1)
                     )
-                    text = await page.locator("body").evaluate(
-                        "(body, limit) => body.innerText.slice(0, limit)",
-                        max_chars,
-                    )
-                finally:
-                    await browser.close()
+                    if not chunk:
+                        break
+                    body_size += len(chunk)
+                    if body_size > remaining:
+                        downloaded_bytes = max_download_bytes
+                        return None
+                    parts.append(chunk)
+                downloaded_bytes += body_size
+                return b"".join(parts)
+
+            async def fetch_script(url: str, session):
+                nonlocal decoded_bytes
+                parsed_url = urlparse(url)
+                if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
+                    return None
+
+                async with resource_lock:
+                    current_url = url
+                    for redirect_count in range(11):
+                        timeout_context = (
+                            asyncio.timeout_at(deadline)
+                            if deadline is not None
+                            else asyncio.timeout(20)
+                        )
+                        try:
+                            async with timeout_context:
+                                async with session.get(
+                                    current_url,
+                                    headers=request_headers,
+                                    allow_redirects=False,
+                                ) as response:
+                                    if response.status in redirect_statuses:
+                                        location = response.headers.get("Location")
+                                        body = await read_bounded_body(response)
+                                        if body is None or not location or redirect_count == 10:
+                                            return None
+                                        current_url = urljoin(current_url, location)
+                                        redirected_url = urlparse(current_url)
+                                        if (
+                                            redirected_url.scheme not in ("http", "https")
+                                            or not redirected_url.netloc
+                                        ):
+                                            return None
+                                        continue
+                                    if response.status >= 400:
+                                        return None
+
+                                    body = await read_bounded_body(response)
+                                    if body is None:
+                                        return None
+                                    encoding = response.headers.get(
+                                        "Content-Encoding", "identity"
+                                    ).lower().strip()
+                                    remaining_decoded = max_decoded_bytes - decoded_bytes
+                                    decoded_body = decode_resource(
+                                        body, encoding, remaining_decoded
+                                    )
+                                    if decoded_body is None:
+                                        decoded_bytes = max_decoded_bytes
+                                        return None
+                                    decoded_bytes += len(decoded_body)
+                                    response_headers = {
+                                        name: value
+                                        for name, value in response.headers.items()
+                                        if name.lower()
+                                        not in {
+                                            "connection",
+                                            "content-encoding",
+                                            "content-length",
+                                            "set-cookie",
+                                            "transfer-encoding",
+                                        }
+                                    }
+                                    return response.status, response_headers, decoded_body
+                        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                            return None
+                    return None
+
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=None), auto_decompress=False
+            ) as session:
+                async with async_playwright() as p:
+                    browser = await p.chromium.launch(headless=True)
+                    try:
+                        page = await browser.new_page()
+
+                        async def handle_request(route):
+                            nonlocal document_served
+                            request = route.request
+                            if request.resource_type == "document":
+                                if not document_served:
+                                    document_served = True
+                                    await route.fulfill(
+                                        status=200,
+                                        headers={
+                                            "content-type": "text/html; charset=utf-8"
+                                        },
+                                        body=html,
+                                    )
+                                else:
+                                    await route.abort()
+                                return
+                            if request.resource_type != "script":
+                                await route.abort()
+                                return
+
+                            resource = await fetch_script(request.url, session)
+                            if resource is None:
+                                await route.abort()
+                                return
+                            status, headers, body = resource
+                            await route.fulfill(
+                                status=status,
+                                headers=headers,
+                                body=body,
+                            )
+
+                        await page.route("**/*", handle_request)
+                        await page.goto(
+                            page_url,
+                            wait_until="domcontentloaded",
+                            timeout=20_000,
+                        )
+                        text = await page.locator("body").evaluate(
+                            "(body, limit) => body.innerText.slice(0, limit)",
+                            max_chars,
+                        )
+                    finally:
+                        await browser.close()
 
             return str(text)[:max_chars]
         except Exception as e:

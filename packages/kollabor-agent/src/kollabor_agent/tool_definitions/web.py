@@ -74,7 +74,8 @@ web_fetch = ToolDefinition(
         "results compact and relevant. At most 500000 downloaded bytes are "
         "retained, with a one-byte overflow check; decompressed responses "
         "are capped at 2000000 bytes. The optional browser "
-        "fallback renders that bounded source and blocks external requests."
+        "fallback renders the bounded source and fetches script resources "
+        "within the remaining byte limits; other browser requests are blocked."
     ),
     safety_features=[
         "30-second timeout prevents hanging on slow servers",
