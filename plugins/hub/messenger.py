@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from .file_lock import locked_file
 from .models import HubMessage
 from .presence import _atomic_write, get_messages_dir, get_socket_dir
 from .relay_state import failure_text
@@ -26,8 +27,8 @@ from .relay_state import failure_text
 # are evicted first at write time.
 INBOX_MAX_SIZE: int = 50
 # Hard cap on durable controls per inbox. Controls bypass ordinary replay
-# limits but must not grow without bound. Oldest controls are evicted
-# (with loud logging) when this cap is exceeded.
+# limits but must not grow without bound. Admission rejects at capacity; it
+# never evicts an accepted control before normal receive classification.
 INBOX_MAX_CONTROLS: int = 200
 # Messages older than this (seconds) are silently discarded on read.
 INBOX_TTL_SECS: int = 7 * 86400  # 7 days
@@ -277,6 +278,24 @@ def _is_durable_control(data: Any) -> bool:
     )
 
 
+def _same_durable_payload(existing: Any, payload: dict[str, Any]) -> bool:
+    """Compare message content while ignoring mutable delivery evidence."""
+    if not isinstance(existing, dict):
+        return False
+
+    def without_delivery_metadata(data: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(data)
+        metadata = normalized.get("metadata")
+        if isinstance(metadata, dict):
+            metadata = dict(metadata)
+            for key in ("_queued_for", "_acked_by", "_socket_failed"):
+                metadata.pop(key, None)
+            normalized["metadata"] = metadata
+        return normalized
+
+    return without_delivery_metadata(existing) == without_delivery_metadata(payload)
+
+
 # Simple cache for control classification: filename -> (is_control, mtime)
 # Invalidated on file modification to avoid stale reads.
 _control_classification_cache: Dict[str, tuple[bool, float]] = {}
@@ -284,10 +303,10 @@ _control_classification_cache: Dict[str, tuple[bool, float]] = {}
 
 def _is_control_cached(path: Path) -> bool:
     """Check if a message file is a durable control, with mtime-based caching."""
+    key = str(path)
     try:
         stat = path.stat()
         mtime = stat.st_mtime
-        key = str(path)
         cached = _control_classification_cache.get(key)
         if cached and cached[1] == mtime:
             return cached[0]
@@ -297,21 +316,38 @@ def _is_control_cached(path: Path) -> bool:
         is_control = _is_durable_control(data)
         _control_classification_cache[key] = (is_control, mtime)
         return is_control
-    except Exception:
-        # On any error, treat as ordinary (safe default)
+    except FileNotFoundError:
+        _control_classification_cache.pop(key, None)
         return False
+    except Exception as exc:
+        # Unknown files and records with invalid JSON must stay out of ordinary
+        # pruning. Treat them as controls so a read or parse failure cannot
+        # evict an accepted one before receive classification can recover it.
+        logger.warning(
+            "Could not classify inbox file %r; preserving it from pruning (%s)",
+            path.name,
+            type(exc).__name__,
+        )
+        return True
+
+
+class InboxCapacityError(RuntimeError):
+    """Raised when a durable control cannot be admitted to a full mailbox."""
+
+
+class InboxMessageIdConflictError(RuntimeError):
+    """Raised when a retry reuses a durable message ID for different content."""
 
 
 def _prune_inbox(msg_dir: Path, max_size: int = INBOX_MAX_SIZE) -> None:
     """Evict oldest ordinary messages while preserving durable controls.
 
     ``max_size`` bounds ordinary chatter, not task controls that still require
-    normal receive classification or an explicit stale ACK. Malformed files
-    are treated as ordinary and remain eligible for eviction.
+    normal receive classification or an explicit stale ACK. Unreadable or
+    undecodable files are treated as controls until they can be classified.
 
-    Durable controls are also capped at INBOX_MAX_CONTROLS to prevent
-    unbounded growth. Oldest controls are evicted with loud logging when
-    this cap is exceeded.
+    Durable controls are admitted separately by ``send_to_file``. This helper
+    never evicts them; capacity exhaustion rejects the new control instead.
 
     Classification uses an mtime-based cache to avoid re-reading files
     on every prune call.
@@ -343,23 +379,6 @@ def _prune_inbox(msg_dir: Path, max_size: int = INBOX_MAX_SIZE) -> None:
                 len(control_files),
             )
 
-        # Evict oldest controls if they exceed the hard cap
-        excess_controls = len(control_files) - INBOX_MAX_CONTROLS
-        if excess_controls > 0:
-            for path in control_files[:excess_controls]:
-                try:
-                    path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-            logger.warning(
-                "Inbox prune: EVICTED %d oldest durable control(s) from %r "
-                "(control_cap=%d, controls_remaining=%d) — "
-                "controls overflow indicates delivery or classification failure",
-                excess_controls,
-                msg_dir.name,
-                INBOX_MAX_CONTROLS,
-                len(control_files) - excess_controls,
-            )
     except Exception as e:
         logger.debug(f"Inbox prune failed for {msg_dir}: {e}")
 
@@ -3334,31 +3353,83 @@ class AgentMessenger:
             return {}
 
     @staticmethod
-    async def send_to_file(target_agent_id: str, message: HubMessage) -> None:
+    async def send_to_file(target_agent_id: str, message: HubMessage) -> bool:
         """Fallback: write message to agent's filesystem mailbox.
 
-        After writing, prunes ordinary traffic to INBOX_MAX_SIZE entries
-        (oldest first). Durable task controls are preserved until classified.
+        Ordinary traffic is written and pruned to INBOX_MAX_SIZE entries
+        (oldest first). Durable task controls are admitted under a per-mailbox
+        lock up to INBOX_MAX_CONTROLS; a full mailbox raises
+        ``InboxCapacityError`` without evicting accepted controls. Retrying an
+        identical durable message ID is idempotent. Storage failures propagate
+        so callers cannot report an unpersisted message as queued.
+
+        Returns True when the message is durably admitted, including an
+        idempotent retry. Capacity exhaustion and storage errors are explicit.
         """
         msg_dir = get_messages_dir() / target_agent_id
         msg_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        payload = message.to_dict()
+
+        if _is_durable_control(payload):
+            lock_path = msg_dir / ".admission.lock"
+            with locked_file(lock_path, private=True):
+                control_files = [
+                    path for path in msg_dir.glob("*.json") if _is_control_cached(path)
+                ]
+                for path in control_files:
+                    try:
+                        with path.open(encoding="utf-8") as stream:
+                            existing = json.load(stream)
+                    except (OSError, ValueError):
+                        continue
+                    if isinstance(existing, dict) and existing.get("id") == message.id:
+                        if not _same_durable_payload(existing, payload):
+                            raise InboxMessageIdConflictError(
+                                "durable message ID already exists with different content"
+                            )
+                        return True
+
+                if len(control_files) >= INBOX_MAX_CONTROLS:
+                    logger.warning(
+                        "Durable mailbox full for %r (control_cap=%d); "
+                        "new control was not admitted",
+                        target_agent_id,
+                        INBOX_MAX_CONTROLS,
+                    )
+                    raise InboxCapacityError(
+                        "durable inbox capacity reached; retry after "
+                        "the receiver drains controls"
+                    )
+
+                filename = (
+                    f"{time.time():.6f}-{uuid.uuid4().hex[:8]}-"
+                    f"from-{message.from_identity}.json"
+                )
+                _atomic_write(msg_dir / filename, payload)
+                _prune_inbox(msg_dir, INBOX_MAX_SIZE)
+                logger.info("Wrote durable control to mailbox: %s", filename)
+                return True
 
         # Timestamp + UUID filename avoids seq race under concurrency
         filename = f"{time.time():.6f}-{uuid.uuid4().hex[:8]}-from-{message.from_identity}.json"
-
-        _atomic_write(msg_dir / filename, message.to_dict())
+        _atomic_write(msg_dir / filename, payload)
         logger.info(f"Wrote message to mailbox: {filename}")
 
-        # Enforce inbox size bound — evict oldest if over limit
+        # Enforce the independent ordinary-message bound.
         _prune_inbox(msg_dir, INBOX_MAX_SIZE)
+        return True
 
     @staticmethod
     def read_mailbox(
         agent_id: str,
         max_replay: int = 0,
         restart_boundary: Optional[float] = None,
+        retain_controls: bool = False,
     ) -> List[HubMessage]:
-        """Read and consume messages from filesystem mailbox.
+        """Read messages from filesystem mailbox.
+
+        Ordinary messages are consumed after parsing. Set ``retain_controls``
+        to keep durable controls counted until receive classification.
 
         Args:
             agent_id: Agent identity or agent_id to read from.
@@ -3373,6 +3444,8 @@ class AgentMessenger:
                 clock-skew grace) are pre-reboot: they are dropped with a log
                 line and never delivered as current instructions, but durable
                 task controls are preserved for TaskLedger classification.
+            retain_controls: Keep parsed durable controls on disk until the
+                normal receive path classifies and acknowledges them.
         """
         msg_dir = get_messages_dir() / agent_id
         if not msg_dir.exists():
@@ -3434,11 +3507,15 @@ class AgentMessenger:
                     pass
                 continue
 
-            # Delete after successful parse
-            try:
-                f.unlink()
-            except Exception:
-                pass
+            # Ordinary messages are consumed after parsing. The live delivery
+            # path keeps controls counted until receive classification so a
+            # concurrent admission cannot take the slot needed by a refusal
+            # retry.
+            if not (retain_controls and is_control):
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
 
             # Issue #639: reconcile pre-restart messages against the boot
             # boundary. Ordinary chatter written by a previous process
@@ -3563,30 +3640,74 @@ class AgentMessenger:
         agent_keys: List[str],
         max_replay: int = 0,
         restart_boundary: Optional[float] = None,
+        retain_controls: bool = True,
     ) -> List[HubMessage]:
-        """Read and consume mailboxes for all durable addresses.
+        """Read mailboxes for all durable addresses.
 
         Agents get a fresh agent_id on restart, but their hub identity
         stays stable. Reading both prevents offline messages from being
-        stranded in the old session's mailbox.
+        stranded in the old session's mailbox. Ordinary messages are consumed
+        on read; durable controls remain counted until receive classification
+        acknowledges them.
 
         Args:
             agent_keys: List of agent_id and identity strings to drain.
             max_replay: Forwarded to read_mailbox — caps per-inbox replay.
             restart_boundary: Forwarded to read_mailbox — pre-reboot
                 reconciliation boundary (defaults to process boot).
+            retain_controls: Keep durable controls on disk until acknowledged.
         """
         messages: List[HubMessage] = []
         seen: set[str] = set()
         for key in dict.fromkeys(k for k in agent_keys if k):
             for msg in AgentMessenger.read_mailbox(
-                key, max_replay=max_replay, restart_boundary=restart_boundary
+                key,
+                max_replay=max_replay,
+                restart_boundary=restart_boundary,
+                retain_controls=retain_controls,
             ):
                 if msg.id in seen:
                     continue
                 seen.add(msg.id)
                 messages.append(msg)
         return sorted(messages, key=lambda msg: msg.timestamp)
+
+    @staticmethod
+    def acknowledge_mailbox_message(
+        agent_keys: List[str], message: HubMessage
+    ) -> int:
+        """Remove a durable control after the normal receive path classifies it."""
+        payload = message.to_dict()
+        message_id = payload.get("id")
+        if not message_id or not _is_durable_control(payload):
+            return 0
+
+        removed = 0
+        messages_dir = get_messages_dir()
+        for key in dict.fromkeys(agent_key for agent_key in agent_keys if agent_key):
+            mailbox_dir = messages_dir / key
+            if not mailbox_dir.is_dir():
+                continue
+            with locked_file(mailbox_dir / ".admission.lock", private=True):
+                for path in mailbox_dir.glob("*.json"):
+                    try:
+                        with path.open(encoding="utf-8") as stream:
+                            existing = json.load(stream)
+                    except (OSError, ValueError):
+                        continue
+                    if (
+                        not isinstance(existing, dict)
+                        or existing.get("id") != message_id
+                        or not _is_durable_control(existing)
+                        or not _same_durable_payload(existing, payload)
+                    ):
+                        continue
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        continue
+                    removed += 1
+        return removed
 
     @staticmethod
     def get_inbox_count(identity: str) -> int:

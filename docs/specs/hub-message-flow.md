@@ -341,7 +341,23 @@ there are TWO separate dedup systems:
     path: ~/.kollab/hub/messages/<agent_id>/
     atomic file write (timestamp-uuid.json)
     polled every 5 seconds by _mailbox_loop
-    consumed (deleted) after read
+    ordinary messages are consumed after read
+    durable task controls stay on disk and count against capacity until
+    normal receive classification succeeds; a refusal leaves the control
+    queued for the next poll
+
+  mailbox admission:
+    ordinary messages are bounded independently by INBOX_MAX_SIZE; oldest
+    ordinary messages may be evicted when that limit is exceeded
+    durable task assignments and task-cron controls are bounded by
+    INBOX_MAX_CONTROLS and are never evicted before receive classification
+    unreadable or undecodable records are preserved as unknown controls and
+    consume control capacity until they can be recovered or classified
+    when that control cap is full, the new write is rejected with explicit
+    backpressure; the sender may retry after the receiver drains its mailbox
+    admission is serialized per mailbox, and retrying an existing message ID
+    is idempotent; storage errors are returned as delivery failures
+    this is at-least-once retry behavior, not an exactly-once effect guarantee
 
   off-box endpoint (optional, plugins.hub.endpoint_enabled):
     remote agent dials wss://host:port (or ws://) instead of a unix socket
