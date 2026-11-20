@@ -212,12 +212,12 @@ describe("daemon outdated notices", () => {
     expect(html).toContain("Run /restart to update the agent version running.");
   });
 
-  it("keeps a usable stop-and-start action while version information is unavailable", () => {
-    const html = renderToStaticMarkup(
-      <DaemonNotice notice={null} fallbackName="lapis" busy={false} onRestart={() => {}} />,
-    );
-    expect(visibleText(html)).toContain("This agent runs older code. Run kollab --hub stop lapis in a terminal");
-    expect(html).toContain('<code class="whitespace-normal">kollab <span class="whitespace-nowrap">--hub</span> stop lapis</code>');
+  it("does not invent a local stop command when the daemon has no live agent identity", () => {
+    const props = { notice: null, fallbackName: "<agent name>", busy: false, onRestart: () => {} };
+    const html = renderToStaticMarkup(<DaemonNotice {...props} />);
+    expect(visibleText(html)).toContain("This agent runs older code. Restart it to use Code, Git and Terminal.");
+    expect(visibleText(html)).not.toContain("<agent name>");
+    expect(html).not.toContain("kollab --hub stop");
   });
 
   it("the Terminal does not offer Retry for daemon_outdated", () => {
