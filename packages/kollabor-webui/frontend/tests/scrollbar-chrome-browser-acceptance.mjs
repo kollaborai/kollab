@@ -297,6 +297,9 @@ async function run() {
       await page.getByTestId("editor-box").hover();
       await page.mouse.wheel(0, 200);
       await page.waitForTimeout(120);
+      await page.getByTestId("terminal-box").hover();
+      await page.mouse.wheel(0, -200);
+      await page.waitForTimeout(120);
     });
     const p1i = await probes(page);
     await check("radix vertical scrollbar hidden while hovered", () => assertChromeHidden("radix-v-scrollbar", p1i["radix-v-scrollbar"]));
@@ -305,6 +308,10 @@ async function run() {
       assert.ok(!p1i["monaco-v-scrollbar"], `monaco vertical slider visible during scroll: ${JSON.stringify(p1i["monaco-v-scrollbar"])}`));
     await check("monaco horizontal slider hidden while scrolling", () =>
       assert.ok(!p1i["monaco-h-scrollbar"], `monaco horizontal slider visible during scroll: ${JSON.stringify(p1i["monaco-h-scrollbar"])}`));
+    await check("xterm scrollbar and thumb hidden while scrolling", () => {
+      assertChromeHidden("xterm vertical scrollbar", p1i["xterm-scrollbar"]);
+      assertChromeHidden("xterm vertical slider", p1i["xterm-slider"]);
+    });
 
     const p2 = await probes(page);
     await check("geometry stable after scrolling", () => assertThicknessZero("native-both", p2["native-both"]));

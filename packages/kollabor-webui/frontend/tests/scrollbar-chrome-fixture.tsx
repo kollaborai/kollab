@@ -295,6 +295,12 @@ window.__scrollbarProbes = () => {
       '[data-testid="editor-box"] .monaco-diff-editor .monaco-scrollable-element > .scrollbar.horizontal',
     ),
     xterm: safe(q('[data-testid="terminal-box"] .xterm-viewport')),
+    "xterm-scrollbar": visibleBox(
+      q('[data-testid="terminal-box"] .xterm .xterm-scrollable-element > .scrollbar.vertical'),
+    ),
+    "xterm-slider": visibleBox(
+      q('[data-testid="terminal-box"] .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider'),
+    ),
     // Layout honesty: a hidden scrollbar must not leave a reserved gutter.
     "native-borderless-no-gutter": (() => {
       const el = byId("native-borderless");
