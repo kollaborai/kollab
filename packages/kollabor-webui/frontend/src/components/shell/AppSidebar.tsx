@@ -883,10 +883,10 @@ export function AppSidebar({
             Could not save sidebar order: {sidebarOrder.error}
           </p>
         ) : null}
-        {/* Use one row when it fits, otherwise two rows of four. */}
+        {/* Use two rows of four below lg and one compact row at lg and above. */}
         <div
           data-sidebar="footer-actions"
-          className="grid grid-cols-4 items-center justify-items-center gap-x-1 gap-y-1 [&>button]:col-span-1 lg:flex lg:justify-between"
+          className="grid grid-cols-4 items-center justify-items-center max-lg:gap-x-1 gap-y-1 [&>button]:col-span-1 lg:flex lg:justify-between"
         >
           <Popover>
             <PopoverTrigger asChild>
