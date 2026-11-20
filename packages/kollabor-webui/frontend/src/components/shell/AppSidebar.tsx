@@ -268,15 +268,30 @@ export function AppSidebar({
   }, [learnActive, whatsNewActive]);
   // PR Chain is a maintainer tool; show it only when its runner folder exists.
   useEffect(() => {
-    const controller = new AbortController();
-    void api.getPrChain(controller.signal)
-      .then(({ root_found }) => {
-        if (!controller.signal.aborted) setPrChainRootFound(root_found);
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) setPrChainRootFound(false);
-      });
-    return () => controller.abort();
+    let request: AbortController | undefined;
+    const refresh = () => {
+      request?.abort();
+      const controller = new AbortController();
+      request = controller;
+      void api.getPrChain(controller.signal)
+        .then(({ root_found }) => {
+          if (!controller.signal.aborted) setPrChainRootFound(root_found);
+        })
+        .catch(() => {
+          if (!controller.signal.aborted) setPrChainRootFound(false);
+        });
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    const timer = window.setInterval(refreshWhenVisible, 30_000);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    refresh();
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      request?.abort();
+    };
   }, [api]);
   // A lifted row's clone replaces the element a touch started on; keep that touch reaching the drag.
   useEffect(() => relayDetachedTouches(window), []);
