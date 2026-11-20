@@ -427,6 +427,18 @@ SUBSTITUTION_GUARD_CASES = [
         "echo '$(kollab --agent coder)'", False, False, id="single-quoted-command-text"
     ),
     pytest.param(
+        "echo safe # $(kollab --agent coder)",
+        False,
+        False,
+        id="command-substitution-in-shell-comment",
+    ),
+    pytest.param(
+        "echo safe # <(kollab --agent coder)",
+        False,
+        False,
+        id="process-substitution-in-shell-comment",
+    ),
+    pytest.param(
         "echo '<(kollab --agent coder)'",
         False,
         False,
