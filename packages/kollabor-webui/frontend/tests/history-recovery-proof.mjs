@@ -174,15 +174,136 @@ const openThread = async (page, marker) => {
   await page.getByText(marker, { exact: true }).first().waitFor({ timeout: 10000 });
 };
 
+const messagePosition = async (page, text, remember = false) =>
+  page.getByText(text, { exact: true }).first().evaluate((element, shouldRemember) => {
+    const viewport = element.closest('[data-slot="aui_thread-viewport"]');
+    if (!viewport) throw new Error("message is outside the thread viewport");
+    const rect = element.getBoundingClientRect();
+    const view = viewport.getBoundingClientRect();
+    const row = element.closest("[data-message-id]");
+    const rowRect = row?.getBoundingClientRect();
+    if (shouldRemember) window.__issue1142Anchor = element;
+    return {
+      offset: rect.top - view.top,
+      rowId: row?.getAttribute("data-message-id"),
+      rowOffset: rowRect ? rowRect.top - view.top : null,
+      visible: rect.bottom > view.top && rect.top < view.bottom,
+      sameNode: window.__issue1142Anchor === element,
+      connected: window.__issue1142Anchor?.isConnected ?? false,
+    };
+  }, remember);
+
+const waitForViewportStable = async (page, stableSamples = 5, messageText) => {
+  const viewport = page.locator('[data-slot="aui_thread-viewport"]');
+  await viewport.waitFor({ timeout: 8000 });
+  let previous = null;
+  let stable = 0;
+  for (let attempt = 0; attempt < 80 && stable < stableSamples; attempt++) {
+    const current = await viewport.evaluate((node) => ({
+      top: node.scrollTop,
+      height: node.scrollHeight,
+      scrolls: window.__issue1142ProgrammaticScrolls?.length ?? 0,
+    }));
+    const position = messageText
+      ? await messagePosition(page, messageText).catch(() => null)
+      : null;
+    const positionStable = !messageText || (position?.visible && previous?.position?.visible &&
+      position.rowId === previous.position.rowId &&
+      Math.abs(position.offset - previous.position.offset) < 1 &&
+      Math.abs(position.rowOffset - previous.position.rowOffset) < 1);
+    stable = previous && Math.abs(current.top - previous.top) < 1 &&
+      current.height === previous.height && current.scrolls === previous.scrolls && positionStable
+      ? stable + 1
+      : 0;
+    previous = { ...current, position };
+    await page.waitForTimeout(50);
+  }
+  if (stable < stableSamples) throw new Error(`thread viewport did not settle for ${messageText ?? "viewport"}: ${JSON.stringify(previous)}`);
+};
+
+const waitForMessageInView = async (page, text) => {
+  const viewport = page.locator('[data-slot="aui_thread-viewport"]');
+  await viewport.waitFor({ timeout: 8000 });
+  await viewport.hover();
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const position = await messagePosition(page, text).catch(() => null);
+    if (position?.visible) {
+      await waitForViewportStable(page, 5, text);
+      const settled = await messagePosition(page, text).catch(() => null);
+      if (settled?.visible) return settled;
+    }
+    await page.mouse.wheel(0, -450);
+    await page.waitForTimeout(35);
+  }
+  throw new Error(`${text} never entered the viewport while scrolling up`);
+};
+
+const programmaticScrollLog = async (page, name) => {
+  const log = await page.evaluate(() => window.__issue1142ProgrammaticScrolls ?? []);
+  console.log(`    ${name} programmatic scrolls:`, JSON.stringify(log));
+  return log;
+};
+
 let browser;
+const proofWidth = Number(process.env.HISTORY_PROOF_WIDTH ?? 820);
 const onlyScenarios = new Set((process.env.HISTORY_PROOF_SCENARIOS ?? "").split(",").filter(Boolean));
-const scenario = async (name, buildState, run) => {
+const scenario = async (name, buildState, run, options = {}) => {
   if (onlyScenarios.size && !onlyScenarios.has(name)) return;
   console.log(`scenario ${name}`);
-  const context = await browser.newContext({ viewport: { width: 820, height: 1180 } });
+  const context = await browser.newContext({
+    viewport: options.viewport ?? { width: proofWidth, height: proofWidth === 390 ? 844 : 1000 },
+    ...(options.isMobile ? { isMobile: true, hasTouch: true, deviceScaleFactor: 1 } : {}),
+  });
   await context.addInitScript(() => {
     localStorage.setItem("kollab.setup-guide.v1", JSON.stringify({ step: "done", dismissed: true }));
     localStorage.setItem("kollab.whats-new.v1", JSON.stringify({ seenVersion: "999.999.999" }));
+    window.__issue1142ProgrammaticScrolls = [];
+    const log = (method, details) => {
+      window.__issue1142ProgrammaticScrolls.push({ method, time: performance.now(), ...details });
+    };
+    let prototype = HTMLElement.prototype;
+    while (prototype && !Object.getOwnPropertyDescriptor(prototype, "scrollTop")) {
+      prototype = Object.getPrototypeOf(prototype);
+    }
+    const scrollTop = prototype && Object.getOwnPropertyDescriptor(prototype, "scrollTop");
+    if (scrollTop?.get && scrollTop?.set) {
+      Object.defineProperty(prototype, "scrollTop", {
+        configurable: true,
+        get() { return scrollTop.get.call(this); },
+        set(value) {
+          if (this.getAttribute?.("data-slot") === "aui_thread-viewport") {
+            log("scrollTop", { before: scrollTop.get.call(this), value: Number(value) });
+          }
+          scrollTop.set.call(this, value);
+        },
+      });
+    }
+    const scrollTo = Element.prototype.scrollTo;
+    if (scrollTo) {
+      Element.prototype.scrollTo = function (...args) {
+        if (this.getAttribute?.("data-slot") === "aui_thread-viewport") {
+          log("scrollTo", { before: this.scrollTop, args });
+        }
+        return scrollTo.apply(this, args);
+      };
+    }
+    const scrollBy = Element.prototype.scrollBy;
+    if (scrollBy) {
+      Element.prototype.scrollBy = function (...args) {
+        if (this.getAttribute?.("data-slot") === "aui_thread-viewport") {
+          log("scrollBy", { before: this.scrollTop, args });
+        }
+        return scrollBy.apply(this, args);
+      };
+    }
+    const scrollIntoView = Element.prototype.scrollIntoView;
+    if (scrollIntoView) {
+      Element.prototype.scrollIntoView = function (...args) {
+        const viewport = this.closest?.('[data-slot="aui_thread-viewport"]');
+        if (viewport) log("scrollIntoView", { target: this.textContent?.slice(0, 48) });
+        return scrollIntoView.apply(this, args);
+      };
+    }
   });
   const page = await context.newPage();
   const requests = [];
@@ -1163,6 +1284,304 @@ try {
       }
     },
   );
+
+  // L: compacted history is imported while this page owns a running turn.
+  // The reader is parked in the old transcript; the rebase must keep its row
+  // mounted and at the same viewport offset after that turn settles.
+  const lRows = Array.from({ length: 120 }, (_, index) => ({
+    role: index % 2 ? "assistant" : "user", content: `message-${index}`,
+  }));
+  const l = { compact: false, events: [], assistant: [], refreshes: 0 };
+  const compactedRows = [...lRows.slice(40), { role: "assistant", content: "", metadata: {
+    context_compaction: true, compaction_round: 1, pre_message_count: 120, post_message_count: 82,
+  } }, { role: "user", content: "NEW-AFTER-RENUMBER" }];
+  const lPage = () => {
+    const history = l.compact ? compactedRows : lRows;
+    return mkPage(0, history.length, { history });
+  };
+  await scenario(
+    "L-1142-compaction-rebase",
+    () => ({
+      resolve(options) {
+        if (options.before) return { status: 200, body: mkPage(0, 0) };
+        l.refreshes += 1;
+        return { status: 200, body: lPage() };
+      },
+      events(route) {
+        return new Promise((resolve) => l.events.push((body) =>
+          resolve(route.fulfill({ status: 200, contentType: "text/event-stream", body }).catch(() => {}))));
+      },
+      assistant(route) {
+        const state = route.request().postDataJSON().state;
+        return new Promise((resolve) => l.assistant.push(() => {
+          const messages = [...state.messages,
+            { id: `user-demo-session-${state.messages.length}`, role: "user", content: "LOCAL-COMPACTION-TURN" },
+            { id: `assistant-demo-session-${state.messages.length + 1}`, role: "assistant", content: "LOCAL-COMPACTION-ANSWER",
+              status: { type: "complete", reason: "stop" } },
+          ];
+          const update = { type: "update-state", operations: [
+            { type: "set", path: ["messages"], value: messages },
+            { type: "set", path: ["synced"], value: { history: 120, messages: messages.length } },
+          ] };
+          const body = `data: ${JSON.stringify(update)}\n\ndata: ${JSON.stringify({ type: "message-finish", finishReason: "stop" })}\n\ndata: [DONE]\n\n`;
+          resolve(route.fulfill({ status: 200, contentType: "text/event-stream", body }).catch(() => {}));
+        }));
+      },
+    }),
+    async (page, _requests, capture) => {
+      try {
+        await openThread(page, "message-119");
+        const composer = page.locator(".aui-composer-input");
+        await composer.fill("LOCAL-COMPACTION-TURN");
+        await composer.press("Enter");
+        for (let n = 0; n < 100 && (!l.assistant.length || !l.events.length); n++) {
+          await page.waitForTimeout(100);
+        }
+        if (!l.assistant.length || !l.events.length) throw new Error("local turn or event stream was not held");
+        await page.getByLabel("Assistant is working").waitFor({ timeout: 8000 });
+        await page.locator("[data-aui-top-anchor-reserve]").waitFor({ state: "attached", timeout: 8000 });
+        await waitForViewportStable(page, 8);
+        await composer.fill("Draft survives compaction");
+        const scrollCountBeforeReaderMoves = await page.evaluate(() => window.__issue1142ProgrammaticScrolls?.length ?? 0);
+        await waitForMessageInView(page, "message-90");
+        const before = await messagePosition(page, "message-90", true);
+        const scrollCountBeforeRebase = await page.evaluate(() => window.__issue1142ProgrammaticScrolls?.length ?? 0);
+        if (scrollCountBeforeRebase !== scrollCountBeforeReaderMoves) {
+          fail("L-1142-compaction-rebase", `programmatic scrolls while reader moved up=${scrollCountBeforeRebase - scrollCountBeforeReaderMoves}`);
+        }
+        const refreshBefore = l.refreshes;
+        l.compact = true;
+        l.events.splice(0).forEach((release) => release('data: {"type":"history_updated"}\n\n'));
+        for (let n = 0; n < 100 && l.refreshes <= refreshBefore; n++) await page.waitForTimeout(100);
+        if (l.refreshes <= refreshBefore) throw new Error("compaction refresh did not arrive during the running turn");
+        await waitForViewportStable(page, 5, "message-90");
+        l.assistant.splice(0).forEach((release) => release());
+        await page.getByText("LOCAL-COMPACTION-ANSWER", { exact: true }).waitFor({ timeout: 10000 });
+        await page.getByText(/Context compacted/).waitFor({ timeout: 10000 });
+        await waitForViewportStable(page, 5, "message-90");
+        const after = await messagePosition(page, "message-90");
+        const scrollCountAfterRebase = await page.evaluate(() => window.__issue1142ProgrammaticScrolls?.length ?? 0);
+        if (scrollCountAfterRebase !== scrollCountBeforeRebase) {
+          fail("L-1142-compaction-rebase", `programmatic scrolls during rebase=${scrollCountAfterRebase - scrollCountBeforeRebase}`);
+        }
+        if (!after.sameNode || !after.connected || Math.abs(after.offset - before.offset) > 5) {
+          fail("L-1142-compaction-rebase", `sameNode=${after.sameNode} before=${before.offset.toFixed(1)} after=${after.offset.toFixed(1)}`);
+        } else {
+          ok("L-1142-compaction-rebase", "running-turn compaction keeps the reader row mounted at the same offset");
+        }
+        for (const text of ["message-0", "message-80", "message-81", "message-90", "NEW-AFTER-RENUMBER"]) {
+          const copies = await page.getByText(text, { exact: true }).count();
+          if (copies !== 1) fail("L-1142-compaction-rebase", `${text} has ${copies} visible transcript entries`);
+        }
+        const branches = await page.getByRole("button", { name: /^(Previous|Next)$/ }).count();
+        if (branches || await composer.inputValue() !== "Draft survives compaction") {
+          fail("L-1142-compaction-rebase", `phantom branch controls=${branches} or draft changed`);
+        }
+        await programmaticScrollLog(page, "L-1142-compaction-rebase");
+        await capture();
+      } finally {
+        l.events.splice(0).forEach((release) => release(""));
+        l.assistant.splice(0).forEach((release) => release());
+      }
+    },
+  );
+
+  // An older page requested after an unaligned send arrives during a second send.
+  // Neither response grants a tail watermark. Only the older prefix can be added.
+  const unaligned = { pages: [], updates: [], events: [], turns: [], sent: 0, releasePages: false };
+  await scenario("U-1142-unaligned-paging", () => ({
+    resolve(options) {
+      if (options.before) {
+        const older = { status: 200, body: mkPage(0, 10) };
+        return unaligned.releasePages ? older : new Promise(resolve => unaligned.pages.push(() => resolve(older)));
+      }
+      if (options.after) return new Promise(resolve => unaligned.updates.push(() => resolve({ status: 200, body: mkPage(60, 60) })));
+      return { status: 200, body: mkPage(10, 60) };
+    },
+    events(route) {
+      return new Promise(resolve => unaligned.events.push(() => resolve(
+        route.fulfill({ status: 200, contentType: "text/event-stream", body: "" }).catch(() => {})
+      )));
+    },
+    assistant(route) {
+      const state = route.request().postDataJSON().state;
+      const n = ++unaligned.sent;
+      return new Promise(resolve => unaligned.turns.push(() => {
+        const messages = [...state.messages,
+          { id: `user-demo-session-${state.messages.length}`, role: "user", content: `U-SEND-${n}` },
+          { id: `assistant-demo-session-${state.messages.length + 1}`, role: "assistant", content: `U-REPLY-${n}`,
+            status: { type: "complete", reason: "stop" } },
+        ];
+        const event = { type: "update-state", operations: [
+          { type: "set", path: ["messages"], value: messages }, { type: "set", path: ["synced"], value: null },
+        ] };
+        const body = `data: ${JSON.stringify(event)}\n\ndata: {"type":"message-finish","finishReason":"stop"}\n\ndata: [DONE]\n\n`;
+        resolve(route.fulfill({ status: 200, contentType: "text/event-stream", body }).catch(() => {}));
+      }));
+    },
+  }), async page => {
+    const waitForTurn = async () => {
+      for (let n = 0; n < 100 && !unaligned.turns.length; n++) await page.waitForTimeout(50);
+      if (!unaligned.turns.length) throw Error("transport did not receive the send");
+    };
+    try {
+      await openThread(page, "message-59");
+      const composer = page.locator(".aui-composer-input");
+      await composer.fill("U-SEND-1");
+      await composer.press("Enter");
+      await waitForTurn();
+      unaligned.turns.shift()();
+      await page.getByText("U-REPLY-1", { exact: true }).waitFor();
+      await scrollToTop(page, "message-10");
+      await composer.fill("U-SEND-2");
+      await composer.press("Enter");
+      await waitForTurn();
+      await composer.fill("U-DRAFT");
+      const viewport = page.locator('[data-slot="aui_thread-viewport"]');
+      await viewport.hover();
+      for (let n = 0; n < 4; n++) {
+        await page.mouse.wheel(0, -25000);
+        await page.waitForTimeout(150);
+      }
+      await waitForViewportStable(page, 5);
+      const before = await messagePosition(page, "message-10", true);
+      unaligned.releasePages = true;
+      unaligned.pages.splice(0).forEach(release => release());
+      await page.waitForTimeout(150);
+      unaligned.turns.shift()();
+      await page.getByText("message-0", { exact: true }).waitFor();
+      await page.getByText("U-REPLY-2", { exact: true }).waitFor();
+      await waitForViewportStable(page, 5);
+      const after = await messagePosition(page, "message-10");
+      for (const label of ["message-0", "message-10", "message-59", "U-SEND-1", "U-REPLY-1", "U-SEND-2", "U-REPLY-2"]) {
+        if (await page.getByText(label, { exact: true }).count() !== 1) fail("U-1142-unaligned-paging", label);
+      }
+      const branches = await page.getByRole("button", { name: /^(Previous|Next)$/ }).count();
+      if (branches || await composer.inputValue() !== "U-DRAFT" || !after.sameNode || Math.abs(after.offset - before.offset) > 6) {
+        fail("U-1142-unaligned-paging", `branches=${branches} sameNode=${after.sameNode} offset=${before.offset}->${after.offset}`);
+      } else {
+        ok("U-1142-unaligned-paging", "older page and both unaligned turns appear once, preserving draft and reader anchor");
+      }
+    } finally {
+      unaligned.releasePages = true;
+      unaligned.pages.splice(0).forEach(release => release());
+      unaligned.turns.splice(0).forEach(release => release());
+      unaligned.events.splice(0).forEach(release => release());
+      unaligned.updates.splice(0).forEach(release => release());
+    }
+  });
+
+  // M/N: three user-triggered older-page loads, including a tool-result
+  // boundary correction. Hold each non-prefetch request so the reader offset
+  // can be measured before the rows land; then grow a newly inserted row.
+  const mRows = Array.from({ length: 120 }, (_, index) => ({
+    role: index % 2 ? "assistant" : "user", content: `message-${index}`,
+  }));
+  mRows[49] = { role: "assistant", content: "", metadata: { tool_calls: [
+    { id: "issue1142-boundary", function: { name: "review_probe_tool", arguments: "{}" } },
+  ] } };
+  mRows[50] = { role: "tool", content: "ISSUE1142_TOOL_RESULT", metadata: {
+    tool_call_id: "issue1142-boundary", tool_name: "review_fallback_tool",
+  } };
+  const runOlderScrollProof = async (name, options) => {
+    const m = { beforeCounts: new Map(), pending: [], refreshes: [], start: 50 };
+    const mPage = (start, end) => mkPage(start, end, { history: mRows.slice(start, end) });
+    await scenario(
+      name,
+      () => ({
+        resolve(request) {
+          if (request.before) {
+            const cursor = request.before;
+            const count = (m.beforeCounts.get(cursor) ?? 0) + 1;
+            m.beforeCounts.set(cursor, count);
+            const end = Number(/^before-(\d+)$/.exec(cursor)?.[1] ?? 0);
+            const start = Math.max(0, end - 20);
+            if (count === 1) return { status: 503, body: { error: "prefetch held out for user-scroll proof" } };
+            return new Promise((resolve) => m.pending.push({ cursor, start, end, resolve }));
+          }
+          if (request.after) {
+            return new Promise((resolve) => m.refreshes.push(resolve));
+          }
+          return { status: 200, body: mPage(m.start, 120) };
+        },
+      }),
+      async (page, _requests, capture) => {
+        await openThread(page, "message-119");
+        const viewport = page.locator('[data-slot="aui_thread-viewport"]');
+        const steps = [
+          { cursor: "before-50", anchor: "message-51", next: "message-30" },
+          { cursor: "before-30", anchor: "message-30", next: "message-10" },
+          { cursor: "before-10", anchor: "message-10", next: "message-0" },
+        ];
+        for (let index = 0; index < steps.length; index++) {
+          const step = steps[index];
+          for (let n = 0; n < 60 && (m.beforeCounts.get(step.cursor) ?? 0) < 1; n++) {
+            await page.waitForTimeout(100);
+          }
+          await page.waitForTimeout(180); // let the failed automatic prefetch release its in-flight guard
+          await viewport.hover();
+          for (let n = 0; n < 120; n++) {
+            const top = await viewport.evaluate((node) => node.scrollTop);
+            if (top <= 64) break;
+            const delta = top > 500 ? -250 : -Math.max(16, Math.min(100, top - 20));
+            await page.mouse.wheel(0, delta);
+            await page.waitForTimeout(20);
+          }
+          for (let n = 0; n < 30 && !m.pending.some((pending) => pending.cursor === step.cursor); n++) {
+            await page.mouse.wheel(0, -120);
+            await page.waitForTimeout(50);
+          }
+          const pending = m.pending.find((entry) => entry.cursor === step.cursor);
+          if (!pending) throw new Error(`user scroll did not request ${step.cursor}`);
+          // Paging starts up to 64px from the top. The first text line can
+          // still be above the viewport when the request is held.
+          if (!(await messagePosition(page, step.anchor)).visible) await page.mouse.wheel(0, -120);
+          await waitForViewportStable(page, 5, step.anchor);
+          const before = await messagePosition(page, step.anchor, true);
+          if (!before.visible) throw new Error(`${step.anchor} was not visible before ${step.cursor}`);
+          m.start = pending.start;
+          pending.resolve({ status: 200, body: mPage(pending.start, pending.end) });
+          m.pending = m.pending.filter((entry) => entry !== pending);
+          await page.getByText(step.next, { exact: true }).waitFor({ timeout: 10000 });
+          m.refreshes.splice(0).forEach((resolve) => resolve({
+            status: 200, body: mPage(m.start, 120),
+          }));
+          await page.waitForTimeout(700);
+          await waitForViewportStable(page, 5, step.anchor);
+          const after = await messagePosition(page, step.anchor);
+          if (!after.sameNode || !after.connected || Math.abs(after.offset - before.offset) > 6) {
+            fail(name, `${step.cursor} sameNode=${after.sameNode} before=${before.offset.toFixed(1)} after=${after.offset.toFixed(1)}`);
+          } else {
+            ok(name, `${step.cursor} keeps ${step.anchor} mounted at the same offset`);
+          }
+          if (index === 0) {
+            const growing = page.getByText("message-30", { exact: true }).first();
+            await growing.evaluate((element) => {
+              element.style.display = "block";
+              element.style.minHeight = "520px";
+              element.style.boxSizing = "border-box";
+            });
+            await page.waitForTimeout(500);
+            await waitForViewportStable(page, 5, step.anchor);
+            const grown = await messagePosition(page, step.anchor);
+            if (!grown.sameNode || Math.abs(grown.offset - before.offset) > 8) {
+              fail(name, `rows grew after restore; anchor=${step.anchor} before=${before.offset.toFixed(1)} after=${grown.offset.toFixed(1)}`);
+            } else {
+              ok(name, "continued row growth above the reader preserves its offset");
+            }
+          }
+        }
+        await programmaticScrollLog(page, name);
+        await capture();
+      },
+      options,
+    );
+  };
+  await runOlderScrollProof("M-1142-older-scroll-desktop");
+  await runOlderScrollProof("N-1142-older-scroll-phone", {
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+  });
 
   // K: another agent's message and reply land while this page owns a local
   // turn. They must be appended after that turn settles, even when the
