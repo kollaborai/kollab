@@ -109,13 +109,22 @@ describe("agents that cannot restart themselves (#968)", () => {
     expect(agentVersionNotice({ ...noVersion, restartAgents: false })).toEqual(expect.objectContaining({ kind: "too-old", name: "lapis" }));
   });
 
-  it("keeps the stop command in a no-wrap code line, with Dismiss only", () => {
+  it("keeps the --hub flag intact in a wrapping code line, with Dismiss only", () => {
     const notice = agentVersionNotice({ ...noVersion, restartAgents: true })!;
     const html = renderToStaticMarkup(<AgentVersionNotice notice={notice} busy={false} onRestart={() => {}} onDismiss={() => {}} />);
     expect(visibleText(html)).toContain(sentence);
-    expect(html).toMatch(/<code class="[^\"]*whitespace-nowrap[^\"]*">kollab --hub stop lapis<\/code>/);
+    expect(html).toMatch(/<code class="[^\"]*\bwhitespace-normal\b[^\"]*">kollab <span class="[^\"]*\bwhitespace-nowrap\b[^\"]*">--hub<\/span> stop lapis<\/code>/);
     expect(html).not.toContain("Try Again");
     expect(html.match(/<button/g)?.length).toBe(1);
+  });
+
+  it("allows a 37-character agent name to wrap without splitting the --hub flag", () => {
+    const name = "studio-mac-agent-01234567890123456789";
+    const notice = agentVersionNotice({ ...noVersion, agent: { ...noVersion.agent, name }, restartAgents: true })!;
+    const html = renderToStaticMarkup(<AgentVersionNotice notice={notice} busy={false} onRestart={() => {}} />);
+
+    expect(visibleText(html)).toContain(`kollab --hub stop ${name}`);
+    expect(html).toMatch(new RegExp(`<code class="[^\\"]*\\bwhitespace-normal\\b[^\\"]*">kollab <span class="[^\\"]*\\bwhitespace-nowrap\\b[^\\"]*">--hub<\\/span> stop ${name}<\\/code>`));
   });
 
   it("a 409 that says the agent is too old: the same sentence, Dismiss only, no Try Again", () => {
