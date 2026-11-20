@@ -65,22 +65,22 @@ class SlashCommandParser:
                 # POSIX shlex treats unquoted backslashes as escapes. Protect separators
                 # only in unquoted Windows path candidates with valid path segments.
                 # A trailing relative separator before another argument must not escape its boundary.
-                # Leave tokens with explicit shell-metacharacter escapes to shlex.
-                # For a single-separator punctuation escape, let shlex consume the escape.
+                # Leave explicit shell-metacharacter escapes to shlex in every path form.
+                # Unlisted punctuation escapes also select shlex for ambiguous relative paths.
                 command_text = re.sub(
                     r"(?P<single_quoted>'[^']*')|"
                     r"(?<!\S)(?<!\\[ \t])"
                     r"(?:--?[\w-]+=)?"
                     r"(?!(?:[^\s]|\\\s)*\\(?:[&;#{}!~\x60()$]|\[|\]))"
-                    r"(?!(?:[^\s\\]|\\\s)*\\(?:[^\w\s\\]|_)[^\s\\]*(?=\s|$))"
                     r"(?!['\"])"
                     r"(?:"
                     r"[A-Za-z]:\\(?:[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*\\?)?"
                     r"|\\\\(?:\?\\)?[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*\\?"
                     r"|\\(?![$()])[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*\\?"
-                    r"|(?!(?:[^\s]|\\\s)*\\[()$])[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*\\(?=\s+--?[\w-]+(?:=|\s|$))"
+                    r"|(?!(?:[^\s]|\\\s)*\\(?:[^\w\s\\]|_)[^\s\\]*(?=\\|\s|$))"
+                    r"(?:(?!(?:[^\s]|\\\s)*\\[()$])[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*\\(?=\s+--?[\w-]+(?:=|\s|$))"
                     r"|(?!(?:[^\s]|\\\s)*\\[()$])[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)+\\(?=\s+[^-\s][^\s]*)"
-                    r"|(?!(?:[^\s]|\\\s)*\\[()$])[^\s\\\"'<>|?*]+\\[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*"
+                    r"|(?!(?:[^\s]|\\\s)*\\[()$])[^\s\\\"'<>|?*]+\\[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*)"
                     r")(?=\s|$)",
                     lambda match: (
                         match.group("single_quoted")
