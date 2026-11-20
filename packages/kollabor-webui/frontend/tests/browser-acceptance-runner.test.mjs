@@ -221,6 +221,15 @@ test("the browser suite list is pinned and every suite script exists", () => {
   }
 });
 
+test("the scrollbar chrome browser proof is assigned to an explicit CI lane", async () => {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+  const workflow = await readFile(path.join(repoRoot, ".github/workflows/ci.yml"), "utf8");
+  assert.ok(
+    /lane: core\s*\n\s*suites:[^\n]*\bscrollbar-chrome\b/.test(workflow),
+    "scrollbar-chrome must run in an explicit support_webui_tests CI lane",
+  );
+});
+
 test("the default suite timeout leaves headroom over the slowest observed CI run", () => {
   // The monolithic learn suite took 231 to 381 s on ubuntu-latest before the #1022 split;
   // the limit must clear twice the slowest run any suite has shown.
