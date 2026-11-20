@@ -26,6 +26,15 @@ vi.mock("@/components/code/floating-sidebar", () => ({
 const agent = { name: "lapis", agent_id: "a1", state: "idle", current_task: "", solo: false, project: "/w" };
 const visibleText = (html: string) => html.replace(/<[^>]+>/g, "");
 
+describe("visibleText", () => {
+  it("preserves text that looks like an HTML element", () => {
+    const text = "<script>alert(1)</script>";
+    const html = renderToStaticMarkup(<span>{text}</span>);
+
+    expect(visibleText(html)).toBe(text);
+  });
+});
+
 describe("agentVersionNotice", () => {
   it("is silent when the agent runs the engine's version", () => {
     expect(agentVersionNotice({ engineVersion: "0.21.0+aaaa1111", agent: { ...agent, version: "0.21.0+aaaa1111" }, restartAgents: true })).toBeNull();
