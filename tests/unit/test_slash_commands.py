@@ -54,6 +54,7 @@ class TestSlashCommandParser(unittest.TestCase):
         self.assertEqual(command.args, ["my file.txt", "--format", "json"])
 
     def test_parse_unquoted_windows_paths_preserves_backslashes(self):
+        """F3: relative and rooted Windows paths must keep their separators."""
         cases = [
             (r"/open C:\work\docs\notes.txt", [r"C:\work\docs\notes.txt"]),
             (r"/open \\server\share\notes.txt", [r"\\server\share\notes.txt"]),
