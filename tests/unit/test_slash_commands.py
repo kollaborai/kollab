@@ -103,6 +103,20 @@ class TestSlashCommandParser(unittest.TestCase):
                 self.assertIsNotNone(command)
                 self.assertEqual(command.args, expected_args)
 
+    def test_escaped_shell_characters_keep_shlex_behavior(self):
+        cases = [
+            (r"/open file\(1\).txt", ["file(1).txt"]),
+            (r"/open report\ \(final\).pdf", ["report (final).pdf"]),
+            (r"/open ./my\(1\).txt", ["./my(1).txt"]),
+            (r"/open \$HOME/x", ["$HOME/x"]),
+        ]
+
+        for input_text, expected_args in cases:
+            with self.subTest(input_text=input_text):
+                command = self.parser.parse_command(input_text)
+                self.assertIsNotNone(command)
+                self.assertEqual(command.args, expected_args)
+
     def test_parse_relative_directory_paths_with_trailing_separators_before_flags(self):
         cases = [
             ("/open folder\\ --mode=read", ["folder\\", "--mode=read"]),
