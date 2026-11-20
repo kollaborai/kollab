@@ -430,6 +430,25 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertTrue(result.success, result.error)
         self.assertIn("show me the full text", result.output)
 
+    def test_web_fetch_extract_main_false_preserves_code_text_without_bs4(self):
+        """The regex fallback also retains code in full-text mode."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        real_import = builtins.__import__
+
+        def import_without_bs4(name, *args, **kwargs):
+            if name == "bs4" or name.startswith("bs4."):
+                raise ImportError("BeautifulSoup intentionally unavailable in this test")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=import_without_bs4):
+            text = ToolExecutor._extract_main_content(
+                "<pre><code>show me the full text</code></pre>",
+                extract_main=False,
+            )
+
+        self.assertIn("show me the full text", text)
+
     def test_web_fetch_regex_fallback_strips_malformed_script(self):
         """The optional regex path drops unclosed and whitespace-closed scripts."""
         from kollabor_agent.tool_executor import ToolExecutor
