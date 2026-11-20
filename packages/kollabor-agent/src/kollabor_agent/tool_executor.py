@@ -3157,9 +3157,10 @@ class ToolExecutor:
     async def _execute_web_fetch(self, tool_data: Dict[str, Any]) -> ToolExecutionResult:
         """Fetch a URL and return cleaned text content.
 
-        Uses aiohttp with a 30-second timeout. Content extraction follows
-        a priority chain: JSON-LD → meta tags → semantic HTML5 → readability
-        heuristic. If the extracted text is suspiciously sparse (<500 chars
+        Uses aiohttp with a 30-second timeout. Content extraction prioritizes
+        JSON-LD article bodies, semantic HTML5, and readability. JSON-LD
+        descriptions supplement the result only when longer than page text.
+        If the extracted text is suspiciously sparse (<500 chars
         from a 200 OK), retries with Playwright headless browser (if installed)
         to handle JS-rendered pages.
 
@@ -3401,33 +3402,35 @@ class ToolExecutor:
         """Extract main content from HTML using a priority chain.
 
         Priority order:
-        1. JSON-LD structured data (articleBody / description)
+        1. JSON-LD articleBody
         2. Semantic HTML5 (<article>, <main>, <section>)
         3. Readability heuristic (highest text-to-tag ratio element)
-        4. Fallback: strip non-content tags, extract remaining text
+        4. Longer JSON-LD description, then stripped page text
 
-        Uses beautifulsoup4 with lxml parser. Falls back to regex-based
-        extraction if bs4 is not available.
+        Uses beautifulsoup4 with Python's built-in HTML parser. Falls back to
+        regex-based extraction if bs4 is not available; that fallback cannot
+        inspect JSON-LD before stripping scripts.
         """
         try:
             from bs4 import BeautifulSoup
-            soup = BeautifulSoup(html, "lxml")
+            soup = BeautifulSoup(html, "html.parser")
         except ImportError:
             # bs4 not available — fall back to regex-based extraction
-            return ToolExecutor._html_to_text_regex(html)
+            return ToolExecutor._html_to_text_regex(html, extract_main=extract_main)
+
+        if extract_main:
+            # JSON-LD lives in script tags, so read it before removing scripts.
+            article_body, description = ToolExecutor._extract_json_ld(soup)
+            if len(article_body) > 200:
+                return article_body
 
         # Remove non-content elements entirely
-        for tag in soup.find_all(["script", "style", "nav", "footer", "aside",
-                                   "header", "noscript", "svg", "form",
+        for tag in soup.find_all(["script", "style", "nav", "footer",
+                                   "aside", "header", "noscript", "svg", "form",
                                    "button", "iframe"]):
             tag.decompose()
 
         if extract_main:
-            # Priority 1: JSON-LD structured data
-            text = ToolExecutor._extract_json_ld(soup)
-            if text and len(text) > 200:
-                return text
-
             # Priority 2: Semantic HTML5 — <article>, <main>
             for selector in ["article", "main", "[role='main']"]:
                 element = soup.select_one(selector)
@@ -3436,19 +3439,91 @@ class ToolExecutor:
                     if len(text) > 200:
                         return text
 
+            # Preformatted samples and inline code are not page prose. A
+            # malformed inline code wrapper with block children must not hide
+            # the page content it swallowed.
+            block_tags = [
+                "p", "div", "section", "article", "main", "h1", "h2", "h3",
+                "h4", "h5", "h6", "ul", "ol", "li", "table", "blockquote",
+            ]
+            for tag in soup.find_all("pre"):
+                tag.decompose()
+
+            code_tags = soup.find_all("code")
+            code_with_blocks = [tag for tag in code_tags if tag.find(block_tags)]
+            if code_with_blocks:
+                import re
+
+                line_offsets = [0]
+                for line in html.splitlines(keepends=True):
+                    line_offsets.append(line_offsets[-1] + len(line))
+                code_tag_tokens = re.compile(r"<(/?)\s*code\b[^>]*>", re.IGNORECASE)
+
+            for tag in code_tags:
+                if tag.find(block_tags):
+                    source_line = getattr(tag, "sourceline", None)
+                    source_pos = getattr(tag, "sourcepos", None)
+                    if (
+                        source_line is None
+                        or source_pos is None
+                        or source_line < 1
+                        or source_line >= len(line_offsets)
+                    ):
+                        has_closing_tag = True
+                    else:
+                        source_start = line_offsets[source_line - 1] + source_pos
+                        tokens = code_tag_tokens.finditer(html, source_start)
+                        opening = next(tokens, None)
+                        has_closing_tag = (
+                            opening is None
+                            or opening.start() != source_start
+                            or bool(opening.group(1))
+                        )
+                        if not has_closing_tag:
+                            depth = 1
+                            for token in tokens:
+                                if token.group(1):
+                                    depth -= 1
+                                    if depth == 0:
+                                        has_closing_tag = True
+                                        break
+                                elif not token.group(0).rstrip().endswith("/>"):
+                                    depth += 1
+
+                    if has_closing_tag:
+                        tag.decompose()
+                    else:
+                        for child in list(tag.contents):
+                            if isinstance(child, str):
+                                child.extract()
+                            elif child.name not in block_tags and child.find(block_tags) is None:
+                                child.decompose()
+                        tag.unwrap()
+                else:
+                    tag.decompose()
+
             # Priority 3: Readability heuristic — find densest content block
             text = ToolExecutor._readability_extract(soup)
             if text and len(text) > 200:
                 return text
 
-        # Priority 4: Fallback — extract all remaining text
-        return ToolExecutor._soup_to_text(soup)
+        # Prefer shorter structured candidates only when they add more than
+        # the semantic, readability, and plain-text fallbacks already found.
+        text = ToolExecutor._soup_to_text(soup)
+        if extract_main:
+            if len(article_body) > len(text):
+                return article_body
+            if len(description) > len(text):
+                return description
+        return text
 
     @staticmethod
-    def _extract_json_ld(soup) -> str:
-        """Extract articleBody or description from JSON-LD script tags."""
+    def _extract_json_ld(soup) -> tuple[str, str]:
+        """Return the longest articleBody and description from JSON-LD tags."""
         import json
 
+        article_body = ""
+        description = ""
         for script in soup.find_all("script", type="application/ld+json"):
             try:
                 data = json.loads(script.string or "")
@@ -3458,18 +3533,28 @@ class ToolExecutor:
                     if not isinstance(item, dict):
                         continue
                     # Look for articleBody first (richest content)
-                    body = item.get("articleBody") or item.get("text", "")
-                    if body and len(body) > 200:
+                    body = item.get("articleBody")
+                    if not isinstance(body, str) or not body.strip():
+                        body = item.get("text", "")
+                    if isinstance(body, str):
                         # Collapse whitespace
                         lines = [ln.strip() for ln in body.split("\n") if ln.strip()]
-                        return "\n".join(lines)
-                    # Fall back to description
-                    desc = item.get("description", "")
-                    if desc and len(desc) > 100:
-                        return desc.strip()
+                        normalized_body = "\n".join(lines)
+                        if len(normalized_body) > len(article_body) and len(normalized_body) > 100:
+                            article_body = normalized_body
+                    # Keep the longest usable description while examining all
+                    # scripts for an article body.
+                    desc = item.get("description")
+                    if isinstance(desc, str):
+                        normalized_description = desc.strip()
+                        if (
+                            len(normalized_description) > len(description)
+                            and len(normalized_description) > 100
+                        ):
+                            description = normalized_description
             except (json.JSONDecodeError, TypeError):
                 continue
-        return ""
+        return article_body, description
 
     @staticmethod
     def _readability_extract(soup) -> str:
@@ -3523,7 +3608,7 @@ class ToolExecutor:
         return "\n".join(lines)
 
     @staticmethod
-    def _html_to_text_regex(html: str) -> str:
+    def _html_to_text_regex(html: str, extract_main: bool = True) -> str:
         """Regex-based HTML to text fallback (no bs4 dependency).
 
         Used when beautifulsoup4 is not installed.
@@ -3531,9 +3616,36 @@ class ToolExecutor:
         import html as html_mod
         import re
 
-        # Remove non-content tags entirely (tag + inner content)
+        # Unterminated script/style content runs to the end; other malformed
+        # non-content tags should not erase the rest of the page.
+        raw_content = re.compile(
+            r"<(script|style)\b[^>]*>.*?(?:</\1\s*>|$)",
+            re.DOTALL | re.IGNORECASE,
+        )
+        html = raw_content.sub("", html)
+
+        if extract_main:
+            # Remove complete pre/code blocks first, including any block tags
+            # nested inside them.
+            closed_code_blocks = re.compile(
+                r"<(pre|code)\b[^>]*>.*?</\1\s*>",
+                re.DOTALL | re.IGNORECASE,
+            )
+            html = closed_code_blocks.sub("", html)
+
+            # For unclosed wrappers, stop at the next block boundary so
+            # malformed inline markup cannot hide following page text.
+            block_start = r"(?=<\s*(?:p|div|section|article|main|h[1-6]|li|ul|ol|table|blockquote)\b)"
+            unclosed_code_blocks = re.compile(
+                r"<(pre|code)\b[^>]*>.*?(?:" + block_start + r"|$)",
+                re.DOTALL | re.IGNORECASE,
+            )
+            html = unclosed_code_blocks.sub("", html)
+
+        # Remove structural non-content elements only when their closing tag
+        # is present, so a malformed navigation tag cannot consume the page.
         non_content = re.compile(
-            r"<(script|style|nav|footer|aside|header|noscript|svg|form|iframe)\b[^>]*>.*?</\1>",
+            r"<(nav|footer|aside|header|noscript|svg|form|iframe)\b[^>]*>.*?</\1\s*>",
             re.DOTALL | re.IGNORECASE,
         )
         html = non_content.sub("", html)

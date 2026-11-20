@@ -1,7 +1,7 @@
 ---
 title: "Tool Calling"
 created: 2026-02-24
-modified: 2026-09-20
+modified: 2026-11-16
 status: active
 ---
 # Tool Calling
@@ -50,6 +50,17 @@ LLM Request
 
 note: these are XML tags parsed by kollabor_ai.response_parser, not tools/
   directory entries. execution happens in packages/kollabor-agent/.
+
+### Web Fetch
+
+`web-fetch` extracts supported JSON-LD article bodies before removing script
+elements, then falls back to semantic HTML and readable page text. It uses a
+JSON-LD description only when that description is longer than the extracted page
+text, so metadata does not mask fuller article content. Fallback text extraction
+removes script, style, `pre`, and `code` bodies. The agent package installs Beautiful
+Soup and uses Python's built-in HTML parser; lxml is not required. If Beautiful
+Soup is unavailable, the regex fallback strips script, style, `pre`, and `code`
+contents but does not extract JSON-LD.
 
 ### Terminal Commands
 
