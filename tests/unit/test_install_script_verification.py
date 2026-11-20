@@ -575,6 +575,33 @@ def test_windows_pip_prefix_uses_scripts_directory(tmp_path: Path) -> None:
     assert str(scripts_dir / "kollab.exe") in result.stdout
 
 
+def test_windows_pip_user_install_uses_user_scripts_directory(tmp_path: Path) -> None:
+    tools_dir = tmp_path / "tools"
+    scripts_dir = tmp_path / "Python User Scripts"
+    _write_executable(tools_dir / "uname", "#!/bin/sh\necho MINGW64_NT-10.0\n")
+    _write_executable(
+        tools_dir / "python3",
+        '#!/bin/sh\n[ "$1" = -c ] && echo "$USER_SCRIPTS"\n',
+    )
+    _write_executable(
+        tools_dir / "pip3",
+        '#!/bin/sh\nif [ "$1" = install ] && [ "$2" = --help ]; then echo --user; fi\nexit 0\n',
+    )
+    _write_executable(
+        scripts_dir / "kollab.exe", "#!/bin/sh\necho 'kollab 4.5.6'\n"
+    )
+
+    result = _run_installer_method(
+        tmp_path,
+        method="pip",
+        path_dirs=[tools_dir, scripts_dir, Path("/usr/bin"), Path("/bin")],
+        extra_env={"PIP_USER": "1", "USER_SCRIPTS": str(scripts_dir)},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert str(scripts_dir / "kollab.exe") in result.stdout
+
+
 def test_timeout_kills_a_version_command_that_ignores_term(tmp_path: Path) -> None:
     functions = tmp_path / "installer-functions.sh"
     functions.write_text(
