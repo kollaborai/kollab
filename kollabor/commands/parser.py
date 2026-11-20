@@ -61,19 +61,20 @@ class SlashCommandParser:
             # This handles quoted arguments properly: /save "my file.txt"
             original_command_text = command_text
             try:
-                # POSIX shlex treats unquoted backslashes as escapes. Protect
-                # separators in unquoted Windows drive, UNC, rooted, and relative paths.
+                # POSIX shlex treats unquoted backslashes as escapes. Protect separators
+                # only in unquoted Windows path candidates with valid path segments.
                 # A trailing relative separator before an option must not escape its boundary.
                 command_text = re.sub(
                     r"(?<!\S)"
                     r"(?:--?[\w-]+=)?"
+                    r"(?!['\"])"
                     r"(?:"
-                    r"[A-Za-z]:\\[^\s]*"
-                    r"|\\\\[^\s]*"
-                    r"|\\[^\s]+"
-                    r"|[^\s\\]+\\(?=\s+--?[\w-]+(?:=|\s|$))"
-                    r"|[^\s\\]+\\[^\s]+"
-                    r")",
+                    r"[A-Za-z]:\\(?:[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*)?"
+                    r"|\\\\(?:\?\\)?[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*"
+                    r"|\\[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*"
+                    r"|[^\s\\\"'<>|?*]+\\(?=\s+--?[\w-]+(?:=|\s|$))"
+                    r"|[^\s\\\"'<>|?*]+\\[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*"
+                    r")(?=\s|$)",
                     lambda match: match.group(0).replace("\\", "\\\\"),
                     command_text,
                 )
