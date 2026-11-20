@@ -82,3 +82,34 @@ def test_config_manager_refuses_a_valid_file_changed_after_load(tmp_path):
 
     assert manager.save_config_file({"settings": {"ours": True}}) is False
     assert path.read_bytes() == concurrent
+
+
+def test_config_manager_refuses_to_save_after_an_unreadable_load(tmp_path, monkeypatch):
+    path = tmp_path / "config.json"
+    original = b'{"layout":{"v":1}}'
+    path.write_bytes(original)
+    manager = ConfigManager(path)
+    read_bytes = Path.read_bytes
+
+    def unreadable(target):
+        if target == path:
+            raise PermissionError("permission denied")
+        return read_bytes(target)
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+    assert manager.load_config_file() == {}
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+
+    assert manager.save_config_file({"layout": {"v": 2}}) is False
+    assert path.read_bytes() == original
+
+
+def test_config_manager_refuses_to_replace_wrong_shape_config(tmp_path):
+    path = tmp_path / "config.json"
+    original = b"[]"
+    path.write_bytes(original)
+    manager = ConfigManager(path)
+
+    assert manager.load_config_file() == {}
+    assert manager.save_config_file({"layout": {}}) is False
+    assert path.read_bytes() == original

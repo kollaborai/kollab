@@ -365,6 +365,38 @@ def test_successful_project_save_keeps_malformed_global_config_error(tmp_path, m
         service.shutdown()
 
 
+def test_successful_key_save_keeps_malformed_global_config_error(tmp_path, monkeypatch):
+    paths = _layer_paths(tmp_path, monkeypatch)
+    _patch_standard_save_paths(paths, monkeypatch)
+    malformed_global = b'{"api_key":"DO_NOT_ECHO",'
+    _write_bytes(paths["global"], malformed_global)
+    _write_bytes(paths["project"], b'{"settings":{"before":1}}')
+    service = ConfigService(paths["global"], fast_mode=True)
+
+    try:
+        assert service.get_config_error()
+        assert service.save_key("settings.after", 2, save_target="local") is True
+        assert "repair" in (service.get_config_error() or "").lower()
+        assert paths["global"].read_bytes() == malformed_global
+    finally:
+        service.shutdown()
+
+
+def test_successful_plugin_update_keeps_malformed_config_error(tmp_path):
+    path = tmp_path / "explicit.json"
+    _write_bytes(path, b'{"api_key":"DO_NOT_ECHO",')
+    service = ConfigService(path, fast_mode=True)
+    service.config_loader.update_with_plugins = lambda: True
+
+    try:
+        assert service.get_config_error()
+        assert service.update_from_plugins() is True
+        assert "repair" in (service.get_config_error() or "").lower()
+        assert path.read_bytes() == b'{"api_key":"DO_NOT_ECHO",'
+    finally:
+        service.shutdown()
+
+
 def test_plugin_update_does_not_replace_an_unreadable_explicit_config(tmp_path):
     path = tmp_path / "explicit.json"
     original = b'{"api_key":"DO_NOT_ECHO",'
