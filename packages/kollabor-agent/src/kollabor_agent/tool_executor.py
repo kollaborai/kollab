@@ -1805,6 +1805,10 @@ class ToolExecutor:
                 )
             background_timeout = requested_timeout.strip().lower()
 
+        # Shell fallback is synchronous, including when a background request
+        # cannot use the persistent-session runner.
+        fallback_timeout_seconds = min(timeout_seconds, self.terminal_timeout)
+
         # Kollab commands run freely from agent terminals by default (#1147).
         # When the owner opts in with tools.block_kollab_terminal_spawn, agent
         # launches, stop-all, and background Kollab commands are refused so
@@ -1875,7 +1879,7 @@ class ToolExecutor:
             try:
                 result = await self.shell_executor.run(
                     command,
-                    timeout=timeout_seconds,
+                    timeout=fallback_timeout_seconds,
                     cwd=cwd,
                 )
             finally:
