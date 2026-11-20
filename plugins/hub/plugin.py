@@ -6994,10 +6994,21 @@ class HubPlugin(BasePlugin):
                     messages = AgentMessenger.read_mailboxes(
                         [self._identity.agent_id, self._identity.identity],
                         max_replay=self._mailbox_replay_cap(INBOX_MAX_REPLAY),
+                        consume=False,
                     )
                     if messages:
-                        await self._deliver_inbox_batch(messages)
-            except asyncio.CancelledError:
+                        acknowledged = await self._deliver_inbox_batch(messages)
+                        AgentMessenger.acknowledge_mailboxes(
+                            [self._identity.agent_id, self._identity.identity],
+                            acknowledged,
+                        )
+            except asyncio.CancelledError as exc:
+                acknowledged = getattr(exc, "acknowledged_message_ids", set())
+                if acknowledged and self._identity:
+                    AgentMessenger.acknowledge_mailboxes(
+                        [self._identity.agent_id, self._identity.identity],
+                        acknowledged,
+                    )
                 break
             except Exception as e:
                 logger.debug(f"Mailbox check error: {e}")
@@ -7043,7 +7054,7 @@ class HubPlugin(BasePlugin):
             logger.debug("mailbox replay cap check failed: %s", exc)
         return cap
 
-    async def _deliver_inbox_batch(self, messages: List[HubMessage]) -> None:
+    async def _deliver_inbox_batch(self, messages: List[HubMessage]) -> set[str]:
         """Deliver a batch of offline inbox messages.
 
         When the batch starts with an inbox_summary (bounded replay), ordinary
@@ -7054,23 +7065,45 @@ class HubPlugin(BasePlugin):
         normal per-message _on_message_received path so existing live-delivery
         behaviour is preserved.
         """
-        if messages and messages[0].action == "inbox_summary":
-            await self._inject_inbox_replay(messages)
-        else:
+        acknowledged: set[str] = set()
+        try:
+            if messages and messages[0].action == "inbox_summary":
+                return await self._inject_inbox_replay(messages, acknowledged)
             for msg in messages:
-                await self._deliver_inbox_message(msg)
+                if await self._deliver_inbox_message(msg):
+                    acknowledged.add(msg.id)
+                    self._acknowledge_inbox_delivery({msg.id})
+            return acknowledged
+        except asyncio.CancelledError as exc:
+            exc.acknowledged_message_ids = acknowledged.copy()
+            raise
 
-    async def _deliver_inbox_message(self, msg: HubMessage) -> None:
-        """Deliver one mailbox message; a refusal puts its file back (#581).
+    def _acknowledge_inbox_delivery(self, message_ids: set[str]) -> None:
+        """Persist each accepted mailbox delivery before yielding control."""
+        identity = getattr(self, "_identity", None)
+        if identity is None or not message_ids:
+            return
+        AgentMessenger.acknowledge_mailboxes(
+            [identity.agent_id, identity.identity], message_ids
+        )
 
-        The mailbox read already deleted the file, so a message the ACP retry
-        queue refused would be lost here. It goes back for the next poll, and
-        the mailbox's own age and size limits still apply to it.
-        """
-        if await self._on_message_received(msg) is False and self._identity:
-            await AgentMessenger.send_to_file(self._identity.identity, msg)
+    async def _deliver_inbox_message(self, msg: HubMessage) -> bool:
+        """Deliver one mailbox message; refusal leaves its file unacknowledged."""
+        try:
+            return await self._on_message_received(msg) is not False
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Mailbox delivery failed for %s (%s); leaving it queued for retry",
+                msg.id,
+                type(exc).__name__,
+            )
+            return False
 
-    async def _inject_inbox_replay(self, messages: List[HubMessage]) -> None:
+    async def _inject_inbox_replay(
+        self, messages: List[HubMessage], acknowledged: Optional[set[str]] = None
+    ) -> set[str]:
         """Coalesce a bounded inbox replay into a single injected block.
 
         messages[0] must be the inbox_summary; messages[1:] are the replayed
@@ -7092,11 +7125,14 @@ class HubPlugin(BasePlugin):
             msg for msg in replay_msgs if _is_durable_control(msg.to_dict())
         ]
         ordinary_msgs = [msg for msg in replay_msgs if msg not in control_msgs]
+        acknowledged = acknowledged if acknowledged is not None else set()
         for msg in control_msgs:
-            await self._deliver_inbox_message(msg)
+            if await self._deliver_inbox_message(msg):
+                acknowledged.add(msg.id)
+                self._acknowledge_inbox_delivery({msg.id})
 
         if not ordinary_msgs:
-            return
+            return acknowledged
 
         llm = None
         if self.event_bus is not None:
@@ -7109,8 +7145,10 @@ class HubPlugin(BasePlugin):
         # (#581); a coalesced block would hide that from it. Deliver one by one.
         if self._agent_dispatch_mode(llm) == "acp":
             for msg in ordinary_msgs:
-                await self._deliver_inbox_message(msg)
-            return
+                if await self._deliver_inbox_message(msg):
+                    acknowledged.add(msg.id)
+                    self._acknowledge_inbox_delivery({msg.id})
+            return acknowledged
 
         lines: List[str] = [summary.content, ""]
         for msg in ordinary_msgs:
@@ -7127,19 +7165,26 @@ class HubPlugin(BasePlugin):
         if llm is not None and hasattr(llm, "inject_system_message"):
             try:
                 await llm.inject_system_message(block, subtype="inbox_replay")
+                acknowledged.update(msg.id for msg in ordinary_msgs)
+                self._acknowledge_inbox_delivery(
+                    {msg.id for msg in ordinary_msgs}
+                )
                 logger.info(
                     "Injected inbox replay block: %d message(s) shown "
                     "(%s total queued)",
                     len(ordinary_msgs),
                     summary.metadata.get("total", "?"),
                 )
-                return
+                return acknowledged
             except Exception as exc:
                 logger.debug("inbox replay injection failed: %s", exc)
 
         # Fallback: individual delivery (no inject_system_message)
         for msg in ordinary_msgs:
-            await self._deliver_inbox_message(msg)
+            if await self._deliver_inbox_message(msg):
+                acknowledged.add(msg.id)
+                self._acknowledge_inbox_delivery({msg.id})
+        return acknowledged
 
     async def _dreaming_loop(self) -> None:
         """Periodically dream when agent is idle -- distill stream into insights.

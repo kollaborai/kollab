@@ -31,6 +31,9 @@ INBOX_MAX_SIZE: int = 50
 INBOX_MAX_CONTROLS: int = 200
 # Messages older than this (seconds) are silently discarded on read.
 INBOX_TTL_SECS: int = 7 * 86400  # 7 days
+# The timestamp field is an epoch-seconds float. Keep arithmetic bounded to
+# timestamps representable by datetime, even when the stored JSON is finite.
+INBOX_MAX_TIMESTAMP: float = 253402300799.0
 # Max ordinary messages replayed to a reconnecting agent per mailbox poll.
 # Durable task controls bypass this cap and retain normal receive semantics.
 INBOX_MAX_REPLAY: int = 20
@@ -67,6 +70,24 @@ def set_restart_boundary(ts: float) -> float:
 def get_restart_boundary() -> float:
     """Return the current restart boundary (process boot by default)."""
     return MESSENGER_BOOT_TS
+
+
+def _validated_mailbox_timestamp(data: Dict[str, Any]) -> Optional[float]:
+    """Return a finite, supported epoch timestamp or ``None`` for corruption."""
+    value = data.get("timestamp")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        timestamp = float(value)
+    except (OverflowError, ValueError):
+        return None
+    if (
+        not math.isfinite(timestamp)
+        or timestamp < 0
+        or timestamp > INBOX_MAX_TIMESTAMP
+    ):
+        return None
+    return timestamp
 
 # Idle timeout (seconds) for the off-box read loop. An authenticated remote
 # peer that handshakes then sends nothing (or stops between actions) is dropped
@@ -3340,6 +3361,8 @@ class AgentMessenger:
         After writing, prunes ordinary traffic to INBOX_MAX_SIZE entries
         (oldest first). Durable task controls are preserved until classified.
         """
+        if _validated_mailbox_timestamp(message.to_dict()) is None:
+            raise ValueError("Cannot write mailbox message with invalid timestamp")
         msg_dir = get_messages_dir() / target_agent_id
         msg_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -3357,8 +3380,9 @@ class AgentMessenger:
         agent_id: str,
         max_replay: int = 0,
         restart_boundary: Optional[float] = None,
+        consume: bool = True,
     ) -> List[HubMessage]:
-        """Read and consume messages from filesystem mailbox.
+        """Read messages from filesystem mailbox.
 
         Args:
             agent_id: Agent identity or agent_id to read from.
@@ -3373,6 +3397,8 @@ class AgentMessenger:
                 clock-skew grace) are pre-reboot: they are dropped with a log
                 line and never delivered as current instructions, but durable
                 task controls are preserved for TaskLedger classification.
+            consume: Remove valid records after parsing. The live delivery loop
+                disables this and acknowledges each message only after delivery.
         """
         msg_dir = get_messages_dir() / agent_id
         if not msg_dir.exists():
@@ -3383,6 +3409,7 @@ class AgentMessenger:
             MESSENGER_BOOT_TS if restart_boundary is None else float(restart_boundary)
         )
         messages: List[HubMessage] = []
+        message_files: Dict[str, Path] = {}
         expired_count = 0
         stale_preboot_count = 0
 
@@ -3391,8 +3418,15 @@ class AgentMessenger:
             try:
                 with open(f) as fh:
                     data = json.load(fh)
+            except OSError as e:
+                logger.warning(
+                    "Could not read mailbox record %s: %s", f.name, type(e).__name__
+                )
+                continue
             except Exception as e:
-                logger.warning(f"Bad mailbox message {f}: {e}")
+                logger.warning(
+                    "Bad mailbox message %s: %s", f.name, type(e).__name__
+                )
                 try:
                     f.unlink()
                 except Exception:
@@ -3411,17 +3445,25 @@ class AgentMessenger:
                     pass
                 continue
 
+            timestamp = _validated_mailbox_timestamp(data)
+            if timestamp is None:
+                logger.warning("Discarding mailbox record with invalid timestamp")
+                try:
+                    f.unlink()
+                except OSError:
+                    logger.warning("Could not discard malformed mailbox record")
+                continue
+
             # TTL bounds ordinary chatter only. Durable task controls must
             # reach normal receive so stale cron reminders are explicitly
             # ACKed and assignments are classified instead of disappearing.
-            ts = data.get("timestamp", 0) or 0
             is_control = _is_durable_control(data)
-            if not is_control and ts and (now - float(ts)) > INBOX_TTL_SECS:
+            if not is_control and (now - timestamp) > INBOX_TTL_SECS:
                 expired_count += 1
                 try:
                     f.unlink()
-                except Exception:
-                    pass
+                except OSError:
+                    logger.warning("Could not discard TTL-expired mailbox record")
                 continue
 
             try:
@@ -3430,15 +3472,18 @@ class AgentMessenger:
                 logger.warning(f"Failed to parse mailbox message {f}: {e}")
                 try:
                     f.unlink()
-                except Exception:
-                    pass
+                except OSError:
+                    logger.warning("Could not discard unparseable mailbox record")
                 continue
 
-            # Delete after successful parse
-            try:
-                f.unlink()
-            except Exception:
-                pass
+            # The live delivery loop keeps parsed records until the receiver
+            # acknowledges them. Direct callers retain the historical
+            # consuming behavior by default.
+            if consume:
+                try:
+                    f.unlink()
+                except OSError:
+                    logger.warning("Could not consume mailbox record after parsing")
 
             # Issue #639: reconcile pre-restart messages against the boot
             # boundary. Ordinary chatter written by a previous process
@@ -3447,13 +3492,18 @@ class AgentMessenger:
             # TaskLedger classification on the normal receive path.
             if (
                 not is_control
-                and ts
-                and float(ts) < boundary - INBOX_RESTART_GRACE_SECS
+                and timestamp
+                and timestamp < boundary - INBOX_RESTART_GRACE_SECS
             ):
                 stale_preboot_count += 1
+                try:
+                    f.unlink()
+                except OSError:
+                    logger.warning("Could not discard pre-restart mailbox record")
                 continue
 
             messages.append(msg)
+            message_files[msg.id] = f
 
         if expired_count:
             logger.info(
@@ -3528,6 +3578,16 @@ class AgentMessenger:
         if max_replay > 0 and len(ordinary) > max_replay:
             replayed_ordinary = ordinary[-max_replay:]
             dropped = len(ordinary) - len(replayed_ordinary)
+            replayed_ordinary_ids = {message.id for message in replayed_ordinary}
+            for message in ordinary:
+                if message.id in replayed_ordinary_ids:
+                    continue
+                path = message_files.get(message.id)
+                if path is not None:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        logger.warning("Could not discard replay-bounded mailbox record")
             replayed_ids = {message.id for message in controls + replayed_ordinary}
             replayed = [message for message in messages if message.id in replayed_ids]
 
@@ -3563,8 +3623,9 @@ class AgentMessenger:
         agent_keys: List[str],
         max_replay: int = 0,
         restart_boundary: Optional[float] = None,
+        consume: bool = True,
     ) -> List[HubMessage]:
-        """Read and consume mailboxes for all durable addresses.
+        """Read mailboxes for all durable addresses, optionally consuming them.
 
         Agents get a fresh agent_id on restart, but their hub identity
         stays stable. Reading both prevents offline messages from being
@@ -3575,18 +3636,55 @@ class AgentMessenger:
             max_replay: Forwarded to read_mailbox — caps per-inbox replay.
             restart_boundary: Forwarded to read_mailbox — pre-reboot
                 reconciliation boundary (defaults to process boot).
+            consume: Forwarded to read_mailbox. Set false to acknowledge only
+                after the returned messages have been delivered.
         """
         messages: List[HubMessage] = []
         seen: set[str] = set()
         for key in dict.fromkeys(k for k in agent_keys if k):
-            for msg in AgentMessenger.read_mailbox(
-                key, max_replay=max_replay, restart_boundary=restart_boundary
-            ):
+            try:
+                mailbox_messages = AgentMessenger.read_mailbox(
+                    key,
+                    max_replay=max_replay,
+                    restart_boundary=restart_boundary,
+                    consume=consume,
+                )
+            except Exception:
+                logger.exception("Mailbox read failed; preserving unreturned records")
+                continue
+            for msg in mailbox_messages:
                 if msg.id in seen:
                     continue
                 seen.add(msg.id)
                 messages.append(msg)
         return sorted(messages, key=lambda msg: msg.timestamp)
+
+    @staticmethod
+    def acknowledge_mailboxes(agent_keys: List[str], message_ids: set[str]) -> None:
+        """Consume matching mailbox records after their receiver accepts them."""
+        if not message_ids:
+            return
+        messages_dir = get_messages_dir()
+        for key in dict.fromkeys(k for k in agent_keys if k):
+            mailbox_dir = messages_dir / key
+            try:
+                for path in mailbox_dir.glob("*.json"):
+                    try:
+                        with open(path) as fh:
+                            data = json.load(fh)
+                        message_id = (
+                            data.get("id") if isinstance(data, dict) else None
+                        )
+                    except (OSError, ValueError, TypeError):
+                        continue
+                    if not isinstance(message_id, str) or message_id not in message_ids:
+                        continue
+                    try:
+                        path.unlink()
+                    except OSError:
+                        logger.warning("Could not acknowledge delivered mailbox record")
+            except OSError:
+                logger.warning("Could not scan mailbox while acknowledging delivery")
 
     @staticmethod
     def get_inbox_count(identity: str) -> int:

@@ -341,7 +341,12 @@ there are TWO separate dedup systems:
     path: ~/.kollab/hub/messages/<agent_id>/
     atomic file write (timestamp-uuid.json)
     polled every 5 seconds by _mailbox_loop
-    consumed (deleted) after read
+    malformed timestamps are reported without message content and discarded
+    valid records remain until delivery succeeds and the reader acknowledges
+    them; interruption or refusal leaves them available for replay
+    TTL-expired, restart-stale ordinary messages, and replay-cap drops are
+    intentionally discarded; durable task controls retain their existing
+    classification path
 
   off-box endpoint (optional, plugins.hub.endpoint_enabled):
     remote agent dials wss://host:port (or ws://) instead of a unix socket
