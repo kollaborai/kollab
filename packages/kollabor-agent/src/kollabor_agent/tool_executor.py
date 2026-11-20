@@ -706,11 +706,15 @@ def _is_blocked_kollab_spawn(
     return scan_tokens(tokens, background, _depth)
 
 
-def _terminal_find_escapes_workspace(command: str, cwd: Path, workspace: Path) -> bool:
+def _terminal_find_escapes_workspace(
+    command: str, cwd: Path, workspace: Path, _depth: int = 0
+) -> bool:
     """Return whether a find command can escape or cannot be scoped safely."""
     find_names = {"find", "gfind"}
     if not re.search(r"\b(?:find|gfind)\b", command):
         return False
+    if _depth > 8:
+        return True
     if any(marker in command for marker in ("`", "$(", "<(")):
         return True
 
@@ -740,12 +744,14 @@ def _terminal_find_escapes_workspace(command: str, cwd: Path, workspace: Path) -
         "busybox",
         "dash",
         "doas",
+        "eval",
         "fish",
         "ksh",
         "nice",
         "sh",
         "stdbuf",
         "sudo",
+        "timeout",
         "xargs",
         "zsh",
     }
@@ -758,8 +764,37 @@ def _terminal_find_escapes_workspace(command: str, cwd: Path, workspace: Path) -
         ):
             return True
         for prefix_index, word in enumerate(words):
-            if word not in {"env", "command", "exec", "time", "nohup"}:
+            prefix_name = Path(word).name.lower()
+            if prefix_name not in {"env", "command", "exec", "time", "nohup"}:
                 continue
+            if prefix_name == "env":
+                env_arguments = words[prefix_index + 1 :]
+                split_string_index = next(
+                    (
+                        position
+                        for position, argument in enumerate(env_arguments)
+                        if argument in {"-S", "--split-string"}
+                        or argument.startswith("--split-string=")
+                        or (argument.startswith("-S") and argument != "-S")
+                    ),
+                    None,
+                )
+                if split_string_index is not None:
+                    split_string_option = env_arguments[split_string_index]
+                    if split_string_option in {"-S", "--split-string"}:
+                        split_string = (
+                            env_arguments[split_string_index + 1]
+                            if split_string_index + 1 < len(env_arguments)
+                            else ""
+                        )
+                    elif split_string_option.startswith("--split-string="):
+                        split_string = split_string_option.split("=", 1)[1]
+                    else:
+                        split_string = split_string_option[2:]
+                    if split_string and _terminal_find_escapes_workspace(
+                        split_string, cwd, workspace, _depth + 1
+                    ):
+                        return True
             find_match = next(
                 (
                     position
