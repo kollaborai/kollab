@@ -1,0 +1,40 @@
+{
+  "name": "loadout-remove-provider",
+  "description": "Remove a provider from /llm with the two-press confirmation; the provider model group and its config profile disappear.",
+  "config": {
+    "command": "bash -lc 'R=$(pwd); cd \"$R\"; HOME=\"$HOME\" KOLLAB_NO_KEYRING=1 PYTHONPATH=\"$R/packages/kollabor-agent/src:$R/packages/kollabor-ai/src:$R/packages/kollabor-config/src:$R/packages/kollabor-engine/src:$R/packages/kollabor-events/src:$R/packages/kollabor-plugins/src:$R/packages/kollabor-rpc/src:$R/packages/kollabor-tui/src:$R/packages/kollabor-voice/src:$R/packages/kollabor-webui/src:$R\" \"$R/../../../kollab/.venv/bin/python\" \"$R/main.py\" --no-daemon'",
+    "app_init_sleep": 4,
+    "show_captures": false,
+    "term_width": 120,
+    "term_height": 40,
+    "key_delay": 0.25
+  },
+  "steps": [
+    { "action": "section", "label": "seed a throwaway HOME with one saved provider" },
+    {
+      "action": "shell",
+      "description": "configure one saved Anthropic profile without a live provider key",
+      "command": "printf '%s' '{\"application\":{\"setup_completed\":true},\"plugins\":{\"hub\":{\"enabled\":false}},\"kollabor\":{\"llm\":{\"active_profile\":\"anthropic-old\",\"profiles\":{\"anthropic-old\":{\"provider\":\"anthropic\",\"model\":\"claude-3-haiku-20240307\",\"api_key\":\"not-a-real-key\"}}}}}' > \"$HOME/.kollab/config.json\"; echo 'provider fixture ready'",
+      "assert_contains": "provider fixture ready"
+    },
+    { "action": "start_app" },
+    { "action": "slash_command", "command": "llm" },
+    { "action": "wait_for", "pattern": "Models.*Anthropic", "timeout": 20 },
+    { "action": "capture" },
+    { "action": "section", "label": "first d arms provider removal" },
+    { "action": "send_keys", "keys": "d" },
+    { "action": "wait_for", "pattern": "press D again to remove the Anthropic provider", "timeout": 8 },
+    { "action": "assert_contains", "pattern": "anthropic-old.*saved keys" },
+    { "action": "section", "label": "second d removes provider" },
+    { "action": "send_keys", "keys": "d" },
+    { "action": "sleep", "seconds": 1 },
+    { "action": "capture" },
+    { "action": "assert_not_contains", "pattern": "Models.*Anthropic" },
+    {
+      "action": "shell",
+      "description": "saved provider profile no longer exists in config",
+      "command": "if grep -q 'anthropic-old' \"$HOME/.kollab/config.json\"; then echo 'provider profile remains'; exit 1; else echo 'provider profile removed from config'; fi",
+      "assert_contains": "provider profile removed from config"
+    }
+  ]
+}
