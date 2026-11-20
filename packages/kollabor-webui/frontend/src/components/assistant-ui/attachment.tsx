@@ -279,16 +279,16 @@ const ComposerImageTokenSynchronizer: FC = () => {
         .join("\u0000"),
     ),
   );
+  const composerText = useAuiState((s) => s.composer.text);
 
-  // Only an attachment change rewrites the text. Running on every keystroke
-  // trimmed the space being typed (it is always trailing) and wrote stale
-  // text back over fast typing.
+  // Draft restoration can change text after the attachment list settles.
+  // Observe both; canonical text is unchanged by the synchronizer.
   useEffect(() => {
     const imageIds = imageAttachmentKey ? imageAttachmentKey.split("\u0000") : [];
     const text = aui.composer.getState().text;
     const nextText = synchronizeComposerImageTokens(text, imageIds.length);
     if (nextText !== text) aui.composer.setText(nextText);
-  }, [aui, imageAttachmentKey]);
+  }, [aui, composerText, imageAttachmentKey]);
 
   return null;
 };
