@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import tempfile
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -29,6 +30,7 @@ from kollabor_config.config_utils import (
     get_local_config_path,
     get_local_config_path_candidates,
 )
+from kollabor_config.file_lock import locked_file
 
 logger = logging.getLogger(__name__)
 _NO_API_KEY_UPDATE = object()
@@ -2316,24 +2318,26 @@ class ProfileManager:
             config_path = get_global_config_path()
             read_path = get_existing_global_config_path()
 
-            if not read_path.exists():
-                logger.warning(f"Config file not found: {read_path}")
-                return False
+            lock_path = config_path.with_name(f"{config_path.name}.lock")
+            with locked_file(lock_path, private=True):
+                if not read_path.exists():
+                    logger.warning(f"Config file not found: {read_path}")
+                    return False
 
-            config_data = json.loads(read_path.read_text(encoding="utf-8"))
+                config_data = json.loads(read_path.read_text(encoding="utf-8"))
 
-            # Ensure core.llm exists
-            if "kollabor" not in config_data:
-                config_data["kollabor"] = {}
-            if "llm" not in config_data["kollabor"]:
-                config_data["kollabor"]["llm"] = {}
+                # Ensure core.llm exists
+                if "kollabor" not in config_data:
+                    config_data["kollabor"] = {}
+                if "llm" not in config_data["kollabor"]:
+                    config_data["kollabor"]["llm"] = {}
 
-            # Save active profile
-            config_data["kollabor"]["llm"]["active_profile"] = name
+                # Save active profile
+                config_data["kollabor"]["llm"]["active_profile"] = name
 
-            write_text_atomic(
-                config_path, json.dumps(config_data, indent=2, ensure_ascii=False)
-            )
+                write_text_atomic(
+                    config_path, json.dumps(config_data, indent=2, ensure_ascii=False)
+                )
 
             logger.debug(f"Saved active profile to config: {name}")
             return True
@@ -2484,26 +2488,28 @@ class ProfileManager:
             ) -> bool:
                 config_path.parent.mkdir(parents=True, exist_ok=True)
 
-                if config_path.exists():
-                    config_data = json.loads(config_path.read_text(encoding="utf-8"))
-                else:
-                    config_data = {}
+                lock_path = config_path.with_name(f"{config_path.name}.lock")
+                with locked_file(lock_path, private=True):
+                    if config_path.exists():
+                        config_data = json.loads(config_path.read_text(encoding="utf-8"))
+                    else:
+                        config_data = {}
 
-                if "kollabor" not in config_data:
-                    config_data["kollabor"] = {}
-                if "llm" not in config_data["kollabor"]:
-                    config_data["kollabor"]["llm"] = {}
-                if "profiles" not in config_data["kollabor"]["llm"]:
-                    config_data["kollabor"]["llm"]["profiles"] = {}
+                    if "kollabor" not in config_data:
+                        config_data["kollabor"] = {}
+                    if "llm" not in config_data["kollabor"]:
+                        config_data["kollabor"]["llm"] = {}
+                    if "profiles" not in config_data["kollabor"]["llm"]:
+                        config_data["kollabor"]["llm"]["profiles"] = {}
 
-                config_data["kollabor"]["llm"]["profiles"][
-                    profile.name
-                ] = _build_profile_dict(secret_name)
+                    config_data["kollabor"]["llm"]["profiles"][
+                        profile.name
+                    ] = _build_profile_dict(secret_name)
 
-                write_text_atomic(
-                    config_path,
-                    json.dumps(config_data, indent=2, ensure_ascii=False),
-                )
+                    write_text_atomic(
+                        config_path,
+                        json.dumps(config_data, indent=2, ensure_ascii=False),
+                    )
 
                 logger.info(
                     f"Saved profile '{profile.name}' to {location} config: {config_path}"
@@ -2918,70 +2924,97 @@ class ProfileManager:
 
         committed: List[Path] = []
         preflight_stages: List[Path] = []
+        lock_paths = sorted(
+            {
+                path.with_name(f"{path.name}.lock")
+                for path, _, _ in updates
+            },
+            key=lambda lock_path: str(lock_path.resolve()),
+        )
         try:
-            for path, _, _ in updates:
-                target_path = Path(os.path.realpath(path))
-                original_text = original_config_text[path.resolve()]
-                if target_path.read_text(encoding="utf-8") != original_text:
-                    raise RuntimeError(f"Provider config changed during removal: {path}")
+            with ExitStack() as lock_stack:
+                for lock_path in lock_paths:
+                    lock_stack.enter_context(locked_file(lock_path, private=True))
 
-                descriptor, staged_name = tempfile.mkstemp(
-                    prefix=f".{target_path.name}.",
-                    suffix=".provider-removal-check.tmp",
-                    dir=target_path.parent,
-                )
-                staged_path = Path(staged_name)
-                preflight_stages.append(staged_path)
-                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                    stream.write(original_text)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(staged_path, target_path)
+                try:
+                    for path, _, _ in updates:
+                        target_path = Path(os.path.realpath(path))
+                        original_text = original_config_text[path.resolve()]
+                        if target_path.read_text(encoding="utf-8") != original_text:
+                            raise RuntimeError(
+                                f"Provider config changed during removal: {path}"
+                            )
+
+                        descriptor, staged_name = tempfile.mkstemp(
+                            prefix=f".{target_path.name}.",
+                            suffix=".provider-removal-check.tmp",
+                            dir=target_path.parent,
+                        )
+                        staged_path = Path(staged_name)
+                        preflight_stages.append(staged_path)
+                        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                            stream.write(original_text)
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                        os.replace(staged_path, target_path)
+                except Exception as exc:
+                    logger.error("Could not preflight provider profile removal: %s", exc)
+                    for staged_path in preflight_stages:
+                        try:
+                            staged_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                    for _, staged_path in staged_updates:
+                        try:
+                            staged_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                    return []
+
+                try:
+                    for path, staged_path in staged_updates:
+                        os.replace(staged_path, os.path.realpath(path))
+                        committed.append(path)
+                except Exception as exc:
+                    logger.error("Could not commit provider profile removal: %s", exc)
+                    for path in reversed(committed):
+                        try:
+                            write_text_atomic(
+                                path, original_config_text[path.resolve()]
+                            )
+                        except Exception as rollback_exc:
+                            try:
+                                path.write_text(
+                                    original_config_text[path.resolve()], encoding="utf-8"
+                                )
+                            except Exception as fallback_exc:
+                                try:
+                                    with open(path, "w", encoding="utf-8") as stream:
+                                        stream.write(original_config_text[path.resolve()])
+                                        stream.flush()
+                                        os.fsync(stream.fileno())
+                                except Exception as final_restore_exc:
+                                    logger.critical(
+                                        "Could not restore provider config %s after a failed removal "
+                                        "(atomic restore: %s; direct restore: %s; final restore: %s)",
+                                        path,
+                                        rollback_exc,
+                                        fallback_exc,
+                                        final_restore_exc,
+                                    )
+                    for _, staged_path in staged_updates:
+                        try:
+                            staged_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                    return []
         except Exception as exc:
-            logger.error("Could not preflight provider profile removal: %s", exc)
+            logger.error("Could not lock provider configs for removal: %s", exc)
             for staged_path in preflight_stages:
                 try:
                     staged_path.unlink(missing_ok=True)
                 except OSError:
                     pass
-            for _, staged_path in staged_updates:
-                try:
-                    staged_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            return []
-
-        try:
-            for path, staged_path in staged_updates:
-                os.replace(staged_path, os.path.realpath(path))
-                committed.append(path)
-        except Exception as exc:
-            logger.error("Could not commit provider profile removal: %s", exc)
-            for path in reversed(committed):
-                try:
-                    write_text_atomic(
-                        path, original_config_text[path.resolve()]
-                    )
-                except Exception as rollback_exc:
-                    try:
-                        path.write_text(
-                            original_config_text[path.resolve()], encoding="utf-8"
-                        )
-                    except Exception as fallback_exc:
-                        try:
-                            with open(path, "w", encoding="utf-8") as stream:
-                                stream.write(original_config_text[path.resolve()])
-                                stream.flush()
-                                os.fsync(stream.fileno())
-                        except Exception as final_restore_exc:
-                            logger.critical(
-                                "Could not restore provider config %s after a failed removal "
-                                "(atomic restore: %s; direct restore: %s; final restore: %s)",
-                                path,
-                                rollback_exc,
-                                fallback_exc,
-                                final_restore_exc,
-                            )
             for _, staged_path in staged_updates:
                 try:
                     staged_path.unlink(missing_ok=True)
@@ -3201,29 +3234,30 @@ class ProfileManager:
                 (path for path in get_global_config_path_candidates() if path.exists()),
                 get_global_config_path(),
             )
+            lock_path = config_path.with_name(f"{config_path.name}.lock")
+            with locked_file(lock_path, private=True):
+                if not config_path.exists():
+                    logger.warning(f"Config file not found: {config_path}")
+                    return True  # No config file, nothing to delete
 
-            if not config_path.exists():
-                logger.warning(f"Config file not found: {config_path}")
-                return True  # No config file, nothing to delete
+                # Load current config
+                config_data = json.loads(config_path.read_text(encoding="utf-8"))
 
-            # Load current config
-            config_data = json.loads(config_path.read_text(encoding="utf-8"))
+                # Check if profile exists in config
+                profiles = (
+                    config_data.get("kollabor", {}).get("llm", {}).get("profiles", {})
+                )
+                if name not in profiles:
+                    logger.debug(f"Profile '{name}' not in config file")
+                    return True  # Not in config, nothing to delete
 
-            # Check if profile exists in config
-            profiles = (
-                config_data.get("kollabor", {}).get("llm", {}).get("profiles", {})
-            )
-            if name not in profiles:
-                logger.debug(f"Profile '{name}' not in config file")
-                return True  # Not in config, nothing to delete
+                # Remove profile from config
+                del config_data["kollabor"]["llm"]["profiles"][name]
 
-            # Remove profile from config
-            del config_data["kollabor"]["llm"]["profiles"][name]
-
-            # Write back
-            write_text_atomic(
-                config_path, json.dumps(config_data, indent=2, ensure_ascii=False)
-            )
+                # Write back
+                write_text_atomic(
+                    config_path, json.dumps(config_data, indent=2, ensure_ascii=False)
+                )
 
             logger.info(f"Deleted profile from config: {name}")
             return True
