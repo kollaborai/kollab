@@ -39,7 +39,6 @@ import {
   saveComposerAttachments,
   saveComposerDraft,
 } from "@/composer-draft";
-import { synchronizeComposerImageTokens } from "@/components/assistant-ui/managed-tokens";
 import {
   collectImageAttachments,
   orphanImageNotice,
