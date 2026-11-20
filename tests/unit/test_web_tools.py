@@ -328,6 +328,61 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertTrue(result.success, result.error)
         self.assertIn(article_body.rstrip(), result.output)
 
+    def test_web_fetch_json_ld_prefers_article_body_over_descriptions(self):
+        """Article content wins across scripts; a valid short description survives."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        short_description = "short JSON-LD description marker " * 5
+        article_after_short_description = "articleBody after short description " * 8
+        website_description = "website metadata description marker " * 8
+        news_article_body = "news article body marker " * 12
+        cases = [
+            (
+                "short description",
+                "<script type=\"application/ld+json\">"
+                + json.dumps({"description": short_description})
+                + "</script><p>ordinary fallback</p>",
+                short_description,
+            ),
+            (
+                "later article body",
+                "<script type=\"application/ld+json\">"
+                + json.dumps({"description": short_description})
+                + "</script><script type=\"application/ld+json\">"
+                + json.dumps({"articleBody": article_after_short_description})
+                + "</script>",
+                article_after_short_description,
+            ),
+            (
+                "article body after website metadata",
+                "<script type=\"application/ld+json\">"
+                + json.dumps({"@type": "WebSite", "description": website_description})
+                + "</script><script type=\"application/ld+json\">"
+                + json.dumps({"@type": "NewsArticle", "articleBody": news_article_body})
+                + "</script>",
+                news_article_body,
+            ),
+        ]
+
+        for label, html, expected in cases:
+            with self.subTest(label=label):
+                response = _make_mock_aiohttp_response(text=html)
+                with (
+                    _patch_aiohttp_session(mock_get=response),
+                    patch.object(
+                        ToolExecutor,
+                        "_playwright_fetch",
+                        new=AsyncMock(return_value=""),
+                    ),
+                ):
+                    result = _run(
+                        self.executor._execute_web_fetch(
+                            {"type": "web_fetch", "url": "https://example.com"}
+                        )
+                    )
+                self.assertTrue(result.success, result.error)
+                self.assertIn(expected.rstrip(), result.output)
+
     def test_web_fetch_regex_fallback_strips_script_content(self):
         """The optional no-bs4 path strips script bodies before returning text."""
         from kollabor_agent.tool_executor import ToolExecutor
