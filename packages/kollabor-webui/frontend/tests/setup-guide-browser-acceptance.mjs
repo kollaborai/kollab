@@ -91,6 +91,11 @@ async function main() {
       releaseProfiles = resolve;
     });
     try {
+      await pending.page.route("**/sessions*", (route) => route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ sessions: [], network: { live: false, remote: [], networks: [] } }),
+      }));
       const startupProfiles = pending.page.waitForResponse(
         (response) => new URL(response.url()).pathname === "/profiles",
         { timeout: 8000 },
@@ -138,6 +143,11 @@ async function main() {
       releaseExistingProfiles = resolve;
     });
     try {
+      await existingProvider.page.route("**/sessions*", (route) => route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ sessions: [], network: { live: false, remote: [], networks: [] } }),
+      }));
       const startupProfiles = existingProvider.page.waitForResponse(
         (response) => new URL(response.url()).pathname === "/profiles",
         { timeout: 8000 },
@@ -180,6 +190,48 @@ async function main() {
     } finally {
       releaseExistingProfiles();
       await existingProvider.context.close();
+    }
+
+    const failedProfiles = await openPage(browser, baseUrl, makeFixtures(), {
+      initialGuideState: JSON.stringify({ step: "welcome", dismissed: true }),
+    });
+    try {
+      await failedProfiles.page.route("**/sessions*", (route) => route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ sessions: [], network: { live: false, remote: [], networks: [] } }),
+      }));
+      const startupProfiles = failedProfiles.page.waitForResponse(
+        (response) => new URL(response.url()).pathname === "/profiles",
+        { timeout: 8000 },
+      );
+      await failedProfiles.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+      await startupProfiles;
+      await failedProfiles.page.route("**/profiles", (route) => route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "temporary profile failure" }),
+      }));
+      const guideProfiles = failedProfiles.page.waitForResponse(
+        (response) => new URL(response.url()).pathname === "/profiles",
+        { timeout: 5000 },
+      );
+      await failedProfiles.page.getByTestId("guided-setup-open").click();
+      const guideProfilesResponse = await guideProfiles;
+      assert.equal(guideProfilesResponse.status(), 503);
+      await failedProfiles.page.getByRole("heading", { name: "Welcome to Kollab", exact: true }).waitFor({ state: "visible" });
+      let setupPanelRequests = 0;
+      failedProfiles.page.on("request", (request) => {
+        if (new URL(request.url()).pathname === "/setup/panels/setup") setupPanelRequests += 1;
+      });
+      const start = failedProfiles.page.getByTestId("setup-guide-next");
+      assert.equal(await start.isDisabled(), false, "Get Started should remain available after a profile request error");
+      await start.click();
+      await failedProfiles.page.waitForTimeout(200);
+      assert.equal(setupPanelRequests, 0, "a failed profile check must not be treated as an unconfigured profile");
+      assert.equal(await failedProfiles.page.getByTestId("setup-step-network").getAttribute("aria-current"), "step");
+    } finally {
+      await failedProfiles.context.close();
     }
   } finally {
     await browser?.close();
