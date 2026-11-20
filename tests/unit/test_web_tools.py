@@ -518,9 +518,14 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertLessEqual(len(result.output), 100)
         self.assertIn("...[truncated]", result.output)
-        fallback.assert_awaited_once_with(
-            "<html><body>x</body></html>", max_chars=2_000_000
-        )
+        fallback.assert_awaited_once()
+        fallback_call = fallback.await_args
+        self.assertEqual(fallback_call.args, ("<html><body>x</body></html>",))
+        self.assertEqual(fallback_call.kwargs["page_url"], tool_data["url"])
+        self.assertEqual(fallback_call.kwargs["max_chars"], 2_000_000)
+        self.assertLess(fallback_call.kwargs["max_download_bytes"], 500_000)
+        self.assertLess(fallback_call.kwargs["max_decoded_bytes"], 2_000_000)
+        self.assertIn("deadline", fallback_call.kwargs)
 
     def test_web_fetch_playwright_fallback_loads_external_script_with_budget(self):
         """Fallback scripts render when their bodies fit the shared byte cap."""
