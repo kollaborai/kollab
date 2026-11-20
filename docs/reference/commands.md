@@ -647,7 +647,9 @@ type / in the input box to open the command menu.
     (no args)                     show the conversation picker
 
   /branch [session_id [msg_idx]]  fork from specific message
-    select a conversation and message to branch from
+    (no args)                     select a conversation and message to branch from
+    <session_id> <msg_idx>        fork a saved conversation
+    current <msg_idx>             fork the live conversation into a new session
 
   /compact [now|status|preview]   context compaction
     (no args)                     ask the model what to keep; it answers with

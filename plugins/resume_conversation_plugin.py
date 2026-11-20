@@ -357,26 +357,19 @@ class ResumeConversationPlugin:
                         display_type="error",
                     )
 
-                # Create branch from current - keep messages up to branch_index.
-                # Use the in-place helper so QueueProcessor / SessionManager /
-                # hub plugin keep their cached list reference valid.
-                branched_messages = current_messages[: branch_index + 1]
-                self._replace_conversation_history(branched_messages)
-
-                # Update session stats to reflect truncated messages
-                if hasattr(self.llm_service, "session_stats"):
-                    self.llm_service.session_stats["messages"] = len(branched_messages)
-
-                msg_count = len(branched_messages)
-                removed_count = len(current_messages) - msg_count
-
-                return CommandResult(
-                    success=True,
-                    message=f"[ok] Branched at message {branch_index}\n"
-                    f"    Kept {msg_count} messages, removed {removed_count}\n"
-                    f"    Continue the conversation from this point.",
-                    display_type="success",
+                source_session_id, save_error = (
+                    self._save_current_session_for_branch(current_messages)
                 )
+                if source_session_id is None:
+                    return CommandResult(
+                        success=False,
+                        message=save_error
+                        or "Could not save the current conversation before branching",
+                        display_type="error",
+                    )
+
+                # Branch from the saved source so the original session remains intact.
+                session_id = source_session_id
 
             # Branch from saved session
             assert self.conversation_manager is not None
@@ -911,6 +904,42 @@ class ResumeConversationPlugin:
             self.conversation_manager = self._get_conversation_manager()
         return self.conversation_manager is not None
 
+    def _save_current_session_for_branch(
+        self, current_messages: list
+    ) -> tuple[str | None, str | None]:
+        """Save the live session with any structured message content preserved."""
+        if not self.conversation_manager:
+            return None, "Conversation manager not available"
+
+        saved_messages = self.conversation_manager.messages
+        if len(saved_messages) != len(current_messages):
+            return None, "Current conversation history is out of sync with its session"
+
+        for current, saved in zip(current_messages, saved_messages):
+            role = (
+                current.get("role")
+                if isinstance(current, dict)
+                else getattr(current, "role", None)
+            )
+            if role != saved.get("role"):
+                return None, "Current conversation history is out of sync with its session"
+
+        for current, saved in zip(current_messages, saved_messages):
+            content = (
+                current.get("content")
+                if isinstance(current, dict)
+                else getattr(current, "content", None)
+            )
+            if not isinstance(content, str):
+                metadata = dict(saved.get("metadata") or {})
+                metadata["structured_content"] = content
+                saved["metadata"] = metadata
+
+        source_session_id = self.conversation_manager.current_session_id
+        if not self.conversation_manager.save_session(source_session_id):
+            return None, "Could not save the current conversation before branching"
+        return source_session_id, None
+
     def _replace_conversation_history(self, new_messages: list) -> None:
         """Replace the LLM service's conversation history in place.
 
@@ -976,17 +1005,24 @@ class ResumeConversationPlugin:
 
         for msg, shown in zip(raw_messages, turn_display_texts(raw_messages)):
             role = msg.get("role", "user")
-            content = msg.get("content", "")
-            reasoning = (msg.get("metadata") or {}).get("provider_reasoning")
+            stored_content = msg.get("content", "")
+            message_metadata = msg.get("metadata") or {}
+            content = message_metadata.get("structured_content", stored_content)
+            hidden = message_metadata.get("hidden") is True
+            loaded_metadata = {
+                key: value
+                for key, value in message_metadata.items()
+                if key not in {"structured_content", "branched_from", "original_uuid"}
+            }
             loaded_messages.append(
                 ConversationMessage(
                     role=role,
                     content=content,
-                    metadata={"provider_reasoning": reasoning} if reasoning else {},
+                    metadata=loaded_metadata,
                 )
             )
 
-            if role in ("user", "assistant") and shown != "":
+            if role in ("user", "assistant") and shown != "" and not hidden:
                 visible = content if shown is None else shown
                 display_messages.append((role, visible, {}))
 
@@ -1033,17 +1069,24 @@ class ResumeConversationPlugin:
 
         for msg, shown in zip(raw_messages, turn_display_texts(raw_messages)):
             role = msg.get("role", "user")
-            content = msg.get("content", "")
-            reasoning = (msg.get("metadata") or {}).get("provider_reasoning")
+            stored_content = msg.get("content", "")
+            message_metadata = msg.get("metadata") or {}
+            content = message_metadata.get("structured_content", stored_content)
+            hidden = message_metadata.get("hidden") is True
+            loaded_metadata = {
+                key: value
+                for key, value in message_metadata.items()
+                if key not in {"structured_content", "branched_from", "original_uuid"}
+            }
             loaded_messages.append(
                 ConversationMessage(
                     role=role,
                     content=content,
-                    metadata={"provider_reasoning": reasoning} if reasoning else {},
+                    metadata=loaded_metadata,
                 )
             )
 
-            if role in ("user", "assistant") and shown != "":
+            if role in ("user", "assistant") and shown != "" and not hidden:
                 visible = content if shown is None else shown
                 messages_for_display.append({"role": role, "content": visible})
 
@@ -1826,6 +1869,29 @@ class ResumeConversationPlugin:
                     self._ensure_conversation_manager()
                     and self.conversation_manager is not None
                 ):
+                    if session_id == "current":
+                        current_messages = getattr(
+                            self.llm_service, "conversation_history", None
+                        )
+                        if not isinstance(current_messages, list):
+                            data["display_messages"] = [
+                                (
+                                    "system",
+                                    "[error] No current conversation available",
+                                    {},
+                                )
+                            ]
+                            return data
+                        source_session_id, save_error = (
+                            self._save_current_session_for_branch(current_messages)
+                        )
+                        if source_session_id is None:
+                            data["display_messages"] = [
+                                ("system", f"[error] {save_error}", {})
+                            ]
+                            return data
+                        session_id = source_session_id
+
                     result = self.conversation_manager.branch_session(
                         session_id, message_index
                     )

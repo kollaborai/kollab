@@ -57,6 +57,12 @@ full message history so the LLM has context from the previous session. Use
 `/branch <session_id> <message_index>` to create a new session from a saved
 conversation at a specific message.
 
+## Branching Conversations
+
+Use `/branch current <message-index>` to continue the live conversation from a message in a new session. The original conversation is saved under its existing session ID, and the new branch becomes the active conversation. The index is zero-based and includes the selected message.
+
+Use `/branch <session-id> <message-index>` to branch from a saved conversation.
+
 ## Saving Conversations
 
 If saving a user message or assistant reply fails, Kollab keeps processing the
