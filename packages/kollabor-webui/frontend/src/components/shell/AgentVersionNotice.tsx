@@ -43,7 +43,9 @@ function stopAndStartLine(name: string) {
   return (
     <>
       Run{" "}
-      <code className="whitespace-nowrap">kollab --hub stop {name}</code>{" "}
+      <code className="whitespace-normal">
+        kollab{" "}<span className="whitespace-nowrap">--hub</span>{" "}stop {name}
+      </code>{" "}
       in a terminal, then select its Offline row in the sidebar to start it again.
     </>
   );
