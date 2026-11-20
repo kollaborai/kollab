@@ -408,6 +408,31 @@ class TestResumeCommand:
         )
         assert result.message == "Usage: /sessions [search <query>]"
 
+    def test_sessions_search_does_not_duplicate_conversation_browser_alias(self):
+        from kollabor.altview.command_integration import AltViewCommandIntegrator
+        from kollabor.commands.registry import SlashCommandRegistry
+        from plugins.altview.conversations_altview import ConversationsAltView
+        from plugins.fullscreen.conversations_plugin import ConversationsPlugin
+        from plugins.resume_conversation_plugin import ResumeConversationPlugin
+
+        command_registry = SlashCommandRegistry()
+        altview = AltViewCommandIntegrator(command_registry, None, None)
+        assert altview._register_plugin_commands(ConversationsAltView)
+
+        plugin = ResumeConversationPlugin()
+        plugin._register_resume_commands(command_registry)
+
+        sessions = command_registry.get_command("sessions")
+        conversations = command_registry.get_command("conversations")
+        assert sessions is not None
+        assert conversations is not None
+        assert command_registry.get_command("convos") is conversations
+        assert command_registry.get_command("history") is sessions
+        assert [cmd.name for cmd in command_registry.search_commands("sessions")] == [
+            "sessions"
+        ]
+        assert ConversationsPlugin().metadata.aliases == ["convos"]
+
     @pytest.mark.asyncio
     async def test_resume_plugin_handle_resume(self):
         """Test resume plugin handle_resume method."""
