@@ -765,8 +765,49 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
             command="sleep 60", timeout=30, cwd=None
         )
 
+    async def test_execute_tool_rejects_timeout_above_configured_limit_without_tmux(self):
+        self.executor.terminal_timeout = 120
+        self.executor.shell_executor.run = AsyncMock(
+            return_value=ShellResult(success=True, stdout="", stderr="", exit_code=0)
+        )
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "terminal-timeout-over-limit-fallback",
+                "command": "sleep 60",
+                "timeout": "1000h",
+            }
+        )
+
+        self.executor.shell_executor.run.assert_not_awaited()
+        self.assertFalse(result.success)
+        self.assertIn("configured", result.error.lower())
+
+    async def test_execute_tool_rejects_timeout_above_configured_limit_with_tmux(self):
+        self.executor.terminal_timeout = 120
+        self.executor.tmux_plugin = MagicMock()
+        self.executor.tmux_plugin.execute_foreground = AsyncMock(
+            return_value={"success": True, "output": "", "error": "", "exit_code": 0}
+        )
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "terminal-timeout-over-limit-tmux",
+                "command": "sleep 60",
+                "timeout": "1000h",
+            }
+        )
+
+        self.executor.tmux_plugin.execute_foreground.assert_not_awaited()
+        self.assertFalse(result.success)
+        self.assertIn("configured", result.error.lower())
+
     async def test_execute_tool_rejects_invalid_terminal_timeout_before_running(self):
-        self.executor.shell_executor.run = AsyncMock()
+        self.executor.shell_executor.run = AsyncMock(
+            return_value=ShellResult(success=True, stdout="", stderr="", exit_code=0)
+        )
 
         result = await self.executor.execute_tool(
             {
@@ -777,9 +818,9 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
             }
         )
 
+        self.executor.shell_executor.run.assert_not_awaited()
         self.assertFalse(result.success)
         self.assertIn("timeout", result.error.lower())
-        self.executor.shell_executor.run.assert_not_awaited()
 
     async def test_execute_mcp_tool_success(self):
         """Test successful MCP tool execution."""
