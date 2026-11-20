@@ -1513,22 +1513,22 @@ export const UserText: FC<{ text?: string }> = ({ text }) => {
         // is missing or failed - it never requests a ref and never opens
         // the viewer (#1124 P2a).
         if (resolved.kind === "literal") return <span key={index}>{resolved.text}</span>;
-        const { entry, index: slot } = resolved;
-        // A resolved thumb implies the row has a media list; an empty list
-        // just yields a -1 viewer index, falling back to the slot position.
-        // Placeholder slots (failed or empty refs) carry no picture for the
-        // viewer to show, so they are filtered out of the fallback list
-        // (#1140 review).
-        const viewerItems = (sessionMedia?.length ? sessionMedia : (media ?? [])).filter(
-          (item) => item.ref && !item.failed,
-        );
+        const { entry } = resolved;
+        // The session list may lag behind a new message. Include valid refs
+        // from this row so selection and navigation resolve by identity.
+        const seenRefs = new Set<string>();
+        const viewerItems = [...(sessionMedia ?? []), ...(media ?? [])].filter((item) => {
+          if (!item.ref || item.failed || seenRefs.has(item.ref)) return false;
+          seenRefs.add(item.ref);
+          return true;
+        });
         const viewerIndex = viewerItems.findIndex((item) => item.ref === entry.ref);
         return (
           <MediaThumb
             key={index}
             ref_={entry.ref}
             className="my-1 align-middle"
-            onOpen={openViewer ? () => openViewer(viewerItems, viewerIndex >= 0 ? viewerIndex : slot) : undefined}
+            onOpen={openViewer && viewerIndex >= 0 ? () => openViewer(viewerItems, viewerIndex) : undefined}
           />
         );
       })}
