@@ -263,3 +263,59 @@ def test_default_agent_and_profile_writers_serialize_updates(
         assert llm["default_profile"]["name"] == profile
         assert llm["active_profile"] == profile
     assert saved["settings"]["keep"] is True
+
+
+def test_startup_config_creation_does_not_clobber_a_concurrent_profile_save(
+    tmp_path, monkeypatch
+):
+    config_dir = tmp_path / ".kollab"
+    config_path = config_dir / "config.json"
+    monkeypatch.setattr(config_utils, "get_config_directory", lambda: config_dir)
+    monkeypatch.setattr(config_utils, "get_global_config_path", lambda: config_path)
+    monkeypatch.setattr(
+        config_utils, "get_existing_global_config_path", lambda: config_path
+    )
+
+    defaults_started = threading.Event()
+    release_defaults = threading.Event()
+    profile_done = threading.Event()
+    failures = []
+    original_defaults = config_utils._get_minimal_default_config
+
+    def pause_default_creation():
+        defaults_started.set()
+        if not release_defaults.wait(timeout=5):
+            raise TimeoutError("startup config creation was not released")
+        return original_defaults()
+
+    def run_startup():
+        try:
+            config_utils.initialize_config()
+        except BaseException as exc:
+            failures.append(exc)
+
+    def save_profile():
+        try:
+            config_utils.set_default_profile("new-profile", "global")
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            profile_done.set()
+
+    monkeypatch.setattr(config_utils, "_get_minimal_default_config", pause_default_creation)
+    startup = threading.Thread(target=run_startup, name="config-startup")
+    profile = threading.Thread(target=save_profile, name="profile-writer")
+    startup.start()
+    assert defaults_started.wait(timeout=5)
+    profile.start()
+    profile_done.wait(timeout=0.5)
+    release_defaults.set()
+    startup.join(timeout=5)
+    profile.join(timeout=5)
+
+    assert not startup.is_alive()
+    assert not profile.is_alive()
+    assert failures == []
+    saved = json.loads(config_path.read_text())
+    assert saved["kollabor"]["llm"]["default_profile"]["name"] == "new-profile"
+    assert saved["kollabor"]["llm"]["active_profile"] == "new-profile"
