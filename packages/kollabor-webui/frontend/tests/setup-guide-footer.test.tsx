@@ -94,9 +94,9 @@ describe("guided setup footer", () => {
     expect(markup).toContain(">Get Started<");
   });
 
-  it("keeps Get Started disabled until provider facts load", () => {
+  it("keeps Get Started available while provider facts are pending", () => {
     expect(guideMarkup("welcome")).toMatch(
-      /<button[^>]*data-testid="setup-guide-next"[^>]*disabled/,
+      /<button[^>]*data-testid="setup-guide-next"(?![^>]*disabled)/,
     );
   });
 });

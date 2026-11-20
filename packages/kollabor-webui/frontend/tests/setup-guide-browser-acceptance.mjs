@@ -82,6 +82,44 @@ async function main() {
     } finally {
       await fresh.context.close();
     }
+
+    const pending = await openPage(browser, baseUrl, makeFixtures(), {
+      initialGuideState: JSON.stringify({ step: "welcome", dismissed: true }),
+    });
+    let releaseProfiles;
+    const profilesGate = new Promise((resolve) => {
+      releaseProfiles = resolve;
+    });
+    try {
+      const startupProfiles = pending.page.waitForResponse(
+        (response) => new URL(response.url()).pathname === "/profiles",
+        { timeout: 8000 },
+      );
+      await pending.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+      await startupProfiles;
+      await pending.page.route("**/profiles", async (route) => {
+        await profilesGate;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ active: "default", profiles: [{ name: "default", provider: "auto" }] }),
+        });
+      });
+      await pending.page.getByTestId("guided-setup-open").click();
+      await pending.page.getByRole("heading", { name: "Welcome to Kollab", exact: true }).waitFor({ state: "visible" });
+      const start = pending.page.getByTestId("setup-guide-next");
+      assert.equal(await start.isDisabled(), false, "Get Started should remain available while /profiles is pending");
+      const setupPanelRequest = pending.page.waitForRequest(
+        (request) => new URL(request.url()).pathname === "/setup/panels/setup",
+        { timeout: 5000 },
+      );
+      await start.click();
+      await setupPanelRequest;
+      assert.equal(await pending.page.getByTestId("setup-step-network").getAttribute("aria-current"), "step");
+    } finally {
+      releaseProfiles();
+      await pending.context.close();
+    }
   } finally {
     await browser?.close();
     await server.close();
