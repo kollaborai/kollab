@@ -489,6 +489,31 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertTrue(result.success, result.error)
         self.assertNotIn("private code marker", result.output)
 
+    def test_web_fetch_preserves_block_text_inside_malformed_code(self):
+        """An unclosed code wrapper cannot hide following block content."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        visible = "visible article marker. " * 15
+        html = f"<p>intro</p><code>stray<p>{visible}</p>"
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(visible.strip(), result.output)
+
     def test_web_fetch_extract_main_false_preserves_code_text(self):
         """Full-text mode retains visible pre/code text."""
         from kollabor_agent.tool_executor import ToolExecutor
