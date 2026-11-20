@@ -283,6 +283,9 @@ def test_project_candidate_is_the_layered_save_target(tmp_path, monkeypatch):
     monkeypatch.setattr(
         loader_module, "get_local_config_directory", lambda *args, **kwargs: local_dir
     )
+    _patch_standard_save_paths(
+        {"global": global_path, "local": local_dir / "config.json"}, monkeypatch
+    )
     loader = ConfigLoader(ConfigManager(project_path), fast_mode=True)
     loader.get_base_config = lambda: {"settings": {}}
     loader.get_plugin_configs = lambda: {}
