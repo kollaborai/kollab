@@ -1306,6 +1306,7 @@ class ToolExecutor:
             and command.strip()
             and not any(char in _SHELL_OPERATOR_CHARS for char in command)
         )
+        git_argv: list[str] = []
         if git_bundle_read_only:
             try:
                 git_argv = shlex.split(command, posix=True)
@@ -1315,6 +1316,11 @@ class ToolExecutor:
                 git_argv and git_argv[0].lower() in {"git", "git.exe"}
             )
         if git_bundle_read_only:
+            if git_argv[0].lower() == "git.exe":
+                tool_data = {
+                    **tool_data,
+                    "command": shlex.join(["git", *git_argv[1:]]),
+                }
             tool_data = {**tool_data, "type": "terminal_read"}
             tool_type = "terminal_read"
 
