@@ -23,10 +23,13 @@ export const DAEMON_OUTDATED_EVENT = "kollab:daemon-outdated";
 // before any of its children fetch, so the many call sites keep mentiko's single-argument codeFetch.
 let activeCodeSession = "";
 let activeCodeRoot = "";
+let activeCodeGeneration = 0;
 export function setCodeRoot(root: string): void { activeCodeRoot = root; }
 
-export function setCodeSession(sessionId: string): void {
+export function setCodeSession(sessionId: string, advanceGeneration = false): number {
+  if (sessionId !== activeCodeSession || advanceGeneration) activeCodeGeneration += 1;
   activeCodeSession = sessionId;
+  return activeCodeGeneration;
 }
 
 export function codeBase(sessionId: string = activeCodeSession): string {
@@ -56,14 +59,15 @@ function isDaemonOutdatedPayload(payload: unknown): boolean {
   return (error as { code?: unknown }).code === "daemon_outdated";
 }
 
-function announceDaemonOutdated(sessionId: string): void {
+function announceDaemonOutdated(sessionId: string, generation: number | null): void {
   if (!sessionId || typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent(DAEMON_OUTDATED_EVENT, { detail: { sessionId } }));
+  window.dispatchEvent(new CustomEvent(DAEMON_OUTDATED_EVENT, { detail: { sessionId, generation } }));
 }
 
 export async function codeFetch(url: string, init: RequestInit = {}, context?: { sessionId: string; root: string }): Promise<Response> {
   // Capture the target before awaiting: the editor can switch sessions while a request is in flight.
   const sessionId = context?.sessionId ?? activeCodeSession;
+  const generation = sessionId === activeCodeSession ? activeCodeGeneration : null;
   try {
     return await api.request(codeRequestUrl(url, context), init);
   } catch (error) {
@@ -76,7 +80,7 @@ export async function codeFetch(url: string, init: RequestInit = {}, context?: {
       body && typeof body === "object" && "success" in (body as object)
         ? body
         : { success: false, error: { code: "request_failed", message } };
-    if (isDaemonOutdatedPayload(payload)) announceDaemonOutdated(sessionId);
+    if (isDaemonOutdatedPayload(payload)) announceDaemonOutdated(sessionId, generation);
     return new Response(JSON.stringify(payload), {
       status,
       headers: { "Content-Type": "application/json" },

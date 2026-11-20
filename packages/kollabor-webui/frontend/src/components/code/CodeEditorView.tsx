@@ -72,17 +72,23 @@ export function CodeEditorView(props: CodeEditorViewProps) {
   const [browsing, setBrowsing] = useState(false);
   const [error, setError] = useState("");
   const [outdated, setOutdated] = useState(false);
+  const codeRequestGeneration = useRef(0);
   const requestContext = JSON.stringify([props.device ?? "", props.sessionId]);
   useLayoutEffect(() => {
-    setCodeSession(props.sessionId);
     setEditorSession(requestContext);
     return () => invalidateEditorSession(requestContext);
   }, [props.sessionId, requestContext]);
+  useLayoutEffect(() => {
+    codeRequestGeneration.current = setCodeSession(props.sessionId, true);
+  }, [props.sessionId, requestContext, props.agentIsCurrent]);
   useEffect(() => {
     const onDaemonOutdated = (event: Event) => {
       const detail: unknown = (event as CustomEvent<unknown>).detail;
       if (!detail || typeof detail !== "object") return;
-      if ((detail as { sessionId?: unknown }).sessionId === props.sessionId) setOutdated(true);
+      const eventDetail = detail as { sessionId?: unknown; generation?: unknown };
+      if (eventDetail.sessionId === props.sessionId && eventDetail.generation === codeRequestGeneration.current) {
+        setOutdated(true);
+      }
     };
     window.addEventListener(DAEMON_OUTDATED_EVENT, onDaemonOutdated);
     return () => window.removeEventListener(DAEMON_OUTDATED_EVENT, onDaemonOutdated);
