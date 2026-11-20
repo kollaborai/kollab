@@ -415,6 +415,38 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertTrue(result.success, result.error)
         self.assertIn(article_body.rstrip(), result.output)
 
+    def test_web_fetch_json_ld_description_does_not_shadow_semantic_article(self):
+        """A metadata description cannot replace longer semantic article text."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        description = "Web page description marker. " * 12
+        article_body = "Visible semantic article body marker. " * 15
+        html = (
+            '<script type="application/ld+json">'
+            + json.dumps({"@type": "WebPage", "description": description})
+            + "</script>"
+            + f"<article><p>{article_body}</p></article>"
+        )
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(article_body.rstrip(), result.output)
+        self.assertNotIn(description.rstrip(), result.output)
+
     def test_web_fetch_regex_fallback_strips_script_content(self):
         """The optional no-bs4 path strips script bodies before returning text."""
         from kollabor_agent.tool_executor import ToolExecutor
