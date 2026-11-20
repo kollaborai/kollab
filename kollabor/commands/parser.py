@@ -64,7 +64,7 @@ class SlashCommandParser:
                     # Single-quoted backslashes are literal; leave those spans unchanged.
                 # POSIX shlex treats unquoted backslashes as escapes. Protect separators
                 # only in unquoted Windows path candidates with valid path segments.
-                # A trailing relative separator before an option must not escape its boundary.
+                # A trailing relative separator before another argument must not escape its boundary.
                 command_text = re.sub(
                     r"(?P<single_quoted>'[^']*')|"
                     r"(?<!\S)(?<!\\[ \t])"
@@ -75,6 +75,7 @@ class SlashCommandParser:
                     r"|\\\\(?:\?\\)?[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*\\?"
                     r"|\\(?![$()])[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*\\?"
                     r"|(?!(?:[^\s]|\\\s)*\\[()$])[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*\\(?=\s+--?[\w-]+(?:=|\s|$))"
+                    r"|(?!(?:[^\s]|\\\s)*\\[()$])[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)+\\(?=\s+[^-\s][^\s]*)"
                     r"|(?!(?:[^\s]|\\\s)*\\[()$])[^\s\\\"'<>|?*]+\\[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*"
                     r")(?=\s|$)",
                     lambda match: (
