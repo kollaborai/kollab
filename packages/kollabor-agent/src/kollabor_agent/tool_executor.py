@@ -824,6 +824,9 @@ class ToolExecutor:
 
         # Track active shell executor so ESC can cancel running subprocesses
         self._active_shell_executor: Optional[ShellExecutor] = None
+        # ShellExecutor tracks its active process per instance, so serialize
+        # terminal dispatches that share this executor.
+        self._terminal_execution_lock = asyncio.Lock()
 
         logger.info(
             "Tool executor initialized with terminal, MCP, and file operations support"
@@ -1446,14 +1449,17 @@ class ToolExecutor:
                             f"About to call _execute_terminal_command for {tool_id}"
                         )
                         mark_tool_execution()
-                        if voice_terminal_plan is not None:
-                            result = await self._execute_voice_terminal_plan(
-                                tool_data,
-                                voice_terminal_plan,
-                                voice_terminal_timeout,
-                            )
-                        else:
-                            result = await self._execute_terminal_command(tool_data)
+                        async with self._terminal_execution_lock:
+                            if voice_terminal_plan is not None:
+                                result = await self._execute_voice_terminal_plan(
+                                    tool_data,
+                                    voice_terminal_plan,
+                                    voice_terminal_timeout,
+                                )
+                            else:
+                                result = await self._execute_terminal_command(
+                                    tool_data
+                                )
                         logger.debug(
                             f"_execute_terminal_command completed for {tool_id}"
                         )
