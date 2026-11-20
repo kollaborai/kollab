@@ -3458,6 +3458,7 @@ class ToolExecutor:
         """Extract articleBody or description from JSON-LD script tags."""
         import json
 
+        article_body = ""
         description = ""
         for script in soup.find_all("script", type="application/ld+json"):
             try:
@@ -3471,10 +3472,14 @@ class ToolExecutor:
                     body = item.get("articleBody")
                     if not isinstance(body, str) or not body.strip():
                         body = item.get("text", "")
-                    if isinstance(body, str) and len(body) > 200:
+                    if isinstance(body, str):
                         # Collapse whitespace
                         lines = [ln.strip() for ln in body.split("\n") if ln.strip()]
-                        return "\n".join(lines)
+                        normalized_body = "\n".join(lines)
+                        if len(normalized_body) > 200:
+                            return normalized_body
+                        if not article_body and len(normalized_body) > 100:
+                            article_body = normalized_body
                     # Keep the first usable description, but inspect later
                     # items first in case they contain the article body.
                     desc = item.get("description")
@@ -3482,7 +3487,7 @@ class ToolExecutor:
                         description = desc.strip()
             except (json.JSONDecodeError, TypeError):
                 continue
-        return description
+        return article_body or description
 
     @staticmethod
     def _readability_extract(soup) -> str:
