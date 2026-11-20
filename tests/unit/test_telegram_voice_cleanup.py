@@ -242,6 +242,65 @@ async def test_cancellation_stops_real_transcriber_descendants(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group lifecycle")
+async def test_cancellation_does_not_wait_for_detached_pipe_holder(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    whisper = tmp_path / "whisper"
+    descendant_script = tmp_path / "descendant.py"
+    descendant_started = tmp_path / "descendant.started"
+    descendant_script.write_text(
+        textwrap.dedent(
+            f"""\
+            import os, pathlib, time
+            os.setsid()
+            pathlib.Path({str(descendant_started)!r}).write_text("ready")
+            time.sleep(0.8)
+            """
+        )
+    )
+    whisper.write_text(
+        "#!/usr/bin/env python3\n"
+        + textwrap.dedent(
+            f"""\
+            import subprocess, sys
+            subprocess.Popen([sys.executable, {str(descendant_script)!r}])
+            """
+        )
+    )
+    whisper.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+    task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
+    deadline = time.monotonic() + 5
+    while not descendant_started.exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+    assert descendant_started.exists(), "detached descendant did not start"
+    task.cancel()
+    _, pending = await asyncio.wait({task}, timeout=0.25)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not pending, "cancellation waited for detached descendant pipe EOF"
+    assert not list(tmp_path.glob("kollab-telegram-voice-*"))
+
+
+@pytest.mark.asyncio
+async def test_missing_whisper_log_keeps_safe_executable_context(monkeypatch, caplog):
+    async def missing(*_args, **_kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "whisper")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", missing)
+    caplog.set_level(logging.ERROR)
+    result = await _bridge()._transcribe_voice("synthetic-file-id")
+
+    assert result == "[voice message - transcription failed]"
+    assert "whisper" in caplog.text
+    assert "synthetic-secret" not in caplog.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process group lifecycle")
 async def test_cancellation_kills_pipe_holder_after_transcriber_exits(
     tmp_path, monkeypatch
