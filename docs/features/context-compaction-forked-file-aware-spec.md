@@ -235,8 +235,8 @@ Unit:
   characters
 - emergency rollover preserves beginning, middle, and ending canaries from an
   oversized active assignment across repeated rollover and persisted reload
-- omitted assignment text names the TaskLedger retrieval command and a
-  truthful recovery action when retrieval fails
+- omitted assignment text directs the agent to ask its assigner through
+  `hub_msg`, and requires it to stop if no reply is available
 - the compacted task prompt estimate stays below 272K
 - summarization-model precedence and per-agent model/duration log fields
 
