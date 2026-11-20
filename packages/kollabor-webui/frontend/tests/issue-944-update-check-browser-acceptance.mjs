@@ -80,7 +80,7 @@ async function main() {
         release: { version: "99.0.0", tag_name: "v99.0.0", name: "Kollab 99", url: "https://example.invalid/release", is_prerelease: false },
         checked_at: Date.now() / 1000, last_successful_check: Date.now() / 1000,
         retry_after_seconds: null, notes: [],
-      }, "Kollab 99.0.0 is available."],
+      }, "A Kollab update is available."],
       ["current", {
         current_version: "0.15.3", status: "current", available: false,
         release: { version: "0.15.3", tag_name: "v0.15.3", name: "Current", url: "https://example.invalid/release", is_prerelease: false },
@@ -108,6 +108,10 @@ async function main() {
       await state.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
       const notice = state.page.getByRole("status").filter({ hasText: text });
       await notice.waitFor({ state: "visible", timeout: 10_000 });
+      if (name === "available") {
+        assert.doesNotMatch(await notice.innerText(), /99\.0\.0/);
+        assert.equal(await notice.getAttribute("title"), "Kollab 99.0.0 is available.");
+      }
       if (name === "rate-limited") {
         assert.equal(await notice.getByRole("button", { name: "Try Again", exact: true }).isDisabled(), true);
       }

@@ -61,7 +61,11 @@ import type {
 } from "@/components/panels/panel-model";
 import { ProfilesDialog } from "@/components/shell/ProfilesDialog";
 import { SetupGuide } from "@/setup/SetupGuide";
-import { WELCOME_GUIDE_DISMISSED_NOTICE } from "@/setup/guide-model";
+import {
+  STORAGE_KEY,
+  WELCOME_GUIDE_DISMISSED_NOTICE,
+  shouldAutoOpenGuide,
+} from "@/setup/guide-model";
 import { SessionPanel, type SessionView } from "@/components/shell/SessionPanel";
 import { latestTodoBlock } from "@/utils/todo-list";
 import { ShellHeader } from "@/components/shell/ShellHeader";
@@ -123,6 +127,13 @@ import { LearnDialog } from "@/components/learn/LearnDialog";
 import { WhatsNewPage } from "@/components/updates/WhatsNewPage";
 import { navigateToLearn } from "@/learn/catalog";
 import { navigateToWhatsNew, pagePath, readMainPageRoute } from "@/utils/page-route";
+import { loadCanonicalWhatsNew } from "@/learn/changelog";
+import { WhatsNewDialog } from "@/whats-new/WhatsNewDialog";
+import {
+  decideWhatsNew,
+  readWhatsNewSeenRaw,
+  type DialogRelease,
+} from "@/whats-new/whats-new-model";
 
 function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current: number | null }) {
   return new Promise<void>((resolve) => {
@@ -141,10 +152,12 @@ function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current:
 
 const api = new EngineApi();
 
-/** True until this browser recorded a guided-setup dismissal. */
+/** True while this browser has no engaged guided-setup record: a first run,
+ * or a record stuck at an undismissed welcome (older builds wrote that on
+ * mount, so their owners never saw the auto-open either). */
 const noGuideYet = () => {
   try {
-    return window.localStorage.getItem("kollab.setup-guide.v1") === null;
+    return shouldAutoOpenGuide(window.localStorage.getItem(STORAGE_KEY));
   } catch {
     return false;
   }
@@ -494,6 +507,9 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [agentLibraryInitialTab, setAgentLibraryInitialTab] = useState<"rosters" | "teams">("rosters");
   const [setupGuideOpen, setSetupGuideOpen] = useState(false);
+  const [firstRun] = useState(noGuideYet);
+  const [whatsNewDialogOpen, setWhatsNewDialogOpen] = useState(false);
+  const [whatsNewRelease, setWhatsNewRelease] = useState<DialogRelease | null>(null);
   const [welcomeGuideNotice, setWelcomeGuideNotice] = useState(false);
   const openWelcomeGuide = useCallback(() => {
     setWelcomeGuideNotice(false);
@@ -1492,6 +1508,21 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         // First run: nothing to restore and no dismissal on record.
         setSetupGuideOpen(true);
       }
+      // What's New never competes with a first run's setup guide.
+      if (!firstRun) {
+        void (async () => {
+          const decision = decideWhatsNew({
+            result: await loadCanonicalWhatsNew(),
+            seenRaw: readWhatsNewSeenRaw(),
+            firstRun,
+          });
+          if (!mounted || operation !== operationRef.current) return;
+          if (decision.show && decision.release) {
+            setWhatsNewRelease(decision.release);
+            setWhatsNewDialogOpen(true);
+          }
+        })();
+      }
       setError(null);
     })()
       .catch((reason) => {
@@ -1505,7 +1536,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     return () => {
       mounted = false;
     };
-  }, [guardHistoryOpen, loadSessions, loadState, recoverPendingTurn, refreshAgentPool]);
+  }, [firstRun, guardHistoryOpen, loadSessions, loadState, recoverPendingTurn, refreshAgentPool]);
 
   // A default loadout belongs to the folder a session starts in: that folder's own project and local config can
   // set one. Ask again when the Workspace field changes, unless a model was picked by hand (#957).
@@ -1935,6 +1966,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           onOpenSettings={(tab) => openSettings({ tab })}
           onStartSession={() => void createSession()}
         />
+        <WhatsNewDialog
+          open={whatsNewDialogOpen}
+          release={whatsNewRelease}
+          onOpenChange={setWhatsNewDialogOpen}
+          onSeeAllChanges={navigateToWhatsNew}
+        />
         <PrChainDialog api={api} open={prChainOpen} onOpenChange={setPrChainOpen} />
         {activeSession ? (
           <AppsDialog
@@ -2020,7 +2057,13 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           ) : null}
           {updateStatus ? (
             <NoticeBar
-              detail={updateStatus === "disabled" ? "Change kollabor.updates.check_enabled in your Kollab configuration." : undefined}
+              detail={
+                updateStatus === "disabled"
+                  ? "Change kollabor.updates.check_enabled in your Kollab configuration."
+                  : updateStatus === "available" && updateInfo?.release
+                    ? `Kollab ${updateInfo.release.version} is available.`
+                    : undefined
+              }
               actions={updateStatus === "disabled" ? undefined : (
                 <>
                   <NoticeAction disabled={updateRetryBlocked} onClick={() => void retryUpdateCheck()}>
@@ -2028,12 +2071,12 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                   </NoticeAction>
                   {updateStatus === "available" && updateInfo?.release ? (
                     <>
+                      <a className="text-foreground underline underline-offset-2" href={updateInfo.release.url} target="_blank" rel="noreferrer">
+                        Release notes
+                      </a>
                       <NoticeAction disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>
                         {updateBusy ? "Updating…" : "Update Now"}
                       </NoticeAction>
-                      <a className="text-foreground underline underline-offset-2" href={updateInfo.release.url} target="_blank" rel="noreferrer">
-                        Release Notes
-                      </a>
                     </>
                   ) : null}
                 </>
@@ -2044,9 +2087,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                 setUpdateRetryFailed(false);
               }}
             >
-              {updateStatus === "disabled"
-                ? "Update checks are off."
-                : updateNoticeMessage}
+              {updateStatus === "available" ? "A Kollab update is available." : updateNoticeMessage}
             </NoticeBar>
           ) : null}
           {contextCompactionStatus ? (

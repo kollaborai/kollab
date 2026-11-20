@@ -86,12 +86,18 @@ async function main() {
     await versionNotice.waitFor({ state: "hidden", timeout: 5_000 });
     await mismatch.context.close();
 
-    // The update notice is the same line, with its two actions.
+    // The update notice keeps one compact line, manual refresh, and release actions.
     const updating = await openPage(browser, baseUrl, makeFixtures({ update: { version: "999.2.0", url: "https://example.invalid/notes" } }));
     await updating.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    const updateNotice = updating.page.getByRole("status").filter({ hasText: "999.2.0" });
+    const updateNotice = updating.page.getByRole("status").filter({
+      has: updating.page.getByRole("button", { name: "Update Now", exact: true }),
+    });
+    await updateNotice.getByRole("button", { name: "Check Again", exact: true }).waitFor({ state: "visible" });
     await updateNotice.getByRole("button", { name: "Update Now", exact: true }).waitFor({ state: "visible", timeout: 5_000 });
-    await updateNotice.getByRole("link", { name: "Release Notes", exact: true }).waitFor({ state: "visible" });
+    await updateNotice.getByRole("link", { name: "Release notes", exact: true }).waitFor({ state: "visible" });
+    await updateNotice.getByText("A Kollab update is available.", { exact: true }).waitFor({ state: "visible" });
+    assert.doesNotMatch(await updateNotice.innerText(), /999\.2\.0/);
+    assert.equal(await updateNotice.getAttribute("title"), "Kollab 999.2.0 is available.");
     assert.ok((await updateNotice.boundingBox()).height <= 40, "the notice is one compact line at desktop width");
     await updateNotice.getByRole("button", { name: "Dismiss", exact: true }).click();
     await updateNotice.waitFor({ state: "hidden", timeout: 5_000 });
