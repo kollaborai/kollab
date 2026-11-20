@@ -111,6 +111,48 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
         self.executor.shell_executor.run_argv.assert_awaited_once()
         terminal_command.assert_not_awaited()
 
+    async def test_livekit_read_only_terminal_honors_requested_timeout(self):
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        self.executor.shell_executor.run_argv = AsyncMock(
+            return_value=ShellResult(success=True, stdout="clean\n", stderr="", exit_code=0)
+        )
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "voice-terminal-timeout",
+                "command": "git status --short",
+                "timeout": "1s",
+            },
+            execution_context=make_voice_origin_context("turn-timeout"),
+        )
+
+        self.assertTrue(result.success)
+        self.executor.shell_executor.run_argv.assert_awaited_once()
+        self.assertEqual(self.executor.shell_executor.run_argv.await_args.kwargs["timeout"], 1)
+
+    async def test_livekit_terminal_rejects_invalid_timeout_before_running(self):
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        self.executor.shell_executor.run_argv = AsyncMock(
+            return_value=ShellResult(success=True, stdout="clean\n", stderr="", exit_code=0)
+        )
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "voice-terminal-invalid-timeout",
+                "command": "git status --short",
+                "timeout": "thirty seconds",
+            },
+            execution_context=make_voice_origin_context("turn-invalid-timeout"),
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("timeout", result.error.lower())
+        self.executor.shell_executor.run_argv.assert_not_awaited()
+
 
     async def test_livekit_path_qualified_executable_never_reaches_process(self):
         from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
@@ -817,6 +859,250 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result.success)
         self.assertIn("timed out", result.error.lower())
+
+    async def test_execute_tool_honors_foreground_timeout_without_tmux(self):
+        self.executor.terminal_timeout = 120
+        self.executor.shell_executor.run = AsyncMock(
+            return_value=ShellResult(
+                success=False,
+                stdout="",
+                stderr="",
+                exit_code=-1,
+                timed_out=True,
+                error="Command timed out after 30s",
+            )
+        )
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "terminal-timeout-fallback",
+                "command": "sleep 60",
+                "timeout": "30s",
+            }
+        )
+
+        self.assertFalse(result.success)
+        self.executor.shell_executor.run.assert_awaited_once_with(
+            "sleep 60", timeout=30, cwd=None
+        )
+
+    async def test_execute_tool_honors_foreground_timeout_with_tmux(self):
+        self.executor.terminal_timeout = 120
+        self.executor.tmux_plugin = MagicMock()
+        self.executor.tmux_plugin.execute_foreground = AsyncMock(
+            return_value={
+                "success": False,
+                "output": "",
+                "error": "Command timed out after 30s",
+                "exit_code": -1,
+            }
+        )
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "terminal-timeout-tmux",
+                "command": "sleep 60",
+                "timeout": "30s",
+            }
+        )
+
+        self.assertFalse(result.success)
+        self.executor.tmux_plugin.execute_foreground.assert_awaited_once_with(
+            command="sleep 60", timeout=30, cwd=None
+        )
+
+    async def test_execute_tool_rejects_timeout_above_configured_limit_without_tmux(self):
+        self.executor.terminal_timeout = 120
+        self.executor.shell_executor.run = AsyncMock(
+            return_value=ShellResult(success=True, stdout="", stderr="", exit_code=0)
+        )
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "terminal-timeout-over-limit-fallback",
+                "command": "sleep 60",
+                "timeout": "1000h",
+            }
+        )
+
+        self.executor.shell_executor.run.assert_not_awaited()
+        self.assertFalse(result.success)
+        self.assertIn("configured", result.error.lower())
+
+    async def test_execute_tool_rejects_timeout_above_configured_limit_with_tmux(self):
+        self.executor.terminal_timeout = 120
+        self.executor.tmux_plugin = MagicMock()
+        self.executor.tmux_plugin.execute_foreground = AsyncMock(
+            return_value={"success": True, "output": "", "error": "", "exit_code": 0}
+        )
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "terminal-timeout-over-limit-tmux",
+                "command": "sleep 60",
+                "timeout": "1000h",
+            }
+        )
+
+        self.executor.tmux_plugin.execute_foreground.assert_not_awaited()
+        self.assertFalse(result.success)
+        self.assertIn("configured", result.error.lower())
+
+    async def test_background_shell_fallback_caps_timeout_without_tmux(self):
+        self.executor.terminal_timeout = 120
+        self.executor.shell_executor.run = AsyncMock(
+            return_value=ShellResult(success=True, stdout="", stderr="", exit_code=0)
+        )
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "background-timeout-fallback",
+                "command": "sleep 1",
+                "background": True,
+                "timeout": "1000h",
+            }
+        )
+
+        self.assertTrue(result.success)
+        self.executor.shell_executor.run.assert_awaited_once_with(
+            "sleep 1", timeout=120, cwd=None
+        )
+
+    async def test_background_shell_fallback_caps_timeout_after_tmux_error(self):
+        self.executor.terminal_timeout = 120
+        self.executor.tmux_plugin = MagicMock()
+        self.executor.tmux_plugin.execute_background = AsyncMock(
+            side_effect=RuntimeError("tmux unavailable")
+        )
+        self.executor.shell_executor.run = AsyncMock(
+            return_value=ShellResult(success=True, stdout="", stderr="", exit_code=0)
+        )
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "background-timeout-tmux-fallback",
+                "command": "sleep 1",
+                "background": True,
+                "timeout": "1000h",
+            }
+        )
+
+        self.assertTrue(result.success)
+        self.executor.tmux_plugin.execute_background.assert_awaited_once()
+        self.executor.shell_executor.run.assert_awaited_once_with(
+            "sleep 1", timeout=120, cwd=None
+        )
+
+    async def test_concurrent_terminal_timeouts_do_not_interrupt_sibling(self):
+        short = {
+            "type": "terminal",
+            "id": "short-timeout",
+            "command": "sleep 2",
+            "timeout": "1s",
+        }
+        long = {
+            "type": "terminal",
+            "id": "long-timeout",
+            "command": "sleep 1",
+            "timeout": "4s",
+        }
+
+        _, long_result = await asyncio.gather(
+            self.executor.execute_tool(short), self.executor.execute_tool(long)
+        )
+        await asyncio.sleep(2)
+
+        self.assertTrue(long_result.success, long_result.error)
+
+    async def test_terminal_status_does_not_wait_for_foreground_execution(self):
+        foreground_started = asyncio.Event()
+        release_foreground = asyncio.Event()
+        status_called = asyncio.Event()
+
+        async def execute_foreground(**kwargs):
+            foreground_started.set()
+            await release_foreground.wait()
+            return {"success": True, "output": "done", "error": "", "exit_code": 0}
+
+        async def get_session_status(session_name):
+            status_called.set()
+            return {
+                "success": True,
+                "status": "running",
+                "command": session_name,
+            }
+
+        self.executor.tmux_plugin = MagicMock()
+        self.executor.tmux_plugin.execute_foreground = AsyncMock(
+            side_effect=execute_foreground
+        )
+        self.executor.tmux_plugin.get_session_status = AsyncMock(
+            side_effect=get_session_status
+        )
+
+        foreground_task = asyncio.create_task(
+            self.executor.execute_tool(
+                {
+                    "type": "terminal",
+                    "id": "foreground",
+                    "command": "build",
+                    "timeout": "4s",
+                }
+            )
+        )
+        await foreground_started.wait()
+        status_task = asyncio.create_task(
+            self.executor.execute_tool(
+                {
+                    "type": "terminal_status",
+                    "id": "status",
+                    "session_name": "build",
+                }
+            )
+        )
+
+        status_was_available = False
+        try:
+            await asyncio.wait_for(status_called.wait(), timeout=0.25)
+            status_was_available = True
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            release_foreground.set()
+
+        foreground_result = await foreground_task
+        status_result = await status_task
+
+        self.assertTrue(foreground_result.success, foreground_result.error)
+        self.assertTrue(status_result.success, status_result.error)
+        self.assertTrue(
+            status_was_available,
+            "terminal_status waited for unrelated foreground execution",
+        )
+
+    async def test_execute_tool_rejects_invalid_terminal_timeout_before_running(self):
+        self.executor.shell_executor.run = AsyncMock(
+            return_value=ShellResult(success=True, stdout="", stderr="", exit_code=0)
+        )
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "terminal-invalid-timeout",
+                "command": "sleep 60",
+                "timeout": "thirty seconds",
+            }
+        )
+
+        self.executor.shell_executor.run.assert_not_awaited()
+        self.assertFalse(result.success)
+        self.assertIn("timeout", result.error.lower())
 
     async def test_execute_mcp_tool_success(self):
         """Test successful MCP tool execution."""
