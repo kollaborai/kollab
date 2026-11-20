@@ -190,11 +190,11 @@ function TerminalSurface() {
 
 function Page() {
   return (
-    <div style={{ padding: 12, width: 1400 }}>
+    <div style={{ padding: 12, width: 1400, minHeight: "calc(100vh + 200px)" }}>
       <h1 style={{ fontSize: 16 }}>scrollbar chrome fixture (#1174)</h1>
       <p style={{ maxWidth: 600 }}>
-        This filler exists so the document itself becomes a vertical scroller; the probe
-        reads the classic-scrollbar gutter from documentElement too.
+        This page extends below the viewport so the document itself becomes a vertical
+        scroller; the probe reads its classic-scrollbar gutter too.
       </p>
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
         <NativeBoth />
