@@ -15,6 +15,11 @@ from kollabor_config import proc_ctl
 from plugins.hub.messaging_bridge import TelegramBridge
 
 
+@pytest.fixture(autouse=True)
+def _isolate_process_tree_enumeration(monkeypatch):
+    monkeypatch.setattr(psutil.Process, "children", lambda *_args, **_kwargs: [])
+
+
 class _TelegramResponse:
     content = b"synthetic audio"
 
