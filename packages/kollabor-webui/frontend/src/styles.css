@@ -214,3 +214,7 @@
   width: 0;
   height: 0;
 }
+/* Monaco sets the minimap slider's display inline, outside its editor scrollbars. */
+.monaco-editor .minimap-slider {
+  display: none !important;
+}
