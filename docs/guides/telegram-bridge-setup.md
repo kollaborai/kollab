@@ -90,8 +90,11 @@ To check the current state:
 
 When you send a voice note on Telegram, the bridge downloads the
 audio file and transcribes it locally using OpenAI's whisper CLI.
-The audio and transcript stay in a private temporary directory and are
-removed after transcription, failure, timeout, or cancellation.
+The audio and transcript stay in a private temporary directory. Cleanup removes
+it after transcription finishes and communication reaches EOF. After a timeout
+or cancellation, an escaped descendant that still holds stdout or stderr open
+keeps the directory on disk until that pipe closes; if it never closes, cleanup
+remains pending.
 
 **Install whisper:**
 
