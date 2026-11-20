@@ -1789,6 +1789,16 @@ class ToolExecutor:
                         "30s, 5m, or 1h."
                     ),
                 )
+            if not background and timeout_seconds > self.terminal_timeout:
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type=tool_type,
+                    success=False,
+                    error=(
+                        "Terminal timeout exceeds the configured limit of "
+                        f"{self.terminal_timeout}s."
+                    ),
+                )
             background_timeout = requested_timeout.strip().lower()
 
         # Kollab commands run freely from agent terminals by default (#1147).

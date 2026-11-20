@@ -48,8 +48,8 @@ terminal_tool = ToolDefinition(
             name="timeout",
             type="string",
             description=(
-                "Execution limit (30s, 5m, 1h). Overrides the configured "
-                "foreground limit or auto-kills a background session."
+                "Execution limit (30s, 5m, 1h). Foreground requests may not "
+                "exceed the configured limit; background values auto-kill."
             ),
             required=False,
         ),
@@ -73,18 +73,22 @@ terminal_tool = ToolDefinition(
     error_modes=[
         "Exit code <N>: <stderr>",
         "Command timed out after <N> seconds",
+        "Invalid terminal timeout",
+        "Terminal timeout exceeds the configured limit",
         "Permission denied",
     ],
     notes=(
         "Background sessions run as persistent subprocesses and "
         "persist across turns. Use terminal-status, terminal-output, "
         "terminal-send, terminal-kill to manage them. Foreground commands use "
-        "the configured terminal timeout when timeout is omitted; background "
-        "sessions have no automatic timeout unless one is set."
+        "the configured terminal timeout when timeout is omitted. Requested "
+        "foreground values may shorten but not exceed it; voice calls may use "
+        "a stricter limit. Background sessions have no automatic timeout "
+        "unless one is set."
     ),
     safety_features=[
         "background sessions run as subprocesses with auto-kill timeouts",
-        "foreground commands enforce a requested timeout or the configured default",
+        "foreground commands enforce a requested timeout within the configured limit",
     ],
     key_rules=[
         "use background=true for dev servers, build scripts, and long-running processes",

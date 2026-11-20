@@ -18,8 +18,10 @@ background persistent sessions:
     cwd="/path"        # working directory
 
   foreground commands use the configured terminal timeout when `timeout` is
-  omitted. Background sessions have no automatic timeout unless one is set.
-  Invalid timeout values are rejected before the command starts.
+  omitted. Requested foreground timeouts may shorten but not exceed that limit;
+  excessive or invalid values are rejected before execution. Voice commands may
+  apply a stricter policy limit. Background sessions have no automatic timeout
+  unless one is set.
 
   use for:
     - dev servers (npm run dev, python -m http.server)
