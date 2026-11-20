@@ -120,6 +120,36 @@ class TestSlashCommandParser(unittest.TestCase):
                 self.assertIsNotNone(command)
                 self.assertEqual(command.args, expected_args)
 
+    def test_parse_windows_paths_with_trailing_separators_before_next_token(self):
+        cases = [
+            (
+                r"/open C:\work\docs\ --mode=read",
+                ["C:\\work\\docs\\", "--mode=read"],
+            ),
+            (
+                r"/open \work\docs\ --mode=read",
+                ["\\work\\docs\\", "--mode=read"],
+            ),
+            (
+                r"/open \\server\share\ --mode=read",
+                ["\\\\server\\share\\", "--mode=read"],
+            ),
+            (
+                r"/open --path=C:\work\docs\ --mode=read",
+                ["--path=C:\\work\\docs\\", "--mode=read"],
+            ),
+            (
+                r"/open C:\work\docs\ target.txt",
+                ["C:\\work\\docs\\", "target.txt"],
+            ),
+        ]
+
+        for input_text, expected_args in cases:
+            with self.subTest(input_text=input_text):
+                command = self.parser.parse_command(input_text)
+                self.assertIsNotNone(command)
+                self.assertEqual(command.args, expected_args)
+
     def test_malformed_quote_fallback_keeps_original_windows_separators(self):
         command = r'/open "C:\work\docs\notes.txt'
         parsed = self.parser.parse_command(command)
