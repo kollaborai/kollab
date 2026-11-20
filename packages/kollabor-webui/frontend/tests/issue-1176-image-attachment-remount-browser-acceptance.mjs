@@ -134,20 +134,19 @@ async function main() {
     );
     await shell.page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await shell.page.waitForFunction(
-      () => document.querySelectorAll('.aui-composer-attachments [aria-label^="Image attachment"]').length === 0,
+      () => document.querySelectorAll('.aui-composer-attachments [aria-label^="Image attachment"]').length === 1,
     );
 
     const restoredText = await composer.inputValue();
     const failures = [];
-    if (restoredText.includes("[image1]")) {
-      failures.push(`restored orphan token remained in composer: ${JSON.stringify(restoredText)}`);
+    const restoredTokenCount = (restoredText.match(/\[image1\]/g) ?? []).length;
+    if (restoredTokenCount !== 1) {
+      failures.push(`restored composer had ${restoredTokenCount} [image1] tokens: ${JSON.stringify(restoredText)}`);
     }
-    if (restoredText !== "Describe this picture") {
+    if (restoredText !== "[image1]\nDescribe this picture") {
       failures.push(`restored composer text changed unexpectedly: ${JSON.stringify(restoredText)}`);
     }
 
-    await attachImage(shell.page, "second.png");
-    await shell.page.waitForFunction(() => document.querySelector(".aui-composer-input")?.value.includes("[image1]"));
     await composer.press("Enter");
 
     const sent = await Promise.race([
@@ -191,7 +190,7 @@ async function main() {
     if (shell.pageErrors.length) failures.push(`browser page errors: ${JSON.stringify(shell.pageErrors)}`);
     if (shell.externalRequests.length) failures.push(`unexpected external requests: ${JSON.stringify(shell.externalRequests)}`);
     if (failures.length) throw new Error(failures.join("\n"));
-    console.log("PASS: restored orphan removed; one image token and image part sent; thumbnail visible at 1280px, 820px, and 390px.");
+    console.log("PASS: one restored image token and image part sent; thumbnail visible at 1280px, 820px, and 390px.");
     console.log("Screenshots: issue-1176-image-message.png, issue-1176-image-message-820.png, issue-1176-image-message-390.png");
   } finally {
     await shell?.context.close();
