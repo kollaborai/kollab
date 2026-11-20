@@ -268,6 +268,40 @@ async def test_invalid_cached_prerelease_flag_is_refetched(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_invalid_cached_prerelease_flag_does_not_hide_terminal_update(monkeypatch):
+    config = _StoredConfig()
+    config.values.update(
+        {
+            "kollabor.updates.last_check_timestamp": time.time() - 60,
+            "kollabor.updates.cached_latest_version": "999.0.0",
+            "kollabor.updates.cached_release_name": "Stable release",
+            "kollabor.updates.cached_release_url": "https://example.invalid/stable",
+            "kollabor.updates.cached_release_is_prerelease": "false",
+        }
+    )
+    service = VersionCheckService(config, __version__)
+    calls = 0
+
+    async def stable_release(self):
+        nonlocal calls
+        calls += 1
+        return {
+            "tag_name": "v999.0.0",
+            "name": "Stable release",
+            "html_url": "https://example.invalid/stable",
+            "prerelease": False,
+        }
+
+    monkeypatch.setattr(VersionCheckService, "_fetch_latest_release", stable_release)
+
+    release = await service.check_for_updates()
+
+    assert release is not None
+    assert release.version == "999.0.0"
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_forced_request_waiting_on_lookup_shares_its_result(monkeypatch):
     calls = 0
     started = asyncio.Event()
