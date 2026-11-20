@@ -522,3 +522,36 @@ def test_restore_from_backup_repairs_config_after_permission_error(tmp_path, mon
         assert service.get_config_error() is None
     finally:
         service.shutdown()
+
+
+def test_restore_from_backup_refuses_unreadable_target_changed_after_load(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "explicit.json"
+    _write_bytes(path, b'{"api_key":"DO_NOT_ECHO",', mode=0o600)
+    backup = tmp_path / "known-good.json"
+    _write_bytes(backup, b'{"settings":{"repaired":true}}')
+    service = ConfigService(path, fast_mode=True, initialize=False)
+    read_bytes = Path.read_bytes
+    denied = False
+
+    def unreadable_for_load(target):
+        nonlocal denied
+        if target == path and not denied:
+            denied = True
+            raise PermissionError("DO_NOT_ECHO")
+        return read_bytes(target)
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable_for_load)
+    try:
+        service.config_loader.load_complete_config()
+        assert service.config_loader.config_load_status["explicit"] == "unreadable"
+        changed = b'{"settings":{"changed_elsewhere":true}}'
+        path.write_bytes(changed)
+        assert service.restore_from_backup(backup) is False
+        assert path.read_bytes() == changed
+        error = service.get_config_error()
+        assert error and "changed" in error.lower()
+        assert "DO_NOT_ECHO" not in error
+    finally:
+        service.shutdown()
