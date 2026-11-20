@@ -1063,7 +1063,7 @@ class TestWebFetchExecution(unittest.TestCase):
             sys.modules,
             {"bs4": fake_bs4, "bs4.exceptions": fake_exceptions},
         ):
-            text = self.executor._html_to_text(html)
+            text = self.executor._extract_main_content(html, extract_main=False)
 
         self.assertEqual(text, "Parser fallback works")
         self.assertEqual(parser_calls, ["lxml", "html.parser"])
