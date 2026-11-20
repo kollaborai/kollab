@@ -824,8 +824,8 @@ class ToolExecutor:
 
         # Track active shell executor so ESC can cancel running subprocesses
         self._active_shell_executor: Optional[ShellExecutor] = None
-        # ShellExecutor tracks its active process per instance, so serialize
-        # terminal dispatches that share this executor.
+        # Serialize only calls that share mutable subprocess state; independent
+        # session-management operations must remain available while they run.
         self._terminal_execution_lock = asyncio.Lock()
 
         logger.info(
@@ -1449,17 +1449,14 @@ class ToolExecutor:
                             f"About to call _execute_terminal_command for {tool_id}"
                         )
                         mark_tool_execution()
-                        async with self._terminal_execution_lock:
-                            if voice_terminal_plan is not None:
-                                result = await self._execute_voice_terminal_plan(
-                                    tool_data,
-                                    voice_terminal_plan,
-                                    voice_terminal_timeout,
-                                )
-                            else:
-                                result = await self._execute_terminal_command(
-                                    tool_data
-                                )
+                        if voice_terminal_plan is not None:
+                            result = await self._execute_voice_terminal_plan(
+                                tool_data,
+                                voice_terminal_plan,
+                                voice_terminal_timeout,
+                            )
+                        else:
+                            result = await self._execute_terminal_command(tool_data)
                         logger.debug(
                             f"_execute_terminal_command completed for {tool_id}"
                         )
@@ -1680,20 +1677,21 @@ class ToolExecutor:
         timeout_seconds: int,
     ) -> ToolExecutionResult:
         """Run a canonical voice plan with argv, never through a command shell."""
-        self._active_shell_executor = self.shell_executor
-        try:
-            result = await self.shell_executor.run_argv(
-                plan.argv,
-                timeout=min(
-                    timeout_seconds,
-                    self.terminal_timeout,
-                    MAX_VOICE_COMMAND_SECONDS,
-                ),
-                cwd=plan.canonical_cwd,
-                max_output_bytes=MAX_VOICE_OUTPUT_BYTES,
-            )
-        finally:
-            self._active_shell_executor = None
+        async with self._terminal_execution_lock:
+            self._active_shell_executor = self.shell_executor
+            try:
+                result = await self.shell_executor.run_argv(
+                    plan.argv,
+                    timeout=min(
+                        timeout_seconds,
+                        self.terminal_timeout,
+                        MAX_VOICE_COMMAND_SECONDS,
+                    ),
+                    cwd=plan.canonical_cwd,
+                    max_output_bytes=MAX_VOICE_OUTPUT_BYTES,
+                )
+            finally:
+                self._active_shell_executor = None
 
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
@@ -1852,11 +1850,12 @@ class ToolExecutor:
                     )
                 else:
                     # Foreground execution via temporary subprocess
-                    result = await self.tmux_plugin.execute_foreground(
-                        command=command,
-                        timeout=timeout_seconds,
-                        cwd=str(cwd) if cwd else None,
-                    )
+                    async with self._terminal_execution_lock:
+                        result = await self.tmux_plugin.execute_foreground(
+                            command=command,
+                            timeout=timeout_seconds,
+                            cwd=str(cwd) if cwd else None,
+                        )
                     return ToolExecutionResult(
                         tool_id=tool_id,
                         tool_type=tool_type,
@@ -1871,15 +1870,16 @@ class ToolExecutor:
                 logger.debug("Falling back to ShellExecutor for command execution")
 
         # Fallback: Use ShellExecutor (no terminal plugin available or it failed)
-        self._active_shell_executor = self.shell_executor
-        try:
-            result = await self.shell_executor.run(
-                command,
-                timeout=timeout_seconds,
-                cwd=cwd,
-            )
-        finally:
-            self._active_shell_executor = None
+        async with self._terminal_execution_lock:
+            self._active_shell_executor = self.shell_executor
+            try:
+                result = await self.shell_executor.run(
+                    command,
+                    timeout=timeout_seconds,
+                    cwd=cwd,
+                )
+            finally:
+                self._active_shell_executor = None
 
         if result.error:
             return ToolExecutionResult(
@@ -1994,17 +1994,18 @@ class ToolExecutor:
                 if not name.upper().startswith("GIT_")
             }
 
-        self._active_shell_executor = self.shell_executor
-        try:
-            result = await self.shell_executor.run_argv(
-                argv,
-                timeout=min(self.terminal_timeout, MAX_VOICE_COMMAND_SECONDS),
-                cwd=cwd,
-                env=command_env,
-                max_output_bytes=MAX_VOICE_OUTPUT_BYTES,
-            )
-        finally:
-            self._active_shell_executor = None
+        async with self._terminal_execution_lock:
+            self._active_shell_executor = self.shell_executor
+            try:
+                result = await self.shell_executor.run_argv(
+                    argv,
+                    timeout=min(self.terminal_timeout, MAX_VOICE_COMMAND_SECONDS),
+                    cwd=cwd,
+                    env=command_env,
+                    max_output_bytes=MAX_VOICE_OUTPUT_BYTES,
+                )
+            finally:
+                self._active_shell_executor = None
 
         return ToolExecutionResult(
             tool_id=tool_id,
