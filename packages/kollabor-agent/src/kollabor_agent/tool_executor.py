@@ -832,7 +832,16 @@ def _terminal_find_escapes_workspace(
         find_commands.append((words, index, has_inline_assignment))
 
     if not find_commands:
-        return False
+        # A literal find can be executable code passed to an interpreter or
+        # wrapper. Allow only standalone text output when no find command was
+        # parsed; fail closed for commands whose behavior cannot be inspected.
+        standalone_text_output = (
+            not has_shell_operators
+            and len(commands) == 1
+            and bool(commands[0])
+            and Path(commands[0][0]).name.lower() in {"echo", "printf"}
+        )
+        return not standalone_text_output
     if has_shell_operators or len(find_commands) != 1:
         return True
 
