@@ -199,6 +199,183 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.error, "")
         self.assertGreaterEqual(result.execution_time, 0)
 
+    async def test_terminal_find_refuses_roots_outside_project_before_execution(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "project"
+            outside_home = root / "home"
+            workspace.mkdir()
+            outside_home.mkdir()
+            self.executor.workspace = workspace
+            self.executor.shell_executor.run = AsyncMock(
+                return_value=ShellResult(
+                    success=True,
+                    stdout="outside fixture\n",
+                    stderr="",
+                    exit_code=0,
+                )
+            )
+
+            commands = [
+                f'find "{outside_home}" -maxdepth 2 -type f -print',
+                'find "$HOME" -maxdepth 2 -type f -print',
+                "find /Users -maxdepth 2 -type f -print",
+                "find / -maxdepth 2 -type f -print",
+                "find ../../ -maxdepth 2 -type f -print",
+                "echo ready; find / -maxdepth 2 -type f -print",
+                f'find -E "{outside_home}" -name marker.txt -print',
+                f'printf "%s\\n" "$(find "{outside_home}" -name marker.txt -print)"',
+                rf'find . -maxdepth 1 -exec find "{outside_home}" -name marker.txt -print \;',
+                f'cd "{outside_home}" && find . -name marker.txt -print',
+                f'find {{{workspace},{outside_home}}} -name marker.txt -print',
+                "find . -follow -name marker.txt -print",
+                f'env -C "{outside_home}" find . -name marker.txt -print',
+                f"sh -c 'find \"{outside_home}\" -name marker.txt -print'",
+                f"eval 'find \"{outside_home}\" -name marker.txt -print'",
+                f'timeout 2 find "{outside_home}" -name marker.txt -print',
+                f'env -S "find {outside_home} -name marker.txt -print"',
+                f'env --split-string="find {outside_home} -name marker.txt -print"',
+                f'/usr/bin/env -S "find {outside_home} -name marker.txt -print"',
+            ]
+            with patch.dict(os.environ, {"HOME": str(outside_home)}):
+                for command in commands:
+                    with self.subTest(command=command):
+                        result = await self.executor._execute_terminal_command(
+                            {"type": "terminal", "id": "find-outside", "command": command}
+                        )
+
+                        self.assertFalse(result.success)
+                        self.assertIn("search paths must stay inside the active workspace", result.error)
+
+            self.executor.shell_executor.run.assert_not_awaited()
+
+    async def test_terminal_find_mention_in_echo_is_not_executed_as_find(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "project"
+            workspace.mkdir()
+            self.executor.workspace = workspace
+            self.executor.shell_executor.run = AsyncMock(
+                return_value=ShellResult(
+                    success=True, stdout="find ../outside -print\n", stderr="", exit_code=0
+                )
+            )
+
+            result = await self.executor._execute_terminal_command(
+                {
+                    "type": "terminal",
+                    "id": "find-mention",
+                    "command": "echo 'find ../outside -print'",
+                }
+            )
+
+            self.assertTrue(result.success)
+            self.executor.shell_executor.run.assert_awaited_once()
+
+    async def test_terminal_find_refuses_uninspectable_interpreter_command(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "project"
+            workspace.mkdir()
+            self.executor.workspace = workspace
+            self.executor.shell_executor.run = AsyncMock(
+                return_value=ShellResult(
+                    success=True,
+                    stdout="../outside/marker.txt\n",
+                    stderr="",
+                    exit_code=0,
+                )
+            )
+            command = (
+                "python3 -c 'import subprocess; "
+                "subprocess.run([\"find\", \"../outside\", \"-name\", "
+                "\"marker.txt\", \"-print\"], check=True)'"
+            )
+
+            result = await self.executor._execute_terminal_command(
+                {"type": "terminal", "id": "find-interpreter", "command": command}
+            )
+
+            self.executor.shell_executor.run.assert_not_awaited()
+            self.assertFalse(result.success)
+            self.assertIn(
+                "search paths must stay inside the active workspace", result.error
+            )
+
+    async def test_terminal_find_refuses_symlinked_root_outside_project(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "project"
+            outside = root / "outside"
+            workspace.mkdir()
+            outside.mkdir()
+            outside_link = workspace / "outside-link"
+            outside_link.symlink_to(outside, target_is_directory=True)
+            self.executor.workspace = workspace
+            self.executor.shell_executor.run = AsyncMock()
+
+            result = await self.executor._execute_terminal_command(
+                {
+                    "type": "terminal",
+                    "id": "find-symlink-outside",
+                    "command": f'find -L "{outside_link}" -maxdepth 2 -type f -print',
+                }
+            )
+
+            self.assertFalse(result.success)
+            self.assertIn("search paths must stay inside the active workspace", result.error)
+            self.executor.shell_executor.run.assert_not_awaited()
+
+    async def test_terminal_find_refuses_following_workspace_symlinks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "project"
+            outside = root / "outside"
+            workspace.mkdir()
+            outside.mkdir()
+            (workspace / "outside-link").symlink_to(outside, target_is_directory=True)
+            self.executor.workspace = workspace
+            self.executor.shell_executor.run = AsyncMock(
+                return_value=ShellResult(
+                    success=True,
+                    stdout="outside fixture\n",
+                    stderr="",
+                    exit_code=0,
+                )
+            )
+
+            result = await self.executor._execute_terminal_command(
+                {
+                    "type": "terminal",
+                    "id": "find-follow-workspace-symlink",
+                    "command": "find -L . -name marker.txt -print",
+                }
+            )
+
+            self.assertFalse(result.success)
+            self.assertIn("search paths must stay inside the active workspace", result.error)
+            self.executor.shell_executor.run.assert_not_awaited()
+
+    async def test_terminal_find_allows_rooted_workspace_search(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "project"
+            workspace.mkdir()
+            self.executor.workspace = workspace
+            self.executor.shell_executor.run = AsyncMock(
+                return_value=ShellResult(
+                    success=True, stdout="src/main.py\n", stderr="", exit_code=0
+                )
+            )
+            command = "find . -maxdepth 2 -type f -print"
+
+            result = await self.executor._execute_terminal_command(
+                {"type": "terminal", "id": "find-inside", "command": command}
+            )
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.output, "src/main.py\n")
+            self.executor.shell_executor.run.assert_awaited_once_with(
+                command, timeout=self.terminal_timeout, cwd=workspace
+            )
+
     async def test_terminal_read_only_tool_allows_reads_and_refuses_writes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)

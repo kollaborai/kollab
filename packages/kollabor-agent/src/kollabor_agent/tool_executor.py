@@ -707,6 +707,266 @@ def _is_blocked_kollab_spawn(
     return scan_tokens(tokens, background, _depth)
 
 
+def _terminal_find_escapes_workspace(
+    command: str, cwd: Path, workspace: Path, _depth: int = 0
+) -> bool:
+    """Return whether a find command can escape or cannot be scoped safely."""
+    find_names = {"find", "gfind"}
+    if not re.search(r"\b(?:find|gfind)\b", command):
+        return False
+    if _depth > 8:
+        return True
+    if any(marker in command for marker in ("`", "$(", "<(")):
+        return True
+
+    try:
+        lexer = shlex.shlex(
+            command.replace("\n", ";"), posix=True, punctuation_chars=";&|()"
+        )
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        tokens = list(lexer)
+        root = workspace.resolve()
+        canonical_cwd = cwd.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return True
+
+    commands: list[list[str]] = [[]]
+    has_shell_operators = False
+    for token in tokens:
+        if token and all(char in ";&|()" for char in token):
+            has_shell_operators = True
+            commands.append([])
+        else:
+            commands[-1].append(token)
+
+    wrappers = {
+        "bash",
+        "busybox",
+        "dash",
+        "doas",
+        "eval",
+        "fish",
+        "ksh",
+        "nice",
+        "sh",
+        "stdbuf",
+        "sudo",
+        "timeout",
+        "xargs",
+        "zsh",
+    }
+    find_commands: list[tuple[list[str], int, bool]] = []
+    for words in commands:
+        index = 0
+        first_name = Path(words[0]).name.lower() if words else ""
+        if first_name in wrappers and re.search(
+            r"\b(?:find|gfind)\b", " ".join(words[1:])
+        ):
+            return True
+        for prefix_index, word in enumerate(words):
+            prefix_name = Path(word).name.lower()
+            if prefix_name not in {"env", "command", "exec", "time", "nohup"}:
+                continue
+            if prefix_name == "env":
+                env_arguments = words[prefix_index + 1 :]
+                split_string_index = next(
+                    (
+                        position
+                        for position, argument in enumerate(env_arguments)
+                        if argument in {"-S", "--split-string"}
+                        or argument.startswith("--split-string=")
+                        or (argument.startswith("-S") and argument != "-S")
+                    ),
+                    None,
+                )
+                if split_string_index is not None:
+                    split_string_option = env_arguments[split_string_index]
+                    if split_string_option in {"-S", "--split-string"}:
+                        split_string = (
+                            env_arguments[split_string_index + 1]
+                            if split_string_index + 1 < len(env_arguments)
+                            else ""
+                        )
+                    elif split_string_option.startswith("--split-string="):
+                        split_string = split_string_option.split("=", 1)[1]
+                    else:
+                        split_string = split_string_option[2:]
+                    if split_string and _terminal_find_escapes_workspace(
+                        split_string, cwd, workspace, _depth + 1
+                    ):
+                        return True
+            find_match = next(
+                (
+                    position
+                    for position in range(prefix_index + 1, len(words))
+                    if Path(words[position]).name.lower() in find_names
+                ),
+                None,
+            )
+            if find_match is not None and any(
+                argument.startswith("-")
+                for argument in words[prefix_index + 1 : find_match]
+            ):
+                return True
+
+        has_inline_assignment = False
+        while index < len(words):
+            word = words[index]
+            if word in {"if", "then", "else", "elif", "do", "!"}:
+                index += 1
+            elif word in {"env", "command", "exec", "time", "nohup"}:
+                index += 1
+            elif Path(word).name.lower() in wrappers:
+                if re.search(r"\b(?:find|gfind)\b", " ".join(words[index + 1 :])):
+                    return True
+                break
+            elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word):
+                has_inline_assignment = True
+                index += 1
+            else:
+                break
+
+        if index >= len(words) or Path(words[index]).name.lower() not in find_names:
+            continue
+        find_commands.append((words, index, has_inline_assignment))
+
+    if not find_commands:
+        # A literal find can be executable code passed to an interpreter or
+        # wrapper. Allow only standalone text output when no find command was
+        # parsed; fail closed for commands whose behavior cannot be inspected.
+        standalone_text_output = (
+            not has_shell_operators
+            and len(commands) == 1
+            and bool(commands[0])
+            and Path(commands[0][0]).name.lower() in {"echo", "printf"}
+        )
+        return not standalone_text_output
+    if has_shell_operators or len(find_commands) != 1:
+        return True
+
+    words, index, has_inline_assignment = find_commands[0]
+    command_arguments = words[index + 1 :]
+    if any(
+        argument in {"-f", "-files0-from"} or argument.startswith("--files0-from=")
+        for argument in command_arguments
+    ):
+        return True
+    exec_marker = re.search(r"\b-exec(?:dir)?\b", command)
+    if exec_marker and re.search(
+        r"\b(?:find|gfind)\b", command[exec_marker.end() :]
+    ):
+        return True
+    if any(argument in {"-L", "-follow"} for argument in command_arguments):
+        return True
+
+    if not canonical_cwd.is_relative_to(root):
+        return True
+
+    roots: list[str] = []
+    end_options = False
+    expression_options = {
+        "-amin",
+        "-atime",
+        "-cmin",
+        "-ctime",
+        "-depth",
+        "-empty",
+        "-executable",
+        "-false",
+        "-fstype",
+        "-gid",
+        "-group",
+        "-ilname",
+        "-iname",
+        "-inum",
+        "-ipath",
+        "-iregex",
+        "-links",
+        "-lname",
+        "-maxdepth",
+        "-mindepth",
+        "-mmin",
+        "-mtime",
+        "-name",
+        "-newer",
+        "-nogroup",
+        "-nouser",
+        "-path",
+        "-perm",
+        "-print",
+        "-print0",
+        "-printf",
+        "-prune",
+        "-quit",
+        "-readable",
+        "-regex",
+        "-samefile",
+        "-size",
+        "-true",
+        "-type",
+        "-uid",
+        "-user",
+        "-used",
+        "-wholename",
+        "-writable",
+        "-xdev",
+    }
+    pending = command_arguments
+    position = 0
+    while position < len(pending):
+        word = pending[position]
+        if word == "--" and not roots:
+            end_options = True
+            position += 1
+            continue
+        if not roots and not end_options and word in {"-H", "-P", "-E", "-X", "-d", "-s"}:
+            position += 1
+            continue
+        if not roots and not end_options and word == "-D":
+            if position + 1 >= len(pending):
+                return True
+            position += 2
+            continue
+        if not roots and not end_options and re.fullmatch(r"-O\d*", word):
+            # GNU find's optimizer option does not consume a root path.
+            if word == "-O" and position + 1 < len(pending) and pending[position + 1].isdigit():
+                position += 2
+            else:
+                position += 1
+            continue
+        if not roots and not end_options and word.startswith("-"):
+            if word in expression_options:
+                break
+            return True
+        if not end_options and word.startswith("-"):
+            break
+        if re.search(r"\{[^{}]*(?:,|\.\.)[^{}]*\}", word):
+            return True
+        roots.append(word)
+        position += 1
+    if not roots:
+        roots = ["."]
+    if has_inline_assignment and any("$" in search_root for search_root in roots):
+        return True
+
+    for search_root in roots:
+        expanded_root = os.path.expandvars(search_root)
+        if "$" in expanded_root:
+            return True
+        try:
+            candidate = Path(expanded_root).expanduser()
+            if not candidate.is_absolute():
+                candidate = canonical_cwd / candidate
+            resolved = candidate.resolve(strict=False)
+        except (OSError, RuntimeError):
+            return True
+        if not resolved.is_relative_to(root):
+            return True
+
+    return False
+
+
 KOLLAB_SPAWN_BLOCK_MESSAGE = (
     "Kollab agent launches, stop-all, and background Kollab commands are "
     "blocked in agent terminals because tools.block_kollab_terminal_spawn is "
@@ -1823,11 +2083,20 @@ class ToolExecutor:
                 error=KOLLAB_SPAWN_BLOCK_MESSAGE,
             )
 
+        cwd = self._resolve_terminal_cwd(tool_data.get("cwd"))
+        if _terminal_find_escapes_workspace(
+            command, cwd or Path.cwd(), self.workspace or Path.cwd()
+        ):
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type=tool_type,
+                success=False,
+                error="find search paths must stay inside the active workspace",
+            )
+
         logger.debug(
             f"Executing terminal command: {command[:100]}... (background={background})"
         )
-
-        cwd = self._resolve_terminal_cwd(tool_data.get("cwd"))
 
         # Use TmuxPlugin if available, otherwise fallback to ShellExecutor
         if self.tmux_plugin:
