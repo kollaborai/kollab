@@ -63,6 +63,7 @@ type EventLike = {
   success?: unknown;
   output?: unknown;
   error?: unknown;
+  message?: unknown;
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -114,7 +115,16 @@ export function applyLiveEvent(current: LiveTurn, event: EventLike): LiveTurn {
     if (newer) return current;
     // Not an ACP turn (no request id): the reload this event triggers brings
     // its reply at once.
-    if (!current.requestId) return emptyLiveTurn();
+    if (!current.requestId) {
+      const hasHistoryNotice = current.parts.some(
+        (part) => part.type === "text" && part.text.includes("ℹ Conversation history not saved for this "),
+      );
+      if (!hasHistoryNotice) return emptyLiveTurn();
+      return {
+        ...current,
+        settled: type === "error" ? "error" : type === "turn_cancelled" ? "cancelled" : "complete",
+      };
+    }
     // An ACP turn gets one terminal event of its own after the engine's
     // turn_cancelled, which fires the moment a stop is asked, before the daemon
     // stored the reply. Keep the text until the history brings it.
@@ -122,10 +132,26 @@ export function applyLiveEvent(current: LiveTurn, event: EventLike): LiveTurn {
     return { ...current, settled: type === "turn_cancelled" ? "cancelled" : type === "error" ? "error" : "complete" };
   }
   // A settled turn shows nothing more; a newer request starts its own.
-  if (current.settled && !newer) return current;
-  const turn: LiveTurn = newer ? { parts: [], requestId } : current;
+  const settledNotice = current.settled === "complete" && current.parts.some(
+    (part) => part.type === "text" && part.text.includes("ℹ Conversation history not saved for this "),
+  );
+  if (current.settled && !newer && !settledNotice) return current;
+  const turn: LiveTurn = newer || settledNotice ? { parts: [], requestId } : current;
   const id = turn.requestId || requestId;
   const grown = (parts: LivePart[]): LiveTurn => (id ? { parts, requestId: id } : { parts });
+  if (type === "notice") {
+    const message = typeof event.message === "string" ? event.message : "";
+    if (!message || !/^Conversation history not saved for this (message|reply)\.$/.test(message)) return current;
+    const parts = [...turn.parts];
+    const last = parts.at(-1);
+    const notice = `ℹ ${message}`;
+    if (last?.type === "text") {
+      parts[parts.length - 1] = { type: "text", text: `${last.text}\n\n${notice}` };
+    } else {
+      parts.push({ type: "text", text: `${notice}\n\n` });
+    }
+    return grown(parts);
+  }
   if (type === "token") {
     const delta = typeof event.text === "string" ? event.text : "";
     if (!delta) return current;
@@ -229,8 +255,29 @@ export function historyReplacesLiveTurn(turn: LiveTurn, tail: ReadonlyArray<Hist
  * The live turn after history replaced it: its late events stay ignored, and
  * the queued turn it held back starts from its first event.
  */
-export const replacedLiveTurn = (turn: LiveTurn): LiveTurn =>
-  (turn.held ?? []).reduce(applyLiveEvent, { parts: [], requestId: turn.requestId, settled: "replaced" });
+export const replacedLiveTurn = (turn: LiveTurn): LiveTurn => {
+  const notices = turn.parts.flatMap((part) =>
+    part.type === "text"
+      ? part.text
+          .split("\n\n")
+          .filter((line) => /^ℹ Conversation history not saved for this (message|reply)\.$/.test(line))
+          .map((text) => ({ type: "text" as const, text }))
+      : [],
+  );
+  if (turn.held?.length) {
+    const queued = turn.held.reduce(applyLiveEvent, {
+      parts: [],
+      requestId: turn.requestId,
+      settled: "replaced",
+    });
+    return notices.length ? { ...queued, parts: [...notices, ...queued.parts] } : queued;
+  }
+  return {
+    parts: notices,
+    requestId: turn.requestId,
+    settled: notices.length ? "complete" : "replaced",
+  };
+};
 
 /**
  * The ephemeral assistant message, or null while nothing has streamed.
@@ -250,11 +297,15 @@ export function liveMessage(turn: LiveTurn): ThreadMessageLike | null {
     (part) => (part.type === "text" && part.text) || part.type === "tool-call",
   );
   if (!parts.length) return null;
+  const standaloneNotice = !turn.requestId && parts.every(
+    (part) => part.type === "text" &&
+      /^ℹ Conversation history not saved for this (message|reply)\.$/.test(part.text.trim()),
+  );
   return {
     id: turn.requestId ? `${LIVE_MESSAGE_ID}:${turn.requestId}` : LIVE_MESSAGE_ID,
     role: "assistant",
     content: parts,
-    status: SETTLED_STATUS[turn.settled ?? ""] ?? { type: "running" },
+    status: SETTLED_STATUS[turn.settled ?? ""] ?? (standaloneNotice ? SETTLED_STATUS.complete : { type: "running" }),
     metadata: { isOptimistic: true },
   };
 }
