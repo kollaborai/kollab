@@ -3423,7 +3423,7 @@ class ToolExecutor:
                 return text
 
         # Remove non-content elements entirely
-        for tag in soup.find_all(["script", "style", "pre", "code", "nav", "footer",
+        for tag in soup.find_all(["script", "style", "nav", "footer",
                                    "aside", "header", "noscript", "svg", "form",
                                    "button", "iframe"]):
             tag.decompose()
@@ -3443,6 +3443,8 @@ class ToolExecutor:
                 return text
 
         # Priority 4: Fallback — extract all remaining text
+        for tag in soup.find_all(["pre", "code"]):
+            tag.decompose()
         return ToolExecutor._soup_to_text(soup)
 
     @staticmethod
