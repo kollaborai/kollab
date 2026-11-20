@@ -26,6 +26,11 @@ provider (a fresh install runs the built-in `default` profile, whose provider is
 **Get Started** moves on to the network and agent cards, and a card whose goal is
 already done (a live network, a running agent) is skipped.
 
+While the guide is still loading provider facts, **Open provider setup** remains
+available as a direct recovery action. It stays available if `/profiles` fails
+or never responds; **Get Started** does not open Setup until the provider lookup
+finishes.
+
 ## What it does
 
 1. **Provider** — pick from Anthropic, OpenAI (API key), OpenAI (ChatGPT

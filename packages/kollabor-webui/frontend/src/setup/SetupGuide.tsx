@@ -242,20 +242,30 @@ export function SetupGuide({
           })}
           </ol>
         </div>
-        <footer className="flex shrink-0 items-center justify-between gap-2 px-6 pt-3">
+        <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-6 pt-3">
           {target ? (
             <Button type="button" variant="ghost" onClick={dismiss}>
               Skip
             </Button>
           ) : null}
-          <Button
-            type="button"
-            data-testid="setup-guide-next"
-            className="ml-auto"
-            onClick={target ? runTarget : step === "done" ? () => onOpenChange(false) : getStarted}
-          >
-            {target ? "Open" : step === "done" ? "Finish" : "Get Started"}
-          </Button>
+          <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+            {!factsLoaded ? (
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => onOpenSettings("setup")}
+              >
+                Open provider setup
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              data-testid="setup-guide-next"
+              onClick={target ? runTarget : step === "done" ? () => onOpenChange(false) : getStarted}
+            >
+              {target ? "Open" : step === "done" ? "Finish" : "Get Started"}
+            </Button>
+          </div>
         </footer>
       </DialogContent>
     </Dialog>
