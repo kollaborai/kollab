@@ -92,6 +92,32 @@ describe("Code and Git panels against a daemon_outdated engine", () => {
     expect(text).not.toContain("Retry");
   });
 
+  it("retries the folder list after the agent reaches the engine version", async () => {
+    const previous = await mount(
+      <CodeEditorView
+        sessionId="s1"
+        workspace="/w"
+        mode="code"
+        agentIsCurrent={false}
+        daemonNotice={daemonNotice}
+      />,
+    );
+    expect(previous).toContain(stopAndStart);
+
+    engine.folders = "ok";
+    const current = await mount(
+      <CodeEditorView
+        sessionId="s1"
+        workspace="/w"
+        mode="code"
+        agentIsCurrent
+        daemonNotice={{ ...daemonNotice, notice: null }}
+      />,
+    );
+    expect(engine.calls.filter((url) => url.startsWith("/code/folders"))).toHaveLength(2);
+    expect(current).not.toContain(stopAndStart);
+  });
+
   it("keeps the generic message for a folder-list failure that is not daemon_outdated", async () => {
     engine.folders = "broken";
     const text = await mount(<CodeEditorView sessionId="s1" workspace="/w" mode="code" daemonNotice={daemonNotice} />);
