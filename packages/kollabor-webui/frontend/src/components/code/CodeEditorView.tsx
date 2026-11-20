@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { openWorkspaceFile, readFileContent, rememberFileRead, fileNameOf, extensionOf } from "@/components/code/open-file";
 import { FolderBrowser } from "@/components/code/folder-browser";
 import { claimEditorWorkspace, invalidateEditorSession, setEditorOwner, setEditorSession } from "@/components/code/workspace-tabs";
-import { codeFetch, DAEMON_OUTDATED_EVENT, isCurrentCodeSessionGeneration, setCodeRoot, setCodeSession, unwrapCodeData } from "@/lib/code-fetch";
+import { codeFetch, CODE_REQUEST_SUCCEEDED_EVENT, DAEMON_OUTDATED_EVENT, getCodeSessionGeneration, isCurrentCodeSessionGeneration, setCodeRoot, setCodeSession, unwrapCodeData } from "@/lib/code-fetch";
 import { cn } from "@/lib/utils";
 import { GitPanel } from "@/components/code/git/GitPanel";
 import { DaemonNotice, type DaemonNoticeProps } from "@/components/code/DaemonNotice";
@@ -89,11 +89,24 @@ export function CodeEditorView(props: CodeEditorViewProps) {
         setOutdated(true);
       }
     };
+    const onCodeRequestSucceeded = (event: Event) => {
+      const detail: unknown = (event as CustomEvent<unknown>).detail;
+      if (!detail || typeof detail !== "object") return;
+      const eventDetail = detail as { sessionId?: unknown; generation?: unknown };
+      if (eventDetail.sessionId === props.sessionId && isCurrentCodeSessionGeneration(props.sessionId, eventDetail.generation)) {
+        setOutdated(false);
+      }
+    };
     window.addEventListener(DAEMON_OUTDATED_EVENT, onDaemonOutdated);
-    return () => window.removeEventListener(DAEMON_OUTDATED_EVENT, onDaemonOutdated);
+    window.addEventListener(CODE_REQUEST_SUCCEEDED_EVENT, onCodeRequestSucceeded);
+    return () => {
+      window.removeEventListener(DAEMON_OUTDATED_EVENT, onDaemonOutdated);
+      window.removeEventListener(CODE_REQUEST_SUCCEEDED_EVENT, onCodeRequestSucceeded);
+    };
   }, [props.sessionId]);
   useEffect(() => {
     let cancelled = false;
+    const requestGeneration = getCodeSessionGeneration(props.sessionId);
     setFolders(null);
     setLoadedContext("");
     setBrowsing(false);
@@ -104,7 +117,7 @@ export function CodeEditorView(props: CodeEditorViewProps) {
         // An agent started before 0.22.0 answers 502 daemon_outdated: show the restart notice, not the generic dead end.
         const raw: unknown = await response.json().catch(() => null);
         if (isDaemonOutdated(raw)) {
-          if (!cancelled) setOutdated(true);
+          if (!cancelled && isCurrentCodeSessionGeneration(props.sessionId, requestGeneration)) setOutdated(true);
           return;
         }
         throw new Error("Could not load folders from this agent.");

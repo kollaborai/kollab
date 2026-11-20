@@ -18,6 +18,7 @@ const api = new EngineApi();
 /** Shown in place of the error when a session's daemon predates Code, Git and Terminal. No version or code in it. */
 export const OUTDATED_NOTICE = "This agent runs older code. Restart it to use Code, Git and Terminal.";
 export const DAEMON_OUTDATED_EVENT = "kollab:daemon-outdated";
+export const CODE_REQUEST_SUCCEEDED_EVENT = "kollab:code-request-succeeded";
 
 // The session the open Code Editor view belongs to. One view is shown at a time and it sets this while it renders,
 // before any of its children fetch, so the many call sites keep mentiko's single-argument codeFetch.
@@ -34,6 +35,10 @@ export function setCodeSession(sessionId: string, advanceGeneration = false): nu
 
 export function isCurrentCodeSessionGeneration(sessionId: string, generation: unknown): boolean {
   return sessionId === activeCodeSession && generation === activeCodeGeneration;
+}
+
+export function getCodeSessionGeneration(sessionId: string): number | null {
+  return sessionId === activeCodeSession ? activeCodeGeneration : null;
 }
 
 export function codeBase(sessionId: string = activeCodeSession): string {
@@ -68,6 +73,11 @@ function announceDaemonOutdated(sessionId: string, generation: number | null): v
   window.dispatchEvent(new CustomEvent(DAEMON_OUTDATED_EVENT, { detail: { sessionId, generation } }));
 }
 
+function announceCodeRequestSucceeded(sessionId: string, generation: number): void {
+  if (!sessionId || typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(CODE_REQUEST_SUCCEEDED_EVENT, { detail: { sessionId, generation } }));
+}
+
 export async function codeFetch(url: string, init: RequestInit = {}, context?: { sessionId: string; root: string }): Promise<Response> {
   // Capture the target before awaiting: the editor can switch sessions while a request is in flight.
   const sessionId = context?.sessionId ?? activeCodeSession;
@@ -77,6 +87,7 @@ export async function codeFetch(url: string, init: RequestInit = {}, context?: {
     // A successful active-session request proves this daemon handles code calls; fence older in-flight errors.
     if (response.ok && sessionId === activeCodeSession && generation === activeCodeGeneration) {
       activeCodeGeneration += 1;
+      announceCodeRequestSucceeded(sessionId, activeCodeGeneration);
     }
     return response;
   } catch (error) {
