@@ -804,6 +804,53 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.success)
         self.assertIn("configured", result.error.lower())
 
+    async def test_background_shell_fallback_caps_timeout_without_tmux(self):
+        self.executor.terminal_timeout = 120
+        self.executor.shell_executor.run = AsyncMock(
+            return_value=ShellResult(success=True, stdout="", stderr="", exit_code=0)
+        )
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "background-timeout-fallback",
+                "command": "sleep 1",
+                "background": True,
+                "timeout": "1000h",
+            }
+        )
+
+        self.assertTrue(result.success)
+        self.executor.shell_executor.run.assert_awaited_once_with(
+            "sleep 1", timeout=120, cwd=None
+        )
+
+    async def test_background_shell_fallback_caps_timeout_after_tmux_error(self):
+        self.executor.terminal_timeout = 120
+        self.executor.tmux_plugin = MagicMock()
+        self.executor.tmux_plugin.execute_background = AsyncMock(
+            side_effect=RuntimeError("tmux unavailable")
+        )
+        self.executor.shell_executor.run = AsyncMock(
+            return_value=ShellResult(success=True, stdout="", stderr="", exit_code=0)
+        )
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "background-timeout-tmux-fallback",
+                "command": "sleep 1",
+                "background": True,
+                "timeout": "1000h",
+            }
+        )
+
+        self.assertTrue(result.success)
+        self.executor.tmux_plugin.execute_background.assert_awaited_once()
+        self.executor.shell_executor.run.assert_awaited_once_with(
+            "sleep 1", timeout=120, cwd=None
+        )
+
     async def test_concurrent_terminal_timeouts_do_not_interrupt_sibling(self):
         short = {
             "type": "terminal",
