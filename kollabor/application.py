@@ -1721,7 +1721,7 @@ class TerminalLLMChat:
                 if not should_stay and not self.pipe_mode:
                     cmd_name = cli_command.get("name", "")
                     cmd_def = cli_command.get("command_def")
-                    stay_commands = {"permissions", "resume", "branch", "fork"}
+                    stay_commands = {"permissions", "resume", "branch", "sessions"}
                     if cmd_name in stay_commands:
                         should_stay = True
                         logger.info(f"{cmd_name} command defaults to interactive mode")
