@@ -1,6 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { SetupGuide } from "../src/setup/SetupGuide";
+import { DEFAULT_SLASH_COMMANDS } from "../src/api";
+import { WELCOME_GUIDE_DISMISSED_NOTICE } from "../src/setup/guide-model";
 import type { EngineApi } from "@/api";
 import type { PanelWizard } from "@/api";
 import { WizardSteps } from "../src/components/panels/WizardSteps";
@@ -141,5 +143,22 @@ describe("ChatGPT setup sign-in step", () => {
     expect(markup).toContain("Cancel");
     expect(markup).not.toContain("API Key");
     expect(markup).not.toContain("Server Address");
+  });
+});
+
+describe("welcome guide recovery entry", () => {
+  it("gives the person the exact command to reopen a dismissed guide", () => {
+    expect(WELCOME_GUIDE_DISMISSED_NOTICE).toBe(
+      "Welcome guide closed. Type /welcome in a chat to open it again.",
+    );
+  });
+
+  it("lists /welcome with its exact slash palette description", () => {
+    expect(DEFAULT_SLASH_COMMANDS).toContainEqual(
+      expect.objectContaining({
+        name: "welcome",
+        description: "Show the welcome guide again",
+      }),
+    );
   });
 });

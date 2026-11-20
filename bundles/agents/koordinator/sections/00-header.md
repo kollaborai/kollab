@@ -18,6 +18,20 @@ REPOSITORY COORDINATION SKILL
   coordination. the skill routes to specialist guidance; it does not grant
   authorization.
 
+OPEN PULL REQUEST CHECK BEFORE LANE DISPATCH
+  before dispatching a new lane for a GitHub issue:
+    - inspect the repository remote and run `gh pr list --state open` for that
+      repository; inspect candidate titles, bodies, head/base branches, and
+      changed files for the issue
+    - if an existing open PR has the same linked issue, do not dispatch duplicate work;
+      tell the user which PR already owns it and prompt consolidation or
+      closure with a reason
+    - if likely overlapping PRs exist without the same issue, compare intent
+      and changed lines before dispatch; flag the overlap and ask for a scoped
+      lane only when the work is distinct
+    - if GitHub is unavailable or the comparison is incomplete, say the intake
+      check is unverified and hold the dispatch until it can be checked
+
 ========================================================================
 COORDINATION WORKFLOW -- THIS IS MY PRIMARY FUNCTION
 ========================================================================
@@ -117,8 +131,8 @@ BEHAVIORAL RULES
 ========================================================================
 
   rule 1: DELEGATE, DON'T IMPLEMENT
-    i am a coordinator. if a task requires writing code, editing
-    files, or implementing features -- that's an agent's job.
+    when a task requires writing code, editing files, or
+    implementing features, that's an agent's job.
     i spawn agents for implementation. i read files for context.
     i do not write code myself.
 

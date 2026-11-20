@@ -22,6 +22,7 @@ import hashlib
 import logging
 import os
 import shutil
+import stat
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -268,6 +269,54 @@ class FileOperationsExecutor:
         except (ValueError, OSError):
             return False
 
+    def is_read_denied_path(self, filepath: str) -> bool:
+        """Deny agent file tools access to plugin code and data.
+
+        This is not a shell sandbox. Resolve symlinks before checking so aliases
+        cannot be used to read the protected paths.
+        """
+        try:
+            path = Path(filepath).expanduser()
+            if not path.is_absolute():
+                path = self.project_root / path
+            lexical = Path(os.path.abspath(path))
+            resolved = lexical.resolve()
+
+            def same_or_case_aliased_prefix(candidate: Path, protected: Path) -> bool:
+                if candidate.is_relative_to(protected):
+                    return True
+                parts = candidate.parts
+                if len(parts) < len(protected.parts):
+                    return False
+                prefix = Path(*parts[:len(protected.parts)])
+                try:
+                    return prefix.exists() and protected.exists() and os.path.samefile(prefix, protected)
+                except OSError:
+                    return False
+
+            home_root = Path.home() / ".kollab"
+            roots = {Path(os.path.abspath(home_root)), home_root.resolve()}
+            override = os.environ.get("KOLLAB_CONFIG_DIR", "").strip()
+            token_roots = roots | ({Path(override).expanduser().resolve()} if override else set())
+            token_paths = {root / "engine.token" for root in token_roots}
+            token_paths |= {token.resolve() for token in token_paths}
+            if any(
+                same_or_case_aliased_prefix(candidate, token)
+                for candidate in (lexical, resolved)
+                for token in token_paths
+            ):
+                return True
+            for candidate in (lexical, resolved):
+                for root in roots:
+                    if same_or_case_aliased_prefix(candidate, root / "plugins"):
+                        return True
+                    data = root / "plugin-data"
+                    if same_or_case_aliased_prefix(candidate, data):
+                        return True
+            return False
+        except (OSError, RuntimeError, ValueError):
+            return True
+
     def is_protected_path(self, filepath: str) -> bool:
         """Check if file path is protected from deletion/modification.
 
@@ -324,20 +373,44 @@ class FileOperationsExecutor:
         return candidates
 
     def is_text_file(self, filepath: str) -> bool:
-        """Check if file is text (not binary).
+        """Return whether a regular file passes the UTF-8 content probe.
 
-        Args:
-            filepath: File path to check
+        Tool handlers use _validate_text_file directly to retain the reason
+        when this boolean check would discard it.
+        """
+        is_valid, _ = self._validate_text_file(filepath, "read")
+        return is_valid
 
-        Returns:
-            True if file is text
+    def _validate_text_file(
+        self, filepath: str, action: str, max_size_mb: Optional[float] = None
+    ) -> Tuple[bool, str]:
+        """Validate a text-operation input without collapsing errors into binary.
+
+        Only regular files reach the content probe. File kind takes precedence
+        over size, and only a decoding failure is classified as binary.
+        Path access validation must already have succeeded in tool handlers.
         """
         try:
+            mode = os.stat(filepath).st_mode
+            if stat.S_ISDIR(mode):
+                return False, f"Cannot {action} directory: {filepath}"
+            if not stat.S_ISREG(mode):
+                return False, f"Cannot {action} non-regular file: {filepath}"
+
+            if max_size_mb is not None:
+                is_valid, error = self.check_file_size(filepath, max_size_mb)
+                if not is_valid:
+                    return False, error
+
             with open(filepath, "r", encoding="utf-8") as f:
                 f.read(1024)  # Try reading first 1KB as text
-            return True
-        except (UnicodeDecodeError, FileNotFoundError):
-            return False
+            return True, ""
+        except UnicodeDecodeError:
+            return False, f"Cannot {action} binary file: {filepath}"
+        except FileNotFoundError:
+            return False, f"File not found: {filepath}"
+        except OSError as e:
+            return False, f"Cannot {action} file: {filepath}: {e}"
 
     def check_file_size(self, filepath: str, max_size_mb: float) -> Tuple[bool, str]:
         """Check if file size is within limits.
@@ -611,6 +684,14 @@ class FileOperationsExecutor:
 
             return {"success": False, "error": "\n".join(error_lines)}
 
+        # Several file operations read contents indirectly (copy, edit and ACP
+        # snapshots as well as read/grep). Check both paths before any snapshot.
+        if op_type.startswith("file_"):
+            for key in ("file", "from", "to"):
+                candidate = operation.get(key)
+                if isinstance(candidate, str) and self.is_read_denied_path(candidate):
+                    return {"success": False, "error": "Access to protected file denied"}
+
         # Single chokepoint for every write: refuse hand-rolled backup files.
         # Backups are automatic, live outside the project, and are dropped on
         # success. A `.bak` written into the tree gets committed, breaks test
@@ -727,17 +808,11 @@ class FileOperationsExecutor:
         if not is_valid:
             return {"success": False, "error": error}
 
-        if not os.path.exists(filepath):
-            return {"success": False, "error": f"File not found: {filepath}"}
-
-        # Check file size
-        is_valid, error = self.check_file_size(filepath, self.max_edit_size_mb)
+        is_valid, error = self._validate_text_file(
+            filepath, "edit", self.max_edit_size_mb
+        )
         if not is_valid:
             return {"success": False, "error": error}
-
-        # Check if text file
-        if not self.is_text_file(filepath):
-            return {"success": False, "error": f"Cannot edit binary file: {filepath}"}
 
         # Read file
         try:
@@ -1182,15 +1257,9 @@ class FileOperationsExecutor:
         if not is_valid:
             return {"success": False, "error": error}
 
-        if not os.path.exists(filepath):
-            return {"success": False, "error": f"File not found: {filepath}"}
-
-        # Check if text file
-        if not self.is_text_file(filepath):
-            return {
-                "success": False,
-                "error": f"Cannot append to binary file: {filepath}",
-            }
+        is_valid, error = self._validate_text_file(filepath, "append to")
+        if not is_valid:
+            return {"success": False, "error": error}
 
         # Create backup
         backup_path = self.create_backup(filepath)
@@ -1235,15 +1304,9 @@ class FileOperationsExecutor:
         if not is_valid:
             return {"success": False, "error": error}
 
-        if not os.path.exists(filepath):
-            return {"success": False, "error": f"File not found: {filepath}"}
-
-        # Check if text file
-        if not self.is_text_file(filepath):
-            return {
-                "success": False,
-                "error": f"Cannot insert into binary file: {filepath}",
-            }
+        is_valid, error = self._validate_text_file(filepath, "insert into")
+        if not is_valid:
+            return {"success": False, "error": error}
 
         # Read file
         try:
@@ -1313,15 +1376,9 @@ class FileOperationsExecutor:
         if not is_valid:
             return {"success": False, "error": error}
 
-        if not os.path.exists(filepath):
-            return {"success": False, "error": f"File not found: {filepath}"}
-
-        # Check if text file
-        if not self.is_text_file(filepath):
-            return {
-                "success": False,
-                "error": f"Cannot insert into binary file: {filepath}",
-            }
+        is_valid, error = self._validate_text_file(filepath, "insert into")
+        if not is_valid:
+            return {"success": False, "error": error}
 
         # Read file
         try:
@@ -1575,17 +1632,11 @@ class FileOperationsExecutor:
         if not is_valid:
             return {"success": False, "error": error}
 
-        if not os.path.exists(filepath):
-            return {"success": False, "error": f"File not found: {filepath}"}
-
-        # Check file size
-        is_valid, error = self.check_file_size(filepath, self.max_read_size_mb)
+        is_valid, error = self._validate_text_file(
+            filepath, "read", self.max_read_size_mb
+        )
         if not is_valid:
             return {"success": False, "error": error}
-
-        # Check if text file
-        if not self.is_text_file(filepath):
-            return {"success": False, "error": f"Cannot read binary file: {filepath}"}
 
         # Read file as bytes (needed for ContextService hash dedup)
         try:
@@ -1758,17 +1809,11 @@ class FileOperationsExecutor:
         if not is_valid:
             return {"success": False, "error": error}
 
-        if not os.path.exists(filepath):
-            return {"success": False, "error": f"File not found: {filepath}"}
-
-        # Check file size
-        is_valid, error = self.check_file_size(filepath, self.max_read_size_mb)
+        is_valid, error = self._validate_text_file(
+            filepath, "grep", self.max_read_size_mb
+        )
         if not is_valid:
             return {"success": False, "error": error}
-
-        # Check if text file
-        if not self.is_text_file(filepath):
-            return {"success": False, "error": f"Cannot grep binary file: {filepath}"}
 
         # Read file and search for pattern
         try:

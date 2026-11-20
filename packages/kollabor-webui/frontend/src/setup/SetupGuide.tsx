@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, X } from "lucide-react";
 import type { EngineApi } from "@/api";
 import { Button } from "@/components/ui/button";
@@ -17,6 +17,7 @@ import {
   nextStep,
   resolveStep,
   saveGuideState,
+  shouldPersistGuide,
   stepIndex,
   stepTarget,
   type GuideState,
@@ -28,6 +29,7 @@ export type SetupGuideProps = {
   api: EngineApi;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onDismiss?: () => void;
   /** Open the Settings dialog on a tab (setup adds a profile, network joins). */
   onOpenSettings: (tab: "setup" | "network") => void;
   /** Start a new session (the first-agent step). */
@@ -43,6 +45,7 @@ export function SetupGuide({
   api,
   open,
   onOpenChange,
+  onDismiss,
   onOpenSettings,
   onStartSession,
 }: SetupGuideProps) {
@@ -53,8 +56,15 @@ export function SetupGuide({
   const [facts, setFacts] = useState<SetupFacts>(emptyFacts);
 
   // Persist every transition; a reload resumes where the user left off.
+  // The persist decision itself is pure (guide-model shouldPersistGuide):
+  // the untouched first-run state must not reach storage, or App's first-run
+  // check is dead again (#1098).
+  const prevStateRef = useRef(state);
   useEffect(() => {
+    const prev = prevStateRef.current;
+    prevStateRef.current = state;
     if (typeof window === "undefined") return;
+    if (!shouldPersistGuide(prev, state)) return;
     window.localStorage.setItem(STORAGE_KEY, saveGuideState(state));
   }, [state]);
 
@@ -103,8 +113,9 @@ export function SetupGuide({
 
   const dismiss = useCallback(() => {
     setState((prev) => ({ ...prev, dismissed: true }));
+    onDismiss?.();
     onOpenChange(false);
-  }, [onOpenChange]);
+  }, [onDismiss, onOpenChange]);
 
   const runTarget = useCallback(() => {
     if (!target) return;
@@ -198,7 +209,7 @@ export function SetupGuide({
             type="button"
             data-testid="setup-guide-next"
             className="ml-auto"
-            onClick={target ? runTarget : step === "done" ? dismiss : advance}
+            onClick={target ? runTarget : step === "done" ? () => onOpenChange(false) : advance}
           >
             {target ? "Open" : step === "done" ? "Finish" : "Get Started"}
           </Button>

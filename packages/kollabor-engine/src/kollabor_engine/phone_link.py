@@ -1238,6 +1238,8 @@ class PhoneLink:
         key = (phone, identifier)
         exchange = self.exchanges.get(key)
         if operation == "start":
+            from .routes.plugins import remote_plugin_route_allowed
+
             if exchange or sum(k[0] == phone for k in self.exchanges) >= 16:
                 raise PhoneLinkError("Too many app requests. Try again shortly.")
             method, path, headers, size = (request.get(n) for n in ("method", "path", "headers", "size"))
@@ -1256,8 +1258,10 @@ class PhoneLink:
                 or "\x00" in decoded
                 or any(part in {".", ".."} for part in decoded.split("/"))
                 or parsed.fragment
-                or decoded.split("/")[1] not in API_ROOTS
+                # Plugin routes use an additional, narrower remote policy below.
+                or (decoded.split("/")[1] not in API_ROOTS and decoded.split("/")[1] != "plugins")
                 or not voice_route_allowed(method, decoded)
+                or not remote_plugin_route_allowed(method, decoded)
             ):
                 raise PhoneLinkError("This action is available only on the computer.")
             if type(size) is not int or not 0 <= size <= MAX_BODY or not isinstance(headers, list):
@@ -1418,6 +1422,7 @@ class PhoneLink:
         headers += [
             (b"authorization", ("Bearer " + (get_token() or read_token_from_disk())).encode()),
             (b"host", b"127.0.0.1"),
+            (b"x-kollab-plugin-remote", b"1"),
         ]
         scope = {
             "type": "http",

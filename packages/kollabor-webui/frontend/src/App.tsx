@@ -61,6 +61,11 @@ import type {
 } from "@/components/panels/panel-model";
 import { ProfilesDialog } from "@/components/shell/ProfilesDialog";
 import { SetupGuide } from "@/setup/SetupGuide";
+import {
+  STORAGE_KEY,
+  WELCOME_GUIDE_DISMISSED_NOTICE,
+  shouldAutoOpenGuide,
+} from "@/setup/guide-model";
 import { SessionPanel, type SessionView } from "@/components/shell/SessionPanel";
 import { latestTodoBlock } from "@/utils/todo-list";
 import { ShellHeader } from "@/components/shell/ShellHeader";
@@ -122,6 +127,13 @@ import { LearnDialog } from "@/components/learn/LearnDialog";
 import { WhatsNewPage } from "@/components/updates/WhatsNewPage";
 import { navigateToLearn } from "@/learn/catalog";
 import { navigateToWhatsNew, pagePath, readMainPageRoute } from "@/utils/page-route";
+import { loadCanonicalWhatsNew } from "@/learn/changelog";
+import { WhatsNewDialog } from "@/whats-new/WhatsNewDialog";
+import {
+  decideWhatsNew,
+  readWhatsNewSeenRaw,
+  type DialogRelease,
+} from "@/whats-new/whats-new-model";
 
 function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current: number | null }) {
   return new Promise<void>((resolve) => {
@@ -140,10 +152,12 @@ function waitForRetry(signal: AbortSignal, delayMs: number, timerRef: { current:
 
 const api = new EngineApi();
 
-/** True until this browser recorded a guided-setup dismissal. */
+/** True while this browser has no engaged guided-setup record: a first run,
+ * or a record stuck at an undismissed welcome (older builds wrote that on
+ * mount, so their owners never saw the auto-open either). */
 const noGuideYet = () => {
   try {
-    return window.localStorage.getItem("kollab.setup-guide.v1") === null;
+    return shouldAutoOpenGuide(window.localStorage.getItem(STORAGE_KEY));
   } catch {
     return false;
   }
@@ -184,6 +198,7 @@ function RuntimeShell({
   remoteAgents,
   onSessionUpdated,
   onOpenSettings,
+  onOpenWelcome,
   onHistoryCleared,
   onActivity,
   eventActivity,
@@ -207,6 +222,7 @@ function RuntimeShell({
   remoteAgents: NetworkAgent[];
   onSessionUpdated: (session: Session) => void;
   onOpenSettings: (request?: PanelOpenRequest) => void;
+  onOpenWelcome: () => void;
   /** Reloads this session's conversation after the engine cleared it. */
   onHistoryCleared: () => Promise<void>;
   /** Reports what this session's gem should act out in the sidebar. */
@@ -308,9 +324,16 @@ function RuntimeShell({
       .listCommands(session.session_id)
       .then((result) => {
         if (!mounted) return;
-        setCommands(
-          result.commands?.length ? result.commands : DEFAULT_SLASH_COMMANDS,
+        const source = result.commands?.length
+          ? result.commands
+          : DEFAULT_SLASH_COMMANDS;
+        const welcome = DEFAULT_SLASH_COMMANDS.find(
+          (command) => command.name === "welcome",
         );
+        setCommands([
+          ...source.filter((command) => command.name.toLowerCase() !== "welcome"),
+          ...(welcome ? [welcome] : []),
+        ]);
       })
       .catch(() => {
         // Keep the first-paint compatibility catalog when an older daemon does
@@ -365,6 +388,7 @@ function RuntimeShell({
                 agents={targets.agents}
                 commands={commands}
                 onOpenPanel={onOpenSettings}
+                onOpenWelcome={onOpenWelcome}
                 attachmentsEnabled={
                   session.supports_vision ?? profile?.supports_vision ?? true
                 }
@@ -483,6 +507,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [agentLibraryInitialTab, setAgentLibraryInitialTab] = useState<"rosters" | "teams">("rosters");
   const [setupGuideOpen, setSetupGuideOpen] = useState(false);
+  const [firstRun] = useState(noGuideYet);
+  const [whatsNewDialogOpen, setWhatsNewDialogOpen] = useState(false);
+  const [whatsNewRelease, setWhatsNewRelease] = useState<DialogRelease | null>(null);
+  const [welcomeGuideNotice, setWelcomeGuideNotice] = useState(false);
+  const openWelcomeGuide = useCallback(() => {
+    setWelcomeGuideNotice(false);
+    setSetupGuideOpen(true);
+  }, []);
   // Settings (PanelHost): one open state for the sidebar button, the toolbar
   // button and the composer's /config-style commands.
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1416,6 +1448,21 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         // First run: nothing to restore and no dismissal on record.
         setSetupGuideOpen(true);
       }
+      // What's New never competes with a first run's setup guide.
+      if (!firstRun) {
+        void (async () => {
+          const decision = decideWhatsNew({
+            result: await loadCanonicalWhatsNew(),
+            seenRaw: readWhatsNewSeenRaw(),
+            firstRun,
+          });
+          if (!mounted || operation !== operationRef.current) return;
+          if (decision.show && decision.release) {
+            setWhatsNewRelease(decision.release);
+            setWhatsNewDialogOpen(true);
+          }
+        })();
+      }
       setError(null);
     })()
       .catch((reason) => {
@@ -1429,7 +1476,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     return () => {
       mounted = false;
     };
-  }, [guardHistoryOpen, loadSessions, loadState, recoverPendingTurn, refreshAgentPool]);
+  }, [firstRun, guardHistoryOpen, loadSessions, loadState, recoverPendingTurn, refreshAgentPool]);
 
   // A default loadout belongs to the folder a session starts in: that folder's own project and local config can
   // set one. Ask again when the Workspace field changes, unless a model was picked by hand (#957).
@@ -1855,8 +1902,15 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           api={api}
           open={setupGuideOpen}
           onOpenChange={setSetupGuideOpen}
+          onDismiss={() => setWelcomeGuideNotice(true)}
           onOpenSettings={(tab) => openSettings({ tab })}
           onStartSession={() => void createSession()}
+        />
+        <WhatsNewDialog
+          open={whatsNewDialogOpen}
+          release={whatsNewRelease}
+          onOpenChange={setWhatsNewDialogOpen}
+          onSeeAllChanges={navigateToWhatsNew}
         />
         <PrChainDialog api={api} open={prChainOpen} onOpenChange={setPrChainOpen} />
         {activeSession ? (
@@ -1903,6 +1957,11 @@ export default function App({ contained = false }: { contained?: boolean } = {})
         >
           {whatsNewActive ? <WhatsNewPage onExit={returnToChat} /> : null}
           <div className={whatsNewActive ? "hidden" : "contents"}>
+          {welcomeGuideNotice ? (
+            <NoticeBar onDismiss={() => setWelcomeGuideNotice(false)}>
+              {WELCOME_GUIDE_DISMISSED_NOTICE}
+            </NoticeBar>
+          ) : null}
           {versionMismatch ? (
             <NoticeBar
               detail={`Page v${versionMismatch.page} · engine v${versionMismatch.engine}`}
@@ -1944,13 +2003,14 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                     Release notes
                   </a>
                   <NoticeAction disabled={updateBusy} onClick={() => void applyAvailableUpdate()}>
-                    {updateBusy ? "Updating…" : "Update now"}
+                    {updateBusy ? "Updating…" : "Update Now"}
                   </NoticeAction>
                 </>
               }
               onDismiss={() => setUpdateInfo(null)}
+              detail={`Kollab ${updateInfo.release.version} is available.`}
             >
-              Kollab {updateInfo.release.version} is available.
+              A Kollab update is available.
             </NoticeBar>
           ) : null}
           {contextCompactionStatus ? (
@@ -2001,6 +2061,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                   supervisorEvents={supervisorEvents}
                   onSessionUpdated={handleSessionUpdated}
                   onOpenSettings={openSettings}
+                  onOpenWelcome={openWelcomeGuide}
                   onHistoryCleared={() => resetThread(activeSession.session_id)}
                   onActivity={setActiveActivity}
                   eventActivity={eventActivity}
@@ -2072,7 +2133,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                     type="button"
                     variant="outline"
                     data-testid="guided-setup-open"
-                    onClick={() => setSetupGuideOpen(true)}
+                    onClick={openWelcomeGuide}
                     disabled={busy}
                   >
                     <Waypoints className="size-4" />

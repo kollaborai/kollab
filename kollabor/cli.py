@@ -5,6 +5,7 @@ import asyncio
 import difflib
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -49,14 +50,14 @@ STOP_TERM_SECONDS = 1.0
 STOP_KILL_SECONDS = 2.0  # final SIGKILL wait — a wedged event loop swallows SIGTERM
 
 
-def parse_timeout(timeout_str: str) -> int:
+def parse_timeout(timeout_str: str) -> float:
     """Parse timeout string into seconds.
 
     Args:
         timeout_str: Timeout string like "30s", "2min", "1h"
 
     Returns:
-        Timeout in seconds
+        Timeout in seconds, including fractional seconds
 
     Raises:
         ValueError: If timeout format is invalid
@@ -73,18 +74,26 @@ def parse_timeout(timeout_str: str) -> int:
             f"Invalid timeout format: {timeout_str}. Use format like '30s', '2min', or '1h'"
         )
 
-    value = float(match.group(1))
+    value_text = match.group(1)
+    value = float(value_text)
     unit = match.group(2)
 
     # Convert to seconds
     if unit in ("s", "sec", "second", "seconds"):
-        return int(value)
+        seconds = value
     elif unit in ("m", "min", "minute", "minutes"):
-        return int(value * 60)
+        seconds = value * 60
     elif unit in ("h", "hour", "hours"):
-        return int(value * 3600)
+        seconds = value * 3600
     else:
         raise ValueError(f"Unknown time unit: {unit}")
+
+    if not math.isfinite(seconds):
+        raise ValueError("Timeout value must be finite")
+
+    if seconds == 0 and any(char in "123456789" for char in value_text):
+        raise ValueError("Timeout value is too small to represent in seconds")
+    return seconds
 
 
 def build_cli_help_text(command_registry: "SlashCommandRegistry") -> str:
@@ -220,10 +229,7 @@ def discover_plugin_args() -> tuple:
     # Determine plugins directory (same logic as application.py)
     package_dir = Path(__file__).parent.parent
     plugins_dir = package_dir / "plugins"
-    if not plugins_dir.exists():
-        plugins_dir = Path.cwd() / "plugins"
-
-    plugin_registry = PluginRegistry(plugins_dir)
+    plugin_registry = PluginRegistry(plugins_dir, no_plugins="--no-plugins" in sys.argv[1:])
     plugin_classes = plugin_registry.discover_classes_only()
 
     return plugin_classes, plugin_registry.discovery
@@ -369,6 +375,8 @@ Telegram bridge setup (run inside interactive mode):
 {cli_help}
         """,
     )
+
+    parser.add_argument("--no-plugins", action="store_true", help="Start without plugin code")
 
     # Manual help argument (we handle it after plugins are initialized)
     parser.add_argument(
@@ -1352,7 +1360,10 @@ async def async_main() -> None:
         # Reuse the discovery object from CLI arg parsing
         from kollabor_plugins import PluginRegistry
 
-        plugin_registry = PluginRegistry(discovery.plugins_dir)
+        if getattr(args, "no_plugins", False):
+            plugin_registry = PluginRegistry(discovery.plugins_dir, no_plugins=True)
+        else:
+            plugin_registry = PluginRegistry(discovery.plugins_dir)
         plugin_registry.discovery = discovery  # Reuse discovery from CLI args
 
         # Resolve attach identity (set earlier if --attach was used)
@@ -3118,8 +3129,11 @@ async def _handle_cli_web_ui(restart: bool = False, hosts: Optional[str] = None)
         else {}
     )
     def start_engine():
+        command = [*py, "-m", "kollabor_engine", "serve", "--port", str(engine_port)]
+        if "--no-plugins" in sys.argv[1:]:
+            command.append("--no-plugins")
         return subprocess.Popen(
-            [*py, "-m", "kollabor_engine", "serve", "--port", str(engine_port)],
+            command,
             **group_flags,
         )
 
@@ -3444,13 +3458,41 @@ def _wait_for_detached_child_startup(read_fd: int, child_pid: int) -> str | None
     return wait_for_detached_startup(read_fd, child_pid)
 
 
+def _block_kollab_terminal_spawn_enabled() -> bool:
+    """Return whether tools.block_kollab_terminal_spawn is on in the user config.
+
+    Agent terminals may launch Kollab by default; any failure to read the
+    setting keeps that default.
+    """
+    try:
+        from kollabor_config import ConfigService
+        from kollabor_config.config_utils import get_config_directory
+
+        config = ConfigService(
+            get_config_directory() / "config.json", None, fast_mode=True
+        )
+        return config.get("tools.block_kollab_terminal_spawn", False) is True
+    except Exception:
+        return False
+
+
 def _is_tool_shell_agent_launch(argv: list[str]) -> bool:
-    """Return whether a marked tool child is trying to launch an agent."""
+    """Return whether a marked tool child is trying to launch an agent.
+
+    Only applies when the owner opted in with tools.block_kollab_terminal_spawn.
+    """
     if not any(
         marker in os.environ for marker in ("KOLLAB_TOOL_SHELL", "KOLLAB_AGENT_PID")
     ):
         return False
 
+    if _is_agent_launch_argv(argv) and _block_kollab_terminal_spawn_enabled():
+        return True
+    return False
+
+
+def _is_agent_launch_argv(argv: list[str]) -> bool:
+    """Return whether argv selects an agent launch (-a/--agent or -d/--detached)."""
     for argument in argv[1:]:
         if argument == "--":
             break
@@ -3467,10 +3509,22 @@ def _is_tool_shell_agent_launch(argv: list[str]) -> bool:
 
 def cli_main() -> None:
     """Synchronous entry point for pip-installed CLI command."""
+    if sys.argv[1:2] == ["plugin"]:
+        from kollabor_plugins.cli import main as plugin_main
+
+        try:
+            result = plugin_main(sys.argv[2:])
+        except (ValueError, OSError) as exc:
+            sys.stderr.write(f"plugin: {exc}\n")
+            raise SystemExit(1) from None
+        if result:
+            raise SystemExit(result)
+        return
     if _is_tool_shell_agent_launch(sys.argv):
         sys.stderr.write(
-            "error: nested --agent launches are blocked in tool/agent contexts; "
-            "use hub_spawn instead.\n"
+            "error: nested --agent launches are blocked in tool/agent contexts "
+            "because tools.block_kollab_terminal_spawn is on; use hub_spawn "
+            "instead or turn the setting off.\n"
         )
         raise SystemExit(2)
 

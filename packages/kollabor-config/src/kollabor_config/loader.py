@@ -5,7 +5,7 @@ import re
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as get_version
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from kollabor_ai.prompt_renderer import render_system_prompt
 from kollabor_events.dict_utils import deep_merge
@@ -25,7 +25,6 @@ from .config_utils import (
     get_system_prompt_path,
 )
 from .manager import ConfigManager
-from .plugin_config_manager import PluginConfigManager
 
 # Configuration version tracking
 CONFIG_VERSION = 2  # Current version
@@ -307,13 +306,6 @@ class ConfigLoader:
         self.config_manager = config_manager
         self.plugin_registry = plugin_registry
         self.fast_mode = fast_mode
-        self.plugin_config_manager = None
-
-        # Initialize plugin config manager if registry is available
-        if plugin_registry and hasattr(plugin_registry, "discovery"):
-            self.plugin_config_manager = PluginConfigManager(plugin_registry.discovery)
-            logger.debug("PluginConfigManager initialized")
-
         logger.debug("ConfigLoader initialized")
 
     def get_config_version(self, config: Dict[str, Any]) -> int:
@@ -503,6 +495,12 @@ class ConfigLoader:
                 "token_ttl_seconds": 900,
                 "validation_timeout_seconds": 600,
                 "audit_log": "",
+            },
+            # Agent terminal policy (#1147): Kollab commands run freely by
+            # default; this opt-in refuses agent launches and background
+            # Kollab commands from agent terminals.
+            "tools": {
+                "block_kollab_terminal_spawn": False,
             },
             "terminal": {
                 "render_fps": 20,
@@ -750,9 +748,6 @@ class ConfigLoader:
         if not self.plugin_registry:
             return {}
 
-        # Discover plugin schemas first
-        self.discover_plugin_schemas()
-
         def get_configs():
             return self.plugin_registry.get_merged_config()
 
@@ -764,60 +759,6 @@ class ConfigLoader:
         )
 
         return plugin_configs if isinstance(plugin_configs, dict) else {}
-
-    def discover_plugin_schemas(self) -> None:
-        """Discover and register plugin configuration schemas."""
-        if not self.plugin_config_manager:
-            return
-
-        def discover():
-            self.plugin_config_manager.discover_plugin_schemas()
-
-        safe_execute(
-            discover, "discovering plugin schemas", default=None, logger_instance=logger
-        )
-
-    def get_plugin_config_sections(self) -> List[Dict[str, Any]]:
-        """Get UI sections for plugin configuration.
-
-        Returns:
-            List of section definitions for the configuration UI.
-        """
-        if not self.plugin_config_manager:
-            return []
-
-        def get_sections():
-            return self.plugin_config_manager.get_plugin_config_sections()
-
-        sections: List[Any] = safe_execute(
-            get_sections,
-            "getting plugin config sections",
-            default=[],
-            logger_instance=logger,
-        )
-
-        return sections if isinstance(sections, list) else []
-
-    def get_plugin_widget_definitions(self) -> List[Dict[str, Any]]:
-        """Get widget definitions for all plugin configurations.
-
-        Returns:
-            List of widget definition dictionaries.
-        """
-        if not self.plugin_config_manager:
-            return []
-
-        def get_widgets():
-            return self.plugin_config_manager.get_widget_definitions()
-
-        widgets: List[Any] = safe_execute(
-            get_widgets,
-            "getting plugin widget definitions",
-            default=[],
-            logger_instance=logger,
-        )
-
-        return widgets if isinstance(widgets, list) else []
 
     def load_complete_config(self) -> Dict[str, Any]:
         """Load complete configuration including plugins.

@@ -706,6 +706,16 @@ def _is_blocked_kollab_spawn(
     return scan_tokens(tokens, background, _depth)
 
 
+KOLLAB_SPAWN_BLOCK_MESSAGE = (
+    "Kollab agent launches, stop-all, and background Kollab commands are "
+    "blocked in agent terminals because tools.block_kollab_terminal_spawn is "
+    "on. Run informational commands such as `kollab --version` or "
+    "`kollab --hub status` in the foreground instead. Use <hub_spawn> to start "
+    "peers and /hub stop all to stop agents owned by this caller. Turn the "
+    "setting off to allow these commands."
+)
+
+
 class ToolExecutor:
     """Execute tools with unified interface for terminal, MCP, and file operations.
 
@@ -929,14 +939,10 @@ class ToolExecutor:
         """Clear bundle scope, allowing all tools."""
         self._bundle_tools = None
 
-    # Internal dispatch types that bypass scope checks.
-    # These are infrastructure types, not agent-facing tools.  ``mcp_tool``
-    # is deliberately absent: external MCP calls are agent-facing and must
-    # be denied when a bounded bundle does not grant them.
+    # Internal dispatch types that bypass scope checks. ``mcp_tool`` is
+    # deliberately absent: external MCP calls are agent-facing and must be
+    # denied when a bounded bundle does not grant them.
     _INTERNAL_TYPES = frozenset({
-        "terminal_status",
-        "terminal_output",
-        "terminal_kill",
         "malformed_file_op",
         "malformed_tool",
         "unknown",
@@ -955,6 +961,9 @@ class ToolExecutor:
         Returns:
             Registry-compatible name, or None if it's an internal type.
         """
+        if tool_type in {"terminal_status", "terminal_output", "terminal_kill"}:
+            return "terminal"
+
         # Internal dispatch types — not agent-facing tools
         if tool_type in self._INTERNAL_TYPES:
             return None
@@ -1718,19 +1727,18 @@ class ToolExecutor:
                 error="Empty command",
             )
 
-        # Block agents from spawning kollab processes via terminal.
-        # Agents MUST use hub_spawn to spawn peers -- direct spawning
-        # bypasses the hub mesh and creates invisible rogue processes.
-        if _is_blocked_kollab_spawn(command, background=bool(background)):
+        # Kollab commands run freely from agent terminals by default (#1147).
+        # When the owner opts in with tools.block_kollab_terminal_spawn, agent
+        # launches, stop-all, and background Kollab commands are refused so
+        # peers are started through hub_spawn and stay visible on the hub mesh.
+        if self._block_kollab_terminal_spawn_enabled() and _is_blocked_kollab_spawn(
+            command, background=bool(background)
+        ):
             return ToolExecutionResult(
                 tool_id=tool_id,
                 tool_type=tool_type,
                 success=False,
-                error=(
-                    "spawning agents via terminal is blocked. "
-                    "CLI stop-all is also blocked; use /hub stop all for agents "
-                    "owned by this caller. Use <hub_spawn> to spawn peers."
-                ),
+                error=KOLLAB_SPAWN_BLOCK_MESSAGE,
             )
 
         logger.debug(
@@ -2390,6 +2398,12 @@ class ToolExecutor:
             return str((self.workspace / path).resolve())
         except Exception:
             return file_path
+
+    def _block_kollab_terminal_spawn_enabled(self) -> bool:
+        """Return whether the owner opted in to the Kollab terminal block."""
+        if not self._config:
+            return False
+        return self._config.get("tools.block_kollab_terminal_spawn", False) is True
 
     def _resolve_terminal_cwd(self, cwd_value: Optional[str]) -> Optional[Path]:
         """Resolve terminal cwd relative to the executor workspace when present."""

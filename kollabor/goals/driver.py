@@ -130,6 +130,7 @@ class GoalTurnDriver:
             await self._drive(goal_id)
         except Exception as exc:
             logger.error("goal driver error for %s: %s", goal_id, exc)
+            self._report_driver_error(goal_id, exc)
             self._safe_error_pause(goal_id, exc)
         finally:
             replay_settlement = goal_id in self._settled_while_running
@@ -652,5 +653,31 @@ class GoalTurnDriver:
                 reason=f"driver error: {exc}",
                 last_reason=f"driver error: {exc}",
             )
-        except GoalStoreError:
-            pass
+        except Exception as store_exc:
+            logger.warning(
+                "could not pause goal %s after driver error: %s", goal_id, store_exc
+            )
+
+    def _report_driver_error(self, goal_id: str, exc: Exception) -> None:
+        """Show a driver failure in the active session even if persistence fails."""
+        renderer = getattr(self.coord, "renderer", None)
+        message_coordinator = getattr(renderer, "message_coordinator", None)
+        if message_coordinator is None:
+            logger.warning("goal driver error could not be displayed for %s", goal_id)
+            return
+        try:
+            message_coordinator.display_message_sequence(
+                [
+                    (
+                        "error",
+                        f"Goal {goal_id[:8]} stopped after a driver error: {exc}",
+                        {},
+                    )
+                ]
+            )
+        except Exception as display_exc:
+            logger.warning(
+                "goal driver error could not be displayed for %s: %s",
+                goal_id,
+                display_exc,
+            )

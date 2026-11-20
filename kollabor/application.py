@@ -236,13 +236,9 @@ class TerminalLLMChat:
                 __file__
             ).parent.parent  # Go up from core/ to package root
             plugins_dir = package_dir / "plugins"
-            if not plugins_dir.exists():
-                plugins_dir = Path.cwd() / "plugins"  # Fallback for development mode
-                logger.info(f"Using development plugins directory: {plugins_dir}")
-            else:
-                logger.info(f"Using installed package plugins directory: {plugins_dir}")
+            logger.info(f"Using installed package plugins directory: {plugins_dir}")
 
-            self.plugin_registry = PluginRegistry(plugins_dir)
+            self.plugin_registry = PluginRegistry(plugins_dir, no_plugins=getattr(args, "no_plugins", False))
             self.plugin_registry.load_all_plugins()
 
         # Initialize configuration service with plugin registry
@@ -374,6 +370,7 @@ class TerminalLLMChat:
                         self.profile_manager.set_active_profile(
                             loadout.provider_profile, persist=False
                         )
+                        self.profile_manager.active_loadout_name = loadout.name
                         logger.info("Applied default loadout '%s'", loadout.name)
                     elif not loadout:
                         # Exact-name miss (a deleted or re-cased default): the
@@ -448,6 +445,7 @@ class TerminalLLMChat:
                                 loadout.provider_profile,
                                 acp_loadout_model(loadout, loadout_profile), loadout.effort,
                             )
+                        self.profile_manager.active_loadout_name = loadout.name
                         activated_via_loadout = True
                         logger.info(
                             f"Resolved '{profile_name}' as loadout -> "
@@ -1168,6 +1166,15 @@ class TerminalLLMChat:
                 continue
         return None
 
+    def _start_plugin_supervisor(self) -> None:
+        """Schedule the shared service sweep as an app-owned background task."""
+        args = getattr(self, "args", None)
+        if args is None or getattr(args, "no_plugins", False):
+            return
+        from kollabor_plugins.services import supervise_services
+
+        self.create_background_task(supervise_services(), "plugin_service_supervisor")
+
     async def start(self, initial_message: str | None = None) -> None:
         """Start the chat application with guaranteed cleanup.
 
@@ -1219,6 +1226,7 @@ class TerminalLLMChat:
                 return
 
         try:
+            self._start_plugin_supervisor()
             # Display banner for interactive/command mode
             await self._display_banner()
             self._needs_terminal_cleanup = True  # Now we need cleanup on exit
@@ -1874,7 +1882,7 @@ class TerminalLLMChat:
                     "Startup ready set in finally (startup may be incomplete)"
                 )
 
-    async def start_pipe_mode(self, piped_input: str, timeout: int = 120) -> None:
+    async def start_pipe_mode(self, piped_input: str, timeout: float = 120) -> None:
         """Start in pipe mode: process input and exit after response.
 
         Args:
@@ -1889,6 +1897,7 @@ class TerminalLLMChat:
             self.renderer.message_renderer.pipe_mode = True
 
         try:
+            self._start_plugin_supervisor()
             # Config hooks (.kollab/hooks.json) load before LLM/MCP init, as in
             # _deferred_startup, so pipe runs fire them too
             await self._load_config_hooks()
@@ -3659,6 +3668,8 @@ class TerminalLLMChat:
 
     def _initialize_fullscreen_commands(self) -> None:
         """Initialize dynamic fullscreen plugin commands."""
+        if getattr(self.args, "no_plugins", False):
+            return
         try:
             from kollabor.fullscreen.command_integration import (
                 FullScreenCommandIntegrator,
@@ -3678,8 +3689,6 @@ class TerminalLLMChat:
             # Use same plugin directory resolution as main plugin registry
             package_dir = Path(__file__).parent.parent
             plugins_dir = package_dir / "plugins"
-            if not plugins_dir.exists():
-                plugins_dir = Path.cwd() / "plugins"
             registered_count = self.fullscreen_integrator.discover_and_register_plugins(
                 plugins_dir
             )
@@ -3702,6 +3711,8 @@ class TerminalLLMChat:
         period. Discovers plugins from plugins/altview/ and registers
         them as slash commands with CommandMode.ALTVIEW.
         """
+        if getattr(self.args, "no_plugins", False):
+            return
         try:
             from kollabor.altview.command_integration import (
                 AltViewCommandIntegrator,
@@ -3720,8 +3731,6 @@ class TerminalLLMChat:
             # Same plugin directory resolution as fullscreen integrator
             package_dir = Path(__file__).parent.parent
             plugins_dir = package_dir / "plugins"
-            if not plugins_dir.exists():
-                plugins_dir = Path.cwd() / "plugins"
             registered_count = self.altview_integrator.discover_and_register_plugins(
                 plugins_dir
             )

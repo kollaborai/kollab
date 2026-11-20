@@ -363,8 +363,8 @@ manage them.
   Plugin code on disk can read `~/.kollab/engine.token` too. Decision D1 accepts this; the add sheet says
   plugins run as the user.
 - The plugin token (`KOLLAB_PLUGIN_TOKEN`) is minted once per plugin, kept in `run/token`, and given to
-  background processes and the engine router. The engine accepts it only on its own id's routes marked
-  above. It narrows mistakes and attributes calls; it is not a boundary against plugin code.
+  background processes and the engine router (as `ctx.token`). The engine accepts it only on its own id's
+  routes marked above. It narrows mistakes and attributes calls; it is not a boundary against plugin code.
 - Agent runs are not a wall either. An agent with a shell runs as the user and can read
   `~/.kollab/engine.token` and call the engine itself. The agent file tools gain a read-side deny list
   for token files and `~/.kollab/plugins/` (the existing `is_protected_path` check,
@@ -443,6 +443,10 @@ Background processes get `KOLLAB_PLUGIN_ID`, `KOLLAB_PLUGIN_ROOT`, `KOLLAB_PLUGI
   under a sibling `runs.json.lock`. The daemon writes its own end state and result when it finishes, is
   refused at the gate or exits, so a run that ends while no engine runs still records how it ended; a
   starting engine marks rows whose daemon is gone as `failed`. Finished rows stay for the daily count.
+  The file is `{ "runs": [<row>, ...] }`; each row has a unique `run_id` and the status above.
+  A terminal row also has `finished_at` (an ISO-8601 timestamp or Unix seconds) and `result.usage`
+  with non-negative integer `input` and `output` counts, including zero when no tokens were used.
+  These fields let the daily counter assign and deduplicate a completed run even after a crash.
 - A plugin runs at most 4 agents at once (`max_concurrent_runs`); the next start gets 429. A run is
   admitted against the day's counted tokens plus the tokens of runs still going.
 - `tools` goes through the agent bundle's tools allowlist. That allowlist has open gaps (#889 to #897),
@@ -731,8 +735,10 @@ Two loops never run on the same PRs. With the owner's yes:
 
 ### Build order
 
-1. Packages, the wrapper and supervisor, the one plugin list with `/config` reading it, the settings
-   writer and the CLI, with the hello plugin's Python, settings and one background process. Terminal only.
+1. Terminal package lifecycle: Git packages pinned to a commit and staged for confirmation; approved
+   development attachments; one plugin list with `/config` reading it; a registry-backed settings writer
+   and CLI; and a service wrapper/supervisor with explicit secret grants and redacted logs. The hello
+   plugin supplies Python, settings and one background process. Terminal only.
    The hello plugin's web parts land in step 3; until then its tests use a committed `web/dist/` fixture.
 2. Engine routes except agent runs (`/plugins`, events, settings, background processes, install and
    management), the agent file tools' read deny list and the `web/dist/` file route, each with its tests.

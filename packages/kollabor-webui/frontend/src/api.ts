@@ -601,6 +601,7 @@ export const DEFAULT_SLASH_COMMANDS: SlashCommand[] = [
   { name: "skills", description: "List available agent skills" },
   { name: "config", description: "Open system configuration" },
   { name: "setup", description: "Run first-time setup" },
+  { name: "welcome", description: "Show the welcome guide again" },
   { name: "doctor", description: "Run a readiness check" },
   { name: "login", description: "Sign in to a provider" },
   { name: "connect", description: "Open this device's agent network" },
@@ -736,6 +737,9 @@ export type PanelRow = {
   badges?: string[] | null;
   /** If set, only these row action ids are offered for the row. */
   actions?: string[] | null;
+  /** Per-row labels and confirmation copy for picker actions. */
+  action_labels?: Record<string, string> | null;
+  action_confirmations?: Record<string, string> | null;
 };
 
 type PanelBase = {
@@ -763,7 +767,14 @@ export type PanelPicker = PanelBase & {
   row_actions?: PanelAction[];
   toolbar_actions?: PanelAction[];
   controls?: PanelField[];
-  empty_groups?: { group: string; reason: string }[];
+  empty_groups?: {
+    group: string;
+    reason: string;
+    id?: string;
+    actions?: string[];
+    action_labels?: Record<string, string>;
+    action_confirmations?: Record<string, string>;
+  }[];
 };
 
 

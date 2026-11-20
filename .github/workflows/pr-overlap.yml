@@ -1,0 +1,33 @@
+name: PR overlap detector
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: pr-overlap-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    name: Detect overlapping pull requests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Compare open pull requests and flag overlaps
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          HOME=/tmp/pr-overlap-home KOLLAB_NO_KEYRING=1 python3 .github/scripts/pr_overlap_detector.py
