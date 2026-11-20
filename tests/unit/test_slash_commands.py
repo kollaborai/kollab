@@ -162,6 +162,10 @@ class TestSlashCommandParser(unittest.TestCase):
                 r"/open C:\work\docs\ target.txt",
                 ["C:\\work\\docs\\", "target.txt"],
             ),
+            (
+                r"/open work\docs\ target.txt",
+                ["work\\docs\\", "target.txt"],
+            ),
         ]
 
         for input_text, expected_args in cases:
