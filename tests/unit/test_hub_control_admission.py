@@ -158,3 +158,28 @@ def test_unreadable_control_is_preserved_and_still_consumes_capacity(
     assert control_path.exists(), "accepted durable control was evicted as ordinary traffic"
     with pytest.raises(RuntimeError, match="durable inbox capacity"):
         _send("receiver", _control("next"))
+
+
+def test_malformed_control_is_preserved_and_still_consumes_capacity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(messenger, "INBOX_MAX_SIZE", 1)
+    monkeypatch.setattr(messenger, "INBOX_MAX_CONTROLS", 1)
+    monkeypatch.setattr(messenger, "get_messages_dir", lambda: tmp_path)
+    _send("receiver", _control("accepted"))
+    control_path = next((tmp_path / "receiver").glob("*.json"))
+    control_path.write_text("{", encoding="utf-8")
+    messenger._control_classification_cache.clear()
+
+    ordinary = HubMessage(
+        id="ordinary",
+        action="message",
+        from_identity="coordinator",
+        to="receiver",
+        content="ordinary traffic",
+    )
+    _send("receiver", ordinary)
+
+    assert control_path.exists(), "accepted control with invalid JSON was pruned"
+    with pytest.raises(RuntimeError, match="durable inbox capacity"):
+        _send("receiver", _control("next"))

@@ -320,12 +320,13 @@ class TestBoundedReplay:
     def test_prune_malformed_json_value_does_not_disable_bound(
         self, tmp_path: Path
     ) -> None:
-        """Malformed and non-object JSON remain evictable ordinary entries."""
+        """Non-control JSON is pruned; undecodable records fail closed."""
         payloads = ["[]", '"scalar"', "null", "not-json"]
         for case, payload in enumerate(payloads):
             inbox = tmp_path / f"lapis-{case}"
             inbox.mkdir()
-            (inbox / "00000000-malformed.json").write_text(payload)
+            malformed = inbox / "00000000-malformed.json"
+            malformed.write_text(payload)
             for i in range(5):
                 (inbox / f"{i + 1:08d}.json").write_text(
                     json.dumps(_make_msg(content=f"ordinary {i}").to_dict())
@@ -333,7 +334,9 @@ class TestBoundedReplay:
 
             _prune_inbox(inbox, max_size=2)
 
-            assert len(list(inbox.glob("*.json"))) == 2
+            expected = 3 if payload == "not-json" else 2
+            assert len(list(inbox.glob("*.json"))) == expected
+            assert malformed.exists() is (payload == "not-json")
 
     def test_ttl_expired_task_cron_is_preserved_for_stale_ack(
         self, tmp_path: Path
