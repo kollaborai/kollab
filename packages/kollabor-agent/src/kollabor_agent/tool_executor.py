@@ -109,6 +109,7 @@ def _is_blocked_kollab_spawn(
     shell_names = {"sh", "bash", "dash", "zsh", "ksh"}
     python_name = re.compile(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?")
     separators = {";", "&", "&&", "|", "||", "(", ")"}
+    heredoc_body_ranges: list[tuple[int, int]] = []
 
     def basename(token: str) -> str:
         return token.replace("\\", "/").rsplit("/", 1)[-1].lower()
@@ -186,13 +187,185 @@ def _is_blocked_kollab_spawn(
             index += 1
         return None
 
+    def closing_backtick(text: str, opening_index: int) -> int | None:
+        index = opening_index + 1
+        while index < len(text):
+            if text[index] == "\\":
+                index += 2
+            elif text[index] == "`":
+                return index
+            else:
+                index += 1
+        return None
+
     def shell_substitutions_blocked(
         text: str, is_background: bool, depth: int
     ) -> bool:
         in_single = False
         in_double = False
+        pending_heredocs: list[tuple[str | None, bool, bool]] = []
+        active_heredocs: list[tuple[str | None, bool, bool]] = []
+        heredoc_header = False
+        heredoc_body_start: int | None = None
         index = 0
+
+        def read_heredoc_delimiter(
+            operator_end: int,
+        ) -> tuple[str | None, bool, bool]:
+            delimiter_index = operator_end
+            strip_tabs = text.startswith("-", delimiter_index)
+            if strip_tabs:
+                delimiter_index += 1
+            while delimiter_index < len(text) and text[delimiter_index] in " \t":
+                delimiter_index += 1
+
+            delimiter: list[str] = []
+            quote: str | None = None
+            was_quoted = False
+            while delimiter_index < len(text):
+                char = text[delimiter_index]
+                if quote is not None:
+                    if char == quote:
+                        quote = None
+                    else:
+                        delimiter.append(char)
+                    delimiter_index += 1
+                    continue
+                if char in "'\"":
+                    quote = char
+                    was_quoted = True
+                    delimiter_index += 1
+                    continue
+                if char == "\\":
+                    was_quoted = True
+                    if delimiter_index + 1 >= len(text):
+                        return None, strip_tabs, True
+                    escaped = text[delimiter_index + 1]
+                    if escaped == "\n":
+                        delimiter_index += 2
+                        continue
+                    if (
+                        escaped == "\r"
+                        and delimiter_index + 2 < len(text)
+                        and text[delimiter_index + 2] == "\n"
+                    ):
+                        delimiter_index += 3
+                        continue
+                    delimiter.append(escaped)
+                    delimiter_index += 2
+                    continue
+                if char.isspace() or char in ";|&()<>":
+                    break
+                delimiter.append(char)
+                delimiter_index += 1
+
+            if quote is not None or not delimiter:
+                return None, strip_tabs, True
+            return "".join(delimiter), strip_tabs, not was_quoted
+
+        def read_heredoc_body(
+            body_start: int, heredoc: tuple[str | None, bool, bool]
+        ) -> tuple[str, int, int]:
+            delimiter, strip_tabs, _expands = heredoc
+            line_start = body_start
+            while line_start < len(text):
+                line_end = text.find("\n", line_start)
+                if line_end < 0:
+                    line_end = len(text)
+                line = text[line_start:line_end]
+                candidate = line.lstrip("\t") if strip_tabs else line
+                if delimiter is not None and candidate == delimiter:
+                    next_index = line_end + 1 if line_end < len(text) else line_end
+                    return text[body_start:line_start], next_index, line_start
+                if line_end == len(text):
+                    break
+                line_start = line_end + 1
+            return text[body_start:], len(text), len(text)
+
+        def heredoc_substitutions_blocked(body: str) -> bool:
+            body_index = 0
+            while body_index < len(body):
+                if (
+                    body[body_index] == "\\"
+                    and body_index + 1 < len(body)
+                    and body[body_index + 1] in {"$", "`", "\\", "\n"}
+                ):
+                    body_index += 2
+                    continue
+                if body.startswith("$(", body_index):
+                    end = substitution_end(body, body_index)
+                    nested = (
+                        body[body_index + 2 : end]
+                        if end is not None
+                        else body[body_index + 2 :]
+                    )
+                    if _is_blocked_kollab_spawn(
+                        nested, background=is_background, _depth=depth + 1
+                    ):
+                        return True
+                    if end is None and suspicious_launch(nested, is_background):
+                        return True
+                    body_index = end + 1 if end is not None else len(body)
+                    continue
+                if body[body_index] == "`":
+                    end = closing_backtick(body, body_index)
+                    nested = (
+                        body[body_index + 1 : end]
+                        if end is not None
+                        else body[body_index + 1 :]
+                    )
+                    if _is_blocked_kollab_spawn(
+                        nested, background=is_background, _depth=depth + 1
+                    ):
+                        return True
+                    if end is None and suspicious_launch(nested, is_background):
+                        return True
+                    body_index = end + 1 if end is not None else len(body)
+                    continue
+                body_index += 1
+            return False
+
+        def comment_starts_shell_word(comment_index: int) -> bool:
+            previous = comment_index - 1
+            while previous >= 0:
+                if (
+                    text[previous] == "\n"
+                    and previous > 0
+                    and text[previous - 1] == "\\"
+                ):
+                    previous -= 2
+                    continue
+                if (
+                    text[previous] == "\n"
+                    and previous > 1
+                    and text[previous - 1] == "\r"
+                    and text[previous - 2] == "\\"
+                ):
+                    previous -= 3
+                    continue
+                break
+            if previous < 0 or text[previous] in ";|&(":
+                return True
+            if not text[previous].isspace():
+                return False
+            if text[previous] not in " \t":
+                return True
+            slash_count = 0
+            while previous > slash_count and text[previous - slash_count - 1] == "\\":
+                slash_count += 1
+            return slash_count % 2 == 0
+
         while index < len(text):
+            if active_heredocs and index == heredoc_body_start:
+                heredoc = active_heredocs.pop(0)
+                body_start = index
+                body, index, body_end = read_heredoc_body(index, heredoc)
+                heredoc_body_ranges.append((body_start, body_end))
+                if heredoc[2] and heredoc_substitutions_blocked(body):
+                    return True
+                heredoc_body_start = index if active_heredocs else None
+                continue
+
             char = text[index]
             if char == "\\" and not in_single:
                 index += 2
@@ -215,6 +388,59 @@ def _is_blocked_kollab_spawn(
             if char == '"' and not in_single:
                 in_double = not in_double
                 index += 1
+                continue
+
+            if (
+                not in_single
+                and not in_double
+                and text.startswith("<<", index)
+                and not text.startswith("<<<", index)
+            ):
+                pending_heredocs.append(read_heredoc_delimiter(index + 2))
+                heredoc_header = True
+            if (
+                char == "#"
+                and not in_single
+                and not in_double
+                and comment_starts_shell_word(index)
+            ):
+                newline = text.find("\n", index)
+                if newline < 0:
+                    return False
+                if heredoc_header:
+                    active_heredocs.extend(
+                        pending_heredocs or [(None, False, True)]
+                    )
+                    pending_heredocs.clear()
+                    heredoc_header = False
+                    heredoc_body_start = newline + 1
+                index = newline + 1
+                continue
+            if char == "\n":
+                if heredoc_header:
+                    active_heredocs.extend(
+                        pending_heredocs or [(None, False, True)]
+                    )
+                    pending_heredocs.clear()
+                    heredoc_header = False
+                    heredoc_body_start = index + 1
+                index += 1
+                continue
+
+            if char == "`" and not in_single:
+                end = closing_backtick(text, index)
+                nested = (
+                    text[index + 1 : end]
+                    if end is not None
+                    else text[index + 1 :]
+                )
+                if _is_blocked_kollab_spawn(
+                    nested, background=is_background, _depth=depth + 1
+                ):
+                    return True
+                if end is None and suspicious_launch(nested, is_background):
+                    return True
+                index = end + 1 if end is not None else len(text)
                 continue
 
             is_command_substitution = not in_single and text.startswith("$(", index)
@@ -812,40 +1038,20 @@ def _is_blocked_kollab_spawn(
     if shell_substitutions_blocked(command, background, _depth):
         return True
 
-    # Unlike shlex tokens, the original command preserves quote/escape context.
-    # Scan backticks here so spaces do not split real substitutions and single-
-    # quoted or escaped backticks remain ordinary data.
-    in_single = False
-    in_double = False
-    index = 0
-    while index < len(command):
-        char = command[index]
-        if char == "\\" and not in_single:
-            index += 2
-            continue
-        if char == "'" and not in_double:
-            in_single = not in_single
-        elif char == '"' and not in_single:
-            in_double = not in_double
-        elif char == "`" and not in_single:
-            end = index + 1
-            while end < len(command):
-                if command[end] == "\\":
-                    end += 2
-                elif command[end] == "`":
-                    break
-                else:
-                    end += 1
-            if end < len(command):
-                if _is_blocked_kollab_spawn(
-                    command[index + 1 : end], background=background, _depth=_depth + 1
-                ):
-                    return True
-                index = end
-        index += 1
+    token_scan_command = command
+    for body_start, body_end in reversed(heredoc_body_ranges):
+        masked_body = "".join(
+            "\n" if char == "\n" else " "
+            for char in command[body_start:body_end]
+        )
+        token_scan_command = (
+            token_scan_command[:body_start]
+            + masked_body
+            + token_scan_command[body_end:]
+        )
 
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
+        lexer = shlex.shlex(token_scan_command, posix=True, punctuation_chars=";&|()")
         lexer.whitespace_split = True
         lexer.commenters = "#"
         tokens = list(lexer)
