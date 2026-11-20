@@ -3549,12 +3549,21 @@ class ToolExecutor:
         import html as html_mod
         import re
 
-        # Remove non-content tags entirely (tag + inner content)
-        non_content_tags = "script|style|nav|footer|aside|header|noscript|svg|form|iframe"
+        # Unterminated raw-content tags can safely consume the rest of the
+        # document; other malformed non-content tags should not erase the page.
+        raw_content_tags = "script|style"
         if extract_main:
-            non_content_tags = "script|style|pre|code|nav|footer|aside|header|noscript|svg|form|iframe"
+            raw_content_tags += "|pre|code"
+        raw_content = re.compile(
+            rf"<({raw_content_tags})\b[^>]*>.*?(?:</\1\s*>|$)",
+            re.DOTALL | re.IGNORECASE,
+        )
+        html = raw_content.sub("", html)
+
+        # Remove structural non-content elements only when their closing tag
+        # is present, so a malformed navigation tag cannot consume the page.
         non_content = re.compile(
-            rf"<({non_content_tags})\b[^>]*>.*?(?:</\1\s*>|$)",
+            r"<(nav|footer|aside|header|noscript|svg|form|iframe)\b[^>]*>.*?</\1\s*>",
             re.DOTALL | re.IGNORECASE,
         )
         html = non_content.sub("", html)
