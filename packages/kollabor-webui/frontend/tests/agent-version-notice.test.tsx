@@ -24,6 +24,7 @@ vi.mock("@/components/code/floating-sidebar", () => ({
 }));
 
 const agent = { name: "lapis", agent_id: "a1", state: "idle", current_task: "", solo: false, project: "/w" };
+const visibleText = (html: string) => html.replace(/<[^>]+>/g, "");
 
 describe("agentVersionNotice", () => {
   it("is silent when the agent runs the engine's version", () => {
@@ -108,10 +109,11 @@ describe("agents that cannot restart themselves (#968)", () => {
     expect(agentVersionNotice({ ...noVersion, restartAgents: false })).toEqual(expect.objectContaining({ kind: "too-old", name: "lapis" }));
   });
 
-  it("the too-old line is plain text: the sentence and a Dismiss, no Restart Agent or Try Again", () => {
+  it("keeps the stop command in a no-wrap code line, with Dismiss only", () => {
     const notice = agentVersionNotice({ ...noVersion, restartAgents: true })!;
     const html = renderToStaticMarkup(<AgentVersionNotice notice={notice} busy={false} onRestart={() => {}} onDismiss={() => {}} />);
-    expect(html).toContain(sentence);
+    expect(visibleText(html)).toContain(sentence);
+    expect(html).toMatch(/<code class="[^\"]*whitespace-nowrap[^\"]*">kollab --hub stop lapis<\/code>/);
     expect(html).not.toContain("Try Again");
     expect(html.match(/<button/g)?.length).toBe(1);
   });
@@ -173,7 +175,8 @@ describe("daemon outdated notices", () => {
 
   it.each(["Terminal", "Code", "Git"])("shows the working stop-and-start instruction in %s for an unversioned agent", (panel) => {
     const html = renderToStaticMarkup(<DaemonNotice {...panelNoticeProps("", false)} />);
-    expect(html, panel).toContain(stopAndStart);
+    expect(visibleText(html), panel).toContain(stopAndStart);
+    expect(html).toMatch(/<code class="[^\"]*whitespace-nowrap[^\"]*">kollab --hub stop lapis<\/code>/);
     expect(html).not.toContain("Retry");
   });
 
@@ -191,14 +194,16 @@ describe("daemon outdated notices", () => {
     const html = renderToStaticMarkup(
       <DaemonNotice notice={null} fallbackName="lapis" busy={false} onRestart={() => {}} />,
     );
-    expect(html).toContain("This agent runs older code. Run kollab --hub stop lapis in a terminal");
+    expect(visibleText(html)).toContain("This agent runs older code. Run kollab --hub stop lapis in a terminal");
+    expect(html).toMatch(/<code class="[^\"]*whitespace-nowrap[^\"]*">kollab --hub stop lapis<\/code>/);
   });
 
   it("the Terminal does not offer Retry for daemon_outdated", () => {
     const html = renderToStaticMarkup(
       <TerminalView sessionId="s1" workspace="/workspace" daemonNotice={panelNoticeProps("", false)} />,
     );
-    expect(html).toContain(stopAndStart);
+    expect(visibleText(html)).toContain(stopAndStart);
+    expect(html).toMatch(/<code class="[^\"]*whitespace-nowrap[^\"]*">kollab --hub stop lapis<\/code>/);
     expect(html).not.toMatch(/>Retry<\/button>/);
   });
 
