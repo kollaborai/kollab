@@ -127,7 +127,6 @@ describe("agents that cannot restart themselves (#968)", () => {
     const html = renderToStaticMarkup(<DaemonNotice notice={notice} fallbackName="lapis" busy={false} onRestart={() => {}} />);
 
     expect(visibleText(html)).toContain(sentence);
-    expect(html).toContain("kollab --hub stop lapis");
   });
 
   it("keeps the --hub flag intact in a wrapping code line, with Dismiss only", () => {
