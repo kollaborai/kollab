@@ -351,6 +351,32 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertNotIn("code marker", text)
         self.assertNotIn("inline code marker", text)
 
+    def test_web_fetch_keeps_code_inside_semantic_article(self):
+        """Recognized article content retains code examples before fallback."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        prose = "Article prose for a useful guide. " * 12
+        code = "def preserve_this_example(): return 42"
+        html = f"<article><p>{prose}</p><pre><code>{code}</code></pre></article>"
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(code, result.output)
+
     def test_web_fetch_truncation(self):
         """Test that max_chars limit truncates output."""
         long_text = "A" * 50000
