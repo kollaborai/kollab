@@ -134,6 +134,8 @@ const normalEditorPath = "/fixture/scrollbar-long.ts";
 const diffEditorPath = "/fixture/.diffs/scrollbar-long.diff";
 setCodeSession("scrollbar-fixture");
 setCodeRoot("/fixture");
+const initialEditorConfig = useEditorStore.getState().editorConfig;
+useEditorStore.setState({ editorConfig: { ...initialEditorConfig, minimap: true } });
 useEditorStore.getState().openFile(paneId, normalEditorPath, "scrollbar-long.ts", ".ts", LONG_CODE);
 useEditorStore.getState().pinFile(normalEditorPath);
 useEditorStore.getState().openFile(paneId, diffEditorPath, "scrollbar-long.diff", ".diff", LONG_CODE);
@@ -282,6 +284,9 @@ window.__scrollbarProbes = () => {
     ),
     "monaco-h-scrollbar": visibleChrome(
       q('[data-testid="editor-box"] .monaco-scrollable-element > .scrollbar.horizontal'),
+    ),
+    "monaco-minimap-slider": visibleChrome(
+      q('[data-testid="editor-box"] .monaco-editor .minimap-slider'),
     ),
     "monaco-diff-v-scrollbar": visibleAny(
       '[data-testid="editor-box"] .monaco-diff-editor .monaco-scrollable-element > .scrollbar.vertical',

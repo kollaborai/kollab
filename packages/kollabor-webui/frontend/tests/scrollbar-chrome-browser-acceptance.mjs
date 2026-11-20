@@ -175,6 +175,8 @@ async function run() {
       assert.ok(!p1["monaco-v-scrollbar"], `monaco vertical slider still visible: ${JSON.stringify(p1["monaco-v-scrollbar"])}`));
     await check("monaco horizontal slider hidden", () =>
       assert.ok(!p1["monaco-h-scrollbar"], `monaco horizontal slider still visible: ${JSON.stringify(p1["monaco-h-scrollbar"])}`));
+    await check("enabled monaco minimap slider hidden", () =>
+      assert.ok(!p1["monaco-minimap-slider"], `monaco minimap slider still visible: ${JSON.stringify(p1["monaco-minimap-slider"])}`));
     await check("hidden chrome leaves no reserved gutter", () => {
       assert.equal(p1["native-borderless-no-gutter"], true, "borderless scroller reserves a gutter for the scrollbar");
     });
