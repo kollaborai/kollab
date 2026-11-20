@@ -104,6 +104,7 @@ def test_snapshot_keeps_window_threshold_and_hard_cap_distinct() -> None:
         input_tokens=30_000,
         history_chars=90_000,
     )
+    plugin.config.values["plugins.context_compaction.token_threshold_k"] = 0  # automatic: ratio of window
 
     snapshot = plugin.get_runtime_status_snapshot()
 
@@ -115,6 +116,7 @@ def test_snapshot_keeps_window_threshold_and_hard_cap_distinct() -> None:
 
 def test_snapshot_marks_unknown_window_and_reports_policy_fallback() -> None:
     plugin = _plugin(context_window=None, input_tokens=110_000)
+    plugin.config.values["plugins.context_compaction.token_threshold_k"] = 0  # automatic fallback
 
     snapshot = plugin.get_runtime_status_snapshot()
 
@@ -141,18 +143,20 @@ def test_snapshot_marks_missing_provider_usage_as_estimated() -> None:
     assert isinstance(datetime.fromisoformat(snapshot["observed_at"]), datetime)
 
 
-def test_threshold_source_only_reports_a_binding_manual_override() -> None:
+def test_threshold_source_reports_an_explicit_override_bounded_by_window() -> None:
     plugin = _plugin(context_window=1_000_000, input_tokens=200_000)
 
-    for manual_k, expected_threshold, expected_source in (
-        (200, 200_000, "manual"),
-        (272, 272_000, "automatic"),
-        (300, 272_000, "automatic"),
+    # An explicit threshold wins over the 272K cap and is bounded by the window (#1104).
+    for manual_k, expected_threshold in (
+        (200, 200_000),
+        (272, 272_000),
+        (300, 300_000),
+        (1500, 1_000_000),
     ):
         plugin.config.values["plugins.context_compaction.token_threshold_k"] = manual_k
         snapshot = plugin.get_runtime_status_snapshot()
         assert snapshot["automatic_compaction_threshold_tokens"] == expected_threshold
-        assert snapshot["threshold_source"] == expected_source
+        assert snapshot["threshold_source"] == "manual"
 
     plugin = _plugin(context_window=None, input_tokens=60_000)
     plugin.config.values["plugins.context_compaction.token_threshold_k"] = 50
