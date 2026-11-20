@@ -559,9 +559,15 @@ class VersionCheckService:
         # release behind): re-check within ~1 hour so users learn about
         # new releases promptly instead of after the full interval.
         cached_version = self.config.get("kollabor.updates.cached_latest_version", "")
-        cached_is_filtered_prerelease = bool(
-            self.config.get("kollabor.updates.cached_release_is_prerelease", False)
-        ) and not self.include_prereleases
+        cached_is_prerelease = self.config.get(
+            "kollabor.updates.cached_release_is_prerelease", False
+        )
+        if not isinstance(cached_is_prerelease, bool):
+            logger.debug("Cached release prerelease flag is invalid; forcing refresh")
+            return False
+        cached_is_filtered_prerelease = (
+            cached_is_prerelease and not self.include_prereleases
+        )
         if cached_is_filtered_prerelease or _cache_shows_current_or_older(
             cached_version, self.current_version
         ):
@@ -592,15 +598,19 @@ class VersionCheckService:
         name = self.config.get(
             "kollabor.updates.cached_release_name", f"Version {version}"
         )
+        is_prerelease = self.config.get(
+            "kollabor.updates.cached_release_is_prerelease", False
+        )
+        if not isinstance(is_prerelease, bool):
+            logger.debug("Cached release prerelease flag is invalid")
+            return None
 
         release_info = ReleaseInfo(
             version=version,
             tag_name=f"v{version}",
             name=name,
             url=url,
-            is_prerelease=bool(
-                self.config.get("kollabor.updates.cached_release_is_prerelease", False)
-            ),
+            is_prerelease=is_prerelease,
         )
 
         logger.debug(f"Retrieved cached release: {version}")
