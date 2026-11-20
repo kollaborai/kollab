@@ -28,7 +28,7 @@ class ConversationsPlugin(FullScreenPlugin):
             author="Kollabor",
             category="system",
             icon="[HST]",
-            aliases=["convos", "sessions"],
+            aliases=["convos"],
         )
         super().__init__(metadata)
 
