@@ -4213,6 +4213,31 @@ class ContextCompactionPlugin(BasePlugin):
           [task reminder]        -- synthetic system note listing active tasks
           [to_keep messages]     -- recent messages kept intact
         """
+        # The same active legacy excerpt can be both pinned and kept in the
+        # recent window. Rewrite that recent copy too, or it still claims the
+        # omitted assignment text was summarized.
+        active_task_ids = self._get_live_task_ids()
+        for task_msg in preserved_tasks or ():
+            task_id = self._message_task_id(task_msg)
+            if task_id:
+                active_task_ids.add(task_id)
+        legacy_suffix = "\n[Remaining assignment text is summarized below.]"
+        to_keep = list(to_keep)
+        for index, task_msg in enumerate(to_keep):
+            task_id = self._message_task_id(task_msg)
+            content = str(getattr(task_msg, "content", "") or "")
+            if (
+                task_id
+                and task_id in active_task_ids
+                and content.endswith(legacy_suffix)
+                and self._is_hub_task(task_msg)
+            ):
+                rewritten, _, _ = self._extract_preservable_messages(
+                    [task_msg], live_task_ids={task_id}
+                )
+                if rewritten:
+                    to_keep[index] = rewritten[0]
+
         base_summary = summary_text  # each drop retry starts from this, so one note
         if _dropped_preserved:
             # Issue #279: say what was dropped so the model knows the
