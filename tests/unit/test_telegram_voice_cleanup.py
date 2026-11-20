@@ -241,22 +241,23 @@ async def test_cancellation_stops_real_transcriber_descendants(tmp_path, monkeyp
     assert not list(tmp_path.glob("kollab-telegram-voice-*"))
 
 
-@pytest.mark.asyncio
-@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group lifecycle")
-async def test_cancellation_does_not_wait_for_detached_pipe_holder(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+def _install_detached_whisper(tmp_path, temp_root, monkeypatch):
     whisper = tmp_path / "whisper"
     descendant_script = tmp_path / "descendant.py"
     descendant_started = tmp_path / "descendant.started"
     descendant_script.write_text(
         textwrap.dedent(
             f"""\
-            import os, pathlib, time
+            import os, pathlib, sys, time
             os.setsid()
             pathlib.Path({str(descendant_started)!r}).write_text("ready")
-            time.sleep(0.8)
+            output = pathlib.Path(sys.argv[1]) / "descendant-output.txt"
+            deadline = time.monotonic() + 0.8
+            while time.monotonic() < deadline:
+                with output.open("a") as stream:
+                    stream.write("x\\n")
+                    stream.flush()
+                time.sleep(0.02)
             """
         )
     )
@@ -264,26 +265,86 @@ async def test_cancellation_does_not_wait_for_detached_pipe_holder(
         "#!/usr/bin/env python3\n"
         + textwrap.dedent(
             f"""\
-            import subprocess, sys
-            subprocess.Popen([sys.executable, {str(descendant_script)!r}])
+            import pathlib, subprocess, sys, time
+            audio = pathlib.Path(sys.argv[1])
+            subprocess.Popen(
+                [sys.executable, {str(descendant_script)!r}, str(audio.parent)]
+            )
+            time.sleep(0.5)
             """
         )
     )
     whisper.chmod(0o700)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    return descendant_started
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group lifecycle")
+async def test_cancellation_defers_cleanup_for_detached_pipe_writer(tmp_path, monkeypatch):
+    temp_root = tmp_path / "temporary"
+    temp_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp_root))
+    descendant_started = _install_detached_whisper(tmp_path, temp_root, monkeypatch)
 
     task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
     deadline = time.monotonic() + 5
     while not descendant_started.exists() and time.monotonic() < deadline:
         await asyncio.sleep(0.02)
     assert descendant_started.exists(), "detached descendant did not start"
+    assert not task.done(), "transcriber exited before cancellation"
     task.cancel()
     _, pending = await asyncio.wait({task}, timeout=0.25)
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not pending, "cancellation waited for detached descendant pipe EOF"
+        run_dirs = list(temp_root.glob("kollab-telegram-voice-*"))
+        assert len(run_dirs) == 1, "artifact cleanup raced the detached writer"
+        output = run_dirs[0] / "descendant-output.txt"
+        before = output.read_text()
+        await asyncio.sleep(0.1)
+        assert output.read_text() != before, "detached writer exited before its pipe closed"
+    finally:
+        await asyncio.sleep(0.9)
 
-    assert not pending, "cancellation waited for detached descendant pipe EOF"
-    assert not list(tmp_path.glob("kollab-telegram-voice-*"))
+    assert list(temp_root.iterdir()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group lifecycle")
+async def test_timeout_defers_cleanup_for_detached_pipe_writer(tmp_path, monkeypatch):
+    temp_root = tmp_path / "temporary"
+    temp_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp_root))
+    descendant_started = _install_detached_whisper(tmp_path, temp_root, monkeypatch)
+    original_wait_for = asyncio.wait_for
+
+    async def short_timeout(awaitable, timeout):
+        if timeout == 60:
+            deadline = time.monotonic() + 5
+            while not descendant_started.exists() and time.monotonic() < deadline:
+                await asyncio.sleep(0.02)
+            raise asyncio.TimeoutError
+        return await original_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", short_timeout)
+    task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
+    _, pending = await asyncio.wait({task}, timeout=0.25)
+    try:
+        assert await task == "[voice message - transcription timed out]"
+        assert descendant_started.exists(), "detached descendant did not start"
+        assert not pending, "timeout waited for detached descendant pipe EOF"
+        run_dirs = list(temp_root.glob("kollab-telegram-voice-*"))
+        assert len(run_dirs) == 1, "artifact cleanup raced the detached writer"
+        output = run_dirs[0] / "descendant-output.txt"
+        before = output.read_text()
+        await asyncio.sleep(0.1)
+        assert output.read_text() != before, "detached writer exited before its pipe closed"
+    finally:
+        await asyncio.sleep(0.9)
+
+    assert list(temp_root.iterdir()) == []
 
 
 @pytest.mark.asyncio
