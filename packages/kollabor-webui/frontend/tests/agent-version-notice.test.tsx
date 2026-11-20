@@ -131,7 +131,7 @@ describe("agents that cannot restart themselves (#968)", () => {
       />,
     );
     expect(html).toContain('role="alert"');
-    expect(html).toContain(sentence);
+    expect(visibleText(html)).toContain(sentence);
     expect(html).not.toContain("Try Again");
     expect(html.match(/<button/g)?.length).toBe(1);
   });
