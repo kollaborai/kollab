@@ -124,6 +124,25 @@ class TestSlashCommandParser(unittest.TestCase):
                 self.assertIsNotNone(command)
                 self.assertEqual(command.args, expected_args)
 
+    def test_escaped_shell_punctuation_keeps_shlex_behavior(self):
+        cases = [
+            (r"/open file\&name.txt", ["file&name.txt"]),
+            (r"/open file\;name.txt", ["file;name.txt"]),
+            (r"/open file\#name.txt", ["file#name.txt"]),
+            (r"/open file\{name\}.txt", ["file{name}.txt"]),
+            (r"/open file\[name\].txt", ["file[name].txt"]),
+            (r"/open file\]name.txt", ["file]name.txt"]),
+            (r"/open file\!name.txt", ["file!name.txt"]),
+            (r"/open file\~name.txt", ["file~name.txt"]),
+            ("/open file\\" + chr(96) + "name.txt", ["file" + chr(96) + "name.txt"]),
+        ]
+
+        for input_text, expected_args in cases:
+            with self.subTest(input_text=input_text):
+                command = self.parser.parse_command(input_text)
+                self.assertIsNotNone(command)
+                self.assertEqual(command.args, expected_args)
+
     def test_parse_relative_directory_paths_with_trailing_separators_before_flags(self):
         cases = [
             ("/open folder\\ --mode=read", ["folder\\", "--mode=read"]),
