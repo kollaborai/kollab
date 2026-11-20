@@ -12,7 +12,7 @@ import shlex
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 from kollabor_events.models import EventType
 
@@ -3093,6 +3093,7 @@ class ToolExecutor:
             ToolExecutionResult with the cleaned text or an error message.
         """
         import zlib
+        from contextlib import asynccontextmanager
         from urllib.parse import urljoin, urlparse
 
         import aiohttp
@@ -3151,6 +3152,18 @@ class ToolExecutor:
             max_decoded_bytes = 2_000_000
             redirect_statuses = {301, 302, 303, 307, 308}
             timeout = aiohttp.ClientTimeout(total=30)
+            loop = asyncio.get_running_loop()
+            total_timeout = timeout.total if timeout.total is not None else 30
+            deadline = loop.time() + total_timeout
+
+            @asynccontextmanager
+            async def request_before_deadline(
+                request_context: Any,
+            ) -> AsyncIterator[Any]:
+                async with asyncio.timeout_at(deadline):
+                    async with request_context as response:
+                        yield response
+
             headers = {
                 "Accept-Encoding": "identity, gzip, deflate",
                 "User-Agent": (
@@ -3171,8 +3184,10 @@ class ToolExecutor:
                             success=False,
                             error="Response exceeded the 500000-byte download limit",
                         )
-                    async with session.get(
-                        current_url, headers=headers, allow_redirects=False
+                    async with request_before_deadline(
+                        session.get(
+                            current_url, headers=headers, allow_redirects=False
+                        )
                     ) as resp:
                         if resp.status in redirect_statuses:
                             location = resp.headers.get("Location")
