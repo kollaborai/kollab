@@ -16,7 +16,8 @@ const SESSION = {
   workspace: "/learn-demo",
   external: false,
 };
-const DRAFT = "[image1]\nDescribe this picture";
+// Inline placement survives draft restore but is not a standalone restore token.
+const DRAFT = "Describe this picture [image1]";
 const MEDIA = { ref: "issue-1176-image", mime: "image/png" };
 const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
@@ -143,7 +144,7 @@ async function main() {
     if (restoredTokenCount !== 1) {
       failures.push(`restored composer had ${restoredTokenCount} [image1] tokens: ${JSON.stringify(restoredText)}`);
     }
-    if (restoredText !== "[image1]\nDescribe this picture") {
+    if (restoredText !== "[image1]\nDescribe this picture ") {
       failures.push(`restored composer text changed unexpectedly: ${JSON.stringify(restoredText)}`);
     }
 
