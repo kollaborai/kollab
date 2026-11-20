@@ -250,7 +250,16 @@ def test_mixed_task_reminder_does_not_apply_excerpt_stop_rule_to_complete_task()
         if message.metadata.get("compaction_task_reminder")
     )
 
-    assert "finish the migration" in reminder
+    reminder_lines = reminder.splitlines()
+    complete_task_line = next(
+        index
+        for index, line in enumerate(reminder_lines)
+        if "Task: finish the migration" in line
+    )
+    assert (
+        reminder_lines[complete_task_line + 1].strip()
+        == "Complete this task and report back as instructed."
+    )
     assert "If the resend is unavailable, stop" not in reminder
 
 
