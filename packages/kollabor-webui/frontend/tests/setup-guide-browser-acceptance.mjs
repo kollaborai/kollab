@@ -109,16 +109,77 @@ async function main() {
       await pending.page.getByRole("heading", { name: "Welcome to Kollab", exact: true }).waitFor({ state: "visible" });
       const start = pending.page.getByTestId("setup-guide-next");
       assert.equal(await start.isDisabled(), false, "Get Started should remain available while /profiles is pending");
+      let setupPanelRequests = 0;
+      pending.page.on("request", (request) => {
+        if (new URL(request.url()).pathname === "/setup/panels/setup") setupPanelRequests += 1;
+      });
+      await start.click();
+      await pending.page.waitForTimeout(200);
+      assert.equal(setupPanelRequests, 0, "Setup should wait until /profiles identifies the provider");
+      assert.equal(await pending.page.getByTestId("setup-step-network").getAttribute("aria-current"), "step");
       const setupPanelRequest = pending.page.waitForRequest(
         (request) => new URL(request.url()).pathname === "/setup/panels/setup",
         { timeout: 5000 },
       );
-      await start.click();
+      releaseProfiles();
       await setupPanelRequest;
+      assert.equal(setupPanelRequests, 1);
       assert.equal(await pending.page.getByTestId("setup-step-network").getAttribute("aria-current"), "step");
     } finally {
       releaseProfiles();
       await pending.context.close();
+    }
+
+    const existingProvider = await openPage(browser, baseUrl, makeFixtures(), {
+      initialGuideState: JSON.stringify({ step: "welcome", dismissed: true }),
+    });
+    let releaseExistingProfiles;
+    const existingProfilesGate = new Promise((resolve) => {
+      releaseExistingProfiles = resolve;
+    });
+    try {
+      const startupProfiles = existingProvider.page.waitForResponse(
+        (response) => new URL(response.url()).pathname === "/profiles",
+        { timeout: 8000 },
+      );
+      await existingProvider.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+      await startupProfiles;
+      await existingProvider.page.route("**/profiles", async (route) => {
+        await existingProfilesGate;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ active: "work", profiles: [{ name: "work", provider: "openai" }] }),
+        });
+      });
+      const guideProfiles = existingProvider.page.waitForRequest(
+        (request) => new URL(request.url()).pathname === "/profiles",
+        { timeout: 5000 },
+      );
+      await existingProvider.page.getByTestId("guided-setup-open").click();
+      await guideProfiles;
+      await existingProvider.page.getByRole("heading", { name: "Welcome to Kollab", exact: true }).waitFor({ state: "visible" });
+      const start = existingProvider.page.getByTestId("setup-guide-next");
+      assert.equal(await start.isDisabled(), false, "Get Started should remain available while /profiles is pending");
+      let setupPanelRequests = 0;
+      existingProvider.page.on("request", (request) => {
+        if (new URL(request.url()).pathname === "/setup/panels/setup") setupPanelRequests += 1;
+      });
+      await start.click();
+      await existingProvider.page.waitForTimeout(200);
+      assert.equal(setupPanelRequests, 0, "a pending profile check must not open Setup for an existing provider");
+      const response = existingProvider.page.waitForResponse(
+        (item) => new URL(item.url()).pathname === "/profiles" && item.request().method() === "GET",
+        { timeout: 5000 },
+      );
+      releaseExistingProfiles();
+      await response;
+      await existingProvider.page.waitForTimeout(200);
+      assert.equal(setupPanelRequests, 0, "an existing provider must not open Settings > Setup");
+      assert.equal(await existingProvider.page.getByTestId("setup-step-network").getAttribute("aria-current"), "step");
+    } finally {
+      releaseExistingProfiles();
+      await existingProvider.context.close();
     }
   } finally {
     await browser?.close();
