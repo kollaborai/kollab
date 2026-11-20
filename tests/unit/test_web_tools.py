@@ -13,6 +13,7 @@ import gzip
 import os
 import re
 import sys
+from types import ModuleType
 import unittest
 import zlib
 from contextlib import contextmanager
@@ -520,6 +521,201 @@ class TestWebFetchExecution(unittest.TestCase):
         fallback.assert_awaited_once_with(
             "<html><body>x</body></html>", max_chars=2_000_000
         )
+
+    def test_web_fetch_playwright_fallback_loads_external_script_with_budget(self):
+        """Fallback scripts render when their bodies fit the shared byte cap."""
+
+        async def run_case():
+            requests = []
+            page_body = (
+                b'<html><body><div id="app"></div>'
+                b'<script src="/bundle.js"></script></body></html>'
+            )
+            large_page_prefix = (
+                b'<html><body><div id="app"></div>'
+                b'<script src="/oversized.js"></script>'
+            )
+            large_page_suffix = b"</body></html>"
+            large_page_body = (
+                large_page_prefix
+                + b" " * (499_900 - len(large_page_prefix) - len(large_page_suffix))
+                + large_page_suffix
+            )
+            script_body = (
+                b'document.getElementById("app").textContent = '
+                b'"BUNDLE RENDERED TEXT";'
+            )
+            oversized_script_body = script_body + b" " * 2_000
+
+            async def handle(reader, writer):
+                request = await reader.readuntil(b"\r\n\r\n")
+                path = request.split(b" ", 2)[1].split(b"?", 1)[0].decode()
+                requests.append(path)
+                if path == "/page":
+                    body = page_body
+                    content_type = "text/html; charset=utf-8"
+                elif path == "/large":
+                    body = large_page_body
+                    content_type = "text/html; charset=utf-8"
+                elif path == "/bundle.js":
+                    body = script_body
+                    content_type = "application/javascript"
+                else:
+                    body = oversized_script_body
+                    content_type = "application/javascript"
+                response = (
+                    b"HTTP/1.1 200 OK\r\n"
+                    + f"Content-Length: {len(body)}\r\n".encode()
+                    + f"Content-Type: {content_type}\r\n".encode()
+                    + b"Connection: close\r\n\r\n"
+                    + body
+                )
+                writer.write(response)
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+
+            server = await asyncio.start_server(handle, "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+            page_url = f"http://127.0.0.1:{port}/page"
+
+            class FakeRequest:
+                def __init__(self, url, resource_type, navigation=False):
+                    self.url = url
+                    self.resource_type = resource_type
+                    self._navigation = navigation
+
+                def is_navigation_request(self):
+                    return self._navigation
+
+            class FakeRoute:
+                def __init__(self, request):
+                    self.request = request
+                    self.fulfilled = None
+                    self.aborted = False
+
+                async def fulfill(self, **kwargs):
+                    self.fulfilled = kwargs
+
+                async def abort(self):
+                    self.aborted = True
+
+            class FakePage:
+                def __init__(self):
+                    self.route_handler = None
+                    self.rendered_text = ""
+
+                async def route(self, _pattern, handler):
+                    self.route_handler = handler
+
+                async def _load_external_script(self, html):
+                    sources = re.findall(
+                        r'<script[^>]+src=["\']([^"\']+)', html
+                    )
+                    for source in sources:
+                        route = FakeRoute(
+                            FakeRequest(
+                                f"http://127.0.0.1:{port}{source}", "script"
+                            )
+                        )
+                        await self.route_handler(route)
+                        if route.fulfilled is not None:
+                            body = route.fulfilled.get("body", b"")
+                            if isinstance(body, str):
+                                body = body.encode()
+                            if b"BUNDLE RENDERED TEXT" in body:
+                                self.rendered_text = "BUNDLE RENDERED TEXT"
+
+                async def set_content(self, html, **_kwargs):
+                    await self._load_external_script(html)
+
+                async def goto(self, url, **_kwargs):
+                    document = FakeRoute(
+                        FakeRequest(url, "document", navigation=True)
+                    )
+                    await self.route_handler(document)
+                    if document.fulfilled is None:
+                        return
+                    body = document.fulfilled.get("body", b"")
+                    if isinstance(body, bytes):
+                        body = body.decode("utf-8")
+                    await self._load_external_script(body)
+
+                def locator(self, _selector):
+                    return self
+
+                async def evaluate(self, _expression, _limit):
+                    return self.rendered_text
+
+            class FakeBrowser:
+                def __init__(self, page):
+                    self.page = page
+
+                async def new_page(self):
+                    return self.page
+
+                async def close(self):
+                    pass
+
+            class FakeChromium:
+                def __init__(self, page):
+                    self.page = page
+
+                async def launch(self, **_kwargs):
+                    return FakeBrowser(self.page)
+
+            class FakePlaywrightContext:
+                def __init__(self, page):
+                    self.chromium = FakeChromium(page)
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    pass
+
+            pages = []
+
+            def fake_async_playwright():
+                page = FakePage()
+                pages.append(page)
+                return FakePlaywrightContext(page)
+
+            async_api = ModuleType("playwright.async_api")
+            async_api.async_playwright = fake_async_playwright
+            playwright = ModuleType("playwright")
+            playwright.__path__ = []
+            try:
+                with patch.dict(
+                    sys.modules,
+                    {
+                        "playwright": playwright,
+                        "playwright.async_api": async_api,
+                    },
+                ):
+                    normal = await self.executor._execute_web_fetch(
+                        {"id": "web_fetch_script", "url": page_url}
+                    )
+                    large = await self.executor._execute_web_fetch(
+                        {
+                            "id": "web_fetch_script_over_budget",
+                            "url": f"http://127.0.0.1:{port}/large",
+                        }
+                    )
+            finally:
+                server.close()
+                await server.wait_closed()
+
+            return normal, large, requests, pages
+
+        normal, large, requests, pages = _run(run_case())
+        self.assertTrue(normal.success)
+        self.assertIn("BUNDLE RENDERED TEXT", normal.output)
+        self.assertTrue(large.success)
+        self.assertNotIn("BUNDLE RENDERED TEXT", large.output)
+        self.assertEqual(requests.count("/bundle.js"), 1)
+        self.assertEqual(requests.count("/oversized.js"), 1)
+        self.assertEqual(pages[1].rendered_text, "")
 
     def test_web_fetch_accepts_exact_download_limit_without_content_length(self):
         """A body exactly at the download cap is allowed without a length header."""
