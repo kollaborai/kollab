@@ -1,0 +1,1 @@
+- Clarify the macOS terminal teardown boundary: jobs that detach and close all PTY descriptors between scans may survive terminal close (#1025).
