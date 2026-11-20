@@ -53,6 +53,183 @@ class TestSlashCommandParser(unittest.TestCase):
         self.assertEqual(command.name, "save")
         self.assertEqual(command.args, ["my file.txt", "--format", "json"])
 
+    def test_parse_unquoted_windows_paths_preserves_backslashes(self):
+        """F3: relative and rooted Windows paths must keep their separators."""
+        cases = [
+            (r"/open C:\work\docs\notes.txt", [r"C:\work\docs\notes.txt"]),
+            (r"/open \\server\share\notes.txt", [r"\\server\share\notes.txt"]),
+            (r"/open ..\work\docs\notes.txt", [r"..\work\docs\notes.txt"]),
+            (r"/open \work\docs\notes.txt", [r"\work\docs\notes.txt"]),
+            (r"/open folder\notes.txt", [r"folder\notes.txt"]),
+            (
+                r'/open "C:\work\docs and notes.txt"',
+                [r"C:\work\docs and notes.txt"],
+            ),
+            (
+                r"/open --path=C:\work\docs\notes.txt",
+                [r"--path=C:\work\docs\notes.txt"],
+            ),
+            (r"/open C:\資料\notes.txt", [r"C:\資料\notes.txt"]),
+            (r"/open my\ file.txt", ["my file.txt"]),
+        ]
+
+        for input_text, expected_args in cases:
+            with self.subTest(input_text=input_text):
+                command = self.parser.parse_command(input_text)
+                self.assertIsNotNone(command)
+                self.assertEqual(command.args, expected_args)
+
+    def test_single_quoted_windows_paths_preserve_backslashes(self):
+        cases = [
+            (r"/open 'C:\my docs\notes.txt'", [r"C:\my docs\notes.txt"]),
+            (r"/open 'C:\work\notes.txt'", [r"C:\work\notes.txt"]),
+            (r"/open 'C:\Program Files\x y.txt'", [r"C:\Program Files\x y.txt"]),
+            (
+                r"/open 'C:\Program Files\Microsoft Office\x.exe'",
+                [r"C:\Program Files\Microsoft Office\x.exe"],
+            ),
+            (r"/say 'use dir\sub now'", [r"use dir\sub now"]),
+        ]
+
+        for input_text, expected_args in cases:
+            with self.subTest(input_text=input_text):
+                command = self.parser.parse_command(input_text)
+                self.assertIsNotNone(command)
+                self.assertEqual(command.args, expected_args)
+
+    def test_escaped_wildcards_keep_shlex_behavior(self):
+        cases = [
+            (r"/open \*", ["*"]),
+            (r"/open folder\*", ["folder*"]),
+            (r"/open --path=\*", ["--path=*"]),
+        ]
+
+        for input_text, expected_args in cases:
+            with self.subTest(input_text=input_text):
+                command = self.parser.parse_command(input_text)
+                self.assertIsNotNone(command)
+                self.assertEqual(command.args, expected_args)
+
+    def test_escaped_shell_characters_keep_shlex_behavior(self):
+        cases = [
+            (r"/open file\(1\).txt", ["file(1).txt"]),
+            (r"/open report\ \(final\).pdf", ["report (final).pdf"]),
+            (r"/open ./my\(1\).txt", ["./my(1).txt"]),
+            (r"/open \$HOME/x", ["$HOME/x"]),
+        ]
+
+        for input_text, expected_args in cases:
+            with self.subTest(input_text=input_text):
+                command = self.parser.parse_command(input_text)
+                self.assertIsNotNone(command)
+                self.assertEqual(command.args, expected_args)
+
+    def test_escaped_shell_punctuation_keeps_shlex_behavior(self):
+        cases = [
+            (r"/open file\&name.txt", ["file&name.txt"]),
+            (r"/open file\;name.txt", ["file;name.txt"]),
+            (r"/open file\#name.txt", ["file#name.txt"]),
+            (r"/open file\{name\}.txt", ["file{name}.txt"]),
+            (r"/open file\[name\].txt", ["file[name].txt"]),
+            (r"/open file\]name.txt", ["file]name.txt"]),
+            (r"/open file\!name.txt", ["file!name.txt"]),
+            (r"/open file\~name.txt", ["file~name.txt"]),
+            (r"/open file\%name.txt", ["file%name.txt"]),
+            (r"/open file\:name.txt", ["file:name.txt"]),
+            (r"/open file\=name.txt", ["file=name.txt"]),
+            (r"/open file\+name.txt", ["file+name.txt"]),
+            (r"/open file\,name.txt", ["file,name.txt"]),
+            (r"/open file\^name.txt", ["file^name.txt"]),
+            (r"/open file\@name.txt", ["file@name.txt"]),
+            (r"/open file\.name.txt", ["file.name.txt"]),
+            (r"/open file\_name.txt", ["file_name.txt"]),
+            ("/open file\\" + chr(96) + "name.txt", ["file" + chr(96) + "name.txt"]),
+        ]
+
+        for input_text, expected_args in cases:
+            with self.subTest(input_text=input_text):
+                command = self.parser.parse_command(input_text)
+                self.assertIsNotNone(command)
+                self.assertEqual(command.args, expected_args)
+
+    def test_escaped_punctuation_after_path_separators_keeps_shlex_behavior(self):
+        path_prefix = "reports\\archive\\file\\"
+        punctuation = ("%", ":", "=", "+", ",", "^", "@", ".", "_")
+
+        for character in punctuation:
+            with self.subTest(character=character):
+                input_text = "/open " + path_prefix + character + "draft.txt"
+                command = self.parser.parse_command(input_text)
+                self.assertIsNotNone(command)
+                self.assertEqual(
+                    command.args,
+                    ["reportsarchivefile" + character + "draft.txt"],
+                )
+
+    def test_escaped_punctuation_before_later_path_segment_keeps_shlex_behavior(self):
+        parsed = self.parser.parse_command(
+            r"/open reports\archive\file\%draft\notes.txt"
+        )
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.args, ["reportsarchivefile%draftnotes.txt"])
+
+    def test_parse_relative_directory_paths_with_trailing_separators_before_flags(self):
+        cases = [
+            ("/open folder\\ --mode=read", ["folder\\", "--mode=read"]),
+            ("/open .\\ --mode=read", [".\\", "--mode=read"]),
+            ("/open ..\\ --mode=read", ["..\\", "--mode=read"]),
+            (
+                "/open --path=folder\\ --mode=read",
+                ["--path=folder\\", "--mode=read"],
+            ),
+        ]
+
+        for input_text, expected_args in cases:
+            with self.subTest(input_text=input_text):
+                command = self.parser.parse_command(input_text)
+                self.assertIsNotNone(command)
+                self.assertEqual(command.args, expected_args)
+
+    def test_parse_windows_paths_with_trailing_separators_before_next_token(self):
+        cases = [
+            (
+                r"/open C:\work\docs\ --mode=read",
+                ["C:\\work\\docs\\", "--mode=read"],
+            ),
+            (
+                r"/open \work\docs\ --mode=read",
+                ["\\work\\docs\\", "--mode=read"],
+            ),
+            (
+                r"/open \\server\share\ --mode=read",
+                ["\\\\server\\share\\", "--mode=read"],
+            ),
+            (
+                r"/open --path=C:\work\docs\ --mode=read",
+                ["--path=C:\\work\\docs\\", "--mode=read"],
+            ),
+            (
+                r"/open C:\work\docs\ target.txt",
+                ["C:\\work\\docs\\", "target.txt"],
+            ),
+            (
+                r"/open work\docs\ target.txt",
+                ["work\\docs\\", "target.txt"],
+            ),
+        ]
+
+        for input_text, expected_args in cases:
+            with self.subTest(input_text=input_text):
+                command = self.parser.parse_command(input_text)
+                self.assertIsNotNone(command)
+                self.assertEqual(command.args, expected_args)
+
+    def test_malformed_quote_fallback_keeps_original_windows_separators(self):
+        command = r'/open "C:\work\docs\notes.txt'
+        parsed = self.parser.parse_command(command)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.args, [r'"C:\work\docs\notes.txt'])
+
     def test_parse_command_with_parameters(self):
         """Test parameter extraction."""
         command = self.parser.parse_command("/config --theme=dark --verbose")

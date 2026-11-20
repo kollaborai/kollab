@@ -1,6 +1,7 @@
 """Slash command parser for Kollab."""
 
 import logging
+import re
 import shlex
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -58,12 +59,41 @@ class SlashCommandParser:
 
             # Split command and arguments using shell-like parsing
             # This handles quoted arguments properly: /save "my file.txt"
+            original_command_text = command_text
             try:
+                # Single-quoted backslashes are literal; leave those spans unchanged.
+                # POSIX shlex treats unquoted backslashes as escapes. Protect separators
+                # only in unquoted Windows path candidates with valid path segments.
+                # A trailing relative separator before another argument must not escape its boundary.
+                # Leave explicit shell-metacharacter escapes to shlex in every path form.
+                # Unlisted punctuation escapes also select shlex for ambiguous relative paths.
+                command_text = re.sub(
+                    r"(?P<single_quoted>'[^']*')|"
+                    r"(?<!\S)(?<!\\[ \t])"
+                    r"(?:--?[\w-]+=)?"
+                    r"(?!(?:[^\s]|\\\s)*\\(?:[&;#{}!~\x60()$]|\[|\]))"
+                    r"(?!['\"])"
+                    r"(?:"
+                    r"[A-Za-z]:\\(?:[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*\\?)?"
+                    r"|\\\\(?:\?\\)?[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*\\?"
+                    r"|\\(?![$()])[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*\\?"
+                    r"|(?!(?:[^\s]|\\\s)*\\(?:[^\w\s\\]|_)[^\s\\]*(?=\\|\s|$))"
+                    r"(?:(?!(?:[^\s]|\\\s)*\\[()$])[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*\\(?=\s+--?[\w-]+(?:=|\s|$))"
+                    r"|(?!(?:[^\s]|\\\s)*\\[()$])[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)+\\(?=\s+[^-\s][^\s]*)"
+                    r"|(?!(?:[^\s]|\\\s)*\\[()$])[^\s\\\"'<>|?*]+\\[^\s\\\"'<>|?*]+(?:\\[^\s\\\"'<>|?*]+)*)"
+                    r")(?=\s|$)",
+                    lambda match: (
+                        match.group("single_quoted")
+                        if match.group("single_quoted") is not None
+                        else match.group(0).replace("\\", "\\\\")
+                    ),
+                    command_text,
+                )
                 parts = shlex.split(command_text)
             except ValueError as e:
                 # Handle malformed quotes gracefully
                 self.logger.warning(f"Quote parsing failed, using simple split: {e}")
-                parts = command_text.split()
+                parts = original_command_text.split()
 
             if not parts:
                 return None
