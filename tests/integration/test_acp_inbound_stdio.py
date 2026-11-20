@@ -324,16 +324,17 @@ def configure_acp(home, workspace, scenario="normal"):
 
 def owned_daemons(home, workspace):
     if os.name == "nt":
-        presence_dir = home / ".kollab" / "hub" / "presence"
+        presence_paths = home.glob(".kollab/**/presence/*.json")
     else:
         # POSIX presence is colocated with the project-scoped socket runtime,
         # not stored under HOME.
         from kollabor_config.hub_paths import hub_project_socket_key, hub_socket_root
 
         presence_dir = hub_socket_root() / hub_project_socket_key(workspace)
+        presence_paths = presence_dir.glob("*.json")
 
     result = []
-    for path in presence_dir.glob("*.json"):
+    for path in presence_paths:
         try:
             record = json.loads(path.read_text())
         except FileNotFoundError:
