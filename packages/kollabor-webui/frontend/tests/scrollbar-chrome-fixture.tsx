@@ -8,16 +8,16 @@
  */
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
-import EditorReact, { type Monaco } from "@monaco-editor/react";
 import { ScrollArea as ScrollAreaPrimitive } from "radix-ui";
 
 import "../src/styles.css";
 import "../src/components/code/monaco-setup";
 import { ScrollArea, ScrollBar } from "../src/components/ui/scroll-area";
 import { Dialog, DialogContent, DialogTrigger, DialogTitle } from "../src/components/ui/dialog";
+import { EditorPane } from "../src/components/code/editor-pane";
+import { useEditorStore } from "../src/components/code/editor-store";
+import { setCodeRoot, setCodeSession } from "../src/lib/code-fetch";
 import { TerminalViewer } from "../src/components/terminal/terminal-viewer";
-// The scrollbar options factory shared with the production editor pane.
-import { editorScrollbars } from "../src/components/code/editor-pane";
 
 function NativeBoth() {
   return (
@@ -129,30 +129,27 @@ const LONG_CODE = Array.from(
   (_, i) => `function line${i}(veryLongArgumentName, anotherVeryLongArgumentName) { return ${i} * ${i}; } // pad pad pad pad pad pad pad pad pad pad`,
 ).join("\n");
 
+const paneId = useEditorStore.getState().activePaneId;
+const normalEditorPath = "/fixture/scrollbar-long.ts";
+const diffEditorPath = "/fixture/.diffs/scrollbar-long.diff";
+setCodeSession("scrollbar-fixture");
+setCodeRoot("/fixture");
+useEditorStore.getState().openFile(paneId, normalEditorPath, "scrollbar-long.ts", ".ts", LONG_CODE);
+useEditorStore.getState().pinFile(normalEditorPath);
+useEditorStore.getState().openFile(paneId, diffEditorPath, "scrollbar-long.diff", ".diff", LONG_CODE);
+useEditorStore.getState().pinFile(diffEditorPath);
+const diffState = useEditorStore.getState();
+const diffFile = diffState.fileCache.get(diffEditorPath);
+if (!diffFile) throw new Error("scrollbar fixture diff file was not seeded");
+const diffCache = new Map(diffState.fileCache);
+diffCache.set(diffEditorPath, { ...diffFile, headContent: LONG_CODE.replaceAll("function line", "function oldLine") });
+useEditorStore.setState({ fileCache: diffCache });
+useEditorStore.getState().setActiveFile(paneId, normalEditorPath);
+
 function EditorSurface() {
-  const [editor, setEditor] = useState<unknown>(null);
   return (
     <div data-testid="editor-box" style={{ width: 400, height: 200 }}>
-      <EditorReact
-        height="100%"
-        defaultLanguage="typescript"
-        defaultValue={LONG_CODE}
-        theme="kollab-dark"
-        onMount={(ed: unknown, _monaco: Monaco) => {
-          setEditor(ed);
-          (window as unknown as Record<string, unknown>).__editor = ed;
-        }}
-        options={{
-          fontSize: 12,
-          minimap: { enabled: false },
-          scrollBeyondLastLine: false,
-          overviewRulerBorder: false,
-          hideCursorInOverviewRuler: true,
-          // The production scrollbar contract, shared with editor-pane.tsx.
-          ...editorScrollbars(),
-        }}
-      />
-      <div data-has-editor={editor ? "yes" : "no"} />
+      <EditorPane paneId={paneId} rootPath="/fixture" />
     </div>
   );
 }
@@ -217,13 +214,16 @@ declare global {
   interface Window {
     __scrollbarProbes?: () => unknown;
     __termWrite?: (text: string) => void;
-    __editor?: unknown;
+    __setEditorVariant?: (variant: "normal" | "diff") => void;
     __ready?: boolean;
   }
 }
 
 const root = createRoot(document.getElementById("root")!);
 root.render(<Page />);
+window.__setEditorVariant = (variant) => {
+  useEditorStore.getState().setActiveFile(paneId, variant === "diff" ? diffEditorPath : normalEditorPath);
+};
 
 // Probes read layout geometry, so they run after paint. visibility hidden and
 // display none both count as "not visible chrome"; so does zero box size.
@@ -263,6 +263,7 @@ window.__scrollbarProbes = () => {
       (box.width > 1 || box.height > 1)
     );
   };
+  const visibleAny = (sel: string) => Array.from(document.querySelectorAll(sel)).some(visibleChrome);
   const byId = (id: string) => document.querySelector(`[data-testid="${id}"]`);
   const safe = (el: Element | null) => (el ? thickness(el) : { v: -1, h: -1, missing: true });
   const nativeBoth = byId("native-both");
@@ -281,6 +282,12 @@ window.__scrollbarProbes = () => {
     ),
     "monaco-h-scrollbar": visibleChrome(
       q('[data-testid="editor-box"] .monaco-scrollable-element > .scrollbar.horizontal'),
+    ),
+    "monaco-diff-v-scrollbar": visibleAny(
+      '[data-testid="editor-box"] .monaco-diff-editor .monaco-scrollable-element > .scrollbar.vertical',
+    ),
+    "monaco-diff-h-scrollbar": visibleAny(
+      '[data-testid="editor-box"] .monaco-diff-editor .monaco-scrollable-element > .scrollbar.horizontal',
     ),
     xterm: safe(q('[data-testid="terminal-box"] .xterm-viewport')),
     // Layout honesty: a hidden scrollbar must not leave a reserved gutter.

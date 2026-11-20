@@ -138,7 +138,7 @@ async function run() {
 
     await check("monaco editor mounted with shared options", async () => {
       await until(
-        () => page.evaluate(() => Boolean(window.__editor)),
+        () => page.evaluate(() => Boolean(document.querySelector('[data-testid="editor-box"] .monaco-editor'))),
         "monaco editor never mounted",
       );
     });
@@ -177,8 +177,13 @@ async function run() {
         ([sel, prop]) => document.querySelector(sel)[prop],
         [sel, prop],
       );
-    const editorScroll = () =>
-      page.evaluate(() => window.__editor.getScrollTop());
+    const editorVisibleLines = () =>
+      page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-testid="editor-box"] .view-line'))
+          .slice(0, 4)
+          .map((line) => line.textContent ?? "")
+          .join("\n"),
+      );
 
     await check("wheel scrolls native vertical", async () => {
       const d = await wheelDelta(page, page.getByTestId("native-both"), 0, 240, r('[data-testid="native-both"]', "scrollTop"));
@@ -211,8 +216,12 @@ async function run() {
       await page.getByTestId("dialog-scroll").waitFor({ state: "detached" });
     });
     await check("wheel scrolls monaco", async () => {
-      const d = await wheelDelta(page, page.getByTestId("editor-box"), 0, 240, editorScroll);
-      assert.ok(d > 0, `monaco wheel scrolled by ${d}`);
+      await page.getByTestId("editor-box").hover();
+      const before = await editorVisibleLines();
+      await page.mouse.wheel(0, 240);
+      await page.waitForTimeout(150);
+      const after = await editorVisibleLines();
+      assert.notEqual(after, before, "monaco visible lines did not change after wheel scrolling");
     });
 
     // Keyboard scrolling on focusable scrollers + editor.
@@ -226,11 +235,11 @@ async function run() {
     });
     await check("keyboard scrolls monaco", async () => {
       await page.getByTestId("editor-box").click();
-      const before = await editorScroll();
+      const before = await editorVisibleLines();
       await page.keyboard.press("PageDown");
       await page.waitForTimeout(150);
-      const after = await editorScroll();
-      assert.ok(after - before > 0, `monaco keyboard scrolled by ${after - before}`);
+      const after = await editorVisibleLines();
+      assert.notEqual(after, before, "monaco visible lines did not change after PageDown");
     });
 
     // Programmatic navigation + anchor stability.
@@ -284,6 +293,29 @@ async function run() {
 
     const p2 = await probes(page);
     await check("geometry stable after scrolling", () => assertThicknessZero("native-both", p2["native-both"]));
+
+    await check("production diff editor mounts through EditorPane", async () => {
+      await page.evaluate(() => window.__setEditorVariant?.("diff"));
+      await until(
+        () => page.evaluate(() => Boolean(document.querySelector('[data-testid="editor-box"] .monaco-diff-editor'))),
+        "production diff editor never mounted",
+      );
+      await until(
+        () => page.evaluate(() => document.querySelectorAll('[data-testid="editor-box"] .monaco-diff-editor .monaco-scrollable-element').length >= 2),
+        "production diff editor scroll views never mounted",
+      );
+      await page.waitForTimeout(250);
+      const box = await page.getByTestId("editor-box").boundingBox();
+      assert.ok(box, "production diff editor has no layout box");
+      await page.mouse.move(box.x + box.width * 0.75, box.y + box.height / 2);
+      await page.mouse.wheel(0, 240);
+      await page.waitForTimeout(150);
+    });
+    const diffProbes = await probes(page);
+    await check("production diff vertical slider hidden", () =>
+      assert.ok(!diffProbes["monaco-diff-v-scrollbar"], `diff vertical slider visible: ${JSON.stringify(diffProbes["monaco-diff-v-scrollbar"])}`));
+    await check("production diff horizontal slider hidden", () =>
+      assert.ok(!diffProbes["monaco-diff-h-scrollbar"], `diff horizontal slider visible: ${JSON.stringify(diffProbes["monaco-diff-h-scrollbar"])}`));
 
     await context.close();
   } finally {
