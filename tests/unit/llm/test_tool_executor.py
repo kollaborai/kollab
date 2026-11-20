@@ -187,6 +187,8 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
                 f'cd "{outside_home}" && find . -name marker.txt -print',
                 f'find {{{workspace},{outside_home}}} -name marker.txt -print',
                 "find . -follow -name marker.txt -print",
+                f'env -C "{outside_home}" find . -name marker.txt -print',
+                f"sh -c 'find \"{outside_home}\" -name marker.txt -print'",
             ]
             with patch.dict(os.environ, {"HOME": str(outside_home)}):
                 for command in commands:
