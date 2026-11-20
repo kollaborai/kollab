@@ -3439,21 +3439,66 @@ class ToolExecutor:
                     if len(text) > 200:
                         return text
 
-            # Code samples are useful in full-text mode but usually overwhelm
-            # the readability fallback for main-content extraction. Malformed
-            # inline code wrappers with block children should not hide the page.
+            # Preformatted samples and inline code are not page prose. A
+            # malformed inline code wrapper with block children must not hide
+            # the page content it swallowed.
             block_tags = [
                 "p", "div", "section", "article", "main", "h1", "h2", "h3",
                 "h4", "h5", "h6", "ul", "ol", "li", "table", "blockquote",
             ]
-            for tag in soup.find_all(["pre", "code"]):
+            for tag in soup.find_all("pre"):
+                tag.decompose()
+
+            code_tags = soup.find_all("code")
+            code_with_blocks = [tag for tag in code_tags if tag.find(block_tags)]
+            if code_with_blocks:
+                import re
+
+                line_offsets = [0]
+                for line in html.splitlines(keepends=True):
+                    line_offsets.append(line_offsets[-1] + len(line))
+                code_tag_tokens = re.compile(r"<(/?)\s*code\b[^>]*>", re.IGNORECASE)
+
+            for tag in code_tags:
                 if tag.find(block_tags):
-                    for child in list(tag.contents):
-                        if isinstance(child, str):
-                            child.extract()
-                        elif child.name not in block_tags and child.find(block_tags) is None:
-                            child.decompose()
-                    tag.unwrap()
+                    source_line = getattr(tag, "sourceline", None)
+                    source_pos = getattr(tag, "sourcepos", None)
+                    if (
+                        source_line is None
+                        or source_pos is None
+                        or source_line < 1
+                        or source_line >= len(line_offsets)
+                    ):
+                        has_closing_tag = True
+                    else:
+                        source_start = line_offsets[source_line - 1] + source_pos
+                        tokens = code_tag_tokens.finditer(html, source_start)
+                        opening = next(tokens, None)
+                        has_closing_tag = (
+                            opening is None
+                            or opening.start() != source_start
+                            or bool(opening.group(1))
+                        )
+                        if not has_closing_tag:
+                            depth = 1
+                            for token in tokens:
+                                if token.group(1):
+                                    depth -= 1
+                                    if depth == 0:
+                                        has_closing_tag = True
+                                        break
+                                elif not token.group(0).rstrip().endswith("/>"):
+                                    depth += 1
+
+                    if has_closing_tag:
+                        tag.decompose()
+                    else:
+                        for child in list(tag.contents):
+                            if isinstance(child, str):
+                                child.extract()
+                            elif child.name not in block_tags and child.find(block_tags) is None:
+                                child.decompose()
+                        tag.unwrap()
                 else:
                     tag.decompose()
 
@@ -3580,14 +3625,22 @@ class ToolExecutor:
         html = raw_content.sub("", html)
 
         if extract_main:
-            # If pre/code is unclosed, stop at the next block boundary so
-            # malformed inline markup cannot hide following page text.
-            block_start = r"(?=<\s*(?:p|div|section|article|main|h[1-6]|li|ul|ol|table|blockquote)\b)"
-            code_blocks = re.compile(
-                r"<(pre|code)\b[^>]*>.*?(?:</\1\s*>|" + block_start + r"|$)",
+            # Remove complete pre/code blocks first, including any block tags
+            # nested inside them.
+            closed_code_blocks = re.compile(
+                r"<(pre|code)\b[^>]*>.*?</\1\s*>",
                 re.DOTALL | re.IGNORECASE,
             )
-            html = code_blocks.sub("", html)
+            html = closed_code_blocks.sub("", html)
+
+            # For unclosed wrappers, stop at the next block boundary so
+            # malformed inline markup cannot hide following page text.
+            block_start = r"(?=<\s*(?:p|div|section|article|main|h[1-6]|li|ul|ol|table|blockquote)\b)"
+            unclosed_code_blocks = re.compile(
+                r"<(pre|code)\b[^>]*>.*?(?:" + block_start + r"|$)",
+                re.DOTALL | re.IGNORECASE,
+            )
+            html = unclosed_code_blocks.sub("", html)
 
         # Remove structural non-content elements only when their closing tag
         # is present, so a malformed navigation tag cannot consume the page.
