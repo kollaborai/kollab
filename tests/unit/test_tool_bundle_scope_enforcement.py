@@ -185,6 +185,33 @@ class TestBundleScopeEnforcement:
         assert result.metadata.get("scope_denied") is None
         assert result.tool_type == "terminal_read"
 
+    def test_git_exe_spelling_is_allowed_without_granting_terminal(self, tmp_path):
+        """Windows' git.exe spelling receives the same Git-only policy."""
+        import subprocess
+        from unittest.mock import AsyncMock, MagicMock
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        executor = _make_executor()
+        executor.workspace = tmp_path
+        executor.event_bus = MagicMock()
+        executor.event_bus.emit_with_hooks = AsyncMock(return_value=None)
+        executor.set_bundle_scope(["file-read", "file-grep", "git"])
+
+        result = _run_async(
+            executor.execute_tool(
+                {
+                    "id": "test-git-exe",
+                    "type": "terminal",
+                    "command": "git.exe status --short",
+                    "cwd": str(tmp_path),
+                }
+            )
+        )
+
+        assert result.success, result.error
+        assert result.metadata.get("scope_denied") is None
+        assert result.tool_type == "terminal_read"
+
     def test_documented_xml_git_call_is_granted_under_git_only_bundle(self, tmp_path):
         """The documented XML terminal form has no native Git name field."""
         import subprocess
