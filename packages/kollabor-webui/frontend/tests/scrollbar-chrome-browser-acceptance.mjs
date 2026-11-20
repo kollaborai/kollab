@@ -154,6 +154,19 @@ async function run() {
     await check("nested outer chrome hidden", () => assertThicknessZero("native-outer", p1["native-outer"]));
     await check("nested inner chrome hidden", () => assertThicknessZero("native-inner", p1["native-inner"]));
     await check("document chrome hidden", () => assertThicknessZero("document", p1.document));
+    await check("document scrolls with hidden chrome", async () => {
+      const result = await page.evaluate(() => {
+        const documentHeight = document.documentElement.scrollHeight;
+        const viewportHeight = document.documentElement.clientHeight;
+        window.scrollTo(0, Number.MAX_SAFE_INTEGER);
+        return { documentHeight, viewportHeight, scrollY: window.scrollY };
+      });
+      assert.ok(
+        result.documentHeight > result.viewportHeight && result.scrollY > 0,
+        `document did not scroll (${JSON.stringify(result)})`,
+      );
+      await page.evaluate(() => window.scrollTo(0, 0));
+    });
     await check("dialog scroller chrome hidden", () => assertThicknessZero("dialog-scroll", p1["dialog-scroll"]));
     await check("xterm viewport chrome hidden", () => assertThicknessZero("xterm", p1.xterm));
     await check("radix vertical scrollbar hidden", () => assertChromeHidden("radix-v-scrollbar", p1["radix-v-scrollbar"]));
