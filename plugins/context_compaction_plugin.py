@@ -3398,6 +3398,7 @@ class ContextCompactionPlugin(BasePlugin):
         oversized_indices: set[int] = set()
         for index, msg in latest_tasks:
             content = str(getattr(msg, "content", "") or "")
+            needs_reexcerpt = False
             task_id = (self._message_task_id(msg) or "unknown")[:128]
             prefix = f"[Active TaskLedger task {task_id}; latest assignment excerpt]\n"
             legacy_suffix = "\n[Remaining assignment text is summarized below.]"
@@ -3417,19 +3418,24 @@ class ContextCompactionPlugin(BasePlugin):
                 and content.startswith(prefix)
                 and content.endswith(legacy_suffix)
             )
-            if is_marked_excerpt or is_legacy_excerpt:
-                normalized_content = content.removesuffix(suffix).removesuffix(
-                    legacy_suffix
-                )
-                if normalized_content != content or is_legacy_excerpt:
-                    msg = copy.copy(msg)
-                    msg.content = normalized_content
-                    msg.metadata = {
-                        **(metadata or {}),
-                        "context_compaction_task_excerpt": True,
-                    }
-                    content = normalized_content
-            if len(content) <= MAX_PRESERVED_HUB_TASK_CHARS:
+            if is_legacy_excerpt or (
+                is_marked_excerpt and content.endswith(legacy_suffix)
+            ):
+                normalized_content = content.removesuffix(legacy_suffix)
+                if normalized_content.startswith(prefix):
+                    normalized_content = normalized_content[len(prefix) :]
+                msg = copy.copy(msg)
+                msg.content = normalized_content
+                msg.metadata = {
+                    **(metadata or {}),
+                    "context_compaction_task_excerpt": True,
+                }
+                content = normalized_content
+                needs_reexcerpt = True
+            if (
+                len(content) <= MAX_PRESERVED_HUB_TASK_CHARS
+                and not needs_reexcerpt
+            ):
                 preserved_by_index[index] = msg
                 continue
 
