@@ -84,8 +84,12 @@ async function main() {
     rootFound = true;
     const beforePresentRead = prChainReads;
     await view.page.setViewportSize({ width: 1280, height: 900 });
-    await view.page.reload({ waitUntil: "domcontentloaded" });
-    await waitForRead(() => prChainReads, beforePresentRead);
+    await view.page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    assert.equal(
+      await waitForRead(() => prChainReads, beforePresentRead),
+      true,
+      "sidebar refreshes runner-folder availability when the page becomes visible",
+    );
     await view.page.getByRole("button", buttonName).waitFor({ state: "visible" });
     await capture(view.page, "pr-chain-sidebar-present-1280.png");
     await view.page.getByRole("button", buttonName).click();
