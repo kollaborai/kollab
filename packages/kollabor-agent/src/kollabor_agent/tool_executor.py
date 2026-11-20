@@ -3423,8 +3423,8 @@ class ToolExecutor:
                 return text
 
         # Remove non-content elements entirely
-        for tag in soup.find_all(["script", "style", "nav", "footer", "aside",
-                                   "header", "noscript", "svg", "form",
+        for tag in soup.find_all(["script", "style", "pre", "code", "nav", "footer",
+                                   "aside", "header", "noscript", "svg", "form",
                                    "button", "iframe"]):
             tag.decompose()
 
@@ -3536,7 +3536,7 @@ class ToolExecutor:
 
         # Remove non-content tags entirely (tag + inner content)
         non_content = re.compile(
-            r"<(script|style|nav|footer|aside|header|noscript|svg|form|iframe)\b[^>]*>.*?</\1>",
+            r"<(script|style|pre|code|nav|footer|aside|header|noscript|svg|form|iframe)\b[^>]*>.*?</\1>",
             re.DOTALL | re.IGNORECASE,
         )
         html = non_content.sub("", html)

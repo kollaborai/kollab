@@ -54,10 +54,11 @@ note: these are XML tags parsed by kollabor_ai.response_parser, not tools/
 ### Web Fetch
 
 `web-fetch` extracts supported JSON-LD article content before removing script
-elements, then falls back to semantic HTML and readable page text. The agent
-package installs Beautiful Soup and uses Python's built-in HTML parser; lxml is
-not required. If Beautiful Soup is unavailable, the tool uses its regex-based
-HTML-to-text fallback, which strips script contents.
+elements, then falls back to semantic HTML and readable page text. When it falls
+back, it removes script, style, `pre`, and `code` bodies before text extraction.
+The agent package installs Beautiful Soup and uses Python's built-in HTML parser;
+lxml is not required. If Beautiful Soup is unavailable, the tool uses its regex-based
+HTML-to-text fallback, which strips script, style, `pre`, and `code` contents.
 
 ### Terminal Commands
 
