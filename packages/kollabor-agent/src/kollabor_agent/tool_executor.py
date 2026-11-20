@@ -1289,6 +1289,7 @@ class ToolExecutor:
             tool_type = "terminal"
 
         voice_terminal_plan: VoiceTerminalPlan | None = None
+        voice_terminal_timeout = self.terminal_timeout
         if is_voice_origin(execution_context) and not self.trust_all:
             decision = voice_decision or self._voice_tool_guard.evaluate(
                 tool_data,
@@ -1309,6 +1310,23 @@ class ToolExecutor:
                     },
                 )
             voice_terminal_plan = decision.plan
+            if voice_terminal_plan is not None:
+                requested_timeout = tool_data.get("timeout")
+                if requested_timeout is not None:
+                    try:
+                        voice_terminal_timeout = self._parse_terminal_timeout(
+                            requested_timeout
+                        )
+                    except ValueError:
+                        return ToolExecutionResult(
+                            tool_id=tool_id,
+                            tool_type=tool_type,
+                            success=False,
+                            error=(
+                                "Invalid terminal timeout. Use a positive duration "
+                                "such as 30s, 5m, or 1h."
+                            ),
+                        )
 
         # Check for cancellation before starting
         if self.is_cancelled():
@@ -1432,6 +1450,7 @@ class ToolExecutor:
                             result = await self._execute_voice_terminal_plan(
                                 tool_data,
                                 voice_terminal_plan,
+                                voice_terminal_timeout,
                             )
                         else:
                             result = await self._execute_terminal_command(tool_data)
@@ -1652,13 +1671,18 @@ class ToolExecutor:
         self,
         tool_data: Dict[str, Any],
         plan: VoiceTerminalPlan,
+        timeout_seconds: int,
     ) -> ToolExecutionResult:
         """Run a canonical voice plan with argv, never through a command shell."""
         self._active_shell_executor = self.shell_executor
         try:
             result = await self.shell_executor.run_argv(
                 plan.argv,
-                timeout=min(self.terminal_timeout, MAX_VOICE_COMMAND_SECONDS),
+                timeout=min(
+                    timeout_seconds,
+                    self.terminal_timeout,
+                    MAX_VOICE_COMMAND_SECONDS,
+                ),
                 cwd=plan.canonical_cwd,
                 max_output_bytes=MAX_VOICE_OUTPUT_BYTES,
             )
