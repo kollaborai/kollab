@@ -32,6 +32,10 @@ export function setCodeSession(sessionId: string, advanceGeneration = false): nu
   return activeCodeGeneration;
 }
 
+export function isCurrentCodeSessionGeneration(sessionId: string, generation: unknown): boolean {
+  return sessionId === activeCodeSession && generation === activeCodeGeneration;
+}
+
 export function codeBase(sessionId: string = activeCodeSession): string {
   return `/sessions/${encodeURIComponent(sessionId)}/code`;
 }
@@ -69,7 +73,12 @@ export async function codeFetch(url: string, init: RequestInit = {}, context?: {
   const sessionId = context?.sessionId ?? activeCodeSession;
   const generation = sessionId === activeCodeSession ? activeCodeGeneration : null;
   try {
-    return await api.request(codeRequestUrl(url, context), init);
+    const response = await api.request(codeRequestUrl(url, context), init);
+    // A successful active-session request proves this daemon handles code calls; fence older in-flight errors.
+    if (response.ok && sessionId === activeCodeSession && generation === activeCodeGeneration) {
+      activeCodeGeneration += 1;
+    }
+    return response;
   } catch (error) {
     // EngineApi.request throws on non-2xx; hand the response shape back so mentiko-style
     // `if (!res.ok)` call sites keep working.

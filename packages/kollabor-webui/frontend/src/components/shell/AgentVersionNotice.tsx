@@ -43,9 +43,11 @@ function stopAndStartLine(name: string) {
   return (
     <>
       Run{" "}
-      <code className="whitespace-normal">
-        kollab{" "}<span className="whitespace-nowrap">--hub</span>{" "}stop {name}
-      </code>{" "}
+      <span className="[&_code]:break-words">
+        <code className="whitespace-normal">
+          kollab{" "}<span className="whitespace-nowrap">--hub</span>{" "}stop {name}
+        </code>
+      </span>{" "}
       in a terminal, then select its Offline row in the sidebar to start it again.
     </>
   );
@@ -57,8 +59,8 @@ function tooOldLine(name: string) {
 
 /**
  * The notice for one chat, or null while its agent runs the engine's version. An agent that publishes
- * no version started before agents did, so it counts as older. With no agent row (still starting,
- * off the hub, or on another computer) or no engine version there is nothing to compare.
+ * no version started before agents did, so it counts as older even while the engine version loads.
+ * A versioned agent waits for the engine version; with no agent row there is no identity to guide.
  */
 export function agentVersionNotice({
   engineVersion,
@@ -69,8 +71,12 @@ export function agentVersionNotice({
   agent: LiveAgent | undefined;
   restartAgents: boolean;
 }): AgentVersionNoticeState | null {
-  if (!agent || !engineVersion) return null;
+  if (!agent) return null;
   const running = agent.version ?? "";
+  if (!engineVersion) {
+    if (running) return null;
+    return { kind: "too-old", detail: "Agent (version unknown) · engine version loading", name: agent.name };
+  }
   if (running === engineVersion) return null;
   const detail = `Agent ${running || "(version unknown)"} · engine ${engineVersion}`;
   // No version means a build from before /restart restarted in place. There /restart is an alias of /new,

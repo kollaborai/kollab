@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { openWorkspaceFile, readFileContent, rememberFileRead, fileNameOf, extensionOf } from "@/components/code/open-file";
 import { FolderBrowser } from "@/components/code/folder-browser";
 import { claimEditorWorkspace, invalidateEditorSession, setEditorOwner, setEditorSession } from "@/components/code/workspace-tabs";
-import { codeFetch, DAEMON_OUTDATED_EVENT, setCodeRoot, setCodeSession, unwrapCodeData } from "@/lib/code-fetch";
+import { codeFetch, DAEMON_OUTDATED_EVENT, isCurrentCodeSessionGeneration, setCodeRoot, setCodeSession, unwrapCodeData } from "@/lib/code-fetch";
 import { cn } from "@/lib/utils";
 import { GitPanel } from "@/components/code/git/GitPanel";
 import { DaemonNotice, type DaemonNoticeProps } from "@/components/code/DaemonNotice";
@@ -72,21 +72,20 @@ export function CodeEditorView(props: CodeEditorViewProps) {
   const [browsing, setBrowsing] = useState(false);
   const [error, setError] = useState("");
   const [outdated, setOutdated] = useState(false);
-  const codeRequestGeneration = useRef(0);
   const requestContext = JSON.stringify([props.device ?? "", props.sessionId]);
   useLayoutEffect(() => {
     setEditorSession(requestContext);
     return () => invalidateEditorSession(requestContext);
   }, [props.sessionId, requestContext]);
   useLayoutEffect(() => {
-    codeRequestGeneration.current = setCodeSession(props.sessionId, true);
+    setCodeSession(props.sessionId, true);
   }, [props.sessionId, requestContext, props.agentIsCurrent]);
   useEffect(() => {
     const onDaemonOutdated = (event: Event) => {
       const detail: unknown = (event as CustomEvent<unknown>).detail;
       if (!detail || typeof detail !== "object") return;
       const eventDetail = detail as { sessionId?: unknown; generation?: unknown };
-      if (eventDetail.sessionId === props.sessionId && eventDetail.generation === codeRequestGeneration.current) {
+      if (eventDetail.sessionId === props.sessionId && isCurrentCodeSessionGeneration(props.sessionId, eventDetail.generation)) {
         setOutdated(true);
       }
     };
