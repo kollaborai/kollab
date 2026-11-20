@@ -111,6 +111,48 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
         self.executor.shell_executor.run_argv.assert_awaited_once()
         terminal_command.assert_not_awaited()
 
+    async def test_livekit_read_only_terminal_honors_requested_timeout(self):
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        self.executor.shell_executor.run_argv = AsyncMock(
+            return_value=ShellResult(success=True, stdout="clean\n", stderr="", exit_code=0)
+        )
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "voice-terminal-timeout",
+                "command": "git status --short",
+                "timeout": "1s",
+            },
+            execution_context=make_voice_origin_context("turn-timeout"),
+        )
+
+        self.assertTrue(result.success)
+        self.executor.shell_executor.run_argv.assert_awaited_once()
+        self.assertEqual(self.executor.shell_executor.run_argv.await_args.kwargs["timeout"], 1)
+
+    async def test_livekit_terminal_rejects_invalid_timeout_before_running(self):
+        from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
+
+        self.executor.shell_executor.run_argv = AsyncMock(
+            return_value=ShellResult(success=True, stdout="clean\n", stderr="", exit_code=0)
+        )
+
+        result = await self.executor.execute_tool(
+            {
+                "type": "terminal",
+                "id": "voice-terminal-invalid-timeout",
+                "command": "git status --short",
+                "timeout": "thirty seconds",
+            },
+            execution_context=make_voice_origin_context("turn-invalid-timeout"),
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("timeout", result.error.lower())
+        self.executor.shell_executor.run_argv.assert_not_awaited()
+
 
     async def test_livekit_path_qualified_executable_never_reaches_process(self):
         from tests.unit.llm.voice_admission_helpers import make_voice_origin_context
