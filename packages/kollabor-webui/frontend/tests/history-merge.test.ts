@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   dropTransientTurnDuplicates,
   historyHasAssistantRequestId,
+  historyMessageIndex,
   isCompactionMarker,
   mergeCompactionHistorySnapshot,
   mergeMissingHistoryMessages,
@@ -70,7 +71,7 @@ test("new history stays before an existing pending permission", () => {
   assert.deepEqual(merged.messages.map((message) => message.id), ["history-0", "history-1", pending.id]);
 });
 
-test("a page-boundary tool result is replaced by its actual call", () => {
+test("a page-boundary tool result is corrected in place with its actual call", () => {
   const fallback = {
     id: "history-10", role: "assistant",
     metadata: { custom: { historyToolFallback: "tool-1" } },
@@ -82,7 +83,28 @@ test("a page-boundary tool result is replaced by its actual call", () => {
   };
   const later = { id: "history-11", role: "user", content: "next" };
   const result = reconcileBoundaryToolResults([fallback, later], [call, later], 0, 12);
-  assert.deepEqual(result?.map((message) => message.id), [call.id, later.id]);
+  assert.deepEqual(result?.map((message) => message.id), [fallback.id, later.id]);
+});
+
+test("a boundary correction keeps the shown id and matches its canonical history row later", () => {
+  const fallback = {
+    id: "history-10", role: "assistant",
+    metadata: { custom: { historyToolFallback: "tool-1" } },
+    content: [{ type: "tool-call", toolCallId: "tool-1", toolName: "fallback" }],
+  };
+  const call = {
+    id: "history-9", role: "assistant",
+    content: [{ type: "tool-call", toolCallId: "tool-1", toolName: "actual", result: "done" }],
+  };
+  const later = { id: "history-11", role: "user", content: "next" };
+  const corrected = reconcileBoundaryToolResults([fallback, later], [call, later], 0, 12);
+  assert.deepEqual(corrected?.map((message) => message.id), [fallback.id, later.id]);
+  assert.equal(corrected?.[0].metadata?.custom?.historySourceIndex, 9);
+  assert.equal(corrected?.[0].metadata?.custom?.historyToolFallback, undefined);
+  assert.equal(shownMessagesChanged(corrected ?? [], [call, later]), false);
+  const next = mergeMissingHistoryMessages(corrected ?? [], [call, later]);
+  assert.deepEqual(next.messages.map((message) => message.id), [fallback.id, later.id]);
+  assert.deepEqual(next.added, []);
 });
 
 test("reconciling an older window preserves newer rows and pending/live state", () => {
@@ -95,7 +117,7 @@ test("reconciling an older window preserves newer rows and pending/live state", 
   const loaded = [{ id: "history-9", content: [{ type: "tool-call", toolCallId: "t1" }] }, row(11)];
   const result = reconcileBoundaryToolResults(shown, loaded, 9, 12);
   assert.deepEqual(result?.map((message) => message.id),
-    ["history-1", "history-9", "history-11", "history-20", pending.id, live.id]);
+    ["history-1", "history-10", "history-11", "history-20", pending.id, live.id]);
   assert.equal(result?.at(-2), pending);
   assert.equal(result?.at(-1), live);
 });
@@ -107,7 +129,7 @@ test("a stale older window cannot overwrite the displayed tool result or other r
   const loaded = [{ id: "history-9", content: [{ type: "tool-call", toolCallId: "t1", result: "cached result" }] },
     { id: "history-11", content: "cached reply" }];
   const result = reconcileBoundaryToolResults([fallback, current], loaded, 9, 12);
-  assert.deepEqual(result?.map((message) => message.id), ["history-9", "history-11"]);
+  assert.deepEqual(result?.map((message) => message.id), ["history-10", "history-11"]);
   assert.equal((result?.[0].content as Array<{ result?: string }>)[0].result, "current result");
   assert.equal((result?.[0].content as Array<{ isError?: boolean }>)[0].isError, true);
   assert.equal(result?.[1], current);
@@ -142,7 +164,7 @@ test("separate fallback results with a reused ID retain their own calls", () => 
     { id: "history-11", content: [{ type: "tool-call", toolCallId: "same-id", result: "cached second" }] },
   ];
   const result = reconcileBoundaryToolResults([fallback(10, "first"), fallback(12, "second")], loaded, 9, 13);
-  assert.deepEqual(result?.map((message) => message.id), ["history-9", "history-11"]);
+  assert.deepEqual(result?.map((message) => message.id), ["history-10", "history-12"]);
   assert.equal((result?.[0].content as Array<{ result?: string }>)[0].result, "first");
   assert.equal((result?.[1].content as Array<{ result?: string }>)[0].result, "second");
 });
@@ -197,7 +219,8 @@ test("compaction archives shown history and imports the compacted snapshot once"
     "retained prompt",
     "answer during compaction",
   ]);
-  assert.match(rebased.messages[0].id ?? "", /^compaction-archive-/);
+  assert.equal(rebased.messages[0].id, old[0].id);
+  assert.equal(historyMessageIndex(rebased.messages[0]), null);
   assert.equal(shownMessagesChanged(rebased.messages, [marker, recent, appended]), false);
   assert.equal(mergeCompactionHistorySnapshot(rebased.messages, [marker, recent, appended]), null);
 });
@@ -254,6 +277,50 @@ test("compaction shows a retained row once, from the compacted history", () => {
     "What is 2+2?",
     "4",
   ]);
+});
+
+test("compaction keeps carried row ids and updates their source indexes", () => {
+  const shown = [
+    {
+      id: "user-demo-session-120",
+      role: "user",
+      content: "current prompt",
+      metadata: { custom: { historySourceIndex: 120 } },
+    },
+    {
+      id: "assistant-demo-session-121",
+      role: "assistant",
+      content: "current answer",
+      metadata: { custom: { historySourceIndex: 121, requestId: "request-current" } },
+    },
+  ];
+  const marker = {
+    id: "history-0",
+    role: "assistant",
+    content: "Context compacted",
+    metadata: { custom: { contextCompaction: true, compactionRound: 1 } },
+  };
+  const loaded = [
+    marker,
+    { id: "history-1", role: "user", content: "current prompt" },
+    {
+      id: "history-2",
+      role: "assistant",
+      content: "current answer",
+      metadata: { custom: { requestId: "request-current" } },
+    },
+  ];
+
+  const rebased = mergeCompactionHistorySnapshot(shown, loaded);
+
+  assert.ok(rebased);
+  assert.deepEqual(rebased.history.map((message) => message.id), [
+    marker.id,
+    shown[0].id,
+    shown[1].id,
+  ]);
+  assert.equal(historyMessageIndex(rebased.history[1]), 1);
+  assert.equal(historyMessageIndex(rebased.history[2]), 2);
 });
 
 test("a row appended during compaction follows the retained rows, which still show once", () => {
@@ -529,7 +596,8 @@ test("each loaded row takes at most one shown row, matched from the newest", () 
   ];
   const rebased = mergeCompactionHistorySnapshot(shown, loaded);
   assert.ok(rebased);
-  assert.deepEqual(rebased.messages.map((message) => message.id), ["history-0", "history-1", "history-2", "history-3"]);
+  assert.deepEqual(rebased.messages.map((message) => message.id), ["history-0", "history-1", "history-2", "history-7"]);
+  assert.equal(rebased.messages[3]?.metadata?.custom?.historySourceIndex, 3);
   assert.equal(rebased.messages.filter((message) => message.content === "go").length, 2);
 });
 
@@ -616,4 +684,26 @@ test("a placeholder picture turn is replaced by its stored copy when both rows c
   const deduped = dropTransientTurnDuplicates(shown, tail);
   assert.ok(deduped);
   assert.equal(deduped.some((message) => message.id === "user-ws1-11"), false);
+});
+
+test("compaction keeps visible display IDs unique and releases archived source positions", () => {
+  const shown = [
+    { id: "user-demo-7", role: "user", content: "archived", metadata: { custom: { historySourceIndex: 3 } } },
+    { id: "history-2", role: "assistant", content: "carried" },
+  ];
+  const marker = { id: "history-4", role: "assistant", content: "marker",
+    metadata: { custom: { contextCompaction: true, compactionRound: 1 } } };
+  const loaded = [
+    { id: "history-1", role: "assistant", content: "carried" },
+    { id: "history-2", role: "user", content: "new row" }, marker,
+  ];
+  const result = mergeCompactionHistorySnapshot(shown, loaded)!;
+  assert.equal(result.messages[0].id, shown[0].id);
+  assert.equal(historyMessageIndex(result.messages[0]), null);
+  assert.equal(result.messages[1].id, shown[1].id);
+  assert.equal(new Set(result.messages.map(m => m.id)).size, result.messages.length);
+  assert.equal(shownMessagesChanged(result.messages, loaded), false);
+  const older = { id: "history-3", role: "user", content: "different at three" };
+  const merged = mergeMissingHistoryMessages(result.messages, [...loaded, older]);
+  assert.deepEqual(merged.added.map(m => m.content), [older.content]);
 });
