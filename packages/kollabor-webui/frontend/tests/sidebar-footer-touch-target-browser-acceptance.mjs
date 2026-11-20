@@ -1,5 +1,5 @@
 // Run from the frontend directory: node tests/sidebar-footer-touch-target-browser-acceptance.mjs <artifact-dir>
-// Opens the mocked shell at phone and tablet widths, checks every sidebar footer target, and saves screenshots.
+// Opens the mocked shell at touch and desktop widths, checks footer targets and row fit, and saves screenshots.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -17,6 +17,7 @@ const screenshotDir = process.argv[2]
 const viewports = [
   { width: 390, height: 844, isMobile: true },
   { width: 820, height: 1180, isMobile: false },
+  { width: 1280, height: 800, isMobile: false },
 ];
 
 async function main() {
@@ -40,7 +41,9 @@ async function main() {
       });
       try {
         await view.page.goto(`${baseUrl}/`, { waitUntil: "domcontentloaded" });
-        await view.page.locator('[data-sidebar="trigger"]').click();
+        if (viewport.width < 1024) {
+          await view.page.locator('[data-sidebar="trigger"]').click();
+        }
 
         const actions = view.page.locator('[data-sidebar="footer-actions"]');
         await actions.waitFor({ state: "visible" });
@@ -84,7 +87,7 @@ async function main() {
 
         assert.equal(layout.buttons.length, 8, `expected eight visible footer buttons at ${viewport.width}px`);
         for (const button of layout.buttons) {
-          if (button.width < 44 || button.height < 44) {
+          if (viewport.width < 1024 && (button.width < 44 || button.height < 44)) {
             failures.push(`${viewport.width}px button ${button.index + 1} is ${button.width}x${button.height}px`);
           }
           assert.ok(button.left >= -1 && button.right <= layout.actionWidth + 1,
