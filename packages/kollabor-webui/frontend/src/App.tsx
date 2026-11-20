@@ -1392,7 +1392,6 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   };
   const daemonNotice: DaemonNoticeProps = {
     notice: versionNotice,
-    fallbackName: activeAgent?.name ?? activeSession?.identity ?? "<agent name>",
     busy: Boolean(restartHere) && !restartHere?.failure,
     waiting: restartHere?.waiting ?? false,
     failure: restartHere?.failure ?? "",

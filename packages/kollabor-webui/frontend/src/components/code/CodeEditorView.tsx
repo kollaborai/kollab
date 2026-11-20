@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { openWorkspaceFile, readFileContent, rememberFileRead, fileNameOf, extensionOf } from "@/components/code/open-file";
 import { FolderBrowser } from "@/components/code/folder-browser";
 import { claimEditorWorkspace, invalidateEditorSession, setEditorOwner, setEditorSession } from "@/components/code/workspace-tabs";
-import { codeFetch, setCodeRoot, setCodeSession, unwrapCodeData } from "@/lib/code-fetch";
+import { codeFetch, DAEMON_OUTDATED_EVENT, setCodeRoot, setCodeSession, unwrapCodeData } from "@/lib/code-fetch";
 import { cn } from "@/lib/utils";
 import { GitPanel } from "@/components/code/git/GitPanel";
 import { DaemonNotice, type DaemonNoticeProps } from "@/components/code/DaemonNotice";
@@ -78,6 +78,15 @@ export function CodeEditorView(props: CodeEditorViewProps) {
     setEditorSession(requestContext);
     return () => invalidateEditorSession(requestContext);
   }, [props.sessionId, requestContext]);
+  useEffect(() => {
+    const onDaemonOutdated = (event: Event) => {
+      const detail: unknown = (event as CustomEvent<unknown>).detail;
+      if (!detail || typeof detail !== "object") return;
+      if ((detail as { sessionId?: unknown }).sessionId === props.sessionId) setOutdated(true);
+    };
+    window.addEventListener(DAEMON_OUTDATED_EVENT, onDaemonOutdated);
+    return () => window.removeEventListener(DAEMON_OUTDATED_EVENT, onDaemonOutdated);
+  }, [props.sessionId]);
   useEffect(() => {
     let cancelled = false;
     setFolders(null);
