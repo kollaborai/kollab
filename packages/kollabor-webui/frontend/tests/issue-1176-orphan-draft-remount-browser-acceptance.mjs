@@ -14,6 +14,7 @@ const SESSION = {
   external: false,
 };
 const DRAFT = "Describe this picture [image1]";
+const DRAFT_KEY = "kollab:webui:composer-draft:v1:local-coder:issue-1176-orphan-session";
 
 function sentText(body) {
   const commandMessage = body.commands?.find((command) => command.type === "add-message")?.message;
@@ -52,9 +53,15 @@ async function main() {
     await shell.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
     await shell.page.locator(`[data-sidebar="sidebar"] button[title*="${SESSION.name}"]`).click();
     const composer = shell.page.getByRole("textbox", { name: "Message input" });
-    await composer.fill(DRAFT);
-    await shell.page.waitForFunction((value) => Object.values(localStorage).includes(value), DRAFT);
+    await composer.waitFor({ state: "visible" });
+    await shell.page.evaluate(
+      ({ key, value }) => localStorage.setItem(key, value),
+      { key: DRAFT_KEY, value: DRAFT },
+    );
     await shell.page.reload({ waitUntil: "domcontentloaded" });
+    const sessionRow = shell.page.locator(`[data-sidebar="sidebar"] button[title*="${SESSION.name}"]`);
+    await sessionRow.waitFor({ state: "visible" });
+    if (await sessionRow.getAttribute("data-active") !== "true") await sessionRow.click();
     await composer.waitFor({ state: "visible" });
     await shell.page.waitForFunction(
       () => (document.querySelector(".aui-composer-input")?.value.length ?? 0) > 0,
