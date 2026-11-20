@@ -263,7 +263,8 @@ class TestWebFetchExecution(unittest.TestCase):
                 (
                     '<script type="application/ld+json">{bad json</script>'
                     "<script>private script marker</script>"
-                    "<pre>code marker</pre><p>ordinary fallback</p>"
+                    "<pre>code marker</pre><code>inline code marker</code>"
+                    "<p>ordinary fallback</p>"
                 ),
                 "ordinary fallback",
                 "private script marker",
@@ -289,6 +290,8 @@ class TestWebFetchExecution(unittest.TestCase):
                 self.assertTrue(result.success, result.error)
                 self.assertIn(expected.rstrip(), result.output)
                 self.assertNotIn(excluded, result.output)
+                self.assertNotIn("code marker", result.output)
+                self.assertNotIn("inline code marker", result.output)
 
     def test_web_fetch_json_ld_does_not_require_lxml(self):
         """A BeautifulSoup install without lxml can still parse web-fetch HTML."""
@@ -331,7 +334,8 @@ class TestWebFetchExecution(unittest.TestCase):
 
         html = (
             "<script>private script marker</script>"
-            "<pre>code marker</pre><p>ordinary fallback</p>"
+            "<pre>code marker</pre><code>inline code marker</code>"
+            "<p>ordinary fallback</p>"
         )
         real_import = builtins.__import__
 
@@ -344,6 +348,8 @@ class TestWebFetchExecution(unittest.TestCase):
             text = ToolExecutor._extract_main_content(html)
         self.assertIn("ordinary fallback", text)
         self.assertNotIn("private script marker", text)
+        self.assertNotIn("code marker", text)
+        self.assertNotIn("inline code marker", text)
 
     def test_web_fetch_truncation(self):
         """Test that max_chars limit truncates output."""
