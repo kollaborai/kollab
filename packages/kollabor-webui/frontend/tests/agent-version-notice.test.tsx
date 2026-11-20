@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, isAgentTooOld } from "@/api";
@@ -24,7 +25,10 @@ vi.mock("@/components/code/floating-sidebar", () => ({
 }));
 
 const agent = { name: "lapis", agent_id: "a1", state: "idle", current_task: "", solo: false, project: "/w" };
-const visibleText = (html: string) => html.replace(/<[^>]+>/g, "");
+const { JSDOM } = createRequire(import.meta.url)("jsdom") as {
+  JSDOM: new (html: string) => { window: { document: { body: { textContent: string | null } } } };
+};
+const visibleText = (html: string) => new JSDOM(html).window.document.body.textContent ?? "";
 
 describe("visibleText", () => {
   it("preserves text that looks like an HTML element", () => {
