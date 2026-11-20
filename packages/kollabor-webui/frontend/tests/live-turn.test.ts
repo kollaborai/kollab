@@ -212,3 +212,19 @@ test("a cancelled turn's late tool result never restarts the live message", () =
   assert.equal(applyLiveEvent(started, late), started);
   assert.equal(liveMessage(applyLiveEvent(emptyLiveTurn(), { ...late, type: "token", text: "x" })), null);
 });
+
+test("a history-save notice appears with the live reply without failing the turn", () => {
+  let turn = applyLiveEvent(emptyLiveTurn(), asked("Here is the answer."));
+  turn = applyLiveEvent(turn, {
+    type: "notice",
+    request_id: "r1",
+    message: "Conversation history not saved for this reply.",
+  });
+
+  const message = liveMessage(turn);
+  assert.equal(message?.status && (message.status as { type: string }).type, "running");
+  assert.deepEqual(message?.content, [{
+    type: "text",
+    text: "Here is the answer.\n\nℹ Conversation history not saved for this reply.",
+  }]);
+});
