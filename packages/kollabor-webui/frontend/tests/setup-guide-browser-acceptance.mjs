@@ -27,7 +27,10 @@ async function main() {
     assert.deepEqual(firstRun.pageErrors, [], "the setup guide should open on a clean first run without errors");
     await firstRun.context.close();
 
-    const view = await openPage(browser, baseUrl, makeFixtures());
+    const view = await openPage(browser, baseUrl, makeFixtures(), {
+      viewport: { width: 390, height: 844 },
+      isMobile: true,
+    });
     await view.page.route("**/sessions*", (route) =>
       route.fulfill({
         status: 200,
@@ -39,13 +42,36 @@ async function main() {
       localStorage.setItem("kollab.setup-guide.v1", JSON.stringify({ step: "provider", dismissed: false }));
     });
     await view.page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    const animationPause = await view.page.addStyleTag({
+      content: '[data-slot="dialog-content"] { animation-play-state: paused !important; }',
+    });
     await view.page.getByRole("button", { name: "Guided setup", exact: true }).click();
+    const openingOpacity = await view.page.getByRole("dialog").evaluate((element) => getComputedStyle(element).opacity);
+    assert.equal(
+      openingOpacity,
+      "1",
+      `the guide should fully cover the staged setup surface while opening (opacity: ${openingOpacity})`,
+    );
+    await animationPause.evaluate((element) => element.remove());
     await view.page.getByRole("heading", { name: "Join a network", exact: true }).waitFor({ state: "visible" });
+    const guide = view.page.getByRole("dialog");
+    await guide.evaluate((element) =>
+      Promise.all(element.getAnimations().map((animation) => animation.finished.catch(() => undefined))),
+    );
+    const guideBounds = await guide.boundingBox();
+    const openBounds = await view.page.getByTestId("setup-guide-next").boundingBox();
+    assert.ok(guideBounds && openBounds);
+    const bottomGap = guideBounds.y + guideBounds.height - (openBounds.y + openBounds.height);
+    assert.ok(
+      bottomGap >= 12,
+      `the active guide should cover the staged setup action row below its footer (gap: ${bottomGap}px)`,
+    );
+    await fs.mkdir(screenshotDir, { recursive: true });
+    await view.page.screenshot({ path: path.join(screenshotDir, "guide-network-phone-dark.png"), fullPage: true });
     await view.page.getByTestId("setup-guide-next").click();
     await view.page.getByTestId("setup-step-agent").waitFor({ state: "visible" });
     assert.equal(await view.page.getByTestId("setup-step-agent").getAttribute("aria-current"), "step");
     await view.page.keyboard.press("Escape");
-    await fs.mkdir(screenshotDir, { recursive: true });
     await view.page.screenshot({ path: path.join(screenshotDir, "setup-guide-resolved-step.png"), fullPage: true });
     assert.deepEqual(view.pageErrors, [], "the setup guide should not throw while advancing");
     console.log(`PASS: saved setup-guide-resolved-step.png to ${screenshotDir}`);
