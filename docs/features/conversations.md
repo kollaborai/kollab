@@ -58,6 +58,10 @@ While reading a long conversation, loading older pages and reconciling compacted
 
 ## Saving Conversations
 
+If saving a user message or assistant reply fails, Kollab keeps processing the
+turn and shows a notice in the terminal and web UI so the unsaved message is
+clear.
+
 Use `/save` to export a conversation in different formats:
 
 ```
