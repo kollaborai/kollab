@@ -512,53 +512,136 @@ async def test_modal_branch_current_preserves_original_and_loads_new_branch(tmp_
         if role in {"user", "assistant"}
     ] == [(role, content) for role, content in original_messages[:2]]
 
-    def test_session_metadata_dataclass(self):
-        """Test SessionMetadata dataclass."""
-        from kollabor_events.data_models import SessionMetadata
+def test_session_metadata_dataclass():
+    """Test SessionMetadata dataclass."""
+    from kollabor_events.data_models import SessionMetadata
 
-        metadata = SessionMetadata(
-            session_id="test_session",
-            start_time=datetime.now(),
-            end_time=None,
-            message_count=5,
-            turn_count=3,
-            working_directory="/test/dir",
-            git_branch="main",
-            themes=["debugging", "feature"],
-            files_mentioned=["test.py"],
-            last_activity=datetime.now(),
-            size_bytes=1024,
-            is_valid=True,
-            validation_issues=[],
+    metadata = SessionMetadata(
+        session_id="test_session",
+        start_time=datetime.now(),
+        end_time=None,
+        message_count=5,
+        turn_count=3,
+        working_directory="/test/dir",
+        git_branch="main",
+        themes=["debugging", "feature"],
+        files_mentioned=["test.py"],
+        last_activity=datetime.now(),
+        size_bytes=1024,
+        is_valid=True,
+        validation_issues=[],
+    )
+
+    assert metadata.session_id == "test_session"
+    assert metadata.message_count == 5
+    assert metadata.is_valid is True
+    assert len(metadata.validation_issues) == 0
+
+
+def test_conversation_metadata_dataclass():
+    """Test ConversationMetadata dataclass."""
+    from kollabor_events.data_models import ConversationMetadata
+
+    metadata = ConversationMetadata(
+        file_path="/test/session.jsonl",
+        session_id="test_session",
+        title="Test Conversation",
+        message_count=5,
+        created_time=datetime.now(),
+        modified_time=None,
+        last_message_preview="Test preview...",
+        topics=["debugging"],
+        file_id="#12345",
+        working_directory="/test/dir",
+        git_branch="main",
+        duration="10m",
+        size_bytes=1024,
+        preview_messages=[],
+    )
+
+    assert metadata.session_id == "test_session"
+    assert metadata.file_id == "#12345"
+    assert metadata.duration == "10m"
+    assert len(metadata.topics) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modal", [False, True], ids=["direct", "modal"])
+async def test_branch_current_keeps_hidden_voice_instruction_out_of_display(
+    tmp_path, modal
+):
+    from plugins.resume_conversation_plugin import ResumeConversationPlugin
+
+    instruction = "Greet the user."
+    config = SimpleNamespace(_conversations_dir=tmp_path, get=lambda _key, default=None: default)
+    manager = ConversationManager(config)
+    manager.save_conversations = False
+    manager.add_message("user", instruction, metadata={"hidden": True})
+    event_bus = SimpleNamespace(emit_with_hooks=AsyncMock())
+    plugin = ResumeConversationPlugin()
+    plugin.conversation_manager = manager
+    plugin.llm_service = SimpleNamespace(
+        conversation_history=[{"role": "user", "content": instruction, "metadata": {"hidden": True}}],
+        session_stats={"messages": 1},
+    )
+    plugin.event_bus = event_bus
+
+    if modal:
+        result = await plugin._handle_modal_command(
+            {"command": {"action": "branch_execute", "metadata": {"session_id": "current", "message_index": 0}}},
+            event=None,
         )
-
-        assert metadata.session_id == "test_session"
-        assert metadata.message_count == 5
-        assert metadata.is_valid is True
-        assert len(metadata.validation_issues) == 0
-
-    def test_conversation_metadata_dataclass(self):
-        """Test ConversationMetadata dataclass."""
-        from kollabor_events.data_models import ConversationMetadata
-
-        metadata = ConversationMetadata(
-            file_path="/test/session.jsonl",
-            session_id="test_session",
-            title="Test Conversation",
-            message_count=5,
-            created_time=datetime.now(),
-            modified_time=None,
-            last_message_preview="Test preview...",
-            topics=["debugging"],
-            file_id="#12345",
-            working_directory="/test/dir",
-            git_branch="main",
-            duration="10m",
-            size_bytes=1024,
-            preview_messages=[],
+        visible = [content for role, content, _ in result["display_messages"] if role == "user"]
+    else:
+        result = await plugin.handle_branch(
+            SlashCommand(name="branch", args=["current", "0"], raw_input="/branch current 0")
         )
+        _, payload, _ = event_bus.emit_with_hooks.await_args.args
+        visible = [message["content"] for message in payload["messages"] if message["role"] == "user"]
 
-        assert metadata.session_id == "test_session"
-        assert metadata.file_id == "#12345"
-        assert metadata.duration == "10m"
-        assert len(metadata.topics) == 1
+    assert "Greet the user." not in visible
+    assert plugin.llm_service.conversation_history[0].metadata.get("hidden") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modal", [False, True], ids=["direct", "modal"])
+async def test_branch_current_preserves_structured_content(tmp_path, modal):
+    from kollabor_ai.message_content import content_to_text
+    from plugins.resume_conversation_plugin import ResumeConversationPlugin
+
+    image = [
+        {"type": "text", "text": "What is in this picture?"},
+        {"type": "image", "image_url": {"url": "data:image/png;base64,AA=="}},
+    ]
+    config = SimpleNamespace(_conversations_dir=tmp_path, get=lambda _key, default=None: default)
+    manager = ConversationManager(config)
+    manager.save_conversations = False
+    manager.add_message("user", content_to_text(image))
+    original_session_id = manager.current_session_id
+    event_bus = SimpleNamespace(emit_with_hooks=AsyncMock())
+    plugin = ResumeConversationPlugin()
+    plugin.conversation_manager = manager
+    plugin.llm_service = SimpleNamespace(
+        conversation_history=[{"role": "user", "content": image}],
+        session_stats={"messages": 1},
+    )
+    plugin.event_bus = event_bus
+
+    if modal:
+        result = await plugin._handle_modal_command(
+            {"command": {"action": "branch_execute", "metadata": {"session_id": "current", "message_index": 0}}},
+            event=None,
+        )
+        visible = [content for role, content, _ in result["display_messages"] if role == "user"]
+    else:
+        result = await plugin.handle_branch(
+            SlashCommand(name="branch", args=["current", "0"], raw_input="/branch current 0")
+        )
+        _, payload, _ = event_bus.emit_with_hooks.await_args.args
+        visible = [message["content"] for message in payload["messages"] if message["role"] == "user"]
+
+    assert plugin.llm_service.conversation_history[0].content == image
+    assert image in visible
+    original_path = tmp_path / f"{original_session_id}.jsonl"
+    original = json.loads(original_path.read_text().splitlines()[0])
+    assert original["messages"][0]["metadata"]["structured_content"] == image
