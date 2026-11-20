@@ -268,18 +268,23 @@ class ResumeConversationPlugin:
         try:
             args = command.args or []
 
-            if not self._ensure_conversation_manager():
-                return CommandResult(
-                    success=False,
-                    message="Conversation manager not available",
-                    display_type="error",
-                )
-
             if len(args) == 0:
+                if not self._ensure_conversation_manager():
+                    return CommandResult(
+                        success=False,
+                        message="Conversation manager not available",
+                        display_type="error",
+                    )
                 # Step 1: Show sessions to branch from (including current)
                 return await self._show_branch_session_selector()
 
             elif len(args) == 1:
+                if not self._ensure_conversation_manager():
+                    return CommandResult(
+                        success=False,
+                        message="Conversation manager not available",
+                        display_type="error",
+                    )
                 # Step 2: Show messages from session to select branch point
                 session_id = args[0]
                 return await self._show_branch_point_selector(session_id)
@@ -300,6 +305,12 @@ class ResumeConversationPlugin:
                         display_type="error",
                     )
 
+                if session_id == "current" and not self._ensure_conversation_manager():
+                    return CommandResult(
+                        success=False,
+                        message="Conversation manager not available",
+                        display_type="error",
+                    )
                 self.logger.info(f"[BRANCH] Executing branch at index {branch_index}")
                 # Create branch and load it
                 result = await self._execute_branch_from_session(
@@ -323,6 +334,27 @@ class ResumeConversationPlugin:
             message="Unexpected branch command state",
             display_type="error",
         )
+
+    async def _branch_saved_session(
+        self, session_id: str, branch_index: int
+    ) -> Dict[str, Any]:
+        event_bus = getattr(self, "event_bus", None)
+        state_service = (
+            event_bus.get_service("state_service")
+            if event_bus is not None and hasattr(event_bus, "get_service")
+            else None
+        )
+        if state_service is None:
+            raise ValueError("State service not available -- cannot branch.")
+
+        result = await state_service.branch_conversation(session_id, branch_index)
+        if not isinstance(result, dict):
+            raise ValueError("Invalid branch response from state service")
+        if result.get("error"):
+            raise ValueError(str(result["error"]))
+        if not result.get("success_message"):
+            raise ValueError("Branch response did not include a success message")
+        return result
 
     async def _execute_branch_from_session(
         self, session_id: str, branch_index: int
@@ -377,25 +409,18 @@ class ResumeConversationPlugin:
                     display_type="success",
                 )
 
-            # Branch from saved session
-            assert self.conversation_manager is not None
-            result = self.conversation_manager.branch_session(session_id, branch_index)
+            result = await self._branch_saved_session(session_id, branch_index)
+            from kollabor.llm.session_resume import resume_display_sequence
 
-            if not result.get("success"):
-                return CommandResult(
-                    success=False,
-                    message=f"Branch failed: {result.get('error', 'Unknown error')}",
-                    display_type="error",
-                )
-
-            new_session_id = result.get("session_id")
-            return await self._load_and_display_session(
-                header=f"--- Branched from {session_id} at message {branch_index} ---",
-                success_msg=(
-                    f"[ok] Created branch: {new_session_id}\n"
-                    f"    From: {session_id} at message {result['branch_point']}\n"
-                    f"    Loaded {result['message_count']} messages. Continue below."
-                ),
+            coordinator = getattr(
+                getattr(self, "renderer", None), "message_coordinator", None
+            )
+            if coordinator is not None:
+                coordinator.display_message_sequence(resume_display_sequence(result))
+            return CommandResult(
+                success=True,
+                message=result["success_message"],
+                display_type="success",
             )
 
         except Exception as e:
@@ -1821,30 +1846,17 @@ class ResumeConversationPlugin:
                 self.logger.info(
                     f"[BRANCH] Executing branch: {session_id} at {message_index}"
                 )
-                if (
-                    self._ensure_conversation_manager()
-                    and self.conversation_manager is not None
-                ):
-                    result = self.conversation_manager.branch_session(
+                try:
+                    result = await self._branch_saved_session(
                         session_id, message_index
                     )
-                    if result.get("success"):
-                        new_session_id = result.get("session_id")
-                        display_messages = self._prepare_session_display(
-                            header=f"--- Branched from {session_id} at message {message_index} ---",
-                            success_msg=(
-                                f"[ok] Created branch: {new_session_id}\n"
-                                f"    From: {session_id} at message {result['branch_point']}\n"
-                                f"    Loaded {result['message_count']} messages. Continue below."
-                            ),
-                        )
-                        if display_messages:
-                            # Return messages for modal_controller to display AFTER modal exits
-                            # This avoids the race condition where ADD_MESSAGE displays to
-                            # the alternate buffer before the modal closes
-                            data["display_messages"] = [
-                                (role, content, meta)
-                                for role, content, meta in display_messages
-                            ]
+                    from kollabor.llm.session_resume import resume_display_sequence
+
+                    # The controller displays this only after leaving the modal.
+                    data["display_messages"] = resume_display_sequence(result)
+                except Exception as exc:
+                    data["display_messages"] = [
+                        ("system", f"[error] Failed to branch: {exc}", {})
+                    ]
 
         return data

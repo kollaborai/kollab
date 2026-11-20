@@ -509,6 +509,7 @@ fully migrated (works in attach mode):
   /permissions (all subcommands)
   /mcp show /mcp list /mcp servers /mcp enable /mcp disable /mcp test /mcp tools /mcp reload
   /resume <id>                    (one-shot resume by id)
+  /branch <id> <msg_idx>          (saved-session branch via StateService RPC)
   /save (all formats)
   /hub status /hub whoami /hub work
   /hub msg /hub broadcast          (StateService RPC)
@@ -529,7 +530,8 @@ deferred or client-local:
   /hub stop/spawn/org             orchestrator control is not a StateService RPC
   /terminal view/attach           needs streaming transport
   /sub completion notifications   MessageInjector rewrite
-  /resume modal/search/branch     needs list/search rpcs
+  /resume modal/search             needs list/search rpcs
+  /branch modal selection          needs list/search rpcs; execution uses state.branch_conversation
   /login                          OAuth browser split
 
 
@@ -647,7 +649,8 @@ type / in the input box to open the command menu.
     modal picker, client-only (deferred to 4.6)
 
   /branch [session_id [msg_idx]]  fork from specific message
-    deferred to 4.6 (needs state.branch_conversation rpc)
+    <id> <msg_idx>                 branch a saved session through state_service
+    modal selection                client-side until list/search rpcs are available
 
   /compact [now|status|preview]   context compaction
     (no args)                     ask the model what to keep; it answers with
