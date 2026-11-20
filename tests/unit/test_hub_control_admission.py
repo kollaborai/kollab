@@ -1,7 +1,9 @@
 """Admission and recovery behavior for durable Hub mailbox controls."""
 
 import asyncio
+import builtins
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
@@ -123,3 +125,36 @@ def test_task_cron_control_survives_restart_boundary_and_capacity_drains(
     assert [message.id for message in AgentMessenger.read_mailbox("receiver")] == [
         retry.id
     ]
+
+
+def test_unreadable_control_is_preserved_and_still_consumes_capacity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(messenger, "INBOX_MAX_SIZE", 1)
+    monkeypatch.setattr(messenger, "INBOX_MAX_CONTROLS", 1)
+    monkeypatch.setattr(messenger, "get_messages_dir", lambda: tmp_path)
+    _send("receiver", _control("accepted"))
+    control_path = next((tmp_path / "receiver").glob("*.json"))
+    os.utime(control_path, (1, 1))
+    messenger._control_classification_cache.clear()
+
+    real_open = builtins.open
+
+    def deny_control_read(path: str | os.PathLike, *args, **kwargs):
+        if Path(path) == control_path:
+            raise PermissionError("simulated inbox read failure")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", deny_control_read)
+    ordinary = HubMessage(
+        id="ordinary",
+        action="message",
+        from_identity="coordinator",
+        to="receiver",
+        content="ordinary traffic",
+    )
+    _send("receiver", ordinary)
+
+    assert control_path.exists(), "accepted durable control was evicted as ordinary traffic"
+    with pytest.raises(RuntimeError, match="durable inbox capacity"):
+        _send("receiver", _control("next"))
