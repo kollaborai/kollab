@@ -152,6 +152,20 @@ class TestSlashCommandParser(unittest.TestCase):
                 self.assertIsNotNone(command)
                 self.assertEqual(command.args, expected_args)
 
+    def test_escaped_punctuation_after_path_separators_keeps_shlex_behavior(self):
+        path_prefix = "reports\\archive\\file\\"
+        punctuation = ("%", ":", "=", "+", ",", "^", "@", ".", "_")
+
+        for character in punctuation:
+            with self.subTest(character=character):
+                input_text = "/open " + path_prefix + character + "draft.txt"
+                command = self.parser.parse_command(input_text)
+                self.assertIsNotNone(command)
+                self.assertEqual(
+                    command.args,
+                    ["reportsarchivefile" + character + "draft.txt"],
+                )
+
     def test_parse_relative_directory_paths_with_trailing_separators_before_flags(self):
         cases = [
             ("/open folder\\ --mode=read", ["folder\\", "--mode=read"]),
