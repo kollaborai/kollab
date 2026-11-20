@@ -377,6 +377,80 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertTrue(result.success, result.error)
         self.assertIn(code, result.output)
 
+    def test_web_fetch_filters_code_from_readability_fallback(self):
+        """Non-semantic code blocks are omitted from main-content fallback."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        code = "private code marker " * 40
+        html = f"<div><pre><code>{code}</code></pre></div>"
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertNotIn("private code marker", result.output)
+
+    def test_web_fetch_extract_main_false_preserves_code_text(self):
+        """Full-text mode retains visible pre/code text."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        html = "<pre><code>show me the full text</code></pre>"
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {
+                        "type": "web_fetch",
+                        "url": "https://example.com",
+                        "extract_main": False,
+                    }
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn("show me the full text", result.output)
+
+    def test_web_fetch_regex_fallback_strips_malformed_script(self):
+        """The optional regex path drops unclosed and whitespace-closed scripts."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        cases = [
+            "<script>private script marker<p>visible text",
+            "<script>private script marker</script ><p>visible text</p>",
+        ]
+        real_import = builtins.__import__
+
+        def import_without_bs4(name, *args, **kwargs):
+            if name == "bs4" or name.startswith("bs4."):
+                raise ImportError("BeautifulSoup intentionally unavailable in this test")
+            return real_import(name, *args, **kwargs)
+
+        for html in cases:
+            with self.subTest(html=html):
+                with patch("builtins.__import__", side_effect=import_without_bs4):
+                    text = ToolExecutor._extract_main_content(html)
+                self.assertNotIn("private script marker", text)
+
     def test_web_fetch_truncation(self):
         """Test that max_chars limit truncates output."""
         long_text = "A" * 50000
