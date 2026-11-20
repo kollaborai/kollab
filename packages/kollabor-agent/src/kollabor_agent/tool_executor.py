@@ -3414,7 +3414,7 @@ class ToolExecutor:
             soup = BeautifulSoup(html, "html.parser")
         except ImportError:
             # bs4 not available — fall back to regex-based extraction
-            return ToolExecutor._html_to_text_regex(html)
+            return ToolExecutor._html_to_text_regex(html, extract_main=extract_main)
 
         if extract_main:
             # JSON-LD lives in script tags, so read it before removing scripts.
@@ -3437,14 +3437,20 @@ class ToolExecutor:
                     if len(text) > 200:
                         return text
 
+            # Code samples are useful in full-text mode but usually overwhelm
+            # the readability fallback for main-content extraction.
+            for tag in soup.find_all(["pre", "code"]):
+                tag.decompose()
+
             # Priority 3: Readability heuristic — find densest content block
             text = ToolExecutor._readability_extract(soup)
             if text and len(text) > 200:
                 return text
 
         # Priority 4: Fallback — extract all remaining text
-        for tag in soup.find_all(["pre", "code"]):
-            tag.decompose()
+        if extract_main:
+            for tag in soup.find_all(["pre", "code"]):
+                tag.decompose()
         return ToolExecutor._soup_to_text(soup)
 
     @staticmethod
@@ -3528,7 +3534,7 @@ class ToolExecutor:
         return "\n".join(lines)
 
     @staticmethod
-    def _html_to_text_regex(html: str) -> str:
+    def _html_to_text_regex(html: str, extract_main: bool = True) -> str:
         """Regex-based HTML to text fallback (no bs4 dependency).
 
         Used when beautifulsoup4 is not installed.
@@ -3537,8 +3543,11 @@ class ToolExecutor:
         import re
 
         # Remove non-content tags entirely (tag + inner content)
+        non_content_tags = "script|style|nav|footer|aside|header|noscript|svg|form|iframe"
+        if extract_main:
+            non_content_tags = "script|style|pre|code|nav|footer|aside|header|noscript|svg|form|iframe"
         non_content = re.compile(
-            r"<(script|style|pre|code|nav|footer|aside|header|noscript|svg|form|iframe)\b[^>]*>.*?</\1>",
+            rf"<({non_content_tags})\b[^>]*>.*?(?:</\1\s*>|$)",
             re.DOTALL | re.IGNORECASE,
         )
         html = non_content.sub("", html)
