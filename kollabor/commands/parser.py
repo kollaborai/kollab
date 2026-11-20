@@ -61,7 +61,7 @@ class SlashCommandParser:
             # This handles quoted arguments properly: /save "my file.txt"
             original_command_text = command_text
             try:
-                    # Single-quoted backslashes are literal; leave those spans unchanged.
+                # Single-quoted backslashes are literal; leave those spans unchanged.
                 # POSIX shlex treats unquoted backslashes as escapes. Protect separators
                 # only in unquoted Windows path candidates with valid path segments.
                 # A trailing relative separator before another argument must not escape its boundary.
