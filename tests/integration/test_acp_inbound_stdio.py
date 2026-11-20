@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import psutil
 import pytest
@@ -456,6 +457,18 @@ async def test_new_session_registers_live_owned_daemon_in_project_scope(tmp_path
             assert len(records) == 1
             assert process_alive(records[0]["pid"])
             assert Path(records[0]["socket_path"]).exists()
+
+
+def test_windows_owned_daemon_lookup_finds_project_scoped_presence(tmp_path, monkeypatch):
+    home, workspace = tmp_path / "home", tmp_path / "project"
+    workspace.mkdir()
+    presence = home / ".kollab" / "projects" / "encoded-project" / "hub" / "presence"
+    presence.mkdir(parents=True)
+    record = {"pid": 12345, "identity": "probe"}
+    (presence / "probe.json").write_text(json.dumps(record))
+    monkeypatch.setattr(sys.modules[__name__], "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(sys.modules[__name__], "process_alive", lambda _pid: True)
+    assert owned_daemons(home, workspace) == [record]
 
 
 @pytest.mark.asyncio
