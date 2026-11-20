@@ -122,6 +122,14 @@ describe("agents that cannot restart themselves (#968)", () => {
     expect(agentVersionNotice({ ...noVersion, restartAgents: false })).toEqual(expect.objectContaining({ kind: "too-old", name: "lapis" }));
   });
 
+  it("shows named recovery while the engine version is still loading", () => {
+    const notice = agentVersionNotice({ engineVersion: "", agent: noVersion.agent, restartAgents: false });
+    const html = renderToStaticMarkup(<DaemonNotice notice={notice} fallbackName="lapis" busy={false} onRestart={() => {}} />);
+
+    expect(visibleText(html)).toContain(sentence);
+    expect(html).toContain("kollab --hub stop lapis");
+  });
+
   it("keeps the --hub flag intact in a wrapping code line, with Dismiss only", () => {
     const notice = agentVersionNotice({ ...noVersion, restartAgents: true })!;
     const html = renderToStaticMarkup(<AgentVersionNotice notice={notice} busy={false} onRestart={() => {}} onDismiss={() => {}} />);

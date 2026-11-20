@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const engine = vi.hoisted(() => ({
   calls: [] as string[],
   deferTree: false,
+  succeedTree: false,
   rejectTree: null as ((error: unknown) => void) | null,
 }));
 
@@ -25,6 +26,9 @@ vi.mock("@/api", async (importOriginal) => {
         if (url.includes("/code/fs/tree")) {
           if (engine.deferTree) {
             return new Promise((_resolve, reject) => { engine.rejectTree = reject; });
+          }
+          if (engine.succeedTree) {
+            return new Response(JSON.stringify({ success: true, data: { entries: [] } }), { status: 200, headers: { "Content-Type": "application/json" } });
           }
           const body = { success: false, error: { code: "daemon_outdated", message: "This agent runs older code. Restart it to use Code, Git and Terminal." } };
           const error = new Error(body.error.message);
@@ -62,6 +66,7 @@ beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   engine.calls = [];
   engine.deferTree = false;
+  engine.succeedTree = false;
   engine.rejectTree = null;
   host = document.createElement("div");
   document.body.appendChild(host);
@@ -127,5 +132,33 @@ describe("daemon_outdated from a Code descendant", () => {
     await act(async () => { await staleRequest; });
 
     expect(host.textContent).not.toContain("This agent runs older code. Restart it to use Code, Git and Terminal.");
+  });
+
+  it("ignores a late daemon_outdated response after a newer same-session request succeeds", async () => {
+    await act(async () => {
+      root.render(<CodeEditorView sessionId="s1" workspace="/w" mode="code" daemonNotice={daemonNotice} />);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    engine.deferTree = true;
+    const staleRequest = codeFetch("/code/fs/tree", {}, { sessionId: "s1", root: "/w" });
+
+    engine.deferTree = false;
+    engine.succeedTree = true;
+    const successfulRequest = codeFetch("/code/fs/tree", {}, { sessionId: "s1", root: "/w" });
+    await successfulRequest;
+
+    const error = new Error("This agent runs older code. Restart it to use Code, Git and Terminal.");
+    Object.assign(error, {
+      status: 502,
+      body: {
+        success: false,
+        error: { code: "daemon_outdated", message: error.message },
+      },
+    });
+    engine.rejectTree?.(error);
+    await act(async () => { await staleRequest; });
+
+    expect(host.textContent).not.toContain(stopAndStart);
   });
 });

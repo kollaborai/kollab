@@ -97,6 +97,24 @@ try {
     });
     process.stdout.write(`Saved ${filename}\n`);
   }
+
+  const longName = `studio-mac-agent-${"x".repeat(120)}`;
+  const longNameNotice = agentVersionNotice({
+    engineVersion: "0.22.0+aaaa1111",
+    agent: { name: longName, agent_id: "a1", state: "idle", current_task: "", solo: false, project: "/w", version: "" },
+    restartAgents: false,
+  });
+  assert.ok(longNameNotice);
+  const longNameMarkup = renderToStaticMarkup(
+    createElement("main", { className: "bg-background p-4 text-foreground" }, createElement(DaemonNotice, { ...recoveryProps, notice: longNameNotice, fallbackName: longName })),
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.setContent(`<!doctype html><html lang="en"><head><meta charset="utf-8"><style>${css}</style></head><body>${longNameMarkup}</body></html>`);
+  assert.equal(
+    await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth),
+    false,
+    "A long agent name overflows the recovery notice at 390px",
+  );
 } finally {
   await browser?.close();
   await vite.close();
