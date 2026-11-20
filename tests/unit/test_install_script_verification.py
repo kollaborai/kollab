@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 from pathlib import Path
 
@@ -500,3 +501,64 @@ def test_pip_prefix_install_verifies_its_custom_scripts_directory(
     assert result.returncode == 0, result.stdout + result.stderr
     assert str(prefix_bin / "kollab") in result.stdout
     assert "4.5.6" in result.stdout
+
+
+def test_windows_console_launcher_is_verified(tmp_path: Path) -> None:
+    tools_dir = tmp_path / "tools"
+    installed_dir = tmp_path / "Python Scripts"
+    _write_executable(tools_dir / "uname", "#!/bin/sh\necho MINGW64_NT-10.0\n")
+    _write_executable(
+        installed_dir / "kollab.exe", "#!/bin/sh\necho 'kollab 4.5.6'\n"
+    )
+
+    result = _run_verification(
+        tmp_path,
+        installed_dir=installed_dir,
+        path_dirs=[tools_dir, installed_dir, Path("/usr/bin"), Path("/bin")],
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert str(installed_dir / "kollab.exe") in result.stdout
+
+
+def test_timeout_kills_a_version_command_that_ignores_term(tmp_path: Path) -> None:
+    functions = tmp_path / "installer-functions.sh"
+    functions.write_text(
+        INSTALL_SCRIPT.read_text().split('\nmain "$@"')[0] + "\n",
+        encoding="utf-8",
+    )
+    installed_dir = tmp_path / "install-bin"
+    _write_executable(
+        installed_dir / "kollab",
+        "#!/bin/sh\ntrap '' TERM\nwhile :; do sleep 0.05; done\n",
+    )
+    env = os.environ.copy()
+    env.update({"HOME": str(tmp_path), "PATH": f"{installed_dir}:/usr/bin:/bin"})
+    process = subprocess.Popen(
+        [
+            "/bin/bash",
+            "-c",
+            'source "$1"; INSTALLED_DIR="$2"; VERSION_CHECK_TIMEOUT_SECONDS=1; verify_install',
+            "installer-test",
+            str(functions),
+            str(installed_dir),
+        ],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    try:
+        stdout, _ = process.communicate(timeout=3)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        pytest.fail("version verification hung after its one second timeout")
+
+    assert process.returncode != 0
+    assert "timed out" in stdout
