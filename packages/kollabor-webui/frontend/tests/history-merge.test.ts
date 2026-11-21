@@ -923,3 +923,14 @@ test("a saved calls row the run's reply already draws is not added again", () =>
   assert.equal(withSavedCopies(shown, loaded)[1], reply);
   assert.equal(shownMessagesChanged(withSavedCopies(shown, loaded), loaded, 3), false);
 });
+
+test("a later turn's calls row is added even when an earlier reply drew the same call id", () => {
+  // Some providers number calls per turn (call_0 each time): only calls rows
+  // saved before the reply that drew them are taken as drawn (#1358).
+  const call = { type: "tool-call", toolCallId: "call_0", result: "ok" };
+  const earlier = drawn("assistant-s1-1", "assistant", [call, { type: "text", text: "first" }], 2);
+  const later = { id: "history-4", role: "assistant", content: [{ ...call, result: "again" }] };
+  assert.deepEqual(mergeMissingHistoryMessages([earlier], [later]).added, [later]);
+  const before = { id: "history-1", role: "assistant", content: [call] };
+  assert.deepEqual(mergeMissingHistoryMessages([earlier], [before]).added, []);
+});
