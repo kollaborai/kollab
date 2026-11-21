@@ -304,10 +304,14 @@ const rowFingerprint = (message: Message): string => {
   return `${String((message as { role?: unknown }).role ?? "")}\n${JSON.stringify(content)}`;
 };
 
-/** The request a row belongs to, stamped on its live and stored assistant rows. */
-const requestIdOf = (message: Message): string | undefined => {
-  const value = message.metadata?.custom?.requestId;
-  return typeof value === "string" && value !== "" ? value : undefined;
+/**
+ * The sends a row belongs to: its own request id, and the ids a saved user row
+ * holds, one per send that went into it (#1359).
+ */
+const requestIdsOf = (message: Message): string[] => {
+  const custom = message.metadata?.custom;
+  const held = Array.isArray(custom?.requestIds) ? custom.requestIds : [];
+  return [...held, custom?.requestId].filter((id): id is string => typeof id === "string" && id !== "");
 };
 
 /**
@@ -332,9 +336,11 @@ const hasPlaceholderPicture = (message: Message): boolean => {
  * proven the same turn: keep both rows (a duplicate) rather than drop the new one.
  */
 const sameTurn = (live: Message, stored: Message): boolean => {
-  const liveRequest = requestIdOf(live);
-  const storedRequest = requestIdOf(stored);
-  if (liveRequest && storedRequest) return liveRequest === storedRequest;
+  const liveRequests = requestIdsOf(live);
+  const storedRequests = requestIdsOf(stored);
+  if (liveRequests.length && storedRequests.length) {
+    return liveRequests.some((id) => storedRequests.includes(id));
+  }
   if (hasPlaceholderPicture(live) || hasPlaceholderPicture(stored)) return false;
   return JSON.stringify(turnParts(live)) === JSON.stringify(turnParts(stored));
 };
@@ -481,14 +487,12 @@ export function dropTransientTurnDuplicates<T extends Message>(
  * (user-<session>-<n>): the pending copy, then the engine's. A history sync in
  * that wait can carry the same send as a newly saved row, and adding it draws
  * the message twice until the run settles (#1356). Leave those saved rows out
- * of the rows to add when they are the same turn (same words, see sameTurn).
- * Neither row carries an id that names the send, so the words must be enough:
- * when more saved rows have them than sends in flight, another sender's
- * message is among them and every row stays (a duplicate). Known limit: when
- * another sender's identical words are saved while this page's send is not
- * yet, that row is the one left out, until settlement reconciles the whole
- * history. Saved user rows that carry their request id would close it. Only the
- * page's own sends count, since the engine keeps user-<session>-<n> on settled
+ * of the rows to add. A saved row that names its sends (#1359) is this page's
+ * exactly when it names one in flight, so another sender's identical words
+ * stay. A row that names none (an older daemon) pairs by words with the sends
+ * no named row claimed (same words, see sameTurn): when more such rows have
+ * them than those sends, another sender's message is among them and every row
+ * stays (a duplicate). Only the page's own sends count, since the engine keeps user-<session>-<n> on settled
  * rows of earlier turns too: the engine's rows named by the ids its running
  * request sent, and its pending copies, whose ids follow the shown row count,
  * in order up to the number of sends in flight (later ones are still queued).
@@ -498,20 +502,29 @@ export function withoutInFlightSends<T extends Message>(
   tail: ReadonlyArray<T>,
   sendIds: ReadonlySet<string>,
 ): T[] {
-  const sendsByWords = new Map<string, Message[]>();
   const users = shown.filter((message) => transientRole(message) === "user");
   const engineRows = users.filter((message) =>
     message.metadata?.isOptimistic !== true && sendIds.has(String(message.id ?? "")) &&
     TRANSIENT_ROW_ID.test(String(message.id ?? "")));
   const pendingRows = users.filter((message) => message.metadata?.isOptimistic === true)
     .slice(0, Math.max(0, sendIds.size - engineRows.length));
-  for (const message of [...engineRows, ...pendingRows]) {
+  const inFlight = [...engineRows, ...pendingRows];
+  const left = new Set<T>();
+  const claimed = new Set<Message>();
+  const savedUsers = tail.filter((row) => transientRole(row) === "user");
+  for (const row of savedUsers) {
+    const ids = requestIdsOf(row);
+    const sends = ids.length ? inFlight.filter((message) => requestIdsOf(message).some((id) => ids.includes(id))) : [];
+    if (sends.length) left.add(row);
+    sends.forEach((message) => claimed.add(message));
+  }
+  const sendsByWords = new Map<string, Message[]>();
+  for (const message of inFlight.filter((send) => !claimed.has(send))) {
     const words = transientText(message.content);
     sendsByWords.set(words, [...(sendsByWords.get(words) ?? []), message]);
   }
-  const left = new Set<T>();
   for (const [words, sends] of sendsByWords) {
-    const saved = tail.filter((row) => transientRole(row) === "user" &&
+    const saved = savedUsers.filter((row) => !requestIdsOf(row).length &&
       transientText(row.content) === words && sends.some((message) => sameTurn(message, row)));
     if (saved.length <= sends.length) saved.forEach((row) => left.add(row));
   }

@@ -462,11 +462,22 @@ function historyToMessages(
       const media = Array.isArray(message.media)
         ? message.media.filter((entry) => entry && typeof entry.ref === "string")
         : [];
+      // The sends this row holds, by the ids their pages made (#1359): one per
+      // operator input, or the row's own id (an ACP admission).
+      const operatorInputs = Array.isArray(metadata?.operator_inputs) ? metadata.operator_inputs : [];
+      const requestIds = [...new Set([
+        ...operatorInputs.map((record) => asString(asRecord(record)?.request_id)),
+        asString(metadata?.request_id),
+      ].filter((id): id is string => id !== null))];
+      const custom = {
+        ...(media.length ? { media } : {}),
+        ...(requestIds.length ? { requestIds } : {}),
+      };
       messages.push({
         id: `history-${sourceIndex}`,
         role: "user",
         content,
-        ...(media.length ? { metadata: { custom: { media } } } : {}),
+        ...(Object.keys(custom).length ? { metadata: { custom } } : {}),
       });
       return;
     }
@@ -629,7 +640,12 @@ const converter = (
         id: `user-${state.sessionId}-${optimisticIndex++}`,
         role: "user" as const,
         content: parts,
-        metadata: { isOptimistic: true },
+        // The engine follows the send by this id into saved history (#1359).
+        metadata: {
+          isOptimistic: true,
+          ...("id" in command.message && typeof command.message.id === "string"
+            ? { custom: { requestId: command.message.id } } : {}),
+        },
       } satisfies ThreadMessageLike,
     ];
   });
