@@ -63,14 +63,20 @@ export function mergeMissingHistoryMessages<T extends Message>(
   // saves them as calls rows of their own. Adding those before the reply makes
   // assistant-ui join them under another id and keep the reply row as a
   // second branch, so a calls row the reply already draws is not added (#1358).
-  const drawnCalls = new Set(shown.flatMap((message) =>
-    transientRole(message) === "assistant" && TRANSIENT_ROW_ID.test(String(message.id ?? ""))
-      ? toolCallIds(message) : []));
+  // By call id, the saved position of the reply that drew it: a calls row is
+  // saved before its reply, and some providers reuse call ids every turn.
+  const drawnCalls = new Map<string, number>();
+  for (const message of shown) {
+    if (transientRole(message) !== "assistant" || !TRANSIENT_ROW_ID.test(String(message.id ?? ""))) continue;
+    const at = historyIndex(message) ?? Infinity;
+    for (const id of toolCallIds(message)) drawnCalls.set(id, Math.max(drawnCalls.get(id) ?? -Infinity, at));
+  }
   const added = loaded.flatMap((message) => {
     const key = sourceId(message);
     if (!key || represented.has(key)) return [];
     const calls = transientRole(message) === "assistant" ? toolCallIds(message) : [];
-    if (calls.length && calls.every((id) => drawnCalls.has(id))) return [];
+    const index = historyIndex(message) ?? Infinity;
+    if (calls.length && calls.every((id) => (drawnCalls.get(id) ?? -Infinity) > index)) return [];
     represented.add(key);
     return [reserveRow(message, used)];
   });
