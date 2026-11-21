@@ -928,11 +928,13 @@ test("a later turn's calls row is added even when an earlier reply drew the same
   // Some providers number calls per turn (call_0 each time): only calls rows
   // saved before the reply that drew them are taken as drawn (#1358).
   const call = { type: "tool-call", toolCallId: "call_0", result: "ok" };
+  // The earlier turn: its send saved at 0, its reply at 2.
+  const sent = drawn("user-s1-0", "user", "go", 0);
   const earlier = drawn("assistant-s1-1", "assistant", [call, { type: "text", text: "first" }], 2);
   const later = { id: "history-4", role: "assistant", content: [{ ...call, result: "again" }] };
-  assert.deepEqual(mergeMissingHistoryMessages([earlier], [later]).added, [later]);
+  assert.deepEqual(mergeMissingHistoryMessages([sent, earlier], [later]).added, [later]);
   const before = { id: "history-1", role: "assistant", content: [call] };
-  assert.deepEqual(mergeMissingHistoryMessages([earlier], [before]).added, []);
+  assert.deepEqual(mergeMissingHistoryMessages([sent, earlier], [before]).added, []);
 });
 
 test("rows saved while this page's turn runs go above that turn", () => {
