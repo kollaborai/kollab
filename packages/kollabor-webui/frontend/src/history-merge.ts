@@ -515,9 +515,10 @@ export function withSavedCopies<T extends Message>(shown: ReadonlyArray<T>, load
  * (user-<session>-<n>): the pending copy, then the engine's. A history sync in
  * that wait can carry the same send as a newly saved row, and adding it draws
  * the message twice until the run settles (#1356). Leave those saved rows out
- * of the rows to add. A saved row that names its sends (#1359) is this page's
- * exactly when it names one in flight, so another sender's identical words
- * stay. A row that names none (an older daemon) pairs by words with the sends
+ * of the rows to add. A saved row that names its sends (#1359) is left out
+ * only when every send it names is in flight here, so another sender's words
+ * stay, even when the daemon saved them in one row with this page's send (that
+ * send then shows twice until the run settles). A row that names none (an older daemon) pairs by words with the sends
  * no named row claimed (same words, see sameTurn): when more such rows have
  * them than those sends, another sender's message is among them and every row
  * stays (a duplicate). Only the page's own sends count, since the engine keeps user-<session>-<n> on settled
@@ -543,7 +544,9 @@ export function withoutInFlightSends<T extends Message>(
   for (const row of savedUsers) {
     const ids = requestIdsOf(row);
     const sends = ids.length ? inFlight.filter((message) => requestIdsOf(message).some((id) => ids.includes(id))) : [];
-    if (sends.length) left.add(row);
+    // Out only when every send it holds is in flight here: a row the daemon
+    // saved with another sender's send too stays, so their words show.
+    if (sends.length && ids.every((id) => sends.some((message) => requestIdsOf(message).includes(id)))) left.add(row);
     sends.forEach((message) => claimed.add(message));
   }
   const sendsByWords = new Map<string, Message[]>();
