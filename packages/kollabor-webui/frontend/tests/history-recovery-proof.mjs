@@ -1583,6 +1583,110 @@ try {
     isMobile: true,
   });
 
+  // #1364: the reader is on a message while this page's own send runs. A
+  // history sync lands mid-turn (another agent's message), then the turn ends
+  // and history saves it. Whatever the reader is looking at stays put: the
+  // message they scrolled up to, or the sent message the view anchored.
+  const runMidTurnScroll = async (name, readerScrolls) => {
+    const st = { events: [], assistant: [], phase: 0, refreshes: 0 };
+    const rows = () => [
+      ...Array.from({ length: 50 }, (_, i) => ({ role: "user", content: `message-${i + 10}` })),
+      ...(st.phase >= 1 ? [{ role: "user", content: "PEER-ARRIVAL" }, { role: "assistant", content: "PEER-REPLY" }] : []),
+      ...(st.phase >= 2 ? [{ role: "user", content: "CLIENT-TURN" }, { role: "assistant", content: "CLIENT-REPLY" }] : []),
+    ];
+    const page60 = () => mkPage(10, 60 + 2 * st.phase, { history: rows() });
+    await scenario(
+      name,
+      () => ({
+        resolve(options) {
+          if (options.before) return { status: 200, body: mkPage(0, 10) };
+          if (options.after) st.refreshes += 1;
+          return { status: 200, body: page60() };
+        },
+        events(route) {
+          return new Promise((resolve) => st.events.push((body) =>
+            resolve(route.fulfill({ status: 200, contentType: "text/event-stream", body }).catch(() => {}))));
+        },
+        assistant(route) {
+          const state = route.request().postDataJSON().state;
+          return new Promise((resolve) => st.assistant.push(() => {
+            // What the engine sends at the end: the state the request sent, then
+            // the turn's rows matched to their saved positions.
+            const messages = [...state.messages,
+              { id: `user-demo-session-${state.messages.length}`, role: "user", content: "CLIENT-TURN",
+                metadata: { custom: { historySourceIndex: 62 } } },
+              { id: `assistant-demo-session-${state.messages.length + 1}`, role: "assistant", content: "CLIENT-REPLY",
+                status: { type: "complete", reason: "stop" }, metadata: { custom: { historySourceIndex: 63 } } },
+            ];
+            const update = { type: "update-state", operations: [
+              { type: "set", path: ["messages"], value: messages },
+              { type: "set", path: ["synced"], value: { history: 64, messages: messages.length } },
+            ] };
+            const body = `data: ${JSON.stringify(update)}\n\ndata: ${JSON.stringify({ type: "message-finish", finishReason: "stop" })}\n\ndata: [DONE]\n\n`;
+            resolve(route.fulfill({ status: 200, contentType: "text/event-stream", body }).catch(() => {}));
+          }));
+        },
+      }),
+      async (page) => {
+        const drift = [];
+        try {
+          await openThread(page, "message-59");
+          const composer = page.locator(".aui-composer-input");
+          await composer.fill("CLIENT-TURN");
+          await composer.press("Enter");
+          for (let n = 0; n < 100 && (!st.assistant.length || !st.events.length); n++) await page.waitForTimeout(100);
+          if (!st.assistant.length || !st.events.length) throw new Error("local send or event stream was not held");
+          await page.waitForTimeout(1200);
+          const viewport = page.locator('[data-slot="aui_thread-viewport"]');
+          let watched = "CLIENT-TURN";
+          if (readerScrolls) {
+            // A real wheel over the thread: the reader scrolls up to read.
+            const box = await viewport.boundingBox();
+            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+            await page.mouse.wheel(0, -400);
+            await page.waitForTimeout(600);
+            watched = await viewport.evaluate((view) => {
+              const top = view.getBoundingClientRect().top;
+              const row = [...view.querySelectorAll('[data-role="user"]')]
+                .find((el) => el.getBoundingClientRect().top >= top + 10);
+              return row?.textContent?.trim() ?? "";
+            });
+            if (!/^message-\d+$/.test(watched)) throw new Error(`no history message at the top of the view: ${watched}`);
+          }
+          const before = await messagePosition(page, watched, true);
+          const sample = async (label) => {
+            const now = await messagePosition(page, watched);
+            drift.push(`${label}: ${Math.round(now.offset - before.offset)}px${now.sameNode ? "" : " (remounted)"}`);
+            return Math.abs(now.offset - before.offset) <= 2 && now.sameNode;
+          };
+          // Mid-turn: another agent's message reaches history.
+          st.phase = 1;
+          st.events.splice(0).forEach((release) => release('data: {"type":"hub_message"}\n\n'));
+          await page.getByText("PEER-ARRIVAL", { exact: true }).first().waitFor({ state: "attached", timeout: 10000 });
+          await page.waitForTimeout(1200);
+          const midTurn = await sample("after the mid-turn sync");
+          // The turn ends and history saves it.
+          st.phase = 2;
+          st.assistant.splice(0).forEach((release) => release());
+          await page.getByText("CLIENT-REPLY", { exact: true }).first().waitFor({ state: "attached", timeout: 10000 });
+          for (let n = 0; n < 50 && !st.events.length; n++) await page.waitForTimeout(100);
+          const refreshesBefore = st.refreshes;
+          st.events.splice(0).forEach((release) => release('data: {"type":"turn_complete"}\n\n'));
+          for (let n = 0; n < 50 && st.refreshes === refreshesBefore; n++) await page.waitForTimeout(100);
+          await page.waitForTimeout(1500);
+          const settled = await sample("after the turn ended");
+          if (midTurn && settled) ok(name, `${watched} stays put (${drift.join(", ")})`);
+          else fail(name, `${watched} moved: ${drift.join(", ")}`);
+        } finally {
+          st.events.splice(0).forEach((release) => release(""));
+          st.assistant.splice(0).forEach((release) => release());
+        }
+      },
+    );
+  };
+  await runMidTurnScroll("S-1364-reader-scrolled-up", true);
+  await runMidTurnScroll("S-1364-reader-on-the-sent-message", false);
+
   // K: another agent's message and reply land while this page owns a local
   // turn. They must be appended after that turn settles, even when the
   // engine refreshed history before the local reply reached the mirror.
