@@ -477,31 +477,45 @@ function historyToMessages(
         return text ? [{ text, requestId: asString(asRecord(record)?.request_id) }] : [];
       });
       // The row as the daemon wrote each send's words (content_to_text): its
-      // parts on lines of their own, each picture as [imageN]. By number, a
-      // picture the thread shows as an image part, or null for a token.
+      // parts on lines of their own, each picture as a token. Each send
+      // numbers its own pictures from 1, so tokens compare as [image]. In
+      // order, the row's pictures: an image part, or null for a token.
+      const TOKEN = /\[image\d+\]/g;
       const pictures: Array<ImageMessagePart | null> = [];
-      const lines = typeof content === "string" ? [content] : content.map((part) => {
-        if (part.type === "image") {
-          pictures.push(part);
-          return `[image${pictures.length}]`;
-        }
-        if (part.type !== "text") return null;
-        if (/^\[image\d+\]$/.test(part.text)) pictures.push(null);
-        return part.text;
-      });
+      const lines = typeof content === "string"
+        ? [content.replace(TOKEN, () => { pictures.push(null); return "[image]"; })]
+        : content.map((part) => {
+          if (part.type === "image") {
+            pictures.push(part);
+            return "[image]";
+          }
+          if (part.type !== "text") return null;
+          if (/^\[image\d+\]$/.test(part.text)) {
+            pictures.push(null);
+            return "[image]";
+          }
+          return part.text.replace(TOKEN, "[image]");
+        });
       const shownText = lines.every((line) => line !== null) ? lines.join("\n") : null;
-      // A piece's [imageN] tokens count across the whole row.
+      const sentText = sends.map((send) => send.text.replace(TOKEN, "[image]")).join("\n");
+      // Every token a send wrote is one of the row's pictures, in order: a
+      // typed [image1] with no picture leaves the row whole.
+      const tokens = sends.reduce((count, send) => count + (send.text.match(TOKEN)?.length ?? 0), 0);
+      let pictureAt = 0;
       const pieceContent = (text: string) => text.split(/(\[image\d+\])/).reduce<Array<TextMessagePart | ImageMessagePart>>(
         (parts, segment) => {
-          const picture = pictures[Number(/^\[image(\d+)\]$/.exec(segment)?.[1] ?? 0) - 1];
+          const token = /^\[image\d+\]$/.test(segment);
+          const picture = token ? pictures[pictureAt] : undefined;
+          // A token keeps its number across the whole row, where the media list is.
+          const words = token ? `[image${++pictureAt}]` : segment;
           const last = parts.at(-1);
           if (picture) parts.push(picture);
-          else if (last?.type === "text") parts[parts.length - 1] = { type: "text", text: last.text + segment };
-          else if (segment) parts.push({ type: "text", text: segment });
+          else if (last?.type === "text") parts[parts.length - 1] = { type: "text", text: last.text + words };
+          else if (words) parts.push({ type: "text", text: words });
           return parts;
         }, []);
-      if (sends.length > 1 && sends.length === operatorInputs.length &&
-          shownText?.trim() === sends.map((send) => send.text).join("\n").trim()) {
+      if (sends.length > 1 && sends.length === operatorInputs.length && tokens === pictures.length &&
+          shownText?.trim() === sentText.trim()) {
         sends.forEach((send, index) => {
           const piece = pieceContent(send.text);
           // A piece showing a picture as its token keeps the row's media list.
