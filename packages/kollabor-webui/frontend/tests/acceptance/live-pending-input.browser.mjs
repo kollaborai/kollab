@@ -289,9 +289,10 @@ try {
       await t.waitUsers("theirs|hello");
       await t.page.close();
     },
-    // This page's send came first in the shared row: it stays above the other
-    // sender's message while the run goes on and after (#1359).
-    async "keeps this page's send above another's saved after it in one row"() {
+    // The daemon saved this page's send and another sender's in one row. While
+    // the run goes on, the page's own turn stays last: a message landing
+    // between the send and its reply would scroll the reader to it (#1364).
+    async "keeps this page's turn below another's message saved in the same row"() {
       const t = await open();
       await t.submit();
       await t.waitUsers("hello");
@@ -305,9 +306,7 @@ try {
         { id: "history-1", role: "assistant", content: [{ type: "text", text: "Working" }] },
       ]);
       await t.waitImported("Working");
-      await t.waitUsers("hello|theirs");
-      await t.finishSubmission();
-      await t.waitUsers("hello|theirs");
+      await t.waitUsers("theirs|hello");
       await t.page.close();
     },
     // Output of a turn this page never saw start is not guessed at.

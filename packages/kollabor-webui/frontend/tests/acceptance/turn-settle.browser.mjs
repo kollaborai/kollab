@@ -159,9 +159,9 @@ try {
       await t.page.close();
     },
     // The page sends while watching another client's turn, whose live copy
-    // sits in the state it sent. Rows a mid-turn sync adds keep history order
-    // around this page's own rows (#1359).
-    async "keeps history order when the page sent while watching another turn"() {
+    // sits in the state it sent. A message another client sends while the
+    // page's turn runs goes above that turn, which stays last (#1364).
+    async "keeps the page's turn last when the page sent while watching another turn"() {
       const t = await open();
       await t.emit({ type: "token", text: "Busy live", request_id: "r-busy" });
       await t.waitFor((s) => s.assistant.includes("Busy live"), "the watched turn");
@@ -173,7 +173,7 @@ try {
       await t.answer(1, 3);
       await t.finish();
       await t.waitFor((s) => s.assistant.includes("Working"), "the reply");
-      await t.holds((s) => s.users === "busy|hello|ping", "history order after the run ends");
+      await t.holds((s) => s.users === "busy|ping|hello", "the page's turn last after the run ends");
       await t.page.close();
     },
     async "settles a turn sent during a busy turn in place"() {

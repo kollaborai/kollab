@@ -1591,14 +1591,24 @@ try {
   // history sync lands mid-turn (another agent's message), then the turn ends
   // and history saves it. Whatever the reader is looking at stays put: the
   // message they scrolled up to, or the sent message the view anchored.
-  const runMidTurnScroll = async (name, readerScrolls, midTurnSync = true, watching = false) => {
-    const st = { events: [], assistant: [], phase: 0, refreshes: 0 };
-    const rows = () => [
+  const runMidTurnScroll = async (name, readerScrolls, midTurnSync = true, watching = false, peerAfterSend = false) => {
+    const st = { events: [], assistant: [], phase: 0, refreshes: 0, sendId: null };
+    // The page's send as the daemon saves it: its request id names the send.
+    const sentRow = () => ({ role: "user", content: "CLIENT-TURN", metadata: { operator_inputs: [
+      { source: "state_rpc", timestamp: "t", text: "CLIENT-TURN", request_id: st.sendId },
+    ] } });
+    const rows = () => peerAfterSend ? [
+      // Another agent's message saved right after the page's send, in its turn.
+      ...Array.from({ length: 50 }, (_, i) => ({ role: "user", content: `message-${i + 10}` })),
+      ...(st.phase >= 1 ? [sentRow(), { role: "user", content: "PEER-ARRIVAL" }] : []),
+      ...(st.phase >= 2 ? [{ role: "assistant", content: "CLIENT-REPLY" }] : []),
+    ] : [
       ...Array.from({ length: 50 }, (_, i) => ({ role: "user", content: `message-${i + 10}` })),
       ...(st.phase >= 1 ? [{ role: "user", content: "PEER-ARRIVAL" }, { role: "assistant", content: "PEER-REPLY" }] : []),
-      ...(st.phase >= 2 ? [{ role: "user", content: "CLIENT-TURN" }, { role: "assistant", content: "CLIENT-REPLY" }] : []),
+      ...(st.phase >= 2 ? [sentRow(), { role: "assistant", content: "CLIENT-REPLY" }] : []),
     ];
-    const page60 = () => mkPage(10, 60 + 2 * st.phase, { history: rows() });
+    const saved = peerAfterSend ? { send: 60, reply: 62 } : { send: 62, reply: 63 };
+    const page60 = () => mkPage(10, 10 + rows().length, { history: rows() });
     await scenario(
       name,
       () => ({
@@ -1621,7 +1631,9 @@ try {
             let raw = "";
             req.on("data", (chunk) => { raw += chunk; });
             req.on("end", async () => {
-              const state = JSON.parse(raw).state;
+              const request = JSON.parse(raw);
+              const state = request.state;
+              st.sendId = request.commands?.[0]?.message?.id ?? null;
               const at = state.messages.length;
               const user = { id: `user-demo-session-${at}`, role: "user", content: "CLIENT-TURN" };
               const reply = { id: `assistant-demo-session-${at + 1}`, role: "assistant", content: "" };
@@ -1637,13 +1649,13 @@ try {
               send([{ type: "set", path: ["messages"], value: [...state.messages, user, { ...reply, content: "CLIENT-REPLY" }] }]);
               await new Promise((wait) => setTimeout(wait, 800));
               const messages = [...state.messages,
-                { ...user, metadata: { custom: { historySourceIndex: 62 } } },
+                { ...user, metadata: { custom: { historySourceIndex: saved.send, requestId: st.sendId } } },
                 { ...reply, content: "CLIENT-REPLY", status: { type: "complete", reason: "stop" },
-                  metadata: { custom: { historySourceIndex: 63 } } },
+                  metadata: { custom: { historySourceIndex: saved.reply } } },
               ];
               send([
                 { type: "set", path: ["messages"], value: messages },
-                { type: "set", path: ["synced"], value: { history: 64, messages: messages.length } },
+                { type: "set", path: ["synced"], value: { history: saved.reply + 1, messages: messages.length } },
               ]);
               res.end(`data: ${JSON.stringify({ type: "message-finish", finishReason: "stop" })}\n\ndata: [DONE]\n\n`);
             });
@@ -1733,6 +1745,8 @@ try {
   await runMidTurnScroll("S-1364-reader-scrolled-up", true);
   await runMidTurnScroll("S-1364-reader-on-the-sent-message", false);
   await runMidTurnScroll("S-1364-reader-scrolled-up-while-watching", true, true, true);
+  await runMidTurnScroll("S-1364-reader-scrolled-up-peer-after-send", true, true, false, true);
+  await runMidTurnScroll("S-1364-reader-on-the-sent-message-peer-after-send", false, true, false, true);
   await runMidTurnScroll("S-1364-reader-scrolled-up-no-sync", true, false);
   await runMidTurnScroll("S-1364-reader-on-the-sent-message-no-sync", false, false);
 

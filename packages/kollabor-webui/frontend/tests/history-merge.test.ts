@@ -11,9 +11,7 @@ import {
   reconcileBoundaryToolResults,
   inFlightSendIdsFor,
   shownMessagesChanged,
-  inFlightPieces,
   withoutInFlightSends,
-  withPieces,
   withSavedCopies,
 } from "../src/history-merge.ts";
 import { historyContentToThreadContent } from "../src/history-content.ts";
@@ -937,22 +935,26 @@ test("a later turn's calls row is added even when an earlier reply drew the same
   assert.deepEqual(mergeMissingHistoryMessages([earlier], [before]).added, []);
 });
 
-test("pieces of one saved row keep their order around this page's own row", () => {
-  // The daemon saved this page's A, then another sender's B, as one row (#1359).
+test("rows saved while this page's turn runs go above that turn", () => {
+  // assistant-ui takes the last user row with a reply after it for the turn it
+  // keeps at the top: a row landing between this page's send and its reply
+  // would scroll the reader to it (#1364). The page's own turn stays last.
   const a = named({ ...saved(9, "A"), id: "history-9-send-0" }, { requestIds: ["my-send"] });
   const b = named({ ...saved(9, "B"), id: "history-9-send-1" }, { requestIds: ["their-send"] });
-  const shown = [pending("user-s1-8", "A", "my-send")];
-  const pieces = inFlightPieces(shown, [a, b], ids("user-s1-8"));
-  assert.deepEqual([...pieces.keys()], ["my-send"]);
-  // While A is in flight its row stands where its piece is saved: B goes after it.
-  const placed = withPieces(shown, pieces);
-  assert.equal(placed[0].id, "user-s1-8");
-  assert.equal(placed[0].content, shown[0].content);
-  assert.equal(historyMessageIndex(placed[0]), 9);
-  assert.deepEqual(mergeMissingHistoryMessages(placed, [b]).messages.map((row) => row.id), ["user-s1-8", "history-9-send-1"]);
-  // A piece sorts by its number even when the other pieces are not loaded.
+  const sent = pending("user-s1-8", "A", "my-send");
+  assert.deepEqual(mergeMissingHistoryMessages([sent], [b]).messages.map((row) => row.id), ["history-9-send-1", "user-s1-8"]);
+  // Once the run's reply has its saved position, rows saved before it go above
+  // the turn and rows saved after it below.
+  const turn = [drawn("user-s1-8", "user", "A", 9), drawn("assistant-s1-9", "assistant", "done", 12)];
+  const during = { id: "history-11", role: "user", content: "ping" };
+  const after = { id: "history-13", role: "user", content: "later" };
+  assert.deepEqual(mergeMissingHistoryMessages(turn, [b, during, after]).messages.map((row) => row.id),
+    ["history-9-send-1", "history-11", "user-s1-8", "assistant-s1-9", "history-13"]);
+  // An earlier turn the page ran is history like any other.
+  const earlier = [drawn("user-s1-2", "user", "old", 2), drawn("assistant-s1-3", "assistant", "ok", 3),
+    { id: "history-4", role: "user", content: "next" }];
+  assert.deepEqual(mergeMissingHistoryMessages(earlier, [{ id: "history-5", role: "assistant", content: "x" }])
+    .messages.map((row) => row.id), ["user-s1-2", "assistant-s1-3", "history-4", "history-5"]);
+  // Pieces of one saved row sort by their number.
   assert.deepEqual(mergeMissingHistoryMessages([b], [a]).messages.map((row) => row.id), ["history-9-send-0", "history-9-send-1"]);
-  // Rows of other sends are left as they are.
-  const other = pending("user-s1-10", "C", "other-send");
-  assert.equal(withPieces([other], pieces)[0], other);
 });
