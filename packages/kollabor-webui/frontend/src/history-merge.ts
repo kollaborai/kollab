@@ -183,8 +183,13 @@ export function reconcileBoundaryToolResults<T extends Message>(
  * now follows ends its group, so the turns show apart. A voice talk-over takes
  * away the reply nobody heard. The thread then reloads whole: assistant-ui
  * keeps every message it was given, so re-importing one by id would branch it.
+ * `savedBefore` is the loaded history's row count: a row of the page's own run
+ * (user-<session>-<n>) that the engine placed at or past it was saved after
+ * this history was read, so it is not gone (#1358).
  */
-export function shownMessagesChanged(shown: ReadonlyArray<Message>, loaded: ReadonlyArray<Message>): boolean {
+export function shownMessagesChanged(
+  shown: ReadonlyArray<Message>, loaded: ReadonlyArray<Message>, savedBefore = Infinity,
+): boolean {
   const bySource = new Map(shown.flatMap((message) => {
     const key = sourceId(message);
     return key ? [[key, message] as const] : [];
@@ -194,6 +199,7 @@ export function shownMessagesChanged(shown: ReadonlyArray<Message>, loaded: Read
   const start = loaded.reduce((low, message) => Math.min(low, historyIndex(message) ?? low), Infinity);
   const gone = shown.some((message) => {
     const index = historyIndex(message);
+    if (index !== null && index >= savedBefore && TRANSIENT_ROW_ID.test(String(message.id ?? ""))) return false;
     return index !== null && index >= start && !loadedIds.has(sourceId(message));
   });
   return gone || loaded.some((message) => {
@@ -480,6 +486,28 @@ export function dropTransientTurnDuplicates<T extends Message>(
     sameTurn(message, stored[index]));
   if (!aligned) return null;
   return shown.slice(0, blockStart);
+}
+
+/**
+ * The rows the page's own run drew (user-<session>-<n>, assistant-<session>-<n>)
+ * carry the saved row the engine matched them to. Once loaded history has that
+ * row, show its saved content under the drawn row's id, so assistant-ui updates
+ * the message in place instead of the thread reloading whole: a blank frame and
+ * a scroll jump at the end of every turn (#1358). Returns `shown` itself when
+ * every such row already reads as its saved copy.
+ */
+export function withSavedCopies<T extends Message>(shown: ReadonlyArray<T>, loaded: ReadonlyArray<T>): ReadonlyArray<T> {
+  const saved = new Map(loaded.map((message) => [sourceId(message), message]));
+  let swapped = false;
+  const messages = shown.map((message) => {
+    const key = sourceId(message);
+    const copy = key && TRANSIENT_ROW_ID.test(String(message.id ?? "")) ? saved.get(key) : undefined;
+    if (!copy || (JSON.stringify(copy.content) === JSON.stringify(message.content) &&
+      copy.convertConfig?.joinStrategy === message.convertConfig?.joinStrategy)) return message;
+    swapped = true;
+    return displayRow(copy, message.id);
+  });
+  return swapped ? messages : shown;
 }
 
 /**
