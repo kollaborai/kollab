@@ -36,7 +36,7 @@ import type {
   SessionEvent,
   TurnError,
 } from "./api";
-import { isToolOutputBatch } from "./api";
+import { isToolOutputBatch, stripAgentHud } from "./api";
 import { GoalCancellationTracker } from "./utils/goal-cancel";
 import {
   dropTransientTurnDuplicates,
@@ -477,29 +477,31 @@ function historyToMessages(
         return text ? [{ text, requestId: asString(asRecord(record)?.request_id) }] : [];
       });
       // The row as the daemon wrote each send's words (content_to_text): its
-      // parts on lines of their own, each picture as a token. Each send
+      // parts on lines of their own, each picture as a token, after the agent
+      // HUD. Pictures are counted from the saved row itself, not its shown
+      // text: once shown, a typed [image1] reads like a stored picture. Each send
       // numbers its own pictures from 1, so tokens compare as [image]. In
-      // order, the row's pictures: an image part, or null for a token.
+      // order, the row's pictures as shown: an image part, or null for a token.
       const TOKEN = /\[image\d+\]/g;
       const pictures: Array<ImageMessagePart | null> = [];
-      const lines = typeof content === "string"
-        ? [content.replace(TOKEN, () => { pictures.push(null); return "[image]"; })]
-        : content.map((part) => {
-          if (part.type === "image") {
-            pictures.push(part);
-            return "[image]";
-          }
-          if (part.type !== "text") return null;
-          if (/^\[image\d+\]$/.test(part.text)) {
-            pictures.push(null);
-            return "[image]";
-          }
-          return part.text.replace(TOKEN, "[image]");
-        });
-      const shownText = lines.every((line) => line !== null) ? lines.join("\n") : null;
+      const rawLines = (Array.isArray(message.content) ? message.content : [message.content]).map((rawPart) => {
+        if (typeof rawPart === "string") return rawPart;
+        const part = asRecord(rawPart);
+        if (part?.type === "text" && typeof part.text === "string") return part.text;
+        if (part?.type !== "image") return null;
+        const shown = historyContentToThreadContent([part]);
+        pictures.push(Array.isArray(shown) && shown[0]?.type === "image" ? shown[0] as ImageMessagePart : null);
+        return "[image]";
+      });
+      // As the engine binds media (count_image_tokens): image parts are the
+      // pictures; a row with none keeps them as tokens, its media list bound
+      // one entry per token.
+      if (!pictures.length) pictures.push(...media.map(() => null));
+      const shownText = rawLines.every((line) => line !== null)
+        ? stripAgentHud(rawLines.join("\n")).replace(TOKEN, "[image]") : null;
       const sentText = sends.map((send) => send.text.replace(TOKEN, "[image]")).join("\n");
       // Every token a send wrote is one of the row's pictures, in order: a
-      // typed [image1] with no picture leaves the row whole.
+      // typed [image1] with no picture of its own leaves the row whole.
       const tokens = sends.reduce((count, send) => count + (send.text.match(TOKEN)?.length ?? 0), 0);
       let pictureAt = 0;
       const pieceContent = (text: string) => text.split(/(\[image\d+\])/).reduce<Array<TextMessagePart | ImageMessagePart>>(
