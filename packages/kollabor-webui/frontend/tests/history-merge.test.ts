@@ -9,6 +9,7 @@ import {
   mergeCompactionHistorySnapshot,
   mergeMissingHistoryMessages,
   reconcileBoundaryToolResults,
+  inFlightSendIdsFor,
   shownMessagesChanged,
   withoutInFlightSends,
 } from "../src/history-merge.ts";
@@ -771,4 +772,20 @@ test("each in-flight send covers one saved row with its words", () => {
 test("a picture placeholder does not prove a saved row is the in-flight send", () => {
   const tail = [saved(9, "[image1] look")];
   assert.deepEqual(withoutInFlightSends([sent("user-s1-8", "[image1] look")], tail, ids("user-s1-8")), tail);
+});
+
+test("a request's messages are in flight as rows after the state it sent", () => {
+  const request = {
+    commands: [{ type: "add-message" }, { type: "add-message" }],
+    state: { messages: [{}, {}, {}] },
+  };
+  assert.deepEqual([...inFlightSendIdsFor(request, "s1", ids())], ["user-s1-3", "user-s1-4"]);
+});
+
+test("a request without a message keeps the sends already in flight", () => {
+  // Approving a tool continues the turn that carries the send; its saved copy
+  // can still arrive during that request.
+  const previous = ids("user-s1-3");
+  assert.equal(inFlightSendIdsFor({ commands: [{ type: "add-tool-result" }], state: { messages: [] } }, "s1", previous), previous);
+  assert.equal(inFlightSendIdsFor({ commands: [] }, "s1", previous), previous);
 });
