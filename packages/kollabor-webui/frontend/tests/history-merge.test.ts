@@ -710,40 +710,53 @@ test("compaction keeps visible display IDs unique and releases archived source p
 });
 
 // #1356: this page's own send is on screen as a transient row (pending, then
-// the engine's) while a history sync brings the same send as a saved row.
+// the engine's) while a history sync brings the same send as a saved row. The
+// page names its in-flight sends by id; other user-<session>-<n> rows are
+// settled rows of earlier turns.
 const sent = (id: string, text: string) => ({ id, role: "user", content: [{ type: "text", text }] });
 const saved = (index: number, text: string) => ({ id: `history-${index}`, role: "user", content: text });
+const ids = (...values: string[]) => new Set(values);
 
 test("a history sync leaves out the saved copy of an in-flight send", () => {
-  const inFlight = [sent("user-s1-38", "message B"), { id: "assistant-s1-39", role: "assistant", content: "" }];
+  const shown = [sent("user-s1-38", "message B"), { id: "assistant-s1-39", role: "assistant", content: "" }];
   const busy = { id: "history-50", role: "user", content: "busy turn" };
   const work = { id: "history-51", role: "assistant", content: "working" };
   const tail = [busy, work, saved(53, "message B")];
-  assert.deepEqual(withoutInFlightSends(inFlight, tail), [busy, work]);
+  assert.deepEqual(withoutInFlightSends(shown, tail, ids("user-s1-38")), [busy, work]);
 });
 
 test("a history sync keeps user rows no in-flight send covers", () => {
   const tail = [saved(4, "another message"), saved(5, "message B")];
-  assert.deepEqual(withoutInFlightSends([], tail), tail);
-  assert.deepEqual(withoutInFlightSends([sent("user-s1-3", "message B")], tail), [tail[0]]);
+  assert.deepEqual(withoutInFlightSends([], tail, ids()), tail);
+  assert.deepEqual(withoutInFlightSends([sent("user-s1-3", "message B")], tail, ids("user-s1-3")), [tail[0]]);
   // A row already in history is not an in-flight send, even with the same words.
-  assert.deepEqual(withoutInFlightSends([sent("history-2", "message B")], tail), tail);
+  assert.deepEqual(withoutInFlightSends([sent("history-2", "message B")], tail, ids("history-2")), tail);
+});
+
+test("a settled row of an earlier turn is not an in-flight send", () => {
+  // The engine keeps user-<session>-<n> on a settled row; only the page's own
+  // send ids count.
+  const tail = [saved(9, "yes")];
+  assert.deepEqual(withoutInFlightSends([sent("user-s1-3", "yes")], tail, ids()), tail);
+  const shown = [sent("user-s1-3", "yes"), sent("user-s1-8", "yes")];
+  const two = [saved(9, "yes"), saved(10, "yes")];
+  assert.deepEqual(withoutInFlightSends(shown, two, ids("user-s1-8")), two);
 });
 
 test("saved rows that outnumber the in-flight sends with their words are all kept", () => {
   // Another sender's "yes" and this page's "yes" land in one sync: the words
   // cannot tell which is which, so hiding either could hide the other sender.
   const tail = [saved(7, "yes"), saved(8, "yes")];
-  assert.deepEqual(withoutInFlightSends([sent("user-s1-6", "yes")], tail), tail);
+  assert.deepEqual(withoutInFlightSends([sent("user-s1-6", "yes")], tail, ids("user-s1-6")), tail);
 });
 
 test("each in-flight send covers one saved row with its words", () => {
   const tail = [saved(7, "yes"), saved(8, "yes"), saved(9, "no")];
-  const inFlight = [sent("user-s1-5", "yes"), sent("user-s1-6", "yes")];
-  assert.deepEqual(withoutInFlightSends(inFlight, tail), [tail[2]]);
+  const shown = [sent("user-s1-5", "yes"), sent("user-s1-6", "yes")];
+  assert.deepEqual(withoutInFlightSends(shown, tail, ids("user-s1-5", "user-s1-6")), [tail[2]]);
 });
 
 test("a picture placeholder does not prove a saved row is the in-flight send", () => {
   const tail = [saved(9, "[image1] look")];
-  assert.deepEqual(withoutInFlightSends([sent("user-s1-8", "[image1] look")], tail), tail);
+  assert.deepEqual(withoutInFlightSends([sent("user-s1-8", "[image1] look")], tail, ids("user-s1-8")), tail);
 });
