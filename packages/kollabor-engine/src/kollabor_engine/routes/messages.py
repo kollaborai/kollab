@@ -852,6 +852,10 @@ def _assistant_align_streamed_ids(
         message_id = message.get("id")
         if role not in ("user", "assistant") or not isinstance(message_id, str):
             continue
+        if message_id == "live-turn" or message_id.startswith("live-turn:"):
+            # The page's copy of a turn it was only watching when it sent:
+            # a display row, never one of this turn's (#1359).
+            continue
         metadata = message.get("metadata")
         custom = metadata.get("custom") if isinstance(metadata, dict) else None
         if isinstance(custom, dict) and "compactionArchiveOrder" in custom:
