@@ -45,6 +45,7 @@ import {
   mergeCompactionHistorySnapshot,
   mergeMissingHistoryMessages,
   reconcileBoundaryToolResults,
+  inFlightSendIdsFor,
   shownMessagesChanged,
   withoutInFlightSends,
 } from "./history-merge";
@@ -729,9 +730,9 @@ export function EngineRuntimeProvider({
   const runVersion = useRef(0);
   const draftKey = composerDraftStorageKey(agentIdentity, sessionId);
   const pendingDraftSubmissions = useRef<ComposerDraftSubmission[]>([]);
-  // The provisional row ids of the messages this page's running request sent:
-  // the engine names them user-<session>-<n> after the state it was sent
-  // (#1356). Cleared when the request ends.
+  // The provisional row ids of the messages this page's running turn sent
+  // (#1356). A turn that stops at a permission prompt keeps them for the
+  // request that answers it; any other end clears them.
   const inFlightSendIds = useRef<ReadonlySet<string>>(new Set());
   const reloadRequestedAt = useRef<number | null>(null);
   const [settledRuns, setSettledRuns] = useState(0);
@@ -761,11 +762,7 @@ export function EngineRuntimeProvider({
     },
     prepareSendCommandsRequest: (body) => {
       runVersion.current += 1;
-      const sentAfter = (body.state as { messages?: unknown } | undefined)?.messages;
-      inFlightSendIds.current = Array.isArray(sentAfter) ? new Set(
-        body.commands.filter((command) => command.type === "add-message")
-          .map((_, index) => `user-${sessionId}-${sentAfter.length + index}`),
-      ) : new Set();
+      inFlightSendIds.current = inFlightSendIdsFor(body, sessionId, inFlightSendIds.current);
       // A new message starts a new turn; a tool answer continues the last one.
       if (body.commands.some((command) => command.type === "add-message")) {
         turnRef.current = newTurnClock();
@@ -820,7 +817,8 @@ export function EngineRuntimeProvider({
       updateState((state) => ({ ...state, error: "Run cancelled" }));
     },
     onFinish: () => {
-      inFlightSendIds.current = new Set();
+      const last = runtime.thread.getState().messages.at(-1);
+      if (last?.status?.type !== "requires-action") inFlightSendIds.current = new Set();
       goalCancellation.current.finish();
       setSettledRuns((count) => count + 1);
     },

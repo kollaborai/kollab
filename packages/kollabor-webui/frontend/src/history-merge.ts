@@ -515,3 +515,21 @@ export function withoutInFlightSends<T extends Message>(
   }
   return tail.filter((row) => !left.has(row));
 }
+
+/**
+ * The provisional row ids of the messages a request sends: row L + i after the
+ * L-row state it carries, as the engine and the pending copies name them. A
+ * request without a message (a tool answer, a resume) continues the turn that
+ * carries the earlier send, so the sends in flight stay as they were.
+ */
+export function inFlightSendIdsFor(
+  request: { commands: ReadonlyArray<{ type?: string }>; state?: unknown },
+  sessionId: string,
+  previous: ReadonlySet<string>,
+): ReadonlySet<string> {
+  const sends = request.commands.filter((command) => command.type === "add-message").length;
+  if (!sends) return previous;
+  const sentAfter = (request.state as { messages?: unknown } | undefined)?.messages;
+  if (!Array.isArray(sentAfter)) return new Set();
+  return new Set(Array.from({ length: sends }, (_, index) => `user-${sessionId}-${sentAfter.length + index}`));
+}
