@@ -816,6 +816,20 @@ test("a send with a picture finds its saved copy by id", () => {
   assert.deepEqual(withoutInFlightSends([pending("user-s1-8", "[image1] look", "my-send")], [mine], ids("user-s1-8")), []);
 });
 
+test("a saved row holding this page's send and another sender's stays", () => {
+  // The daemon saves sends that arrive together as one row: leaving it out
+  // would hide the other sender's words, so it stays (this send shows twice
+  // until the run settles) (#1359).
+  const both = named(saved(9, "hello\nhello"), { requestIds: ["my-send", "their-send"] });
+  assert.deepEqual(withoutInFlightSends([pending("user-s1-8", "hello", "my-send")], [both], ids("user-s1-8")), [both]);
+  // Its words cannot then pair an unnamed row with the send it already holds.
+  const unnamed = saved(10, "hello");
+  assert.deepEqual(
+    withoutInFlightSends([pending("user-s1-8", "hello", "my-send")], [both, unnamed], ids("user-s1-8")),
+    [both, unnamed],
+  );
+});
+
 test("a saved row that names no send still pairs by its words", () => {
   const unnamed = saved(9, "hello");
   assert.deepEqual(withoutInFlightSends([pending("user-s1-8", "hello", "my-send")], [unnamed], ids("user-s1-8")), []);

@@ -1998,3 +1998,39 @@ async def test_a_send_is_followed_by_its_client_message_id(monkeypatch, client_i
     user_row = captured["controller"].state["messages"][0]
     assert user_row["role"] == "user"
     assert user_row["metadata"]["custom"]["requestId"] == request_id
+
+
+def _saved_user(content, *request_ids):
+    return {"role": "user", "content": content, "metadata": {"operator_inputs": [
+        {"source": "state_rpc", "timestamp": "t", "text": "x", "request_id": request_id}
+        for request_id in request_ids
+    ]}}
+
+
+def test_align_helper_pairs_a_user_row_with_its_saved_copy_by_request_id():
+    """The daemon saves sends that arrive together as one row, behind any agent
+    HUD, so its words differ from the streamed row; the request id it names
+    still pairs them (#1359)."""
+    streamed = [
+        {"id": "user-s1-2", "role": "user", "content": "twin words",
+         "metadata": {"custom": {"requestId": "mine"}}},
+        {"id": "assistant-s1-3", "role": "assistant", "content": [{"type": "text", "text": "done"}]},
+    ]
+    stored = [
+        _saved_user("<agent_hud>budget</agent_hud>\ntwin words\ntwin words", "mine", "theirs"),
+        {"role": "assistant", "content": "done"},
+    ]
+    assert messages._assistant_align_streamed_ids(streamed, stored) is True
+    assert [m["metadata"]["custom"]["historySourceIndex"] for m in streamed] == [0, 1]
+
+
+def test_align_helper_does_not_pair_another_senders_identical_words():
+    """Same words, another send's id: not this turn's row (#1359)."""
+    streamed = [
+        {"id": "user-s1-2", "role": "user", "content": "twin words",
+         "metadata": {"custom": {"requestId": "mine"}}},
+        {"id": "assistant-s1-3", "role": "assistant", "content": [{"type": "text", "text": "done"}]},
+    ]
+    stored = [_saved_user("twin words", "theirs"), {"role": "assistant", "content": "done"}]
+    assert messages._assistant_align_streamed_ids(streamed, stored) is False
+    assert "historySourceIndex" not in streamed[0]["metadata"]["custom"]
