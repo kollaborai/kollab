@@ -112,9 +112,12 @@ export function mergeMissingHistoryMessages<T extends Message>(
   let shownUpTo = -Infinity;
   for (const message of shown) {
     if (transientRole(message) !== "assistant" || !TRANSIENT_ROW_ID.test(String(message.id ?? ""))) {
-      if (!TRANSIENT_ROW_ID.test(String(message.id ?? ""))) shownUpTo = Math.max(shownUpTo, historyIndex(message) ?? -Infinity);
+      // The page's own send counts once it has its saved position.
+      shownUpTo = Math.max(shownUpTo, historyIndex(message) ?? -Infinity);
       continue;
     }
+    // Nothing bounds this reply's turn: a call id alone hides nothing.
+    if (shownUpTo === -Infinity) continue;
     const window = { after: shownUpTo, before: historyIndex(message) ?? Infinity };
     for (const id of toolCallIds(message)) drawnCalls.set(id, [...(drawnCalls.get(id) ?? []), window]);
   }
