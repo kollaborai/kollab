@@ -2,7 +2,7 @@ type Message = {
   id?: string;
   role?: string;
   content?: unknown;
-  metadata?: { custom?: Record<string, unknown> };
+  metadata?: { custom?: Record<string, unknown>; isOptimistic?: boolean };
   convertConfig?: { joinStrategy?: string };
 };
 
@@ -474,4 +474,64 @@ export function dropTransientTurnDuplicates<T extends Message>(
     sameTurn(message, stored[index]));
   if (!aligned) return null;
   return shown.slice(0, blockStart);
+}
+
+/**
+ * While this page's own send is in flight it shows as a transient user row
+ * (user-<session>-<n>): the pending copy, then the engine's. A history sync in
+ * that wait can carry the same send as a newly saved row, and adding it draws
+ * the message twice until the run settles (#1356). Leave those saved rows out
+ * of the rows to add when they are the same turn (same words, see sameTurn).
+ * Neither row carries an id that names the send, so the words must be enough:
+ * when more saved rows have them than sends in flight, another sender's
+ * message is among them and every row stays (a duplicate). Known limit: when
+ * another sender's identical words are saved while this page's send is not
+ * yet, that row is the one left out, until settlement reconciles the whole
+ * history. Saved user rows that carry their request id would close it. Only the
+ * page's own sends count, since the engine keeps user-<session>-<n> on settled
+ * rows of earlier turns too: the engine's rows named by the ids its running
+ * request sent, and its pending copies, whose ids follow the shown row count,
+ * in order up to the number of sends in flight (later ones are still queued).
+ */
+export function withoutInFlightSends<T extends Message>(
+  shown: ReadonlyArray<Message>,
+  tail: ReadonlyArray<T>,
+  sendIds: ReadonlySet<string>,
+): T[] {
+  const sendsByWords = new Map<string, Message[]>();
+  const users = shown.filter((message) => transientRole(message) === "user");
+  const engineRows = users.filter((message) =>
+    message.metadata?.isOptimistic !== true && sendIds.has(String(message.id ?? "")) &&
+    TRANSIENT_ROW_ID.test(String(message.id ?? "")));
+  const pendingRows = users.filter((message) => message.metadata?.isOptimistic === true)
+    .slice(0, Math.max(0, sendIds.size - engineRows.length));
+  for (const message of [...engineRows, ...pendingRows]) {
+    const words = transientText(message.content);
+    sendsByWords.set(words, [...(sendsByWords.get(words) ?? []), message]);
+  }
+  const left = new Set<T>();
+  for (const [words, sends] of sendsByWords) {
+    const saved = tail.filter((row) => transientRole(row) === "user" &&
+      transientText(row.content) === words && sends.some((message) => sameTurn(message, row)));
+    if (saved.length <= sends.length) saved.forEach((row) => left.add(row));
+  }
+  return tail.filter((row) => !left.has(row));
+}
+
+/**
+ * The provisional row ids of the messages a request sends: row L + i after the
+ * L-row state it carries, as the engine and the pending copies name them. A
+ * request without a message (a tool answer, a resume) continues the turn that
+ * carries the earlier send, so the sends in flight stay as they were.
+ */
+export function inFlightSendIdsFor(
+  request: { commands: ReadonlyArray<{ type?: string }>; state?: unknown },
+  sessionId: string,
+  previous: ReadonlySet<string>,
+): ReadonlySet<string> {
+  const sends = request.commands.filter((command) => command.type === "add-message").length;
+  if (!sends) return previous;
+  const sentAfter = (request.state as { messages?: unknown } | undefined)?.messages;
+  if (!Array.isArray(sentAfter)) return new Set();
+  return new Set(Array.from({ length: sends }, (_, index) => `user-${sessionId}-${sentAfter.length + index}`));
 }

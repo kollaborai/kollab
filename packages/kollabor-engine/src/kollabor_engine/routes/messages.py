@@ -664,9 +664,12 @@ def _assistant_update_message_state(
                 message["status"] = status
             return messages
 
+    # Row L + i after an L-row state, the id the web client gives its pending
+    # copy of message i and tracks while the send is in flight (#1356).
+    first_row = len(messages)
     for index, submitted_content in enumerate(submitted_contents):
         row: Dict[str, Any] = {
-            "id": f"user-{session_id}-{len(messages) + index}",
+            "id": f"user-{session_id}-{first_row + index}",
             "role": "user",
             # Keep data URLs out of assistant-ui state/history. The image
             # was already handed to the daemon; the visible token is the
