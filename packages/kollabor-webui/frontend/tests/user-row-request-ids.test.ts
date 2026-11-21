@@ -55,6 +55,42 @@ describe("saved user rows", () => {
       ]);
   });
 
+  it("split a saved picture row as the daemon wrote it: parts on lines, pictures as tokens", () => {
+    const records = [
+      { source: "state_rpc", timestamp: "t1", text: "look\n[image1]", request_id: "r1" },
+      { source: "state_rpc", timestamp: "t2", text: "theirs", request_id: "r2" },
+    ];
+    const media = [{ ref: "m1", mime: "image/png" }];
+    // A stored upload shows as its token, with the row's media list.
+    const stored = buildInitialState("s1", [], [{
+      role: "user", media, metadata: { operator_inputs: records },
+      content: [
+        { type: "text", text: "<agent_hud>\nbudget\n</agent_hud>\n" },
+        { type: "text", text: "look" },
+        { type: "image", source: { kind: "managed_upload", media_id: "m1" } },
+        { type: "text", text: "theirs" },
+      ],
+    } as unknown as HistoryMessage]).messages;
+    expect(stored.map((row) => [row.id, row.content, (row.metadata?.custom as Record<string, unknown>)?.media]))
+      .toEqual([
+        ["history-0-send-0", [{ type: "text", text: "look\n[image1]" }], media],
+        ["history-0-send-1", [{ type: "text", text: "theirs" }], undefined],
+      ]);
+    // A picture with an address shows as the picture.
+    const linked = buildInitialState("s1", [], [{
+      role: "user", metadata: { operator_inputs: records },
+      content: [
+        { type: "text", text: "look" },
+        { type: "image", source: { kind: "url", url: "https://example.test/a.png" } },
+        { type: "text", text: "theirs" },
+      ],
+    } as unknown as HistoryMessage]).messages;
+    expect(linked.map((row) => [row.id, row.content])).toEqual([
+      ["history-0-send-0", [{ type: "text", text: "look\n" }, { type: "image", image: "https://example.test/a.png" }]],
+      ["history-0-send-1", [{ type: "text", text: "theirs" }]],
+    ]);
+  });
+
   it("stay one row when the sends' words are not what it shows", () => {
     const rows = buildInitialState("s1", [], [{
       role: "user", content: "edited words",

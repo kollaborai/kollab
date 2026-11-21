@@ -958,3 +958,15 @@ test("rows saved while this page's turn runs go above that turn", () => {
   // Pieces of one saved row sort by their number.
   assert.deepEqual(mergeMissingHistoryMessages([b], [a]).messages.map((row) => row.id), ["history-9-send-0", "history-9-send-1"]);
 });
+
+test("an earlier turn the page ran keeps its saved place behind its last one", () => {
+  // The engine keeps user-/assistant-<session>-<n> on rows of turns that
+  // ended: only the page's last turn stays last (#1364).
+  const shown = [
+    drawn("user-s1-2", "user", "first", 2), drawn("assistant-s1-3", "assistant", "one", 3),
+    drawn("user-s1-4", "user", "second", 5), drawn("assistant-s1-5", "assistant", "two", 7),
+  ];
+  const between = { id: "history-4", role: "user", content: "theirs" };
+  assert.deepEqual(mergeMissingHistoryMessages(shown, [between]).messages.map((row) => row.id),
+    ["user-s1-2", "assistant-s1-3", "history-4", "user-s1-4", "assistant-s1-5"]);
+});
