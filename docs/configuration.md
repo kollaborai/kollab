@@ -207,6 +207,30 @@ background and runs from the next launch. A failed install leaves the launch on
 the current version and shows why. Only the window you launch installs:
 detached agents and `kollab service` daemons just report the new release.
 
+### Nightly builds
+
+Every night at 09:00 UTC, when `main` has changed, CI publishes a nightly build:
+the single-file binaries as a GitHub prerelease tagged `nightly-<version>`, for
+example `nightly-0.22.2.dev202611200900`. Stable installs never see one. To
+follow nightlies with the binary from `install.sh`, set:
+
+```json
+{
+  "kollabor": {
+    "updates": {
+      "include_prereleases": true,
+      "auto_update_enabled": true
+    }
+  }
+}
+```
+
+With `include_prereleases` on, the update check, `/upgrade` and `kollab --update`
+take the newest release, nightly or stable. With `auto_update_enabled` also on,
+each launch installs the newest one first. Nightlies are binaries only, so
+`uv tool`, `pipx` and `pip` installs still upgrade only to PyPI releases. To
+install one nightly directly, run `KOLLAB_VERSION=<version> bash install.sh`.
+
 ## Project Data Directory
 
 Each project has its own data directory:
