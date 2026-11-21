@@ -165,14 +165,19 @@ def _open(url: str, timeout: float, headers: dict | None = None):
 
 
 def _include_prereleases() -> bool:
-    """kollabor.updates.include_prereleases in the global config: the nightly channel (#1349)."""
-    try:
-        from kollabor_config import ConfigService
-        from kollabor_config.config_utils import get_config_directory
+    """kollabor.updates.include_prereleases in the global config: the nightly channel (#1349).
 
-        config = ConfigService(get_config_directory() / "config.json", None, fast_mode=True)
-        return bool(config.get("kollabor.updates.include_prereleases", False))
-    except Exception as exc:  # an unreadable config keeps the stable channel
+    A plain read: /upgrade runs this inside the app, where a second ConfigService
+    would migrate, create or poll the file the app's own service owns.
+    """
+    from kollabor_config.config_utils import get_config_directory
+
+    try:
+        config = json.loads((get_config_directory() / "config.json").read_text(encoding="utf-8"))
+        return config.get("kollabor", {}).get("updates", {}).get("include_prereleases") is True
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError, AttributeError) as exc:  # unreadable: keep the stable channel
         logger.info(f"Could not read the update channel, using stable releases: {exc}")
         return False
 
