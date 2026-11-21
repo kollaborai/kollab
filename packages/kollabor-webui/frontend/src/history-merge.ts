@@ -481,22 +481,27 @@ export function dropTransientTurnDuplicates<T extends Message>(
  * (user-<session>-<n>): the pending copy, then the engine's. A history sync in
  * that wait can carry the same send as a newly saved row, and adding it draws
  * the message twice until the run settles (#1356). Leave those saved rows out
- * of the rows to add: each in-flight row covers the first saved user row that
- * is the same turn (same words, see sameTurn). Settlement reconciles the whole
- * history afterwards.
+ * of the rows to add when they are the same turn (same words, see sameTurn).
+ * Neither row carries an id that names the send, so the words must be enough:
+ * when more saved rows have them than sends in flight, another sender's
+ * message is among them and every row stays (a duplicate, never a hidden
+ * message). Settlement reconciles the whole history afterwards.
  */
 export function withoutInFlightSends<T extends Message>(
   inFlight: ReadonlyArray<Message>,
   tail: ReadonlyArray<T>,
 ): T[] {
-  const open = inFlight.filter((message) =>
-    transientRole(message) === "user" && TRANSIENT_ROW_ID.test(String(message.id ?? "")));
-  return tail.filter((row) => {
-    if (transientRole(row) !== "user") return true;
-    const index = open.findIndex((message) =>
-      transientText(message.content) === transientText(row.content) && sameTurn(message, row));
-    if (index < 0) return true;
-    open.splice(index, 1);
-    return false;
-  });
+  const sendsByWords = new Map<string, Message[]>();
+  for (const message of inFlight) {
+    if (transientRole(message) !== "user" || !TRANSIENT_ROW_ID.test(String(message.id ?? ""))) continue;
+    const words = transientText(message.content);
+    sendsByWords.set(words, [...(sendsByWords.get(words) ?? []), message]);
+  }
+  const left = new Set<T>();
+  for (const [words, sends] of sendsByWords) {
+    const saved = tail.filter((row) => transientRole(row) === "user" &&
+      transientText(row.content) === words && sends.some((message) => sameTurn(message, row)));
+    if (saved.length <= sends.length) saved.forEach((row) => left.add(row));
+  }
+  return tail.filter((row) => !left.has(row));
 }
