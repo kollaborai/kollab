@@ -1,6 +1,6 @@
 """Shared Engine DTOs for the WebUI voice session runtime.
 
-These models mirror the frozen contracts in specs/voice-mode/livekit-web.
+These models mirror the frozen contracts in docs/specs/voice-mode/livekit-web.
 Keep the Engine as the sole source of truth for session and generation fields.
 """
 
