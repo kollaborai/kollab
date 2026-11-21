@@ -267,6 +267,25 @@ try {
       await t.waitUsers("hello|hello");
       await t.page.close();
     },
+    // The daemon saved this page's send and another sender's in one row: its
+    // words show once, in the send's own row, while the run goes on (#1359).
+    async "shows a saved row holding this page's send and another's in the send's row"() {
+      const t = await open();
+      await t.submit();
+      await t.waitUsers("hello");
+      const mine = await t.sentId();
+      assert.ok(mine, "the send carried no message id");
+      await t.page.evaluate((rows) => window.setHistory(rows), [
+        { id: "history-0", role: "user", content: [{ type: "text", text: "hello\nhello" }],
+          metadata: { custom: { requestIds: [mine, "their-send"] } } },
+        { id: "history-1", role: "assistant", content: [{ type: "text", text: "Working" }] },
+      ]);
+      await t.waitImported("Working");
+      await t.waitUsers("hello\nhello");
+      await t.finishSubmission();
+      await t.waitUsers("hello\nhello");
+      await t.page.close();
+    },
     // Output of a turn this page never saw start is not guessed at.
     async "ignores events of an unseen turn while pending"() {
       const t = await open();

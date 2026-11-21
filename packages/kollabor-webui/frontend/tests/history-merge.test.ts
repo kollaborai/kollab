@@ -11,8 +11,10 @@ import {
   reconcileBoundaryToolResults,
   inFlightSendIdsFor,
   shownMessagesChanged,
+  savedCopiesOfSends,
   withoutInFlightSends,
   withSavedCopies,
+  withSendCopies,
 } from "../src/history-merge.ts";
 import { historyContentToThreadContent } from "../src/history-content.ts";
 
@@ -816,18 +818,28 @@ test("a send with a picture finds its saved copy by id", () => {
   assert.deepEqual(withoutInFlightSends([pending("user-s1-8", "[image1] look", "my-send")], [mine], ids("user-s1-8")), []);
 });
 
-test("a saved row holding this page's send and another sender's stays", () => {
-  // The daemon saves sends that arrive together as one row: leaving it out
-  // would hide the other sender's words, so it stays (this send shows twice
-  // until the run settles) (#1359).
+test("a saved row holding this page's send and another sender's shows in the send's row", () => {
+  // The daemon saves sends that arrive together as one row. It is left out
+  // like any saved copy of an in-flight send, and its words show in that
+  // send's own row, so the other sender's words show at once and no row
+  // leaves the thread when the run settles (#1359).
   const both = named(saved(9, "hello\nhello"), { requestIds: ["my-send", "their-send"] });
-  assert.deepEqual(withoutInFlightSends([pending("user-s1-8", "hello", "my-send")], [both], ids("user-s1-8")), [both]);
-  // Its words cannot then pair an unnamed row with the send it already holds.
-  const unnamed = saved(10, "hello");
-  assert.deepEqual(
-    withoutInFlightSends([pending("user-s1-8", "hello", "my-send")], [both, unnamed], ids("user-s1-8")),
-    [both, unnamed],
-  );
+  const shown = [pending("user-s1-8", "hello", "my-send")];
+  assert.deepEqual(withoutInFlightSends(shown, [both], ids("user-s1-8")), []);
+  const copies = savedCopiesOfSends(shown, [both], ids("user-s1-8"));
+  assert.deepEqual([...copies.keys()], ["my-send"]);
+  const [row] = withSendCopies(shown, copies);
+  assert.equal(row.id, "user-s1-8");
+  assert.equal(row.content, "hello\nhello");
+  assert.equal(row.metadata?.isOptimistic, true);
+  assert.equal(historyMessageIndex(row), 9);
+  // A saved copy that holds only this page's sends needs no showing.
+  const mine = named(saved(10, "hello"), { requestIds: ["my-send"] });
+  assert.equal(savedCopiesOfSends(shown, [mine], ids("user-s1-8")).size, 0);
+  // Rows of other sends, and saved rows, are left as they are.
+  const other = pending("user-s1-9", "bye", "other-send");
+  assert.equal(withSendCopies([other, both], copies)[0], other);
+  assert.equal(withSendCopies([other, both], copies)[1], both);
 });
 
 test("a saved row that names no send still pairs by its words", () => {
