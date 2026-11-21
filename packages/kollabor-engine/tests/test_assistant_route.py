@@ -9,6 +9,7 @@ network or a running daemon.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import re
 import sys
@@ -2058,3 +2059,35 @@ def test_align_helper_skips_the_live_row_of_a_watched_turn():
     assert messages._assistant_align_streamed_ids(streamed, stored) is True
     assert [streamed[i]["metadata"]["custom"]["historySourceIndex"] for i in (2, 3)] == [3, 4]
     assert "metadata" not in streamed[1]
+
+
+def test_align_helper_skips_another_senders_message_steered_into_the_turn():
+    """Another client's message that arrives mid-turn is saved between this
+    turn's rows (the daemon steers it into the running turn). It names only its
+    own send, so it is not one of this page's rows and must not stop the
+    pairing; the page adds it from history (#1359)."""
+    streamed = [
+        {"id": "user-s1-0", "role": "user", "content": "twin words",
+         "metadata": {"custom": {"requestId": "mine"}}},
+        {"id": "assistant-s1-1", "role": "assistant", "content": [
+            {"type": "tool-call", "toolCallId": "c1"}, {"type": "tool-call", "toolCallId": "c2"},
+            {"type": "text", "text": "done"},
+        ]},
+    ]
+    stored = [
+        _saved_user("twin words\ntwin words", "mine", "theirs"),
+        {"role": "assistant", "content": "", "metadata": {"tool_calls": [{"id": "c1"}]}},
+        {"role": "tool", "content": "", "metadata": {"tool_call_id": "c1"}},
+        _saved_user("ping", "theirs-ping"),
+        {"role": "assistant", "content": "", "metadata": {"tool_calls": [{"id": "c2"}]}},
+        {"role": "tool", "content": "", "metadata": {"tool_call_id": "c2"}},
+        {"role": "assistant", "content": "done"},
+    ]
+    assert messages._assistant_align_streamed_ids(streamed, stored) is True
+    assert [m["metadata"]["custom"]["historySourceIndex"] for m in streamed] == [0, 6]
+
+    # A streamed user row that names no send proves nothing: no skipping.
+    unnamed = copy.deepcopy(streamed)
+    del unnamed[0]["metadata"]
+    unnamed[1].pop("metadata", None)
+    assert messages._assistant_align_streamed_ids(unnamed, stored) is False
