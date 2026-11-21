@@ -122,6 +122,13 @@ def test_the_channel_comes_from_the_global_config(tmp_path, monkeypatch):
     assert auto_update._include_prereleases() is True
 
 
+def test_reading_the_channel_writes_nothing(tmp_path, monkeypatch):
+    # /upgrade reads it inside the running app, beside the app's own config service.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert auto_update._include_prereleases() is False
+    assert list(tmp_path.iterdir()) == []
+
+
 class FakeConfig:
     def __init__(self, values):
         self.values = dict(values)
