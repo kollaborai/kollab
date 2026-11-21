@@ -484,8 +484,10 @@ export function dropTransientTurnDuplicates<T extends Message>(
  * of the rows to add when they are the same turn (same words, see sameTurn).
  * Neither row carries an id that names the send, so the words must be enough:
  * when more saved rows have them than sends in flight, another sender's
- * message is among them and every row stays (a duplicate, never a hidden
- * message). Settlement reconciles the whole history afterwards. Only the
+ * message is among them and every row stays (a duplicate). Known limit: when
+ * another sender's identical words are saved while this page's send is not
+ * yet, that row is the one left out, until settlement reconciles the whole
+ * history. Saved user rows that carry their request id would close it. Only the
  * page's own sends count, since the engine keeps user-<session>-<n> on settled
  * rows of earlier turns too: the engine's rows named by the ids its running
  * request sent, and its pending copies, whose ids follow the shown row count,
