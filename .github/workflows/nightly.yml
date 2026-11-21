@@ -22,30 +22,30 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Every job checks out github.sha: for a schedule or a dispatch on main it is
+  # main's head when the run started, so all jobs build the same commit even if
+  # main moves meanwhile. A dispatch from any other branch builds nothing.
   version:
     name: nightly/version
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.pick.outputs.version }}
-      sha: ${{ steps.pick.outputs.sha }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: main
           persist-credentials: false
 
       - name: Pick the version, or skip when main already has a nightly
         id: pick
         run: |
-          sha=$(git rev-parse HEAD)
-          if git ls-remote --tags origin 'refs/tags/nightly-*' | awk '{print $1}' | grep -qx "$sha"; then
-            echo "main ($sha) already has a nightly; nothing to build."
+          if git ls-remote --tags origin 'refs/tags/nightly-*' | awk '{print $1}' | grep -qx "$GITHUB_SHA"; then
+            echo "main ($GITHUB_SHA) already has a nightly; nothing to build."
             exit 0
           fi
           version=$(python3 scripts/nightly_version.py)
-          echo "Nightly $version from $sha"
+          echo "Nightly $version from $GITHUB_SHA"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
   frontend:
     name: nightly/frontend
@@ -55,7 +55,6 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ needs.version.outputs.sha }}
           persist-credentials: false
 
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -98,7 +97,6 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ needs.version.outputs.sha }}
           persist-credentials: false
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -160,7 +158,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
-          SHA: ${{ needs.version.outputs.sha }}
+          SHA: ${{ github.sha }}
         run: |
           {
             echo "Nightly build of \`main\` at $SHA. A prerelease: stable installs never see it."
