@@ -47,10 +47,8 @@ import {
   reconcileBoundaryToolResults,
   inFlightSendIdsFor,
   shownMessagesChanged,
-  savedCopiesOfSends,
   withoutInFlightSends,
   withSavedCopies,
-  withSendCopies,
 } from "./history-merge";
 import { historyContentToThreadContent } from "./history-content";
 import {
@@ -472,6 +470,26 @@ function historyToMessages(
         ...operatorInputs.map((record) => asString(asRecord(record)?.request_id)),
         asString(metadata?.request_id),
       ].filter((id): id is string => id !== null))];
+      // The daemon saves sends that arrive together as one row: show a row
+      // per send, as each was sent, when the row reads as exactly their words.
+      const sends = operatorInputs.flatMap((record) => {
+        const text = asString(asRecord(record)?.text);
+        return text ? [{ text, requestId: asString(asRecord(record)?.request_id) }] : [];
+      });
+      const shownText = typeof content === "string" ? content
+        : content.every((part) => part.type === "text") ? content.map((part) => (part as TextMessagePart).text).join("") : null;
+      if (!media.length && sends.length > 1 && sends.length === operatorInputs.length &&
+          shownText?.trim() === sends.map((send) => send.text).join("\n").trim()) {
+        sends.forEach((send, index) => messages.push({
+          // Every piece has an id of its own: the engine maps a send's row to
+          // the saved row's index, so history-<n> would read as shown.
+          id: `history-${sourceIndex}-send-${index}`,
+          role: "user",
+          content: [{ type: "text", text: send.text }],
+          ...(send.requestId ? { metadata: { custom: { requestIds: [send.requestId] } } } : {}),
+        }));
+        return;
+      }
       const custom = {
         ...(media.length ? { media } : {}),
         ...(requestIds.length ? { requestIds } : {}),
@@ -614,7 +632,6 @@ function historyToMessages(
 const converter = (
   state: EngineState,
   metadata: AssistantTransportConnectionMetadata,
-  sendCopies: ReadonlyMap<string, ThreadMessageLike> = new Map(),
 ) => {
   // Stream timing rides on the assistant message's metadata, where
   // `useMessageTiming` reads it (see turn-timing.ts).
@@ -660,8 +677,7 @@ const converter = (
     // than the transport's structural JSON type.
     state: JSON.parse(JSON.stringify(state)),
     messages: messageConverter.toThreadMessages(
-      // A send's saved copy that holds another sender's send too (#1359).
-      withSendCopies([...stored, ...optimistic], sendCopies),
+      [...stored, ...optimistic],
       metadata.isSending,
       { error: state.error },
     ),
@@ -769,14 +785,10 @@ export function EngineRuntimeProvider({
   // dropped rows as a second branch (the "2 / 2" picker). The converter adds
   // them back until the run lets go and they are folded into the state.
   const midTurnRows = useRef<ThreadMessageLike[]>([]);
-  // Saved rows that hold a send in flight here and another sender's send too,
-  // by the send's request id: the send's own row shows them (#1359), folded
-  // into the state with midTurnRows.
-  const sendCopies = useRef<Map<string, ThreadMessageLike>>(new Map());
   const convert = useCallback((state: EngineState, metadata: AssistantTransportConnectionMetadata) =>
     converter(midTurnRows.current.length
       ? { ...state, messages: mergeMissingHistoryMessages(liveLast(state.messages), midTurnRows.current).messages }
-      : state, metadata, sendCopies.current), []);
+      : state, metadata), []);
   const reloadRequestedAt = useRef<number | null>(null);
   const [settledRuns, setSettledRuns] = useState(0);
   const [permissionCancellationPending, setPermissionCancellationPending] = useState(false);
@@ -1034,14 +1046,12 @@ export function EngineRuntimeProvider({
   const deferredOlderWindow = useRef<EngineState | null>(null);
   useEffect(() => runtime.thread.subscribe(() => {
     if (ownsPendingInput(runtime.thread.getState())) return;
-    if (midTurnRows.current.length || sendCopies.current.size) {
+    if (midTurnRows.current.length) {
       const held = midTurnRows.current;
-      const copies = sendCopies.current;
       midTurnRows.current = [];
-      sendCopies.current = new Map();
       const current = (runtime.thread.getState().extras as { state?: EngineState } | undefined)?.state;
-      const folded = current && mergeMissingHistoryMessages(liveLast(withSendCopies(current.messages, copies)), held);
-      if (current && folded && (folded.added.length || copies.size)) runtime.thread.importExternalState({
+      const folded = current && mergeMissingHistoryMessages(liveLast(current.messages), held);
+      if (current && folded?.added.length) runtime.thread.importExternalState({
         ...current,
         messages: folded.messages,
         synced: current.synced ? { ...current.synced, messages: folded.messages.length } : current.synced,
@@ -1155,11 +1165,9 @@ export function EngineRuntimeProvider({
           const index = historyMessageIndex(message);
           return index !== null && index >= from.history;
         });
-        const copies = savedCopiesOfSends(thread.messages, newRows, inFlightSendIds.current);
-        copies.forEach((row, requestId) => sendCopies.current.set(requestId, row));
         const tail = withoutInFlightSends(thread.messages, newRows, inFlightSendIds.current);
         const merged = mergeMissingHistoryMessages(liveLast(shown.messages), tail);
-        if (merged.added.length || copies.size) {
+        if (merged.added.length) {
           midTurnRows.current = mergeMissingHistoryMessages(midTurnRows.current, merged.added).messages;
           runtime.thread.importExternalState({
             ...shown,

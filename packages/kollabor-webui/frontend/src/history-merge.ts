@@ -523,14 +523,30 @@ export function withSavedCopies<T extends Message>(shown: ReadonlyArray<T>, load
     const key = sourceId(message);
     // Only the run's user rows: its reply keeps the tool calls it drew, which
     // history saves as rows of their own (see mergeMissingHistoryMessages).
-    const copy = key && transientRole(message) === "user" && TRANSIENT_ROW_ID.test(String(message.id ?? ""))
-      ? saved.get(key) : undefined;
-    if (!copy || (JSON.stringify(copy.content) === JSON.stringify(message.content) &&
+    if (!key || transientRole(message) !== "user" || !TRANSIENT_ROW_ID.test(String(message.id ?? ""))) return message;
+    // A row saved with other sends shows a row per send (#1359): the engine
+    // names the saved row, the request id names this send's piece of it.
+    const index = historyIndex(message);
+    const ids = requestIdsOf(message);
+    const copy = (ids.length ? loaded.find((row) => historyIndex(row) === index && transientRole(row) === "user" &&
+      requestIdsOf(row).some((id) => ids.includes(id))) : undefined) ?? saved.get(key);
+    if (!copy || (sourceId(copy) === key && JSON.stringify(copy.content) === JSON.stringify(message.content) &&
       copy.convertConfig?.joinStrategy === message.convertConfig?.joinStrategy)) return message;
     swapped = true;
     return displayRow(copy, message.id);
   });
   return swapped ? messages : shown;
+}
+
+/** This page's sends in flight: its engine rows, then its pending copies (see withoutInFlightSends). */
+function inFlightSends(shown: ReadonlyArray<Message>, sendIds: ReadonlySet<string>): Message[] {
+  const users = shown.filter((message) => transientRole(message) === "user");
+  const engineRows = users.filter((message) =>
+    message.metadata?.isOptimistic !== true && sendIds.has(String(message.id ?? "")) &&
+    TRANSIENT_ROW_ID.test(String(message.id ?? "")));
+  const pendingRows = users.filter((message) => message.metadata?.isOptimistic === true)
+    .slice(0, Math.max(0, sendIds.size - engineRows.length));
+  return [...engineRows, ...pendingRows];
 }
 
 /**
@@ -539,9 +555,11 @@ export function withSavedCopies<T extends Message>(shown: ReadonlyArray<T>, load
  * that wait can carry the same send as a newly saved row, and adding it draws
  * the message twice until the run settles (#1356). Leave those saved rows out
  * of the rows to add. A saved row that names its sends (#1359) is left out
- * when it names one in flight here, so another sender's identical words stay;
- * one the daemon saved with another sender's send too shows its words in the
- * send's own row (savedCopiesOfSends). A row that names none (an older daemon) pairs by words with the sends
+ * when it names one in flight here, so another sender's identical words stay.
+ * Sends the daemon saved as one row show as a row each (history-<n>-send-<i>),
+ * so the other sender's piece stays; a row it cannot split (a picture) shows
+ * whole in the send's row once the run settles (withSavedCopies). A row that
+ * names none (an older daemon) pairs by words with the sends
  * no named row claimed (same words, see sameTurn): when more such rows have
  * them than those sends, another sender's message is among them and every row
  * stays (a duplicate). Only the page's own sends count, since the engine keeps user-<session>-<n> on settled
@@ -561,8 +579,6 @@ export function withoutInFlightSends<T extends Message>(
   for (const row of savedUsers) {
     const ids = requestIdsOf(row);
     const sends = ids.length ? inFlight.filter((message) => requestIdsOf(message).some((id) => ids.includes(id))) : [];
-    // A row the daemon saved with another sender's send too goes as well: its
-    // words show in the send's own row (see savedCopiesOfSends).
     if (sends.length) left.add(row);
     sends.forEach((message) => claimed.add(message));
   }
@@ -585,63 +601,6 @@ export function withoutInFlightSends<T extends Message>(
  * request without a message (a tool answer, a resume) continues the turn that
  * carries the earlier send, so the sends in flight stay as they were.
  */
-/** This page's sends in flight: its engine rows, then its pending copies (see withoutInFlightSends). */
-function inFlightSends(shown: ReadonlyArray<Message>, sendIds: ReadonlySet<string>): Message[] {
-  const users = shown.filter((message) => transientRole(message) === "user");
-  const engineRows = users.filter((message) =>
-    message.metadata?.isOptimistic !== true && sendIds.has(String(message.id ?? "")) &&
-    TRANSIENT_ROW_ID.test(String(message.id ?? "")));
-  const pendingRows = users.filter((message) => message.metadata?.isOptimistic === true)
-    .slice(0, Math.max(0, sendIds.size - engineRows.length));
-  return [...engineRows, ...pendingRows];
-}
-
-/**
- * The daemon saves sends that arrive together as one row, so a saved copy of
- * this page's in-flight send can hold another sender's send too. A sync
- * leaves it out (withoutInFlightSends); these are those rows, by the request
- * id of the send they hold, so the send's own row can show their words at once
- * (withSendCopies). Showing them under the send's id means no row leaves the
- * thread when the run settles: assistant-ui keeps a dropped row as a second
- * branch (#1359).
- */
-export function savedCopiesOfSends<T extends Message>(
-  shown: ReadonlyArray<Message>, tail: ReadonlyArray<T>, sendIds: ReadonlySet<string>,
-): Map<string, T> {
-  const sendRequests = new Set(inFlightSends(shown, sendIds).flatMap(requestIdsOf));
-  const copies = new Map<string, T>();
-  for (const row of tail) {
-    const ids = transientRole(row) === "user" ? requestIdsOf(row) : [];
-    if (!ids.some((id) => sendRequests.has(id)) || ids.every((id) => sendRequests.has(id))) continue;
-    for (const id of ids) if (sendRequests.has(id)) copies.set(id, row);
-  }
-  return copies;
-}
-
-/**
- * The rows of in-flight sends that have a saved copy (savedCopiesOfSends),
- * shown as that copy: its words and saved position, under the row's own id
- * and flags. Every other row is returned as it is.
- */
-export function withSendCopies<T extends Message>(
-  messages: ReadonlyArray<T>, copies: ReadonlyMap<string, Message>,
-): T[] {
-  if (!copies.size) return [...messages];
-  return messages.map((message) => {
-    if (!TRANSIENT_ROW_ID.test(String(message.id ?? ""))) return message;
-    const copy = requestIdsOf(message).map((id) => copies.get(id)).find(Boolean);
-    if (!copy) return message;
-    const media = copy.metadata?.custom?.media;
-    return {
-      ...message,
-      content: copy.content,
-      metadata: { ...message.metadata, custom: {
-        ...message.metadata?.custom, ...(media ? { media } : {}),
-        historySourceId: sourceId(copy), historySourceIndex: historyIndex(copy),
-      } },
-    };
-  });
-}
 
 export function inFlightSendIdsFor(
   request: { commands: ReadonlyArray<{ type?: string }>; state?: unknown },
