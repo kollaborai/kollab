@@ -639,29 +639,33 @@ function historyToMessages(
   return messages;
 }
 
-const NO_MID_TURN = { rows: [], pieces: new Map() } as const;
+type MidTurn = {
+  rows: readonly ThreadMessageLike[];
+  pieces: ReadonlyMap<string, ThreadMessageLike>;
+  /** The provisional ids of the sends in flight, in order (inFlightSendIdsFor). */
+  sendIds?: readonly string[];
+};
+const NO_MID_TURN: MidTurn = { rows: [], pieces: new Map() };
 
 /**
  * Rows a history sync added while this page's run owned the thread, merged
  * around the run's own rows (#1358). The page's in-flight sends stand where
  * their saved copies are, so a message saved after one shows after it (#1359).
  */
-const withMidTurnRows = (
-  messages: ThreadMessageLike[],
-  midTurn: { rows: readonly ThreadMessageLike[]; pieces: ReadonlyMap<string, ThreadMessageLike> },
-): ThreadMessageLike[] => {
+const withMidTurnRows = (messages: ThreadMessageLike[], midTurn: MidTurn): ThreadMessageLike[] => {
   const placed = withPieces(messages, midTurn.pieces);
   if (!midTurn.rows.length) return placed;
   // The sync imported them too: take them out and merge them back in order,
   // so a pending send's row is placed among them.
   const midTurnIds = new Set(midTurn.rows.map((row) => row.id));
-  return mergeMissingHistoryMessages(liveLast(placed.filter((row) => !midTurnIds.has(row.id))), [...midTurn.rows]).messages;
+  return aroundLive(placed.filter((row) => !midTurnIds.has(row.id)),
+    (rows) => mergeMissingHistoryMessages(rows, [...midTurn.rows]).messages);
 };
 
 const converter = (
   state: EngineState,
   metadata: AssistantTransportConnectionMetadata,
-  midTurn: { rows: readonly ThreadMessageLike[]; pieces: ReadonlyMap<string, ThreadMessageLike> } = NO_MID_TURN,
+  midTurn: MidTurn = NO_MID_TURN,
 ) => {
   // Stream timing rides on the assistant message's metadata, where
   // `useMessageTiming` reads it (see turn-timing.ts).
@@ -674,7 +678,14 @@ const converter = (
       ? { ...message, metadata: { ...message.metadata, timing } }
       : message;
   });
-  let optimisticIndex = state.messages.length;
+  // A send in flight keeps the id its request was sent with: rows a sync adds
+  // meanwhile change the row count, and a new id makes assistant-ui take the
+  // row for a new turn and scroll it to the top under the reader (#1364).
+  // Sends still queued number after it.
+  const inFlight = (midTurn.sendIds ?? []).filter((id) => !state.messages.some((message) => message.id === id));
+  let optimisticIndex = Math.max(state.messages.length, ...inFlight.map((id) =>
+    Number(/-(\d+)$/.exec(id)?.[1] ?? -1) + 1));
+  let sentIndex = 0;
   const optimistic = metadata.pendingCommands.flatMap((command) => {
     if (command.type !== "add-message") return [];
     const parts: Array<TextMessagePart | ImageMessagePart> = command.message.parts.map(
@@ -688,7 +699,7 @@ const converter = (
     // from treating the same turn as a new top-anchored message.
     return [
       {
-        id: `user-${state.sessionId}-${optimisticIndex++}`,
+        id: inFlight[sentIndex++] ?? `user-${state.sessionId}-${optimisticIndex++}`,
         role: "user" as const,
         content: parts,
         // The engine follows the send by this id into saved history (#1359).
@@ -723,12 +734,22 @@ type ThreadReadyRuntime = {
 };
 
 /**
- * A watched turn's live row rides at the end. The state a page's own send
- * carries keeps it where it was, before the send's rows; history rows merged
- * around it would then land ahead of the send's rows out of history order (#1359).
+ * Merges rows as if a watched turn's live row were not there, then puts it
+ * back before the row that followed it. The state a page's own send carries
+ * keeps that row before the send's rows: merged around it, history rows would
+ * land ahead of the send out of order (#1359); moved to the end, it would
+ * change the turn the chat anchors to the top and scroll the reader (#1364).
  */
-const liveLast = <T extends { id?: unknown }>(messages: readonly T[]): T[] =>
-  [...messages.filter((message) => !isLiveMessage(message)), ...messages.filter(isLiveMessage)];
+const aroundLive = <T extends { id?: unknown }>(messages: readonly T[], merge: (rows: T[]) => T[]): T[] => {
+  const live = messages.flatMap((message, index) => isLiveMessage(message)
+    ? [{ row: message, next: messages.slice(index + 1).find((later) => !isLiveMessage(later)) }] : []);
+  const merged = merge(messages.filter((message) => !isLiveMessage(message)));
+  for (const { row, next } of live) {
+    const at = next ? merged.indexOf(next) : -1;
+    if (at < 0) merged.push(row); else merged.splice(at, 0, row);
+  }
+  return merged;
+};
 
 const ownsPendingInput = (thread: {
   isRunning: boolean;
@@ -818,7 +839,9 @@ export function EngineRuntimeProvider({
   // The saved copies of this page's in-flight sends, by request id (#1359).
   const sendPieces = useRef<Map<string, ThreadMessageLike>>(new Map());
   const convert = useCallback((state: EngineState, metadata: AssistantTransportConnectionMetadata) =>
-    converter(state, metadata, { rows: midTurnRows.current, pieces: sendPieces.current }), []);
+    converter(state, metadata, {
+      rows: midTurnRows.current, pieces: sendPieces.current, sendIds: [...inFlightSendIds.current],
+    }), []);
   const reloadRequestedAt = useRef<number | null>(null);
   const [settledRuns, setSettledRuns] = useState(0);
   const [permissionCancellationPending, setPermissionCancellationPending] = useState(false);
@@ -996,7 +1019,11 @@ export function EngineRuntimeProvider({
       const kept = shown.messages.filter((message) => !isLiveMessage(message));
       const live = liveMessage(next);
       if (!live && kept.length === shown.messages.length) return;
-      importLiveState(live ? [...kept, live] : kept);
+      // A live row already shown is updated where it is: moved to the end it
+      // would change the turn the chat anchors and scroll the reader (#1364).
+      const at = shown.messages.findIndex(isLiveMessage);
+      importLiveState(!live ? kept : at < 0 ? [...kept, live]
+        : [...kept.slice(0, at), live, ...kept.slice(at)]);
       // Completed replies stay visible until canonical history catches up.
       // Preserve the prior bounded cleanup for cancellation and error states.
       clearTimeout(settleTimer.current);
@@ -1201,7 +1228,12 @@ export function EngineRuntimeProvider({
         const pieces = inFlightPieces(thread.messages, newRows, inFlightSendIds.current);
         pieces.forEach((row, requestId) => sendPieces.current.set(requestId, row));
         const tail = withoutInFlightSends(thread.messages, newRows, inFlightSendIds.current);
-        const merged = mergeMissingHistoryMessages(liveLast(withPieces(shown.messages, sendPieces.current)), tail);
+        const merged = { added: [] as ThreadMessageLike[], messages: [] as ThreadMessageLike[] };
+        merged.messages = aroundLive(withPieces(shown.messages, sendPieces.current), (rows) => {
+          const result = mergeMissingHistoryMessages(rows, tail);
+          merged.added = result.added;
+          return result.messages;
+        });
         if (merged.added.length || pieces.size) {
           midTurnRows.current = mergeMissingHistoryMessages(midTurnRows.current, merged.added).messages;
           runtime.thread.importExternalState({
@@ -1376,7 +1408,9 @@ export function EngineRuntimeProvider({
     // ones it already drew (#666); drop the transient block when the tail
     // carries the same turn, proven row by row before anything is hidden.
     const deduped = dropTransientTurnDuplicates(merged.messages, tail);
-    const messages = [...(deduped ?? merged.messages), ...liveShown];
+    // A live row that history did not replace keeps its place (#1364).
+    const messages = replaced ? [...(deduped ?? merged.messages), ...liveShown]
+      : aroundLive(settled, () => [...(deduped ?? merged.messages)]);
     runtime.thread.importExternalState({
       ...shown,
       messages,
