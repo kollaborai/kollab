@@ -44,7 +44,7 @@
     {
       "action": "shell",
       "description": "the installed binary is the new release",
-      "command": "D=$(cat \"${TMPDIR:-/tmp}/kollab-spec-binary-upgrade.path\"); V=$(HOME=\"$D/home\" \"$D/bin/kollab\" --version | awk '{print $NF}'); test \"$V\" = \"$(cat \"$D/new-version\")\" && echo \"installed binary is v$V\"",
+      "command": "D=$(cat \"${TMPDIR:-/tmp}/kollab-spec-binary-upgrade.path\"); V=$(HOME=\"$D/home\" \"$D/bin/kollab\" --version | tail -n 1 | awk '{print $NF}'); test \"$V\" = \"$(cat \"$D/new-version\")\" && echo \"installed binary is v$V\"",
       "assert_contains": "installed binary is v"
     },
     {
