@@ -2,7 +2,7 @@ type Message = {
   id?: string;
   role?: string;
   content?: unknown;
-  metadata?: { custom?: Record<string, unknown> };
+  metadata?: { custom?: Record<string, unknown>; isOptimistic?: boolean };
   convertConfig?: { joinStrategy?: string };
 };
 
@@ -485,15 +485,25 @@ export function dropTransientTurnDuplicates<T extends Message>(
  * Neither row carries an id that names the send, so the words must be enough:
  * when more saved rows have them than sends in flight, another sender's
  * message is among them and every row stays (a duplicate, never a hidden
- * message). Settlement reconciles the whole history afterwards.
+ * message). Settlement reconciles the whole history afterwards. Only the
+ * page's own sends count, since the engine keeps user-<session>-<n> on settled
+ * rows of earlier turns too: the engine's rows named by the ids its running
+ * request sent, and its pending copies, whose ids follow the shown row count,
+ * in order up to the number of sends in flight (later ones are still queued).
  */
 export function withoutInFlightSends<T extends Message>(
-  inFlight: ReadonlyArray<Message>,
+  shown: ReadonlyArray<Message>,
   tail: ReadonlyArray<T>,
+  sendIds: ReadonlySet<string>,
 ): T[] {
   const sendsByWords = new Map<string, Message[]>();
-  for (const message of inFlight) {
-    if (transientRole(message) !== "user" || !TRANSIENT_ROW_ID.test(String(message.id ?? ""))) continue;
+  const users = shown.filter((message) => transientRole(message) === "user");
+  const engineRows = users.filter((message) =>
+    message.metadata?.isOptimistic !== true && sendIds.has(String(message.id ?? "")) &&
+    TRANSIENT_ROW_ID.test(String(message.id ?? "")));
+  const pendingRows = users.filter((message) => message.metadata?.isOptimistic === true)
+    .slice(0, Math.max(0, sendIds.size - engineRows.length));
+  for (const message of [...engineRows, ...pendingRows]) {
     const words = transientText(message.content);
     sendsByWords.set(words, [...(sendsByWords.get(words) ?? []), message]);
   }

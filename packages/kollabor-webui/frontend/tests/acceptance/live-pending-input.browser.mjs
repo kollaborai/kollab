@@ -74,9 +74,10 @@ try {
     ).catch(async () => {
       assert.fail(`expected user messages "${text}" but the page shows "${await page.locator("#users").innerText()}"`);
     });
-    // The running thread draws an empty assistant placeholder after the rows.
+    // The running thread draws an empty assistant placeholder after the rows,
+    // and adjacent assistant rows render as one message.
     const waitImported = (text) => page.waitForFunction(
-      (expected) => document.getElementById("assistant")?.textContent?.split("|").includes(expected),
+      (expected) => document.getElementById("assistant")?.textContent?.includes(expected),
       text, { timeout: 5000 },
     ).catch(async () => {
       assert.fail(`expected an assistant row "${text}" but the page shows "${await shown()}"`);
@@ -203,6 +204,21 @@ try {
       await t.waitUsers("hello");
       await t.finishSubmission();
       await t.waitUsers("hello");
+      await t.page.close();
+    },
+    // The pending copy's id follows the shown row count, so it moves when the
+    // busy turn's rows sync first; the saved copy arriving later is still it.
+    async "shows a held send once when its saved copy arrives in a later sync"() {
+      const t = await open();
+      await t.submit();
+      await t.waitUsers("hello");
+      await t.page.evaluate(() => window.refreshBusyHistory());
+      await t.waitImported("Busy work");
+      await t.page.evaluate(() => window.refreshSentHistory());
+      await t.waitImported("Working");
+      await t.waitUsers("busy|hello");
+      await t.finishSubmission();
+      await t.waitUsers("busy|hello");
       await t.page.close();
     },
     // An earlier message with the same text is not the saved copy of this send.

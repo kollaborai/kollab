@@ -729,6 +729,10 @@ export function EngineRuntimeProvider({
   const runVersion = useRef(0);
   const draftKey = composerDraftStorageKey(agentIdentity, sessionId);
   const pendingDraftSubmissions = useRef<ComposerDraftSubmission[]>([]);
+  // The provisional row ids of the messages this page's running request sent:
+  // the engine names them user-<session>-<n> after the state it was sent
+  // (#1356). Cleared when the request ends.
+  const inFlightSendIds = useRef<ReadonlySet<string>>(new Set());
   const reloadRequestedAt = useRef<number | null>(null);
   const [settledRuns, setSettledRuns] = useState(0);
   const [permissionCancellationPending, setPermissionCancellationPending] = useState(false);
@@ -757,6 +761,11 @@ export function EngineRuntimeProvider({
     },
     prepareSendCommandsRequest: (body) => {
       runVersion.current += 1;
+      const sentAfter = (body.state as { messages?: unknown } | undefined)?.messages;
+      inFlightSendIds.current = Array.isArray(sentAfter) ? new Set(
+        body.commands.filter((command) => command.type === "add-message")
+          .map((_, index) => `user-${sessionId}-${sentAfter.length + index}`),
+      ) : new Set();
       // A new message starts a new turn; a tool answer continues the last one.
       if (body.commands.some((command) => command.type === "add-message")) {
         turnRef.current = newTurnClock();
@@ -789,10 +798,12 @@ export function EngineRuntimeProvider({
       }
     },
     onError: async (error, { updateState }) => {
+      inFlightSendIds.current = new Set();
       pendingDraftSubmissions.current.shift();
       updateState((state) => ({ ...state, error: error.message }));
     },
     onCancel: ({ commands, updateState, error }) => {
+      inFlightSendIds.current = new Set();
       // A failed request lands here too, after onError: keep the error it
       // set, and leave the daemon's turn alone (a dropped phone connection
       // must not stop the agent's work).
@@ -809,6 +820,7 @@ export function EngineRuntimeProvider({
       updateState((state) => ({ ...state, error: "Run cancelled" }));
     },
     onFinish: () => {
+      inFlightSendIds.current = new Set();
       goalCancellation.current.finish();
       setSettledRuns((count) => count + 1);
     },
@@ -1087,7 +1099,7 @@ export function EngineRuntimeProvider({
         const tail = withoutInFlightSends(thread.messages, initialState.messages.filter((message) => {
           const index = historyMessageIndex(message);
           return index !== null && index >= from.history;
-        }));
+        }), inFlightSendIds.current);
         const merged = mergeMissingHistoryMessages(shown.messages, tail);
         if (merged.added.length) {
           runtime.thread.importExternalState({

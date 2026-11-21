@@ -743,6 +743,18 @@ test("a settled row of an earlier turn is not an in-flight send", () => {
   assert.deepEqual(withoutInFlightSends(shown, two, ids("user-s1-8")), two);
 });
 
+test("a pending copy is an in-flight send whatever its id", () => {
+  // assistant-ui renumbers a pending copy as rows sync in; the request sent it
+  // as user-s1-10.
+  const pending = (id: string, text: string) => ({ ...sent(id, text), metadata: { isOptimistic: true } });
+  const tail = [saved(12, "hello")];
+  assert.deepEqual(withoutInFlightSends([pending("user-s1-12", "hello")], tail, ids("user-s1-10")), []);
+  // A copy still queued behind the one in flight was not sent: it covers nothing.
+  const queued = [pending("user-s1-12", "first"), pending("user-s1-13", "yes")];
+  const other = [saved(14, "yes")];
+  assert.deepEqual(withoutInFlightSends(queued, other, ids("user-s1-10")), other);
+});
+
 test("saved rows that outnumber the in-flight sends with their words are all kept", () => {
   // Another sender's "yes" and this page's "yes" land in one sync: the words
   // cannot tell which is which, so hiding either could hide the other sender.

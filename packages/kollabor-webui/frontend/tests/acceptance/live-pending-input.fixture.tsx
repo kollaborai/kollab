@@ -10,6 +10,7 @@ declare global {
     refreshHistory: () => void;
     seedSentHistory: () => void;
     refreshSentHistory: () => void;
+    refreshBusyHistory: () => void;
   }
 }
 
@@ -80,6 +81,19 @@ function Fixture() {
   });
   window.seedSentHistory = () => setState({
     ...initialState, messages: [userRow(0)], synced: { history: 1, messages: 1 },
+  });
+  // Rows of the busy turn the send waits behind, saved before the send is.
+  window.refreshBusyHistory = () => setState((current) => {
+    const start = current.messages.length;
+    return {
+      ...initialState,
+      messages: [
+        ...current.messages,
+        { id: `history-${start}`, role: "user", content: [{ type: "text", text: "busy" }] },
+        { id: `history-${start + 1}`, role: "assistant", content: [{ type: "text", text: "Busy work" }] },
+      ],
+      synced: { history: start + 2, messages: start + 2 },
+    };
   });
   window.refreshSentHistory = () => setState((current) => {
     const start = current.messages.length;
