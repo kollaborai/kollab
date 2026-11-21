@@ -103,6 +103,8 @@ config = {
         "updates": {
             "auto_update_enabled": True,
             "include_prereleases": nightly,
+            # A cache from the other channel is refetched, so it records its own.
+            "cached_include_prereleases": nightly,
             "last_check_timestamp": int(time.time()),
             "cached_latest_version": new,
             "cached_release_url": f"https://github.com/kollaborai/kollab/releases/tag/{tag}",
