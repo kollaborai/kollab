@@ -239,7 +239,13 @@ export function shownMessagesChanged(
 }
 
 
-type HistoryOrder = { section: number; index: number; tie: number };
+type HistoryOrder = { section: number; index: number; piece: number; tie: number };
+
+/** A send's piece of a row the daemon saved for several sends (history-<n>-send-<i>, #1359). */
+const pieceOf = (message: Message): number => {
+  const piece = /-send-(\d+)$/.exec(sourceId(message) ?? "")?.[1];
+  return piece === undefined ? -1 : Number(piece);
+};
 
 const compactionArchiveOrder = (message: Message): number | null => {
   const value = message.metadata?.custom?.compactionArchiveOrder;
@@ -283,14 +289,14 @@ const compactionMarkerKey = (message: Message): string => {
 
 const historyOrder = (message: Message, tie: number): HistoryOrder => {
   const archived = compactionArchiveOrder(message);
-  if (archived !== null) return { section: 0, index: archived, tie };
+  if (archived !== null) return { section: 0, index: archived, piece: -1, tie };
   const index = historyIndex(message);
-  if (index !== null) return { section: 1, index, tie };
-  return { section: 2, index: 0, tie };
+  if (index !== null) return { section: 1, index, piece: pieceOf(message), tie };
+  return { section: 2, index: 0, piece: -1, tie };
 };
 
 const compareHistoryOrder = (left: HistoryOrder, right: HistoryOrder): number =>
-  left.section - right.section || left.index - right.index || left.tie - right.tie;
+  left.section - right.section || left.index - right.index || left.piece - right.piece || left.tie - right.tie;
 
 /**
  * A paged tool result carries a reference signed with its row position, and
@@ -599,6 +605,42 @@ export function withoutInFlightSends<T extends Message>(
     if (saved.length <= sends.length) saved.forEach((row) => left.add(row));
   }
   return tail.filter((row) => !left.has(row));
+}
+
+/**
+ * The saved rows a mid-turn sync leaves out because they are the saved copy of
+ * a send in flight here (withoutInFlightSends), by that send's request id
+ * (#1359).
+ */
+export function inFlightPieces<T extends Message>(
+  shown: ReadonlyArray<Message>, tail: ReadonlyArray<T>, sendIds: ReadonlySet<string>,
+): Map<string, T> {
+  const sendRequests = new Set(inFlightSends(shown, sendIds).flatMap(requestIdsOf));
+  const pieces = new Map<string, T>();
+  for (const row of tail) {
+    if (transientRole(row) !== "user") continue;
+    for (const id of requestIdsOf(row)) if (sendRequests.has(id)) pieces.set(id, row);
+  }
+  return pieces;
+}
+
+/**
+ * The rows of in-flight sends whose saved copy is known (inFlightPieces), placed
+ * where that copy is saved: its position, under the row's own id, words and
+ * flags. History rows a sync adds then merge around them in saved order, so a
+ * message saved after this page's send shows after it (#1359). Every other row
+ * is returned as it is.
+ */
+export function withPieces<T extends Message>(messages: ReadonlyArray<T>, pieces: ReadonlyMap<string, Message>): T[] {
+  if (!pieces.size) return [...messages];
+  return messages.map((message) => {
+    if (transientRole(message) !== "user" || !TRANSIENT_ROW_ID.test(String(message.id ?? ""))) return message;
+    const piece = requestIdsOf(message).map((id) => pieces.get(id)).find(Boolean);
+    if (!piece) return message;
+    return { ...message, metadata: { ...message.metadata, custom: {
+      ...message.metadata?.custom, historySourceId: sourceId(piece), historySourceIndex: historyIndex(piece),
+    } } };
+  });
 }
 
 /**

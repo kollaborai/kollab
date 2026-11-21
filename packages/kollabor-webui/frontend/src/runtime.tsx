@@ -47,7 +47,9 @@ import {
   reconcileBoundaryToolResults,
   inFlightSendIdsFor,
   shownMessagesChanged,
+  inFlightPieces,
   withoutInFlightSends,
+  withPieces,
   withSavedCopies,
 } from "./history-merge";
 import { historyContentToThreadContent } from "./history-content";
@@ -478,16 +480,24 @@ function historyToMessages(
       });
       const shownText = typeof content === "string" ? content
         : content.every((part) => part.type === "text") ? content.map((part) => (part as TextMessagePart).text).join("") : null;
-      if (!media.length && sends.length > 1 && sends.length === operatorInputs.length &&
+      if (sends.length > 1 && sends.length === operatorInputs.length &&
           shownText?.trim() === sends.map((send) => send.text).join("\n").trim()) {
-        sends.forEach((send, index) => messages.push({
-          // Every piece has an id of its own: the engine maps a send's row to
-          // the saved row's index, so history-<n> would read as shown.
-          id: `history-${sourceIndex}-send-${index}`,
-          role: "user",
-          content: [{ type: "text", text: send.text }],
-          ...(send.requestId ? { metadata: { custom: { requestIds: [send.requestId] } } } : {}),
-        }));
+        sends.forEach((send, index) => {
+          // A piece's [imageN] tokens count across the whole row, so a piece
+          // with pictures keeps the row's media list.
+          const custom = {
+            ...(media.length && /\[image\d+\]/.test(send.text) ? { media } : {}),
+            ...(send.requestId ? { requestIds: [send.requestId] } : {}),
+          };
+          messages.push({
+            // Every piece has an id of its own: the engine maps a send's row to
+            // the saved row's index, so history-<n> would read as shown.
+            id: `history-${sourceIndex}-send-${index}`,
+            role: "user",
+            content: [{ type: "text", text: send.text }],
+            ...(Object.keys(custom).length ? { metadata: { custom } } : {}),
+          });
+        });
         return;
       }
       const custom = {
@@ -629,13 +639,33 @@ function historyToMessages(
   return messages;
 }
 
+const NO_MID_TURN = { rows: [], pieces: new Map() } as const;
+
+/**
+ * Rows a history sync added while this page's run owned the thread, merged
+ * around the run's own rows (#1358). The page's in-flight sends stand where
+ * their saved copies are, so a message saved after one shows after it (#1359).
+ */
+const withMidTurnRows = (
+  messages: ThreadMessageLike[],
+  midTurn: { rows: readonly ThreadMessageLike[]; pieces: ReadonlyMap<string, ThreadMessageLike> },
+): ThreadMessageLike[] => {
+  const placed = withPieces(messages, midTurn.pieces);
+  if (!midTurn.rows.length) return placed;
+  // The sync imported them too: take them out and merge them back in order,
+  // so a pending send's row is placed among them.
+  const midTurnIds = new Set(midTurn.rows.map((row) => row.id));
+  return mergeMissingHistoryMessages(liveLast(placed.filter((row) => !midTurnIds.has(row.id))), [...midTurn.rows]).messages;
+};
+
 const converter = (
   state: EngineState,
   metadata: AssistantTransportConnectionMetadata,
+  midTurn: { rows: readonly ThreadMessageLike[]; pieces: ReadonlyMap<string, ThreadMessageLike> } = NO_MID_TURN,
 ) => {
   // Stream timing rides on the assistant message's metadata, where
   // `useMessageTiming` reads it (see turn-timing.ts).
-  const stored = apartFromLive(state.messages).map((message) => {
+  const stored = state.messages.map((message) => {
     const timing =
       message.role === "assistant" && message.id
         ? turnTimings.get(message.id)
@@ -677,7 +707,7 @@ const converter = (
     // than the transport's structural JSON type.
     state: JSON.parse(JSON.stringify(state)),
     messages: messageConverter.toThreadMessages(
-      [...stored, ...optimistic],
+      apartFromLive(withMidTurnRows([...stored, ...optimistic], midTurn)),
       metadata.isSending,
       { error: state.error },
     ),
@@ -785,10 +815,10 @@ export function EngineRuntimeProvider({
   // dropped rows as a second branch (the "2 / 2" picker). The converter adds
   // them back until the run lets go and they are folded into the state.
   const midTurnRows = useRef<ThreadMessageLike[]>([]);
+  // The saved copies of this page's in-flight sends, by request id (#1359).
+  const sendPieces = useRef<Map<string, ThreadMessageLike>>(new Map());
   const convert = useCallback((state: EngineState, metadata: AssistantTransportConnectionMetadata) =>
-    converter(midTurnRows.current.length
-      ? { ...state, messages: mergeMissingHistoryMessages(liveLast(state.messages), midTurnRows.current).messages }
-      : state, metadata), []);
+    converter(state, metadata, { rows: midTurnRows.current, pieces: sendPieces.current }), []);
   const reloadRequestedAt = useRef<number | null>(null);
   const [settledRuns, setSettledRuns] = useState(0);
   const [permissionCancellationPending, setPermissionCancellationPending] = useState(false);
@@ -1046,16 +1076,19 @@ export function EngineRuntimeProvider({
   const deferredOlderWindow = useRef<EngineState | null>(null);
   useEffect(() => runtime.thread.subscribe(() => {
     if (ownsPendingInput(runtime.thread.getState())) return;
-    if (midTurnRows.current.length) {
-      const held = midTurnRows.current;
+    if (midTurnRows.current.length || sendPieces.current.size) {
+      const midTurn = { rows: midTurnRows.current, pieces: sendPieces.current };
       midTurnRows.current = [];
+      sendPieces.current = new Map();
       const current = (runtime.thread.getState().extras as { state?: EngineState } | undefined)?.state;
-      const folded = current && mergeMissingHistoryMessages(liveLast(current.messages), held);
-      if (current && folded?.added.length) runtime.thread.importExternalState({
-        ...current,
-        messages: folded.messages,
-        synced: current.synced ? { ...current.synced, messages: folded.messages.length } : current.synced,
-      });
+      if (current) {
+        const messages = withMidTurnRows(current.messages, midTurn);
+        runtime.thread.importExternalState({
+          ...current,
+          messages,
+          synced: current.synced ? { ...current.synced, messages: messages.length } : current.synced,
+        });
+      }
     }
     if (!deferredHistorySync.current) return;
     deferredHistorySync.current = false;
@@ -1165,9 +1198,11 @@ export function EngineRuntimeProvider({
           const index = historyMessageIndex(message);
           return index !== null && index >= from.history;
         });
+        const pieces = inFlightPieces(thread.messages, newRows, inFlightSendIds.current);
+        pieces.forEach((row, requestId) => sendPieces.current.set(requestId, row));
         const tail = withoutInFlightSends(thread.messages, newRows, inFlightSendIds.current);
-        const merged = mergeMissingHistoryMessages(liveLast(shown.messages), tail);
-        if (merged.added.length) {
+        const merged = mergeMissingHistoryMessages(liveLast(withPieces(shown.messages, sendPieces.current)), tail);
+        if (merged.added.length || pieces.size) {
           midTurnRows.current = mergeMissingHistoryMessages(midTurnRows.current, merged.added).messages;
           runtime.thread.importExternalState({
             ...shown,
