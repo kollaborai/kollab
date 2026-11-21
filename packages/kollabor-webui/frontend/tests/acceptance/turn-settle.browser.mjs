@@ -35,7 +35,7 @@ const row = (index, role, value) => ({ id: `history-${index}`, role, content: te
  * the request sent, then user-s1-<n> and assistant-s1-<n+1> mapped to their
  * saved rows (the engine sends the user row's words as a string).
  */
-const finalState = (sent, saved) => {
+const finalState = (sent, saved, reply = saved + 1) => {
   const at = sent.length;
   const messages = [
     ...sent,
@@ -43,11 +43,11 @@ const finalState = (sent, saved) => {
       metadata: { custom: { historySourceIndex: saved } } },
     { id: `assistant-s1-${at + 1}`, role: "assistant", content: text("Working"),
       status: { type: "complete", reason: "stop" },
-      metadata: { custom: { historySourceIndex: saved + 1 } } },
+      metadata: { custom: { historySourceIndex: reply } } },
   ];
   const update = { type: "update-state", operations: [
     { type: "set", path: ["messages"], value: messages },
-    { type: "set", path: ["synced"], value: { history: saved + 2, messages: messages.length } },
+    { type: "set", path: ["synced"], value: { history: reply + 1, messages: messages.length } },
   ] };
   return `data: ${JSON.stringify(update)}\n\n`;
 };
@@ -87,10 +87,10 @@ try {
       await page.locator("#send").click();
       await page.waitForFunction(() => document.getElementById("running")?.textContent === "running");
     };
-    const answer = async (saved) => {
+    const answer = async (saved, reply) => {
       await page.waitForFunction(() => window.transport !== undefined);
       const sent = await page.evaluate(() => window.transport.request.state?.messages ?? []);
-      await page.evaluate((frame) => window.transport.push(frame), finalState(sent, saved));
+      await page.evaluate((frame) => window.transport.push(frame), finalState(sent, saved, reply));
     };
     const finish = async (saved) => {
       if (saved !== undefined) await answer(saved);
@@ -105,7 +105,8 @@ try {
         await page.waitForTimeout(50);
       }
     };
-    return { page, read, setHistory, waitFor, holds, send, answer, finish };
+    const emit = (event) => page.evaluate((e) => window.liveEvent(e), event);
+    return { page, read, setHistory, waitFor, holds, send, answer, finish, emit };
   }
 
   const scenarios = {
@@ -137,6 +138,24 @@ try {
       await t.setHistory([row(0, "user", "hello"), row(1, "assistant", "Working")]);
       await t.holds((s) => s.remounts === "0" && s.users === "hello" && s.assistant === "Working",
         "after the settle reload");
+      await t.page.close();
+    },
+    // The page sends while watching another client's turn, whose live copy
+    // sits in the state it sent. Rows a mid-turn sync adds keep history order
+    // around this page's own rows (#1359).
+    async "keeps history order when the page sent while watching another turn"() {
+      const t = await open();
+      await t.emit({ type: "token", text: "Busy live", request_id: "r-busy" });
+      await t.waitFor((s) => s.assistant.includes("Busy live"), "the watched turn");
+      await t.send();
+      // This page's send is saved at row 1 and another client's "ping" at 2.
+      await t.setHistory([row(0, "user", "busy"), row(1, "user", "hello"), row(2, "user", "ping")]);
+      await t.waitFor((s) => s.users.includes("ping"), "mid-turn sync");
+      // The reply is saved after the ping, at row 3.
+      await t.answer(1, 3);
+      await t.finish();
+      await t.waitFor((s) => s.assistant.includes("Working"), "the reply");
+      await t.holds((s) => s.users === "busy|hello|ping", "history order after the run ends");
       await t.page.close();
     },
     async "settles a turn sent during a busy turn in place"() {

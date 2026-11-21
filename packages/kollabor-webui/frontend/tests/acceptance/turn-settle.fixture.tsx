@@ -1,12 +1,13 @@
 import { ThreadPrimitive, useAui, useAuiState } from "@assistant-ui/react";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { EngineApi } from "../../src/api";
+import type { EngineApi, SessionEvent } from "../../src/api";
 import { EngineRuntimeProvider, type EngineState } from "../../src/runtime";
 
 declare global {
   interface Window {
     setHistory: (messages: EngineState["messages"]) => void;
+    liveEvent: (event: SessionEvent) => void;
     transport?: { request: { state?: EngineState }; push: (frame: string) => void; close: () => void };
   }
 }
@@ -46,6 +47,10 @@ const api = {
 const initialState: EngineState = {
   sessionId: "s1", sessions: [], messages: [], synced: { history: 0, messages: 0 },
 };
+
+// Another client's turn this page watches streams through App's events.
+const liveEvents: { current: ((event: SessionEvent) => void) | null } = { current: null };
+window.liveEvent = (event) => liveEvents.current?.(event);
 
 const texts = (role: string) => (s: { thread: { messages: readonly { role: string; content: readonly { type: string; text?: string }[] }[] } }) =>
   s.thread.messages
@@ -90,6 +95,7 @@ function Fixture() {
         sessionId="s1"
         initialState={state}
         onStale={() => setRemounts((count) => count + 1)}
+        liveEvents={liveEvents}
       >
         <Probe />
       </EngineRuntimeProvider>
