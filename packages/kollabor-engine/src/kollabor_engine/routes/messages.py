@@ -894,6 +894,20 @@ def _assistant_align_streamed_ids(
         (messages[i] for i in provisional if messages[i].get("role") == "assistant"),
         {},
     )
+    # The sends this turn's user rows are. When each names one, a saved user
+    # row naming only other sends is another client's message the daemon
+    # steered into the running turn: not one of these rows, so the walk passes
+    # it and the page adds it from history (#1359).
+    own_requests = [
+        _streamed_request_id(messages[i]) for i in provisional if messages[i].get("role") == "user"
+    ]
+
+    def _foreign_user(stored_row: Dict[str, Any]) -> bool:
+        if stored_row.get("role") != "user" or not own_requests or not all(own_requests):
+            return False
+        saved_ids = _saved_request_ids(stored_row)
+        return bool(saved_ids) and not saved_ids & set(own_requests)
+
     stored: List[int] = []
     cursor = len(provisional) - 1
     for index in range(len(history) - 1, -1, -1):
@@ -912,6 +926,8 @@ def _assistant_align_streamed_ids(
             continue
         if role not in ("user", "assistant") or index in shown:
             return False
+        if _foreign_user(stored_row):
+            continue
         streamed_row = messages[provisional[cursor]]
         if role == streamed_row.get("role") and _pairs_by_content(
             stored_row, streamed_row
@@ -959,6 +975,8 @@ def _assistant_align_streamed_ids(
             if role not in ("user", "assistant") or history_index in shown:
                 alignment_counts[key] = 0
                 return 0
+            if _foreign_user(stored_row):
+                continue
 
             message_index = provisional[cursor]
             streamed_row = messages[message_index]
