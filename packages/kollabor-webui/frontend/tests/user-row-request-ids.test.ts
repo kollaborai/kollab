@@ -137,7 +137,7 @@ describe("saved user rows", () => {
     const typed = buildInitialState("s1", [], [{
       role: "user", content: "[image1]\n[image1]", metadata: records("[image1]", "[image1]"),
     } as unknown as HistoryMessage]).messages;
-    expect(typed.map((row) => [row.id, row.content])).toEqual([["history-0", [{ type: "text", text: "[image1]\n[image1]" }]]]);
+    expect(typed.map((row) => [row.id, row.content])).toEqual([["history-0", "[image1]\n[image1]"]]);
     // A typed token before a stored upload must not take the upload's picture.
     const upload = buildInitialState("s1", [], [{
       role: "user", media: [{ ref: "m1", mime: "image/png" }], metadata: records("see [image1]", "[image1]"),
