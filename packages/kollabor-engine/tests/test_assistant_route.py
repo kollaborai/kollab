@@ -400,7 +400,9 @@ async def test_assistant_transport_preserves_state_through_real_state_proxy(
     assert state["sessionId"] == initial_state["sessionId"]
     assert state["messages"] == [
         *prior_messages,
-        {"id": "user-session-test-1", "role": "user", "content": "hello"},
+        # The send's request id rides on its row (#1359).
+        {"id": "user-session-test-1", "role": "user", "content": "hello",
+         "metadata": {"custom": {"requestId": ANY}}},
         {
             "id": "assistant-session-test-2",
             "role": "assistant",
