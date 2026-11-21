@@ -29,6 +29,9 @@ jobs:
     name: nightly/version
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
     outputs:
       version: ${{ steps.pick.outputs.version }}
     steps:
@@ -36,11 +39,22 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Pick the version, or skip when main already has a nightly
+      # Installs on the nightly channel take it at launch, so only a commit whose
+      # ci/tests passed is built; a red or unfinished main waits for tomorrow.
+      - name: Pick the version, or skip when main has a nightly or CI is not green
         id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if git ls-remote --tags origin 'refs/tags/nightly-*' | awk '{print $1}' | grep -qx "$GITHUB_SHA"; then
+          tags=$(git ls-remote --tags origin 'refs/tags/nightly-*')
+          if printf '%s\n' "$tags" | awk '{print $1}' | grep -qx "$GITHUB_SHA"; then
             echo "main ($GITHUB_SHA) already has a nightly; nothing to build."
+            exit 0
+          fi
+          ci=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?check_name=ci/tests" \
+            --jq '[.check_runs[] | .conclusion // .status] | if length == 0 then "missing" else (unique | join(",")) end')
+          if [ "$ci" != success ]; then
+            echo "ci/tests on main ($GITHUB_SHA) is '$ci', not success; no nightly tonight."
             exit 0
           fi
           version=$(python3 scripts/nightly_version.py)
@@ -172,12 +186,15 @@ jobs:
             --prerelease --latest=false \
             --title "Nightly $VERSION" --notes-file notes.md
 
+      # Ranked by version, as the updater ranks them (a release's createdAt is
+      # its commit's date, not when it was published).
       - name: Keep the newest 14 nightlies
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,createdAt \
-            --jq '[.[] | select(.tagName | startswith("nightly-"))] | sort_by(.createdAt) | reverse | .[14:][] | .tagName' |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName \
+            --jq '.[].tagName | select(startswith("nightly-"))' |
+          sort -t- -k2 -V -r | tail -n +15 |
           while read -r tag; do
             gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
           done

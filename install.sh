@@ -284,6 +284,11 @@ main() {
             verify_install
             exit 0
         fi
+        if [[ "$method" == binary && "$VERSION" == *.dev* ]]; then
+            # PyPI has no nightlies: a package install could only fail less clearly.
+            error "No nightly $VERSION binary for this machine. Pick another nightly, or a release."
+            exit 1
+        fi
         if [[ "$method" == binary && ${#methods[@]} -gt 1 ]]; then
             info "Installing the Python package instead..."
         fi

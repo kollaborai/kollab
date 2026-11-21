@@ -97,8 +97,9 @@ reports the release, so the two never install it at once.
 
 ## Nightly Builds
 
-`.github/workflows/nightly.yml` runs at 09:00 UTC and on manual dispatch. When
-`main` has no `nightly-*` tag yet, it stamps `X.Y.(Z+1).devYYYYMMDDHHMM` into
+`.github/workflows/nightly.yml` runs at 09:00 UTC and on manual dispatch, on
+`main` only. When main's head has no `nightly-*` tag yet and its `ci/tests`
+check passed, it stamps `X.Y.(Z+1).devYYYYMMDDHHMM` into
 every pyproject, every `kollabor-*` constraint and the frontend `package.json`
 (`scripts/nightly_version.py --stamp`; build only, never committed). It then
 builds the four binaries with the same `build_binary.py --expect-version` smoke
@@ -107,7 +108,10 @@ test that releases run, and publishes them as a prerelease tagged
 use that form. The workflow keeps the newest 14 nightlies. Desktop apps and PyPI
 are not built nightly.
 
-`kollabor.updates.include_prereleases` is the nightly channel. With it on,
+`kollabor.updates.include_prereleases` is the nightly channel, honored only by
+the single-file binary (`running_binary()` set, `app_launcher()` unset). The
+update cache saves `cached_include_prereleases`, and a cache from the other
+channel is refetched. With the channel on,
 `VersionCheckService` and `auto_update._release_to_install` read
 `/releases?per_page=30` and take the newest non-draft version
 (`version_comparator.newest_release`); with it off they read `/releases/latest`,
