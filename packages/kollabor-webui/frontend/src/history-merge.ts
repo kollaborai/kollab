@@ -51,6 +51,40 @@ export function historyMessageIndex(message: Message): number | null {
   return historyIndex(message);
 }
 
+const isLiveRow = (message: Message): boolean => {
+  const id = String(message.id ?? "");
+  return id === "live-turn" || id.startsWith("live-turn:");
+};
+
+/**
+ * The page's own last turn: the rows it drew (user-/assistant-<session>-<n>)
+ * at the end of the thread, live rows aside. While a run goes on, assistant-ui
+ * keeps the last user row with a reply after it at the top of the view, so a
+ * row landing inside this turn would become that turn and scroll the reader to
+ * it (#1364). The turn sorts as saved where its reply is: rows saved before
+ * that go above it, rows saved after it below, and while the reply's position
+ * is unknown every history row goes above it.
+ */
+const trailingTurn = (shown: ReadonlyArray<Message>): { rows: Set<Message>; order: HistoryOrder } | null => {
+  const rows = new Set<Message>();
+  let last: Message | undefined;
+  for (let index = shown.length - 1; index >= 0; index -= 1) {
+    const message = shown[index];
+    if (isLiveRow(message)) continue;
+    if (!TRANSIENT_ROW_ID.test(String(message.id ?? ""))) break;
+    last ??= message;
+    rows.add(message);
+  }
+  if (![...rows].some((message) => transientRole(message) === "user") || !last) return null;
+  const savedAt = transientRole(last) === "assistant" ? historyIndex(last) : null;
+  return {
+    rows,
+    order: savedAt === null
+      ? { section: 2, index: 0, piece: Infinity, tie: Infinity }
+      : { section: 1, index: savedAt, piece: Infinity, tie: Infinity },
+  };
+};
+
 /** Insert newly reached history rows without dropping previously shown rows. */
 export function mergeMissingHistoryMessages<T extends Message>(
   shown: ReadonlyArray<T>,
@@ -80,10 +114,12 @@ export function mergeMissingHistoryMessages<T extends Message>(
     represented.add(key);
     return [reserveRow(message, used)];
   });
+  const turn = trailingTurn(shown);
   const messages: T[] = [];
   let nextAdded = 0;
   for (const existing of shown) {
-    const existingOrder = historyOrder(existing, order.get(sourceId(existing)) ?? Infinity);
+    const existingOrder = turn?.rows.has(existing) ? turn.order
+      : historyOrder(existing, order.get(sourceId(existing)) ?? Infinity);
     while (nextAdded < added.length) {
       const candidate = added[nextAdded];
       const candidateOrder = historyOrder(candidate, order.get(sourceId(candidate)) ?? Infinity);
@@ -605,42 +641,6 @@ export function withoutInFlightSends<T extends Message>(
     if (saved.length <= sends.length) saved.forEach((row) => left.add(row));
   }
   return tail.filter((row) => !left.has(row));
-}
-
-/**
- * The saved rows a mid-turn sync leaves out because they are the saved copy of
- * a send in flight here (withoutInFlightSends), by that send's request id
- * (#1359).
- */
-export function inFlightPieces<T extends Message>(
-  shown: ReadonlyArray<Message>, tail: ReadonlyArray<T>, sendIds: ReadonlySet<string>,
-): Map<string, T> {
-  const sendRequests = new Set(inFlightSends(shown, sendIds).flatMap(requestIdsOf));
-  const pieces = new Map<string, T>();
-  for (const row of tail) {
-    if (transientRole(row) !== "user") continue;
-    for (const id of requestIdsOf(row)) if (sendRequests.has(id)) pieces.set(id, row);
-  }
-  return pieces;
-}
-
-/**
- * The rows of in-flight sends whose saved copy is known (inFlightPieces), placed
- * where that copy is saved: its position, under the row's own id, words and
- * flags. History rows a sync adds then merge around them in saved order, so a
- * message saved after this page's send shows after it (#1359). Every other row
- * is returned as it is.
- */
-export function withPieces<T extends Message>(messages: ReadonlyArray<T>, pieces: ReadonlyMap<string, Message>): T[] {
-  if (!pieces.size) return [...messages];
-  return messages.map((message) => {
-    if (transientRole(message) !== "user" || !TRANSIENT_ROW_ID.test(String(message.id ?? ""))) return message;
-    const piece = requestIdsOf(message).map((id) => pieces.get(id)).find(Boolean);
-    if (!piece) return message;
-    return { ...message, metadata: { ...message.metadata, custom: {
-      ...message.metadata?.custom, historySourceId: sourceId(piece), historySourceIndex: historyIndex(piece),
-    } } };
-  });
 }
 
 /**

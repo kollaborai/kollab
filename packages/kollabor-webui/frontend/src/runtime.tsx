@@ -47,9 +47,7 @@ import {
   reconcileBoundaryToolResults,
   inFlightSendIdsFor,
   shownMessagesChanged,
-  inFlightPieces,
   withoutInFlightSends,
-  withPieces,
   withSavedCopies,
 } from "./history-merge";
 import { historyContentToThreadContent } from "./history-content";
@@ -641,24 +639,21 @@ function historyToMessages(
 
 type MidTurn = {
   rows: readonly ThreadMessageLike[];
-  pieces: ReadonlyMap<string, ThreadMessageLike>;
   /** The provisional ids of the sends in flight, in order (inFlightSendIdsFor). */
   sendIds?: readonly string[];
 };
-const NO_MID_TURN: MidTurn = { rows: [], pieces: new Map() };
+const NO_MID_TURN: MidTurn = { rows: [] };
 
 /**
  * Rows a history sync added while this page's run owned the thread, merged
- * around the run's own rows (#1358). The page's in-flight sends stand where
- * their saved copies are, so a message saved after one shows after it (#1359).
+ * around the run's own rows, which stay last (#1358, #1364).
  */
 const withMidTurnRows = (messages: ThreadMessageLike[], midTurn: MidTurn): ThreadMessageLike[] => {
-  const placed = withPieces(messages, midTurn.pieces);
-  if (!midTurn.rows.length) return placed;
+  if (!midTurn.rows.length) return messages;
   // The sync imported them too: take them out and merge them back in order,
-  // so a pending send's row is placed among them.
+  // so a pending send's row is placed after them.
   const midTurnIds = new Set(midTurn.rows.map((row) => row.id));
-  return aroundLive(placed.filter((row) => !midTurnIds.has(row.id)),
+  return aroundLive(messages.filter((row) => !midTurnIds.has(row.id)),
     (rows) => mergeMissingHistoryMessages(rows, [...midTurn.rows]).messages);
 };
 
@@ -836,12 +831,8 @@ export function EngineRuntimeProvider({
   // dropped rows as a second branch (the "2 / 2" picker). The converter adds
   // them back until the run lets go and they are folded into the state.
   const midTurnRows = useRef<ThreadMessageLike[]>([]);
-  // The saved copies of this page's in-flight sends, by request id (#1359).
-  const sendPieces = useRef<Map<string, ThreadMessageLike>>(new Map());
   const convert = useCallback((state: EngineState, metadata: AssistantTransportConnectionMetadata) =>
-    converter(state, metadata, {
-      rows: midTurnRows.current, pieces: sendPieces.current, sendIds: [...inFlightSendIds.current],
-    }), []);
+    converter(state, metadata, { rows: midTurnRows.current, sendIds: [...inFlightSendIds.current] }), []);
   const reloadRequestedAt = useRef<number | null>(null);
   const [settledRuns, setSettledRuns] = useState(0);
   const [permissionCancellationPending, setPermissionCancellationPending] = useState(false);
@@ -1103,10 +1094,9 @@ export function EngineRuntimeProvider({
   const deferredOlderWindow = useRef<EngineState | null>(null);
   useEffect(() => runtime.thread.subscribe(() => {
     if (ownsPendingInput(runtime.thread.getState())) return;
-    if (midTurnRows.current.length || sendPieces.current.size) {
-      const midTurn = { rows: midTurnRows.current, pieces: sendPieces.current };
+    if (midTurnRows.current.length) {
+      const midTurn = { rows: midTurnRows.current };
       midTurnRows.current = [];
-      sendPieces.current = new Map();
       const current = (runtime.thread.getState().extras as { state?: EngineState } | undefined)?.state;
       if (current) {
         const messages = withMidTurnRows(current.messages, midTurn);
@@ -1225,16 +1215,14 @@ export function EngineRuntimeProvider({
           const index = historyMessageIndex(message);
           return index !== null && index >= from.history;
         });
-        const pieces = inFlightPieces(thread.messages, newRows, inFlightSendIds.current);
-        pieces.forEach((row, requestId) => sendPieces.current.set(requestId, row));
         const tail = withoutInFlightSends(thread.messages, newRows, inFlightSendIds.current);
         const merged = { added: [] as ThreadMessageLike[], messages: [] as ThreadMessageLike[] };
-        merged.messages = aroundLive(withPieces(shown.messages, sendPieces.current), (rows) => {
+        merged.messages = aroundLive(shown.messages, (rows) => {
           const result = mergeMissingHistoryMessages(rows, tail);
           merged.added = result.added;
           return result.messages;
         });
-        if (merged.added.length || pieces.size) {
+        if (merged.added.length) {
           midTurnRows.current = mergeMissingHistoryMessages(midTurnRows.current, merged.added).messages;
           runtime.thread.importExternalState({
             ...shown,
