@@ -795,9 +795,38 @@ def _assistant_align_streamed_ids(
         streamed_ids = _streamed_call_ids(streamed_row)
         return bool(streamed_ids) and stored_ids.issubset(streamed_ids)
 
+    def _streamed_request_id(row: Dict[str, Any]) -> str:
+        """The request id of the send a streamed user row is (#1359)."""
+        metadata = row.get("metadata")
+        custom = metadata.get("custom") if isinstance(metadata, dict) else None
+        value = custom.get("requestId") if isinstance(custom, dict) else None
+        return value if isinstance(value, str) else ""
+
+    def _saved_request_ids(row: Dict[str, Any]) -> set[str]:
+        """The request ids of the sends a saved user row holds (#1359)."""
+        metadata = row.get("metadata")
+        if not isinstance(metadata, dict):
+            return set()
+        records = metadata.get("operator_inputs")
+        ids = {
+            record["request_id"]
+            for record in (records if isinstance(records, list) else [])
+            if isinstance(record, dict) and isinstance(record.get("request_id"), str) and record["request_id"]
+        }
+        if isinstance(metadata.get("request_id"), str) and metadata["request_id"]:
+            ids.add(metadata["request_id"])
+        return ids
+
     def _pairs_by_content(stored_row: Dict[str, Any], streamed_row: Dict[str, Any]) -> bool:
         """Content identity for a role-matched pair."""
         if stored_row.get("role") == "user":
+            # A saved row that names its sends pairs by id: the daemon saves
+            # sends that arrive together as one row, behind any agent HUD, and
+            # another sender's identical words are not this send.
+            request_id = _streamed_request_id(streamed_row)
+            saved_ids = _saved_request_ids(stored_row)
+            if request_id and saved_ids:
+                return request_id in saved_ids
             return _text(stored_row.get("content")) == _text(streamed_row.get("content"))
         stored_text = _text(stored_row.get("content"))
         if not stored_text:
