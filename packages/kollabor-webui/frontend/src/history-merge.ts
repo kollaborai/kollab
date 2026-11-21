@@ -414,7 +414,8 @@ export function mergeCompactionHistorySnapshot<T extends Message>(
 
 const TRANSIENT_ROW_ID = /^(?:user|assistant)-.+-(\d+)$/;
 
-const transientText = (content: unknown): string => {
+/** The trimmed text of a row's content, string or text parts. */
+export const transientText = (content: unknown): string => {
   if (typeof content === "string") return content.trim();
   if (!Array.isArray(content)) return "";
   return content

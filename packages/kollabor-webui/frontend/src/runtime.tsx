@@ -46,6 +46,7 @@ import {
   mergeMissingHistoryMessages,
   reconcileBoundaryToolResults,
   shownMessagesChanged,
+  transientText,
 } from "./history-merge";
 import { historyContentToThreadContent } from "./history-content";
 import {
@@ -595,6 +596,10 @@ function historyToMessages(
   return messages;
 }
 
+// The row ids shown when each pending send was first drawn, keyed by the
+// message object assistant-ui keeps queued until the engine answers (#1356).
+const sendBaselines = new WeakMap<object, ReadonlySet<unknown>>();
+
 const converter = (
   state: EngineState,
   metadata: AssistantTransportConnectionMetadata,
@@ -610,9 +615,28 @@ const converter = (
       ? { ...message, metadata: { ...message.metadata, timing } }
       : message;
   });
+  // A held send (steering behind a busy turn) is saved to history before its
+  // stream answers, and a history sync in that wait brings the saved row in.
+  // A user row with the send's text that was not shown when the send was
+  // first drawn is that saved copy: draw it alone, not beside the pending
+  // one (#1356). Each saved row covers one send.
+  const claimed = new Set<unknown>();
+  const savedCopy = (message: object, text: string): boolean => {
+    const baseline = sendBaselines.get(message);
+    if (!baseline) {
+      sendBaselines.set(message, new Set(stored.map((row) => row.id)));
+      return false;
+    }
+    const saved = text ? stored.find((row) => row.role === "user" && !baseline.has(row.id) &&
+      !claimed.has(row.id) && transientText(row.content) === text) : undefined;
+    if (!saved) return false;
+    claimed.add(saved.id);
+    return true;
+  };
   let optimisticIndex = state.messages.length;
   const optimistic = metadata.pendingCommands.flatMap((command) => {
     if (command.type !== "add-message") return [];
+    if (savedCopy(command.message, transientText(command.message.parts))) return [];
     const parts: Array<TextMessagePart | ImageMessagePart> = command.message.parts.map(
       (part) =>
         part.type === "text"
