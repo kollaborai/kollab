@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 import aiohttp
 from packaging.version import InvalidVersion, Version
 
+from ..binary import app_launcher, running_binary
 from .version_comparator import is_newer_version, newest_release, release_version
 
 logger = logging.getLogger(__name__)
@@ -99,8 +100,12 @@ class VersionCheckService:
             "kollabor.updates.github_repo", "kollaborai/kollab"
         )
         self.timeout_seconds = config.get("kollabor.updates.timeout_seconds", 5)
-        self.include_prereleases = config.get(
-            "kollabor.updates.include_prereleases", False
+        # The nightly channel (#1349). Nightlies are binaries only: pip, uv,
+        # pipx and Kollab.app could never install one, so they stay on stable.
+        self.include_prereleases = (
+            config.get("kollabor.updates.include_prereleases", False) is True
+            and running_binary() is not None
+            and app_launcher() is None
         )
 
         # HTTP session (initialized in initialize())
@@ -342,6 +347,8 @@ class VersionCheckService:
         Returns:
             True if cache is valid (age < TTL)
         """
+        if not self._cache_matches_channel():
+            return False
         last_check: int = self.config.get("kollabor.updates.last_check_timestamp", 0)
         current_time = int(time.time())
         ttl_seconds = self.check_interval_hours * 3600
@@ -366,12 +373,19 @@ class VersionCheckService:
 
         return is_valid
 
+    def _cache_matches_channel(self) -> bool:
+        """The cache was written for this channel (#1349); a cache that records none was stable."""
+        cached_channel = self.config.get("kollabor.updates.cached_include_prereleases", False) is True
+        return cached_channel == self.include_prereleases
+
     def _get_cached_release(self) -> Optional[ReleaseInfo]:
         """Retrieve cached release information from config.
 
         Returns:
-            ReleaseInfo from cache or None if not cached
+            ReleaseInfo from cache or None if not cached (or cached for the other channel)
         """
+        if not self._cache_matches_channel():
+            return None
         version = self.config.get("kollabor.updates.cached_latest_version")
         if not version:
             logger.debug("No cached release data found")
@@ -405,6 +419,7 @@ class VersionCheckService:
         self.config.save_key("kollabor.updates.cached_latest_version", release_info.version)
         self.config.save_key("kollabor.updates.cached_release_url", release_info.url)
         self.config.save_key("kollabor.updates.cached_release_name", release_info.name)
+        self.config.save_key("kollabor.updates.cached_include_prereleases", self.include_prereleases)
 
         logger.debug(
             f"Updated cache with version {release_info.version} at timestamp {current_time}"
