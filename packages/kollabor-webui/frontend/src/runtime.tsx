@@ -476,15 +476,38 @@ function historyToMessages(
         const text = asString(asRecord(record)?.text);
         return text ? [{ text, requestId: asString(asRecord(record)?.request_id) }] : [];
       });
-      const shownText = typeof content === "string" ? content
-        : content.every((part) => part.type === "text") ? content.map((part) => (part as TextMessagePart).text).join("") : null;
+      // The row as the daemon wrote each send's words (content_to_text): its
+      // parts on lines of their own, each picture as [imageN]. By number, a
+      // picture the thread shows as an image part, or null for a token.
+      const pictures: Array<ImageMessagePart | null> = [];
+      const lines = typeof content === "string" ? [content] : content.map((part) => {
+        if (part.type === "image") {
+          pictures.push(part);
+          return `[image${pictures.length}]`;
+        }
+        if (part.type !== "text") return null;
+        if (/^\[image\d+\]$/.test(part.text)) pictures.push(null);
+        return part.text;
+      });
+      const shownText = lines.every((line) => line !== null) ? lines.join("\n") : null;
+      // A piece's [imageN] tokens count across the whole row.
+      const pieceContent = (text: string) => text.split(/(\[image\d+\])/).reduce<Array<TextMessagePart | ImageMessagePart>>(
+        (parts, segment) => {
+          const picture = pictures[Number(/^\[image(\d+)\]$/.exec(segment)?.[1] ?? 0) - 1];
+          const last = parts.at(-1);
+          if (picture) parts.push(picture);
+          else if (last?.type === "text") parts[parts.length - 1] = { type: "text", text: last.text + segment };
+          else if (segment) parts.push({ type: "text", text: segment });
+          return parts;
+        }, []);
       if (sends.length > 1 && sends.length === operatorInputs.length &&
           shownText?.trim() === sends.map((send) => send.text).join("\n").trim()) {
         sends.forEach((send, index) => {
-          // A piece's [imageN] tokens count across the whole row, so a piece
-          // with pictures keeps the row's media list.
+          const piece = pieceContent(send.text);
+          // A piece showing a picture as its token keeps the row's media list.
           const custom = {
-            ...(media.length && /\[image\d+\]/.test(send.text) ? { media } : {}),
+            ...(media.length && piece.some((part) => part.type === "text" && /\[image\d+\]/.test(part.text))
+              ? { media } : {}),
             ...(send.requestId ? { requestIds: [send.requestId] } : {}),
           };
           messages.push({
@@ -492,7 +515,7 @@ function historyToMessages(
             // the saved row's index, so history-<n> would read as shown.
             id: `history-${sourceIndex}-send-${index}`,
             role: "user",
-            content: [{ type: "text", text: send.text }],
+            content: piece,
             ...(Object.keys(custom).length ? { metadata: { custom } } : {}),
           });
         });

@@ -66,12 +66,19 @@ const isLiveRow = (message: Message): boolean => {
  * is unknown every history row goes above it.
  */
 const trailingTurn = (shown: ReadonlyArray<Message>): { rows: Set<Message>; order: HistoryOrder } | null => {
+  // Only its last turn: the engine keeps those ids on rows of turns that
+  // ended, which are history like any other. The turn is its reply rows at the
+  // end and the sends right before them.
   const rows = new Set<Message>();
   let last: Message | undefined;
+  let sends = false;
   for (let index = shown.length - 1; index >= 0; index -= 1) {
     const message = shown[index];
     if (isLiveRow(message)) continue;
     if (!TRANSIENT_ROW_ID.test(String(message.id ?? ""))) break;
+    const user = transientRole(message) === "user";
+    if (sends && !user) break;
+    sends ||= user;
     last ??= message;
     rows.add(message);
   }
