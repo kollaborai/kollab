@@ -289,6 +289,27 @@ try {
       await t.waitUsers("theirs|hello");
       await t.page.close();
     },
+    // This page's send came first in the shared row: it stays above the other
+    // sender's message while the run goes on and after (#1359).
+    async "keeps this page's send above another's saved after it in one row"() {
+      const t = await open();
+      await t.submit();
+      await t.waitUsers("hello");
+      const mine = await t.sentId();
+      assert.ok(mine, "the send carried no message id");
+      await t.page.evaluate((rows) => window.setHistory(rows), [
+        { id: "history-0-send-0", role: "user", content: [{ type: "text", text: "hello" }],
+          metadata: { custom: { requestIds: [mine] } } },
+        { id: "history-0-send-1", role: "user", content: [{ type: "text", text: "theirs" }],
+          metadata: { custom: { requestIds: ["their-send"] } } },
+        { id: "history-1", role: "assistant", content: [{ type: "text", text: "Working" }] },
+      ]);
+      await t.waitImported("Working");
+      await t.waitUsers("hello|theirs");
+      await t.finishSubmission();
+      await t.waitUsers("hello|theirs");
+      await t.page.close();
+    },
     // Output of a turn this page never saw start is not guessed at.
     async "ignores events of an unseen turn while pending"() {
       const t = await open();

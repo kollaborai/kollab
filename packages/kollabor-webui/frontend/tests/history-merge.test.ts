@@ -11,7 +11,9 @@ import {
   reconcileBoundaryToolResults,
   inFlightSendIdsFor,
   shownMessagesChanged,
+  inFlightPieces,
   withoutInFlightSends,
+  withPieces,
   withSavedCopies,
 } from "../src/history-merge.ts";
 import { historyContentToThreadContent } from "../src/history-content.ts";
@@ -933,4 +935,24 @@ test("a later turn's calls row is added even when an earlier reply drew the same
   assert.deepEqual(mergeMissingHistoryMessages([earlier], [later]).added, [later]);
   const before = { id: "history-1", role: "assistant", content: [call] };
   assert.deepEqual(mergeMissingHistoryMessages([earlier], [before]).added, []);
+});
+
+test("pieces of one saved row keep their order around this page's own row", () => {
+  // The daemon saved this page's A, then another sender's B, as one row (#1359).
+  const a = named({ ...saved(9, "A"), id: "history-9-send-0" }, { requestIds: ["my-send"] });
+  const b = named({ ...saved(9, "B"), id: "history-9-send-1" }, { requestIds: ["their-send"] });
+  const shown = [pending("user-s1-8", "A", "my-send")];
+  const pieces = inFlightPieces(shown, [a, b], ids("user-s1-8"));
+  assert.deepEqual([...pieces.keys()], ["my-send"]);
+  // While A is in flight its row stands where its piece is saved: B goes after it.
+  const placed = withPieces(shown, pieces);
+  assert.equal(placed[0].id, "user-s1-8");
+  assert.equal(placed[0].content, shown[0].content);
+  assert.equal(historyMessageIndex(placed[0]), 9);
+  assert.deepEqual(mergeMissingHistoryMessages(placed, [b]).messages.map((row) => row.id), ["user-s1-8", "history-9-send-1"]);
+  // A piece sorts by its number even when the other pieces are not loaded.
+  assert.deepEqual(mergeMissingHistoryMessages([b], [a]).messages.map((row) => row.id), ["history-9-send-0", "history-9-send-1"]);
+  // Rows of other sends are left as they are.
+  const other = pending("user-s1-10", "C", "other-send");
+  assert.equal(withPieces([other], pieces)[0], other);
 });

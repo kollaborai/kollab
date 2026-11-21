@@ -39,6 +39,22 @@ describe("saved user rows", () => {
       ]);
   });
 
+  it("show a picture send and another sender's words as a row each", () => {
+    const media = [{ ref: "m1", mime: "image/png" }];
+    const rows = buildInitialState("s1", [], [{
+      role: "user", content: "[image1] look\ntheirs", media,
+      metadata: { operator_inputs: [
+        { source: "state_rpc", timestamp: "t1", text: "[image1] look", request_id: "r1" },
+        { source: "state_rpc", timestamp: "t2", text: "theirs", request_id: "r2" },
+      ] },
+    } as unknown as HistoryMessage]).messages;
+    expect(rows.map((row) => [row.id, row.content, (row.metadata?.custom as Record<string, unknown>)?.media]))
+      .toEqual([
+        ["history-0-send-0", [{ type: "text", text: "[image1] look" }], media],
+        ["history-0-send-1", [{ type: "text", text: "theirs" }], undefined],
+      ]);
+  });
+
   it("stay one row when the sends' words are not what it shows", () => {
     const rows = buildInitialState("s1", [], [{
       role: "user", content: "edited words",
