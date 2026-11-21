@@ -128,6 +128,27 @@ describe("saved user rows", () => {
     expect(rows.map((row) => row.id)).toEqual(["history-0"]);
   });
 
+  it("stay one row when sends type picture tokens they did not send", () => {
+    const records = (a: string, b: string) => ({ operator_inputs: [
+      { source: "state_rpc", timestamp: "t1", text: a, request_id: "r1" },
+      { source: "state_rpc", timestamp: "t2", text: b, request_id: "r2" },
+    ] });
+    // Typed tokens and no pictures: the words stay as typed.
+    const typed = buildInitialState("s1", [], [{
+      role: "user", content: "[image1]\n[image1]", metadata: records("[image1]", "[image1]"),
+    } as unknown as HistoryMessage]).messages;
+    expect(typed.map((row) => [row.id, row.content])).toEqual([["history-0", [{ type: "text", text: "[image1]\n[image1]" }]]]);
+    // A typed token before a stored upload must not take the upload's picture.
+    const upload = buildInitialState("s1", [], [{
+      role: "user", media: [{ ref: "m1", mime: "image/png" }], metadata: records("see [image1]", "[image1]"),
+      content: [
+        { type: "text", text: "see [image1]" },
+        { type: "image", source: { kind: "managed_upload", media_id: "m1" } },
+      ],
+    } as unknown as HistoryMessage]).messages;
+    expect(upload.map((row) => row.id)).toEqual(["history-0"]);
+  });
+
   it("stay one row when the sends' words are not what it shows", () => {
     const rows = buildInitialState("s1", [], [{
       role: "user", content: "edited words",
