@@ -866,7 +866,7 @@ test("a replayed turn's transient rows drop when their saved copies name the sam
 const drawn = (id: string, role: string, content: unknown, index: number) =>
   ({ id, role, content, metadata: { custom: { historySourceIndex: index } } });
 
-test("the run's own rows take their saved copies under the ids they were drawn with", () => {
+test("the run's own user rows take their saved copies under the ids they were drawn with", () => {
   const shown = [
     { id: "history-0", role: "user", content: [{ type: "text", text: "busy" }] },
     drawn("user-s1-1", "user", "hello", 1),
@@ -880,10 +880,12 @@ test("the run's own rows take their saved copies under the ids they were drawn w
   ];
   const settled = withSavedCopies(shown, loaded);
   assert.deepEqual(settled.map((message) => message.id), ["history-0", "user-s1-1", "assistant-s1-2"]);
-  assert.deepEqual(settled.map((message) => message.content), [shown[0].content, loaded[1].content, loaded[3].content]);
-  assert.equal(settled[2].metadata?.custom?.requestId, "r1");
+  // The reply keeps the tool call it drew: history saves the call as a row of
+  // its own, and taking the words-only row would drop the card (#1358).
+  assert.deepEqual(settled.map((message) => message.content), [shown[0].content, loaded[1].content, shown[2].content]);
   assert.deepEqual(settled.map(historyMessageIndex), [0, 1, 3]);
   assert.equal(settled[0], shown[0]);
+  assert.equal(settled[2], shown[2]);
   // Already reading as saved: nothing to swap.
   assert.equal(withSavedCopies(settled, loaded), settled);
 });
