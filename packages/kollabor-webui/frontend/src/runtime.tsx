@@ -45,7 +45,9 @@ import {
   mergeCompactionHistorySnapshot,
   mergeMissingHistoryMessages,
   reconcileBoundaryToolResults,
+  inFlightSendIdsFor,
   shownMessagesChanged,
+  withoutInFlightSends,
 } from "./history-merge";
 import { historyContentToThreadContent } from "./history-content";
 import {
@@ -728,6 +730,10 @@ export function EngineRuntimeProvider({
   const runVersion = useRef(0);
   const draftKey = composerDraftStorageKey(agentIdentity, sessionId);
   const pendingDraftSubmissions = useRef<ComposerDraftSubmission[]>([]);
+  // The provisional row ids of the messages this page's running turn sent
+  // (#1356). A turn that stops at a permission prompt keeps them for the
+  // request that answers it; any other end clears them.
+  const inFlightSendIds = useRef<ReadonlySet<string>>(new Set());
   const reloadRequestedAt = useRef<number | null>(null);
   const [settledRuns, setSettledRuns] = useState(0);
   const [permissionCancellationPending, setPermissionCancellationPending] = useState(false);
@@ -756,6 +762,7 @@ export function EngineRuntimeProvider({
     },
     prepareSendCommandsRequest: (body) => {
       runVersion.current += 1;
+      inFlightSendIds.current = inFlightSendIdsFor(body, sessionId, inFlightSendIds.current);
       // A new message starts a new turn; a tool answer continues the last one.
       if (body.commands.some((command) => command.type === "add-message")) {
         turnRef.current = newTurnClock();
@@ -788,10 +795,12 @@ export function EngineRuntimeProvider({
       }
     },
     onError: async (error, { updateState }) => {
+      inFlightSendIds.current = new Set();
       pendingDraftSubmissions.current.shift();
       updateState((state) => ({ ...state, error: error.message }));
     },
     onCancel: ({ commands, updateState, error }) => {
+      inFlightSendIds.current = new Set();
       // A failed request lands here too, after onError: keep the error it
       // set, and leave the daemon's turn alone (a dropped phone connection
       // must not stop the agent's work).
@@ -808,6 +817,8 @@ export function EngineRuntimeProvider({
       updateState((state) => ({ ...state, error: "Run cancelled" }));
     },
     onFinish: () => {
+      const last = runtime.thread.getState().messages.at(-1);
+      if (last?.status?.type !== "requires-action") inFlightSendIds.current = new Set();
       goalCancellation.current.finish();
       setSettledRuns((count) => count + 1);
     },
@@ -1081,10 +1092,12 @@ export function EngineRuntimeProvider({
         // Publish only newly arrived canonical history rows while this page's
         // turn is active. Preserve its in-flight messages and defer any full
         // reconciliation until settlement, when the engine mirror has caught up.
-        const tail = initialState.messages.filter((message) => {
+        // The saved copy of this page's own send stays out: its in-flight row
+        // already shows it (#1356).
+        const tail = withoutInFlightSends(thread.messages, initialState.messages.filter((message) => {
           const index = historyMessageIndex(message);
           return index !== null && index >= from.history;
-        });
+        }), inFlightSendIds.current);
         const merged = mergeMissingHistoryMessages(shown.messages, tail);
         if (merged.added.length) {
           runtime.thread.importExternalState({

@@ -1942,3 +1942,18 @@ async def test_completed_non_goal_still_reads_its_own_shared_events(monkeypatch)
     events = [item async for item in response.body_iterator]
     assert "actual response" in repr(events) and "Goal request" not in repr(events)
     assert not session.subscriptions
+
+
+def test_batched_sends_get_consecutive_provisional_ids():
+    """Two messages in one request are rows L and L+1 after an L-row state (#1356).
+
+    The web client names its pending copies user-<session>-<L + i> and tracks
+    its in-flight sends by those ids, so the engine's rows must use the same
+    numbers.
+    """
+    state = [
+        {"id": "history-0", "role": "user", "content": "earlier"},
+        {"id": "history-1", "role": "assistant", "content": "ok"},
+    ]
+    rows = messages._assistant_update_message_state(state, "s1", ["first", "second"], [], None)
+    assert [row["id"] for row in rows[2:]] == ["user-s1-2", "user-s1-3", "assistant-s1-4"]
