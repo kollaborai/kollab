@@ -237,6 +237,32 @@ def test_a_cache_from_the_other_channel_is_not_trusted(install):
     assert requested == [LATEST_URL] and release is None
 
 
+def test_the_web_ui_update_check_follows_the_channel(install, tmp_path, monkeypatch):
+    # The web server keeps no update cache, but the channel is the user's setting.
+    from fastapi.testclient import TestClient
+    from kollabor_webui import server
+
+    import kollabor.version
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".kollab").mkdir(exist_ok=True)
+    (tmp_path / ".kollab" / "config.json").write_text(
+        json.dumps({"kollabor": {"updates": {"include_prereleases": True}}})
+    )
+    monkeypatch.setattr(kollabor.version, "__version__", STABLE)
+    channels = []
+
+    async def fetch(self):
+        channels.append(self.include_prereleases)
+        return newest_release(RELEASES) if self.include_prereleases else published(f"v{STABLE}")
+
+    monkeypatch.setattr(VersionCheckService, "_fetch_latest_release", fetch)
+    with TestClient(server.create_app(), base_url="http://127.0.0.1", client=("127.0.0.1", 12345)) as client:
+        body = client.get("/api/update/check").json()
+    assert channels == [True]
+    assert body["available"] is True and body["release"]["version"] == NIGHTLY
+
+
 def test_a_cache_without_a_channel_counts_as_stable(install):
     config = cached("0.22.5", channel=False)
     del config["kollabor.updates.cached_include_prereleases"]
