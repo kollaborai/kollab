@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import sys
+import time
 
 import pytest
 
@@ -167,26 +168,77 @@ class FakeSession:
         return FakeResponse(self.routes[url])
 
 
-def check(prereleases):
-    service = VersionCheckService(FakeConfig({"kollabor.updates.include_prereleases": prereleases}), STABLE)
-    session = FakeSession(
-        {
-            "https://api.github.com/repos/kollaborai/kollab/releases?per_page=30": RELEASES,
-            "https://api.github.com/repos/kollaborai/kollab/releases/latest": published(f"v{STABLE}"),
-        }
-    )
+LIST_URL = "https://api.github.com/repos/kollaborai/kollab/releases?per_page=30"
+LATEST_URL = "https://api.github.com/repos/kollaborai/kollab/releases/latest"
+
+
+@pytest.fixture
+def install(monkeypatch, tmp_path):
+    """Pick the install kind the version check sees: the binary by default."""
+    import kollabor.updates.version_check_service as service_module
+
+    def pick(kind="binary"):
+        binary = tmp_path / "kollab" if kind in ("binary", "app") else None
+        launcher = tmp_path / "Kollab.app" if kind == "app" else None
+        monkeypatch.setattr(service_module, "running_binary", lambda: binary, raising=False)
+        monkeypatch.setattr(service_module, "app_launcher", lambda: launcher, raising=False)
+
+    pick()
+    return pick
+
+
+def check(prereleases, config=None):
+    values = {"kollabor.updates.include_prereleases": prereleases, **(config or {})}
+    fake = FakeConfig(values)
+    service = VersionCheckService(fake, STABLE)
+    session = FakeSession({LIST_URL: RELEASES, LATEST_URL: published(f"v{STABLE}")})
     service.session = session
-    return asyncio.run(service.check_for_updates()), session.requested
+    return asyncio.run(service.check_for_updates()), session.requested, fake
 
 
-def test_the_version_check_reports_the_newest_nightly_on_the_nightly_channel():
-    release, requested = check(prereleases=True)
+def test_the_version_check_reports_the_newest_nightly_on_the_nightly_channel(install):
+    release, requested, _ = check(prereleases=True)
     assert release is not None and release.version == NIGHTLY and release.is_prerelease
     assert release.tag_name == f"nightly-{NIGHTLY}"
-    assert requested == ["https://api.github.com/repos/kollaborai/kollab/releases?per_page=30"]
+    assert requested == [LIST_URL]
 
 
-def test_the_version_check_stays_on_stable_releases_by_default():
-    release, requested = check(prereleases=False)
+def test_the_version_check_stays_on_stable_releases_by_default(install):
+    release, requested, _ = check(prereleases=False)
     assert release is None
-    assert requested == ["https://api.github.com/repos/kollaborai/kollab/releases/latest"]
+    assert requested == [LATEST_URL]
+
+
+@pytest.mark.parametrize("kind", ["package", "app"])
+def test_only_the_binary_follows_nightlies(install, kind):
+    # pip, uv, pipx and Kollab.app cannot install a nightly: offering one would
+    # announce it forever and rerun a no-op upgrade at every launch.
+    install(kind)
+    release, requested, _ = check(prereleases=True)
+    assert release is None
+    assert requested == [LATEST_URL]
+
+
+def cached(version, *, channel):
+    return {
+        "kollabor.updates.last_check_timestamp": int(time.time()),
+        "kollabor.updates.cached_latest_version": version,
+        "kollabor.updates.cached_include_prereleases": channel,
+    }
+
+
+def test_a_cache_from_the_other_channel_is_not_trusted(install):
+    # Stable cache, nightly channel now on: ask again instead of waiting out the TTL.
+    release, requested, fake = check(prereleases=True, config=cached("0.22.5", channel=False))
+    assert requested == [LIST_URL] and release.version == NIGHTLY
+    assert fake.values["kollabor.updates.cached_include_prereleases"] is True
+    # Nightly cache, channel turned off: never offer the cached nightly.
+    release, requested, _ = check(prereleases=False, config=cached(NIGHTLY, channel=True))
+    assert requested == [LATEST_URL] and release is None
+
+
+def test_a_cache_without_a_channel_counts_as_stable(install):
+    config = cached("0.22.5", channel=False)
+    del config["kollabor.updates.cached_include_prereleases"]
+    release, requested, _ = check(prereleases=False, config=config)
+    assert requested == [] and release.version == "0.22.5"
