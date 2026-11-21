@@ -1,7 +1,7 @@
 ---
 title: "Slash Commands"
 created: 2026-02-24
-modified: 2026-09-20
+modified: 2026-11-16
 status: active
 ---
 # Slash Commands
@@ -63,6 +63,13 @@ Use arrow keys to navigate, Enter to execute.
 In a Web UI chat, `/welcome` reopens the welcome guide at the step where it was
 left. The guide's Skip and close controls show this command in a dismissible
 notice; finishing the guide does not show that notice.
+
+The Web UI command menu loads the selected session's live command catalog. While
+it loads, after an empty result, or when the request fails, the composer shows
+that state instead of offering an unverified built-in list. An unavailable
+catalog can be retried without losing the text in the composer. Engines that
+return 404 because they do not support the catalog endpoint use a labeled
+built-in compatibility list; other request failures stay visible.
 
 ### Subcommands
 
