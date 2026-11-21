@@ -10,6 +10,7 @@ import {
   mergeMissingHistoryMessages,
   reconcileBoundaryToolResults,
   shownMessagesChanged,
+  withoutInFlightSends,
 } from "../src/history-merge.ts";
 import { historyContentToThreadContent } from "../src/history-content.ts";
 
@@ -706,4 +707,35 @@ test("compaction keeps visible display IDs unique and releases archived source p
   const older = { id: "history-3", role: "user", content: "different at three" };
   const merged = mergeMissingHistoryMessages(result.messages, [...loaded, older]);
   assert.deepEqual(merged.added.map(m => m.content), [older.content]);
+});
+
+// #1356: this page's own send is on screen as a transient row (pending, then
+// the engine's) while a history sync brings the same send as a saved row.
+const sent = (id: string, text: string) => ({ id, role: "user", content: [{ type: "text", text }] });
+const saved = (index: number, text: string) => ({ id: `history-${index}`, role: "user", content: text });
+
+test("a history sync leaves out the saved copy of an in-flight send", () => {
+  const inFlight = [sent("user-s1-38", "message B"), { id: "assistant-s1-39", role: "assistant", content: "" }];
+  const busy = { id: "history-50", role: "user", content: "busy turn" };
+  const work = { id: "history-51", role: "assistant", content: "working" };
+  const tail = [busy, work, saved(53, "message B")];
+  assert.deepEqual(withoutInFlightSends(inFlight, tail), [busy, work]);
+});
+
+test("a history sync keeps user rows no in-flight send covers", () => {
+  const tail = [saved(4, "another message"), saved(5, "message B")];
+  assert.deepEqual(withoutInFlightSends([], tail), tail);
+  assert.deepEqual(withoutInFlightSends([sent("user-s1-3", "message B")], tail), [tail[0]]);
+  // A row already in history is not an in-flight send, even with the same words.
+  assert.deepEqual(withoutInFlightSends([sent("history-2", "message B")], tail), tail);
+});
+
+test("one in-flight send covers one saved row", () => {
+  const tail = [saved(7, "yes"), saved(8, "yes")];
+  assert.deepEqual(withoutInFlightSends([sent("user-s1-6", "yes")], tail), [tail[1]]);
+});
+
+test("a picture placeholder does not prove a saved row is the in-flight send", () => {
+  const tail = [saved(9, "[image1] look")];
+  assert.deepEqual(withoutInFlightSends([sent("user-s1-8", "[image1] look")], tail), tail);
 });
