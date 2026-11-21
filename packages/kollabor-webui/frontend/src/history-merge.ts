@@ -104,20 +104,28 @@ export function mergeMissingHistoryMessages<T extends Message>(
   // saves them as calls rows of their own. Adding those before the reply makes
   // assistant-ui join them under another id and keep the reply row as a
   // second branch, so a calls row the reply already draws is not added (#1358).
-  // By call id, the saved position of the reply that drew it: a calls row is
-  // saved before its reply, and some providers reuse call ids every turn.
-  const drawnCalls = new Map<string, number>();
+  // By call id, where the reply that drew it saved its turn: after every
+  // history row shown before the reply and before the reply itself. Some
+  // providers reuse call ids every turn, so a calls row outside that window is
+  // another turn's and is added.
+  const drawnCalls = new Map<string, Array<{ after: number; before: number }>>();
+  let shownUpTo = -Infinity;
   for (const message of shown) {
-    if (transientRole(message) !== "assistant" || !TRANSIENT_ROW_ID.test(String(message.id ?? ""))) continue;
-    const at = historyIndex(message) ?? Infinity;
-    for (const id of toolCallIds(message)) drawnCalls.set(id, Math.max(drawnCalls.get(id) ?? -Infinity, at));
+    if (transientRole(message) !== "assistant" || !TRANSIENT_ROW_ID.test(String(message.id ?? ""))) {
+      if (!TRANSIENT_ROW_ID.test(String(message.id ?? ""))) shownUpTo = Math.max(shownUpTo, historyIndex(message) ?? -Infinity);
+      continue;
+    }
+    const window = { after: shownUpTo, before: historyIndex(message) ?? Infinity };
+    for (const id of toolCallIds(message)) drawnCalls.set(id, [...(drawnCalls.get(id) ?? []), window]);
   }
+  const drawnBy = (id: string, index: number) =>
+    (drawnCalls.get(id) ?? []).some((window) => window.after < index && index < window.before);
   const added = loaded.flatMap((message) => {
     const key = sourceId(message);
     if (!key || represented.has(key)) return [];
     const calls = transientRole(message) === "assistant" ? toolCallIds(message) : [];
     const index = historyIndex(message) ?? Infinity;
-    if (calls.length && calls.every((id) => (drawnCalls.get(id) ?? -Infinity) > index)) return [];
+    if (calls.length && calls.every((id) => drawnBy(id, index))) return [];
     represented.add(key);
     return [reserveRow(message, used)];
   });
