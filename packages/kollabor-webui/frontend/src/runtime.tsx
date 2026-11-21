@@ -676,6 +676,14 @@ type ThreadReadyRuntime = {
   };
 };
 
+/**
+ * A watched turn's live row rides at the end. The state a page's own send
+ * carries keeps it where it was, before the send's rows; history rows merged
+ * around it would then land ahead of the send's rows out of history order (#1359).
+ */
+const liveLast = <T extends { id?: unknown }>(messages: readonly T[]): T[] =>
+  [...messages.filter((message) => !isLiveMessage(message)), ...messages.filter(isLiveMessage)];
+
 const ownsPendingInput = (thread: {
   isRunning: boolean;
   messages: readonly { role: string; metadata?: { isOptimistic?: boolean } }[];
@@ -767,7 +775,7 @@ export function EngineRuntimeProvider({
   const sendCopies = useRef<Map<string, ThreadMessageLike>>(new Map());
   const convert = useCallback((state: EngineState, metadata: AssistantTransportConnectionMetadata) =>
     converter(midTurnRows.current.length
-      ? { ...state, messages: mergeMissingHistoryMessages(state.messages, midTurnRows.current).messages }
+      ? { ...state, messages: mergeMissingHistoryMessages(liveLast(state.messages), midTurnRows.current).messages }
       : state, metadata, sendCopies.current), []);
   const reloadRequestedAt = useRef<number | null>(null);
   const [settledRuns, setSettledRuns] = useState(0);
@@ -1032,7 +1040,7 @@ export function EngineRuntimeProvider({
       midTurnRows.current = [];
       sendCopies.current = new Map();
       const current = (runtime.thread.getState().extras as { state?: EngineState } | undefined)?.state;
-      const folded = current && mergeMissingHistoryMessages(withSendCopies(current.messages, copies), held);
+      const folded = current && mergeMissingHistoryMessages(liveLast(withSendCopies(current.messages, copies)), held);
       if (current && folded && (folded.added.length || copies.size)) runtime.thread.importExternalState({
         ...current,
         messages: folded.messages,
@@ -1150,7 +1158,7 @@ export function EngineRuntimeProvider({
         const copies = savedCopiesOfSends(thread.messages, newRows, inFlightSendIds.current);
         copies.forEach((row, requestId) => sendCopies.current.set(requestId, row));
         const tail = withoutInFlightSends(thread.messages, newRows, inFlightSendIds.current);
-        const merged = mergeMissingHistoryMessages(shown.messages, tail);
+        const merged = mergeMissingHistoryMessages(liveLast(shown.messages), tail);
         if (merged.added.length || copies.size) {
           midTurnRows.current = mergeMissingHistoryMessages(midTurnRows.current, merged.added).messages;
           runtime.thread.importExternalState({
