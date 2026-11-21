@@ -405,10 +405,11 @@ with glibc 2.28+, on x86_64 or arm64) into `~/.local/bin`: no Python needed.
 `/upgrade` swaps it for the latest release's binary; with automatic updates on
 (`/config`), each launch installs a newer release first and restarts into it. Every
 [release](https://github.com/kollaborai/kollab/releases) carries the binaries;
-elsewhere the installer falls back to the Python package below. For binary
-installs, to also take nightly builds of `main`, set
+elsewhere the installer falls back to the Python package below. To also take
+nightly builds of `main` (binary installs only), set
 `kollabor.updates.include_prereleases` to `true` in the global
-`~/.kollab/config.json`; pip, uv, pipx and Kollab.app installs ignore it
+`~/.kollab/config.json`; the newer of nightly or stable is installed. pip, uv,
+pipx and Kollab.app installs ignore that setting
 ([Nightly builds](docs/configuration.md#nightly-builds)).
 
 Python package managers:
