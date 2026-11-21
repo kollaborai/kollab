@@ -1,0 +1,185 @@
+name: Nightly
+
+# A build of main every night (#1349): the four single-file kollab binaries,
+# published as a GitHub prerelease tagged nightly-<version>. /releases/latest
+# skips prereleases, so stable installs never see one. An install follows
+# nightlies with kollabor.updates.include_prereleases on
+# (docs/reference/agent-guide/releases.md, "Nightly builds").
+#
+# Tags start with nightly-, not v: the release-tag ruleset protects v*.
+# The build steps are binaries.yml's frontend and binary jobs plus the version
+# stamp (scripts/nightly_version.py). No PyPI upload and no desktop apps.
+on:
+  schedule:
+    - cron: "0 9 * * *" # 09:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: nightly/version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      sha: ${{ steps.pick.outputs.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Pick the version, or skip when main already has a nightly
+        id: pick
+        run: |
+          sha=$(git rev-parse HEAD)
+          if git ls-remote --tags origin 'refs/tags/nightly-*' | awk '{print $1}' | grep -qx "$sha"; then
+            echo "main ($sha) already has a nightly; nothing to build."
+            exit 0
+          fi
+          version=$(python3 scripts/nightly_version.py)
+          echo "Nightly $version from $sha"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  frontend:
+    name: nightly/frontend
+    needs: version
+    if: needs.version.outputs.version != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      # Stamped after npm ci: the web UI compares its bundle version to the engine's.
+      - name: Compile the frontend with the nightly version
+        working-directory: packages/kollabor-webui/frontend
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          python3 ../../../scripts/nightly_version.py --stamp "$VERSION"
+          npm run build -- --outDir "$RUNNER_TEMP/kollab-frontend"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: frontend-dist
+          path: ${{ runner.temp }}/kollab-frontend
+          if-no-files-found: error
+
+  build:
+    name: nightly/${{ matrix.platform }}
+    needs: [version, frontend]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        include:
+          - platform: macos-aarch64
+            runner: macos-15
+          - platform: macos-x86_64
+            runner: macos-15-intel
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: false
+
+      - name: Download the nightly frontend
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: frontend-dist
+          path: ${{ runner.temp }}/kollab-frontend
+
+      - name: Stamp the nightly version
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: python scripts/nightly_version.py --stamp "$VERSION"
+
+      # The same build and smoke test as a release binary: --version must report
+      # the nightly version, kollab's imports must load and HTTPS must verify.
+      - name: Build the binary and check that it runs
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          SCIENCE_AUTH_API_GITHUB_COM_BEARER: ${{ github.token }}
+        run: python scripts/build_binary.py --frontend-dist "$RUNNER_TEMP/kollab-frontend" --out dist/bin --expect-version "$VERSION"
+
+      - name: Check it runs on the oldest supported Linux
+        if: runner.os == 'Linux'
+        run: docker run --rm -v "$PWD/dist/bin:/bin-dir:ro" almalinux:8 /bin-dir/kollab-${{ matrix.platform }} --version
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: kollab-${{ matrix.platform }}
+          path: |
+            dist/bin/kollab-${{ matrix.platform }}
+            dist/bin/kollab-${{ matrix.platform }}.sha256
+          if-no-files-found: error
+
+  publish:
+    name: nightly/publish
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: kollab-*
+          path: dist/bin
+          merge-multiple: true
+
+      # gh uploads the assets to a draft and publishes it only when all are up,
+      # and the updater skips drafts, so no install sees a half-uploaded nightly.
+      - name: Publish the nightly prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+          SHA: ${{ needs.version.outputs.sha }}
+        run: |
+          {
+            echo "Nightly build of \`main\` at $SHA. A prerelease: stable installs never see it."
+            echo
+            echo "Follow nightlies: set \`kollabor.updates.include_prereleases\` to \`true\` in \`~/.kollab/config.json\`,"
+            echo "and \`kollabor.updates.auto_update_enabled\` to \`true\` to install them at launch."
+            echo "Install this one: \`KOLLAB_VERSION=$VERSION bash install.sh\`"
+          } > notes.md
+          gh release create "nightly-$VERSION" dist/bin/* \
+            --repo "$GITHUB_REPOSITORY" --target "$SHA" \
+            --prerelease --latest=false \
+            --title "Nightly $VERSION" --notes-file notes.md
+
+      - name: Keep the newest 14 nightlies
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("nightly-"))] | sort_by(.createdAt) | reverse | .[14:][] | .tagName' |
+          while read -r tag; do
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          done

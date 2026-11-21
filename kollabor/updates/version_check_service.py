@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional
 import aiohttp
 from packaging.version import InvalidVersion, Version
 
-from .version_comparator import is_newer_version
+from .version_comparator import is_newer_version, newest_release, release_version
 
 logger = logging.getLogger(__name__)
 
@@ -213,12 +213,23 @@ class VersionCheckService:
             logger.debug("HTTP session not initialized - update check disabled")
             return None
 
-        url = f"https://api.github.com/repos/{self.github_repo}/releases/latest"
+        # /releases/latest never returns a prerelease, so the nightly channel
+        # (include_prereleases) reads the list and takes the newest (#1349).
+        if self.include_prereleases:
+            url = f"https://api.github.com/repos/{self.github_repo}/releases?per_page=30"
+        else:
+            url = f"https://api.github.com/repos/{self.github_repo}/releases/latest"
 
         try:
             async with self.session.get(url) as response:
                 if response.status == 200:
-                    data: Dict[str, Any] = await response.json()
+                    payload = await response.json()
+                    data: Optional[Dict[str, Any]] = (
+                        newest_release(payload) if self.include_prereleases else payload
+                    )
+                    if data is None:
+                        logger.info(f"GitHub lists no published release for {self.github_repo}")
+                        return None
                     logger.debug(f"GitHub API returned: {data.get('tag_name')}")
                     return data
                 elif response.status == 404:
@@ -276,8 +287,8 @@ class VersionCheckService:
             url = release_json["html_url"]
             is_prerelease = release_json.get("prerelease", False)
 
-            # Strip 'v' prefix from tag to get version
-            version = tag_name.lstrip("v")
+            # v0.22.1 or nightly-0.22.2.dev202611200900
+            version = release_version(tag_name)
 
             # Filter pre-releases if configured
             if is_prerelease and not self.include_prereleases:

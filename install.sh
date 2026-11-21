@@ -6,7 +6,7 @@
 #
 # Environment:
 #   KOLLAB_INSTALL_METHOD  binary, uv, pipx or pip: use only that method
-#   KOLLAB_VERSION         install this release (0.15.1) instead of the latest
+#   KOLLAB_VERSION         install this release (0.15.1) or nightly (0.22.2.dev202611200900) instead of the latest
 #   KOLLAB_INSTALL_DIR     where the binary goes (default: ~/.local/bin)
 #   KOLLAB_RELEASES_URL    where release binaries are downloaded from
 
@@ -109,7 +109,10 @@ try_binary() {
     local asset url tmp expected actual shown
     command_exists curl || return 1
     asset=$(binary_asset) || return 1
-    if [[ -n "$VERSION" ]]; then
+    if [[ "$VERSION" == *.dev* ]]; then
+        # Nightly builds are binary-only prereleases tagged nightly-<version> (#1349).
+        url="$RELEASES_URL/download/nightly-$VERSION/$asset"
+    elif [[ -n "$VERSION" ]]; then
         url="$RELEASES_URL/download/v$VERSION/$asset"
     else
         url="$RELEASES_URL/latest/download/$asset"
