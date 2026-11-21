@@ -122,6 +122,11 @@ def _foreign_output(event: Dict[str, Any], request_ids: set[str], tagged: bool =
     return bool(named and request_ids) and not named & request_ids
 
 
+# A message id the page made that may name its send (#1359): letters, digits,
+# dashes and underscores (assistant-ui's ids, uuids).
+_CLIENT_REQUEST_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
 def _is_goal_message(content: Any) -> bool:
     """Recognize authored goal text without synthetic image placeholders."""
     if isinstance(content, str):
@@ -620,6 +625,7 @@ def _assistant_update_message_state(
     parts: List[Dict[str, Any]],
     status: Optional[Dict[str, str]],
     submitted_media: Optional[List[List[Dict[str, str]]]] = None,
+    submitted_request_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Persist the completed or interrupted turn in assistant-ui state.
 
@@ -680,6 +686,9 @@ def _assistant_update_message_state(
         # renders thumbnails from these refs instead of the raw tokens.
         if submitted_media and index < len(submitted_media) and submitted_media[index]:
             row["media"] = submitted_media[index]
+        # The send this row is: its saved copy names the same id (#1359).
+        if submitted_request_ids and index < len(submitted_request_ids):
+            row["metadata"] = {"custom": {"requestId": submitted_request_ids[index]}}
         messages.append(row)
 
     assistant_message: Dict[str, Any] = {
@@ -1323,6 +1332,8 @@ async def assistant_transport(
         # Per-submission stored-image refs (#1088), parallel to
         # submitted_contents: saved at send time so the bytes outlive the turn.
         submitted_media: List[List[Dict[str, str]]] = []
+        # The request id of each submission, parallel to submitted_contents (#1359).
+        submitted_request_ids: List[str] = []
         request_ids: set[str] = set()
         untagged = False  # an admission that echoed no id: its turn carries none (#551)
         answered_prompts: set[str] = set()  # daemon tool ids this request answered
@@ -1360,6 +1371,7 @@ async def assistant_transport(
                 copy.deepcopy(assistant_parts),
                 None,
                 copy.deepcopy(submitted_media),
+                list(submitted_request_ids),
             )
             published = controller.state["messages"]
             for index, message in enumerate(progress):
@@ -1410,8 +1422,11 @@ async def assistant_transport(
                         return
                     message = command.get("message")
                     client_id = message.get("id") if isinstance(message, dict) else None
-                    request_id = (client_id if _is_image_goal(message_content)
-                                  and isinstance(client_id, str) and client_id else uuid.uuid4().hex)
+                    # The page knows its send by the id it made, so that id
+                    # follows the send into saved history (#1359); an image goal
+                    # also replays by it. Anything unsafe gets a fresh id.
+                    request_id = (client_id if isinstance(client_id, str)
+                                  and _CLIENT_REQUEST_ID.fullmatch(client_id) else uuid.uuid4().hex)
                     private_goal = _is_goal_message(message_content)
                     kwargs = {"request_id": request_id}
                     if private_goal:
@@ -1462,6 +1477,7 @@ async def assistant_transport(
                         untagged = True
                     submitted_contents.append(message_content)
                     submitted_media.append(_save_sent_media(message_content, session_id))
+                    submitted_request_ids.append(request_id)
                 elif command_type == "add-tool-result":
                     call_id, result, decision, scope = _assistant_tool_result(command)
                     if not call_id:
@@ -1642,6 +1658,7 @@ async def assistant_transport(
                         assistant_parts,
                         {"type": "requires-action", "reason": "tool-calls"},
                         submitted_media,
+                        submitted_request_ids,
                     )
                     if persist_message_state:
                         _assistant_set_messages(controller, state_messages)
@@ -1726,6 +1743,7 @@ async def assistant_transport(
                             assistant_parts,
                             {"type": "complete", "reason": "stop"},
                             submitted_media,
+                            submitted_request_ids,
                         )
                         if persist_message_state:
                             _assistant_set_messages(controller, state_messages)
@@ -1775,6 +1793,7 @@ async def assistant_transport(
                             else {"type": "complete", "reason": "stop"}
                         ),
                         submitted_media,
+                        submitted_request_ids,
                     )
                     if persist_message_state:
                         if goal_pump is not None:
