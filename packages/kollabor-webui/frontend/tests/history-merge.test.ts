@@ -905,3 +905,22 @@ test("a run's row saved after the loaded history was read is not gone from it", 
   const heard = { id: "history-1", role: "assistant", content: "Let me check" };
   assert.equal(shownMessagesChanged([busy, heard], [busy], 1), true);
 });
+
+// #1358: a turn that ran a tool draws its calls inside the run's reply row.
+test("a saved calls row the run's reply already draws is not added again", () => {
+  const call = { type: "tool-call", toolCallId: "c1", result: "ok" };
+  const reply = drawn("assistant-s1-1", "assistant", [call, { type: "text", text: "Working" }], 2);
+  const shown = [drawn("user-s1-0", "user", "hello", 0), reply];
+  const loaded = [
+    { id: "history-0", role: "user", content: [{ type: "text", text: "hello" }] },
+    { id: "history-1", role: "assistant", content: [call] },
+    { id: "history-2", role: "assistant", content: [{ type: "text", text: "Working" }] },
+  ];
+  assert.deepEqual(mergeMissingHistoryMessages(shown, loaded).added, []);
+  // A calls row with a call the reply does not draw is added.
+  const other = { id: "history-3", role: "assistant", content: [{ ...call, toolCallId: "c2" }] };
+  assert.deepEqual(mergeMissingHistoryMessages(shown, [...loaded, other]).added, [other]);
+  // The reply keeps what it drew, so its saved copy does not change the thread.
+  assert.equal(withSavedCopies(shown, loaded)[1], reply);
+  assert.equal(shownMessagesChanged(withSavedCopies(shown, loaded), loaded, 3), false);
+});
