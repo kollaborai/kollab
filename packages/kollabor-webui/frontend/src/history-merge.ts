@@ -414,8 +414,7 @@ export function mergeCompactionHistorySnapshot<T extends Message>(
 
 const TRANSIENT_ROW_ID = /^(?:user|assistant)-.+-(\d+)$/;
 
-/** The trimmed text of a row's content, string or text parts. */
-export const transientText = (content: unknown): string => {
+const transientText = (content: unknown): string => {
   if (typeof content === "string") return content.trim();
   if (!Array.isArray(content)) return "";
   return content
@@ -475,4 +474,29 @@ export function dropTransientTurnDuplicates<T extends Message>(
     sameTurn(message, stored[index]));
   if (!aligned) return null;
   return shown.slice(0, blockStart);
+}
+
+/**
+ * While this page's own send is in flight it shows as a transient user row
+ * (user-<session>-<n>): the pending copy, then the engine's. A history sync in
+ * that wait can carry the same send as a newly saved row, and adding it draws
+ * the message twice until the run settles (#1356). Leave those saved rows out
+ * of the rows to add: each in-flight row covers the first saved user row that
+ * is the same turn (same words, see sameTurn). Settlement reconciles the whole
+ * history afterwards.
+ */
+export function withoutInFlightSends<T extends Message>(
+  inFlight: ReadonlyArray<Message>,
+  tail: ReadonlyArray<T>,
+): T[] {
+  const open = inFlight.filter((message) =>
+    transientRole(message) === "user" && TRANSIENT_ROW_ID.test(String(message.id ?? "")));
+  return tail.filter((row) => {
+    if (transientRole(row) !== "user") return true;
+    const index = open.findIndex((message) =>
+      transientText(message.content) === transientText(row.content) && sameTurn(message, row));
+    if (index < 0) return true;
+    open.splice(index, 1);
+    return false;
+  });
 }
