@@ -46,11 +46,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Done only when a nightly of this commit is published with all 8 assets
+          # (4 binaries, 4 .sha256); a publish that died halfway is built again.
           tags=$(git ls-remote --tags origin 'refs/tags/nightly-*')
-          if printf '%s\n' "$tags" | awk '{print $1}' | grep -qx "$GITHUB_SHA"; then
-            echo "main ($GITHUB_SHA) already has a nightly; nothing to build."
-            exit 0
-          fi
+          for tag in $(printf '%s\n' "$tags" | awk -v sha="$GITHUB_SHA" '$1 == sha {sub("refs/tags/", "", $2); sub(/\^\{\}$/, "", $2); print $2}' | sort -u); do
+            assets=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft,assets \
+              --jq 'if .isDraft then 0 else (.assets | length) end' || echo 0)
+            if [ "$assets" -ge 8 ]; then
+              echo "main ($GITHUB_SHA) already has $tag; nothing to build."
+              exit 0
+            fi
+            echo "$tag has $assets of 8 assets; building again."
+          done
           ci=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?check_name=ci/tests" \
             --jq '[.check_runs[] | .conclusion // .status] | if length == 0 then "missing" else (unique | join(",")) end')
           if [ "$ci" != success ]; then
@@ -196,5 +203,6 @@ jobs:
             --jq '.[].tagName | select(startswith("nightly-"))' |
           sort -t- -k2 -V -r | tail -n +15 |
           while read -r tag; do
-            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag ||
+              echo "::warning::could not delete $tag"
           done
