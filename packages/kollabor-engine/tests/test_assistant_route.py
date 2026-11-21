@@ -1957,3 +1957,42 @@ def test_batched_sends_get_consecutive_provisional_ids():
     ]
     rows = messages._assistant_update_message_state(state, "s1", ["first", "second"], [], None)
     assert [row["id"] for row in rows[2:]] == ["user-s1-2", "user-s1-3", "assistant-s1-4"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("client_id", "expected"),
+    [("Wfw7Jka", "Wfw7Jka"), ("has spaces", None), ("x" * 129, None), (7, None)],
+)
+async def test_a_send_is_followed_by_its_client_message_id(monkeypatch, client_id, expected):
+    """The page knows its send by the message id it made (#1359).
+
+    The daemon saves the request id on the user row, so a safe client id is the
+    request id: the page can tell its own saved send from another sender's
+    before the engine answers. Anything else gets a fresh id.
+    """
+    session = _FakeSession([{"type": "turn_complete"}])
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{
+                "type": "add-message",
+                "message": {"id": client_id, "parts": [{"type": "text", "text": "hello"}]},
+            }],
+            state={"messages": []},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    request_id = session.send_message.await_args.kwargs["request_id"]
+    if expected is None:
+        assert re.fullmatch(r"[0-9a-f]{32}", request_id)
+    else:
+        assert request_id == expected
+    user_row = captured["controller"].state["messages"][0]
+    assert user_row["role"] == "user"
+    assert user_row["metadata"]["custom"]["requestId"] == request_id

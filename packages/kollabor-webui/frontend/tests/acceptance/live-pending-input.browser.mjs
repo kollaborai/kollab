@@ -43,8 +43,10 @@ try {
     const page = await browser.newPage();
     page.on("pageerror", (error) => browserErrors.push(error.message));
     let release;
+    let sentBody;
     const held = new Promise((resolve) => { release = resolve; });
     await page.route("**/sessions/s1/assistant", async (route) => {
+      sentBody = route.request().postDataJSON();
       await held;
       await route.fulfill({
         status: 200,
@@ -82,7 +84,12 @@ try {
     ).catch(async () => {
       assert.fail(`expected an assistant row "${text}" but the page shows "${await shown()}"`);
     });
-    return { page, emit, waitShown, waitUsers, waitImported, submit, finishSubmission };
+    /** The id the page gave its send: the engine follows the send by it (#1359). */
+    const sentId = async () => {
+      for (let n = 0; n < 100 && !sentBody; n++) await page.waitForTimeout(50);
+      return sentBody?.commands?.[0]?.message?.id;
+    };
+    return { page, emit, waitShown, waitUsers, waitImported, submit, finishSubmission, sentId };
   }
 
   const scenarios = {
@@ -229,6 +236,31 @@ try {
       await t.submit();
       await t.waitUsers("hello|hello");
       await t.page.evaluate(() => window.refreshSentHistory());
+      await t.waitImported("Working");
+      await t.waitUsers("hello|hello");
+      await t.finishSubmission();
+      await t.waitUsers("hello|hello");
+      await t.page.close();
+    },
+    // #1359: another sender's identical words are saved while this page's send
+    // still waits. The saved rows name their sends, so theirs stays and only
+    // this page's own saved copy is left out.
+    async "keeps another sender's identical message saved before this page's send"() {
+      const t = await open();
+      await t.submit();
+      await t.waitUsers("hello");
+      const mine = await t.sentId();
+      assert.ok(mine, "the send carried no message id");
+      const row = (index, requestId) => ({
+        id: `history-${index}`, role: "user", content: [{ type: "text", text: "hello" }],
+        metadata: { custom: { requestIds: [requestId] } },
+      });
+      await t.page.evaluate((rows) => window.setHistory(rows), [row(0, "their-send")]);
+      await t.waitUsers("hello|hello");
+      await t.page.evaluate((rows) => window.setHistory(rows), [
+        row(0, "their-send"), row(1, mine),
+        { id: "history-2", role: "assistant", content: [{ type: "text", text: "Working" }] },
+      ]);
       await t.waitImported("Working");
       await t.waitUsers("hello|hello");
       await t.finishSubmission();

@@ -11,6 +11,7 @@ declare global {
     seedSentHistory: () => void;
     refreshSentHistory: () => void;
     refreshBusyHistory: () => void;
+    setHistory: (messages: EngineState["messages"]) => void;
   }
 }
 
@@ -94,6 +95,9 @@ function Fixture() {
       ],
       synced: { history: start + 2, messages: start + 2 },
     };
+  });
+  window.setHistory = (messages) => setState({
+    ...initialState, messages, synced: { history: messages.length, messages: messages.length },
   });
   window.refreshSentHistory = () => setState((current) => {
     const start = current.messages.length;

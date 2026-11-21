@@ -789,3 +789,47 @@ test("a request without a message keeps the sends already in flight", () => {
   assert.equal(inFlightSendIdsFor({ commands: [{ type: "add-tool-result" }], state: { messages: [] } }, "s1", previous), previous);
   assert.equal(inFlightSendIdsFor({ commands: [] }, "s1", previous), previous);
 });
+
+// #1359: rows that name their send pair by id, not by words.
+const named = <T extends { metadata?: unknown }>(row: T, custom: Record<string, unknown>) =>
+  ({ ...row, metadata: { custom } });
+const pending = (id: string, text: string, requestId: string) =>
+  ({ ...sent(id, text), metadata: { isOptimistic: true, custom: { requestId } } });
+
+test("another sender's identical words, saved first, stay while this page's send is in flight", () => {
+  const theirs = named(saved(9, "hello"), { requestIds: ["their-send"] });
+  assert.deepEqual(withoutInFlightSends([pending("user-s1-8", "hello", "my-send")], [theirs], ids("user-s1-8")), [theirs]);
+  const mine = named(saved(10, "hello"), { requestIds: ["my-send"] });
+  assert.deepEqual(withoutInFlightSends([pending("user-s1-8", "hello", "my-send")], [theirs, mine], ids("user-s1-8")), [theirs]);
+});
+
+test("the engine's row of a send finds its saved copy by id", () => {
+  const engineRow = named(sent("user-s1-8", "hello"), { requestId: "my-send" });
+  const mine = named(saved(10, "hello"), { requestIds: ["my-send"] });
+  const theirs = named(saved(11, "hello"), { requestIds: ["their-send"] });
+  assert.deepEqual(withoutInFlightSends([engineRow], [mine, theirs], ids("user-s1-8")), [theirs]);
+});
+
+test("a send with a picture finds its saved copy by id", () => {
+  const mine = named(saved(9, "[image1] look"), { requestIds: ["my-send"] });
+  assert.deepEqual(withoutInFlightSends([pending("user-s1-8", "[image1] look", "my-send")], [mine], ids("user-s1-8")), []);
+});
+
+test("a saved row that names no send still pairs by its words", () => {
+  const unnamed = saved(9, "hello");
+  assert.deepEqual(withoutInFlightSends([pending("user-s1-8", "hello", "my-send")], [unnamed], ids("user-s1-8")), []);
+});
+
+test("a replayed turn's transient rows drop when their saved copies name the same send", () => {
+  const stored = [
+    named({ id: "history-0", role: "user", content: "[image1] look" }, { requestIds: ["r1"] }),
+    { id: "history-1", role: "assistant", content: "seen" },
+  ];
+  const transient = [
+    named({ id: "user-s1-2", role: "user", content: "[image1] look" }, { requestId: "r1" }),
+    { id: "assistant-s1-3", role: "assistant", content: "seen" },
+  ];
+  assert.deepEqual(dropTransientTurnDuplicates([...stored, ...transient], stored), stored);
+  const other = [named(transient[0], { requestId: "r2" }), transient[1]];
+  assert.equal(dropTransientTurnDuplicates([...stored, ...other], stored), null);
+});
