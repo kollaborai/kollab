@@ -69,7 +69,19 @@ try {
       release();
       await page.waitForFunction(() => document.getElementById("running")?.textContent === "idle");
     };
-    return { page, emit, waitShown, submit, finishSubmission };
+    const waitUsers = (text) => page.waitForFunction(
+      (expected) => document.getElementById("users")?.textContent === expected, text, { timeout: 5000 },
+    ).catch(async () => {
+      assert.fail(`expected user messages "${text}" but the page shows "${await page.locator("#users").innerText()}"`);
+    });
+    // The running thread draws an empty assistant placeholder after the rows.
+    const waitImported = (text) => page.waitForFunction(
+      (expected) => document.getElementById("assistant")?.textContent?.split("|").includes(expected),
+      text, { timeout: 5000 },
+    ).catch(async () => {
+      assert.fail(`expected an assistant row "${text}" but the page shows "${await shown()}"`);
+    });
+    return { page, emit, waitShown, waitUsers, waitImported, submit, finishSubmission };
   }
 
   const scenarios = {
@@ -177,6 +189,34 @@ try {
       assert.equal(await t.page.locator("#running").innerText(), "running");
       await t.finishSubmission();
       await t.waitShown("AlphaBeta");
+      await t.page.close();
+    },
+    // #1356: the engine saves a held send before its stream answers. A history
+    // sync in that window brings the saved row; the pending copy must not
+    // stay drawn beside it.
+    async "shows a held send once after history saves it"() {
+      const t = await open();
+      await t.submit();
+      await t.waitUsers("hello");
+      await t.page.evaluate(() => window.refreshSentHistory());
+      await t.waitImported("Working");
+      await t.waitUsers("hello");
+      await t.finishSubmission();
+      await t.waitUsers("hello");
+      await t.page.close();
+    },
+    // An earlier message with the same text is not the saved copy of this send.
+    async "keeps a held send beside an earlier identical message"() {
+      const t = await open();
+      await t.page.evaluate(() => window.seedSentHistory());
+      await t.waitUsers("hello");
+      await t.submit();
+      await t.waitUsers("hello|hello");
+      await t.page.evaluate(() => window.refreshSentHistory());
+      await t.waitImported("Working");
+      await t.waitUsers("hello|hello");
+      await t.finishSubmission();
+      await t.waitUsers("hello|hello");
       await t.page.close();
     },
     // Output of a turn this page never saw start is not guessed at.

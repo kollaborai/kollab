@@ -8,6 +8,8 @@ declare global {
   interface Window {
     liveEvent: (event: SessionEvent) => void;
     refreshHistory: () => void;
+    seedSentHistory: () => void;
+    refreshSentHistory: () => void;
   }
 }
 
@@ -38,6 +40,12 @@ function Probe({ onRefresh, historyCount }: { onRefresh: () => void; historyCoun
       .map((part) => (part.type === "text" ? part.text : ""))
       .join(""))
     .join("|"));
+  const users = useAuiState((s) => s.thread.messages
+    .filter((message) => message.role === "user")
+    .map((message) => message.content
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join(""))
+    .join("|"));
   return (
     <div>
       <button id="send" onClick={() => aui.thread().append("hello")}>send</button>
@@ -45,6 +53,7 @@ function Probe({ onRefresh, historyCount }: { onRefresh: () => void; historyCoun
       <div id="running">{running ? "running" : "idle"}</div>
       <div id="history-count">{historyCount}</div>
       <div id="assistant">{text}</div>
+      <div id="users">{users}</div>
     </div>
   );
 }
@@ -63,6 +72,27 @@ function Fixture() {
     synced: { history: 1, messages: 1 },
   });
   window.refreshHistory = refreshHistory;
+  // Saved history rows for this page's own sends (#1356). An earlier
+  // identical "hello" may already be on screen; the refresh then brings the
+  // saved copy of the pending send and output of a turn it was held behind.
+  const userRow = (index: number) => ({
+    id: `history-${index}`, role: "user" as const, content: [{ type: "text" as const, text: "hello" }],
+  });
+  window.seedSentHistory = () => setState({
+    ...initialState, messages: [userRow(0)], synced: { history: 1, messages: 1 },
+  });
+  window.refreshSentHistory = () => setState((current) => {
+    const start = current.messages.length;
+    return {
+      ...initialState,
+      messages: [
+        ...current.messages,
+        userRow(start),
+        { id: `history-${start + 1}`, role: "assistant", content: [{ type: "text", text: "Working" }] },
+      ],
+      synced: { history: start + 2, messages: start + 2 },
+    };
+  });
   return (
     <EngineRuntimeProvider
       key={runtimeEpoch}
