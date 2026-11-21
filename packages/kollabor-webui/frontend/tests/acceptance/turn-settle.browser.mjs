@@ -35,13 +35,13 @@ const row = (index, role, value) => ({ id: `history-${index}`, role, content: te
  * the request sent, then user-s1-<n> and assistant-s1-<n+1> mapped to their
  * saved rows (the engine sends the user row's words as a string).
  */
-const finalState = (sent, saved, reply = saved + 1) => {
+const finalState = (sent, saved, reply = saved + 1, replyContent = text("Working")) => {
   const at = sent.length;
   const messages = [
     ...sent,
     { id: `user-s1-${at}`, role: "user", content: "hello",
       metadata: { custom: { historySourceIndex: saved } } },
-    { id: `assistant-s1-${at + 1}`, role: "assistant", content: text("Working"),
+    { id: `assistant-s1-${at + 1}`, role: "assistant", content: replyContent,
       status: { type: "complete", reason: "stop" },
       metadata: { custom: { historySourceIndex: reply } } },
   ];
@@ -87,10 +87,10 @@ try {
       await page.locator("#send").click();
       await page.waitForFunction(() => document.getElementById("running")?.textContent === "running");
     };
-    const answer = async (saved, reply) => {
+    const answer = async (saved, reply, replyContent) => {
       await page.waitForFunction(() => window.transport !== undefined);
       const sent = await page.evaluate(() => window.transport.request.state?.messages ?? []);
-      await page.evaluate((frame) => window.transport.push(frame), finalState(sent, saved, reply));
+      await page.evaluate((frame) => window.transport.push(frame), finalState(sent, saved, reply, replyContent));
     };
     const finish = async (saved) => {
       if (saved !== undefined) await answer(saved);
@@ -138,6 +138,24 @@ try {
       await t.setHistory([row(0, "user", "hello"), row(1, "assistant", "Working")]);
       await t.holds((s) => s.remounts === "0" && s.users === "hello" && s.assistant === "Working",
         "after the settle reload");
+      await t.page.close();
+    },
+    // A turn that ran a tool: the run drew its call inside the reply, and
+    // history saves the call as a row of its own before the reply's words.
+    async "settles a turn that ran a tool in place, with no second branch"() {
+      const t = await open();
+      await t.send();
+      const call = { type: "tool-call", toolCallId: "c1", toolName: "terminal", args: {}, argsText: "{}", result: "ok" };
+      await t.answer(0, 2, [call, ...text("Working")]);
+      await t.finish();
+      await t.waitFor((s) => s.assistant.includes("Working"), "the reply");
+      await t.setHistory([
+        row(0, "user", "hello"),
+        { id: "history-1", role: "assistant", content: [call] },
+        row(2, "assistant", "Working"),
+      ]);
+      await t.holds((s) => s.remounts === "0" && s.branches === 0 && s.users === "hello" &&
+        s.assistant.includes("Working"), "after the settle reload");
       await t.page.close();
     },
     // The page sends while watching another client's turn, whose live copy
