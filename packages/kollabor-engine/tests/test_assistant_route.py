@@ -2034,3 +2034,27 @@ def test_align_helper_does_not_pair_another_senders_identical_words():
     stored = [_saved_user("twin words", "theirs"), {"role": "assistant", "content": "done"}]
     assert messages._assistant_align_streamed_ids(streamed, stored) is False
     assert "historySourceIndex" not in streamed[0]["metadata"]["custom"]
+
+
+def test_align_helper_skips_the_live_row_of_a_watched_turn():
+    """A page that sent while watching another turn's reply carries that live
+    row (live-turn) in its state. It is a display row, not one of this turn's,
+    so it must not stop the turn's rows from pairing (#1359)."""
+    streamed = [
+        {"id": "history-0", "role": "user", "content": "busy"},
+        {"id": "live-turn", "role": "assistant",
+         "content": [{"type": "tool-call", "toolCallId": "call-1", "toolName": "terminal"}]},
+        {"id": "user-s1-2", "role": "user", "content": "twin words",
+         "metadata": {"custom": {"requestId": "mine"}}},
+        {"id": "assistant-s1-3", "role": "assistant", "content": [{"type": "text", "text": "done"}]},
+    ]
+    stored = [
+        {"role": "user", "content": "busy"},
+        {"role": "assistant", "content": "", "metadata": {"tool_calls": [{"id": "call-1"}]}},
+        {"role": "tool", "content": "", "metadata": {"tool_call_id": "call-1"}},
+        _saved_user("<agent_hud>budget</agent_hud>\ntwin words\ntwin words", "mine", "theirs"),
+        {"role": "assistant", "content": "done"},
+    ]
+    assert messages._assistant_align_streamed_ids(streamed, stored) is True
+    assert [streamed[i]["metadata"]["custom"]["historySourceIndex"] for i in (2, 3)] == [3, 4]
+    assert "metadata" not in streamed[1]
