@@ -970,3 +970,18 @@ test("an earlier turn the page ran keeps its saved place behind its last one", (
   assert.deepEqual(mergeMissingHistoryMessages(shown, [between]).messages.map((row) => row.id),
     ["user-s1-2", "assistant-s1-3", "history-4", "user-s1-4", "assistant-s1-5"]);
 });
+
+test("an older calls row sharing a call id with the running reply is still added", () => {
+  // Providers that reuse call ids (call_0 each turn): a calls row saved
+  // before the rows shown ahead of the running turn is not that turn's (#1358).
+  const call = { type: "tool-call", toolCallId: "call_0", result: "ok" };
+  const shown = [
+    { id: "history-10", role: "user", content: "earlier" },
+    { id: "history-11", role: "assistant", content: "answer" },
+    drawn("user-s1-2", "user", "now", 12),
+    { id: "assistant-s1-3", role: "assistant", content: [call, { type: "text", text: "Working" }] },
+  ];
+  const older = { id: "history-3", role: "assistant", content: [{ ...call, result: "old" }] };
+  const own = { id: "history-13", role: "assistant", content: [call] };
+  assert.deepEqual(mergeMissingHistoryMessages(shown, [older, own]).added.map((row) => row.id), ["history-3"]);
+});
