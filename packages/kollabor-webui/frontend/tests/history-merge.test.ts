@@ -985,3 +985,17 @@ test("an older calls row sharing a call id with the running reply is still added
   const own = { id: "history-13", role: "assistant", content: [call] };
   assert.deepEqual(mergeMissingHistoryMessages(shown, [older, own]).added.map((row) => row.id), ["history-3"]);
 });
+
+test("with nothing saved above the running turn, a calls row is not hidden on a call id alone", () => {
+  // No history row shown above the reply and no saved position for the send:
+  // nothing bounds the reply's turn, so a reused call id hides nothing (#1358).
+  const call = { type: "tool-call", toolCallId: "call_0", result: "ok" };
+  const reply = { id: "assistant-s1-1", role: "assistant", content: [call, { type: "text", text: "Working" }] };
+  const older = { id: "history-3", role: "assistant", content: [{ ...call, result: "old" }] };
+  assert.deepEqual(mergeMissingHistoryMessages([{ id: "user-s1-0", role: "user", content: "now" }, reply], [older])
+    .added.map((row) => row.id), ["history-3"]);
+  // Once the send has its saved position, the turn's own calls row is drawn.
+  const placed = [drawn("user-s1-0", "user", "now", 5), drawn("assistant-s1-1", "assistant", reply.content, 7)];
+  const own = { id: "history-6", role: "assistant", content: [call] };
+  assert.deepEqual(mergeMissingHistoryMessages(placed, [older, own]).added.map((row) => row.id), ["history-3"]);
+});
