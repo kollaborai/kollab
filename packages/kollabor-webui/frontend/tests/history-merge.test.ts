@@ -730,9 +730,17 @@ test("a history sync keeps user rows no in-flight send covers", () => {
   assert.deepEqual(withoutInFlightSends([sent("history-2", "message B")], tail), tail);
 });
 
-test("one in-flight send covers one saved row", () => {
+test("saved rows that outnumber the in-flight sends with their words are all kept", () => {
+  // Another sender's "yes" and this page's "yes" land in one sync: the words
+  // cannot tell which is which, so hiding either could hide the other sender.
   const tail = [saved(7, "yes"), saved(8, "yes")];
-  assert.deepEqual(withoutInFlightSends([sent("user-s1-6", "yes")], tail), [tail[1]]);
+  assert.deepEqual(withoutInFlightSends([sent("user-s1-6", "yes")], tail), tail);
+});
+
+test("each in-flight send covers one saved row with its words", () => {
+  const tail = [saved(7, "yes"), saved(8, "yes"), saved(9, "no")];
+  const inFlight = [sent("user-s1-5", "yes"), sent("user-s1-6", "yes")];
+  assert.deepEqual(withoutInFlightSends(inFlight, tail), [tail[2]]);
 });
 
 test("a picture placeholder does not prove a saved row is the in-flight send", () => {
