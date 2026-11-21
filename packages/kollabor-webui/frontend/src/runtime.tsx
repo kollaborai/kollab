@@ -48,6 +48,7 @@ import {
   inFlightSendIdsFor,
   shownMessagesChanged,
   withoutInFlightSends,
+  withSavedCopies,
 } from "./history-merge";
 import { historyContentToThreadContent } from "./history-content";
 import {
@@ -734,6 +735,16 @@ export function EngineRuntimeProvider({
   // (#1356). A turn that stops at a permission prompt keeps them for the
   // request that answers it; any other end clears them.
   const inFlightSendIds = useRef<ReadonlySet<string>>(new Set());
+  // History rows a sync added while this page's run owned the thread (#1358).
+  // Each state the run streams is built from what its request sent, so it
+  // leaves them out: drawn without them for a frame, and assistant-ui keeps the
+  // dropped rows as a second branch (the "2 / 2" picker). The converter adds
+  // them back until the run lets go and they are folded into the state.
+  const midTurnRows = useRef<ThreadMessageLike[]>([]);
+  const convert = useCallback((state: EngineState, metadata: AssistantTransportConnectionMetadata) =>
+    converter(midTurnRows.current.length
+      ? { ...state, messages: mergeMissingHistoryMessages(state.messages, midTurnRows.current).messages }
+      : state, metadata), []);
   const reloadRequestedAt = useRef<number | null>(null);
   const [settledRuns, setSettledRuns] = useState(0);
   const [permissionCancellationPending, setPermissionCancellationPending] = useState(false);
@@ -747,7 +758,7 @@ export function EngineRuntimeProvider({
     initialState,
     api: api.assistantUrl(sessionId),
     protocol: "assistant-transport",
-    converter,
+    converter: convert,
     adapters: { attachments: imageAttachmentAdapter },
     headers: async () => {
       // Refresh before every transport request. Engine restarts rotate the
@@ -990,7 +1001,19 @@ export function EngineRuntimeProvider({
   const deferredHistorySync = useRef(false);
   const deferredOlderWindow = useRef<EngineState | null>(null);
   useEffect(() => runtime.thread.subscribe(() => {
-    if (!deferredHistorySync.current || ownsPendingInput(runtime.thread.getState())) return;
+    if (ownsPendingInput(runtime.thread.getState())) return;
+    if (midTurnRows.current.length) {
+      const held = midTurnRows.current;
+      midTurnRows.current = [];
+      const current = (runtime.thread.getState().extras as { state?: EngineState } | undefined)?.state;
+      const folded = current && mergeMissingHistoryMessages(current.messages, held);
+      if (current && folded?.added.length) runtime.thread.importExternalState({
+        ...current,
+        messages: folded.messages,
+        synced: current.synced ? { ...current.synced, messages: folded.messages.length } : current.synced,
+      });
+    }
+    if (!deferredHistorySync.current) return;
     deferredHistorySync.current = false;
     setHistorySyncRevision((revision) => revision + 1);
   }), [runtime]);
@@ -1100,6 +1123,7 @@ export function EngineRuntimeProvider({
         }), inFlightSendIds.current);
         const merged = mergeMissingHistoryMessages(shown.messages, tail);
         if (merged.added.length) {
+          midTurnRows.current = mergeMissingHistoryMessages(midTurnRows.current, merged.added).messages;
           runtime.thread.importExternalState({
             ...shown,
             messages: merged.messages,
@@ -1236,13 +1260,15 @@ export function EngineRuntimeProvider({
       }, 0);
       return () => window.clearTimeout(timer);
     }
+    // The run's own rows take their saved copies in place (#1358).
+    const settled = withSavedCopies(shown.messages, initialState.messages);
     // A non-authoritative window (older-focused merge, or a cache fallback
     // while a fresh sync was unavailable) cannot prove that rows missing
     // from it were deleted: merging keeps the shown rows instead of
     // resetting the thread on every such publish. Only a fresh
     // latest-window claim may declare shown rows gone.
     if (
-      shownMessagesChanged(shown.messages, initialState.messages) &&
+      shownMessagesChanged(settled, initialState.messages, initialState.synced.history) &&
       initialState.synced.authoritative !== false && !deferred
     ) {
       reloaded.current = initialState.messages;
@@ -1253,13 +1279,13 @@ export function EngineRuntimeProvider({
     reloaded.current = initialState.messages;
     const currentStart = from.start ?? 0;
     const nextStart = initialState.synced.start ?? currentStart;
-    const kept = shown.messages.filter((message) => !isLiveMessage(message));
+    const kept = settled.filter((message) => !isLiveMessage(message));
     const merged = mergeMissingHistoryMessages(kept, initialState.messages);
     const tail = merged.added.filter((message) => {
       const index = historyMessageIndex(message);
       return index !== null && index >= from.history;
     });
-    if (!merged.added.length && nextStart >= currentStart) return;
+    if (!merged.added.length && nextStart >= currentStart && settled === shown.messages) return;
     // A live turn this page is only watching rides at the end, outside the
     // synced bookkeeping, until the history carries its reply (replaced above).
     const replaced = historyReplacesLiveTurn(liveTurn.current, tail);

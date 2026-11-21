@@ -12,6 +12,7 @@ import {
   inFlightSendIdsFor,
   shownMessagesChanged,
   withoutInFlightSends,
+  withSavedCopies,
 } from "../src/history-merge.ts";
 import { historyContentToThreadContent } from "../src/history-content.ts";
 
@@ -788,4 +789,49 @@ test("a request without a message keeps the sends already in flight", () => {
   const previous = ids("user-s1-3");
   assert.equal(inFlightSendIdsFor({ commands: [{ type: "add-tool-result" }], state: { messages: [] } }, "s1", previous), previous);
   assert.equal(inFlightSendIdsFor({ commands: [] }, "s1", previous), previous);
+});
+
+// #1358: the rows the page's own run drew carry the saved row the engine
+// matched them to (custom.historySourceIndex).
+const drawn = (id: string, role: string, content: unknown, index: number) =>
+  ({ id, role, content, metadata: { custom: { historySourceIndex: index } } });
+
+test("the run's own rows take their saved copies under the ids they were drawn with", () => {
+  const shown = [
+    { id: "history-0", role: "user", content: [{ type: "text", text: "busy" }] },
+    drawn("user-s1-1", "user", "hello", 1),
+    drawn("assistant-s1-2", "assistant", [{ type: "tool-call", toolCallId: "t1" }, { type: "text", text: "Working" }], 3),
+  ];
+  const loaded = [
+    shown[0],
+    { id: "history-1", role: "user", content: [{ type: "text", text: "hello" }] },
+    { id: "history-2", role: "assistant", content: [{ type: "tool-call", toolCallId: "t1" }] },
+    { id: "history-3", role: "assistant", content: [{ type: "text", text: "Working" }], metadata: { custom: { requestId: "r1" } } },
+  ];
+  const settled = withSavedCopies(shown, loaded);
+  assert.deepEqual(settled.map((message) => message.id), ["history-0", "user-s1-1", "assistant-s1-2"]);
+  assert.deepEqual(settled.map((message) => message.content), [shown[0].content, loaded[1].content, loaded[3].content]);
+  assert.equal(settled[2].metadata?.custom?.requestId, "r1");
+  assert.deepEqual(settled.map(historyMessageIndex), [0, 1, 3]);
+  assert.equal(settled[0], shown[0]);
+  // Already reading as saved: nothing to swap.
+  assert.equal(withSavedCopies(settled, loaded), settled);
+});
+
+test("a row without a saved copy yet, or a history row, is left as shown", () => {
+  const pending = drawn("user-s1-1", "user", "hello", 1);
+  const older = { id: "history-0", role: "assistant", content: "old words" };
+  const shown = [older, pending];
+  assert.equal(withSavedCopies(shown, [{ id: "history-0", role: "assistant", content: "new words" }]), shown);
+});
+
+test("a run's row saved after the loaded history was read is not gone from it", () => {
+  const busy = { id: "history-0", role: "user", content: "busy" };
+  const sent = drawn("user-s1-1", "user", "hello", 1);
+  assert.equal(shownMessagesChanged([busy, sent], [busy], 1), false);
+  // Without the loaded row count nothing says when it was read.
+  assert.equal(shownMessagesChanged([busy, sent], [busy]), true);
+  // A history row past it is still gone (a talk-over took the reply away).
+  const heard = { id: "history-1", role: "assistant", content: "Let me check" };
+  assert.equal(shownMessagesChanged([busy, heard], [busy], 1), true);
 });

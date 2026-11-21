@@ -1,0 +1,100 @@
+import { ThreadPrimitive, useAui, useAuiState } from "@assistant-ui/react";
+import { useState } from "react";
+import { createRoot } from "react-dom/client";
+import type { EngineApi } from "../../src/api";
+import { EngineRuntimeProvider, type EngineState } from "../../src/runtime";
+
+declare global {
+  interface Window {
+    setHistory: (messages: EngineState["messages"]) => void;
+    transport?: { request: { state?: EngineState }; push: (frame: string) => void; close: () => void };
+  }
+}
+
+// The page's send streams from here: the test reads what the request sent,
+// pushes the engine's frames one at a time and ends the stream (an engine
+// holds it open between its final state and the finish while it refreshes
+// history).
+const realFetch = window.fetch.bind(window);
+window.fetch = async (input, init) => {
+  if (!String(input instanceof Request ? input.url : input).endsWith("/sessions/s1/assistant")) {
+    return realFetch(input, init);
+  }
+  const encoder = new TextEncoder();
+  let stream!: ReadableStreamDefaultController<Uint8Array>;
+  const body = new ReadableStream<Uint8Array>({ start: (controller) => { stream = controller; } });
+  window.transport = {
+    request: JSON.parse(String(init?.body ?? "{}")),
+    push: (frame) => stream.enqueue(encoder.encode(frame)),
+    close: () => stream.close(),
+  };
+  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+};
+
+// Synthetic: a fake API, no engine and no provider (#1358). The browser test
+// answers the page's send with the frames the engine streams, and plays App's
+// history reloads through setHistory.
+const api = {
+  assistantUrl: (sessionId: string) => `/sessions/${sessionId}/assistant`,
+  refreshToken: async () => false,
+  getToken: () => null,
+  getSessionState: async () => ({}),
+  cancel: async () => undefined,
+  cancelOwned: async () => undefined,
+} as unknown as EngineApi;
+
+const initialState: EngineState = {
+  sessionId: "s1", sessions: [], messages: [], synced: { history: 0, messages: 0 },
+};
+
+const texts = (role: string) => (s: { thread: { messages: readonly { role: string; content: readonly { type: string; text?: string }[] }[] } }) =>
+  s.thread.messages
+    .filter((message) => message.role === role)
+    .map((message) => message.content.map((part) => (part.type === "text" ? part.text : "")).join(""))
+    .join("|");
+
+// A message with a sibling branch: the "2 / 2" picker the chat would draw.
+function Branched() {
+  const branches = useAuiState((s) => s.message.branchCount);
+  return branches > 1 ? <span className="branched">{branches}</span> : null;
+}
+
+function Probe() {
+  const aui = useAui();
+  const running = useAuiState((s) => s.thread.isRunning);
+  const assistant = useAuiState(texts("assistant"));
+  const users = useAuiState(texts("user"));
+  return (
+    <div>
+      <button id="send" onClick={() => aui.thread().append("hello")}>send</button>
+      <div id="running">{running ? "running" : "idle"}</div>
+      <div id="assistant">{assistant}</div>
+      <div id="users">{users}</div>
+      <div id="branches"><ThreadPrimitive.Messages>{() => <Branched />}</ThreadPrimitive.Messages></div>
+    </div>
+  );
+}
+
+function Fixture() {
+  const [state, setState] = useState(initialState);
+  const [remounts, setRemounts] = useState(0);
+  window.setHistory = (messages) => setState({
+    ...initialState, messages, synced: { history: messages.length, messages: messages.length },
+  });
+  return (
+    <>
+      <div id="remounts">{remounts}</div>
+      <EngineRuntimeProvider
+        key={remounts}
+        api={api}
+        sessionId="s1"
+        initialState={state}
+        onStale={() => setRemounts((count) => count + 1)}
+      >
+        <Probe />
+      </EngineRuntimeProvider>
+    </>
+  );
+}
+
+createRoot(document.getElementById("root")!).render(<Fixture />);
