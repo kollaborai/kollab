@@ -1,0 +1,185 @@
+"""The nightly channel: kollabor.updates.include_prereleases follows nightly builds (#1349).
+
+Nightlies are GitHub prereleases tagged nightly-<version>. /releases/latest never
+returns a prerelease, so with the setting on both release lookups read the
+release list and take the newest version; with it off nothing changes.
+"""
+
+import asyncio
+import hashlib
+import io
+import json
+import sys
+
+import pytest
+
+import kollabor.updates.auto_update as auto_update
+from kollabor.updates import VersionCheckService
+from kollabor.updates.version_comparator import newest_release, release_version
+
+NAME = "kollab-macos-aarch64"
+STABLE = "0.22.1"
+NIGHTLY = "0.22.2.dev202611200900"
+BASE = "https://downloads.invalid/"
+
+
+def published(tag, *, prerelease=False, draft=False, assets=(NAME, f"{NAME}.sha256")):
+    return {
+        "tag_name": tag,
+        "name": tag,
+        "html_url": f"https://example.invalid/{tag}",
+        "prerelease": prerelease,
+        "draft": draft,
+        "assets": [{"name": name, "browser_download_url": f"{BASE}{tag}/{name}"} for name in assets],
+    }
+
+
+RELEASES = [
+    published("nightly-0.22.3.dev202611210900", draft=True),  # still uploading
+    published(f"nightly-{NIGHTLY}", prerelease=True),
+    published(f"v{STABLE}"),
+    published("nightly-not-a-version", prerelease=True),
+    published("nightly-0.22.2.dev202611190900", prerelease=True),
+]
+
+
+def test_a_nightly_tag_names_its_version():
+    assert release_version(f"nightly-{NIGHTLY}") == NIGHTLY
+    assert release_version(f"v{STABLE}") == STABLE
+
+
+def test_the_newest_published_release_wins_by_version():
+    assert newest_release(RELEASES)["tag_name"] == f"nightly-{NIGHTLY}"
+    assert newest_release([published(f"v{STABLE}")])["tag_name"] == f"v{STABLE}"
+    assert newest_release([published("nightly-x", draft=True)]) is None
+
+
+@pytest.fixture
+def binary(tmp_path, monkeypatch):
+    """This process runs from tmp_path/bin/kollab: the launcher's SCIE plus its pex venv."""
+    venv = tmp_path / "venv"
+    venv.mkdir()
+    (venv / "PEX-INFO").write_text("{}")
+    path = tmp_path / "bin" / "kollab"
+    path.parent.mkdir()
+    path.write_bytes(b"old")
+    path.chmod(0o755)
+    monkeypatch.setattr(sys, "prefix", str(venv))
+    monkeypatch.setenv("SCIE", str(path))
+    return path
+
+
+def serve(monkeypatch, *, prereleases):
+    """GitHub for _open: the release list, /releases/latest, and the nightly binary."""
+    body = f'#!/bin/sh\necho "$(basename "$0") {NIGHTLY}"\n'.encode()
+    digest = hashlib.sha256(body).hexdigest()
+    tag = f"nightly-{NIGHTLY}"
+    files = {
+        auto_update.RELEASES: json.dumps(RELEASES).encode(),
+        auto_update.LATEST_RELEASE: json.dumps(published(f"v{STABLE}")).encode(),
+        f"{BASE}{tag}/{NAME}": body,
+        f"{BASE}{tag}/{NAME}.sha256": f"{digest} *{NAME}".encode(),
+    }
+    opened = []
+
+    def fake_open(url, timeout, headers=None):
+        opened.append(url)
+        if url not in files:
+            raise OSError(f"HTTP Error 404: {url}")
+        return io.BytesIO(files[url])
+
+    monkeypatch.setattr(auto_update, "_open", fake_open)
+    monkeypatch.setattr(auto_update, "platform_name", lambda: "macos-aarch64")
+    monkeypatch.setattr(auto_update, "_installed_version", lambda: STABLE)
+    monkeypatch.setattr(auto_update, "_include_prereleases", lambda: prereleases)
+    return opened
+
+
+def test_a_binary_on_the_nightly_channel_upgrades_to_the_newest_nightly(binary, monkeypatch):
+    opened = serve(monkeypatch, prereleases=True)
+    result = auto_update.run_auto_update()
+    assert result.success and result.changed, result.message
+    assert NIGHTLY in result.message
+    assert opened[0] == auto_update.RELEASES
+    assert NIGHTLY.encode() in binary.read_bytes()
+
+
+def test_a_stable_binary_never_sees_a_nightly(binary, monkeypatch):
+    opened = serve(monkeypatch, prereleases=False)
+    result = auto_update.run_auto_update()
+    assert result.success and not result.changed, result.message
+    assert opened == [auto_update.LATEST_RELEASE]
+    assert binary.read_bytes() == b"old"
+
+
+def test_the_channel_comes_from_the_global_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert auto_update._include_prereleases() is False
+    (tmp_path / ".kollab").mkdir(exist_ok=True)  # reading the config may create it
+    (tmp_path / ".kollab" / "config.json").write_text(
+        json.dumps({"kollabor": {"updates": {"include_prereleases": True}}})
+    )
+    assert auto_update._include_prereleases() is True
+
+
+class FakeConfig:
+    def __init__(self, values):
+        self.values = dict(values)
+
+    def get(self, key, default=None):
+        return self.values.get(key, default)
+
+    def save_key(self, key, value, **_kwargs):
+        self.values[key] = value
+        return True
+
+
+class FakeResponse:
+    status = 200
+
+    def __init__(self, data):
+        self.data = data
+
+    async def json(self):
+        return self.data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class FakeSession:
+    def __init__(self, routes):
+        self.routes = routes
+        self.requested = []
+
+    def get(self, url):
+        self.requested.append(url)
+        return FakeResponse(self.routes[url])
+
+
+def check(prereleases):
+    service = VersionCheckService(FakeConfig({"kollabor.updates.include_prereleases": prereleases}), STABLE)
+    session = FakeSession(
+        {
+            "https://api.github.com/repos/kollaborai/kollab/releases?per_page=30": RELEASES,
+            "https://api.github.com/repos/kollaborai/kollab/releases/latest": published(f"v{STABLE}"),
+        }
+    )
+    service.session = session
+    return asyncio.run(service.check_for_updates()), session.requested
+
+
+def test_the_version_check_reports_the_newest_nightly_on_the_nightly_channel():
+    release, requested = check(prereleases=True)
+    assert release is not None and release.version == NIGHTLY and release.is_prerelease
+    assert release.tag_name == f"nightly-{NIGHTLY}"
+    assert requested == ["https://api.github.com/repos/kollaborai/kollab/releases?per_page=30"]
+
+
+def test_the_version_check_stays_on_stable_releases_by_default():
+    release, requested = check(prereleases=False)
+    assert release is None
+    assert requested == ["https://api.github.com/repos/kollaborai/kollab/releases/latest"]
