@@ -34,7 +34,7 @@ describe("saved user rows", () => {
     } as unknown as HistoryMessage]).messages;
     expect(rows.map((row) => [row.id, row.content, (row.metadata?.custom as Record<string, unknown>)?.requestIds]))
       .toEqual([
-        ["history-0", [{ type: "text", text: "mine" }], ["r1"]],
+        ["history-0-send-0", [{ type: "text", text: "mine" }], ["r1"]],
         ["history-0-send-1", [{ type: "text", text: "theirs" }], ["r2"]],
       ]);
   });

@@ -277,7 +277,7 @@ try {
       const mine = await t.sentId();
       assert.ok(mine, "the send carried no message id");
       await t.page.evaluate((rows) => window.setHistory(rows), [
-        { id: "history-0", role: "user", content: [{ type: "text", text: "theirs" }],
+        { id: "history-0-send-0", role: "user", content: [{ type: "text", text: "theirs" }],
           metadata: { custom: { requestIds: ["their-send"] } } },
         { id: "history-0-send-1", role: "user", content: [{ type: "text", text: "hello" }],
           metadata: { custom: { requestIds: [mine] } } },

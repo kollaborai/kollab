@@ -821,19 +821,22 @@ test("a saved row holding this page's send and another sender's shows each send 
   // row per send (history-<n>, history-<n>-send-<i>), each naming its send.
   // This page's piece is left out while its send is in flight, the other
   // sender's piece shows next to it (#1359).
-  const theirs = named(saved(9, "hello"), { requestIds: ["their-send"] });
+  const theirs = named({ ...saved(9, "hello"), id: "history-9-send-0" }, { requestIds: ["their-send"] });
   const mine = named({ ...saved(9, "hello"), id: "history-9-send-1" }, { requestIds: ["my-send"] });
   const shown = [pending("user-s1-8", "hello", "my-send")];
   assert.deepEqual(withoutInFlightSends(shown, [theirs, mine], ids("user-s1-8")), [theirs]);
   // At settle the engine maps the send's row to saved row 9; it takes its own
   // piece, so the other sender's piece is still added beside it.
   const sent = named(drawn("user-s1-8", "user", "hello", 9), { requestId: "my-send", historySourceIndex: 9 });
+  // Before settle the row names saved row 9 only: that is no piece's id, so
+  // the other sender's piece is not taken as shown.
+  assert.deepEqual(mergeMissingHistoryMessages([sent], [theirs]).added, [theirs]);
   const [settled] = withSavedCopies([sent], [theirs, mine]);
   assert.equal(settled.id, "user-s1-8");
   assert.equal(settled.metadata?.custom?.historySourceId, "history-9-send-1");
   assert.deepEqual(mergeMissingHistoryMessages([settled], [theirs, mine]).added, [theirs]);
   assert.deepEqual(mergeMissingHistoryMessages([settled], [theirs, mine]).messages.map((row) => row.id),
-    ["history-9", "user-s1-8"]);
+    ["history-9-send-0", "user-s1-8"]);
 });
 
 test("a saved row that names no send still pairs by its words", () => {
