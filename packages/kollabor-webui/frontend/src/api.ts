@@ -242,6 +242,12 @@ export type Profile = {
   streaming?: boolean;
   supports_tools?: boolean;
   supports_vision?: boolean;
+  last_completed_turn?: {
+    model: string;
+    effort: string;
+    completed_at: string;
+  } | null;
+  unavailable_models?: string[];
 };
 
 /** One provider profile x model x effort a session can run on (`GET /profiles/choices`). */
