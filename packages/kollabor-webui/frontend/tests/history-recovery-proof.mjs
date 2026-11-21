@@ -1640,8 +1640,8 @@ try {
               const send = (operations) => res.write(`data: ${JSON.stringify({ type: "update-state", operations })}\n\n`);
               res.writeHead(200, {
                 "content-type": "text/event-stream",
-                "access-control-allow-origin": req.headers.origin ?? "*",
-                "access-control-allow-credentials": "true",
+                // Only the app this harness serves reads it.
+                "access-control-allow-origin": base,
               });
               await new Promise((release) => st.assistant.push(release));
               send([{ type: "set", path: ["messages"], value: [...state.messages, user, reply] }]);
@@ -1662,8 +1662,7 @@ try {
           });
           if (route.request().method() === "OPTIONS") {
             return route.fulfill({ status: 204, headers: {
-              "access-control-allow-origin": route.request().headers().origin ?? "*",
-              "access-control-allow-credentials": "true",
+              "access-control-allow-origin": base,
               "access-control-allow-methods": "POST, OPTIONS",
               "access-control-allow-headers": "authorization, content-type",
             } });
