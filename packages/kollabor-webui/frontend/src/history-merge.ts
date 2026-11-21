@@ -37,6 +37,15 @@ function reserveRow<T extends Message>(row: T, used: Set<string | undefined>): T
   return displayRow(row, id);
 }
 
+/** The tool-call ids a message draws. */
+const toolCallIds = (message: Message): string[] =>
+  Array.isArray(message.content)
+    ? message.content.flatMap((part) => part && typeof part === "object" &&
+      (part as { type?: unknown }).type === "tool-call" &&
+      typeof (part as { toolCallId?: unknown }).toolCallId === "string"
+      ? [(part as { toolCallId: string }).toolCallId] : [])
+    : [];
+
 /** The source history row for a displayed message, including stable-id aliases. */
 export function historyMessageIndex(message: Message): number | null {
   return historyIndex(message);
@@ -50,9 +59,18 @@ export function mergeMissingHistoryMessages<T extends Message>(
   const used = new Set(shown.map((message) => message.id));
   const represented = new Set(shown.map(sourceId));
   const order = new Map(loaded.map((message, index) => [sourceId(message), index]));
+  // A turn the page ran draws its tool calls inside its reply row; history
+  // saves them as calls rows of their own. Adding those before the reply makes
+  // assistant-ui join them under another id and keep the reply row as a
+  // second branch, so a calls row the reply already draws is not added (#1358).
+  const drawnCalls = new Set(shown.flatMap((message) =>
+    transientRole(message) === "assistant" && TRANSIENT_ROW_ID.test(String(message.id ?? ""))
+      ? toolCallIds(message) : []));
   const added = loaded.flatMap((message) => {
     const key = sourceId(message);
     if (!key || represented.has(key)) return [];
+    const calls = transientRole(message) === "assistant" ? toolCallIds(message) : [];
+    if (calls.length && calls.every((id) => drawnCalls.has(id))) return [];
     represented.add(key);
     return [reserveRow(message, used)];
   });
@@ -205,6 +223,8 @@ export function shownMessagesChanged(
   return gone || loaded.some((message) => {
     const key = sourceId(message);
     const old = key ? bySource.get(key) : undefined;
+    // The run's own reply keeps what it streamed (see withSavedCopies).
+    if (old && TRANSIENT_ROW_ID.test(String(old.id ?? "")) && transientRole(old) === "assistant") return false;
     return old !== undefined && (
       JSON.stringify(old.content) !== JSON.stringify(message.content) ||
       old.convertConfig?.joinStrategy !== message.convertConfig?.joinStrategy
@@ -501,7 +521,10 @@ export function withSavedCopies<T extends Message>(shown: ReadonlyArray<T>, load
   let swapped = false;
   const messages = shown.map((message) => {
     const key = sourceId(message);
-    const copy = key && TRANSIENT_ROW_ID.test(String(message.id ?? "")) ? saved.get(key) : undefined;
+    // Only the run's user rows: its reply keeps the tool calls it drew, which
+    // history saves as rows of their own (see mergeMissingHistoryMessages).
+    const copy = key && transientRole(message) === "user" && TRANSIENT_ROW_ID.test(String(message.id ?? ""))
+      ? saved.get(key) : undefined;
     if (!copy || (JSON.stringify(copy.content) === JSON.stringify(message.content) &&
       copy.convertConfig?.joinStrategy === message.convertConfig?.joinStrategy)) return message;
     swapped = true;
