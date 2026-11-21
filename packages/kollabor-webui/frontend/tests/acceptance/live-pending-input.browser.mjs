@@ -267,23 +267,26 @@ try {
       await t.waitUsers("hello|hello");
       await t.page.close();
     },
-    // The daemon saved this page's send and another sender's in one row: its
-    // words show once, in the send's own row, while the run goes on (#1359).
-    async "shows a saved row holding this page's send and another's in the send's row"() {
+    // The daemon saved this page's send and another sender's in one row; history
+    // shows a row per send. The other sender's shows next to this page's send,
+    // and this page's words show once (#1359).
+    async "shows another sender's message saved in one row with this page's send"() {
       const t = await open();
       await t.submit();
       await t.waitUsers("hello");
       const mine = await t.sentId();
       assert.ok(mine, "the send carried no message id");
       await t.page.evaluate((rows) => window.setHistory(rows), [
-        { id: "history-0", role: "user", content: [{ type: "text", text: "hello\nhello" }],
-          metadata: { custom: { requestIds: [mine, "their-send"] } } },
+        { id: "history-0", role: "user", content: [{ type: "text", text: "theirs" }],
+          metadata: { custom: { requestIds: ["their-send"] } } },
+        { id: "history-0-send-1", role: "user", content: [{ type: "text", text: "hello" }],
+          metadata: { custom: { requestIds: [mine] } } },
         { id: "history-1", role: "assistant", content: [{ type: "text", text: "Working" }] },
       ]);
       await t.waitImported("Working");
-      await t.waitUsers("hello\nhello");
+      await t.waitUsers("theirs|hello");
       await t.finishSubmission();
-      await t.waitUsers("hello\nhello");
+      await t.waitUsers("theirs|hello");
       await t.page.close();
     },
     // Output of a turn this page never saw start is not guessed at.
