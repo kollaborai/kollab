@@ -24,7 +24,7 @@ const repoRoot = path.resolve(frontendRoot, "../../..");
 const browserErrors = [];
 const browserConsole = [];
 const scenario = process.argv[2] ?? "target";
-assert.ok(["target", "queue-control", "permission-handover", "permission-stop-owner", "permission-outcome"].includes(scenario), `unknown scenario: ${scenario}`);
+assert.ok(["target", "queue-control", "permission-handover", "permission-stop-owner", "permission-outcome", "permission-parked-event"].includes(scenario), `unknown scenario: ${scenario}`);
 
 const vite = await createServer({
   root: frontendRoot,
@@ -168,6 +168,38 @@ try {
       "an exact foreign permission outcome removes the resolved answer card");
     assert.deepEqual(browserErrors, [], "the browser reports no runtime errors");
     await outcome.page.close();
+    console.log(`PASS ${scenario}`);
+  } else if (scenario === "permission-parked-event") {
+    const parked = await open("?permissions=live");
+    const stop = parked.page.getByRole("button", { name: "Stop generating", exact: true });
+    await stop.waitFor();
+    await parked.page.evaluate(() => {
+      window.setPermissionSnapshot("s1", [{
+        tool_id: "shared-tool-id",
+        permission_id: "owner-live",
+        request_id: "parent-live",
+        tool_name: "terminal",
+        tool_type: "command",
+        input: { command: "echo prompt" },
+        details: {
+          source: "acp",
+          request_id: "provider-owner-live",
+          parked: true,
+          acp_options: [{ optionId: "allow-once", name: "Allow once", kind: "allow_once" }],
+        },
+      }]);
+      window.sessionEventTransport.push({
+        type: "permission_parked",
+        request_id: "parent-live",
+        tool_id: "shared-tool-id",
+        permission_id: "owner-live",
+      });
+    });
+    await stop.waitFor({ state: "detached", timeout: 3000 });
+    assert.equal(await parked.page.getByRole("button", { name: "Allow once", exact: true }).count(), 1,
+      "a parked event refreshes status but keeps the permission explicitly answerable");
+    assert.deepEqual(browserErrors, [], "the browser reports no runtime errors");
+    await parked.page.close();
     console.log(`PASS ${scenario}`);
   } else if (scenario === "permission-stop-owner") {
     const t = await open("?permissions=live");

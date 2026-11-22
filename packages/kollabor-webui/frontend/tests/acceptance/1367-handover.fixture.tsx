@@ -205,7 +205,7 @@ const startupPermission = (toolId: string, permissionId: string, requestId: stri
   details: {
     source: "acp",
     request_id: `provider-${permissionId}`,
-    ...(parked ? { parked: true } : {}),
+    parked,
     acp_options: [{ optionId: "allow-once", name: "Allow once", kind: "allow_once" }],
   },
 });
@@ -280,7 +280,7 @@ function Fixture() {
       window.sessionEventsDelivered.push(event);
       liveEvents.current?.(event);
       const type = event.type ?? "";
-      if (refreshesOnEvent(type) && ["permission_granted", "permission_denied", "permission_cancelled"].includes(type)) {
+      if (refreshesOnEvent(type) && ["permission_parked", "permission_granted", "permission_denied", "permission_cancelled"].includes(type)) {
         void api.getPermissions(sessionId).then((snapshot) => {
           setState(buildInitialState(sessionId, [], [], snapshot.pending_prompts));
         });
