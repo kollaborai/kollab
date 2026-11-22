@@ -63,11 +63,14 @@ try {
     executablePath: process.env.CHROME_PATH ?? chromium.executablePath(),
   });
 
-  /** Fresh page; `answer(saved)` streams its final state with "hello" saved at row `saved`, `finish()` ends it. */
-  async function open() {
+  /**
+   * Fresh page; `answer(saved)` streams its final state with "hello" saved at row `saved`, `finish()` ends it.
+   * `open("?chat")` also draws the real chat, with its message box.
+   */
+  async function open(query = "") {
     const page = await browser.newPage();
     page.on("pageerror", (error) => browserErrors.push(error.message));
-    await page.goto(`${origin}/tests/acceptance/turn-settle.html`, { waitUntil: "domcontentloaded" });
+    await page.goto(`${origin}/tests/acceptance/turn-settle.html${query}`, { waitUntil: "domcontentloaded" });
     await page.locator("#send").waitFor();
     const read = async () => ({
       assistant: await page.locator("#assistant").innerText(),
@@ -428,6 +431,49 @@ try {
       await t.waitFor((s) => said(s) === "Working|Sure", "the saved turn");
       await t.holds((s) => s.users === "hello|what" && said(s) === "Working|Sure" && s.remounts === "0" &&
         s.branches === 0 && s.errors === "0", "after the settle reload");
+      await t.page.close();
+    },
+    // Enter in the message box sends while the agent works, as the Send button
+    // does: the message goes to the agent at once. Shift+Enter still starts a
+    // new line, and Enter on an open slash menu still picks its row (#1365).
+    async "sends on Enter while the agent works"() {
+      const t = await open("?chat");
+      const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
+      await t.send();
+      const first = await t.sending();
+      await t.push(state([{ type: "set", path: ["messages"], value: [
+        { id: "user-s1-0", role: "user", content: "hello", metadata: { custom: { requestId: first.id } } },
+        { id: "assistant-s1-1", role: "assistant", content: text("Wor") },
+      ] }]));
+      await t.waitFor((s) => s.assistant.includes("Wor"), "the run's reply");
+      const box = t.page.getByLabel("Message input");
+      const requests = () => t.page.evaluate(() => window.transports.length);
+      await box.fill("one");
+      await box.press("Shift+Enter");
+      await box.pressSequentially("two");
+      assert.equal(await box.inputValue(), "one\ntwo", "Shift+Enter starts a new line");
+      assert.equal(await requests(), 1, "Shift+Enter sent nothing");
+      await box.fill("");
+      await box.pressSequentially("/con");
+      await t.page.locator("[data-palette-list]").waitFor();
+      await box.press("Enter");
+      await t.page.locator("[data-palette-list]").waitFor({ state: "detached" });
+      assert.match(await box.inputValue(), /^\/config/, "Enter picked the slash menu's row");
+      assert.equal(await requests(), 1, "picking a slash menu row sent nothing");
+      await box.fill("what");
+      await box.press("Enter");
+      await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
+        .catch(() => assert.fail("Enter did not send the message"));
+      const second = await t.page.evaluate(() => ({
+        commands: window.transport.request.commands, cancels: window.cancels,
+        running: document.getElementById("running")?.textContent,
+      }));
+      assert.equal(second.commands.length, 1);
+      assert.equal(second.commands[0].message.parts[0].text, "what");
+      assert.equal(second.cancels, 0, "the agent's turn was not stopped");
+      assert.equal(second.running, "running");
+      assert.equal(await box.inputValue(), "", "the message box is empty after the send");
+      await t.waitFor((s) => s.users === "hello|what" && s.errors === "0", "the sent message");
       await t.page.close();
     },
     // Stop still stops the agent's turn, and a message waiting behind it is not sent.

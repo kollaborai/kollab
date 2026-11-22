@@ -2,6 +2,7 @@ import { ThreadPrimitive, useAui, useAuiState } from "@assistant-ui/react";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { EngineApi, SessionEvent } from "../../src/api";
+import { Thread } from "../../src/components/assistant-ui/thread";
 import { EngineRuntimeProvider, type EngineState } from "../../src/runtime";
 
 declare global {
@@ -73,6 +74,11 @@ const texts = (role: string) => (s: { thread: { messages: readonly { role: strin
     .map((message) => message.content.map((part) => (part.type === "text" ? part.text : "")).join(""))
     .join("|");
 
+// `?chat` draws the real chat under the probe, for a scenario that types
+// into the real message box. `/config` gives the slash menu a row to pick.
+const realChat = new URLSearchParams(window.location.search).has("chat");
+const commands = [{ name: "config", description: "Settings" }];
+
 // A message with a sibling branch: the "2 / 2" picker the chat would draw.
 function Branched() {
   const branches = useAuiState((s) => s.message.branchCount);
@@ -130,6 +136,7 @@ function Fixture() {
         liveEvents={liveEvents}
       >
         <Probe />
+        {realChat ? <Thread commands={commands} attachmentsEnabled={false} /> : null}
       </EngineRuntimeProvider>
     </>
   );
