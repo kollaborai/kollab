@@ -891,6 +891,31 @@ def test_an_acp_stop_cancels_only_its_exact_request_owner():
     ]
 
 
+def test_attach_bridge_captures_parent_owner_from_current_turn_context():
+    from kollabor_tui.turn_context import current_turn
+
+    async def run_bridge():
+        bridge, display_tap = AttachPermissionBridge(), FakeDisplayTap()
+        token = current_turn.set({"request_id": "parent-from-context"})
+        try:
+            prompt = asyncio.create_task(bridge.request_confirmation(
+                display_tap=display_tap,
+                rpc_server=FakeRpcServer(),
+                details={"tool_id": "context-tool", "permission_id": "context-permission"},
+                timeout=None,
+            ))
+            await asyncio.sleep(0)
+            assert bridge._pending_request_ids[
+                ("context-tool", "context-permission")
+            ] == "parent-from-context"
+            bridge.cancel_pending("parent-from-context")
+            return await prompt
+        finally:
+            current_turn.reset(token)
+
+    assert asyncio.run(run_bridge()) is ConfirmationResponse.CANCEL
+
+
 def test_an_acp_stop_refuses_the_tool_its_turn_waits_to_approve():
     # ACP's Stop while a tool waits for approval: the tool is refused at once
     # instead of holding the turn for 5 minutes.
@@ -901,6 +926,7 @@ def test_an_acp_stop_refuses_the_tool_its_turn_waits_to_approve():
         manager = _confirm_all_manager()
 
         async def ask(details):
+            details["request_id"] = "request-B"
             response = await bridge.request_confirmation(
                 display_tap=display_tap, rpc_server=FakeRpcServer(), details=dict(details), timeout=300
             )
@@ -913,7 +939,7 @@ def test_an_acp_stop_refuses_the_tool_its_turn_waits_to_approve():
                 break
             await asyncio.sleep(0)
         assert bridge._pending  # the prompt is open
-        manager.cancel_confirmations()
+        manager.cancel_confirmations("request-B")
         return await asyncio.wait_for(check, 1)
 
     decision = asyncio.run(scenario())
