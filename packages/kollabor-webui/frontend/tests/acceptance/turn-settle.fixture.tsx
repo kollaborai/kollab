@@ -69,6 +69,9 @@ function Probe() {
   const running = useAuiState((s) => s.thread.isRunning);
   const assistant = useAuiState(texts("assistant"));
   const users = useAuiState(texts("user"));
+  // Every tool call the chat draws, by id: a call drawn twice shows twice.
+  const tools = useAuiState((s) => s.thread.messages.flatMap((message) => message.role !== "assistant" ? []
+    : message.content.flatMap((part) => (part.type === "tool-call" ? [part.toolCallId] : []))).join("|"));
   // Replies the chat would draw an error box under.
   const errors = useAuiState((s) => s.thread.messages.filter((message) =>
     message.role === "assistant" && message.status?.type === "incomplete" && message.status.reason === "error").length);
@@ -80,6 +83,7 @@ function Probe() {
       <div id="assistant">{assistant}</div>
       <div id="users">{users}</div>
       <div id="errors">{errors}</div>
+      <div id="tools">{tools}</div>
       <div id="branches"><ThreadPrimitive.Messages>{() => <Branched />}</ThreadPrimitive.Messages></div>
     </div>
   );

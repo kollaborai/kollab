@@ -75,6 +75,7 @@ try {
       branches: await page.locator("#branches .branched").count(),
       remounts: await page.locator("#remounts").innerText(),
       errors: await page.locator("#errors").innerText(),
+      tools: await page.locator("#tools").innerText(),
     });
     const setHistory = (messages) => page.evaluate((m) => window.setHistory(m), messages);
     const waitFor = async (check, label) => {
@@ -233,6 +234,33 @@ try {
         s.remounts === "0" && s.errors === "0";
       await t.waitFor(settled, "the saved turn");
       await t.holds(settled, "after it settles");
+      await t.page.close();
+    },
+    // The page only watches a turn (another window's, or its own after its
+    // stream dropped): it draws the turn from its events and from the history
+    // that lands while it runs. Each tool call shows once, and the reply stays
+    // on screen from its last word until its saved row takes its place (#1359).
+    async "draws a watched turn's tool call once and keeps its reply through the end"() {
+      const t = await open();
+      const done = { type: "complete", reason: "stop" };
+      const named = { request_ids: ["s1"] };
+      await t.setHistory([row(0, "user", "go")]);
+      await t.waitFor((s) => s.users === "go", "seeded");
+      await t.emit({ type: "tool_start", tool_id: "c1", tool_name: "terminal: ls", input: {}, ...named });
+      await t.waitFor((s) => s.tools === "c1", "the live tool call");
+      await t.emit({ type: "tool_result", tool_id: "c1", output: "ok", ...named });
+      // The round is saved: its row lands while the turn goes on.
+      const call = { id: "history-1", role: "assistant", status: done,
+        content: [{ type: "tool-call", toolCallId: "c1", toolName: "terminal", args: {}, argsText: "{}", result: "ok" }] };
+      await t.setHistory([row(0, "user", "go"), call]);
+      await t.holds((s) => s.tools === "c1", "the saved call beside the live turn");
+      await t.emit({ type: "token", text: "All done", ...named });
+      await t.waitFor((s) => s.assistant.includes("All done"), "the live reply");
+      await t.emit({ type: "turn_complete", ...named });
+      await t.holds((s) => s.assistant.includes("All done"), "the reply after the turn ended");
+      await t.setHistory([row(0, "user", "go"), call, { ...row(2, "assistant", "All done"), status: done }]);
+      await t.holds((s) => s.assistant.split("All done").length === 2 && s.tools === "c1" && s.remounts === "0",
+        "the saved reply in its place");
       await t.page.close();
     },
     // A shown row reads differently in the reloaded history: it changes where
