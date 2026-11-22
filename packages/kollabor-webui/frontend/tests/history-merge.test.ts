@@ -1293,3 +1293,19 @@ test("a reply cut short keeps its turn when another sender's message sits before
   assert.deepEqual(rebaseOntoHistory([sent, loaded[2], ahead], loaded, 8).map((row) => row.id),
     ["user-s1-0", "assistant-s1-1", "history-6", "history-7"]);
 });
+
+test("a message history never held keeps its place when newer rows are saved", () => {
+  // The page sent "lost" and the daemon never saved it (the turn was stopped
+  // at once). The page then sent "next", which history holds with its reply.
+  const lost = mine("user-s1-4", "lost", "r-lost");
+  const next = mine("user-s1-5", "next", "r-next");
+  const answer = { id: "assistant-s1-6", role: "assistant", content: words("Sure") };
+  const shown = [saved(0, "first"), reply(1, words("Hi")), lost, next, answer];
+  const loaded = [saved(0, "first"), reply(1, words("Hi")), named(saved(2, "next"), { requestIds: ["r-next"] }), reply(3, words("Sure"))];
+  // Not after the newer turn: it was sent before it.
+  assert.deepEqual(rebaseOntoHistory(shown, loaded, 4).map((row) => row.id),
+    ["history-0", "history-1", "user-s1-4", "user-s1-5", "assistant-s1-6"]);
+  // With nothing newer saved it is the last row, as a message on its way is.
+  assert.deepEqual(rebaseOntoHistory(shown.slice(0, 3), loaded.slice(0, 2), 2).map((row) => row.id),
+    ["history-0", "history-1", "user-s1-4"]);
+});
