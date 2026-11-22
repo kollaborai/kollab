@@ -81,6 +81,9 @@ const texts = (role: string) => (s: { thread: { messages: readonly { role: strin
 // `?chat` draws the real chat under the probe, for a scenario that types
 // into the real message box. `/config` gives the slash menu a row to pick.
 const realChat = new URLSearchParams(window.location.search).has("chat");
+// `?harness`: the session runs on a harness (Codex CLI, Claude Code).
+const sessionKind: Record<string, unknown> = new URLSearchParams(window.location.search).has("harness")
+  ? { harness: true } : {};
 const commands = [{ name: "config", description: "Settings" }];
 
 // A message with a sibling branch: the "2 / 2" picker the chat would draw.
@@ -138,6 +141,7 @@ function Fixture() {
         initialState={state}
         onStale={() => setRemounts((count) => count + 1)}
         liveEvents={liveEvents}
+        {...sessionKind}
       >
         <Probe />
         {realChat ? <Thread commands={commands} attachmentsEnabled={false} /> : null}
