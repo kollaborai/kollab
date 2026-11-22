@@ -56,6 +56,7 @@ import { useRoomVoiceMode, useVoiceRoomLive, VoiceRoomBar } from "@/voice/voice-
 import {
   imageAttachmentAdapter,
   usePendingPermissionCancellation,
+  useSendWaitingNow,
 } from "@/runtime";
 import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
@@ -528,6 +529,9 @@ const Composer: FC<{
     (command) => command.name === "voice" && command.enabled !== false,
   );
   const permissionStop = usePendingPermissionCancellation();
+  const sendWaitingNow = useSendWaitingNow();
+  // The submit under way came from Cmd/Ctrl+Enter: the message goes at once.
+  const submitSendsNow = useRef(false);
   const slotMode = useAuiState((s) =>
     composerSlotMode(s, voiceAvailable ? voice : null, Boolean(permissionStop)),
   );
@@ -692,6 +696,7 @@ const Composer: FC<{
     defaultPrevented?: boolean;
   }) => {
     if (!isRunning || event.defaultPrevented) return;
+    const sendsNow = submitSendsNow.current;
     const state = aui.composer.getState();
     if (!state.text.trim() && state.attachments.length === 0) return;
 
@@ -744,12 +749,14 @@ const Composer: FC<{
       if (parts.length === 0) throw new Error("Message has no sendable content");
       queueComposerDraftSubmission(draftKey, state.text);
       if (state.text.length > 0) skipEmptyDraftPersist.current = true;
+      // The message waits for the turn to end, as a queued message (#1102).
       sendTransportCommand({
         type: "add-message",
         message: { role: "user", parts },
         parentId: null,
         sourceId: null,
       });
+      if (sendsNow) sendWaitingNow();
       const currentState = aui.composer.getState();
       const currentFingerprint = `${currentState.text}\u0000${currentState.attachments
         .map((attachment) => attachment.id)
@@ -975,9 +982,11 @@ const Composer: FC<{
 
   // While a turn runs the kit leaves Enter alone (it has no queue to put the
   // message in), and the message box starts a new line. Send the message as
-  // the Send button does (#1365). This runs after the message box's own
-  // handler: an Enter the slash or @ menu took has its default prevented, and
-  // Shift+Enter still starts a new line.
+  // the Send button does (#1365): it waits for the turn to end. Cmd+Enter
+  // (Ctrl+Enter off a Mac) sends it, and every message waiting before it, at
+  // once (#1102). This runs after the message box's own handler: an Enter the
+  // slash or @ menu took has its default prevented, and Shift+Enter still
+  // starts a new line.
   const handleBusyEnter = (event: KeyboardEvent<HTMLDivElement>) => {
     if (
       event.key !== "Enter" ||
@@ -991,7 +1000,10 @@ const Composer: FC<{
       return;
     }
     event.preventDefault();
+    // The submit handler runs inside requestSubmit and reads this at once.
+    submitSendsNow.current = event.metaKey || event.ctrlKey;
     event.target.form?.requestSubmit();
+    submitSendsNow.current = false;
   };
 
   const agentItems = useMemo<readonly ComposerPaletteItem[]>(() => {
@@ -1166,6 +1178,10 @@ function prettyCommandName(name: string): string {
 
 type ComposerSlotMode = "mic" | "send" | "listening" | "stop";
 
+// The keys that send a message into the running turn at once (#1102).
+const SEND_NOW_KEYS = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform)
+  ? "⌘ Enter" : "Ctrl+Enter";
+
 // One trailing button slot that morphs: stop while a run is going, send once
 // there is something to send, otherwise the voice mic (a mic, or the
 // pulsing listening button while the voice room is up) where the session offers it.
@@ -1265,7 +1281,7 @@ const ComposerSlot: FC<{
       )}
       {running ? (
         <TooltipIconButton
-          tooltip="Send while generating"
+          tooltip={`Queue Message (${SEND_NOW_KEYS} Sends Now)`}
           side="top"
           type="button"
           variant="default"
@@ -1545,7 +1561,28 @@ export const UserText: FC<{ text?: string }> = ({ text }) => {
   );
 };
 
+// Under a message that waits for the running turn to end: what it is waiting
+// for, and the way to send it into the turn at once (#1102).
+const QueuedMessageNote: FC = () => {
+  const sendWaitingNow = useSendWaitingNow();
+  return (
+    <div className="aui-user-message-queued text-muted-foreground col-start-2 flex items-center justify-end gap-2 text-xs">
+      <span title="Sent when the agent finishes this turn">Queued</span>
+      <Button
+        type="button"
+        variant="link"
+        className="text-foreground h-auto p-0 text-xs pointer-coarse:py-2"
+        title="Send it now: the agent reads it at its next step"
+        onClick={sendWaitingNow}
+      >
+        Send Now
+      </Button>
+    </div>
+  );
+};
+
 const UserMessage: FC = () => {
+  const queued = useAuiState((s) => s.message.metadata.custom?.queued === true);
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
@@ -1562,7 +1599,7 @@ const UserMessage: FC = () => {
           <UserActionBar />
         </div>
       </div>
-
+      {queued ? <QueuedMessageNote /> : null}
     </MessagePrimitive.Root>
   );
 };

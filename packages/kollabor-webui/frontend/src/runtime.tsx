@@ -119,6 +119,14 @@ const PermissionCancellationContext = createContext<{
   cancelling: boolean;
 } | null>(null);
 
+const SendWaitingNowContext = createContext<() => void>(() => undefined);
+
+/**
+ * Sends the messages waiting behind the running turn at once: the agent takes
+ * them in at its next step. Without it they go out when the turn ends (#1102).
+ */
+export const useSendWaitingNow = () => useContext(SendWaitingNowContext);
+
 export function usePendingPermissionCancellation() {
   const control = useContext(PermissionCancellationContext);
   const messages = useAuiState((state) => state.thread.messages);
@@ -697,6 +705,8 @@ type MidTurn = {
   live?: { id: string; message: ThreadMessageLike | null } | null;
   /** The row id of each send still waiting behind the running turn, by request id (pendingSendIds). */
   waiting?: Map<string, string>;
+  /** The request ids of the sends that wait for the streaming request to end. */
+  queued?: ReadonlySet<string>;
 };
 const NO_MID_TURN: MidTurn = { rows: [] };
 
@@ -755,7 +765,10 @@ const converter = (
       role: "user" as const,
       content: parts,
       // The engine follows the send by this id into saved history (#1359).
-      metadata: { isOptimistic: true, ...(requestId === undefined ? {} : { custom: { requestId } }) },
+      // `queued` draws the message as waiting, with Send Now (#1102).
+      metadata: { isOptimistic: true, ...(requestId === undefined ? {} : {
+        custom: { requestId, ...(midTurn.queued?.has(requestId) ? { queued: true } : {}) },
+      }) },
     } satisfies ThreadMessageLike;
   });
 
@@ -896,6 +909,8 @@ export function EngineRuntimeProvider({
   const streamingRun = useRef<WeakSet<object> | null>(null);
   // A message waits behind the streaming request, and all that request sent has arrived.
   const handOverDue = useRef(false);
+  // The user asked for the waiting messages to go now (Send Now, #1102).
+  const sendNow = useRef(false);
   // Ends the stream of the request now streaming (see the hand-over below).
   const endRun = useRef<(() => void) | null>(null);
   const convert = useCallback((state: EngineState, metadata: AssistantTransportConnectionMetadata) => {
@@ -903,9 +918,12 @@ export function EngineRuntimeProvider({
     const pending = metadata.pendingCommands;
     handOverDue.current = !!run && metadata.isSending && pending.length > 0 &&
       pending.every((command) => command.type === "add-message" && !run.has(command));
+    const queued = new Set(run ? pending.flatMap((command) =>
+      command.type === "add-message" && !run.has(command) && "id" in command.message &&
+        typeof command.message.id === "string" ? [command.message.id] : []) : []);
     return converter(state, metadata, {
       rows: midTurnRows.current, sendIds: [...inFlightSendIds.current], live: midTurnLive.current,
-      waiting: waitingSendIds.current,
+      waiting: waitingSendIds.current, queued,
     });
   }, []);
   const reloadRequestedAt = useRef<number | null>(null);
@@ -938,6 +956,7 @@ export function EngineRuntimeProvider({
       runVersion.current += 1;
       streamingRun.current = new WeakSet<object>(body.commands);
       endRun.current = null;
+      sendNow.current = false;   // this request takes every message that waited
       inFlightSendIds.current = inFlightSendIdsFor(body, sessionId, inFlightSendIds.current);
       // A new message starts a new turn; a tool answer continues the last one.
       if (body.commands.some((command) => command.type === "add-message")) {
@@ -992,6 +1011,7 @@ export function EngineRuntimeProvider({
     onCancel: ({ commands, updateState, error }) => {
       streamingRun.current = null;
       endRun.current = null;
+      sendNow.current = false;
       inFlightSendIds.current = new Set();
       // A failed request lands here too, after onError: keep the error it
       // set, and leave the daemon's turn alone (a dropped phone connection
@@ -1020,28 +1040,34 @@ export function EngineRuntimeProvider({
 
   // A message sent while this page's turn runs waits behind the request that
   // streams the turn: assistant-ui sends it when that request ends, which is
-  // when the whole turn does. The daemon takes a message into the running
-  // turn at its next step, as it does for another client's, so let the
-  // request go and send the message now (#1365). The engine closes a request
-  // the page drops without stopping the daemon; the next request streams the
-  // rest of the turn under the new message, and the part the dropped request
-  // had not shown comes with saved history. Only once all the streaming
-  // request sent has arrived: a message of its own still on its way would be
-  // lost with it. The page ends the request's stream as the engine ends a
-  // turn's, so assistant-ui sends the waiting message as it does after any
-  // run. Cancelling the run instead takes the message's row and the typing
-  // dots down for a draw.
-  useEffect(() => runtime.thread.subscribe(() => {
-    if (!handOverDue.current) return;
+  // when the whole turn does. Send Now sends it at once (#1102, #1365): the
+  // daemon takes a message into the running turn at its next step, as it does
+  // for another client's, so the page lets its request go and sends the
+  // waiting messages. The engine closes a request the page drops without
+  // stopping the daemon; the next request streams the rest of the turn under
+  // the new message, and the part the dropped request had not shown comes
+  // with saved history. Only once all the streaming request sent has arrived:
+  // a message of its own still on its way would be lost with it. The page
+  // ends the request's stream as the engine ends a turn's, so assistant-ui
+  // sends the waiting messages as it does after any run. Cancelling the run
+  // instead takes the message's row and the typing dots down for a draw.
+  const handOver = useCallback(() => {
+    if (!sendNow.current || !handOverDue.current) return;
     queueMicrotask(() => {
-      if (!mounted.current || !handOverDue.current) return;
+      if (!mounted.current || !sendNow.current || !handOverDue.current) return;
       if (!runtime.thread.getState().isRunning) return;
       handOverDue.current = false;
+      sendNow.current = false;
       const end = endRun.current;
       endRun.current = null;
       end?.();
     });
-  }), [runtime]);
+  }, [runtime]);
+  useEffect(() => runtime.thread.subscribe(handOver), [runtime, handOver]);
+  const sendWaitingNow = useCallback(() => {
+    sendNow.current = true;
+    handOver();
+  }, [handOver]);
 
   useEffect(() => {
     // A goal's result is private to its requesting stream, but its history can
@@ -1635,15 +1661,17 @@ export function EngineRuntimeProvider({
       <PermissionCancellationContext.Provider
         value={{ cancel: cancelPermission, cancelling: permissionCancellationPending }}
       >
-        <InitialMessagesGate
-          runtime={runtime}
-          messages={initialState.messages}
-        >
-          <PermissionToolUI />
-          <VoiceModeProvider api={api} sessionId={sessionId}>
-            {children}
-          </VoiceModeProvider>
-        </InitialMessagesGate>
+        <SendWaitingNowContext.Provider value={sendWaitingNow}>
+          <InitialMessagesGate
+            runtime={runtime}
+            messages={initialState.messages}
+          >
+            <PermissionToolUI />
+            <VoiceModeProvider api={api} sessionId={sessionId}>
+              {children}
+            </VoiceModeProvider>
+          </InitialMessagesGate>
+        </SendWaitingNowContext.Provider>
       </PermissionCancellationContext.Provider>
     </AssistantRuntimeProvider>
   );
