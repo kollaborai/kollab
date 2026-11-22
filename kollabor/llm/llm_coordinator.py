@@ -2322,13 +2322,16 @@ class LLMService:
             isinstance(input_source, str)
             and input_source in HUMAN_USER_INPUT_SOURCES
         ):
-            operator_inputs = (
-                {
-                    "source": input_source,
-                    "timestamp": utc_stamp(),
-                    "text": message if isinstance(message, str) else display_text,
-                },
-            )
+            record = {
+                "source": input_source,
+                "timestamp": utc_stamp(),
+                "text": message if isinstance(message, str) else display_text,
+            }
+            # The saved row names the send, so a page tells its own send from
+            # another sender's identical words (#1359).
+            if isinstance(request_id, str) and request_id:
+                record["request_id"] = request_id
+            operator_inputs = (record,)
 
         # A LiveKit room's turn, or a /voice turn VoicePlugin.admit let in.
         claims_voice_origin = isinstance(origin_context, dict) and is_voice_origin(origin_context)

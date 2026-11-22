@@ -43,8 +43,10 @@ try {
     const page = await browser.newPage();
     page.on("pageerror", (error) => browserErrors.push(error.message));
     let release;
+    let sentBody;
     const held = new Promise((resolve) => { release = resolve; });
     await page.route("**/sessions/s1/assistant", async (route) => {
+      sentBody = route.request().postDataJSON();
       await held;
       await route.fulfill({
         status: 200,
@@ -82,7 +84,12 @@ try {
     ).catch(async () => {
       assert.fail(`expected an assistant row "${text}" but the page shows "${await shown()}"`);
     });
-    return { page, emit, waitShown, waitUsers, waitImported, submit, finishSubmission };
+    /** The id the page gave its send: the engine follows the send by it (#1359). */
+    const sentId = async () => {
+      for (let n = 0; n < 100 && !sentBody; n++) await page.waitForTimeout(50);
+      return sentBody?.commands?.[0]?.message?.id;
+    };
+    return { page, emit, waitShown, waitUsers, waitImported, submit, finishSubmission, sentId };
   }
 
   const scenarios = {
@@ -233,6 +240,76 @@ try {
       await t.waitUsers("hello|hello");
       await t.finishSubmission();
       await t.waitUsers("hello|hello");
+      await t.page.close();
+    },
+    // #1359: another sender's identical words are saved while this page's send
+    // still waits. The saved rows name their sends, so theirs stays and only
+    // this page's own saved copy is left out.
+    async "keeps another sender's identical message saved before this page's send"() {
+      const t = await open();
+      await t.submit();
+      await t.waitUsers("hello");
+      const mine = await t.sentId();
+      assert.ok(mine, "the send carried no message id");
+      const row = (index, requestId) => ({
+        id: `history-${index}`, role: "user", content: [{ type: "text", text: "hello" }],
+        metadata: { custom: { requestIds: [requestId] } },
+      });
+      await t.page.evaluate((rows) => window.setHistory(rows), [row(0, "their-send")]);
+      await t.waitUsers("hello|hello");
+      // The busy turn's reply was saved before this page's send: rows saved
+      // after it are the turn the page's own stream draws.
+      await t.page.evaluate((rows) => window.setHistory(rows), [
+        row(0, "their-send"),
+        { id: "history-1", role: "assistant", content: [{ type: "text", text: "Working" }] },
+        row(2, mine),
+      ]);
+      await t.waitImported("Working");
+      await t.waitUsers("hello|hello");
+      await t.finishSubmission();
+      await t.waitUsers("hello|hello");
+      await t.page.close();
+    },
+    // The daemon saved this page's send and another sender's in one row; history
+    // shows a row per send. The other sender's shows next to this page's send,
+    // and this page's words show once (#1359).
+    async "shows another sender's message saved in one row with this page's send"() {
+      const t = await open();
+      await t.submit();
+      await t.waitUsers("hello");
+      const mine = await t.sentId();
+      assert.ok(mine, "the send carried no message id");
+      await t.page.evaluate((rows) => window.setHistory(rows), [
+        { id: "history-0", role: "assistant", content: [{ type: "text", text: "Working" }] },
+        { id: "history-1-send-0", role: "user", content: [{ type: "text", text: "theirs" }],
+          metadata: { custom: { requestIds: ["their-send"] } } },
+        { id: "history-1-send-1", role: "user", content: [{ type: "text", text: "hello" }],
+          metadata: { custom: { requestIds: [mine] } } },
+      ]);
+      await t.waitImported("Working");
+      await t.waitUsers("theirs|hello");
+      await t.finishSubmission();
+      await t.waitUsers("theirs|hello");
+      await t.page.close();
+    },
+    // The daemon saved this page's send and another sender's in one row. While
+    // the run goes on, the page's own turn stays last: a message landing
+    // between the send and its reply would scroll the reader to it (#1364).
+    async "keeps this page's turn below another's message saved in the same row"() {
+      const t = await open();
+      await t.submit();
+      await t.waitUsers("hello");
+      const mine = await t.sentId();
+      assert.ok(mine, "the send carried no message id");
+      await t.page.evaluate((rows) => window.setHistory(rows), [
+        { id: "history-0", role: "assistant", content: [{ type: "text", text: "Working" }] },
+        { id: "history-1-send-0", role: "user", content: [{ type: "text", text: "hello" }],
+          metadata: { custom: { requestIds: [mine] } } },
+        { id: "history-1-send-1", role: "user", content: [{ type: "text", text: "theirs" }],
+          metadata: { custom: { requestIds: ["their-send"] } } },
+      ]);
+      await t.waitImported("Working");
+      await t.waitUsers("theirs|hello");
       await t.page.close();
     },
     // Output of a turn this page never saw start is not guessed at.
