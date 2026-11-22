@@ -705,7 +705,7 @@ function inFlightSends(shown: ReadonlyArray<Message>, sendIds: ReadonlySet<strin
  * stays (a duplicate). Only the page's own sends count, since the engine keeps user-<session>-<n> on settled
  * rows of earlier turns too: the engine's rows named by the ids its running
  * request sent, and its pending copies, whose ids follow the shown row count,
- * in order up to the number of sends in flight (later ones are still queued).
+ * in order up to the number of sends in flight (later ones still wait, see pendingSendIds).
  */
 export function withoutInFlightSends<T extends Message>(
   shown: ReadonlyArray<Message>,
@@ -752,6 +752,43 @@ export function inFlightSendIdsFor(
   const sentAfter = (request.state as { messages?: unknown } | undefined)?.messages;
   if (!Array.isArray(sentAfter)) return new Set();
   return new Set(Array.from({ length: sends }, (_, index) => `user-${sessionId}-${sentAfter.length + index}`));
+}
+
+/**
+ * The row id of each of the page's pending sends, in order. The first are in
+ * flight and take the ids their request sent them with (`inFlight`). A send
+ * still waiting behind the running turn is numbered after the rows and keeps
+ * that id while it waits (`waiting`, by request id): a history sync adds rows
+ * to the state and the turn's next state is built without them, and an id that
+ * followed the row count changed both times. The chat takes a row whose id
+ * changed down and builds it again, with the typing dots under it, and
+ * scrolls to it anew (#1359). A kept id that a row of the state took is given
+ * up. `waiting` is updated in place: sends no longer waiting are forgotten.
+ */
+export function pendingSendIds(
+  requestIds: ReadonlyArray<string | undefined>,
+  inFlight: ReadonlyArray<string>,
+  rows: ReadonlyArray<{ id?: unknown }>,
+  sessionId: string,
+  waiting: Map<string, string>,
+): string[] {
+  const queued = requestIds.slice(inFlight.length);
+  for (const requestId of [...waiting.keys()]) if (!queued.includes(requestId)) waiting.delete(requestId);
+  const taken = new Set<string>([...rows.map((row) => String(row.id ?? "")), ...inFlight]);
+  for (const [requestId, id] of [...waiting]) {
+    if (taken.has(id)) waiting.delete(requestId); else taken.add(id);
+  }
+  let next = Math.max(rows.length, ...inFlight.map((id) => Number(/-(\d+)$/.exec(id)?.[1] ?? -1) + 1));
+  return requestIds.map((requestId, index) => {
+    if (index < inFlight.length) return inFlight[index];
+    const kept = requestId === undefined ? undefined : waiting.get(requestId);
+    if (kept !== undefined) return kept;
+    let id = `user-${sessionId}-${next++}`;
+    while (taken.has(id)) id = `user-${sessionId}-${next++}`;
+    taken.add(id);
+    if (requestId !== undefined) waiting.set(requestId, id);
+    return id;
+  });
 }
 
 /**

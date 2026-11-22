@@ -47,6 +47,7 @@ import {
   reconcileBoundaryToolResults,
   hasUnsettledRows,
   inFlightSendIdsFor,
+  pendingSendIds,
   rememberSavedSends,
   shownMessagesChanged,
   withoutInFlightSends,
@@ -693,6 +694,8 @@ type MidTurn = {
    * bring back the parts a sync took (#1359).
    */
   live?: { id: string; message: ThreadMessageLike | null } | null;
+  /** The row id of each send still waiting behind the running turn, by request id (pendingSendIds). */
+  waiting?: Map<string, string>;
 };
 const NO_MID_TURN: MidTurn = { rows: [] };
 
@@ -730,35 +733,29 @@ const converter = (
   // A send in flight keeps the id its request was sent with: rows a sync adds
   // meanwhile change the row count, and a new id makes assistant-ui take the
   // row for a new turn and scroll it to the top under the reader (#1364).
-  // Sends still queued number after it.
+  // That id is the one the engine gives the row, so it stays through the
+  // first streamed state. Sends still waiting number after it and keep their
+  // ids while they wait (pendingSendIds).
   const inFlight = (midTurn.sendIds ?? []).filter((id) => !state.messages.some((message) => message.id === id));
-  let optimisticIndex = Math.max(state.messages.length, ...inFlight.map((id) =>
-    Number(/-(\d+)$/.exec(id)?.[1] ?? -1) + 1));
-  let sentIndex = 0;
-  const optimistic = metadata.pendingCommands.flatMap((command) => {
-    if (command.type !== "add-message") return [];
+  const sends = metadata.pendingCommands.flatMap((command) => (command.type === "add-message" ? [command] : []));
+  const requestIds = sends.map((command) =>
+    ("id" in command.message && typeof command.message.id === "string" ? command.message.id : undefined));
+  const ids = pendingSendIds(requestIds, inFlight, state.messages, state.sessionId, midTurn.waiting ?? new Map());
+  const optimistic = sends.map((command, index) => {
     const parts: Array<TextMessagePart | ImageMessagePart> = command.message.parts.map(
       (part) =>
         part.type === "text"
           ? { type: "text" as const, text: part.text }
           : { type: "image" as const, image: part.image },
     );
-    // Match the id the engine uses for this provisional row. Keeping the
-    // anchor id through the first streamed state update prevents assistant-ui
-    // from treating the same turn as a new top-anchored message.
-    return [
-      {
-        id: inFlight[sentIndex++] ?? `user-${state.sessionId}-${optimisticIndex++}`,
-        role: "user" as const,
-        content: parts,
-        // The engine follows the send by this id into saved history (#1359).
-        metadata: {
-          isOptimistic: true,
-          ...("id" in command.message && typeof command.message.id === "string"
-            ? { custom: { requestId: command.message.id } } : {}),
-        },
-      } satisfies ThreadMessageLike,
-    ];
+    const requestId = requestIds[index];
+    return {
+      id: ids[index],
+      role: "user" as const,
+      content: parts,
+      // The engine follows the send by this id into saved history (#1359).
+      metadata: { isOptimistic: true, ...(requestId === undefined ? {} : { custom: { requestId } }) },
+    } satisfies ThreadMessageLike;
   });
 
   return {
@@ -891,8 +888,13 @@ export function EngineRuntimeProvider({
   const midTurnRows = useRef<ThreadMessageLike[]>([]);
   // The live row a sync changed while this page's run owned the thread (see MidTurn.live).
   const midTurnLive = useRef<MidTurn["live"]>(null);
+  // The row ids of the sends waiting behind this page's running turn (see MidTurn.waiting).
+  const waitingSendIds = useRef(new Map<string, string>());
   const convert = useCallback((state: EngineState, metadata: AssistantTransportConnectionMetadata) =>
-    converter(state, metadata, { rows: midTurnRows.current, sendIds: [...inFlightSendIds.current], live: midTurnLive.current }), []);
+    converter(state, metadata, {
+      rows: midTurnRows.current, sendIds: [...inFlightSendIds.current], live: midTurnLive.current,
+      waiting: waitingSendIds.current,
+    }), []);
   const reloadRequestedAt = useRef<number | null>(null);
   const [settledRuns, setSettledRuns] = useState(0);
   const [permissionCancellationPending, setPermissionCancellationPending] = useState(false);

@@ -11,6 +11,7 @@ import {
   reconcileBoundaryToolResults,
   hasUnsettledRows,
   inFlightSendIdsFor,
+  pendingSendIds,
   rebaseOntoHistory,
   rememberSavedSends,
   shownMessagesChanged,
@@ -1204,4 +1205,41 @@ test("a send saved before the loaded window keeps its place when the thread is r
   assert.equal(rows[2], drawnCalls);
   // Not knowing where the first send is saved, it reads as not saved yet and goes last.
   assert.deepEqual(rebaseOntoHistory(shown, loaded, 43).map((row) => row.id).at(-1), "assistant-s1-2");
+});
+
+test("a send waiting behind the running turn keeps its row id while the rows ahead of it change", () => {
+  const waiting = new Map<string, string>();
+  const turn = [{ id: "user-s1-0" }, { id: "assistant-s1-1" }];
+  assert.deepEqual(pendingSendIds(["r2"], [], turn, "s1", waiting), ["user-s1-2"]);
+  // A sync adds another sender's row to the state; the turn's next state is built without it.
+  const synced = [{ id: "history-1" }, ...turn];
+  assert.deepEqual(pendingSendIds(["r2"], [], synced, "s1", waiting), ["user-s1-2"]);
+  // A second send queued then is numbered after the rows and after the first.
+  assert.deepEqual(pendingSendIds(["r2", "r3"], [], synced, "s1", waiting), ["user-s1-2", "user-s1-3"]);
+  assert.deepEqual(pendingSendIds(["r2", "r3"], [], turn, "s1", waiting), ["user-s1-2", "user-s1-3"]);
+  // A third never takes an id one of them holds.
+  assert.deepEqual(pendingSendIds(["r2", "r3", "r4"], [], turn, "s1", waiting), ["user-s1-2", "user-s1-3", "user-s1-4"]);
+  // One without a request id has nothing to be kept by: it follows the rows, clear of the kept ids.
+  assert.deepEqual(pendingSendIds(["r2", undefined], [], synced, "s1", waiting), ["user-s1-2", "user-s1-3"]);
+});
+
+test("a waiting send takes the id its request sends it with and is forgotten", () => {
+  const waiting = new Map<string, string>();
+  const turn = [{ id: "user-s1-0" }, { id: "assistant-s1-1" }];
+  pendingSendIds(["r2", "r3"], [], turn, "s1", waiting);
+  // Both go out in one request after a four-row state; a send queued meanwhile follows them.
+  const rows = [{ id: "history-1" }, ...turn, { id: "history-2" }];
+  assert.deepEqual(pendingSendIds(["r2", "r3", "r4"], ["user-s1-4", "user-s1-5"], rows, "s1", waiting),
+    ["user-s1-4", "user-s1-5", "user-s1-6"]);
+  assert.deepEqual([...waiting], [["r4", "user-s1-6"]]);
+  // The engine's rows are there and the sends are no longer pending.
+  assert.deepEqual(pendingSendIds([], [], [...rows, { id: "user-s1-4" }, { id: "user-s1-5" }], "s1", waiting), []);
+  assert.equal(waiting.size, 0);
+});
+
+test("a waiting send gives up a kept id that a row of the state took", () => {
+  const waiting = new Map<string, string>();
+  assert.deepEqual(pendingSendIds(["r2"], [], [{ id: "user-s1-0" }, { id: "assistant-s1-1" }], "s1", waiting), ["user-s1-2"]);
+  const rows = [{ id: "user-s1-0" }, { id: "assistant-s1-1" }, { id: "user-s1-2" }];
+  assert.deepEqual(pendingSendIds(["r2"], [], rows, "s1", waiting), ["user-s1-3"]);
 });
