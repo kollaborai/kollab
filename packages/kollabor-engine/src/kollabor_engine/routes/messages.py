@@ -626,6 +626,7 @@ def _assistant_update_message_state(
     status: Optional[Dict[str, str]],
     submitted_media: Optional[List[List[Dict[str, str]]]] = None,
     submitted_request_ids: Optional[List[str]] = None,
+    submitted_row_ids: Optional[List[Optional[str]]] = None,
 ) -> List[Dict[str, Any]]:
     """Persist the completed or interrupted turn in assistant-ui state.
 
@@ -671,11 +672,21 @@ def _assistant_update_message_state(
             return messages
 
     # Row L + i after an L-row state, the id the web client gives its pending
-    # copy of message i and tracks while the send is in flight (#1356).
+    # copy of message i and tracks while the send is in flight (#1356). A
+    # message the page drew before it sent it (it waited behind a running
+    # turn) names the row it has on screen, and keeps it (#1102): a row under
+    # a new id is taken down and built again. The name must be one of this
+    # session's send rows and free.
     first_row = len(messages)
+    taken = {message.get("id") for message in messages}
+    named_row = re.compile(rf"user-{re.escape(session_id)}-\d+")
     for index, submitted_content in enumerate(submitted_contents):
+        row_id = submitted_row_ids[index] if submitted_row_ids and index < len(submitted_row_ids) else None
+        if not isinstance(row_id, str) or row_id in taken or named_row.fullmatch(row_id) is None:
+            row_id = f"user-{session_id}-{first_row + index}"
+        taken.add(row_id)
         row: Dict[str, Any] = {
-            "id": f"user-{session_id}-{first_row + index}",
+            "id": row_id,
             "role": "user",
             # Keep data URLs out of assistant-ui state/history. The image
             # was already handed to the daemon; the visible token is the
@@ -1393,6 +1404,7 @@ async def assistant_transport(
         submitted_media: List[List[Dict[str, str]]] = []
         # The request id of each submission, parallel to submitted_contents (#1359).
         submitted_request_ids: List[str] = []
+        submitted_row_ids: List[Optional[str]] = []  # the row each send names, if any (#1102)
         request_ids: set[str] = set()
         untagged = False  # an admission that echoed no id: its turn carries none (#551)
         answered_prompts: set[str] = set()  # daemon tool ids this request answered
@@ -1431,6 +1443,7 @@ async def assistant_transport(
                 None,
                 copy.deepcopy(submitted_media),
                 list(submitted_request_ids),
+                list(submitted_row_ids),
             )
             published = controller.state["messages"]
             for index, message in enumerate(progress):
@@ -1537,6 +1550,7 @@ async def assistant_transport(
                     submitted_contents.append(message_content)
                     submitted_media.append(_save_sent_media(message_content, session_id))
                     submitted_request_ids.append(request_id)
+                    submitted_row_ids.append(command.get("rowId"))
                 elif command_type == "add-tool-result":
                     call_id, result, decision, scope = _assistant_tool_result(command)
                     if not call_id:
@@ -1609,6 +1623,7 @@ async def assistant_transport(
                     None,
                     copy.deepcopy(submitted_media),
                     list(submitted_request_ids),
+                    list(submitted_row_ids),
                 )[:-1]
                 controller.state["messages"].extend(admitted[len(sent_messages):])
                 sent_messages = admitted
@@ -1737,6 +1752,7 @@ async def assistant_transport(
                         {"type": "requires-action", "reason": "tool-calls"},
                         submitted_media,
                         submitted_request_ids,
+                        submitted_row_ids,
                     )
                     if persist_message_state:
                         _assistant_set_messages(controller, state_messages)
@@ -1822,6 +1838,7 @@ async def assistant_transport(
                             {"type": "complete", "reason": "stop"},
                             submitted_media,
                             submitted_request_ids,
+                            submitted_row_ids,
                         )
                         if persist_message_state:
                             _assistant_set_messages(controller, state_messages)
@@ -1872,6 +1889,7 @@ async def assistant_transport(
                         ),
                         submitted_media,
                         submitted_request_ids,
+                        submitted_row_ids,
                     )
                     if persist_message_state:
                         if goal_pump is not None:

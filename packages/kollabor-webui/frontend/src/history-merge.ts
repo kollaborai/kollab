@@ -738,22 +738,36 @@ export function withoutInFlightSends<T extends Message>(
 }
 
 /**
- * The provisional row ids of the messages a request sends: row L + i after the
- * L-row state it carries, as the engine and the pending copies name them. A
- * request without a message (a tool answer, a resume) continues the turn that
- * carries the earlier send, so the sends in flight stay as they were.
+ * The provisional row ids of the messages a request sends, in order. A
+ * message that waited behind the running turn keeps the row it was drawn with
+ * (`waiting`, by request id): rows that joined the state while it waited do
+ * not renumber it, and the request names that row to the engine (#1102). Any
+ * other message is row L + i after the L-row state the request carries, as
+ * the engine numbers it. A request without a message (a tool answer, a
+ * resume) continues the turn that carries the earlier send, so the sends in
+ * flight stay as they were.
  */
 
 export function inFlightSendIdsFor(
-  request: { commands: ReadonlyArray<{ type?: string }>; state?: unknown },
+  request: { commands: ReadonlyArray<{ type?: string; message?: object }>; state?: unknown },
   sessionId: string,
   previous: ReadonlySet<string>,
+  waiting: ReadonlyMap<string, string> = new Map(),
 ): ReadonlySet<string> {
-  const sends = request.commands.filter((command) => command.type === "add-message").length;
-  if (!sends) return previous;
+  const sends = request.commands.filter((command) => command.type === "add-message");
+  if (!sends.length) return previous;
   const sentAfter = (request.state as { messages?: unknown } | undefined)?.messages;
   if (!Array.isArray(sentAfter)) return new Set();
-  return new Set(Array.from({ length: sends }, (_, index) => `user-${sessionId}-${sentAfter.length + index}`));
+  const taken = new Set<unknown>(sentAfter.map((row) => (row as { id?: unknown } | null)?.id));
+  const ids = new Set<string>();
+  sends.forEach((command, index) => {
+    const requestId = (command.message as { id?: unknown } | undefined)?.id;
+    const kept = typeof requestId === "string" ? waiting.get(requestId) : undefined;
+    const id = kept !== undefined && !taken.has(kept) ? kept : `user-${sessionId}-${sentAfter.length + index}`;
+    taken.add(id);
+    ids.add(id);
+  });
+  return ids;
 }
 
 /**

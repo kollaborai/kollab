@@ -957,7 +957,12 @@ export function EngineRuntimeProvider({
       streamingRun.current = new WeakSet<object>(body.commands);
       endRun.current = null;
       sendNow.current = false;   // this request takes every message that waited
-      inFlightSendIds.current = inFlightSendIdsFor(body, sessionId, inFlightSendIds.current);
+      inFlightSendIds.current = inFlightSendIdsFor(body, sessionId, inFlightSendIds.current, waitingSendIds.current);
+      // Each message names its row: one that waited keeps the row it has on screen.
+      const rowIds = [...inFlightSendIds.current];
+      let sent = 0;
+      const commands = body.commands.map((command) =>
+        (command.type === "add-message" && rowIds[sent] ? { ...command, rowId: rowIds[sent++] } : command));
       // A new message starts a new turn; a tool answer continues the last one.
       if (body.commands.some((command) => command.type === "add-message")) {
         turnRef.current = newTurnClock();
@@ -966,7 +971,7 @@ export function EngineRuntimeProvider({
       }
       runStartRef.current = performance.now();
       const goalReplyId = goalCancellation.current.prepare(body.commands);
-      return { ...body, sessionId, ...(goalReplyId ? { goal_reply_id: goalReplyId } : {}) };
+      return { ...body, commands, sessionId, ...(goalReplyId ? { goal_reply_id: goalReplyId } : {}) };
     },
     onResponse: (response) => {
       const draftSubmission = pendingDraftSubmissions.current.shift();
