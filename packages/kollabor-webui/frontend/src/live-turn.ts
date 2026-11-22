@@ -109,6 +109,10 @@ const eventRequestId = (event: EventLike): string => {
   return typeof first === "string" ? first : "";
 };
 
+/** Whether an event names `requestId`: as its one request, or among its turn's sends. */
+export const eventNamesRequest = (event: EventLike, requestId: string): boolean =>
+  event.request_id === requestId || (Array.isArray(event.request_ids) && event.request_ids.includes(requestId));
+
 /**
  * Fold one session-stream event into the live turn. Returns the same object
  * when the event carries nothing renderable, so callers can skip the import.

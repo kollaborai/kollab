@@ -64,6 +64,8 @@ import {
   apartFromLive,
   applyLiveEvent,
   emptyLiveTurn,
+  endsLiveTurn,
+  eventNamesRequest,
   historyReplacesLiveTurn,
   isLiveMessage,
   liveMessage,
@@ -684,6 +686,12 @@ type MidTurn = {
   rows: readonly ThreadMessageLike[];
   /** The provisional ids of the sends in flight, in order (inFlightSendIdsFor). */
   sendIds?: readonly string[];
+  /**
+   * The watched turn's live row as it stands now, or null once history shows
+   * all of it. The run's states carry the row its request sent, which would
+   * bring back the parts a sync took (#1359).
+   */
+  live?: { id: string; message: ThreadMessageLike | null } | null;
 };
 const NO_MID_TURN: MidTurn = { rows: [] };
 
@@ -707,14 +715,16 @@ const converter = (
 ) => {
   // Stream timing rides on the assistant message's metadata, where
   // `useMessageTiming` reads it (see turn-timing.ts).
-  const stored = state.messages.map((message) => {
+  const live = midTurn.live;
+  const stored = state.messages.flatMap((message) => {
+    if (live && message.id === live.id) return live.message ? [live.message] : [];
     const timing =
       message.role === "assistant" && message.id
         ? turnTimings.get(message.id)
         : undefined;
-    return timing
+    return [timing
       ? { ...message, metadata: { ...message.metadata, timing } }
-      : message;
+      : message];
   });
   // A send in flight keeps the id its request was sent with: rows a sync adds
   // meanwhile change the row count, and a new id makes assistant-ui take the
@@ -878,8 +888,10 @@ export function EngineRuntimeProvider({
   // dropped rows as a second branch (the "2 / 2" picker). The converter adds
   // them back until the run lets go and they are folded into the state.
   const midTurnRows = useRef<ThreadMessageLike[]>([]);
+  // The live row a sync changed while this page's run owned the thread (see MidTurn.live).
+  const midTurnLive = useRef<MidTurn["live"]>(null);
   const convert = useCallback((state: EngineState, metadata: AssistantTransportConnectionMetadata) =>
-    converter(state, metadata, { rows: midTurnRows.current, sendIds: [...inFlightSendIds.current] }), []);
+    converter(state, metadata, { rows: midTurnRows.current, sendIds: [...inFlightSendIds.current], live: midTurnLive.current }), []);
   const reloadRequestedAt = useRef<number | null>(null);
   const [settledRuns, setSettledRuns] = useState(0);
   const [permissionCancellationPending, setPermissionCancellationPending] = useState(false);
@@ -1102,7 +1114,12 @@ export function EngineRuntimeProvider({
         // state and show them when the run ends. Save notices are accepted
         // before the streamed reply has established its request id.
         const visible = liveTurn.current;
-        if (event.type !== "notice" && (!visible.requestId || event.request_id !== visible.requestId)) return;
+        // The turn this page was watching when it sent ends with the page's
+        // own: its terminal event settles the live row, whose output the
+        // page's stream draws from here on (#1362).
+        const ends = !!visible.requestId && (endsLiveTurn(String(event.type ?? "")) || event.type === "turn_cancelled") &&
+          eventNamesRequest(event, visible.requestId);
+        if (!ends && event.type !== "notice" && (!visible.requestId || event.request_id !== visible.requestId)) return;
         if (event.type === "notice" && visible.requestId && event.request_id
             && event.request_id !== visible.requestId) return;
         const folded = applyLiveEvent(visible, event);
@@ -1132,9 +1149,14 @@ export function EngineRuntimeProvider({
     liveTurn.current = synced;
     const live = liveMessage(synced);
     const at = messages.findIndex(isLiveMessage);
+    if (at >= 0 && runtime.thread.getState().isRunning) {
+      // The run's next state brings the row its request sent: keep this one.
+      midTurnLive.current = { id: String(messages[at].id), message: live };
+      unshownLive.current = true;
+    }
     const kept = messages.filter((message) => !isLiveMessage(message));
     return !live ? kept : at < 0 ? [...kept, live] : [...kept.slice(0, at), live, ...kept.slice(at)];
-  }, []);
+  }, [runtime]);
 
   // Output folded in while this page's own run was pending shows once it ends.
   useEffect(() => runtime.thread.subscribe(() => {
@@ -1156,12 +1178,18 @@ export function EngineRuntimeProvider({
   const deferredOlderWindow = useRef<EngineState | null>(null);
   useEffect(() => runtime.thread.subscribe(() => {
     if (ownsPendingInput(runtime.thread.getState())) return;
+    // The run let go: its states no longer bring the sent live row back.
+    midTurnLive.current = null;
     if (midTurnRows.current.length) {
       const midTurn = { rows: midTurnRows.current };
       midTurnRows.current = [];
       const current = (runtime.thread.getState().extras as { state?: EngineState } | undefined)?.state;
       if (current) {
-        const messages = withMidTurnRows(current.messages, midTurn);
+        // The run's last state carries the live row its request sent: show the
+        // watched turn as it stands now.
+        const live = liveMessage(liveTurn.current);
+        const messages = withMidTurnRows(current.messages, midTurn)
+          .flatMap((row) => !isLiveMessage(row) ? [row] : live && live.id === row.id ? [live] : []);
         runtime.thread.importExternalState({
           ...current,
           messages,
