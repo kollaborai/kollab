@@ -988,15 +988,16 @@ export function rebaseOntoHistory<T extends Message>(
     if (slot) { rows.push(...(ahead.get(key) ?? []), slot); continue; }
     if (transientRole(row) === "assistant") {
       if (drawnInOwnTurn(settled, row) || stands.some((item) => item.after < index && drawnBy(item.reply, row))) continue;
-      // The first saved row of a reply's turn stands where the reply stood. It
-      // keeps the reply's id when it has words, so the chat updates the
-      // message in place; the engine pairs such a row by those words, which a
-      // row of calls alone does not have.
+      // The first saved row of a reply's turn stands where the reply stood,
+      // under the reply's id, so the chat updates the message in place: a row
+      // under a new id is taken down and built again, and the chat jumps. The
+      // engine knows such a row by its words, or by its tool calls when it
+      // has no words; a row with neither keeps its own id.
       let turn = -1;
       for (let at = 0; at < taken.length && taken[at].after < index; at += 1) turn = at;
       if (turn >= 0) {
         const [reply] = taken.splice(0, turn + 1).slice(-1);
-        if (wordsOf(row) && !used.has(reply.id)) {
+        if ((wordsOf(row) || toolCalls(row).length) && !used.has(reply.id)) {
           used.add(reply.id);
           rows.push(displayRow(row, reply.id));
           continue;

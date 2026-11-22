@@ -871,7 +871,15 @@ def _assistant_align_streamed_ids(
             if (
                 0 <= source_index < len(history)
                 and history[source_index].get("role") == role
-                and _pairs_by_content(history[source_index], message)
+                and (
+                    _pairs_by_content(history[source_index], message)
+                    # A stored row of tool calls alone has no words to
+                    # compare: the row shown for it draws its calls.
+                    or (
+                        not _text(history[source_index].get("content"))
+                        and _rendered_inside(history[source_index], message)
+                    )
+                )
             ):
                 shown.add(source_index)
                 continue
