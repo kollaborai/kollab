@@ -140,6 +140,32 @@ async def test_enqueue_batch_is_ordered_atomic_and_idempotent_without_exposing_p
 
 
 @pytest.mark.asyncio
+async def test_oversized_iterable_is_bounded_before_materialization():
+    queue = WebMessageQueue(scope_id="conversation-owner-a", max_batch_items=2)
+    consumed = 0
+
+    def endless_items():
+        nonlocal consumed
+        while True:
+            consumed += 1
+            if consumed > 3:
+                raise AssertionError("queue consumed beyond its bounded lookahead")
+            yield WebMessage(
+                _request_id(queue, f"request-endless-{consumed}"), b"message"
+            )
+
+    with pytest.raises(CapacityExceeded):
+        await queue.enqueue_batch(
+            _op(queue, "op-endless-generator"),
+            _batch_id(queue, "batch-endless-generator"),
+            endless_items(),
+        )
+
+    assert consumed == 3
+    assert (await queue.snapshot()).revision == 0
+
+
+@pytest.mark.asyncio
 async def test_response_loss_retry_returns_committed_receipt_without_duplicating_batch():
     queue = WebMessageQueue(scope_id="conversation-owner-a")
     items = (
@@ -561,6 +587,43 @@ async def test_claim_reserves_settlement_capacity_before_other_writes_can_consum
     )
     assert ack.status == "accepted"
     assert (await queue.snapshot()).batches == ()
+
+
+@pytest.mark.asyncio
+async def test_in_doubt_snapshot_keeps_display_content_but_cannot_dispatch_it():
+    queue = WebMessageQueue(scope_id="conversation-owner-a")
+    payload = b"private body for authorized UI rendering"
+    batch_id = _batch_id(queue, "batch-in-doubt-display")
+    request_id = _request_id(queue, "request-in-doubt-display")
+    await queue.enqueue_batch(
+        _op(queue, "op-enqueue-in-doubt-display"),
+        batch_id,
+        (WebMessage(request_id, payload),),
+    )
+    claim = await queue.claim_next(_op(queue, "op-claim-in-doubt-display"))
+    attempt = await queue.claim_next_item(
+        _op(queue, "op-attempt-in-doubt-display"), claim.claim_id
+    )
+    await queue.settle_item(
+        _op(queue, "op-settle-in-doubt-display"),
+        attempt.attempt_id,
+        ClaimOutcome.IN_DOUBT,
+    )
+
+    snapshot = await queue.snapshot()
+    item = snapshot.batches[0].items[0]
+    assert snapshot.batches[0].status == BatchStatus.IN_DOUBT
+    assert item.status is ItemStatus.IN_DOUBT
+    assert item.payload == payload
+
+    revision = snapshot.revision
+    with pytest.raises(ClaimNotDispatchable):
+        await queue.item_payload(attempt.attempt_id)
+    with pytest.raises(ClaimNotDispatchable):
+        await queue.claim_next_item(
+            _op(queue, "op-retry-in-doubt-display"), claim.claim_id
+        )
+    assert (await queue.snapshot()).revision == revision
 
 
 @pytest.mark.asyncio
