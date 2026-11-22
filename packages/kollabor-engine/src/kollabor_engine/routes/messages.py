@@ -122,6 +122,11 @@ def _foreign_output(event: Dict[str, Any], request_ids: set[str], tagged: bool =
     return bool(named and request_ids) and not named & request_ids
 
 
+# A message id the page made that may name its send (#1359): letters, digits,
+# dashes and underscores (assistant-ui's ids, uuids).
+_CLIENT_REQUEST_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
 def _is_goal_message(content: Any) -> bool:
     """Recognize authored goal text without synthetic image placeholders."""
     if isinstance(content, str):
@@ -620,6 +625,8 @@ def _assistant_update_message_state(
     parts: List[Dict[str, Any]],
     status: Optional[Dict[str, str]],
     submitted_media: Optional[List[List[Dict[str, str]]]] = None,
+    submitted_request_ids: Optional[List[str]] = None,
+    submitted_row_ids: Optional[List[Optional[str]]] = None,
 ) -> List[Dict[str, Any]]:
     """Persist the completed or interrupted turn in assistant-ui state.
 
@@ -664,9 +671,22 @@ def _assistant_update_message_state(
                 message["status"] = status
             return messages
 
+    # Row L + i after an L-row state, the id the web client gives its pending
+    # copy of message i and tracks while the send is in flight (#1356). A
+    # message the page drew before it sent it (it waited behind a running
+    # turn) names the row it has on screen, and keeps it (#1102): a row under
+    # a new id is taken down and built again. The name must be one of this
+    # session's send rows and free.
+    first_row = len(messages)
+    taken = {message.get("id") for message in messages}
+    named_row = re.compile(rf"user-{re.escape(session_id)}-\d+")
     for index, submitted_content in enumerate(submitted_contents):
+        row_id = submitted_row_ids[index] if submitted_row_ids and index < len(submitted_row_ids) else None
+        if not isinstance(row_id, str) or row_id in taken or named_row.fullmatch(row_id) is None:
+            row_id = f"user-{session_id}-{first_row + index}"
+        taken.add(row_id)
         row: Dict[str, Any] = {
-            "id": f"user-{session_id}-{len(messages) + index}",
+            "id": row_id,
             "role": "user",
             # Keep data URLs out of assistant-ui state/history. The image
             # was already handed to the daemon; the visible token is the
@@ -677,6 +697,9 @@ def _assistant_update_message_state(
         # renders thumbnails from these refs instead of the raw tokens.
         if submitted_media and index < len(submitted_media) and submitted_media[index]:
             row["media"] = submitted_media[index]
+        # The send this row is: its saved copy names the same id (#1359).
+        if submitted_request_ids and index < len(submitted_request_ids):
+            row["metadata"] = {"custom": {"requestId": submitted_request_ids[index]}}
         messages.append(row)
 
     assistant_message: Dict[str, Any] = {
@@ -783,9 +806,38 @@ def _assistant_align_streamed_ids(
         streamed_ids = _streamed_call_ids(streamed_row)
         return bool(streamed_ids) and stored_ids.issubset(streamed_ids)
 
+    def _streamed_request_id(row: Dict[str, Any]) -> str:
+        """The request id of the send a streamed user row is (#1359)."""
+        metadata = row.get("metadata")
+        custom = metadata.get("custom") if isinstance(metadata, dict) else None
+        value = custom.get("requestId") if isinstance(custom, dict) else None
+        return value if isinstance(value, str) else ""
+
+    def _saved_request_ids(row: Dict[str, Any]) -> set[str]:
+        """The request ids of the sends a saved user row holds (#1359)."""
+        metadata = row.get("metadata")
+        if not isinstance(metadata, dict):
+            return set()
+        records = metadata.get("operator_inputs")
+        ids = {
+            record["request_id"]
+            for record in (records if isinstance(records, list) else [])
+            if isinstance(record, dict) and isinstance(record.get("request_id"), str) and record["request_id"]
+        }
+        if isinstance(metadata.get("request_id"), str) and metadata["request_id"]:
+            ids.add(metadata["request_id"])
+        return ids
+
     def _pairs_by_content(stored_row: Dict[str, Any], streamed_row: Dict[str, Any]) -> bool:
         """Content identity for a role-matched pair."""
         if stored_row.get("role") == "user":
+            # A saved row that names its sends pairs by id: the daemon saves
+            # sends that arrive together as one row, behind any agent HUD, and
+            # another sender's identical words are not this send.
+            request_id = _streamed_request_id(streamed_row)
+            saved_ids = _saved_request_ids(stored_row)
+            if request_id and saved_ids:
+                return request_id in saved_ids
             return _text(stored_row.get("content")) == _text(streamed_row.get("content"))
         stored_text = _text(stored_row.get("content"))
         if not stored_text:
@@ -811,6 +863,10 @@ def _assistant_align_streamed_ids(
         message_id = message.get("id")
         if role not in ("user", "assistant") or not isinstance(message_id, str):
             continue
+        if message_id == "live-turn" or message_id.startswith("live-turn:"):
+            # The page's copy of a turn it was only watching when it sent:
+            # a display row, never one of this turn's (#1359).
+            continue
         metadata = message.get("metadata")
         custom = metadata.get("custom") if isinstance(metadata, dict) else None
         if isinstance(custom, dict) and "compactionArchiveOrder" in custom:
@@ -826,7 +882,15 @@ def _assistant_align_streamed_ids(
             if (
                 0 <= source_index < len(history)
                 and history[source_index].get("role") == role
-                and _pairs_by_content(history[source_index], message)
+                and (
+                    _pairs_by_content(history[source_index], message)
+                    # A stored row of tool calls alone has no words to
+                    # compare: the row shown for it draws its calls.
+                    or (
+                        not _text(history[source_index].get("content"))
+                        and _rendered_inside(history[source_index], message)
+                    )
+                )
             ):
                 shown.add(source_index)
                 continue
@@ -849,6 +913,20 @@ def _assistant_align_streamed_ids(
         (messages[i] for i in provisional if messages[i].get("role") == "assistant"),
         {},
     )
+    # The sends this turn's user rows are. When each names one, a saved user
+    # row naming only other sends is another client's message the daemon
+    # steered into the running turn: not one of these rows, so the walk passes
+    # it and the page adds it from history (#1359).
+    own_requests = [
+        _streamed_request_id(messages[i]) for i in provisional if messages[i].get("role") == "user"
+    ]
+
+    def _foreign_user(stored_row: Dict[str, Any]) -> bool:
+        if stored_row.get("role") != "user" or not own_requests or not all(own_requests):
+            return False
+        saved_ids = _saved_request_ids(stored_row)
+        return bool(saved_ids) and not saved_ids & set(own_requests)
+
     stored: List[int] = []
     cursor = len(provisional) - 1
     for index in range(len(history) - 1, -1, -1):
@@ -867,6 +945,8 @@ def _assistant_align_streamed_ids(
             continue
         if role not in ("user", "assistant") or index in shown:
             return False
+        if _foreign_user(stored_row):
+            continue
         streamed_row = messages[provisional[cursor]]
         if role == streamed_row.get("role") and _pairs_by_content(
             stored_row, streamed_row
@@ -914,6 +994,8 @@ def _assistant_align_streamed_ids(
             if role not in ("user", "assistant") or history_index in shown:
                 alignment_counts[key] = 0
                 return 0
+            if _foreign_user(stored_row):
+                continue
 
             message_index = provisional[cursor]
             streamed_row = messages[message_index]
@@ -1320,6 +1402,9 @@ async def assistant_transport(
         # Per-submission stored-image refs (#1088), parallel to
         # submitted_contents: saved at send time so the bytes outlive the turn.
         submitted_media: List[List[Dict[str, str]]] = []
+        # The request id of each submission, parallel to submitted_contents (#1359).
+        submitted_request_ids: List[str] = []
+        submitted_row_ids: List[Optional[str]] = []  # the row each send names, if any (#1102)
         request_ids: set[str] = set()
         untagged = False  # an admission that echoed no id: its turn carries none (#551)
         answered_prompts: set[str] = set()  # daemon tool ids this request answered
@@ -1357,6 +1442,8 @@ async def assistant_transport(
                 copy.deepcopy(assistant_parts),
                 None,
                 copy.deepcopy(submitted_media),
+                list(submitted_request_ids),
+                list(submitted_row_ids),
             )
             published = controller.state["messages"]
             for index, message in enumerate(progress):
@@ -1407,8 +1494,11 @@ async def assistant_transport(
                         return
                     message = command.get("message")
                     client_id = message.get("id") if isinstance(message, dict) else None
-                    request_id = (client_id if _is_image_goal(message_content)
-                                  and isinstance(client_id, str) and client_id else uuid.uuid4().hex)
+                    # The page knows its send by the id it made, so that id
+                    # follows the send into saved history (#1359); an image goal
+                    # also replays by it. Anything unsafe gets a fresh id.
+                    request_id = (client_id if isinstance(client_id, str)
+                                  and _CLIENT_REQUEST_ID.fullmatch(client_id) else uuid.uuid4().hex)
                     private_goal = _is_goal_message(message_content)
                     kwargs = {"request_id": request_id}
                     if private_goal:
@@ -1459,6 +1549,8 @@ async def assistant_transport(
                         untagged = True
                     submitted_contents.append(message_content)
                     submitted_media.append(_save_sent_media(message_content, session_id))
+                    submitted_request_ids.append(request_id)
+                    submitted_row_ids.append(command.get("rowId"))
                 elif command_type == "add-tool-result":
                     call_id, result, decision, scope = _assistant_tool_result(command)
                     if not call_id:
@@ -1515,6 +1607,26 @@ async def assistant_transport(
                     if part.get("toolCallId"):
                         assistant_tool_parts[part["toolCallId"]] = part
                         assistant_parts.append(part)
+            elif persist_message_state:
+                # The page drops its pending copy of a send at the first state
+                # it receives, and clearing the last turn's error above is one.
+                # A daemon busy with another turn stays quiet long after it
+                # admits the send, so show the send's row now (#1359). The
+                # reply's row follows with its first output: until then the
+                # page keeps the placeholder it already draws, and the first
+                # words still publish at once (the throttle has not started).
+                admitted = _assistant_update_message_state(
+                    [dict(message) for message in state_messages],
+                    session_id,
+                    submitted_contents,
+                    [],
+                    None,
+                    copy.deepcopy(submitted_media),
+                    list(submitted_request_ids),
+                    list(submitted_row_ids),
+                )[:-1]
+                controller.state["messages"].extend(admitted[len(sent_messages):])
+                sent_messages = admitted
 
             while True:
                 event = await _assistant_next_event(
@@ -1639,6 +1751,8 @@ async def assistant_transport(
                         assistant_parts,
                         {"type": "requires-action", "reason": "tool-calls"},
                         submitted_media,
+                        submitted_request_ids,
+                        submitted_row_ids,
                     )
                     if persist_message_state:
                         _assistant_set_messages(controller, state_messages)
@@ -1723,6 +1837,8 @@ async def assistant_transport(
                             assistant_parts,
                             {"type": "complete", "reason": "stop"},
                             submitted_media,
+                            submitted_request_ids,
+                            submitted_row_ids,
                         )
                         if persist_message_state:
                             _assistant_set_messages(controller, state_messages)
@@ -1772,6 +1888,8 @@ async def assistant_transport(
                             else {"type": "complete", "reason": "stop"}
                         ),
                         submitted_media,
+                        submitted_request_ids,
+                        submitted_row_ids,
                     )
                     if persist_message_state:
                         if goal_pump is not None:

@@ -10,6 +10,30 @@ from packaging.version import InvalidVersion, Version
 
 logger = logging.getLogger(__name__)
 
+# Nightly builds are GitHub prereleases tagged nightly-<version> (#1349): the
+# release-tag ruleset protects v*, so they cannot use the release tag form.
+NIGHTLY_TAG_PREFIX = "nightly-"
+
+
+def release_version(tag: str) -> str:
+    """The version a release tag names: v0.22.1 and nightly-0.22.2.dev202611200900 alike."""
+    return tag.removeprefix(NIGHTLY_TAG_PREFIX).removeprefix("v")
+
+
+def newest_release(releases: list[dict]) -> dict | None:
+    """The newest published release by version, prereleases included; drafts are still uploading."""
+    best, best_version = None, None
+    for release in releases:
+        if release.get("draft"):
+            continue
+        try:
+            found = Version(release_version(str(release.get("tag_name", ""))))
+        except InvalidVersion:
+            continue
+        if best_version is None or found > best_version:
+            best, best_version = release, found
+    return best
+
 
 def is_newer_version(current: str, latest: str) -> bool:
     """Check if latest version is newer than current version.

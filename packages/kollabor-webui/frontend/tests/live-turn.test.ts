@@ -10,6 +10,7 @@ import {
   LIVE_MESSAGE_ID,
   liveMessage,
   replacedLiveTurn,
+  withoutSavedParts,
 } from "../src/live-turn.ts";
 
 const token = (text: string) => ({ type: "token", text });
@@ -227,4 +228,91 @@ test("a history-save notice appears with the live reply without failing the turn
     type: "text",
     text: "Here is the answer.\n\nℹ Conversation history not saved for this reply.",
   }]);
+});
+
+// #1359: a turn the page only watches (another window's, or its own after its
+// stream dropped) names the requests of its sends, not one request.
+const sent = (text: string, ...request_ids: string[]) => ({ type: "token", text, request_ids });
+const tool = (id: string, request_ids = ["s1"]) =>
+  ({ type: "tool_start", tool_id: id, tool_name: "terminal: ls", input: {}, request_ids });
+
+test("a watched turn that names its sends keeps its words through its end", () => {
+  let turn = applyLiveEvent(emptyLiveTurn(), sent("Working", "s1"));
+  assert.equal(liveMessage(turn)?.id, `${LIVE_MESSAGE_ID}:s1`);
+  // A send steered into the turn joins the list behind the first: same turn.
+  turn = applyLiveEvent(turn, sent(" on it", "s1", "s2"));
+  assert.deepEqual(liveMessage(turn)?.content, [{ type: "text", text: "Working on it" }]);
+  const done = applyLiveEvent(turn, { type: "turn_complete", request_ids: ["s1", "s2"] });
+  // The reply stays, no longer running, until the saved one lands.
+  assert.deepEqual(liveMessage(done)?.content, [{ type: "text", text: "Working on it" }]);
+  assert.deepEqual(liveMessage(done)?.status, { type: "complete", reason: "stop" });
+  assert.equal(historyReplacesLiveTurn(done, [{ role: "user" }]), false);
+  assert.equal(historyReplacesLiveTurn(done, [reply()]), true);
+  // The next turn names other sends: it waits behind this one, then starts.
+  const held = applyLiveEvent(done, sent("next", "s3"));
+  assert.deepEqual(liveMessage(held)?.content, [{ type: "text", text: "Working on it" }]);
+  assert.deepEqual(liveMessage(replacedLiveTurn(held))?.content, [{ type: "text", text: "next" }]);
+});
+
+test("a watched turn gives up the tool calls and words saved history shows", () => {
+  let turn = applyLiveEvent(emptyLiveTurn(), tool("c1"));
+  turn = applyLiveEvent(turn, { type: "tool_result", tool_id: "c1", output: "ok", request_ids: ["s1"] });
+  turn = applyLiveEvent(turn, tool("c2"));
+  turn = applyLiveEvent(turn, sent("All do", "s1"));
+  // The first round is saved: its call shows in the history row, once.
+  const saved = [{ role: "assistant", content: [{ type: "tool-call", toolCallId: "c1", result: "ok" }] }];
+  const trimmed = withoutSavedParts(turn, saved);
+  assert.deepEqual(liveMessage(trimmed)?.content.map((part) => part.type === "tool-call" ? part.toolCallId : part.text),
+    ["c2", "All do"]);
+  assert.equal(trimmed.requestId, "s1");
+  // Rows that show none of it, and other roles, change nothing.
+  assert.equal(withoutSavedParts(turn, [{ role: "user", content: "All do" }]), turn);
+  assert.equal(withoutSavedParts(turn, [{ role: "assistant", content: "something else" }]), turn);
+  // Words still being written are not the saved row's until it holds them all.
+  assert.equal(withoutSavedParts(trimmed, [{ role: "assistant", content: [{ type: "text", text: "All" }] }]), trimmed);
+  const rest = withoutSavedParts(trimmed, [
+    { role: "assistant", content: [{ type: "tool-call", toolCallId: "c2" }] },
+    { role: "assistant", content: [{ type: "text", text: "All done." }] },
+  ]);
+  assert.equal(liveMessage(rest), null);
+  // Still running: the turn goes on under its request, with what comes next.
+  assert.deepEqual(liveMessage(applyLiveEvent(rest, sent("More", "s1")))?.content, [{ type: "text", text: "More" }]);
+});
+
+test("a settled turn history shows whole is replaced, and holds nothing back", () => {
+  let turn = applyLiveEvent(emptyLiveTurn(), sent("done", "s1"));
+  turn = applyLiveEvent(turn, { type: "turn_complete", request_ids: ["s1"] });
+  turn = applyLiveEvent(turn, sent("next", "s2"));  // held behind the settled turn
+  const replaced = withoutSavedParts(turn, [{ role: "assistant", content: "done" }]);
+  assert.equal(replaced.settled, undefined);
+  assert.deepEqual(liveMessage(replaced)?.content, [{ type: "text", text: "next" }]);
+  // History showed every part before the turn's end arrived: nothing to wait
+  // for, so the next turn starts at once.
+  let early = applyLiveEvent(emptyLiveTurn(), sent("done", "s1"));
+  early = withoutSavedParts(early, [{ role: "assistant", content: "done" }]);
+  early = applyLiveEvent(early, { type: "turn_complete", request_ids: ["s1"] });
+  assert.equal(early.settled, "replaced");
+  assert.deepEqual(liveMessage(applyLiveEvent(early, sent("next", "s2")))?.content, [{ type: "text", text: "next" }]);
+});
+
+test("a save notice stays when history takes the reply it came with", () => {
+  let turn = applyLiveEvent(emptyLiveTurn(), sent("done", "s1"));
+  turn = applyLiveEvent(turn, { type: "notice", message: "Conversation history not saved for this reply.", request_ids: ["s1"] });
+  const trimmed = withoutSavedParts(turn, [{ role: "assistant", content: "done" }]);
+  assert.deepEqual(liveMessage(trimmed)?.content,
+    [{ type: "text", text: "ℹ Conversation history not saved for this reply." }]);
+});
+
+test("a watched turn keeps the parts another request's saved row repeats", () => {
+  let turn = applyLiveEvent(emptyLiveTurn(), tool("c1"));
+  turn = applyLiveEvent(turn, sent("current reply", "s1"));
+  const content = [{ type: "tool-call", toolCallId: "c1", result: "ok" }, { type: "text", text: "current reply" }];
+  const named = (custom: Record<string, unknown>) => ({ role: "assistant", content, metadata: { custom } });
+  // A provider can reuse a call id and two replies can read alike: a row
+  // that names another request, or another voice turn, is not this turn's.
+  assert.equal(withoutSavedParts(turn, [named({ requestId: "other" })]), turn);
+  assert.equal(withoutSavedParts(turn, [named({ voiceTurnId: "v9" })]), turn);
+  // The turn's own row takes them, named by its request or its voice turn.
+  assert.equal(liveMessage(withoutSavedParts(turn, [named({ requestId: "s1" })])), null);
+  assert.equal(liveMessage(withoutSavedParts(turn, [named({ voiceTurnId: "s1" })])), null);
 });
