@@ -428,8 +428,11 @@ async function record(flow, session, browser) {
       await send(`${U(1)}: ${tools(3, 6)}. ${say(1)}`, "U1");
       await sleep(7000);
       await collect();
-      await mark("RELOAD");
+      // The page's own log goes with the page: keep these marks and its count here.
+      const started = await page.evaluate(() => window.__rec.toolsStarted);
+      collected.marks.push({ t: Date.now() - wall0, name: "RELOAD" });
       await page.reload({ waitUntil: "domcontentloaded" });
+      await page.evaluate((count) => { window.__rec.toolsStarted += count; }, started);
       await sleep(2500);
       await mark("RELOADED");
       await settle(R(1));
