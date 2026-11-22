@@ -164,7 +164,9 @@ const ownTurns = (shown: ReadonlyArray<Message>): OwnTurn[] => {
         turns.push({ reply: message, after, before: saved ?? Infinity, streaming: saved === null });
       }
     }
-    sends = [];
+    // A reply ends the sends before it. A message another sender put into
+    // the running turn, saved between a send and its reply, does not.
+    if (transientRole(message) === "assistant") sends = [];
   }
   return turns;
 };
@@ -896,10 +898,11 @@ export function rebaseOntoHistory<T extends Message>(
     const own = TRANSIENT_ROW_ID.test(String(row.id ?? "")) || row.metadata?.isOptimistic === true;
     const send = own && transientRole(row) === "user";
     const reply = own && transientRole(row) === "assistant";
-    // The sends right before a reply are its turn.
+    // The sends before a reply are its turn, up to the reply before them
+    // (another sender's message between a send and its reply is in the turn).
     const turnSends = sends;
     const turnUnsaved = unsaved;
-    if (!send) { sends = []; unsaved = false; }
+    if (transientRole(row) === "assistant") { sends = []; unsaved = false; }
     if (compactionArchiveOrder(row) !== null) { before.push(row); continue; }
     const key = sourceId(row);
     if (key !== null) {
@@ -954,7 +957,9 @@ export function rebaseOntoHistory<T extends Message>(
     stands.push({ reply: row, after });
   }
 
-  const settled = ownTurns([...slots.values()]).filter((turn) => !turn.streaming);
+  // The turns the page ran and history holds. A long turn's send can sit
+  // before the loaded rows, with the older ones: it still starts its turn.
+  const settled = ownTurns([...before, ...slots.values()]).filter((turn) => !turn.streaming);
   const used = new Set<string | undefined>([...before, ...slots.values(), ...waiting.map((item) => item.row), ...last]
     .map((row) => row.id));
   waiting.sort((left, right) => left.after - right.after);
