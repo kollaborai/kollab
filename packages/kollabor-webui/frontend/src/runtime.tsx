@@ -68,6 +68,7 @@ import {
   isLiveMessage,
   liveMessage,
   replacedLiveTurn,
+  withoutSavedParts,
   type LiveTurn,
 } from "./live-turn";
 import { parseHubMessageHeader, splitAgentHud, splitObservationReplies, type HubNote } from "./hub-notes";
@@ -1118,6 +1119,21 @@ export function EngineRuntimeProvider({
     return () => { liveEvents.current = null; clearTimeout(settleTimer.current); };
   }, [runtime, liveEvents, initialState.conversationUid]);
 
+  /**
+   * The thread after a history sync added `rows`: the live turn gives up the
+   * parts those rows now show (a tool call drawn twice otherwise), and its row
+   * follows (#1359).
+   */
+  const withLiveSynced = useCallback((messages: ThreadMessageLike[], rows: readonly ThreadMessageLike[]) => {
+    const synced = withoutSavedParts(liveTurn.current, rows);
+    if (synced === liveTurn.current) return messages;
+    liveTurn.current = synced;
+    const live = liveMessage(synced);
+    const at = messages.findIndex(isLiveMessage);
+    const kept = messages.filter((message) => !isLiveMessage(message));
+    return !live ? kept : at < 0 ? [...kept, live] : [...kept.slice(0, at), live, ...kept.slice(at)];
+  }, []);
+
   // Output folded in while this page's own run was pending shows once it ends.
   useEffect(() => runtime.thread.subscribe(() => {
     if (!unshownLive.current || runtime.thread.getState().isRunning) return;
@@ -1271,13 +1287,14 @@ export function EngineRuntimeProvider({
         });
         if (merged.added.length) {
           midTurnRows.current = mergeMissingHistoryMessages(midTurnRows.current, merged.added).messages;
+          const messages = withLiveSynced(merged.messages, merged.added);
           runtime.thread.importExternalState({
             ...shown,
-            messages: merged.messages,
+            messages,
             synced: {
               ...from,
               history: Math.max(from.history, initialState.synced.history),
-              messages: merged.messages.length,
+              messages: messages.length,
             },
           });
         }
@@ -1334,7 +1351,8 @@ export function EngineRuntimeProvider({
       if (replaced) liveTurn.current = replacedLiveTurn(liveTurn.current);
       const held = replaced ? liveMessage(liveTurn.current) : null;
       const messages = replaced
-        ? [...rebuilt.filter((row) => !isLiveMessage(row)), ...(held ? [held] : [])] : rebuilt;
+        ? [...rebuilt.filter((row) => !isLiveMessage(row)), ...(held ? [held] : [])]
+        : withLiveSynced(rebuilt, added);
       deferredOlderWindow.current = null;
       // Rows history has not taken yet keep the thread off its sync point, so
       // the next load rebuilds it again.
@@ -1493,9 +1511,10 @@ export function EngineRuntimeProvider({
     // ones it already drew (#666); drop the transient block when the tail
     // carries the same turn, proven row by row before anything is hidden.
     const deduped = dropTransientTurnDuplicates(merged.messages, tail);
-    // A live row that history did not replace keeps its place (#1364).
+    // A live row that history did not replace keeps its place (#1364), without
+    // the parts the new rows show.
     const messages = replaced ? [...(deduped ?? merged.messages), ...liveShown]
-      : aroundLive(settled, () => [...(deduped ?? merged.messages)]);
+      : withLiveSynced(aroundLive(settled, () => [...(deduped ?? merged.messages)]), tail);
     runtime.thread.importExternalState({
       ...shown,
       messages,
