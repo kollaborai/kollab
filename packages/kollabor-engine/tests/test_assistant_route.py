@@ -1467,6 +1467,44 @@ def test_align_helper_preserves_streamed_ids_for_matching_content():
     assert [m["id"] for m in other] == ["user-y", "assistant-y"]
 
 
+def test_align_helper_keeps_a_row_shown_for_a_saved_row_of_tool_calls_alone():
+    """A reply that starts with a tool call keeps its row in the chat (#1359).
+
+    The page shows the reply's first saved row, tool calls with no words, under
+    the id it drew the reply with. That row has no words to compare, so its
+    call ids are its identity: the next turn still lines up with history.
+    """
+    def shown() -> list[dict]:
+        return [
+            {"id": "user-s-0", "role": "user", "content": "q1",
+             "metadata": {"custom": {"historySourceId": "history-0", "historySourceIndex": 0}}},
+            {"id": "assistant-s-1", "role": "assistant",
+             "content": [{"type": "tool-call", "toolCallId": "c1", "toolName": "terminal", "result": "ok"}],
+             "metadata": {"custom": {"historySourceId": "history-1", "historySourceIndex": 1}}},
+            {"id": "history-3", "role": "assistant", "content": [{"type": "text", "text": "first answer"}]},
+            {"id": "user-s-4", "role": "user", "content": "q2"},
+            {"id": "assistant-s-5", "role": "assistant", "content": [{"type": "text", "text": "second answer"}]},
+        ]
+
+    stored = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "", "metadata": {"tool_calls": [{"id": "c1"}]}},
+        {"role": "tool", "content": "ok"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "q2"},
+        {"role": "assistant", "content": "second answer"},
+    ]
+    rows = shown()
+    assert messages._assistant_align_streamed_ids(rows, stored) is True
+    assert [m["id"] for m in rows] == ["user-s-0", "assistant-s-1", "history-3", "user-s-4", "assistant-s-5"]
+    assert [m["metadata"]["custom"]["historySourceIndex"] for m in rows[3:]] == [4, 5]
+
+    # The position now holds other calls: the row names an obsolete place.
+    moved = [dict(row) for row in stored]
+    moved[1] = {"role": "assistant", "content": "", "metadata": {"tool_calls": [{"id": "c9"}]}}
+    assert messages._assistant_align_streamed_ids(shown(), moved) is False
+
+
 def test_archive_and_synthetic_alias_cannot_claim_the_new_turns_history_row():
     previous = [
         {

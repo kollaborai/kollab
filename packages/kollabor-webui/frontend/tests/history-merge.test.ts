@@ -1074,9 +1074,9 @@ test("a run that ended before its turn is rebuilt on the saved history under the
     reply(2, [call]), named({ id: "history-3", role: "user", content: words("two") }, { requestIds: ["r2"] }),
     reply(4, words("done"))];
   const rows = rebaseOntoHistory(shown, loaded, 5);
-  // Each send keeps the id it was drawn with. A reply's saved words keep the
-  // reply's id; a row of calls alone is its saved row.
-  assert.deepEqual(rows.map((row) => row.id), ["history-0", "user-s1-1", "history-2", "user-s1-3", "assistant-s1-4"]);
+  // Each send keeps the id it was drawn with, and so does each reply: its
+  // saved words, or its saved calls when it drew no words.
+  assert.deepEqual(rows.map((row) => row.id), ["history-0", "user-s1-1", "assistant-s1-2", "user-s1-3", "assistant-s1-4"]);
   assert.deepEqual(rows.map(historyMessageIndex), [0, 1, 2, 3, 4]);
   assert.deepEqual(rows.map((row) => row.content), loaded.map((row) => row.content));
   assert.equal(rows[0], before);
@@ -1100,10 +1100,11 @@ test("a reply history does not hold yet stays behind its send, without the rows 
   const more = reply(3, [{ type: "tool-call", toolCallId: "c2", result: "ok" }]);
   assert.deepEqual(rebaseOntoHistory(shown, [sent, reply(2, [call]), more], 4).map((row) => row.id),
     ["user-s1-1", "assistant-s1-2", "history-3"]);
-  // Once history holds the whole answer, it replaces the reply.
+  // Once history holds the whole answer, it replaces the reply, where the
+  // reply stands: the first of its saved rows keeps the reply's id.
   const whole = reply(3, words("Half an answer."));
   assert.deepEqual(rebaseOntoHistory(shown, [sent, reply(2, [call]), whole], 4).map((row) => row.id),
-    ["user-s1-1", "history-2", "history-3"]);
+    ["user-s1-1", "assistant-s1-2", "history-3"]);
   // A turn saved as words alone keeps the reply's id, and reads as saved from then on.
   const plain = [mine("user-s1-1", "one", "r1"), { id: "assistant-s1-2", role: "assistant", content: words("An answer") }];
   const answered = rebaseOntoHistory(plain, [sent, reply(2, words("An answer."))], 3);
@@ -1287,9 +1288,10 @@ test("a reply cut short keeps its turn when another sender's message sits before
     named(saved(6, "Hello"), { requestIds: ["r9"] }), reply(7, words("Working on it")),
   ];
   // Shown in saved order, the other sender's message between the send and the reply.
-  // History holds all the reply shows: the turn's saved rows take its place, once.
+  // History holds all the reply shows: the turn's saved rows take its place,
+  // once, and the first of them keeps the reply's id.
   assert.deepEqual(rebaseOntoHistory([sent, loaded[2], answer], loaded, 8).map((row) => row.id),
-    ["user-s1-0", "history-5", "history-6", "history-7"]);
+    ["user-s1-0", "assistant-s1-1", "history-6", "history-7"]);
   // Words history does not hold yet: the reply stays after its send and
   // stands for the saved call it drew.
   const ahead = { ...answer, content: [call("c1"), ...words("Working hard")] };
@@ -1327,12 +1329,33 @@ test("a reply still being saved stays under the last message of its turn", () =>
   // Not above the second message: the call saved before it is, as its own row.
   assert.deepEqual(rebaseOntoHistory([first, second, answer], loaded, 8).map((row) => row.id),
     ["user-s1-0", "history-5", "user-s1-1", "assistant-s1-2"]);
-  // Once history holds the words too, the rows saved after the second message take the reply's place.
+  // Once history holds the words too, the rows saved after the second message
+  // take the reply's place, and the first of them keeps the reply's id.
   const whole = [...loaded, reply(8, words("zebra"))];
   assert.deepEqual(rebaseOntoHistory([first, second, answer], whole, 9).map((row) => row.id),
-    ["user-s1-0", "history-5", "user-s1-1", "history-7", "history-8"]);
+    ["user-s1-0", "history-5", "user-s1-1", "assistant-s1-2", "history-8"]);
   // A row with words saved before the second message is not the reply's: it keeps its own id.
   const spoke = [loaded[0], reply(5, words("On it")), loaded[2], reply(7, [call("c2")]), reply(8, words("zebra"))];
   assert.deepEqual(rebaseOntoHistory([first, second, answer], spoke, 9).map((row) => row.id),
-    ["user-s1-0", "history-5", "user-s1-1", "history-7", "history-8"]);
+    ["user-s1-0", "history-5", "user-s1-1", "assistant-s1-2", "history-8"]);
+});
+
+test("a reply that starts with a tool call keeps its row when its turn is saved (#1359)", () => {
+  // A row under a new id is taken down and built again: the reply fades in
+  // anew and the chat jumps. The reply's first saved row is its calls alone.
+  const call = { type: "tool-call", toolCallId: "c1", result: "ok" };
+  const sent = mine("user-s1-1", "one", "r1");
+  const answer = { id: "assistant-s1-2", role: "assistant", content: [call, ...words("done")] };
+  const loaded = [named(saved(1, "one"), { requestIds: ["r1"] }), reply(2, [call]), reply(3, words("done"))];
+  const rows = rebaseOntoHistory([sent, answer], loaded, 4);
+  assert.deepEqual(rows.map((row) => row.id), ["user-s1-1", "assistant-s1-2", "history-3"]);
+  // It is the saved row from here on: the engine knows it by its calls.
+  assert.deepEqual(rows[1].content, [call]);
+  assert.deepEqual(rows.map(historyMessageIndex), [1, 2, 3]);
+  assert.equal(hasUnsettledRows(rows), false);
+  assert.deepEqual(rebaseOntoHistory(rows, loaded, 4), rows);
+  // A first saved row with neither words nor calls keeps its own id: nothing proves it is the reply's.
+  const bare = [loaded[0], reply(2, []), reply(3, words("done"))];
+  assert.deepEqual(rebaseOntoHistory([sent, { ...answer, content: words("done") }], bare, 4).map((row) => row.id),
+    ["user-s1-1", "history-2", "history-3"]);
 });

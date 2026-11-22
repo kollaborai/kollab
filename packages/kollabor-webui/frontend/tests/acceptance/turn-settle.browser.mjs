@@ -559,6 +559,39 @@ try {
         s.assistant.includes("Working"), "after the settle reload");
       await t.page.close();
     },
+    // A reply that starts with a tool call stays where it is when its turn is
+    // reloaded from history, as after a message sent mid-turn or a dropped
+    // stream (the engine could not match the turn's rows). Its first saved
+    // row is the call alone. A reply put under a new id is taken down and
+    // built again: it fades in anew, the chat jumps, and the row it replaced
+    // stays as a second branch (the "2 / 2" picker) (#1359).
+    async "keeps a reply that starts with a tool call in place when its turn is reloaded"() {
+      const t = await open();
+      const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
+      const call = { type: "tool-call", toolCallId: "c1", toolName: "terminal", args: {}, argsText: "{}", result: "ok" };
+      await t.send();
+      const first = await t.sending();
+      await t.push(state([{ type: "set", path: ["messages"], value: [
+        { id: "user-s1-0", role: "user", content: "hello", metadata: { custom: { requestId: first.id } } },
+        { id: "assistant-s1-1", role: "assistant", content: [call, ...text("Working")],
+          status: { type: "complete", reason: "stop" } },
+      ] }]));
+      await t.waitFor((s) => s.assistant.includes("Working"), "the reply");
+      await t.end();
+      const drawn = (await t.read()).ids;
+      assert.deepEqual(drawn, ["user-s1-0", "assistant-s1-1"]);
+      // Another sender's message saved after the turn shows the reload is in.
+      await t.setHistory([
+        { ...row(0, "user", "hello"), metadata: { custom: { requestIds: [first.id] } } },
+        { id: "history-1", role: "assistant", content: [call] },
+        row(2, "assistant", "Working"),
+        row(3, "user", "ping"),
+      ]);
+      await t.waitFor((s) => s.users === "hello|ping", "the reloaded history");
+      await t.holds((s) => s.ids.join("|") === [...drawn, "history-3"].join("|") && s.tools === "c1" &&
+        s.assistant === "Working" && s.remounts === "0" && s.branches === 0 && s.errors === "0", "after the reload", 400);
+      await t.page.close();
+    },
     // The page sends while watching another client's turn, whose live copy
     // sits in the state it sent. A message another client sends while the
     // page's turn runs goes above that turn, which stays last (#1364).
