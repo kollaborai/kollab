@@ -1585,6 +1585,25 @@ async def assistant_transport(
                     if part.get("toolCallId"):
                         assistant_tool_parts[part["toolCallId"]] = part
                         assistant_parts.append(part)
+            elif persist_message_state:
+                # The page drops its pending copy of a send at the first state
+                # it receives, and clearing the last turn's error above is one.
+                # A daemon busy with another turn stays quiet long after it
+                # admits the send, so show the send's row now (#1359). The
+                # reply's row follows with its first output: until then the
+                # page keeps the placeholder it already draws, and the first
+                # words still publish at once (the throttle has not started).
+                admitted = _assistant_update_message_state(
+                    [dict(message) for message in state_messages],
+                    session_id,
+                    submitted_contents,
+                    [],
+                    None,
+                    copy.deepcopy(submitted_media),
+                    list(submitted_request_ids),
+                )[:-1]
+                controller.state["messages"].extend(admitted[len(sent_messages):])
+                sent_messages = admitted
 
             while True:
                 event = await _assistant_next_event(
