@@ -21,6 +21,10 @@ test("permission outcomes reload the pending prompt snapshot", () => {
   ]);
 });
 
+test("a prompt parking reloads its authoritative status", () => {
+  assert.deepEqual(refreshed(["permission_parked"]), ["permission_parked"]);
+});
+
 test("an accepted user message reloads so external voice transcripts reach the thread", () => {
   assert.deepEqual(refreshed(["user_message"]), ["user_message"]);
 });
