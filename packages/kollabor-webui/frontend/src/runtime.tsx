@@ -47,6 +47,7 @@ import {
   reconcileBoundaryToolResults,
   hasUnsettledRows,
   inFlightSendIdsFor,
+  rememberSavedSends,
   shownMessagesChanged,
   withoutInFlightSends,
   withSavedCopies,
@@ -1174,6 +1175,8 @@ export function EngineRuntimeProvider({
   const latestInitial = useRef(initialState);
   latestInitial.current = initialState;
   const [historySyncRevision, setHistorySyncRevision] = useState(0);
+  // Where saved history holds each send this page has seen saved (see SavedSends).
+  const savedSends = useRef(new Map<string, number>());
   const deferredHistorySync = useRef(false);
   const deferredOlderWindow = useRef<EngineState | null>(null);
   useEffect(() => runtime.thread.subscribe(() => {
@@ -1212,6 +1215,9 @@ export function EngineRuntimeProvider({
       initialState.synced && initialState.synced.authoritative !== false
       ? mergeCompactionHistorySnapshot(currentShown.messages, initialState.messages)
       : null;
+    // A compaction renumbers the rows: positions from before it mean nothing.
+    if (compacted) savedSends.current.clear();
+    rememberSavedSends(savedSends.current, initialState.messages);
     if (compacted) {
       if (ownsPendingInput(thread)) {
         deferredHistorySync.current = true;
@@ -1308,7 +1314,7 @@ export function EngineRuntimeProvider({
         // Nor do the rows of the turn its stream is drawing, and the saved
         // copies of sends an earlier run left on screen (#1359).
         const tail = withoutOwnTurnRows(thread.messages, initialState.messages,
-          withoutInFlightSends(thread.messages, newRows, inFlightSendIds.current));
+          withoutInFlightSends(thread.messages, newRows, inFlightSendIds.current), savedSends.current);
         const merged = { added: [] as ThreadMessageLike[], messages: [] as ThreadMessageLike[] };
         merged.messages = aroundLive(shown.messages, (rows) => {
           const result = mergeMissingHistoryMessages(rows, tail);
@@ -1372,7 +1378,7 @@ export function EngineRuntimeProvider({
       const known = new Set(shown.messages);
       let added: ThreadMessageLike[] = [];
       const rebuilt = aroundLive(shown.messages, (rows) => {
-        const next = rebaseOntoHistory(rows, initialState.messages, loaded.history);
+        const next = rebaseOntoHistory(rows, initialState.messages, loaded.history, savedSends.current);
         added = next.filter((row) => !known.has(row) && historyMessageIndex(row) !== null);
         return next;
       });

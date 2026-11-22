@@ -754,6 +754,23 @@ export function inFlightSendIdsFor(
   return new Set(Array.from({ length: sends }, (_, index) => `user-${sessionId}-${sentAfter.length + index}`));
 }
 
+/**
+ * Where saved history holds each send, by request id. The page loads only the
+ * newest rows, and a turn with many tool calls pushes its own send out of that
+ * window, so the positions are kept from the loads that showed them (#1359).
+ */
+export type SavedSends = ReadonlyMap<string, number>;
+const NO_SAVED_SENDS: SavedSends = new Map();
+
+/** Adds the sends the loaded rows name to `savedAt` (see SavedSends). */
+export function rememberSavedSends(savedAt: Map<string, number>, loaded: ReadonlyArray<Message>): void {
+  for (const row of loaded) {
+    if (transientRole(row) !== "user") continue;
+    const index = historyIndex(row);
+    if (index !== null) for (const id of requestIdsOf(row)) savedAt.set(id, index);
+  }
+}
+
 /** The loaded row that holds a send the page drew: the saved row naming its request id (#1359). */
 const savedSend = <T extends Message>(send: Message, loaded: ReadonlyArray<T>): T | undefined => {
   const ids = requestIdsOf(send);
@@ -777,11 +794,16 @@ export function withoutOwnTurnRows<T extends Message>(
   shown: ReadonlyArray<Message>,
   loaded: ReadonlyArray<Message>,
   tail: ReadonlyArray<T>,
+  savedAt: SavedSends = NO_SAVED_SENDS,
 ): T[] {
   const sends = new Set(shown.filter((row) => isUnsettled(row) && transientRole(row) === "user").flatMap(requestIdsOf));
   if (!sends.size) return [...tail];
   const own = (row: Message) => transientRole(row) === "user" && requestIdsOf(row).some((id) => sends.has(id));
-  const start = loaded.reduce((low, row) => own(row) ? Math.min(low, historyIndex(row) ?? low) : low, Infinity);
+  // A long turn pushes its own send out of the loaded window: its position is
+  // then the one an earlier load showed.
+  const remembered = [...sends].flatMap((id) => savedAt.has(id) ? [savedAt.get(id)!] : []);
+  const start = loaded.reduce((low, row) => own(row) ? Math.min(low, historyIndex(row) ?? low) : low,
+    Math.min(Infinity, ...remembered));
   return tail.filter((row) => !own(row) &&
     !(transientRole(row) === "assistant" && (historyIndex(row) ?? -Infinity) > start));
 }
@@ -803,13 +825,15 @@ export const hasUnsettledRows = (shown: ReadonlyArray<Message>): boolean => show
  * the page drew gives way to the saved rows of its turn once they hold all it
  * shows; until then it stays behind its send, and the saved rows it already
  * shows stay out. Rows before the loaded window (older pages) and rows saved
- * after it was read (`end` is its row count) stay as they are. A shown history
- * row the window no longer has is dropped. Live rows are the caller's.
+ * after it was read (`end` is its row count) stay as they are; `savedAt` says
+ * which of the page's own sends are such older rows. A shown history row the
+ * window no longer has is dropped. Live rows are the caller's.
  */
 export function rebaseOntoHistory<T extends Message>(
   shown: ReadonlyArray<T>,
   loaded: ReadonlyArray<T>,
   end: number,
+  savedAt: SavedSends = NO_SAVED_SENDS,
 ): T[] {
   const start = loaded.reduce((low, row) => Math.min(low, historyIndex(row) ?? low), Infinity);
   const bySource = new Map<string, T>();
@@ -857,7 +881,15 @@ export function rebaseOntoHistory<T extends Message>(
       const saved = savedSend(row, loaded);
       const savedKey = saved ? sourceId(saved) : null;
       const index = saved ? historyIndex(saved) : null;
-      if (!saved || !savedKey || index === null) { unsaved = true; last.push(row); continue; }
+      if (!saved || !savedKey || index === null) {
+        // Saved before the loaded window (a long turn pushed it out): it is an
+        // older row like any other, and its turn starts there.
+        const known = requestIdsOf(row).flatMap((id) => savedAt.has(id) ? [savedAt.get(id)!] : []);
+        if (known.length && Math.min(...known) < start) { sends.push(Math.min(...known)); before.push(row); continue; }
+        unsaved = true;
+        last.push(row);
+        continue;
+      }
       sends.push(index);
       // A row saved for two sends and shown whole takes the first of them.
       if (!slots.has(savedKey)) slots.set(savedKey, drawnSend(saved, row));
