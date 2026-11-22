@@ -346,8 +346,10 @@ export function shownMessagesChanged(
   return gone || loaded.some((message) => {
     const key = sourceId(message);
     const old = key ? bySource.get(key) : undefined;
-    // The run's own reply keeps what it streamed (see withSavedCopies).
-    if (old && TRANSIENT_ROW_ID.test(String(old.id ?? "")) && transientRole(old) === "assistant") return false;
+    // The run's own reply keeps what it streamed (see withSavedCopies); a saved
+    // row shown under a reply's id (rebaseOntoHistory) reads as history does.
+    if (old && TRANSIENT_ROW_ID.test(String(old.id ?? "")) && transientRole(old) === "assistant" &&
+      typeof old.metadata?.custom?.historySourceId !== "string") return false;
     return old !== undefined && (
       JSON.stringify(old.content) !== JSON.stringify(message.content) ||
       old.convertConfig?.joinStrategy !== message.convertConfig?.joinStrategy
@@ -813,6 +815,7 @@ export function rebaseOntoHistory<T extends Message>(
   const before: T[] = [];                                  // older pages and archived rows
   const slots = new Map<string, T>();                      // saved row -> the row shown for it
   const waiting: Array<{ row: T; after: number }> = [];   // replies history does not hold yet, behind their sends
+  const taken: Array<{ id: T["id"]; after: number }> = []; // replies history holds whole, and where their turns start
   const last: T[] = [];                                    // rows history does not hold, in the order shown
   const stands: Array<{ reply: T; after: number }> = [];  // those replies and the saved rows they already show
   let sends: number[] = [];                                // saved positions of the sends before the next reply
@@ -868,7 +871,7 @@ export function rebaseOntoHistory<T extends Message>(
         const text = String((part as { text?: unknown }).text ?? "").replace(/\s+/g, " ").trim();
         return !text || words.includes(text);
       });
-    if (held && !turnUnsaved) continue;                    // history shows the whole reply
+    if (held && !turnUnsaved) { taken.push({ id: row.id, after }); continue; }   // history shows the whole reply
     waiting.push({ row, after });
     stands.push({ reply: row, after });
   }
@@ -877,6 +880,7 @@ export function rebaseOntoHistory<T extends Message>(
   const used = new Set<string | undefined>([...before, ...slots.values(), ...waiting.map((item) => item.row), ...last]
     .map((row) => row.id));
   waiting.sort((left, right) => left.after - right.after);
+  taken.sort((left, right) => left.after - right.after);
   const rows: T[] = [...before];
   for (const row of loaded) {
     const key = sourceId(row);
@@ -885,8 +889,23 @@ export function rebaseOntoHistory<T extends Message>(
     while (waiting.length && waiting[0].after < index) rows.push(waiting.shift()!.row);
     const slot = slots.get(key);
     if (slot) { rows.push(slot); continue; }
-    if (transientRole(row) === "assistant" && (drawnInOwnTurn(settled, row) ||
-      stands.some((item) => item.after < index && drawnBy(item.reply, row)))) continue;
+    if (transientRole(row) === "assistant") {
+      if (drawnInOwnTurn(settled, row) || stands.some((item) => item.after < index && drawnBy(item.reply, row))) continue;
+      // The first saved row of a reply's turn stands where the reply stood. It
+      // keeps the reply's id when it has words, so the chat updates the
+      // message in place; the engine pairs such a row by those words, which a
+      // row of calls alone does not have.
+      let turn = -1;
+      for (let at = 0; at < taken.length && taken[at].after < index; at += 1) turn = at;
+      if (turn >= 0) {
+        const [reply] = taken.splice(0, turn + 1).slice(-1);
+        if (wordsOf(row) && !used.has(reply.id)) {
+          used.add(reply.id);
+          rows.push(displayRow(row, reply.id));
+          continue;
+        }
+      }
+    }
     rows.push(reserveRow(row, used));
   }
   return [...rows, ...waiting.map((item) => item.row), ...last];

@@ -759,8 +759,10 @@ const converter = (
       apartFromLive(withMidTurnRows([...stored, ...optimistic], midTurn)),
       metadata.isSending,
       // The engine clears an error with an empty string, which assistant-ui
-      // would draw as an empty error box.
-      { error: state.error || undefined },
+      // would draw as an empty error box. An error still there while a request
+      // is out belongs to the run before it: the engine clears it on admission,
+      // and until then it would sit under the new message.
+      { error: metadata.isSending ? undefined : state.error || undefined },
     ),
     isRunning: metadata.isSending,
   };
