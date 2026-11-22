@@ -794,6 +794,14 @@ test("a request without a message keeps the sends already in flight", () => {
   const previous = ids("user-s1-3");
   assert.equal(inFlightSendIdsFor({ commands: [{ type: "add-tool-result" }], state: { messages: [] } }, "s1", previous), previous);
   assert.equal(inFlightSendIdsFor({ commands: [] }, "s1", previous), previous);
+  // A message that waited keeps the row it was drawn with: rows that joined
+  // the state while it waited do not renumber it (#1102).
+  const waited = { commands: [{ type: "add-message", message: { id: "r1" } }, { type: "add-message", message: { id: "r2" } }],
+    state: { messages: [{ id: "history-0" }, { id: "user-s1-0" }, { id: "assistant-s1-1" }] } };
+  assert.deepEqual([...inFlightSendIdsFor(waited, "s1", ids(), new Map([["r1", "user-s1-1"]]))], ["user-s1-1", "user-s1-4"]);
+  // A kept row the state has taken, or the message before it, is numbered anew.
+  assert.deepEqual([...inFlightSendIdsFor(waited, "s1", ids(), new Map([["r1", "user-s1-0"], ["r2", "user-s1-3"]]))],
+    ["user-s1-3", "user-s1-4"]);
 });
 
 // #1359: rows that name their send pair by id, not by words.

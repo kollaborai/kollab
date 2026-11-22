@@ -1467,6 +1467,31 @@ def test_align_helper_preserves_streamed_ids_for_matching_content():
     assert [m["id"] for m in other] == ["user-y", "assistant-y"]
 
 
+def test_a_sent_message_takes_the_row_id_the_page_names():
+    """A message the page already shows keeps its row when it is sent (#1102).
+
+    A queued message is drawn before it is sent, and rows can join the chat
+    while it waits. Numbered by the rows at hand it would get a new id, and
+    the chat takes a row whose id changed down and builds it again.
+    """
+    state = [{"id": "history-0", "role": "user", "content": "q"}, {"id": "user-s1-9", "role": "user", "content": "x"}]
+
+    def rows(row_ids):
+        built = messages._assistant_update_message_state(
+            [dict(row) for row in state], "s1", ["first", "second"], [], None, None, ["r1", "r2"], row_ids
+        )
+        return [row["id"] for row in built[2:4]]
+
+    assert rows(["user-s1-1", "user-s1-7"]) == ["user-s1-1", "user-s1-7"]
+    # No name, a row the chat already has, another session's row, another kind
+    # of row and a name used twice: the message is numbered by the rows at hand.
+    assert rows(None) == ["user-s1-2", "user-s1-3"]
+    assert rows(["user-s1-9", "user-s2-4"]) == ["user-s1-2", "user-s1-3"]
+    assert rows(["history-0", "assistant-s1-4"]) == ["user-s1-2", "user-s1-3"]
+    assert rows(["user-s1-5", "user-s1-5"]) == ["user-s1-5", "user-s1-3"]
+    assert rows(["user-s1-5"]) == ["user-s1-5", "user-s1-3"]
+
+
 def test_align_helper_keeps_a_row_shown_for_a_saved_row_of_tool_calls_alone():
     """A reply that starts with a tool call keeps its row in the chat (#1359).
 

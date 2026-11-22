@@ -482,6 +482,51 @@ try {
       assert.equal(await t.page.getByText("Queued", { exact: true }).count(), 0, "a message on its way is not queued");
       await t.page.close();
     },
+    // A queued message keeps its row when it is sent. The reply's first row
+    // came while the message waited, so a row numbered by the rows at hand
+    // would get a new id: the chat takes such a row down and builds it again,
+    // with a blink and a jump. The page names the row in its request, and
+    // the engine gives the message that row (#1102).
+    async "keeps a queued message's row when it is sent"() {
+      const t = await open("?chat");
+      const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
+      const said = (s) => s.assistant.split("|").filter(Boolean).join("|");
+      await t.send();
+      const first = await t.sending();
+      const hello = { id: "user-s1-0", role: "user", content: "hello", metadata: { custom: { requestId: first.id } } };
+      await t.push(state([{ type: "set", path: ["messages"], value: [hello] }]));
+      await t.page.waitForTimeout(100);
+      await t.page.locator("#send-what").click();
+      await t.page.getByText("Queued", { exact: true }).waitFor();
+      await t.push(state([{ type: "set", path: ["messages"], value: [
+        hello, { id: "assistant-s1-1", role: "assistant", content: text("Wor") },
+      ] }]));
+      await t.waitFor((s) => s.assistant.includes("Wor") && s.users === "hello|what", "the run's reply");
+      const waiting = (await t.read()).ids[2];
+      await t.page.evaluate(() => {
+        const ids = document.getElementById("ids");
+        window.drawn = [ids.textContent];
+        new MutationObserver(() => window.drawn.push(ids.textContent))
+          .observe(ids, { childList: true, characterData: true, subtree: true });
+      });
+      await t.page.getByRole("button", { name: "Send Now" }).click();
+      await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 });
+      const second = await t.page.evaluate(() => ({
+        command: window.transport.request.commands[0], sent: window.transport.request.state?.messages ?? [],
+      }));
+      // The engine: the row the request names, else row L of the L rows sent.
+      const at = second.sent.length;
+      await t.push(state([{ type: "set", path: ["messages"], value: [...second.sent,
+        { id: second.command.rowId ?? `user-s1-${at}`, role: "user", content: "what",
+          metadata: { custom: { requestId: second.command.message.id } } },
+        { id: `assistant-s1-${at + 1}`, role: "assistant", content: text("Sure") },
+      ] }]));
+      await t.waitFor((s) => said(s) === "Wor|Sure" && s.users === "hello|what", "the reply under the message");
+      const drawn = await t.page.evaluate(() => window.drawn);
+      assert.ok(drawn.every((ids) => ids.split("|").includes(waiting)),
+        `the message's row ${waiting} was taken down when it was sent: ${JSON.stringify(drawn)}`);
+      await t.page.close();
+    },
     // Enter in the message box sends while the agent works, as the Send button
     // does: the message waits for the turn to end. Ctrl+Enter (Cmd+Enter on a
     // Mac) sends it, and every message waiting before it, at once. Shift+Enter
