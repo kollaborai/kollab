@@ -381,6 +381,72 @@ try {
     },
     // A shown row reads differently in the reloaded history: it changes where
     // it is, without the whole reload that blanked the chat (#1358).
+    // A message sent while the page's turn runs goes to the agent at once: the
+    // page lets its request go, without stopping the turn, and sends the
+    // message in a request of its own. The agent takes it in at its next
+    // step, and the reply goes on under the message (#1365).
+    async "hands a message sent mid-turn to the agent at once"() {
+      const t = await open();
+      const done = { type: "complete", reason: "stop" };
+      const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
+      const said = (s) => s.assistant.split("|").filter(Boolean).join("|");
+      await t.send();
+      const first = await t.sending();
+      await t.push(state([{ type: "set", path: ["messages"], value: [
+        { id: "user-s1-0", role: "user", content: "hello", metadata: { custom: { requestId: first.id } } },
+        { id: "assistant-s1-1", role: "assistant", content: text("Wor") },
+      ] }]));
+      await t.waitFor((s) => s.assistant.includes("Wor"), "the run's reply");
+      await t.page.locator("#send-what").click();
+      await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
+        .catch(() => assert.fail("the message waited behind the running turn"));
+      const second = await t.page.evaluate(() => ({
+        commands: window.transport.request.commands, sent: window.transport.request.state?.messages ?? [],
+        let: window.transports[0].aborted, cancels: window.cancels,
+        running: document.getElementById("running")?.textContent,
+      }));
+      assert.equal(second.commands.length, 1);
+      assert.equal(second.commands[0].message.parts[0].text, "what");
+      assert.equal(second.let, true, "the page let its first request go");
+      assert.equal(second.cancels, 0, "the agent's turn was not stopped");
+      assert.equal(second.running, "running");
+      await t.holds((s) => s.errors === "0" && s.users === "hello|what" && said(s) === "Wor", "while the message is on its way", 200);
+      // The engine admits it; the turn's reply goes on under it.
+      const at = second.sent.length;
+      await t.push(state([{ type: "set", path: ["messages"], value: [...second.sent,
+        { id: `user-s1-${at}`, role: "user", content: "what", metadata: { custom: { requestId: second.commands[0].message.id } } },
+        { id: `assistant-s1-${at + 1}`, role: "assistant", content: text("Sure") },
+      ] }]));
+      await t.waitFor((s) => s.users === "hello|what" && said(s) === "Wor|Sure", "the reply under the message");
+      await t.end();
+      await t.setHistory([
+        { ...row(0, "user", "hello"), metadata: { custom: { requestIds: [first.id] } } },
+        { ...row(1, "assistant", "Working"), status: done },
+        { ...row(2, "user", "what"), metadata: { custom: { requestIds: [second.commands[0].message.id] } } },
+        { ...row(3, "assistant", "Sure"), status: done },
+      ]);
+      await t.waitFor((s) => said(s) === "Working|Sure", "the saved turn");
+      await t.holds((s) => s.users === "hello|what" && said(s) === "Working|Sure" && s.remounts === "0" &&
+        s.branches === 0 && s.errors === "0", "after the settle reload");
+      await t.page.close();
+    },
+    // Stop still stops the agent's turn, and a message waiting behind it is not sent.
+    async "stops the agent's turn on Stop"() {
+      const t = await open();
+      const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
+      await t.send();
+      const first = await t.sending();
+      await t.push(state([{ type: "set", path: ["messages"], value: [
+        { id: "user-s1-0", role: "user", content: "hello", metadata: { custom: { requestId: first.id } } },
+        { id: "assistant-s1-1", role: "assistant", content: text("Wor") },
+      ] }]));
+      await t.waitFor((s) => s.assistant.includes("Wor"), "the run's reply");
+      await t.page.locator("#stop").click();
+      await t.page.waitForFunction(() => document.getElementById("running")?.textContent === "idle");
+      const after = await t.page.evaluate(() => ({ cancels: window.cancels, requests: window.transports.length }));
+      assert.deepEqual(after, { cancels: 1, requests: 1 });
+      await t.page.close();
+    },
     // A message sent while the page's turn runs waits behind it. A history
     // sync then adds another sender's message to the thread, and the turn's
     // next state is built without it: the waiting message keeps its row both

@@ -8,9 +8,16 @@ declare global {
   interface Window {
     setHistory: (messages: EngineState["messages"], window?: { start: number; total: number }) => void;
     liveEvent: (event: SessionEvent) => void;
-    transport?: { request: { state?: EngineState }; push: (frame: string) => void; close: () => void };
+    transport?: Transport;
+    /** Every request the page sent, oldest first. */
+    transports: Transport[];
+    /** How many times the page asked the engine to stop the agent's turn. */
+    cancels: number;
   }
 }
+type Transport = { request: { state?: EngineState }; push: (frame: string) => void; close: () => void; aborted: boolean };
+window.transports = [];
+window.cancels = 0;
 
 // The page's send streams from here: the test reads what the request sent,
 // pushes the engine's frames one at a time and ends the stream (an engine
@@ -24,11 +31,19 @@ window.fetch = async (input, init) => {
   const encoder = new TextEncoder();
   let stream!: ReadableStreamDefaultController<Uint8Array>;
   const body = new ReadableStream<Uint8Array>({ start: (controller) => { stream = controller; } });
-  window.transport = {
+  const transport: Transport = {
     request: JSON.parse(String(init?.body ?? "{}")),
     push: (frame) => stream.enqueue(encoder.encode(frame)),
     close: () => stream.close(),
+    aborted: false,
   };
+  // As a real fetch does: a request the page lets go ends its stream.
+  init?.signal?.addEventListener("abort", () => {
+    transport.aborted = true;
+    try { stream.error(init.signal?.reason); } catch { /* already closed */ }
+  });
+  window.transport = transport;
+  window.transports.push(transport);
   return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
 };
 
@@ -40,8 +55,8 @@ const api = {
   refreshToken: async () => false,
   getToken: () => null,
   getSessionState: async () => ({}),
-  cancel: async () => undefined,
-  cancelOwned: async () => undefined,
+  cancel: async () => { window.cancels += 1; },
+  cancelOwned: async () => { window.cancels += 1; },
 } as unknown as EngineApi;
 
 const initialState: EngineState = {
@@ -81,6 +96,7 @@ function Probe() {
     <div>
       <button id="send" onClick={() => aui.thread().append("hello")}>send</button>
       <button id="send-what" onClick={() => aui.thread().append("what")}>send what</button>
+      <button id="stop" onClick={() => aui.thread().cancelRun()}>stop</button>
       <div id="running">{running ? "running" : "idle"}</div>
       <div id="assistant">{assistant}</div>
       <div id="users">{users}</div>
