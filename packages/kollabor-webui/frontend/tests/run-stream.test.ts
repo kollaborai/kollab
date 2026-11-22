@@ -65,6 +65,32 @@ test("a run's stream ended inside an event ends after that event", async () => {
   assert.equal(from.state.let, true);
 });
 
+test("a run's stream ended inside an event passes on nothing the engine sent after that event", async () => {
+  // The engine's next event is already waiting when the page ends the stream.
+  const encoder = new TextEncoder();
+  let letGo = false;
+  const source = new ReadableStream<Uint8Array>({
+    start: (controller) => {
+      for (const chunk of ["data: one\r", "\n\r\n", "data: two\n\n"]) controller.enqueue(encoder.encode(chunk));
+    },
+    cancel: () => { letGo = true; },
+  });
+  const run = endableStream(source);
+  const reader = run.stream.getReader();
+  const decoder = new TextDecoder();
+  let text = decoder.decode((await reader.read()).value, { stream: true });
+  // Time for a stream that reads ahead to take what waits.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  run.end();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    text += decoder.decode(value, { stream: true });
+  }
+  assert.equal(text, `data: one\r\n\r\n${FINISH}`);
+  assert.equal(letGo, true, "the engine's stream is let go");
+});
+
 test("a run's stream ended before its first event holds only the end", async () => {
   const from = engine();
   const run = endableStream(from.source);
