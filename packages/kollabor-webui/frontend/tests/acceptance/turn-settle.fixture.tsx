@@ -75,6 +75,8 @@ function Probe() {
   // Replies the chat would draw an error box under.
   const errors = useAuiState((s) => s.thread.messages.filter((message) =>
     message.role === "assistant" && message.status?.type === "incomplete" && message.status.reason === "error").length);
+  // Every row the chat draws, by id: the chat takes down a row whose id changes and builds it again.
+  const ids = useAuiState((s) => s.thread.messages.map((message) => message.id).join("|"));
   return (
     <div>
       <button id="send" onClick={() => aui.thread().append("hello")}>send</button>
@@ -84,6 +86,7 @@ function Probe() {
       <div id="users">{users}</div>
       <div id="errors">{errors}</div>
       <div id="tools">{tools}</div>
+      <div id="ids">{ids}</div>
       <div id="branches"><ThreadPrimitive.Messages>{() => <Branched />}</ThreadPrimitive.Messages></div>
     </div>
   );
