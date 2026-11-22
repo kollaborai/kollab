@@ -268,6 +268,40 @@ try {
         "the saved reply in its place");
       await t.page.close();
     },
+    // The page watches a turn, then sends into it. The run's states carry the
+    // rows its request sent, the watched turn's live row among them: the tool
+    // call history saved meanwhile shows once, during the run and after it, and
+    // no live row is left running when the turn ends (#1359, #1362).
+    async "shows a watched turn's tool call once after the page sends into it"() {
+      const t = await open();
+      const done = { type: "complete", reason: "stop" };
+      const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
+      await t.setHistory([row(0, "user", "go")]);
+      await t.waitFor((s) => s.users === "go", "seeded");
+      await t.emit({ type: "tool_start", tool_id: "c1", tool_name: "terminal: ls", input: {}, request_ids: ["s1"] });
+      await t.waitFor((s) => s.tools === "c1", "the live tool call");
+      await t.send();
+      const sent = await t.sending();
+      assert.ok(sent.sent.some((message) => String(message.id).startsWith("live-turn")), "the request sent the live row");
+      const call = { id: "history-1", role: "assistant", status: done,
+        content: [{ type: "tool-call", toolCallId: "c1", toolName: "terminal", args: {}, argsText: "{}", result: "ok" }] };
+      await t.setHistory([row(0, "user", "go"), call]);
+      await t.holds((s) => s.tools === "c1", "the saved call during the run", 300);
+      await t.push(state([{ type: "set", path: ["messages"], value: [...sent.sent,
+        { id: `user-s1-${sent.sent.length}`, role: "user", content: "hello", metadata: { custom: { requestId: sent.id } } },
+        { id: `assistant-s1-${sent.sent.length + 1}`, role: "assistant", content: text("Wor") },
+      ] }]));
+      await t.waitFor((s) => s.assistant.includes("Wor"), "the run's reply");
+      await t.holds((s) => s.tools === "c1", "the run's next state");
+      await t.emit({ type: "turn_complete", request_ids: ["s1", sent.id] });
+      await t.finish(2);
+      await t.setHistory([row(0, "user", "go"), call, row(2, "user", "hello"), { ...row(3, "assistant", "Working"), status: done }]);
+      const settled = (s) => s.tools === "c1" && s.users === "go|hello" && s.assistant.split("Working").length === 2 &&
+        s.remounts === "0";
+      await t.waitFor(settled, "the turn once it ended");
+      await t.holds(settled, "after it settles");
+      await t.page.close();
+    },
     // A shown row reads differently in the reloaded history: it changes where
     // it is, without the whole reload that blanked the chat (#1358).
     async "takes a changed row in place, without reloading the chat"() {
