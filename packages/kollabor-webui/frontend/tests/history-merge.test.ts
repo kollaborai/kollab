@@ -1257,3 +1257,39 @@ test("a settled reply stands for its saved rows when its send is saved before th
   assert.deepEqual(rows.map((row) => row.id), ["user-s1-0", "assistant-s1-1", "history-73"]);
   assert.equal(rows[1], answer);
 });
+
+test("a message another sender put into the turn does not end the turn its reply stands for", () => {
+  // The page's send (row 1), a message another client sent mid-turn (row 28)
+  // and the reply the page streamed, which the engine matched to row 72.
+  const call = (id: string) => ({ type: "tool-call", toolCallId: id, result: "ok" });
+  const sent = drawn("user-s1-0", "user", "go", 1);
+  const other = saved(28, "Hello");
+  const answer = drawn("assistant-s1-1", "assistant", [call("c1"), call("c2"), call("c3"), ...words("All done")], 72);
+  const shown = [sent, other, answer];
+  const rounds = [reply(27, [call("c1")]), reply(70, [call("c2")]), reply(71, [call("c3")]), reply(72, words("All done"))];
+  // A sync while the page's next run streams: the turn's saved rows are the reply's.
+  assert.deepEqual(mergeMissingHistoryMessages(shown, rounds).added, []);
+  // Rebuilt on a reload that holds only the newest rows.
+  const rows = rebaseOntoHistory(shown, [...rounds.slice(1), saved(73, "next")], 74);
+  assert.deepEqual(rows.map((row) => row.id), ["user-s1-0", "history-28", "assistant-s1-1", "history-73"]);
+});
+
+test("a reply cut short keeps its turn when another sender's message sits before it", () => {
+  // The stream dropped: the send and the reply are as the page drew them.
+  const call = (id: string) => ({ type: "tool-call", toolCallId: id, result: "ok" });
+  const sent = mine("user-s1-0", "go", "r1");
+  const answer = { id: "assistant-s1-1", role: "assistant", content: [call("c1"), ...words("Working")] };
+  const loaded = [
+    named(saved(4, "go"), { requestIds: ["r1"] }), reply(5, [call("c1")]),
+    named(saved(6, "Hello"), { requestIds: ["r9"] }), reply(7, words("Working on it")),
+  ];
+  // Shown in saved order, the other sender's message between the send and the reply.
+  // History holds all the reply shows: the turn's saved rows take its place, once.
+  assert.deepEqual(rebaseOntoHistory([sent, loaded[2], answer], loaded, 8).map((row) => row.id),
+    ["user-s1-0", "history-5", "history-6", "history-7"]);
+  // Words history does not hold yet: the reply stays after its send and
+  // stands for the saved call it drew.
+  const ahead = { ...answer, content: [call("c1"), ...words("Working hard")] };
+  assert.deepEqual(rebaseOntoHistory([sent, loaded[2], ahead], loaded, 8).map((row) => row.id),
+    ["user-s1-0", "assistant-s1-1", "history-6", "history-7"]);
+});
