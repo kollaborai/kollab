@@ -134,17 +134,19 @@ const drawnBy = (reply: Message, row: Message): boolean => {
 
 /**
  * A reply the page's own run drew and where its turn sits in saved history:
- * after its send (`after`) and up to its own saved row (`before`). The daemon
- * runs one turn at a time, so the assistant rows saved in between are this
- * reply's turn, whatever call ids their provider reuses (#1358).
+ * after its send (`after`) and up to its own saved row or the next turn the
+ * page ran (`before`). The daemon runs one turn at a time, so the assistant
+ * rows saved in between are this reply's turn, whatever call ids their
+ * provider reuses (#1358). `streaming`: the page's last reply, with no saved
+ * row yet: its stream may still be writing it.
  */
-type OwnTurn = { reply: Message; after: number; before: number };
+type OwnTurn = { reply: Message; after: number; before: number; streaming: boolean };
 
 /**
  * The page's own turns that saved history can place: a reply whose send has a
  * saved position. A reply nothing places hides no row.
  */
-const ownTurns = (shown: ReadonlyArray<Message>, sentAt: (send: Message) => number | null = historyIndex): OwnTurn[] => {
+const ownTurns = (shown: ReadonlyArray<Message>): OwnTurn[] => {
   const turns: OwnTurn[] = [];
   let sends: Message[] = [];
   for (const message of shown) {
@@ -152,8 +154,15 @@ const ownTurns = (shown: ReadonlyArray<Message>, sentAt: (send: Message) => numb
     const own = TRANSIENT_ROW_ID.test(String(message.id ?? "")) || message.metadata?.isOptimistic === true;
     if (own && transientRole(message) === "user") { sends.push(message); continue; }
     if (own && transientRole(message) === "assistant") {
-      const placed = sends.map(sentAt).filter((index): index is number => index !== null);
-      if (placed.length) turns.push({ reply: message, after: Math.min(...placed), before: historyIndex(message) ?? Infinity });
+      const placed = sends.map(historyIndex).filter((index): index is number => index !== null);
+      if (placed.length) {
+        const after = Math.min(...placed);
+        // An earlier turn ends where this one starts.
+        const earlier = turns.at(-1);
+        if (earlier) { earlier.before = Math.min(earlier.before, after); earlier.streaming = false; }
+        const saved = historyIndex(message);
+        turns.push({ reply: message, after, before: saved ?? Infinity, streaming: saved === null });
+      }
     }
     sends = [];
   }
@@ -161,17 +170,17 @@ const ownTurns = (shown: ReadonlyArray<Message>, sentAt: (send: Message) => numb
 };
 
 /**
- * A saved assistant row one of the page's own replies stands for. A reply
+ * A saved assistant row one of the page's own replies stands for. The reply
  * still being written stands for every assistant row of its turn: the stream
  * draws them, and a row saved a moment before its words reach the page must not
- * show next to them. A reply with its saved position stands for the rows it
- * shows: their tool calls and words.
+ * show next to them. Any other reply stands for the rows it shows: their tool
+ * calls and words.
  */
 const drawnInOwnTurn = (turns: ReadonlyArray<OwnTurn>, row: Message): boolean => {
   if (transientRole(row) !== "assistant") return false;
   const index = historyIndex(row);
   return index !== null && turns.some((turn) => turn.after < index && index < turn.before &&
-    (turn.before === Infinity || drawnBy(turn.reply, row)));
+    (turn.streaming || drawnBy(turn.reply, row)));
 };
 
 /** Insert newly reached history rows without dropping previously shown rows. */
@@ -876,7 +885,7 @@ export function rebaseOntoHistory<T extends Message>(
     stands.push({ reply: row, after });
   }
 
-  const settled = ownTurns([...slots.values()]).filter((turn) => turn.before !== Infinity);
+  const settled = ownTurns([...slots.values()]).filter((turn) => !turn.streaming);
   const used = new Set<string | undefined>([...before, ...slots.values(), ...waiting.map((item) => item.row), ...last]
     .map((row) => row.id));
   waiting.sort((left, right) => left.after - right.after);
