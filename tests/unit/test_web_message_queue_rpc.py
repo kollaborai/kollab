@@ -221,3 +221,227 @@ async def test_concurrent_acquisition_of_same_scope_returns_one_queue():
     first, second = await asyncio.gather(get_queue(), get_queue())
     assert first is second
     assert registry.scope_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ("enqueue", "remove", "settle", "release"))
+async def test_replayed_mutation_never_notifies_an_old_revision(mutation):
+    registry = WebMessageQueueRegistry(max_scopes=2)
+    server = RpcServer()
+    changes = asyncio.Queue(maxsize=64)
+    register_web_message_queue_handlers(
+        server,
+        registry,
+        resolve_scope=lambda _params: "authorized-scope-a",
+        on_change=changes.put_nowait,
+    )
+
+    async def allocate(item_count: int) -> dict:
+        response = await _rpc_call(
+            server,
+            "state.web_queue.allocate_ids",
+            {"item_count": item_count, "operation_count": 8},
+        )
+        assert response["error"] is None
+        return response["result"]
+
+    async def enqueue(ids: dict, *, operation_index: int = 0) -> None:
+        response = await _rpc_call(
+            server,
+            "state.web_queue.enqueue_batch",
+            {
+                "operation_id": ids["operation_ids"][operation_index],
+                "batch_id": ids["batch_id"],
+                "items": [
+                    {
+                        "request_id": request_id,
+                        "payload_b64": base64.b64encode(b"private").decode("ascii"),
+                    }
+                    for request_id in ids["request_ids"]
+                ],
+            },
+        )
+        assert response["error"] is None
+
+    replay_params: dict
+    if mutation == "enqueue":
+        replay_ids = await allocate(1)
+        await enqueue(replay_ids)
+        later_ids = await allocate(1)
+        await enqueue(later_ids)
+        replay_params = {
+            "operation_id": replay_ids["operation_ids"][0],
+            "batch_id": replay_ids["batch_id"],
+            "items": [
+                {
+                    "request_id": replay_ids["request_ids"][0],
+                    "payload_b64": base64.b64encode(b"private").decode("ascii"),
+                }
+            ],
+        }
+        replay_method = "state.web_queue.enqueue_batch"
+    elif mutation == "remove":
+        ids = await allocate(2)
+        await enqueue(ids)
+        replay_params = {
+            "operation_id": ids["operation_ids"][1],
+            "request_id": ids["request_ids"][0],
+        }
+        first_remove = await _rpc_call(
+            server, "state.web_queue.remove_item", replay_params
+        )
+        assert first_remove["error"] is None
+        second_remove = await _rpc_call(
+            server,
+            "state.web_queue.remove_item",
+            {
+                "operation_id": ids["operation_ids"][2],
+                "request_id": ids["request_ids"][1],
+            },
+        )
+        assert second_remove["error"] is None
+        replay_method = "state.web_queue.remove_item"
+    elif mutation == "settle":
+        ids = await allocate(2)
+        await enqueue(ids)
+        claim = await _rpc_call(
+            server,
+            "state.web_queue.claim_batch",
+            {
+                "operation_id": ids["operation_ids"][1],
+                "batch_id": ids["batch_id"],
+            },
+        )
+        item = await _rpc_call(
+            server,
+            "state.web_queue.claim_next_item",
+            {
+                "operation_id": ids["operation_ids"][2],
+                "claim_id": claim["result"]["claim_id"],
+            },
+        )
+        replay_params = {
+            "operation_id": ids["operation_ids"][3],
+            "attempt_id": item["result"]["attempt_id"],
+            "outcome": "accepted",
+        }
+        settled = await _rpc_call(server, "state.web_queue.settle_item", replay_params)
+        assert settled["error"] is None
+        later_ids = await allocate(1)
+        await enqueue(later_ids)
+        replay_method = "state.web_queue.settle_item"
+    else:
+        ids = await allocate(1)
+        await enqueue(ids)
+        claim = await _rpc_call(
+            server,
+            "state.web_queue.claim_batch",
+            {
+                "operation_id": ids["operation_ids"][1],
+                "batch_id": ids["batch_id"],
+            },
+        )
+        replay_params = {
+            "operation_id": ids["operation_ids"][2],
+            "claim_id": claim["result"]["claim_id"],
+        }
+        released = await _rpc_call(
+            server, "state.web_queue.release_claim", replay_params
+        )
+        assert released["error"] is None
+        later_ids = await allocate(1)
+        await enqueue(later_ids)
+        replay_method = "state.web_queue.release_claim"
+
+    replayed = await _rpc_call(server, replay_method, replay_params)
+    assert replayed["error"] is None
+    snapshot = await _rpc_call(server, "state.web_queue.snapshot", {})
+    current_revision = snapshot["result"]["revision"]
+    assert replayed["result"]["revision"] < current_revision
+
+    emitted = []
+    while not changes.empty():
+        emitted.append(changes.get_nowait())
+    assert not emitted or emitted[-1]["revision"] == current_revision
+
+
+@pytest.mark.asyncio
+async def test_rpc_rejects_async_change_notifier_without_starting_or_waiting_for_it():
+    registry = WebMessageQueueRegistry(max_scopes=1)
+    server = RpcServer()
+    started = asyncio.Event()
+
+    async def hanging_notifier(_metadata: dict) -> None:
+        started.set()
+        await asyncio.Future()
+
+    with pytest.raises(TypeError, match="bounded asyncio.Queue.put_nowait"):
+        register_web_message_queue_handlers(
+            server,
+            registry,
+            resolve_scope=lambda _params: "authorized-scope-a",
+            on_change=hanging_notifier,
+        )
+
+    assert not started.is_set()
+    assert registry.scope_count == 0
+
+
+def test_rpc_rejects_unbounded_change_event_queue():
+    with pytest.raises(ValueError, match="finite maxsize"):
+        register_web_message_queue_handlers(
+            RpcServer(),
+            WebMessageQueueRegistry(max_scopes=1),
+            resolve_scope=lambda _params: "authorized-scope-a",
+            on_change=asyncio.Queue().put_nowait,
+        )
+
+
+@pytest.mark.asyncio
+async def test_full_change_buffer_drops_hints_and_snapshot_remains_authoritative():
+    registry = WebMessageQueueRegistry(max_scopes=1)
+    server = RpcServer()
+    changes = asyncio.Queue(maxsize=1)
+    register_web_message_queue_handlers(
+        server,
+        registry,
+        resolve_scope=lambda _params: "authorized-scope-a",
+        on_change=changes.put_nowait,
+    )
+
+    async def enqueue_one() -> str:
+        minted = await _rpc_call(
+            server,
+            "state.web_queue.allocate_ids",
+            {"item_count": 1, "operation_count": 1},
+        )
+        assert minted["error"] is None
+        ids = minted["result"]
+        enqueued = await _rpc_call(
+            server,
+            "state.web_queue.enqueue_batch",
+            {
+                "operation_id": ids["operation_ids"][0],
+                "batch_id": ids["batch_id"],
+                "items": [
+                    {
+                        "request_id": ids["request_ids"][0],
+                        "payload_b64": base64.b64encode(b"queued").decode("ascii"),
+                    }
+                ],
+            },
+        )
+        assert enqueued["error"] is None
+        return ids["batch_id"]
+
+    first_batch = await enqueue_one()
+    second_batch = await enqueue_one()
+    assert changes.qsize() == 1
+    assert changes.get_nowait()["revision"] == 1
+
+    snapshot = await _rpc_call(server, "state.web_queue.snapshot", {})
+    assert snapshot["result"]["revision"] == 2
+    assert [batch["batch_id"] for batch in snapshot["result"]["batches"]] == [
+        first_batch,
+        second_batch,
+    ]

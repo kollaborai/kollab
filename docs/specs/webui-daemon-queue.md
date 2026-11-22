@@ -18,9 +18,13 @@ that survives page and engine/session reloads while that daemon process remains
 alive. Queue changes are atomic, idempotent, visible through a revisioned
 snapshot, and can be claimed or removed without splitting a batch.
 
-This spec implements only the in-memory queue state primitive. It does not wire
-RPCs, event fanout, HTTP routes, WebUI UI, native queue admission, ACP steering,
-or provider execution. Daemon-process restart persistence is not promised.
+This slice includes the in-memory queue primitive, a bounded per-scope registry,
+and a JSON-safe handler registrar for the daemon's existing `RpcServer`. It does
+not yet register those handlers in the Hub daemon lifecycle, add
+`RemoteStateService` client methods, bridge queue-change events to the engine
+session stream, change HTTP routes or the WebUI, or connect claims to native
+queue admission, ACP steering, or provider execution. Daemon-process restart
+persistence is not promised.
 
 ## What people see
 
@@ -41,8 +45,10 @@ scope observe the same queue. The primitive stores opaque `bytes` payloads,
 never parses them, and excludes payloads from reprs and error messages. It does
 not log message content.
 
-The queue mints stable `operation_id`, `batch_id`, and `request_id` tokens for
-one daemon incarnation. Each token has the form
+Each scoped queue mints stable `operation_id`, `batch_id`, and `request_id`
+tokens for its current queue incarnation. A queue instance remains stable while
+retained by the daemon registry; idle empty queues may be retired only after
+their full retry lease expires. Each token has the form
 `kind-incarnation-monotonic-nanoseconds-nonce-mac`; all fields use letters,
 digits, `_`, or `-`, so `request_id` passes the WebUI transport's client-ID
 predicate `_CLIENT_REQUEST_ID` in
@@ -65,14 +71,63 @@ process-local and discarded at daemon restart.
 Enqueue validates the whole batch before committing it; no prefix can be
 accepted. A batch envelope preserves item order and receives one queue sequence.
 
+`WebMessageQueueRegistry` bounds the number of retained conversation/principal
+queues (default 16). When full, it may retire a scope only if that queue is
+empty, has no active or in-doubt claim, all operation receipts and entity
+tombstones are beyond their retry leases, the latest ID it minted is past its
+retry lease (or the queue has minted no IDs), and no handler holds a registry
+lease. Otherwise a new scope is rejected with `QueueScopeCapacityExceeded`; no
+pending work is evicted. At the defaults, the registry bounds pending payload
+capacity to 128 MiB across all scopes, plus bounded IDs, receipts, and Python
+object overhead.
+
+`register_web_message_queue_handlers(rpc_server, registry, resolve_scope=...)`
+adds these JSON RPC methods:
+
+- `state.web_queue.allocate_ids` returns operation IDs, one batch ID, and the
+  requested item IDs before enqueue.
+- `state.web_queue.enqueue_batch` takes opaque payloads as base64 and commits
+  the full ordered envelope atomically.
+- `state.web_queue.snapshot` returns progress and base64 payloads for authorized
+  display/reconciliation.
+- `state.web_queue.claim_next`, `claim_batch`, `claim_next_item`,
+  `item_payload`, `settle_item`, `remove_item`, and `release_claim` mirror the
+  state primitive's claim and mutation contracts.
+
+The required `resolve_scope` callback is the authorization boundary: it must
+return an opaque canonical scope derived from trusted caller authorization and
+conversation identity. Handler parameters never directly select a scope. The
+adapter itself does not enforce caller roles. The current `RpcServer` handler
+signature supplies only the request parameter dictionary, so daemon wiring must
+provide a resolver that can validate the relevant caller/session authority. An
+optional `on_change` must be the built-in `put_nowait` method of a finite
+`asyncio.Queue`; arbitrary or async callbacks are rejected. The adapter reads
+the current queue revision for invalidation metadata, so replayed operations
+cannot publish an older receipt revision. Queue-full hints are dropped. There
+are no detached notifier tasks and notification delivery is not guaranteed.
+Snapshot RPC is authoritative; event-driven integration remains blocked until
+consumers have a coalescing/reconciliation contract that recovers from dropped
+hints. Polling or explicit snapshot reconciliation is required meanwhile. The
+event metadata never includes payloads.
+
 The snapshot is `{scope_id, incarnation, revision, batches}`. Each batch has
 an ordered list of remaining items; each item reports `queued`, `dispatching`,
 or `in_doubt`. Accepted items are removed from pending state, so a confirmed
 prefix cannot be replayed. Receipts also carry `scope_id`. The process-local
-`incarnation` is new for each daemon lifetime; `revision` increments once per
+`incarnation` identifies the scoped queue instance and changes if an expired
+idle queue is retired or the daemon restarts; `revision` increments once per
 committed visible mutation and starts at zero in a new incarnation. Pages
-subscribe to change events, then reconcile snapshots by incarnation and
+may receive revision hints, then reconcile snapshots by incarnation and
 revision.
+
+`snapshot()` is for authorized UI display and reconciliation only. Its items
+include opaque payload bytes, including bytes for an `in_doubt` item, so the UI
+can render the original message and its status. A snapshot is never a provider
+dispatch source. Provider input may come only from `item_payload(attempt_id)`
+while that attempt is currently dispatching; the method refuses in-doubt or
+otherwise inactive attempts. This primitive does not authenticate RPC callers
+or enforce roles. Every RPC, including snapshot and `item_payload`, must enforce
+the authorized principal and canonical conversation scope before reading data.
 
 `claim_next` atomically claims the oldest eligible envelope. `claim_batch(...,
 send_now=True)` atomically claims the named queued envelope and moves it ahead
@@ -133,6 +188,13 @@ must surface it and must not log payloads.
   queue snapshot still contains the pending batch.
 - If the daemon process restarts, then its in-memory queue is empty and has a
   new incarnation; no persistence claim is made.
+- If a scoped queue is empty and has no unexpired receipts, tombstones, minted
+  IDs, or active registry leases, then the daemon may retire it under registry
+  pressure; later access gets a new queue incarnation and old IDs cannot mutate
+  it.
+- If registry scope capacity is full and no scope satisfies every retirement
+  condition, then a new scope receives explicit bounded rejection and retained
+  queue state remains intact.
 - If a retried enqueue uses the same operation ID and payload, then the same
   receipt is returned and the batch appears once.
 - If an operation or entity retry lease expires, then the old ID is explicitly
@@ -214,7 +276,20 @@ prefixes, in-doubt middle items, recoverable suffixes under both explicit
 resolution outcomes, removal/claim races, pre-dispatch claim release, concurrent
 release/item-claim winner selection, reserved lifecycle capacity, retry-lease
 expiration, and bounded receipt/tombstone pruning with stale-ID rejection.
-Live proof is not part of this primitive-only change.
+RPC adapter tests cover JSON round-trips, trusted scope resolution, refusal of
+caller-selected scope IDs, registry contention, immediate retirement of
+snapshot-only scopes, lease-safe retirement after IDs are issued, current
+revision hints on replayed enqueue/remove/settle/release, rejection of async
+and unbounded notifier callbacks, and bounded overflow with snapshot
+reconciliation. Queue tests bound consumption of oversized item iterables to
+the configured batch limit plus one lookahead.
+The primitive test also confirms an authorized-display snapshot retains an
+in-doubt item's content and status while `item_payload` and the next-item claim
+refuse to retry it. The integration PR must test that each RPC rejects
+unauthorized principals and cross-conversation access, and that provider input
+is sourced only through `item_payload` for the active dispatching attempt. The
+primitive itself does not enforce caller roles. Live proof is not part of this
+primitive-only change.
 
 ## Docs and changelog fragment
 
@@ -228,7 +303,17 @@ to users.
   mint queue IDs before admission, preserve each exact operation ID through
   RPC retries within its lease, and reconcile snapshots when a retry returns
   stale. Backend-specific multi-message steering semantics remain unresolved.
+- Integration must register the handlers and registry once for the daemon
+  lifetime, provide a trusted per-principal/canonical-conversation scope
+  resolver, add remote client methods, and surface explicit scope-capacity
+  rejection.
+- Integration must publish revision-only queue invalidations to the current
+  session event stream and have the WebUI reconcile via `snapshot`; that path is
+  not wired by this slice.
 - Integration must define how provider evidence resolves an in-doubt claim.
+- Integration must enforce per-principal and canonical-conversation
+  authorization on snapshot, `item_payload`, and mutation RPCs; the primitive
+  only isolates queues by its caller-supplied scope ID.
 - Integration must decide how queued attachments remain readable while waiting.
 - This primitive exposes synchronous ID factories; the daemon RPC contract must
   make those IDs available to the WebUI before enqueue and mutation calls.
