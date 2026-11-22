@@ -1203,8 +1203,11 @@ test("a send saved before the loaded window keeps its place when the thread is r
   assert.deepEqual(rows.map((row) => row.id), ["history-3", "user-s1-1", "assistant-s1-2", "history-40", "user-s1-3", "assistant-s1-4"]);
   assert.equal(rows[1], first);
   assert.equal(rows[2], drawnCalls);
-  // Not knowing where the first send is saved, it reads as not saved yet and goes last.
-  assert.deepEqual(rebaseOntoHistory(shown, loaded, 43).map((row) => row.id).at(-1), "assistant-s1-2");
+  // Not knowing where the first send is saved, it reads as not saved: it and
+  // what its run drew stay ahead of the second send, as they were shown, and
+  // nothing places the saved row of its turn.
+  assert.deepEqual(rebaseOntoHistory(shown, loaded, 43).map((row) => row.id),
+    ["history-3", "history-40", "user-s1-1", "assistant-s1-2", "user-s1-3", "assistant-s1-4"]);
 });
 
 test("a send waiting behind the running turn keeps its row id while the rows ahead of it change", () => {

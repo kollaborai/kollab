@@ -889,6 +889,16 @@ export function rebaseOntoHistory<T extends Message>(
   const waiting: Array<{ row: T; after: number }> = [];   // replies history does not hold yet, behind their sends
   const taken: Array<{ id: T["id"]; after: number }> = []; // replies history holds whole, and where their turns start
   const last: T[] = [];                                    // rows history does not hold, in the order shown
+  // A row history does not hold stays ahead of the rows it was shown ahead
+  // of: a message the daemon never saved (its turn was stopped at once) is
+  // older than the turns saved after it, not the newest row.
+  let unplaced: T[] = [];                                      // such rows, until a later row history holds
+  const ahead = new Map<string, T[]>();                    // and the saved row they stand before
+  const place = (key: string, row: T) => {
+    slots.set(key, row);
+    if (unplaced.length) { ahead.set(key, unplaced); unplaced = []; }
+  };
+  const older = (row: T) => { before.push(...unplaced, row); unplaced = []; };
   const stands: Array<{ reply: T; after: number }> = [];  // those replies and the saved rows they already show
   let sends: number[] = [];                                // saved positions of the sends before the next reply
   let unsaved = false;                                     // one of them has no saved row yet
@@ -903,18 +913,18 @@ export function rebaseOntoHistory<T extends Message>(
     const turnSends = sends;
     const turnUnsaved = unsaved;
     if (transientRole(row) === "assistant") { sends = []; unsaved = false; }
-    if (compactionArchiveOrder(row) !== null) { before.push(row); continue; }
+    if (compactionArchiveOrder(row) !== null) { older(row); continue; }
     const key = sourceId(row);
     if (key !== null) {
       const index = historyIndex(row);
       if (send && index !== null) sends.push(index);
-      if (index !== null && index < start) { before.push(row); continue; }
-      if (index !== null && index >= end) { last.push(row); continue; }
+      if (index !== null && index < start) { older(row); continue; }
+      if (index !== null && index >= end) { last.push(...unplaced, row); unplaced = []; continue; }
       const saved = bySource.get(key);
       if (!saved || slots.has(key)) continue;              // gone from history, or shown twice
       // The run's own reply keeps what it streamed: its tool calls sit inside it.
       const streamed = reply && typeof row.metadata?.custom?.historySourceId !== "string";
-      slots.set(key, streamed || same(row, saved) ? row : displayRow(saved, row.id));
+      place(key, streamed || same(row, saved) ? row : displayRow(saved, row.id));
       continue;
     }
     if (send) {
@@ -925,17 +935,17 @@ export function rebaseOntoHistory<T extends Message>(
         // Saved before the loaded window (a long turn pushed it out): it is an
         // older row like any other, and its turn starts there.
         const known = requestIdsOf(row).flatMap((id) => savedAt.has(id) ? [savedAt.get(id)!] : []);
-        if (known.length && Math.min(...known) < start) { sends.push(Math.min(...known)); before.push(row); continue; }
+        if (known.length && Math.min(...known) < start) { sends.push(Math.min(...known)); older(row); continue; }
         unsaved = true;
-        last.push(row);
+        unplaced.push(row);
         continue;
       }
       sends.push(index);
       // A row saved for two sends and shown whole takes the first of them.
-      if (!slots.has(savedKey)) slots.set(savedKey, drawnSend(saved, row));
+      if (!slots.has(savedKey)) place(savedKey, drawnSend(saved, row));
       continue;
     }
-    if (!reply || !turnSends.length) { last.push(row); continue; }
+    if (!reply || !turnSends.length) { unplaced.push(row); continue; }
     const after = Math.min(...turnSends);
     const parts = Array.isArray(row.content) ? row.content : [{ type: "text", text: String(row.content ?? "") }];
     const blank = (part: unknown) => !!part && typeof part === "object" &&
@@ -959,9 +969,10 @@ export function rebaseOntoHistory<T extends Message>(
 
   // The turns the page ran and history holds. A long turn's send can sit
   // before the loaded rows, with the older ones: it still starts its turn.
+  last.push(...unplaced);
   const settled = ownTurns([...before, ...slots.values()]).filter((turn) => !turn.streaming);
-  const used = new Set<string | undefined>([...before, ...slots.values(), ...waiting.map((item) => item.row), ...last]
-    .map((row) => row.id));
+  const used = new Set<string | undefined>([...before, ...slots.values(), ...[...ahead.values()].flat(),
+    ...waiting.map((item) => item.row), ...last].map((row) => row.id));
   waiting.sort((left, right) => left.after - right.after);
   taken.sort((left, right) => left.after - right.after);
   const rows: T[] = [...before];
@@ -971,7 +982,7 @@ export function rebaseOntoHistory<T extends Message>(
     if (!key || index === null) continue;
     while (waiting.length && waiting[0].after < index) rows.push(waiting.shift()!.row);
     const slot = slots.get(key);
-    if (slot) { rows.push(slot); continue; }
+    if (slot) { rows.push(...(ahead.get(key) ?? []), slot); continue; }
     if (transientRole(row) === "assistant") {
       if (drawnInOwnTurn(settled, row) || stands.some((item) => item.after < index && drawnBy(item.reply, row))) continue;
       // The first saved row of a reply's turn stands where the reply stood. It
