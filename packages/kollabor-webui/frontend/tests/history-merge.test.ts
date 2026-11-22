@@ -1155,3 +1155,19 @@ test("a rebuilt thread keeps a settled turn as the run drew it", () => {
   assert.equal(rows[1], answer);
   assert.deepEqual(rows[2].content, words("new words"));
 });
+
+test("an earlier turn the page ran ends where its next one starts", () => {
+  // The earlier reply has no saved row (its run ended early) and the page's
+  // next send is saved at 4: only the last reply may still be streaming.
+  const call = { type: "tool-call", toolCallId: "call_0", result: "ok" };
+  const shown = [
+    drawn("user-s1-0", "user", "a", 0), { id: "assistant-s1-1", role: "assistant", content: [call] },
+    drawn("user-s1-2", "user", "b", 4), { id: "assistant-s1-3", role: "assistant", content: [call] },
+  ];
+  const first = reply(1, [call]);
+  // Saved in the earlier turn, and nothing the earlier reply shows: it is added.
+  const unseen = reply(2, [{ type: "tool-call", toolCallId: "call_7", result: "ok" }]);
+  const own = reply(5, [call]);
+  const answer = reply(6, words("done"));
+  assert.deepEqual(mergeMissingHistoryMessages(shown, [first, unseen, own, answer]).added, [unseen]);
+});
