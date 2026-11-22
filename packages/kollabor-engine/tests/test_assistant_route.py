@@ -373,6 +373,7 @@ async def test_assistant_transport_preserves_state_through_real_state_proxy(
         if line.startswith("data: {")
     ]
     assert [frame["type"] for frame in frames] == [
+        "update-state",
         "part-start",
         "text-delta",
         "update-state",
@@ -383,21 +384,25 @@ async def test_assistant_transport_preserves_state_through_real_state_proxy(
         "part-finish",
         "message-finish",
     ]
-    assert frames[1]["path"] == [0]
-    assert frames[1]["textDelta"] == "thinking"
+    # The admitted send shows at once, before the daemon says anything (#1359).
+    admitted = [(op["path"], op["value"]) for op in frames[0]["operations"]]
+    assert [path for path, _ in admitted] == [["messages", "1"]]
+    assert admitted[0][1]["content"] == "hello"
+    assert frames[2]["path"] == [0]
+    assert frames[2]["textDelta"] == "thinking"
     # The first streamed event publishes at once; "hello" lands inside the
     # throttle window and rides the final publish.
-    mid_turn = [(op["path"], op["value"]) for op in frames[2]["operations"]]
-    assert [path for path, _ in mid_turn] == [["messages", "1"], ["messages", "2"]]
-    assert mid_turn[1][1]["content"] == [{"type": "reasoning", "text": "thinking"}]
-    assert frames[5]["path"] == [1]
-    assert frames[5]["textDelta"] == "hello"
-    assert frames[6]["operations"] == [
+    mid_turn = [(op["path"], op["value"]) for op in frames[3]["operations"]]
+    assert [path for path, _ in mid_turn] == [["messages", "2"]]
+    assert mid_turn[0][1]["content"] == [{"type": "reasoning", "text": "thinking"}]
+    assert frames[6]["path"] == [1]
+    assert frames[6]["textDelta"] == "hello"
+    assert frames[7]["operations"] == [
         {"type": "set", "path": ["messages"], "value": state["messages"]},
         {"type": "set", "path": ["synced"], "value": None},
         {"type": "set", "path": ["usage"], "value": state["usage"]},
     ]
-    assert frames[8]["finishReason"] == "stop"
+    assert frames[9]["finishReason"] == "stop"
     assert state["sessionId"] == initial_state["sessionId"]
     assert state["messages"] == [
         *prior_messages,
@@ -621,8 +626,10 @@ async def test_a_message_that_answers_a_shown_card_closes_it(monkeypatch, event,
         state,
     )
 
-    # The card closes as soon as its answer lands, before the turn goes on.
-    path, message = sets[0]
+    # The answering message shows at once (#1359); the card closes as soon as
+    # its answer lands, before the turn goes on.
+    assert sets[0][0] == ["messages", "2"] and sets[0][1]["content"] == "yes"
+    path, message = sets[1]
     assert path == ["messages", "1"]
     assert message["content"][0]["result"] == {"decision": decision, "scope": "once"}
     assert message["content"][0]["isError"] is (decision == "deny")
@@ -776,8 +783,9 @@ async def test_assistant_transport_publishes_running_tool_with_timing(monkeypatc
         ["synced"],
         ["usage"],
     ]
-    # tool_start: the user message and an in-flight assistant message, no result
-    # and no explicit status (the client shows it running while the run is open).
+    # Admission: the user message, before the daemon says anything (#1359).
+    # tool_start: an in-flight assistant message, no result and no explicit
+    # status (the client shows it running while the run is open).
     assert sets[0][1]["role"] == "user"
     running = sets[1][1]
     part = running["content"][0]
@@ -973,6 +981,8 @@ async def test_assistant_transport_throttles_streamed_text_publishes(monkeypatch
         ["synced"],
         ["usage"],
     ]
+    # The admitted send's publish does not start the throttle: "a" still
+    # publishes at once.
     assert sets[1][1]["content"] == [{"type": "text", "text": "a"}]
     assert sets[2][1][1]["content"] == [{"type": "text", "text": "abc"}]
 
@@ -1584,6 +1594,52 @@ async def test_new_admitted_turn_clears_previous_cancel_error(monkeypatch):
     assert state["messages"][0] == cancelled
     assert state["messages"][-1]["status"] == {"type": "complete", "reason": "stop"}
     assert captured["controller"].errors == []
+
+
+@pytest.mark.asyncio
+async def test_admitted_send_reaches_the_page_before_the_daemon_speaks(monkeypatch):
+    """The page drops its pending copy of a send at the first state it receives.
+
+    A daemon busy with another turn stays quiet long after it admits the send,
+    and clearing the last turn's error is already a state: without the send's
+    row in it, the message is gone from the chat until the daemon speaks (#1359).
+    """
+    session = _FakeSession([])
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    captured, _, drain_stream = _install_fake_assistant_stream(monkeypatch)
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{
+                "type": "add-message",
+                "message": {"id": "send-1", "parts": [{"type": "text", "text": "hello"}]},
+            }],
+            state={
+                "messages": [{"id": "history-0", "role": "user", "content": "earlier"}],
+                "error": "Run cancelled",
+            },
+        ),
+    )
+    run = asyncio.create_task(drain_stream(response.stream))
+    try:
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if session.send_message.await_count:
+                break
+        await asyncio.sleep(0.01)
+        state = captured["controller"].state
+        assert state["error"] == ""
+        # The reply's row comes with its first output: until then the page
+        # keeps the placeholder it already shows.
+        assert [row["id"] for row in state["messages"]] == ["history-0", "user-session-test-1"]
+        assert state["messages"][1]["content"] == "hello"
+        assert state["messages"][1]["metadata"] == {"custom": {"requestId": "send-1"}}
+    finally:
+        session._events.put_nowait({"type": "turn_complete"})
+        await run
+    final = captured["controller"].state["messages"]
+    assert [row["id"] for row in final] == ["history-0", "user-session-test-1", "assistant-session-test-2"]
+    assert final[-1]["status"] == {"type": "complete", "reason": "stop"}
 
 
 @pytest.mark.parametrize("status", ["completed", "failed"])
