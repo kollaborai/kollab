@@ -3,10 +3,10 @@ import test from "node:test";
 import { ApiError, EngineApi } from "../src/api.ts";
 import { cancelPendingPermission, pendingPermissions, permissionOwner, promptParkedSinceShown } from "../src/utils/permission-cancel.ts";
 
-const owner = (toolId: string, requestId = toolId, source = "acp") => ({ toolId, requestId, source });
+const owner = (toolId: string, requestId = toolId, source = "acp", parked = false) => ({ toolId, requestId, source, parked });
 const permission = (id: string, result?: unknown, status = "requires-action") => ({
   status: { type: status },
-  content: [{ type: "tool-call", toolName: "request_permission", args: { tool_id: id, request_id: `turn-${id}`, details: { source: "acp" } }, result }],
+  content: [{ type: "tool-call", toolName: "request_permission", args: { tool_id: id, request_id: `turn-${id}`, details: { source: "acp", parked: false } }, result }],
 });
 
 test("only unresolved permission parts expose their parent request owner", () => {
@@ -22,14 +22,14 @@ test("only unresolved permission parts expose their parent request owner", () =>
 test("live and restored permission args read the top-level turn owner, not nested detail metadata", () => {
   const liveArgs = {
     tool_id: "reused-tool", request_id: "parent-live", permission_id: "owner-live",
-    details: { source: "acp", request_id: "vendor-live" },
+    details: { source: "acp", request_id: "vendor-live", parked: false },
   };
   const restoredArgs = {
     tool_id: "reused-tool", request_id: "parent-restored", permission_id: "owner-restored",
     details: { source: "acp", request_id: "vendor-restored", parked: true },
   };
-  assert.deepEqual(permissionOwner(liveArgs), owner("reused-tool", "parent-live"));
-  assert.deepEqual(permissionOwner(restoredArgs), owner("reused-tool", "parent-restored"));
+  assert.deepEqual(permissionOwner(liveArgs), owner("reused-tool", "parent-live", "acp", false));
+  assert.deepEqual(permissionOwner(restoredArgs), owner("reused-tool", "parent-restored", "acp", true));
   assert.deepEqual(pendingPermissions([
     {
       status: { type: "requires-action" },
@@ -39,10 +39,23 @@ test("live and restored permission args read the top-level turn owner, not neste
       status: { type: "requires-action" },
       content: [{ type: "tool-call", toolName: "request_permission", args: restoredArgs }],
     },
-  ]), [owner("reused-tool", "parent-live"), owner("reused-tool", "parent-restored")]);
+  ]), [owner("reused-tool", "parent-live", "acp", false), owner("reused-tool", "parent-restored", "acp", true)]);
   assert.equal(permissionOwner({
     tool_id: "old-prompt", details: { source: "acp", request_id: "vendor-only" },
   })?.requestId, undefined, "nested provider metadata is not the parent request owner");
+});
+
+test("a parked prompt fails closed for request-scoped Stop", async () => {
+  const parked = [owner("same-tool", "old-turn", "acp", true)];
+  let reads = 0, cancellations = 0;
+  assert.equal(await cancelPendingPermission({
+    expected: parked,
+    current: () => parked,
+    readPending: async () => { reads++; return parked; },
+    cancel: async () => { cancellations++; return { cancelled: true }; },
+  }), false);
+  assert.equal(reads, 0);
+  assert.equal(cancellations, 0);
 });
 
 test("a stale click after resolution never fetches or cancels a replacement turn", async () => {

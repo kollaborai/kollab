@@ -861,6 +861,7 @@ def test_an_acp_stop_cancels_only_its_exact_request_owner():
                     "tool_id": "reused-tool",
                     "permission_id": permission_id,
                     **({"request_id": request_id} if request_id else {}),
+                    **({"parked": True} if request_id == "request-A" else {}),
                     "source": "acp",
                     "acp_options": [],
                 },
