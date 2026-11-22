@@ -257,9 +257,12 @@ try {
       });
       await t.page.evaluate((rows) => window.setHistory(rows), [row(0, "their-send")]);
       await t.waitUsers("hello|hello");
+      // The busy turn's reply was saved before this page's send: rows saved
+      // after it are the turn the page's own stream draws.
       await t.page.evaluate((rows) => window.setHistory(rows), [
-        row(0, "their-send"), row(1, mine),
-        { id: "history-2", role: "assistant", content: [{ type: "text", text: "Working" }] },
+        row(0, "their-send"),
+        { id: "history-1", role: "assistant", content: [{ type: "text", text: "Working" }] },
+        row(2, mine),
       ]);
       await t.waitImported("Working");
       await t.waitUsers("hello|hello");
@@ -277,11 +280,11 @@ try {
       const mine = await t.sentId();
       assert.ok(mine, "the send carried no message id");
       await t.page.evaluate((rows) => window.setHistory(rows), [
-        { id: "history-0-send-0", role: "user", content: [{ type: "text", text: "theirs" }],
+        { id: "history-0", role: "assistant", content: [{ type: "text", text: "Working" }] },
+        { id: "history-1-send-0", role: "user", content: [{ type: "text", text: "theirs" }],
           metadata: { custom: { requestIds: ["their-send"] } } },
-        { id: "history-0-send-1", role: "user", content: [{ type: "text", text: "hello" }],
+        { id: "history-1-send-1", role: "user", content: [{ type: "text", text: "hello" }],
           metadata: { custom: { requestIds: [mine] } } },
-        { id: "history-1", role: "assistant", content: [{ type: "text", text: "Working" }] },
       ]);
       await t.waitImported("Working");
       await t.waitUsers("theirs|hello");
@@ -299,11 +302,11 @@ try {
       const mine = await t.sentId();
       assert.ok(mine, "the send carried no message id");
       await t.page.evaluate((rows) => window.setHistory(rows), [
-        { id: "history-0-send-0", role: "user", content: [{ type: "text", text: "hello" }],
+        { id: "history-0", role: "assistant", content: [{ type: "text", text: "Working" }] },
+        { id: "history-1-send-0", role: "user", content: [{ type: "text", text: "hello" }],
           metadata: { custom: { requestIds: [mine] } } },
-        { id: "history-0-send-1", role: "user", content: [{ type: "text", text: "theirs" }],
+        { id: "history-1-send-1", role: "user", content: [{ type: "text", text: "theirs" }],
           metadata: { custom: { requestIds: ["their-send"] } } },
-        { id: "history-1", role: "assistant", content: [{ type: "text", text: "Working" }] },
       ]);
       await t.waitImported("Working");
       await t.waitUsers("theirs|hello");

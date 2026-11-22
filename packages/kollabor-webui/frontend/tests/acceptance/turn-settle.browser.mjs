@@ -74,6 +74,7 @@ try {
       users: await page.locator("#users").innerText(),
       branches: await page.locator("#branches .branched").count(),
       remounts: await page.locator("#remounts").innerText(),
+      errors: await page.locator("#errors").innerText(),
     });
     const setHistory = (messages) => page.evaluate((m) => window.setHistory(m), messages);
     const waitFor = async (check, label) => {
@@ -155,8 +156,9 @@ try {
     },
     // A run's stream ends early (an error) while the agent works on; the page
     // sends again, and the agent takes that into the same turn. Neither run's
-    // rows are matched to saved history, so the page must not draw a send next
-    // to its saved copy, and must take the saved turn once it is idle (#1359).
+    // rows are matched to saved history, so the page must not draw a send or
+    // the reply next to its saved copy, and must take the saved turn once it
+    // is idle, where it stands (#1359).
     async "shows each send once when a run ended before its turn did"() {
       const t = await open();
       const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
@@ -176,15 +178,75 @@ try {
       await t.setHistory([saved(0, "hello", first.id), { id: "history-1", role: "assistant", content: [call] },
         saved(2, "what", second.id)]);
       await t.holds((s) => s.users === "hello|what", "while the second send runs", 800);
+      // The stream writes the reply; its row was saved a moment earlier.
+      await t.push(state([{ type: "set", path: ["messages"], value: [...second.sent,
+        { id: `user-s1-${second.sent.length}`, role: "user", content: "what", metadata: { custom: { requestId: second.id } } },
+        { id: `assistant-s1-${second.sent.length + 1}`, role: "assistant", content: text("do") },
+      ] }]));
+      const history = [saved(0, "hello", first.id), { id: "history-1", role: "assistant", content: [call] },
+        saved(2, "what", second.id), row(3, "assistant", "done")];
+      await t.setHistory(history);
+      await t.holds((s) => s.users === "hello|what" && !s.assistant.includes("done"), "the reply saved before the stream wrote it", 800);
       await t.push(state([{ type: "set", path: ["messages"], value: [...second.sent,
         { id: `user-s1-${second.sent.length}`, role: "user", content: "what", metadata: { custom: { requestId: second.id } } },
         { id: `assistant-s1-${second.sent.length + 1}`, role: "assistant", content: text("done"), status: { type: "complete", reason: "stop" } },
       ] }, { type: "set", path: ["synced"], value: null }]));
       await t.end();
-      await t.setHistory([saved(0, "hello", first.id), { id: "history-1", role: "assistant", content: [call] },
-        saved(2, "what", second.id), row(3, "assistant", "done")]);
-      await t.waitFor((s) => s.users === "hello|what" && s.assistant === "done", "the saved turn once idle");
-      await t.holds((s) => s.users === "hello|what" && s.assistant === "done" && s.branches === 0, "after it settles");
+      await t.setHistory([...history]);
+      // The saved turn: the call's row, then the reply, each once, with no reload.
+      const once = (s) => s.users === "hello|what" && s.assistant.split("done").length === 2 &&
+        s.remounts === "0" && s.errors === "0";
+      await t.waitFor(once, "the saved turn once idle");
+      await t.holds(once, "after it settles");
+      // The thread is on its sync point again: a later turn another client ran shows.
+      await t.setHistory([...history, row(4, "user", "later"), row(5, "assistant", "Later answer")]);
+      await t.waitFor((s) => s.users === "hello|what|later" && s.assistant.includes("Later answer") && s.remounts === "0",
+        "a later sync");
+      await t.page.close();
+    },
+    // The page's request dropped mid-turn and the page only watches from then
+    // on: the saved turn takes the place of the rows its run left, in place.
+    async "takes the saved turn in place after its stream dropped"() {
+      const t = await open();
+      const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
+      const call = { type: "tool-call", toolCallId: "c1", toolName: "terminal", args: {}, argsText: "{}" };
+      await t.send();
+      const first = await t.sending();
+      await t.push(state([{ type: "set", path: ["messages"], value: [...first.sent,
+        { id: "user-s1-0", role: "user", content: "hello", metadata: { custom: { requestId: first.id } } },
+        { id: "assistant-s1-1", role: "assistant", content: [call] },
+      ] }]));
+      // No finish frame: the connection is gone.
+      await t.page.evaluate(() => window.transport.close());
+      await t.page.waitForFunction(() => document.getElementById("running")?.textContent === "idle");
+      await t.waitFor((s) => s.errors === "1", "the dropped stream's error");
+      const saved = { id: "history-0", role: "user", content: [{ type: "text", text: "hello" }],
+        metadata: { custom: { requestIds: [first.id] } } };
+      // Rows as the page builds them from history: every reply has its status.
+      const done = { type: "complete", reason: "stop" };
+      // The call is saved, its result is not in yet.
+      await t.setHistory([saved, { id: "history-1", role: "assistant", content: [call], status: done }]);
+      await t.holds((s) => s.users === "hello" && s.remounts === "0", "while the turn goes on");
+      await t.setHistory([saved, { id: "history-1", role: "assistant", content: [{ ...call, result: "ok" }], status: done },
+        { ...row(2, "assistant", "Working"), status: done }]);
+      const settled = (s) => s.users === "hello" && s.assistant.split("Working").length === 2 &&
+        s.remounts === "0" && s.errors === "0";
+      await t.waitFor(settled, "the saved turn");
+      await t.holds(settled, "after it settles");
+      await t.page.close();
+    },
+    // A shown row reads differently in the reloaded history: it changes where
+    // it is, without the whole reload that blanked the chat (#1358).
+    async "takes a changed row in place, without reloading the chat"() {
+      const t = await open();
+      await t.setHistory([row(0, "user", "go"), row(1, "assistant", "First words"), row(2, "user", "next")]);
+      await t.waitFor((s) => s.assistant === "First words", "seeded");
+      await t.setHistory([row(0, "user", "go"), row(1, "assistant", "Second words"), row(2, "user", "next")]);
+      await t.waitFor((s) => s.assistant === "Second words", "the changed row");
+      // A row history no longer has goes, and a new one shows.
+      await t.setHistory([row(0, "user", "go"), row(1, "assistant", "Second words"), row(2, "assistant", "More")]);
+      await t.waitFor((s) => s.users === "go" && s.assistant.includes("More"), "the dropped and the new row");
+      await t.holds((s) => s.remounts === "0", "without a reload");
       await t.page.close();
     },
     // A turn that ran a tool: the run drew its call inside the reply, and

@@ -9,9 +9,12 @@ import {
   mergeCompactionHistorySnapshot,
   mergeMissingHistoryMessages,
   reconcileBoundaryToolResults,
+  hasUnsettledRows,
   inFlightSendIdsFor,
+  rebaseOntoHistory,
   shownMessagesChanged,
   withoutInFlightSends,
+  withoutOwnTurnRows,
   withSavedCopies,
 } from "../src/history-merge.ts";
 import { historyContentToThreadContent } from "../src/history-content.ts";
@@ -1010,4 +1013,137 @@ test("a saved send the page already draws, in flight or not, is not added again"
   const copy = named(saved(0, "hello"), { requestIds: ["r1"] });
   const other = named(saved(1, "hello"), { requestIds: ["r2"] });
   assert.deepEqual(mergeMissingHistoryMessages([sent], [copy, other]).added, [other]);
+});
+
+// #1359: the words of a turn the page ran show once, whatever its run did.
+const words = (text: string) => [{ type: "text", text }];
+const reply = (index: number, content: unknown) => ({ id: `history-${index}`, role: "assistant", content });
+const mine = (id: string, text: string, requestId: string) =>
+  ({ id, role: "user", content: text, metadata: { custom: { requestId } } });
+
+test("a saved text row the settled reply already shows is not added again", () => {
+  // The agent answered, then went on (another message was steered in): the
+  // run's reply drew both answers, and history saves the first as a row of its
+  // own inside the turn.
+  const call = { type: "tool-call", toolCallId: "c1", result: "ok" };
+  const shown = [drawn("user-s1-0", "user", "go", 0),
+    drawn("assistant-s1-1", "assistant", [{ type: "text", text: "First answer." }, call, { type: "text", text: "Second answer." }], 4)];
+  const first = reply(2, words("First answer."));
+  const calls = reply(3, [call]);
+  assert.deepEqual(mergeMissingHistoryMessages(shown, [first, calls]).added, []);
+  // Words the reply does not show are another row's.
+  const other = reply(2, words("Something else."));
+  assert.deepEqual(mergeMissingHistoryMessages(shown, [other]).added, [other]);
+});
+
+test("while the page's run streams, the saved rows of its turn stay out", () => {
+  const sent = mine("user-s1-4", "hello", "r1");
+  const writing = { id: "assistant-s1-5", role: "assistant", content: words("Wor") };
+  const copy = named(saved(10, "hello"), { requestIds: ["r1"] });
+  const answer = reply(11, words("Working"));
+  const theirs = named(saved(12, "ping"), { requestIds: ["r9"] });
+  const older = reply(9, words("earlier turn"));
+  // The reply was saved a moment before its last words reached the page.
+  assert.deepEqual(withoutOwnTurnRows([sent, writing], [older, copy, answer, theirs], [older, copy, answer, theirs]),
+    [older, theirs]);
+  // Before the send is saved nothing places the turn: every row is another's.
+  assert.deepEqual(withoutOwnTurnRows([sent, writing], [older], [older]), [older]);
+  // A page with no row of its own takes them all.
+  assert.deepEqual(withoutOwnTurnRows([saved(1, "x")], [copy, answer], [copy, answer]), [copy, answer]);
+});
+
+test("a send left by a run that ended early keeps its saved copy out while a later send runs", () => {
+  // The first run's stream dropped; its rows stayed. A second send is now in flight.
+  const first = mine("user-s1-4", "one", "r1");
+  const partial = { id: "assistant-s1-5", role: "assistant", content: [{ type: "tool-call", toolCallId: "c1" }] };
+  const second = { ...mine("user-s1-6", "two", "r2"), metadata: { isOptimistic: true, custom: { requestId: "r2" } } };
+  const history = [named(saved(10, "one"), { requestIds: ["r1"] }), reply(11, [{ type: "tool-call", toolCallId: "c1", result: "ok" }]),
+    named(saved(12, "two"), { requestIds: ["r2"] }), reply(13, words("done"))];
+  assert.deepEqual(withoutOwnTurnRows([first, partial, second], history, history), []);
+});
+
+test("a run that ended before its turn is rebuilt on the saved history under the ids it drew", () => {
+  const call = { type: "tool-call", toolCallId: "c1", result: "ok" };
+  const before = { id: "history-0", role: "user", content: words("earlier") };
+  const shown = [before, mine("user-s1-1", "one", "r1"),
+    { id: "assistant-s1-2", role: "assistant", content: [{ type: "tool-call", toolCallId: "c1" }] },
+    mine("user-s1-3", "two", "r2"), { id: "assistant-s1-4", role: "assistant", content: words("done") }];
+  const loaded = [before, named({ id: "history-1", role: "user", content: words("one") }, { requestIds: ["r1"] }),
+    reply(2, [call]), named({ id: "history-3", role: "user", content: words("two") }, { requestIds: ["r2"] }),
+    reply(4, words("done"))];
+  const rows = rebaseOntoHistory(shown, loaded, 5);
+  // Each send keeps the id it was drawn with; each reply is its saved row.
+  assert.deepEqual(rows.map((row) => row.id), ["history-0", "user-s1-1", "history-2", "user-s1-3", "history-4"]);
+  assert.deepEqual(rows.map(historyMessageIndex), [0, 1, 2, 3, 4]);
+  assert.deepEqual(rows.map((row) => row.content), loaded.map((row) => row.content));
+  assert.equal(rows[0], before);
+  assert.equal(hasUnsettledRows(rows), false);
+  // Already rebuilt: the same rows again.
+  assert.deepEqual(rebaseOntoHistory(rows, loaded, 5), rows);
+});
+
+test("a reply history does not hold yet stays behind its send, without the rows it already shows", () => {
+  // The stream dropped mid-reply: the page shows a call and half an answer,
+  // history has the call's row only.
+  const call = { type: "tool-call", toolCallId: "c1", result: "ok" };
+  const half = { id: "assistant-s1-2", role: "assistant", content: [call, { type: "text", text: "Half an ans" }] };
+  const shown = [mine("user-s1-1", "one", "r1"), half];
+  const sent = named({ id: "history-1", role: "user", content: words("one") }, { requestIds: ["r1"] });
+  const rows = rebaseOntoHistory(shown, [sent, reply(2, [call])], 3);
+  assert.deepEqual(rows.map((row) => row.id), ["user-s1-1", "assistant-s1-2"]);
+  assert.equal(rows[1], half);
+  assert.equal(hasUnsettledRows(rows), true);
+  // A row the reply does not show is added behind it.
+  const more = reply(3, [{ type: "tool-call", toolCallId: "c2", result: "ok" }]);
+  assert.deepEqual(rebaseOntoHistory(shown, [sent, reply(2, [call]), more], 4).map((row) => row.id),
+    ["user-s1-1", "assistant-s1-2", "history-3"]);
+  // Once history holds the whole answer, it replaces the reply.
+  const whole = reply(3, words("Half an answer."));
+  assert.deepEqual(rebaseOntoHistory(shown, [sent, reply(2, [call]), whole], 4).map((row) => row.id),
+    ["user-s1-1", "history-2", "history-3"]);
+});
+
+test("a send history does not hold yet stays last, with its reply", () => {
+  const before = { id: "history-0", role: "user", content: words("earlier") };
+  const sent = mine("user-s1-1", "one", "r1");
+  const answer = { id: "assistant-s1-2", role: "assistant", content: words("done") };
+  const rows = rebaseOntoHistory([before, sent, answer], [before], 1);
+  assert.deepEqual(rows, [before, sent, answer]);
+  assert.equal(rows[1], sent);
+});
+
+test("a reply that drew nothing goes once its send is saved", () => {
+  const sent = named({ id: "history-1", role: "user", content: words("one") }, { requestIds: ["r1"] });
+  const rows = rebaseOntoHistory([mine("user-s1-1", "one", "r1"), { id: "assistant-s1-2", role: "assistant", content: "" }], [sent], 2);
+  assert.deepEqual(rows.map((row) => row.id), ["user-s1-1"]);
+});
+
+test("a rebuilt thread takes changed rows in place and drops rows history no longer has", () => {
+  const user = { id: "history-0", role: "user", content: words("go") };
+  const pendingCall = reply(1, [{ type: "tool-call", toolCallId: "t1" }]);
+  const heard = reply(2, words("Let me check"));
+  const shown = [user, pendingCall, heard];
+  const done = reply(1, [{ type: "tool-call", toolCallId: "t1", result: "ok" }]);
+  const next = { id: "history-2", role: "user", content: words("stop") };
+  // The call got its result; a talk-over took the reply away and a new row has its place.
+  const rows = rebaseOntoHistory(shown, [user, done, next], 3);
+  assert.deepEqual(rows, [user, done, next]);
+  assert.equal(rows[0], user);
+  // Older pages and rows saved after the history was read stay as they are.
+  const older = { id: "history-0", role: "user", content: words("old page") };
+  const late = drawn("user-s1-9", "user", "late", 7);
+  assert.deepEqual(rebaseOntoHistory([older, reply(5, words("a")), late], [reply(5, words("b"))], 6).map((row) => row.id),
+    ["history-0", "history-5", "user-s1-9"]);
+});
+
+test("a rebuilt thread keeps a settled turn as the run drew it", () => {
+  const call = { type: "tool-call", toolCallId: "c1", result: "ok" };
+  const answer = drawn("assistant-s1-1", "assistant", [call, { type: "text", text: "Working" }], 2);
+  const shown = [drawn("user-s1-0", "user", "hello", 0), answer, { id: "history-3", role: "user", content: words("old words") }];
+  const loaded = [{ id: "history-0", role: "user", content: words("hello") }, reply(1, [call]), reply(2, words("Working")),
+    { id: "history-3", role: "user", content: words("new words") }];
+  const rows = rebaseOntoHistory(shown, loaded, 4);
+  assert.deepEqual(rows.map((row) => row.id), ["user-s1-0", "assistant-s1-1", "history-3"]);
+  assert.equal(rows[1], answer);
+  assert.deepEqual(rows[2].content, words("new words"));
 });

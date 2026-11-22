@@ -69,6 +69,9 @@ function Probe() {
   const running = useAuiState((s) => s.thread.isRunning);
   const assistant = useAuiState(texts("assistant"));
   const users = useAuiState(texts("user"));
+  // Replies the chat would draw an error box under.
+  const errors = useAuiState((s) => s.thread.messages.filter((message) =>
+    message.role === "assistant" && message.status?.type === "incomplete" && message.status.reason === "error").length);
   return (
     <div>
       <button id="send" onClick={() => aui.thread().append("hello")}>send</button>
@@ -76,6 +79,7 @@ function Probe() {
       <div id="running">{running ? "running" : "idle"}</div>
       <div id="assistant">{assistant}</div>
       <div id="users">{users}</div>
+      <div id="errors">{errors}</div>
       <div id="branches"><ThreadPrimitive.Messages>{() => <Branched />}</ThreadPrimitive.Messages></div>
     </div>
   );
