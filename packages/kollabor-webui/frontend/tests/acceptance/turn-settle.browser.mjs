@@ -384,12 +384,13 @@ try {
     },
     // A shown row reads differently in the reloaded history: it changes where
     // it is, without the whole reload that blanked the chat (#1358).
-    // A message sent while the page's turn runs goes to the agent at once: the
-    // page lets its request go, without stopping the turn, and sends the
+    // A message sent while the page's turn runs waits for the turn to end
+    // (the next scenario). Send Now on the waiting message sends it at once:
+    // the page lets its request go, without stopping the turn, and sends the
     // message in a request of its own. The agent takes it in at its next
-    // step, and the reply goes on under the message (#1365).
-    async "hands a message sent mid-turn to the agent at once"() {
-      const t = await open();
+    // step, and the reply goes on under the message (#1102, #1365).
+    async "hands a waiting message to the agent at once on Send Now"() {
+      const t = await open("?chat");
       const done = { type: "complete", reason: "stop" };
       const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
       const said = (s) => s.assistant.split("|").filter(Boolean).join("|");
@@ -408,8 +409,10 @@ try {
           .observe(ids, { childList: true, characterData: true, subtree: true });
       });
       await t.page.locator("#send-what").click();
+      await t.waitFor((s) => s.users === "hello|what", "the waiting message");
+      await t.page.getByRole("button", { name: "Send Now" }).click();
       await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
-        .catch(() => assert.fail("the message waited behind the running turn"));
+        .catch(() => assert.fail("Send Now left the message waiting behind the running turn"));
       const second = await t.page.evaluate(() => ({
         commands: window.transport.request.commands, sent: window.transport.request.state?.messages ?? [],
         let: window.transports[0].aborted, cancels: window.cancels,
@@ -418,6 +421,7 @@ try {
       assert.equal(second.commands.length, 1);
       assert.equal(second.commands[0].message.parts[0].text, "what");
       assert.equal(second.let, true, "the page let its first request go");
+      assert.equal(await t.page.getByRole("button", { name: "Send Now" }).count(), 0, "a message on its way is not waiting");
       assert.equal(second.cancels, 0, "the agent's turn was not stopped");
       assert.equal(second.running, "running");
       await t.holds((s) => s.errors === "0" && s.users === "hello|what" && said(s) === "Wor", "while the message is on its way", 200);
@@ -447,9 +451,42 @@ try {
         s.branches === 0 && s.errors === "0", "after the settle reload");
       await t.page.close();
     },
+    // A message sent while the page's turn runs waits: the turn goes on as it
+    // was, the message shows as queued, and it is sent when the turn ends (#1102).
+    async "keeps a message sent mid-turn waiting until the turn ends"() {
+      const t = await open("?chat");
+      const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
+      await t.send();
+      const first = await t.sending();
+      await t.push(state([{ type: "set", path: ["messages"], value: [
+        { id: "user-s1-0", role: "user", content: "hello", metadata: { custom: { requestId: first.id } } },
+        { id: "assistant-s1-1", role: "assistant", content: text("Wor") },
+      ] }]));
+      await t.waitFor((s) => s.assistant.includes("Wor"), "the run's reply");
+      await t.page.locator("#send-what").click();
+      await t.waitFor((s) => s.users === "hello|what", "the waiting message");
+      await t.page.getByText("Queued", { exact: true }).waitFor({ timeout: 3000 })
+        .catch(() => assert.fail("the waiting message does not say it is queued"));
+      for (let n = 0; n < 8; n++) {
+        assert.deepEqual(await t.page.evaluate(() => [window.transports.length, window.transports[0].aborted, window.cancels]),
+          [1, false, 0], "the turn's request streams on while the message waits");
+        await t.page.waitForTimeout(50);
+      }
+      // The engine ends the turn: the message goes out.
+      await t.page.evaluate((frames) => { window.transport.push(frames); window.transport.close(); }, finishFrames);
+      await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
+        .catch(() => assert.fail("the waiting message was not sent when the turn ended"));
+      const second = await t.page.evaluate(() => window.transport.request.commands);
+      assert.equal(second.length, 1);
+      assert.equal(second[0].message.parts[0].text, "what");
+      assert.equal(await t.page.getByText("Queued", { exact: true }).count(), 0, "a message on its way is not queued");
+      await t.page.close();
+    },
     // Enter in the message box sends while the agent works, as the Send button
-    // does: the message goes to the agent at once. Shift+Enter still starts a
-    // new line, and Enter on an open slash menu still picks its row (#1365).
+    // does: the message waits for the turn to end. Ctrl+Enter (Cmd+Enter on a
+    // Mac) sends it, and every message waiting before it, at once. Shift+Enter
+    // still starts a new line, and Enter on an open slash menu still picks
+    // its row (#1102, #1365).
     async "sends on Enter while the agent works"() {
       const t = await open("?chat");
       const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
@@ -476,18 +513,25 @@ try {
       assert.equal(await requests(), 1, "picking a slash menu row sent nothing");
       await box.fill("what");
       await box.press("Enter");
-      await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
+      await t.waitFor((s) => s.users === "hello|what" && s.errors === "0", "the message Enter sent")
         .catch(() => assert.fail("Enter did not send the message"));
+      assert.equal(await box.inputValue(), "", "the message box is empty after the send");
+      await t.page.getByText("Queued", { exact: true }).waitFor({ timeout: 3000 })
+        .catch(() => assert.fail("the message Enter sent does not say it is queued"));
+      assert.equal(await requests(), 1, "a message sent with Enter waits for the turn to end");
+      await box.fill("now");
+      await box.press("Control+Enter");
+      await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
+        .catch(() => assert.fail("Ctrl+Enter did not send the waiting messages at once"));
       const second = await t.page.evaluate(() => ({
-        commands: window.transport.request.commands, cancels: window.cancels,
-        running: document.getElementById("running")?.textContent,
+        texts: window.transport.request.commands.map((command) => command.message.parts[0].text),
+        cancels: window.cancels, running: document.getElementById("running")?.textContent,
       }));
-      assert.equal(second.commands.length, 1);
-      assert.equal(second.commands[0].message.parts[0].text, "what");
+      assert.deepEqual(second.texts, ["what", "now"]);
       assert.equal(second.cancels, 0, "the agent's turn was not stopped");
       assert.equal(second.running, "running");
       assert.equal(await box.inputValue(), "", "the message box is empty after the send");
-      await t.waitFor((s) => s.users === "hello|what" && s.errors === "0", "the sent message");
+      await t.waitFor((s) => s.users === "hello|what|now" && s.errors === "0", "the sent messages");
       await t.page.close();
     },
     // Stop still stops the agent's turn, and a message waiting behind it is not sent.
