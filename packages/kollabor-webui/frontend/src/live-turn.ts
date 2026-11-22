@@ -276,19 +276,35 @@ const SAVE_NOTICE = /^ℹ Conversation history not saved for this (message|reply
 const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
 
 /**
- * The live turn without the parts the loaded history rows now show: a tool
- * call one of them holds, words one of them contains. A page that watches a
- * turn draws it from its events and from the history that lands while it
- * runs; without this both showed every tool call until the turn ended (#1359).
- * A save notice stays: no row holds it. A settled turn with nothing left is
- * replaced (see replacedLiveTurn). Returns the same object when nothing goes.
+ * Whether a saved assistant row can be the live turn's. A row that names a
+ * request or a voice turn is the turn's under that id only: another turn's
+ * row can repeat a call id or read alike. A row that names none (the daemon's
+ * own turns save theirs unnamed) is left to the caller, which passes only the
+ * rows saved after the turn's message where it knows that message's place.
+ */
+const savedByTurn = (turn: LiveTurn, row: HistoryRow): boolean => {
+  const requestId = row.metadata?.custom?.requestId;
+  const voiceTurnId = row.metadata?.custom?.voiceTurnId;
+  if (typeof requestId !== "string" && typeof voiceTurnId !== "string") return true;
+  return !!turn.requestId && (requestId === turn.requestId || voiceTurnId === turn.requestId);
+};
+
+/**
+ * The live turn without the parts its saved rows now show: a tool call one of
+ * them holds, words one of them contains. A page that watches a turn draws it
+ * from its events and from the history that lands while it runs; without this
+ * both showed every tool call until the turn ended (#1359). `rows` are the
+ * assistant rows a sync added; the ones another turn saved take nothing (see
+ * savedByTurn). A save notice stays: no row holds it. A settled turn with
+ * nothing left is replaced (see replacedLiveTurn). Returns the same object
+ * when nothing goes.
  */
 export function withoutSavedParts(turn: LiveTurn, rows: ReadonlyArray<HistoryRow>): LiveTurn {
   if (!turn.parts.length || turn.settled === "replaced") return turn;
   const calls = new Set<string>();
   const words: string[] = [];
   for (const row of rows) {
-    if (row.role !== "assistant") continue;
+    if (row.role !== "assistant" || !savedByTurn(turn, row)) continue;
     if (typeof row.content === "string") { words.push(oneLine(row.content)); continue; }
     if (!Array.isArray(row.content)) continue;
     for (const part of row.content as Array<{ type?: unknown; text?: unknown; toolCallId?: unknown }>) {

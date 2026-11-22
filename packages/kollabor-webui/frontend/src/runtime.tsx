@@ -1141,13 +1141,23 @@ export function EngineRuntimeProvider({
     return () => { liveEvents.current = null; clearTimeout(settleTimer.current); };
   }, [runtime, liveEvents, initialState.conversationUid]);
 
+  // Where saved history holds each send this page has seen saved (see SavedSends).
+  const savedSends = useRef(new Map<string, number>());
+
   /**
    * The thread after a history sync added `rows`: the live turn gives up the
    * parts those rows now show (a tool call drawn twice otherwise), and its row
    * follows (#1359).
    */
   const withLiveSynced = useCallback((messages: ThreadMessageLike[], rows: readonly ThreadMessageLike[]) => {
-    const synced = withoutSavedParts(liveTurn.current, rows);
+    // Only the rows saved after the message that started the turn are its
+    // own: the reply of the turn before can reach the page late, after this
+    // one's first words, and contain them. A turn whose message the page has
+    // not seen saved is a long one, and the rows a sync adds are its own.
+    const startedAt = liveTurn.current.requestId ? savedSends.current.get(liveTurn.current.requestId) : undefined;
+    const own = startedAt === undefined ? rows
+      : rows.filter((row) => (historyMessageIndex(row) ?? Number.POSITIVE_INFINITY) > startedAt);
+    const synced = withoutSavedParts(liveTurn.current, own);
     if (synced === liveTurn.current) return messages;
     liveTurn.current = synced;
     const live = liveMessage(synced);
@@ -1177,8 +1187,6 @@ export function EngineRuntimeProvider({
   const latestInitial = useRef(initialState);
   latestInitial.current = initialState;
   const [historySyncRevision, setHistorySyncRevision] = useState(0);
-  // Where saved history holds each send this page has seen saved (see SavedSends).
-  const savedSends = useRef(new Map<string, number>());
   const deferredHistorySync = useRef(false);
   const deferredOlderWindow = useRef<EngineState | null>(null);
   useEffect(() => runtime.thread.subscribe(() => {
