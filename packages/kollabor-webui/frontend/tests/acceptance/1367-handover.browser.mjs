@@ -156,6 +156,9 @@ try {
     const outcome = await open("?permissions=outcome");
     const prompt = outcome.page.getByText("Permission required: terminal", { exact: true });
     await prompt.waitFor();
+    const sibling = outcome.page.getByText("Permission required: file_write", { exact: true });
+    assert.equal(await sibling.count(), 0, "the sibling is absent from the initially shown snapshot");
+    const epoch = await outcome.page.evaluate(() => window.runtimeEpoch);
     await outcome.page.evaluate(() => window.setPermissionSnapshot("s1", [{
       tool_id: "shared-tool-id",
       permission_id: "owner-sibling",
@@ -176,8 +179,9 @@ try {
       permission_id: "owner-outcome",
       request_id: "parent-outcome",
     });
+    await outcome.page.waitForFunction((before) => window.runtimeEpoch > before, epoch);
     await prompt.waitFor({ state: "detached", timeout: 3000 });
-    await outcome.page.getByText("Permission required: file_write", { exact: true }).waitFor();
+    await sibling.waitFor();
     assert.equal(await outcome.page.getByRole("button", { name: "Allow once", exact: true }).count(), 1,
       "an outcome removes only the exact permission owner when tool IDs are reused");
     assert.deepEqual(browserErrors, [], "the browser reports no runtime errors");

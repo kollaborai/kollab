@@ -55,6 +55,7 @@ declare global {
     permissionResponses: PermissionResponseRecord[];
     permissionCancellations: PermissionCancellationRecord[];
     permissionReads: Array<{ sessionId: string; authorization: string | null }>;
+    runtimeEpoch: number;
     refreshPermissions: (prompts: PermissionPrompt[]) => void;
     setPermissionSnapshot: (sessionId: string, prompts: PermissionPrompt[]) => void;
     pausePermissionRead: (sessionId: string) => void;
@@ -71,6 +72,7 @@ window.permissionSnapshot = { s1: [], s2: [] };
 window.permissionResponses = [];
 window.permissionCancellations = [];
 window.permissionReads = [];
+window.runtimeEpoch = 0;
 let permissionReadGate: PermissionReadGate | null = null;
 window.pausePermissionRead = (sessionId) => {
   let release!: () => void;
@@ -217,10 +219,7 @@ const startupPermissions = (() => {
     : kind === "parked"
       ? [startupPermission("shared-tool-id", "owner-parked", "parent-parked", "terminal", true)]
       : kind === "outcome"
-        ? [
-          startupPermission("shared-tool-id", "owner-outcome", "parent-outcome", "terminal"),
-          startupPermission("shared-tool-id", "owner-sibling", "parent-sibling", "file_write"),
-        ]
+        ? [startupPermission("shared-tool-id", "owner-outcome", "parent-outcome", "terminal")]
         : kind === "live" ? [live] : [];
   window.permissionSnapshot.s1 = prompts;
   return prompts;
@@ -264,6 +263,7 @@ function Fixture() {
   const [sessionId, setSessionId] = useState("s1");
   const [state, setState] = useState(initialState);
   const [runtimeEpoch, setRuntimeEpoch] = useState(0);
+  useEffect(() => { window.runtimeEpoch = runtimeEpoch; }, [runtimeEpoch]);
   window.setPermissionSnapshot = (forSessionId, prompts) => {
     window.permissionSnapshot[forSessionId] = prompts;
   };
