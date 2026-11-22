@@ -31,14 +31,18 @@ window.fetch = async (input, init) => {
   }
   const encoder = new TextEncoder();
   let stream!: ReadableStreamDefaultController<Uint8Array>;
-  const body = new ReadableStream<Uint8Array>({ start: (controller) => { stream = controller; } });
+  const body = new ReadableStream<Uint8Array>({
+    start: (controller) => { stream = controller; },
+    cancel: () => { transport.aborted = true; },
+  });
   const transport: Transport = {
     request: JSON.parse(String(init?.body ?? "{}")),
     push: (frame) => stream.enqueue(encoder.encode(frame)),
     close: () => stream.close(),
     aborted: false,
   };
-  // As a real fetch does: a request the page lets go ends its stream.
+  // As a real fetch does: a request the page lets go ends its stream, and a
+  // stream the page stops reading lets its request go.
   init?.signal?.addEventListener("abort", () => {
     transport.aborted = true;
     try { stream.error(init.signal?.reason); } catch { /* already closed */ }
