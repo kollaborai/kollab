@@ -712,17 +712,41 @@ type MidTurn = {
 };
 const NO_MID_TURN: MidTurn = { rows: [] };
 
+const isPermissionPromptRow = (message: ThreadMessageLike): boolean =>
+  message.role === "assistant" && Array.isArray(message.content) && message.content.some((part) =>
+    part.type === "tool-call" && part.toolName === "request_permission");
+
+const isSyntheticPermissionRow = (message: ThreadMessageLike): boolean =>
+  isPermissionPromptRow(message) && historyMessageIndex(message) === null &&
+  String(message.id ?? "").startsWith("permission-");
+
+const mergeMidTurnRows = (
+  shown: readonly ThreadMessageLike[],
+  loaded: readonly ThreadMessageLike[],
+): { messages: ThreadMessageLike[]; added: ThreadMessageLike[] } => {
+  const historyRows = loaded.filter((row) => historyMessageIndex(row) !== null);
+  const merged = mergeMissingHistoryMessages(shown, historyRows);
+  const shownIds = new Set(merged.messages.map((row) => row.id));
+  const permissions = loaded.filter((row) => isPermissionPromptRow(row) && !shownIds.has(row.id));
+  return {
+    messages: [...merged.messages, ...permissions],
+    added: [...merged.added, ...permissions],
+  };
+};
+
 /**
  * Rows a history sync added while this page's run owned the thread, merged
  * around the run's own rows, which stay last (#1358, #1364).
  */
 const withMidTurnRows = (messages: ThreadMessageLike[], midTurn: MidTurn): ThreadMessageLike[] => {
   if (!midTurn.rows.length) return messages;
-  // The sync imported them too: take them out and merge them back in order,
-  // so a pending send's row is placed after them.
-  const midTurnIds = new Set(midTurn.rows.map((row) => row.id));
+  // Replace canonical history copies with these mid-turn rows to keep their
+  // position. Synthetic permission rows have no history identity: keep a
+  // current streamed copy when present, otherwise append the saved prompt.
+  const historyRows = midTurn.rows.filter((row) => historyMessageIndex(row) !== null);
+  const midTurnIds = new Set(historyRows.map((row) => row.id));
   return aroundLive(messages.filter((row) => !midTurnIds.has(row.id)),
-    (rows) => mergeMissingHistoryMessages(rows, [...midTurn.rows]).messages);
+    (rows) => mergeMidTurnRows(rows, midTurn.rows).messages);
 };
 
 const converter = (
@@ -1461,23 +1485,40 @@ export function EngineRuntimeProvider({
         // turn is active. Preserve its in-flight messages and defer any full
         // reconciliation until settlement, when the engine mirror has caught up.
         // The saved copy of this page's own send stays out: its in-flight row
-        // already shows it (#1356).
+        // already shows it (#1356). Pending permission cards are the exception:
+        // App rebuilds them from /permissions without history indexes, and they
+        // must stay answerable while this page's new request is still running.
         const newRows = initialState.messages.filter((message) => {
           const index = historyMessageIndex(message);
-          return index !== null && index >= from.history;
+          const pendingPermission = isSyntheticPermissionRow(message) &&
+            message.status?.type === "requires-action" && Array.isArray(message.content) &&
+            message.content.some((part) => part.type === "tool-call" && part.toolName === "request_permission" &&
+              part.result === undefined);
+          return (index !== null && index >= from.history) || pendingPermission;
         });
         // Nor do the rows of the turn its stream is drawing, and the saved
         // copies of sends an earlier run left on screen (#1359).
         const tail = withoutOwnTurnRows(thread.messages, initialState.messages,
           withoutInFlightSends(thread.messages, newRows, inFlightSendIds.current), savedSends.current);
+        const pendingPermissionIds = new Set(initialState.messages
+          .filter(isSyntheticPermissionRow).map((message) => message.id));
+        const stalePermissionIds = new Set([...shown.messages, ...midTurnRows.current]
+          .filter((message) => isSyntheticPermissionRow(message) && !pendingPermissionIds.has(message.id))
+          .map((message) => message.id));
+        if (stalePermissionIds.size) {
+          midTurnRows.current = midTurnRows.current.filter((message) => !stalePermissionIds.has(message.id));
+        }
+        const shownRows = stalePermissionIds.size
+          ? shown.messages.filter((message) => !stalePermissionIds.has(message.id))
+          : shown.messages;
         const merged = { added: [] as ThreadMessageLike[], messages: [] as ThreadMessageLike[] };
-        merged.messages = aroundLive(shown.messages, (rows) => {
-          const result = mergeMissingHistoryMessages(rows, tail);
+        merged.messages = aroundLive(shownRows, (rows) => {
+          const result = mergeMidTurnRows(rows, tail);
           merged.added = result.added;
           return result.messages;
         });
-        if (merged.added.length) {
-          midTurnRows.current = mergeMissingHistoryMessages(midTurnRows.current, merged.added).messages;
+        if (merged.added.length || stalePermissionIds.size) {
+          midTurnRows.current = mergeMidTurnRows(midTurnRows.current, merged.added).messages;
           const messages = withLiveSynced(merged.messages, merged.added);
           runtime.thread.importExternalState({
             ...shown,
