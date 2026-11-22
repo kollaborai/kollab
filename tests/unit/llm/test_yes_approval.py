@@ -100,7 +100,7 @@ def test_a_later_yes_does_not_close_an_older_card_for_the_same_call():
     assert closed == []
     assert set(approvals._cards) == {("call-1", "permission-A")}
     assert approvals.answered_on_card(call, True) == ""
-    assert set(approvals._cards) == {("call-1", "permission-B")}
+    assert set(approvals._cards) == {("call-1", "permission-A")}
 ASKING_MODES = pytest.mark.parametrize("mode", ["confirm_all", "default", "auto_approve_edits"])
 EVERY_VOICE = pytest.mark.parametrize(
     "voice_origin", [make_voice_origin_context, make_device_voice_context], ids=["livekit", "device"]

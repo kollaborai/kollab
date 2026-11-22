@@ -863,7 +863,7 @@ def test_an_acp_stop_cancels_only_its_exact_request_owner():
                     **({"request_id": request_id} if request_id else {}),
                     **({"parked": True} if request_id == "request-A" else {}),
                     "source": "acp",
-                    "acp_options": [],
+                    "acp_options": [{"optionId": "allow-once", "kind": "allow_once"}],
                 },
                 timeout=None,
             ))
