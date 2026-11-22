@@ -2040,6 +2040,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                 api={api}
                 sessionId={activeSession.session_id}
                 agentIdentity={activeSession.identity}
+                harness={Boolean(activeSession.harness)}
                 initialState={initialState}
                 onStale={(stillCurrent) => resetThread(activeSession.session_id, stillCurrent)}
                 liveEvents={liveEventsRef}

@@ -119,11 +119,12 @@ const PermissionCancellationContext = createContext<{
   cancelling: boolean;
 } | null>(null);
 
-const SendWaitingNowContext = createContext<() => void>(() => undefined);
+const SendWaitingNowContext = createContext<(() => void) | null>(null);
 
 /**
  * Sends the messages waiting behind the running turn at once: the agent takes
  * them in at its next step. Without it they go out when the turn ends (#1102).
+ * Null where the session cannot take a message that way (a harness session).
  */
 export const useSendWaitingNow = () => useContext(SendWaitingNowContext);
 
@@ -867,6 +868,7 @@ export function EngineRuntimeProvider({
   api,
   sessionId,
   agentIdentity,
+  harness = false,
   initialState,
   onStale,
   liveEvents,
@@ -875,6 +877,12 @@ export function EngineRuntimeProvider({
   api: EngineApi;
   sessionId: string;
   agentIdentity?: string;
+  /**
+   * The session runs on a harness (Codex CLI, Claude Code). It gets no Send
+   * Now: the harness steers a message into its running turn, and the engine
+   * does not end the stream of such a message, so the chat would stay busy.
+   */
+  harness?: boolean;
   initialState: EngineState;
   /** Reload the thread whole, optionally only while a caller's guard holds. */
   onStale?: (stillCurrent?: () => boolean) => void | Promise<void>;
@@ -1666,7 +1674,7 @@ export function EngineRuntimeProvider({
       <PermissionCancellationContext.Provider
         value={{ cancel: cancelPermission, cancelling: permissionCancellationPending }}
       >
-        <SendWaitingNowContext.Provider value={sendWaitingNow}>
+        <SendWaitingNowContext.Provider value={harness ? null : sendWaitingNow}>
           <InitialMessagesGate
             runtime={runtime}
             messages={initialState.messages}

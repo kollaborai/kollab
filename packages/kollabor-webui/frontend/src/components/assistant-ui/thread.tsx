@@ -26,6 +26,7 @@ import {
   ToolGroupTrigger,
 } from "@/components/assistant-ui/tool-group";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { resolveMediaSegment, splitMediaSegments } from "@/components/media/media-tokens";
 import { MediaThumb, useMediaViewer, useSessionMedia } from "@/components/media/media-view";
 import { agentStatus, bundleName } from "@/components/panels/panel-model";
@@ -756,7 +757,7 @@ const Composer: FC<{
         parentId: null,
         sourceId: null,
       });
-      if (sendsNow) sendWaitingNow();
+      if (sendsNow) sendWaitingNow?.();
       const currentState = aui.composer.getState();
       const currentFingerprint = `${currentState.text}\u0000${currentState.attachments
         .map((attachment) => attachment.id)
@@ -1001,7 +1002,7 @@ const Composer: FC<{
     }
     event.preventDefault();
     // The submit handler runs inside requestSubmit and reads this at once.
-    submitSendsNow.current = event.metaKey || event.ctrlKey;
+    submitSendsNow.current = sendWaitingNow !== null && (event.metaKey || event.ctrlKey);
     event.target.form?.requestSubmit();
     submitSendsNow.current = false;
   };
@@ -1180,7 +1181,7 @@ type ComposerSlotMode = "mic" | "send" | "listening" | "stop";
 
 // The keys that send a message into the running turn at once (#1102).
 const SEND_NOW_KEYS = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform)
-  ? "⌘ Enter" : "Ctrl+Enter";
+  ? "⌘+Enter" : "Ctrl+Enter";
 
 // One trailing button slot that morphs: stop while a run is going, send once
 // there is something to send, otherwise the voice mic (a mic, or the
@@ -1249,6 +1250,7 @@ const ComposerSlot: FC<{
   onBeforeSend: (event: { preventDefault: () => void }) => void;
   onSteer: (event: { preventDefault: () => void }) => void;
 }> = ({ voice, running, permissionStop, onBeforeSend, onSteer }) => {
+  const sendsNow = useSendWaitingNow() !== null;
   return (
     <div className="aui-composer-slot relative size-9 shrink-0">
       {voice && (
@@ -1281,7 +1283,7 @@ const ComposerSlot: FC<{
       )}
       {running ? (
         <TooltipIconButton
-          tooltip={`Queue Message (${SEND_NOW_KEYS} Sends Now)`}
+          tooltip={sendsNow ? `Queue Message (${SEND_NOW_KEYS} Sends Now)` : "Queue Message"}
           side="top"
           type="button"
           variant="default"
@@ -1562,22 +1564,37 @@ export const UserText: FC<{ text?: string }> = ({ text }) => {
 };
 
 // Under a message that waits for the running turn to end: what it is waiting
-// for, and the way to send it into the turn at once (#1102).
+// for, and the way to send it into the turn at once (#1102). It hangs under
+// the bubble and takes no room in the thread, so the rows under it stay where
+// they are when it comes and goes. On a touch screen Send Now is 44px tall.
 const QueuedMessageNote: FC = () => {
   const sendWaitingNow = useSendWaitingNow();
   return (
-    <div className="aui-user-message-queued text-muted-foreground col-start-2 flex items-center justify-end gap-2 text-xs">
-      <span title="Sent when the agent finishes this turn">Queued</span>
-      <Button
-        type="button"
-        variant="link"
-        className="text-foreground h-auto p-0 text-xs pointer-coarse:py-2"
-        title="Send it now: the agent reads it at its next step"
-        onClick={sendWaitingNow}
-      >
-        Send Now
-      </Button>
-    </div>
+    <TooltipProvider delayDuration={600}>
+      <div className="aui-user-message-queued text-muted-foreground absolute end-0 top-full mt-1 flex items-center gap-2 text-xs whitespace-nowrap">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span>Queued</span>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">Sent when the agent finishes this turn</TooltipContent>
+        </Tooltip>
+        {sendWaitingNow ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="link"
+                className="text-foreground h-auto p-0 text-xs pointer-coarse:-my-3.5 pointer-coarse:py-3.5"
+                onClick={sendWaitingNow}
+              >
+                Send Now
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">The agent reads it at its next step</TooltipContent>
+          </Tooltip>
+        ) : null}
+      </div>
+    </TooltipProvider>
   );
 };
 
@@ -1598,8 +1615,8 @@ const UserMessage: FC = () => {
         <div className="aui-user-action-bar-wrapper absolute start-0 top-1/2 -translate-x-full -translate-y-1/2 pe-2 peer-empty:hidden rtl:translate-x-full">
           <UserActionBar />
         </div>
+        {queued ? <QueuedMessageNote /> : null}
       </div>
-      {queued ? <QueuedMessageNote /> : null}
     </MessagePrimitive.Root>
   );
 };
