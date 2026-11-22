@@ -400,6 +400,13 @@ try {
         { id: "assistant-s1-1", role: "assistant", content: text("Wor") },
       ] }]));
       await t.waitFor((s) => s.assistant.includes("Wor"), "the run's reply");
+      // Every list of rows the chat draws from here on, a frame-long one included.
+      await t.page.evaluate(() => {
+        const ids = document.getElementById("ids");
+        window.drawn = [];
+        new MutationObserver(() => window.drawn.push(ids.textContent))
+          .observe(ids, { childList: true, characterData: true, subtree: true });
+      });
       await t.page.locator("#send-what").click();
       await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
         .catch(() => assert.fail("the message waited behind the running turn"));
@@ -414,6 +421,13 @@ try {
       assert.equal(second.cancels, 0, "the agent's turn was not stopped");
       assert.equal(second.running, "running");
       await t.holds((s) => s.errors === "0" && s.users === "hello|what" && said(s) === "Wor", "while the message is on its way", 200);
+      // The message and the typing dots under it stay drawn through the
+      // hand-over: a row taken down and drawn again blinks, and the chat
+      // jumps for a frame.
+      const drawn = (await t.page.evaluate(() => window.drawn)).map((ids) => ids.split("|").filter(Boolean));
+      assert.equal(drawn.at(-1)?.length, 4, `the turn, the message and the dots under it: ${JSON.stringify(drawn)}`);
+      drawn.forEach((rows, n) => assert.ok(n === 0 || drawn[n - 1].every((id) => rows.includes(id)),
+        `a row was taken down during the hand-over: ${JSON.stringify(drawn)}`));
       // The engine admits it; the turn's reply goes on under it.
       const at = second.sent.length;
       await t.push(state([{ type: "set", path: ["messages"], value: [...second.sent,
