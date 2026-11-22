@@ -1563,15 +1563,20 @@ export const UserText: FC<{ text?: string }> = ({ text }) => {
   );
 };
 
-// Under a message that waits for the running turn to end: what it is waiting
-// for, and the way to send it into the turn at once (#1102). It hangs under
-// the bubble and takes no room in the thread, so the rows under it stay where
-// they are when it comes and goes. On a touch screen Send Now is 44px tall.
+// The row under a message that waits for the running turn to end. The thread's
+// rows clip what hangs outside them, so the note has a row of its own. On a
+// touch screen the row is taller: Send Now's 44px target reaches 14px above
+// the line and 14px under it.
+const QUEUED_NOTE_ROW = "col-start-2 h-4 any-pointer-coarse:h-[30px]";
+
+// What the message is waiting for, and the way to send it into the turn at
+// once (#1102). A session that cannot take a message that way (a harness
+// session) gets the word alone.
 const QueuedMessageNote: FC = () => {
   const sendWaitingNow = useSendWaitingNow();
   return (
     <TooltipProvider delayDuration={600}>
-      <div className="aui-user-message-queued text-muted-foreground absolute end-0 top-full mt-1 flex items-center gap-2 text-xs whitespace-nowrap">
+      <div className={cn("aui-user-message-queued text-muted-foreground flex items-start justify-end gap-2 text-xs leading-4", QUEUED_NOTE_ROW)}>
         <Tooltip>
           <TooltipTrigger asChild>
             <span>Queued</span>
@@ -1584,7 +1589,7 @@ const QueuedMessageNote: FC = () => {
               <Button
                 type="button"
                 variant="link"
-                className="text-foreground h-auto p-0 text-xs any-pointer-coarse:-my-[14px] any-pointer-coarse:min-h-[44px] any-pointer-coarse:min-w-[44px]"
+                className="text-foreground h-4 p-0 text-xs leading-4 any-pointer-coarse:-mt-[14px] any-pointer-coarse:h-[44px] any-pointer-coarse:min-w-[44px]"
                 onClick={sendWaitingNow}
               >
                 Send Now
@@ -1600,6 +1605,10 @@ const QueuedMessageNote: FC = () => {
 
 const UserMessage: FC = () => {
   const queued = useAuiState((s) => s.message.metadata.custom?.queued === true);
+  // A message that was queued keeps the note's row, empty, once it is sent:
+  // the rows under it stay where they are.
+  const [wasQueued, setWasQueued] = useState(queued);
+  if (queued && !wasQueued) setWasQueued(true);
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
@@ -1615,8 +1624,8 @@ const UserMessage: FC = () => {
         <div className="aui-user-action-bar-wrapper absolute start-0 top-1/2 -translate-x-full -translate-y-1/2 pe-2 peer-empty:hidden rtl:translate-x-full">
           <UserActionBar />
         </div>
-        {queued ? <QueuedMessageNote /> : null}
       </div>
+      {queued ? <QueuedMessageNote /> : wasQueued ? <div aria-hidden className={QUEUED_NOTE_ROW} /> : null}
     </MessagePrimitive.Root>
   );
 };
