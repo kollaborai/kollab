@@ -1001,3 +1001,13 @@ test("with nothing saved above the running turn, a calls row is not hidden on a 
   const own = { id: "history-6", role: "assistant", content: [call] };
   assert.deepEqual(mergeMissingHistoryMessages(placed, [older, own]).added.map((row) => row.id), ["history-3"]);
 });
+
+test("a saved send the page already draws, in flight or not, is not added again", () => {
+  // The page's own row of a send names its request id; its saved copy names
+  // the same id. A run that ended before the engine matched them must not
+  // leave the send drawn twice (#1359).
+  const sent = { id: "user-s1-0", role: "user", content: "hello", metadata: { custom: { requestId: "r1" } } };
+  const copy = named(saved(0, "hello"), { requestIds: ["r1"] });
+  const other = named(saved(1, "hello"), { requestIds: ["r2"] });
+  assert.deepEqual(mergeMissingHistoryMessages([sent], [copy, other]).added, [other]);
+});

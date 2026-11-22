@@ -106,7 +106,20 @@ try {
       }
     };
     const emit = (event) => page.evaluate((e) => window.liveEvent(e), event);
-    return { page, read, setHistory, waitFor, holds, send, answer, finish, emit };
+    /** The id the page made for the send now streaming, and the rows its request sent. */
+    const sending = async () => {
+      await page.waitForFunction(() => window.transport !== undefined);
+      return page.evaluate(() => ({
+        id: window.transport.request.commands?.[0]?.message?.id,
+        sent: window.transport.request.state?.messages ?? [],
+      }));
+    };
+    const push = (frame) => page.evaluate((f) => window.transport.push(f), frame);
+    const end = async () => {
+      await page.evaluate((frames) => { window.transport.push(frames); window.transport.close(); }, finishFrames);
+      await page.waitForFunction(() => document.getElementById("running")?.textContent === "idle");
+    };
+    return { page, read, setHistory, waitFor, holds, send, answer, finish, emit, sending, push, end };
   }
 
   const scenarios = {
@@ -138,6 +151,40 @@ try {
       await t.setHistory([row(0, "user", "hello"), row(1, "assistant", "Working")]);
       await t.holds((s) => s.remounts === "0" && s.users === "hello" && s.assistant === "Working",
         "after the settle reload");
+      await t.page.close();
+    },
+    // A run's stream ends early (an error) while the agent works on; the page
+    // sends again, and the agent takes that into the same turn. Neither run's
+    // rows are matched to saved history, so the page must not draw a send next
+    // to its saved copy, and must take the saved turn once it is idle (#1359).
+    async "shows each send once when a run ended before its turn did"() {
+      const t = await open();
+      const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
+      const call = { type: "tool-call", toolCallId: "c1", toolName: "terminal", args: {}, argsText: "{}", result: "ok" };
+      await t.send();
+      const first = await t.sending();
+      await t.push(state([{ type: "set", path: ["messages"], value: [...first.sent,
+        { id: "user-s1-0", role: "user", content: "hello", metadata: { custom: { requestId: first.id } } },
+        { id: "assistant-s1-1", role: "assistant", content: [call], status: { type: "incomplete", reason: "error" } },
+      ] }]));
+      await t.end();
+      await t.page.evaluate(() => { window.transport = undefined; });
+      await t.page.locator("#send-what").click();
+      const second = await t.sending();
+      const saved = (index, content, requestId) => ({ id: `history-${index}`, role: "user",
+        content: [{ type: "text", text: content }], metadata: { custom: { requestIds: [requestId] } } });
+      await t.setHistory([saved(0, "hello", first.id), { id: "history-1", role: "assistant", content: [call] },
+        saved(2, "what", second.id)]);
+      await t.holds((s) => s.users === "hello|what", "while the second send runs", 800);
+      await t.push(state([{ type: "set", path: ["messages"], value: [...second.sent,
+        { id: `user-s1-${second.sent.length}`, role: "user", content: "what", metadata: { custom: { requestId: second.id } } },
+        { id: `assistant-s1-${second.sent.length + 1}`, role: "assistant", content: text("done"), status: { type: "complete", reason: "stop" } },
+      ] }, { type: "set", path: ["synced"], value: null }]));
+      await t.end();
+      await t.setHistory([saved(0, "hello", first.id), { id: "history-1", role: "assistant", content: [call] },
+        saved(2, "what", second.id), row(3, "assistant", "done")]);
+      await t.waitFor((s) => s.users === "hello|what" && s.assistant === "done", "the saved turn once idle");
+      await t.holds((s) => s.users === "hello|what" && s.assistant === "done" && s.branches === 0, "after it settles");
       await t.page.close();
     },
     // A turn that ran a tool: the run drew its call inside the reply, and
