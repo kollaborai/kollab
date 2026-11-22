@@ -168,12 +168,17 @@ try {
       const first = await t.sending();
       await t.push(state([{ type: "set", path: ["messages"], value: [...first.sent,
         { id: "user-s1-0", role: "user", content: "hello", metadata: { custom: { requestId: first.id } } },
-        { id: "assistant-s1-1", role: "assistant", content: [call], status: { type: "incomplete", reason: "error" } },
+        { id: "assistant-s1-1", role: "assistant", content: [call] },
       ] }]));
-      await t.end();
+      // No finish frame: the connection is gone, and the page says so.
+      await t.page.evaluate(() => window.transport.close());
+      await t.page.waitForFunction(() => document.getElementById("running")?.textContent === "idle");
+      await t.waitFor((s) => s.errors === "1", "the dropped stream's error");
       await t.page.evaluate(() => { window.transport = undefined; });
       await t.page.locator("#send-what").click();
       const second = await t.sending();
+      // That error was the last run's: it does not sit under the new message.
+      await t.holds((s) => s.errors === "0", "once the next message is out", 300);
       const saved = (index, content, requestId) => ({ id: `history-${index}`, role: "user",
         content: [{ type: "text", text: content }], metadata: { custom: { requestIds: [requestId] } } });
       await t.setHistory([saved(0, "hello", first.id), { id: "history-1", role: "assistant", content: [call] },
