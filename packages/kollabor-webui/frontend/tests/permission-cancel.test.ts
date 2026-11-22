@@ -3,10 +3,10 @@ import test from "node:test";
 import { ApiError, EngineApi } from "../src/api.ts";
 import { cancelPendingPermission, pendingPermissions, permissionOwner, promptParkedSinceShown } from "../src/utils/permission-cancel.ts";
 
-const owner = (toolId: string, requestId = toolId) => ({ toolId, requestId, source: "acp" });
+const owner = (toolId: string, requestId = toolId, source = "acp") => ({ toolId, requestId, source });
 const permission = (id: string, result?: unknown, status = "requires-action") => ({
   status: { type: status },
-  content: [{ type: "tool-call", toolName: "request_permission", args: { tool_id: id, details: { source: "acp", request_id: `turn-${id}` } }, result }],
+  content: [{ type: "tool-call", toolName: "request_permission", args: { tool_id: id, request_id: `turn-${id}`, details: { source: "acp" } }, result }],
 });
 
 test("only unresolved permission parts expose their parent request owner", () => {
@@ -19,9 +19,40 @@ test("only unresolved permission parts expose their parent request owner", () =>
   assert.equal(permissionOwner({ tool_id: "" }), null);
 });
 
+test("live and restored permission args read the top-level turn owner, not nested detail metadata", () => {
+  const liveArgs = {
+    tool_id: "reused-tool", request_id: "parent-live", permission_id: "owner-live",
+    details: { source: "acp", request_id: "vendor-live" },
+  };
+  const restoredArgs = {
+    tool_id: "reused-tool", request_id: "parent-restored", permission_id: "owner-restored",
+    details: { source: "acp", request_id: "vendor-restored", parked: true },
+  };
+  assert.deepEqual(permissionOwner(liveArgs), owner("reused-tool", "parent-live"));
+  assert.deepEqual(permissionOwner(restoredArgs), owner("reused-tool", "parent-restored"));
+  assert.deepEqual(pendingPermissions([
+    {
+      status: { type: "requires-action" },
+      content: [{ type: "tool-call", toolName: "request_permission", args: liveArgs }],
+    },
+    {
+      status: { type: "requires-action" },
+      content: [{ type: "tool-call", toolName: "request_permission", args: restoredArgs }],
+    },
+  ]), [owner("reused-tool", "parent-live"), owner("reused-tool", "parent-restored")]);
+  assert.equal(permissionOwner({
+    tool_id: "old-prompt", details: { source: "acp", request_id: "vendor-only" },
+  })?.requestId, undefined, "nested provider metadata is not the parent request owner");
+});
+
 test("a stale click after resolution never fetches or cancels a replacement turn", async () => {
   const rendered = [owner("old")];
-  for (const current of [[], [owner("new")], [owner("old", "replacement-parent")]]) {
+  for (const current of [
+    [],
+    [owner("new")],
+    [owner("old", "replacement-parent")],
+    [owner("old", "old", "native")],
+  ]) {
     let reads = 0, cancellations = 0;
     const cancelled = await cancelPendingPermission({
       expected: rendered, current: () => current,
@@ -35,7 +66,12 @@ test("a stale click after resolution never fetches or cancels a replacement turn
 });
 
 test("resolution or a different daemon owner prevents cancellation, even with a reused tool ID", async () => {
-  for (const daemon of [[], [owner("replacement")], [owner("old", "new-turn")]]) {
+  for (const daemon of [
+    [],
+    [owner("replacement")],
+    [owner("old", "new-turn")],
+    [owner("old", "old", "native")],
+  ]) {
     let cancellations = 0;
     assert.equal(await cancelPendingPermission({
       expected: [owner("old")], current: () => [owner("old")], readPending: async () => daemon,
@@ -65,6 +101,31 @@ test("a live, reloaded, or external-client ACP prompt passes its parent ID rathe
     cancel: async (requestId) => { sent.push(requestId); return { cancelled: true }; },
   }), true);
   assert.deepEqual(sent, ["parent-request"]);
+});
+
+test("the global Stop control does not guess when distinct pending owners coexist", async () => {
+  const siblings = [owner("reused-tool", "parent-A"), owner("reused-tool", "parent-B")];
+  let reads = 0, cancellations = 0;
+  assert.equal(await cancelPendingPermission({
+    expected: siblings,
+    current: () => siblings,
+    readPending: async () => { reads++; return siblings; },
+    cancel: async () => { cancellations++; return { cancelled: true }; },
+  }), false);
+  assert.equal(reads, 0);
+  assert.equal(cancellations, 0);
+});
+
+test("a selected sibling cancellation stays on that exact request owner", async () => {
+  const siblings = [owner("reused-tool", "parent-A"), owner("reused-tool", "parent-B")];
+  const sent: string[] = [];
+  assert.equal(await cancelPendingPermission({
+    expected: [siblings[1]],
+    current: () => siblings,
+    readPending: async () => siblings,
+    cancel: async (requestId) => { sent.push(requestId); return { cancelled: true }; },
+  }), true);
+  assert.deepEqual(sent, ["parent-B"]);
 });
 
 test("an ACP permission missing a parent owner fails closed", async () => {

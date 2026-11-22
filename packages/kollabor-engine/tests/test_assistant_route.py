@@ -469,6 +469,7 @@ async def test_assistant_transport_exposes_and_resolves_permission_prompt(monkey
         [
             {
                 "type": "permission_request",
+                "request_id": "parent-turn-shell-2",
                 "tool_id": "shell-2",
                 "permission_id": permission_id,
                 "tool_name": "terminal",
@@ -514,6 +515,7 @@ async def test_assistant_transport_exposes_and_resolves_permission_prompt(monkey
         ("request_permission", f"permission_shell-2_{permission_id}")
     ]
     assert '"tool_id": "shell-2"' in first_controller.tool_calls[0].args
+    assert '"request_id": "parent-turn-shell-2"' in first_controller.tool_calls[0].args
 
     second = await messages.assistant_transport(
         session.session_id,
