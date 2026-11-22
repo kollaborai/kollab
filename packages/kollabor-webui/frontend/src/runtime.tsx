@@ -77,7 +77,12 @@ import {
   type LiveTurn,
 } from "./live-turn";
 import { parseHubMessageHeader, splitAgentHud, splitObservationReplies, type HubNote } from "./hub-notes";
-import { PermissionToolUI } from "./components/PermissionTool";
+import {
+  PermissionResponseContext,
+  PermissionToolUI,
+  type PermissionArgs,
+  type PermissionResult,
+} from "./components/PermissionTool";
 import { endableStream } from "./run-stream";
 import {
   historyTurnTiming,
@@ -114,6 +119,36 @@ const messageConverter = createMessageConverter<ThreadMessageLike>((message) => 
 // The converter reads convertConfig off a message: "none" ends its join group.
 type JoinableMessage = ThreadMessageLike & { convertConfig?: { joinStrategy?: "concat-content" | "none" } };
 export const imageAttachmentAdapter = new SimpleImageAttachmentAdapter();
+
+type PermissionResponseOwner = PendingPermission & { permissionId: string };
+
+const permissionResponseOwner = (payload: unknown): PermissionResponseOwner | null => {
+  const owner = permissionOwner(payload);
+  if (!owner || !payload || typeof payload !== "object") return null;
+  const value = payload as { request_id?: unknown; permission_id?: unknown; details?: unknown };
+  const details = value.details && typeof value.details === "object"
+    ? value.details as { permission_id?: unknown }
+    : undefined;
+  const permissionId = typeof value.permission_id === "string" && value.permission_id
+    ? value.permission_id
+    : typeof details?.permission_id === "string" && details.permission_id
+      ? details.permission_id
+      : "";
+  if (!permissionId) return null;
+  const requestId = value.request_id;
+  return {
+    ...owner,
+    ...(typeof requestId === "string" && requestId ? { requestId } : {}),
+    permissionId,
+  };
+};
+
+const samePermissionResponseOwner = (
+  expected: PermissionResponseOwner,
+  candidates: readonly PermissionResponseOwner[],
+) => candidates.some((candidate) => candidate.toolId === expected.toolId &&
+  candidate.requestId === expected.requestId && candidate.source === expected.source &&
+  candidate.permissionId === expected.permissionId);
 
 const PermissionCancellationContext = createContext<{
   cancel: (expected: readonly PendingPermission[]) => Promise<void>;
@@ -664,29 +699,36 @@ function historyToMessages(
   closeTurn();
 
   // A daemon does not re-emit permission_request after a browser reload. Keep
-  // the prompt as a pending tool call so assistant-ui can render it and its
-  // addResult callback can submit the answer through assistant-transport.
+  // the prompt as a pending tool call so assistant-ui can render it. Preserve
+  // the top-level owner request id too: the original turn may have ended its
+  // POST at the prompt while a later send is still streaming.
   for (const [index, prompt] of pendingPermissions.entries()) {
-    const toolCallId = `permission_${prompt.tool_id}`;
+    const permissionId = prompt.permission_id ?? prompt.details?.permission_id;
+    const toolCallId = `permission_${prompt.tool_id}_${permissionId || index}`;
+    const requestId = (prompt as PermissionPrompt & { request_id?: unknown }).request_id;
+    const args = JSON.parse(JSON.stringify({
+      tool_id: prompt.tool_id,
+      ...(typeof permissionId === "string" && permissionId ? { permission_id: permissionId } : {}),
+      tool_name: prompt.tool_name,
+      tool_type: prompt.tool_type || null,
+      risk_level: prompt.risk_level || null,
+      risk_reason: prompt.risk_reason || null,
+      input: prompt.input || {},
+      details: prompt.details || {},
+      acp_options: prompt.details?.acp_options || [],
+      ...(typeof requestId === "string" && requestId ? { request_id: requestId } : {}),
+    }));
     messages.push({
       id: `permission-${prompt.tool_id}-${index}`,
       role: "assistant",
+      metadata: { custom: { pendingPermission: true } },
       content: [
         {
           type: "tool-call",
           toolCallId,
           toolName: "request_permission",
-          args: JSON.parse(JSON.stringify({
-            tool_id: prompt.tool_id,
-            tool_name: prompt.tool_name,
-            tool_type: prompt.tool_type || null,
-            risk_level: prompt.risk_level || null,
-            risk_reason: prompt.risk_reason || null,
-            input: prompt.input || {},
-            details: prompt.details || {},
-            acp_options: prompt.details?.acp_options || [],
-          })),
-          argsText: JSON.stringify(prompt),
+          args,
+          argsText: JSON.stringify(args),
         },
       ],
       status: { type: "requires-action", reason: "tool-calls" },
@@ -923,6 +965,7 @@ export function EngineRuntimeProvider({
   const turnRef = useRef<TurnClock>(newTurnClock());
   const runStartRef = useRef(0);
   const cancellingPermission = useRef(false);
+  const permissionResponsesInFlight = useRef(new Set<string>());
   const goalCancellation = useRef(new GoalCancellationTracker());
   const mounted = useRef(true);
   const runVersion = useRef(0);
@@ -1184,6 +1227,63 @@ export function EngineRuntimeProvider({
       if (mounted.current) setPermissionCancellationPending(false);
     }
   }, [api, sessionId, onStale, runtime]);
+
+  const respondToPermission = useCallback(async (
+    toolCallId: string,
+    args: PermissionArgs,
+    result: PermissionResult,
+  ): Promise<"answered" | "stale" | "transport"> => {
+    const findPrompt = () => runtime.thread.getState().messages.flatMap((message) => {
+      if (!Array.isArray(message.content)) return [];
+      const part = message.content.find((content) => content.type === "tool-call" &&
+        content.toolName === "request_permission" && content.toolCallId === toolCallId &&
+        content.result === undefined);
+      return part ? [{ message, part }] : [];
+    })[0];
+    const initial = findPrompt();
+    if (!initial) return "stale";
+    if (initial.message.metadata?.custom?.pendingPermission !== true) {
+      return permissionResponseOwner(args) ? "transport" : "stale";
+    }
+    if (initial.message.status?.type !== "requires-action") return "stale";
+    const expected = permissionResponseOwner(initial.part.args);
+    const displayed = permissionResponseOwner(args);
+    if (!expected || !displayed || !samePermissionResponseOwner(expected, [displayed])) return "stale";
+    const key = `${sessionId}:${expected.permissionId}`;
+    if (permissionResponsesInFlight.current.has(key)) return "stale";
+    const isCurrent = () => {
+      if (!mounted.current) return false;
+      const current = findPrompt();
+      if (!current || current.message.id !== initial.message.id ||
+          current.message.status?.type !== "requires-action") return false;
+      const owner = permissionResponseOwner(current.part.args);
+      return !!owner && samePermissionResponseOwner(expected, [owner]);
+    };
+    if (!isCurrent()) return "stale";
+
+    permissionResponsesInFlight.current.add(key);
+    try {
+      const permissions = await api.getPermissions(sessionId);
+      const owners = permissions.pending_prompts.flatMap((prompt) => {
+        const owner = permissionResponseOwner(prompt);
+        return owner ? [owner] : [];
+      });
+      if (!isCurrent() || !samePermissionResponseOwner(expected, owners)) return "stale";
+      await api.request(`/sessions/${encodeURIComponent(sessionId)}/permission`, {
+        method: "POST",
+        body: JSON.stringify({
+          tool_id: expected.toolId,
+          permission_id: expected.permissionId,
+          decision: result.decision,
+          scope: result.scope ?? "once",
+          ...(result.option_id ? { option_id: result.option_id } : {}),
+        }),
+      });
+      return "answered";
+    } finally {
+      permissionResponsesInFlight.current.delete(key);
+    }
+  }, [api, runtime, sessionId]);
 
   // A turn this page did not start (another window, the agent's terminal, a
   // peer's message) streams through App's event subscription. Its events fold
@@ -1760,21 +1860,23 @@ export function EngineRuntimeProvider({
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <PermissionCancellationContext.Provider
-        value={{ cancel: cancelPermission, cancelling: permissionCancellationPending }}
-      >
-        <SendWaitingNowContext.Provider value={harness ? null : sendWaitingNow}>
-          <InitialMessagesGate
-            runtime={runtime}
-            messages={initialState.messages}
-          >
-            <PermissionToolUI />
-            <VoiceModeProvider api={api} sessionId={sessionId}>
-              {children}
-            </VoiceModeProvider>
-          </InitialMessagesGate>
-        </SendWaitingNowContext.Provider>
-      </PermissionCancellationContext.Provider>
+      <PermissionResponseContext.Provider value={respondToPermission}>
+        <PermissionCancellationContext.Provider
+          value={{ cancel: cancelPermission, cancelling: permissionCancellationPending }}
+        >
+          <SendWaitingNowContext.Provider value={harness ? null : sendWaitingNow}>
+            <InitialMessagesGate
+              runtime={runtime}
+              messages={initialState.messages}
+            >
+              <PermissionToolUI />
+              <VoiceModeProvider api={api} sessionId={sessionId}>
+                {children}
+              </VoiceModeProvider>
+            </InitialMessagesGate>
+          </SendWaitingNowContext.Provider>
+        </PermissionCancellationContext.Provider>
+      </PermissionResponseContext.Provider>
     </AssistantRuntimeProvider>
   );
 }

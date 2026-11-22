@@ -112,9 +112,9 @@ class YesApprovals:
         self._approved: set[str] = set()
         self._note = ""
         self._conversation: str | None = None
-        self._cards: dict[str, str] = {}  # parked prompt's call id -> approval key
-        # Closes a parked prompt's card: (call id, approve / deny / None cancel).
-        self.close_card: Callable[[str, bool | None], None] | None = None
+        self._cards: dict[tuple[str, str], tuple[str, str | None]] = {}  # (call id, permission owner) -> approval key
+        # Closes a parked prompt's card with its exact permission owner.
+        self.close_card: Callable[[str, str | None, bool | None], None] | None = None
 
     def ask(self, tool_data: Mapping[str, Any], context: Mapping[str, Any] | None = None) -> None:
         """Keep a call that needs the user's OK for the reply being written."""
@@ -155,20 +155,30 @@ class YesApprovals:
         self._approved.discard(key)
         return True
 
-    def park(self, tool_data: Mapping[str, Any]) -> None:
+    def park(self, tool_data: Mapping[str, Any], permission_id: str | None = None) -> None:
         """Its approval prompt stays open past its turn: its card answers it too."""
-        self._cards[str(tool_data.get("id"))] = approval_key(tool_data)
+        card = (str(tool_data.get("id")), str(permission_id or ""))
+        self._cards[card] = (approval_key(tool_data), permission_id)
 
-    def answered_on_card(self, tool_data: Mapping[str, Any], allowed: bool | None) -> str:
+    def answered_on_card(
+        self,
+        tool_data: Mapping[str, Any],
+        allowed: bool | None,
+        permission_id: str | None = None,
+    ) -> str:
         """A parked prompt was answered on its card: what to run now, or "".
 
         Allow approves that call once and Deny drops the ask; a prompt that closed
         unanswered (None) leaves it open. A card the user's typed answer already
         closed does nothing.
         """
-        key = self._cards.pop(str(tool_data.get("id")), None)
-        if key is None or allowed is None:
+        if not permission_id:
             return ""
+        card = (str(tool_data.get("id")), permission_id)
+        owner = self._cards.pop(card, None)
+        if owner is None or allowed is None:
+            return ""
+        key, _permission_id = owner
         self._asked.pop(key, None)
         if not allowed:
             return ""
@@ -176,11 +186,11 @@ class YesApprovals:
         return _describe(tool_data)
 
     def _close_cards(self, keys: set[str], allowed: bool | None) -> None:
-        for card, key in list(self._cards.items()):
+        for card, (key, permission_id) in list(self._cards.items()):
             if key in keys:
                 del self._cards[card]
                 if self.close_card is not None:
-                    self.close_card(card, allowed)
+                    self.close_card(card[0], permission_id, allowed)
 
     def on_human_input(self, text: str, conversation: str | None = None, *, talk_over: bool = False) -> None:
         """The user's own message (never another agent's or the model's).
@@ -194,7 +204,7 @@ class YesApprovals:
             if self._conversation is not None:
                 # /resume or a new chat: what the agent asked is not in this one.
                 self._asked.clear()
-                self._close_cards(set(self._cards.values()), None)
+                self._close_cards({key for key, _permission_id in self._cards.values()}, None)
             self._conversation = conversation
         if self._asked_until and time.monotonic() > self._asked_until:
             self._asked.clear()

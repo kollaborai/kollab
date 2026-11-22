@@ -821,10 +821,10 @@ class TerminalLLMChat:
                 self._attach_permission_bridge.cancel_pending()
                 self.renderer.layout_manager.cancel_permission_prompt()
 
-            def park_confirmation(tool_id: str) -> None:
+            def park_confirmation(tool_id: str, permission_id: str) -> None:
                 # Its turn went on: the terminal's prompt would answer the next
                 # message's keys, so it closes; the card stays open.
-                self._attach_permission_bridge.park(tool_id)
+                self._attach_permission_bridge.park(tool_id, permission_id)
                 self.renderer.layout_manager.cancel_permission_prompt()
 
             self.permission_manager.set_confirmation_callback(
@@ -2809,6 +2809,9 @@ class TerminalLLMChat:
                                 layout_manager=self.renderer.layout_manager,
                                 event=event,
                                 wait_for_rpc_reply=False,
+                                on_response_failure=lambda message: coordinator.display_message_sequence(
+                                    [("error", message, {"display_type": "error"})]
+                                ),
                             ),
                             name="attach-permission-prompt",
                         )

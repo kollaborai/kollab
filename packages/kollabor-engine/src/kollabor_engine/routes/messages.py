@@ -511,6 +511,30 @@ def _assistant_tool_result(command: Dict[str, Any]) -> tuple[str, Any, str, str]
     return tool_call_id, result, decision, scope
 
 
+def _assistant_permission_identity(messages: List[Dict[str, Any]], call_id: str) -> tuple[str, str]:
+    """Find the tool id and owner token on the exact permission call in client state."""
+    for message in messages:
+        content = message.get("content")
+        if message.get("role") != "assistant" or not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("toolCallId") != call_id:
+                continue
+            if part.get("toolName") != "request_permission":
+                continue
+            args = part.get("args")
+            if not isinstance(args, dict):
+                continue
+            tool_id = args.get("tool_id")
+            value = args.get("permission_id")
+            if not isinstance(value, str) or not value:
+                details = args.get("details")
+                value = details.get("permission_id") if isinstance(details, dict) else None
+            if isinstance(tool_id, str) and tool_id and isinstance(value, str) and value:
+                return tool_id, value
+    return "", ""
+
+
 async def _assistant_next_event(queue, controller, timeout=None):
     """Wait for either a daemon event or assistant-stream cancellation.
 
@@ -559,7 +583,7 @@ def _permission_result_from_event(event: Dict[str, Any]) -> Dict[str, Any]:
     }
     if "scope" in event or not event.get("vendor_saved"):
         result["scope"] = event.get("scope", "once")
-    for key in ("option_id", "vendor_saved", "warning"):
+    for key in ("option_id", "vendor_saved", "warning", "permission_id"):
         if key in event:
             result[key] = event[key]
     return result
@@ -1070,7 +1094,10 @@ def _assistant_set_messages(controller: Any, messages: List[Dict[str, Any]]) -> 
 
 
 def _assistant_close_shown_prompt(
-    messages: List[Dict[str, Any]], call_id: str, result: Dict[str, Any]
+    messages: List[Dict[str, Any]],
+    call_id: str,
+    result: Dict[str, Any],
+    permission_id: str | None,
 ) -> None:
     """Put the answer on a prompt card an earlier message shows.
 
@@ -1082,7 +1109,18 @@ def _assistant_close_shown_prompt(
         if message.get("role") != "assistant" or not isinstance(content, list):
             continue
         for at, part in enumerate(content):
-            if isinstance(part, dict) and part.get("toolCallId") == call_id:
+            if not isinstance(part, dict) or part.get("toolCallId") != call_id:
+                continue
+            args = part.get("args")
+            current_id = args.get("permission_id") if isinstance(args, dict) else None
+            if not current_id and isinstance(args, dict):
+                details = args.get("details")
+                current_id = details.get("permission_id") if isinstance(details, dict) else None
+            if permission_id and current_id != permission_id:
+                continue
+            if not permission_id and current_id:
+                continue
+            if isinstance(part, dict):
                 parts = list(content)
                 parts[at] = {
                     **part,
@@ -1392,7 +1430,7 @@ async def assistant_transport(
         goal_pump = None
         revocation_watch = None
         tool_controllers: Dict[str, Any] = {}
-        permission_controllers: Dict[str, Any] = {}
+        permission_controllers: Dict[tuple[str, str], Any] = {}
         permission_tool_ids: Dict[str, str] = {}
         state_messages = _assistant_copy_messages(body.state)
         persist_message_state = isinstance(body.state, dict) and isinstance(
@@ -1407,7 +1445,7 @@ async def assistant_transport(
         submitted_row_ids: List[Optional[str]] = []  # the row each send names, if any (#1102)
         request_ids: set[str] = set()
         untagged = False  # an admission that echoed no id: its turn carries none (#551)
-        answered_prompts: set[str] = set()  # daemon tool ids this request answered
+        answered_prompts: set[tuple[str, str]] = set()  # exact permission owners this request answered
         assistant_tool_parts: Dict[str, Dict[str, Any]] = {}
         # Text, reasoning and tool-call parts in arrival order.
         assistant_parts: List[Dict[str, Any]] = []
@@ -1558,13 +1596,23 @@ async def assistant_transport(
                             "add-tool-result command has no toolCallId"
                         )
                         return
-                    source_tool_id = permission_tool_ids.get(call_id, call_id)
-                    # Permission tool-call IDs are stable across requests so the
-                    # browser can answer a prompt from a later add-tool-result
-                    # request. Recover the original daemon tool id when this
-                    # callback did not see the request_permission event itself.
-                    if source_tool_id == call_id and call_id.startswith("permission_"):
-                        source_tool_id = call_id.removeprefix("permission_")
+                    state_tool_id, state_permission_id = _assistant_permission_identity(state_messages, call_id)
+                    result_tool_id = result.get("tool_id") if isinstance(result, dict) else None
+                    result_permission_id = result.get("permission_id") if isinstance(result, dict) else None
+                    if (state_permission_id and result_permission_id and
+                            state_permission_id != result_permission_id):
+                        controller.add_error("permission response owner does not match the displayed prompt")
+                        return
+                    source_tool_id = (
+                        state_tool_id
+                        or (result_tool_id if isinstance(result_tool_id, str) else None)
+                        or permission_tool_ids.get(call_id)
+                    )
+                    if not source_tool_id:
+                        controller.add_error(
+                            "permission response is missing its tool owner; refresh the chat before answering"
+                        )
+                        return
                     if not decision:
                         decision = "approve" if result is True else "deny"
                     if decision not in ("approve", "deny"):
@@ -1573,22 +1621,34 @@ async def assistant_transport(
                         )
                         return
                     option_id = result.get("option_id") if isinstance(result, dict) else None
+                    permission_id = result_permission_id or state_permission_id
+                    if not isinstance(permission_id, str) or not permission_id:
+                        controller.add_error(
+                            "permission response is missing its owner; refresh the chat before answering"
+                        )
+                        return
                     if option_id is None:
-                        resolved = await session.resolve_permission(source_tool_id, decision, scope)
+                        resolved = await session.resolve_permission(
+                            source_tool_id,
+                            decision,
+                            scope,
+                            permission_id=permission_id,
+                        )
                     else:
                         resolved = await session.resolve_permission(
                             source_tool_id,
                             decision,
                             scope,
                             option_id=str(option_id),
+                            permission_id=permission_id,
                         )
                     saw_action = True
                     if not resolved:
                         controller.add_error(
-                            f"No pending permission for tool_id '{source_tool_id}'"
+                            f"Permission owner is stale or no longer pending for tool_id '{source_tool_id}'"
                         )
                         return
-                    answered_prompts.add(source_tool_id)
+                    answered_prompts.add((source_tool_id, permission_id))
                 else:
                     controller.add_error(
                         f"Unsupported assistant command: {command_type or 'unknown'}"
@@ -1718,24 +1778,32 @@ async def assistant_transport(
                     source_tool_id = str(event.get("tool_id") or "")
                     if not source_tool_id:
                         continue
-                    permission_call_id = f"permission_{source_tool_id}"
+                    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+                    permission_id = event.get("permission_id") or details.get("permission_id")
+                    permission_call_id = (
+                        f"permission_{source_tool_id}_{permission_id}"
+                        if permission_id
+                        else f"permission_{source_tool_id}"
+                    )
                     permission_tool_ids[permission_call_id] = source_tool_id
                     permission_controller = await controller.add_tool_call(
                         "request_permission", permission_call_id
                     )
-                    permission_controllers[source_tool_id] = permission_controller
+                    permission_controllers[(source_tool_id, str(permission_id or ""))] = permission_controller
                     permission_part = {
                         "type": "tool-call",
                         "toolCallId": permission_call_id,
                         "toolName": "request_permission",
                         "args": {
                             "tool_id": source_tool_id,
+                            "permission_id": event.get("permission_id")
+                            or (event.get("details") or {}).get("permission_id"),
                             "tool_name": event.get("tool_name"),
                             "risk_level": event.get("risk_level"),
                             "risk_reason": event.get("risk_reason"),
                             "input": event.get("input") or {},
-                            "details": event.get("details") or {},
-                            "acp_options": (event.get("details") or {}).get("acp_options", []),
+                            "details": details,
+                            "acp_options": details.get("acp_options", []),
                         },
                     }
                     permission_part["argsText"] = json.dumps(
@@ -1794,11 +1862,18 @@ async def assistant_transport(
                     publish_progress()
                 elif event_type in ("permission_granted", "permission_denied", "permission_cancelled"):
                     source_tool_id = str(event.get("tool_id") or "")
+                    permission_id = event.get("permission_id")
                     permission_result = _permission_result_from_event(event)
-                    permission_part = assistant_tool_parts.get(
-                        f"permission_{source_tool_id}"
+                    permission_call_id = (
+                        f"permission_{source_tool_id}_{permission_id}"
+                        if permission_id else f"permission_{source_tool_id}"
                     )
-                    if permission_part is not None:
+                    permission_part = assistant_tool_parts.get(
+                        permission_call_id
+                    )
+                    part_args = permission_part.get("args") if isinstance(permission_part, dict) else None
+                    part_permission_id = part_args.get("permission_id") if isinstance(part_args, dict) else None
+                    if permission_part is not None and permission_id == part_permission_id:
                         permission_part.update(
                             {
                                 "result": permission_result,
@@ -1810,12 +1885,12 @@ async def assistant_transport(
                         # message (a typed yes or no answers a parked card).
                         _assistant_close_shown_prompt(
                             state_messages,
-                            f"permission_{source_tool_id}",
+                            permission_call_id,
                             permission_result,
+                            permission_id if isinstance(permission_id, str) else None,
                         )
-                    permission_controller = permission_controllers.pop(
-                        source_tool_id, None
-                    )
+                    permission_key = (source_tool_id, str(permission_id or ""))
+                    permission_controller = permission_controllers.pop(permission_key, None)
                     if permission_controller is not None:
                         _assistant_set_tool_result(
                             permission_controller,
@@ -1825,7 +1900,7 @@ async def assistant_transport(
                     if (
                         event.get("parked")
                         and event_type != "permission_granted"
-                        and source_tool_id in answered_prompts
+                        and permission_key in answered_prompts
                         and not submitted_contents
                     ):
                         # A prompt its turn left open, answered no: no turn
