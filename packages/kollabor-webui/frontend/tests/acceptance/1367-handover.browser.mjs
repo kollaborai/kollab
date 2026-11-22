@@ -300,9 +300,12 @@ try {
     };
     const promptEvent = {
       type: "permission_request", request_id: first.id, tool_id: "permission-tool-a",
+      permission_id: "permission-owner-token-a",
       tool_name: "terminal", tool_type: "command", input: { cmd: "echo needs approval" },
       risk_level: "medium", risk_reason: "This command needs approval.",
-      details: { source: "acp", request_id: "permission-owner-a" },
+      details: {
+        source: "acp", request_id: "permission-owner-a", permission_id: "permission-owner-token-a",
+      },
     };
     assert.deepEqual(engineForeignOutput([promptEvent], [second.id], true), [true],
       "the engine filters request A's permission event from request B's assistant stream");
@@ -319,12 +322,19 @@ try {
     // the exact mid-turn snapshot that the running thread must retain.
     const pendingPermission = {
       tool_id: "permission-tool-a",
+      permission_id: "permission-owner-token-a",
+      request_id: first.id,
       tool_name: "terminal",
       tool_type: "command",
       input: { cmd: "echo needs approval" },
       risk_level: "medium",
       risk_reason: "This command needs approval.",
-      details: { source: "acp", request_id: "permission-owner-a" },
+      details: {
+        source: "acp",
+        request_id: "permission-owner-a",
+        permission_id: "permission-owner-token-a",
+        acp_options: [{ optionId: "allow-once-a", name: "Allow once", kind: "allow_once" }],
+      },
     };
     await t.page.evaluate((prompt) => window.refreshPermissions([prompt]), pendingPermission);
     const prompt = t.page.getByText("Permission required: terminal", { exact: true });
@@ -337,7 +347,7 @@ try {
     }
     assert.equal(await t.page.getByText("Permission required: foreign-tool", { exact: true }).count(), 0,
       "the refresh does not invent a prompt for a foreign event");
-    for (const label of ["Allow once", "Allow session", "Deny"]) {
+    for (const label of ["Allow once"]) {
       const button = t.page.getByRole("button", { name: label, exact: true });
       assert.equal(await button.count(), 1, `${label} appears once on the prompt`);
       assert.equal(await button.isEnabled(), true, `${label} requires an explicit user choice`);
@@ -346,14 +356,30 @@ try {
     assert.equal(beforeAnswer.running, "running", "request B remains active while the permission prompt is shown");
     assert.equal(await t.page.getByText("Allowed (once)", { exact: true }).count(), 0,
       "the permission remains unanswered until the user chooses");
+    assert.equal((await t.page.evaluate(() => window.permissionResponses)).length, 0,
+      "the engine has not received an answer before the user chooses");
     assert.deepEqual(beforeAnswer.transports[1], { closed: false, aborted: false, pushCount: 0 },
       "B's assistant transport remains open and does not receive A's filtered event");
 
     const allowOnce = t.page.getByRole("button", { name: "Allow once", exact: true });
-    await allowOnce.click();
+    await allowOnce.evaluate((button) => { button.click(); button.click(); });
     await t.page.getByText("Allowed (once)", { exact: true }).waitFor();
     assert.equal(await prompt.count(), 1, "answering does not duplicate the permission row");
     assert.equal(await allowOnce.isDisabled(), true, "the same prompt cannot be answered twice");
+    const allowedResponses = await t.page.evaluate(() => window.permissionResponses);
+    assert.equal(allowedResponses.length, 1,
+      `the permission decision reaches the engine API exactly once despite a repeated click; ` +
+        JSON.stringify({ ids: (await t.read()).ids, reads: await t.page.evaluate(() => window.permissionReads) }));
+    assert.deepEqual(allowedResponses[0], {
+      sessionId: "s1",
+      method: "POST",
+      authorization: "Bearer fixture-token",
+      body: {
+        tool_id: "permission-tool-a", permission_id: "permission-owner-token-a",
+        decision: "approve", scope: "once", option_id: "allow-once-a",
+      },
+      handoverTransportOpen: true,
+    }, "the authenticated response resolves A's permission while B's POST remains open");
     const afterAnswer = await t.read();
     assert.equal(await t.page.getByText("Allowed (once)", { exact: true }).count(), 1,
       "the explicit choice is shown on the permission prompt");
@@ -367,27 +393,92 @@ try {
     await prompt.waitFor({ state: "detached" });
     assert.equal(await t.page.getByRole("button", { name: "Allow once", exact: true }).count(), 0,
       "a resolved synthetic prompt is no longer answerable");
-    assert.ok(!(await t.read()).tools.includes("permission_permission-tool-a"),
+    assert.ok(!(await t.read()).tools.includes("permission_permission-tool-a_permission-owner-token-a"),
       "a resolved prompt is removed from the thread state");
 
     const stalePermission = {
       ...pendingPermission,
-      tool_id: "permission-tool-stale",
+      // Reuse A's source tool ID with a fresh owner token. A client that keys
+      // only by tool_id must not send this denial/approval to the new owner.
+      tool_id: "permission-tool-a",
+      permission_id: "permission-owner-token-stale",
       tool_name: "file_write",
-      details: { source: "acp", request_id: "permission-owner-stale" },
+      request_id: `${first.id}-stale`,
+      details: {
+        source: "acp", request_id: "permission-owner-stale", permission_id: "permission-owner-token-stale",
+      },
     };
     await t.page.evaluate((value) => window.refreshPermissions([value]), stalePermission);
     const stalePrompt = t.page.getByText("Permission required: file_write", { exact: true });
     await stalePrompt.waitFor();
-    assert.equal(await t.page.getByRole("button", { name: "Allow once", exact: true }).isEnabled(), true,
-      "a later pending prompt is answerable before switching sessions");
+    const staleAllow = t.page.getByRole("button", { name: "Allow once", exact: true });
+    assert.equal(await staleAllow.isEnabled(), true, "a pending prompt is answerable before its server snapshot changes");
+    await t.page.evaluate(({ sessionId, prompt }) => window.setPermissionSnapshot(sessionId, [prompt]), {
+      sessionId: "s1",
+      prompt: {
+        ...stalePermission,
+        request_id: `${first.id}-different-owner`,
+        permission_id: "permission-owner-token-different",
+      },
+    });
+    await staleAllow.click();
+    await t.page.getByText("This permission request is no longer pending.", { exact: true }).waitFor();
+    assert.equal(await staleAllow.isDisabled(), true, "a server-side owner mismatch disables the stale decision");
+    assert.equal((await t.page.evaluate(() => window.permissionResponses)).length, 1,
+      "the stale prompt sends no permission response");
+    assert.equal((await t.page.evaluate(() => window.permissionReads)).at(-1)?.authorization, "Bearer fixture-token",
+      "stale ownership was checked through the authenticated API");
+    await t.page.evaluate(() => window.refreshPermissions([]));
+    await stalePrompt.waitFor({ state: "detached" });
+
+    const denyPermission = {
+      ...pendingPermission,
+      tool_id: "permission-tool-deny",
+      permission_id: "permission-owner-token-deny",
+      request_id: `${first.id}-deny`,
+      tool_name: "shell",
+      details: {
+        source: "acp", request_id: "permission-owner-deny", permission_id: "permission-owner-token-deny",
+      },
+    };
+    await t.page.evaluate((value) => window.refreshPermissions([value]), denyPermission);
+    const denyPrompt = t.page.getByText("Permission required: shell", { exact: true });
+    await denyPrompt.waitFor();
+    const deny = t.page.getByRole("button", { name: "Deny", exact: true });
+    await deny.evaluate((button) => { button.click(); button.click(); });
+    await t.page.getByText("Denied (once)", { exact: true }).waitFor();
+    const decisions = await t.page.evaluate(() => window.permissionResponses);
+    assert.equal(decisions.length, 2, "deny reaches the API once despite a repeated click");
+    assert.deepEqual(decisions[1], {
+      sessionId: "s1",
+      method: "POST",
+      authorization: "Bearer fixture-token",
+      body: {
+        tool_id: "permission-tool-deny", permission_id: "permission-owner-token-deny",
+        decision: "deny", scope: "once",
+      },
+      handoverTransportOpen: true,
+    }, "denial is sent to the matching session while request B remains open");
+
+    await t.page.evaluate((value) => window.refreshPermissions([value]), stalePermission);
+    const switchingPrompt = t.page.getByText("Permission required: file_write", { exact: true });
+    await switchingPrompt.waitFor();
+    const responsesBeforeSwitch = (await t.page.evaluate(() => window.permissionResponses)).length;
+    const readsBeforeSwitch = (await t.page.evaluate(() => window.permissionReads)).length;
+    await t.page.evaluate(() => window.pausePermissionRead("s1"));
+    await t.page.getByRole("button", { name: "Allow once", exact: true }).click();
+    await t.page.waitForFunction((before) => window.permissionReads.length > before, readsBeforeSwitch);
 
     // App keys the runtime by session. A later session must not inherit this
     // permission card or its answer control from the prior run.
     await t.page.evaluate(() => window.switchSession("s2"));
     await t.page.waitForFunction(() => window.sessionEventOpen && window.sessionEventTransport !== undefined);
     await prompt.waitFor({ state: "detached" });
-    await stalePrompt.waitFor({ state: "detached" });
+    await switchingPrompt.waitFor({ state: "detached" });
+    await t.page.evaluate(() => window.releasePermissionRead());
+    await t.page.waitForTimeout(50);
+    assert.equal((await t.page.evaluate(() => window.permissionResponses)).length, responsesBeforeSwitch,
+      "a session switch during the ownership check cannot send a decision");
     assert.equal(await t.page.getByRole("button", { name: "Allow once", exact: true }).count(), 0,
       "the next session has no stale answer control");
     const afterSwitch = await t.read();

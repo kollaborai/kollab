@@ -257,16 +257,17 @@ async def test_permission_scope_and_opaque_options(engine_factory, tmp_path, att
     agent = KollabACPAgent()
     agent.on_connect(sdk_connection())
     engine = engine_factory("engine", workspace=str(tmp_path))
+    engine.daemon.rpc.call.return_value = {"ok": True}
     session = ClientSession("client", engine, str(tmp_path), attached)
     offered = [{"optionId": "vendor-once", "name": "Allow once", "kind": "allow_once"},
                {"optionId": "vendor-always", "name": "Always", "kind": "allow_always"},
                {"optionId": "vendor-deny", "name": "Deny", "kind": "reject_once"}]
     agent.connection.request_permission.return_value = RequestPermissionResponse.model_validate(
         {"outcome": {"outcome": "selected", "optionId": "vendor-once"}})
-    await agent._permission(session, {"tool_id": "vendor", "details": {"acp_options": offered}})
+    await agent._permission(session, {"tool_id": "vendor", "permission_id": "owner-vendor", "details": {"acp_options": offered}})
     options = agent.connection.request_permission.call_args.kwargs["options"]
     assert ("allow_always" in {option.kind for option in options}) == (not attached)
-    assert engine.daemon.rpc.call.call_args.args == ("permission.respond", {"tool_id": "vendor", "option_id": "vendor-once"})
+    assert engine.daemon.rpc.call.call_args.args == ("permission.respond_owned", {"tool_id": "vendor", "permission_id": "owner-vendor", "option_id": "vendor-once"})
 
 
 @pytest.mark.asyncio
@@ -283,6 +284,7 @@ async def test_repeated_live_source_ids_are_unique_and_permission_replies_keep_s
     produced = []
     source_events = []
     permission_replies = []
+    permission_owner_tokens = []
     permission_done = asyncio.Event()
 
     async def select(**kwargs):
@@ -296,7 +298,9 @@ async def test_repeated_live_source_ids_are_unique_and_permission_replies_keep_s
             permission_done.clear()
             start = {"type": "tool_start", "tool_id": "terminal_0",
                      "tool_name": "terminal", "tool_type": "terminal", "input": {"command": str(index)}}
-            permission = {"type": "permission_request", "tool_id": "terminal_0", "tool_name": "terminal"}
+            permission_id = f"owner-{request_id}-{index}"
+            permission_owner_tokens.append(permission_id)
+            permission = {"type": "permission_request", "tool_id": "terminal_0", "permission_id": permission_id, "tool_name": "terminal"}
             if wrapped:
                 # The compatibility display event must not allocate a second invocation.
                 engine.events.put_nowait({"request_id": request_id, **start, "acp_passthrough": True})
@@ -326,10 +330,10 @@ async def test_repeated_live_source_ids_are_unique_and_permission_replies_keep_s
         if name == "state.acp_submit":
             produced.append(asyncio.create_task(produce(params["request_id"])))
             return {"accepted": True}
-        if name == "permission.respond":
+        if name == "permission.respond_owned":
             permission_replies.append(params)
             permission_done.set()
-        return {}
+        return {"ok": True}
 
     engine.daemon.rpc.call.side_effect = rpc
     for _ in range(2):
@@ -347,8 +351,11 @@ async def test_repeated_live_source_ids_are_unique_and_permission_replies_keep_s
         assert [row["toolCallId"] for row in agent.connection.updates
                 if row.get("status") == "in_progress"] == start_ids
         assert all(row.get("rawOutput") == 0 for row in agent.connection.updates if row.get("status") == "in_progress")
-    assert permission_replies == [{"tool_id": "terminal_0", **(
-        {"option_id": "opaque-yes"} if wrapped else {"control": "APPROVE_ONCE"})}] * 4
+    assert permission_replies == [
+        {"tool_id": "terminal_0", "permission_id": permission_id, **(
+            {"option_id": "opaque-yes"} if wrapped else {"control": "APPROVE_ONCE"})}
+        for permission_id in permission_owner_tokens
+    ]
     assert all(row == original for row, original in source_events)
     await agent.shutdown()
 

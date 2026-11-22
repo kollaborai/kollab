@@ -22,6 +22,20 @@ type SessionEventTransport = {
   pushCount: number;
 };
 
+type PermissionResponseRecord = {
+  sessionId: string;
+  method: string;
+  authorization: string | null;
+  body: Record<string, unknown>;
+  handoverTransportOpen: boolean;
+};
+
+type PermissionReadGate = {
+  sessionId: string;
+  wait: Promise<void>;
+  release: () => void;
+};
+
 declare global {
   interface Window {
     transports: AssistantTransport[];
@@ -30,7 +44,13 @@ declare global {
     sessionEventOpen: boolean;
     sessionEventsDelivered: SessionEvent[];
     mockEngineRequests: string[];
+    permissionSnapshot: Record<string, PermissionPrompt[]>;
+    permissionResponses: PermissionResponseRecord[];
+    permissionReads: Array<{ sessionId: string; authorization: string | null }>;
     refreshPermissions: (prompts: PermissionPrompt[]) => void;
+    setPermissionSnapshot: (sessionId: string, prompts: PermissionPrompt[]) => void;
+    pausePermissionRead: (sessionId: string) => void;
+    releasePermissionRead: () => void;
     switchSession: (sessionId: string) => void;
   }
 }
@@ -39,6 +59,19 @@ window.transports = [];
 window.sessionEventOpen = false;
 window.sessionEventsDelivered = [];
 window.mockEngineRequests = [];
+window.permissionSnapshot = { s1: [], s2: [] };
+window.permissionResponses = [];
+window.permissionReads = [];
+let permissionReadGate: PermissionReadGate | null = null;
+window.pausePermissionRead = (sessionId) => {
+  let release!: () => void;
+  const wait = new Promise<void>((resolve) => { release = resolve; });
+  permissionReadGate = { sessionId, wait, release };
+};
+window.releasePermissionRead = () => {
+  permissionReadGate?.release();
+  permissionReadGate = null;
+};
 
 // The fixture exposes two distinct HTTP response bodies: the assistant POST
 // transport and the session GET /events stream. The latter is consumed by the
@@ -50,6 +83,35 @@ window.fetch = async (input, init) => {
   const pathname = new URL(url, window.location.origin).pathname;
   window.mockEngineRequests.push(pathname);
   const encoder = new TextEncoder();
+
+  const permissionsSession = /^\/sessions\/([^/]+)\/permissions$/.exec(pathname)?.[1];
+  if (permissionsSession && init?.method !== "POST") {
+    window.permissionReads.push({
+      sessionId: permissionsSession,
+      authorization: new Headers(init?.headers).get("Authorization"),
+    });
+    const gate = permissionReadGate;
+    if (gate?.sessionId === permissionsSession) await gate.wait;
+    return Response.json({ pending_prompts: window.permissionSnapshot[permissionsSession] ?? [] });
+  }
+
+  const permissionSession = /^\/sessions\/([^/]+)\/permission$/.exec(pathname)?.[1];
+  if (permissionSession && init?.method === "POST") {
+    const body = JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>;
+    window.permissionResponses.push({
+      sessionId: permissionSession,
+      method: init.method,
+      authorization: new Headers(init.headers).get("Authorization"),
+      body,
+      handoverTransportOpen: window.transports[1]?.closed === false,
+    });
+    const prompts = window.permissionSnapshot[permissionSession] ?? [];
+    const index = prompts.findIndex((prompt) => prompt.tool_id === body.tool_id &&
+      prompt.permission_id === body.permission_id);
+    if (index < 0) return Response.json({ detail: "No pending permission" }, { status: 404 });
+    window.permissionSnapshot[permissionSession] = prompts.filter((_, at) => at !== index);
+    return Response.json({ ok: true, tool_id: body.tool_id, decision: body.decision });
+  }
 
   const eventsSession = /^\/sessions\/([^/]+)\/events$/.exec(pathname)?.[1];
   if (eventsSession) {
@@ -110,6 +172,7 @@ window.fetch = async (input, init) => {
 const api = new EngineApi(window.location.origin);
 // Pin the EngineApi to Vite's local origin without requesting a host engine's
 // /api/config or credentials. streamEvents and its SSE parser remain real.
+api.setToken("fixture-token");
 api.loadConfig = async () => null;
 api.refreshToken = async () => false;
 const initialState: EngineState = {
@@ -152,12 +215,17 @@ function BranchProbe() {
 function Fixture() {
   const [sessionId, setSessionId] = useState("s1");
   const [state, setState] = useState(initialState);
-  window.refreshPermissions = (prompts) => setState(buildInitialState(
-    sessionId, initialState.sessions, [], prompts,
-  ));
+  window.setPermissionSnapshot = (forSessionId, prompts) => {
+    window.permissionSnapshot[forSessionId] = prompts;
+  };
+  window.refreshPermissions = (prompts) => {
+    window.permissionSnapshot[sessionId] = prompts;
+    setState(buildInitialState(sessionId, initialState.sessions, [], prompts));
+  };
   window.switchSession = (nextSessionId) => {
     window.sessionEventOpen = false;
     window.sessionEventTransport = undefined;
+    window.permissionSnapshot[nextSessionId] ??= [];
     setSessionId(nextSessionId);
     setState(buildInitialState(nextSessionId, [], [], []));
   };

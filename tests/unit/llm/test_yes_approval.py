@@ -43,6 +43,22 @@ def test_anything_else_is_a_normal_turn(text):
 CHECK_PRS = {"type": "terminal", "id": "call-1", "command": "gh pr list"}
 # The voice policy in every mode that asks, for a LiveKit room's turn and a /voice
 # turn. Trust All asks for nothing: its voice turns run as typed ones do.
+
+
+def test_parked_cards_with_reused_tool_id_keep_distinct_permission_owners():
+    approvals = YesApprovals()
+    call = dict(CHECK_PRS)
+    approvals.park(call, "permission-A")
+    approvals.park(call, "permission-B")
+
+    assert set(approvals._cards) == {
+        ("call-1", "permission-A"),
+        ("call-1", "permission-B"),
+    }
+    assert approvals.answered_on_card(call, True, "permission-A") == "gh pr list"
+    assert set(approvals._cards) == {("call-1", "permission-B")}
+    assert approvals.answered_on_card(call, True) == ""
+    assert set(approvals._cards) == {("call-1", "permission-B")}
 ASKING_MODES = pytest.mark.parametrize("mode", ["confirm_all", "default", "auto_approve_edits"])
 EVERY_VOICE = pytest.mark.parametrize(
     "voice_origin", [make_voice_origin_context, make_device_voice_context], ids=["livekit", "device"]
@@ -470,6 +486,10 @@ async def _parked_call():
     return executor, manager, bridge, tap, result
 
 
+def _bridge_owner(bridge, tool_id):
+    return next(permission_id for pending_tool_id, permission_id in bridge._pending if pending_tool_id == tool_id)
+
+
 def _continued(manager):
     """The agent was told to go on (TRIGGER_LLM_CONTINUE), and with what."""
     from kollabor_events.models import EventType
@@ -487,8 +507,8 @@ def test_allow_on_a_parked_card_runs_the_call_and_the_agent_goes_on():
 
     async def scenario():
         executor, manager, bridge, tap, first = await _parked_call()
-        assert "call-1" in bridge._pending  # the card stays open after the Stop
-        bridge.try_settle_response("call-1", ConfirmationResponse.APPROVE_ONCE)  # Allow
+        permission_id = _bridge_owner(bridge, "call-1")
+        bridge.try_settle_response("call-1", permission_id, ConfirmationResponse.APPROVE_ONCE)  # Allow
         for _ in range(50):
             await asyncio.sleep(0)
         triggers, hud = _continued(manager)
@@ -502,7 +522,8 @@ def test_allow_on_a_parked_card_runs_the_call_and_the_agent_goes_on():
     assert (section, label) == ("permission", "approved") and "gh pr list" in text
     assert second.success and second.output == "#318 open"
     executor._execute_terminal_command.assert_awaited_once()
-    assert events[-1] == {"type": "permission_granted", "tool_id": "call-1", "scope": "once", "parked": True}
+    permission_id = events[0]["details"]["permission_id"]
+    assert events[-1] == {"type": "permission_granted", "tool_id": "call-1", "scope": "once", "parked": True, "permission_id": permission_id}
 
 
 def test_deny_on_a_parked_card_never_runs_it_and_the_agent_stays_quiet():
@@ -510,15 +531,16 @@ def test_deny_on_a_parked_card_never_runs_it_and_the_agent_stays_quiet():
 
     async def scenario():
         executor, manager, bridge, tap, first = await _parked_call()
-        bridge.try_settle_response("call-1", ConfirmationResponse.DENY)
+        bridge.try_settle_response("call-1", _bridge_owner(bridge, "call-1"), ConfirmationResponse.DENY)
         for _ in range(50):
             await asyncio.sleep(0)
         triggers, _ = _continued(manager)
         executor.yes_approvals.on_human_input("yes")  # nothing is asked any more
-        return executor, triggers, executor.yes_approvals.take(again(CHECK_PRS))
+        return executor, triggers, executor.yes_approvals.take(again(CHECK_PRS)), list(tap.events)
 
-    executor, triggers, approved = asyncio.run(scenario())
+    executor, triggers, approved, events = asyncio.run(scenario())
     assert triggers == [] and not approved
+    assert events[-1]["permission_id"] == events[0]["details"]["permission_id"]
     executor._execute_terminal_command.assert_not_awaited()
 
 
@@ -534,7 +556,8 @@ def test_a_typed_yes_closes_the_parked_card_and_runs_the_call():
 
     executor, pending, triggers, second, events = asyncio.run(scenario())
     assert not pending  # its card closed, approved
-    assert events[-1] == {"type": "permission_granted", "tool_id": "call-1", "scope": "once", "parked": True}
+    permission_id = events[0]["details"]["permission_id"]
+    assert events[-1] == {"type": "permission_granted", "tool_id": "call-1", "scope": "once", "parked": True, "permission_id": permission_id}
     assert triggers == []  # the yes is its own turn: it runs the call there
     assert second.success
     executor._execute_terminal_command.assert_awaited_once()
@@ -550,7 +573,8 @@ def test_a_typed_no_closes_the_parked_card_denied():
 
     pending, events = asyncio.run(scenario())
     assert not pending
-    assert events[-1] == {"type": "permission_denied", "tool_id": "call-1", "parked": True}
+    permission_id = events[0]["details"]["permission_id"]
+    assert events[-1] == {"type": "permission_denied", "tool_id": "call-1", "parked": True, "permission_id": permission_id}
 
 
 def test_a_new_chat_closes_the_old_ones_parked_cards():
@@ -564,4 +588,5 @@ def test_a_new_chat_closes_the_old_ones_parked_cards():
 
     pending, events = asyncio.run(scenario())
     assert not pending
-    assert events[-1] == {"type": "permission_denied", "tool_id": "call-1", "outcome": "cancelled", "parked": True}
+    permission_id = events[0]["details"]["permission_id"]
+    assert events[-1] == {"type": "permission_denied", "tool_id": "call-1", "outcome": "cancelled", "parked": True, "permission_id": permission_id}
