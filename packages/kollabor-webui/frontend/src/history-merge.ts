@@ -30,6 +30,18 @@ function displayRow<T extends Message>(row: T, id: string | undefined): T {
   };
 }
 
+/**
+ * A send's saved row under the id the page drew the send with. It keeps naming
+ * its request: the engine pairs a drawn row with its saved one by that id, and
+ * by its words otherwise, which a saved row behind an agent HUD does not match.
+ */
+function drawnSend<T extends Message>(saved: T, send: Message): T {
+  const row = displayRow(saved, send.id);
+  const requestId = send.metadata?.custom?.requestId;
+  if (typeof requestId !== "string" || !requestId || row.metadata?.custom?.requestId === requestId) return row;
+  return { ...row, metadata: { ...row.metadata, custom: { ...row.metadata?.custom, requestId } } };
+}
+
 function reserveRow<T extends Message>(row: T, used: Set<string | undefined>): T {
   let id = row.id;
   for (let n = 1; used.has(id); n++) id = `history-view-${row.id}-${n}`;
@@ -44,6 +56,15 @@ const toolCallIds = (message: Message): string[] =>
       (part as { type?: unknown }).type === "tool-call" &&
       typeof (part as { toolCallId?: unknown }).toolCallId === "string"
       ? [(part as { toolCallId: string }).toolCallId] : [])
+    : [];
+
+/** The tool calls a message draws, each with whether its result is in. */
+const toolCalls = (message: Message): Array<[string, boolean]> =>
+  Array.isArray(message.content)
+    ? message.content.flatMap((part): Array<[string, boolean]> => part && typeof part === "object" &&
+      (part as { type?: unknown }).type === "tool-call" &&
+      typeof (part as { toolCallId?: unknown }).toolCallId === "string"
+      ? [[(part as { toolCallId: string }).toolCallId, (part as { result?: unknown }).result !== undefined]] : [])
     : [];
 
 /** The source history row for a displayed message, including stable-id aliases. */
@@ -92,6 +113,67 @@ const trailingTurn = (shown: ReadonlyArray<Message>): { rows: Set<Message>; orde
   };
 };
 
+/**
+ * A row the page drew itself (its run's row, or the pending copy of a send)
+ * that no saved row is matched to yet.
+ */
+const isUnsettled = (message: Message): boolean =>
+  (TRANSIENT_ROW_ID.test(String(message.id ?? "")) || message.metadata?.isOptimistic === true) &&
+  !isLiveRow(message) && sourceId(message) === null;
+
+/** A row's words on one line: what two copies of the same text share whatever their parts. */
+const wordsOf = (message: Message): string => transientText(message.content).replace(/\s+/g, " ").trim();
+
+/** Whether `reply`, a row the page's run drew, already shows all that the saved assistant row `row` holds. */
+const drawnBy = (reply: Message, row: Message): boolean => {
+  const drawn = new Set(toolCallIds(reply));
+  if (!toolCallIds(row).every((id) => drawn.has(id))) return false;
+  const words = wordsOf(row);
+  return !words || wordsOf(reply).includes(words);
+};
+
+/**
+ * A reply the page's own run drew and where its turn sits in saved history:
+ * after its send (`after`) and up to its own saved row (`before`). The daemon
+ * runs one turn at a time, so the assistant rows saved in between are this
+ * reply's turn, whatever call ids their provider reuses (#1358).
+ */
+type OwnTurn = { reply: Message; after: number; before: number };
+
+/**
+ * The page's own turns that saved history can place: a reply whose send has a
+ * saved position. A reply nothing places hides no row.
+ */
+const ownTurns = (shown: ReadonlyArray<Message>, sentAt: (send: Message) => number | null = historyIndex): OwnTurn[] => {
+  const turns: OwnTurn[] = [];
+  let sends: Message[] = [];
+  for (const message of shown) {
+    if (isLiveRow(message)) continue;
+    const own = TRANSIENT_ROW_ID.test(String(message.id ?? "")) || message.metadata?.isOptimistic === true;
+    if (own && transientRole(message) === "user") { sends.push(message); continue; }
+    if (own && transientRole(message) === "assistant") {
+      const placed = sends.map(sentAt).filter((index): index is number => index !== null);
+      if (placed.length) turns.push({ reply: message, after: Math.min(...placed), before: historyIndex(message) ?? Infinity });
+    }
+    sends = [];
+  }
+  return turns;
+};
+
+/**
+ * A saved assistant row one of the page's own replies stands for. A reply
+ * still being written stands for every assistant row of its turn: the stream
+ * draws them, and a row saved a moment before its words reach the page must not
+ * show next to them. A reply with its saved position stands for the rows it
+ * shows: their tool calls and words.
+ */
+const drawnInOwnTurn = (turns: ReadonlyArray<OwnTurn>, row: Message): boolean => {
+  if (transientRole(row) !== "assistant") return false;
+  const index = historyIndex(row);
+  return index !== null && turns.some((turn) => turn.after < index && index < turn.before &&
+    (turn.before === Infinity || drawnBy(turn.reply, row)));
+};
+
 /** Insert newly reached history rows without dropping previously shown rows. */
 export function mergeMissingHistoryMessages<T extends Message>(
   shown: ReadonlyArray<T>,
@@ -100,35 +182,16 @@ export function mergeMissingHistoryMessages<T extends Message>(
   const used = new Set(shown.map((message) => message.id));
   const represented = new Set(shown.map(sourceId));
   const order = new Map(loaded.map((message, index) => [sourceId(message), index]));
-  // A turn the page ran draws its tool calls inside its reply row; history
-  // saves them as calls rows of their own. Adding those before the reply makes
-  // assistant-ui join them under another id and keep the reply row as a
-  // second branch, so a calls row the reply already draws is not added (#1358).
-  // By call id, where the reply that drew it saved its turn: after every
-  // history row shown before the reply and before the reply itself. Some
-  // providers reuse call ids every turn, so a calls row outside that window is
-  // another turn's and is added.
-  const drawnCalls = new Map<string, Array<{ after: number; before: number }>>();
-  let shownUpTo = -Infinity;
-  for (const message of shown) {
-    if (transientRole(message) !== "assistant" || !TRANSIENT_ROW_ID.test(String(message.id ?? ""))) {
-      // The page's own send counts once it has its saved position.
-      shownUpTo = Math.max(shownUpTo, historyIndex(message) ?? -Infinity);
-      continue;
-    }
-    // Nothing bounds this reply's turn: a call id alone hides nothing.
-    if (shownUpTo === -Infinity) continue;
-    const window = { after: shownUpTo, before: historyIndex(message) ?? Infinity };
-    for (const id of toolCallIds(message)) drawnCalls.set(id, [...(drawnCalls.get(id) ?? []), window]);
-  }
-  const drawnBy = (id: string, index: number) =>
-    (drawnCalls.get(id) ?? []).some((window) => window.after < index && index < window.before);
+  // A send the page drew itself names its request id, and so does its saved
+  // copy: one is enough, whether its request is in flight or ended before the
+  // engine matched the two (#1359).
+  const drawnSends = new Set(shown.filter(isUnsettled).flatMap(requestIdsOf));
+  const turns = ownTurns(shown);
   const added = loaded.flatMap((message) => {
     const key = sourceId(message);
     if (!key || represented.has(key)) return [];
-    const calls = transientRole(message) === "assistant" ? toolCallIds(message) : [];
-    const index = historyIndex(message) ?? Infinity;
-    if (calls.length && calls.every((id) => drawnBy(id, index))) return [];
+    if (transientRole(message) === "user" && requestIdsOf(message).some((id) => drawnSends.has(id))) return [];
+    if (drawnInOwnTurn(turns, message)) return [];
     represented.add(key);
     return [reserveRow(message, used)];
   });
@@ -599,7 +662,7 @@ export function withSavedCopies<T extends Message>(shown: ReadonlyArray<T>, load
     if (!copy || (sourceId(copy) === key && JSON.stringify(copy.content) === JSON.stringify(message.content) &&
       copy.convertConfig?.joinStrategy === message.convertConfig?.joinStrategy)) return message;
     swapped = true;
-    return displayRow(copy, message.id);
+    return drawnSend(copy, message);
   });
   return swapped ? messages : shown;
 }
@@ -678,4 +741,153 @@ export function inFlightSendIdsFor(
   const sentAfter = (request.state as { messages?: unknown } | undefined)?.messages;
   if (!Array.isArray(sentAfter)) return new Set();
   return new Set(Array.from({ length: sends }, (_, index) => `user-${sessionId}-${sentAfter.length + index}`));
+}
+
+/** The loaded row that holds a send the page drew: the saved row naming its request id (#1359). */
+const savedSend = <T extends Message>(send: Message, loaded: ReadonlyArray<T>): T | undefined => {
+  const ids = requestIdsOf(send);
+  return ids.length ? loaded.find((row) => transientRole(row) === "user" &&
+    requestIdsOf(row).some((id) => ids.includes(id))) : undefined;
+};
+
+/**
+ * While the page's own run streams, its turn's saved rows stay out of the rows
+ * a history sync adds: the stream draws them (#1356, #1359). `loaded` is the
+ * whole loaded history, where a send's saved row names its request id and so
+ * places the turn; `tail` holds the rows the sync would add. Left out are the
+ * saved copy of every send the page drew itself (in flight, or left by a run
+ * that ended before the engine matched its rows) and every assistant row saved
+ * after the first of them: the daemon runs one turn at a time, so those are the
+ * turn the stream is writing, and a reply saved a moment before its words reach
+ * the page must not show next to them. Another sender's message steered into
+ * the turn stays.
+ */
+export function withoutOwnTurnRows<T extends Message>(
+  shown: ReadonlyArray<Message>,
+  loaded: ReadonlyArray<Message>,
+  tail: ReadonlyArray<T>,
+): T[] {
+  const sends = new Set(shown.filter((row) => isUnsettled(row) && transientRole(row) === "user").flatMap(requestIdsOf));
+  if (!sends.size) return [...tail];
+  const own = (row: Message) => transientRole(row) === "user" && requestIdsOf(row).some((id) => sends.has(id));
+  const start = loaded.reduce((low, row) => own(row) ? Math.min(low, historyIndex(row) ?? low) : low, Infinity);
+  return tail.filter((row) => !own(row) &&
+    !(transientRole(row) === "assistant" && (historyIndex(row) ?? -Infinity) > start));
+}
+
+/** True while the thread holds a row the page drew itself that saved history has not taken yet. */
+export const hasUnsettledRows = (shown: ReadonlyArray<Message>): boolean => shown.some(isUnsettled);
+
+/**
+ * The thread rebuilt on the loaded history, in place: what a whole reload
+ * would show, under the ids the rows already have, so the chat neither blanks
+ * nor jumps (#1358). For a thread a sync cannot extend row by row: a run that
+ * ended before the engine matched its rows (its stream dropped, or the final
+ * state claimed no sync), or shown rows that read differently in the reloaded
+ * history or are gone from it.
+ *
+ * Every loaded row shows once, in its saved order. A row already on screen
+ * keeps its id, so assistant-ui updates it where it is. A send the page drew
+ * takes its saved row by request id, under the id it was drawn with. A reply
+ * the page drew gives way to the saved rows of its turn once they hold all it
+ * shows; until then it stays behind its send, and the saved rows it already
+ * shows stay out. Rows before the loaded window (older pages) and rows saved
+ * after it was read (`end` is its row count) stay as they are. A shown history
+ * row the window no longer has is dropped. Live rows are the caller's.
+ */
+export function rebaseOntoHistory<T extends Message>(
+  shown: ReadonlyArray<T>,
+  loaded: ReadonlyArray<T>,
+  end: number,
+): T[] {
+  const start = loaded.reduce((low, row) => Math.min(low, historyIndex(row) ?? low), Infinity);
+  const bySource = new Map<string, T>();
+  for (const row of loaded) {
+    const key = sourceId(row);
+    if (key && !bySource.has(key)) bySource.set(key, row);
+  }
+  const same = (left: Message, right: Message) =>
+    JSON.stringify(left.content) === JSON.stringify(right.content) &&
+    left.convertConfig?.joinStrategy === right.convertConfig?.joinStrategy;
+
+  const before: T[] = [];                                  // older pages and archived rows
+  const slots = new Map<string, T>();                      // saved row -> the row shown for it
+  const waiting: Array<{ row: T; after: number }> = [];   // replies history does not hold yet, behind their sends
+  const last: T[] = [];                                    // rows history does not hold, in the order shown
+  const stands: Array<{ reply: T; after: number }> = [];  // those replies and the saved rows they already show
+  let sends: number[] = [];                                // saved positions of the sends before the next reply
+  let unsaved = false;                                     // one of them has no saved row yet
+
+  for (const row of withSavedCopies(shown, loaded)) {
+    if (isLiveRow(row)) continue;
+    const own = TRANSIENT_ROW_ID.test(String(row.id ?? "")) || row.metadata?.isOptimistic === true;
+    const send = own && transientRole(row) === "user";
+    const reply = own && transientRole(row) === "assistant";
+    // The sends right before a reply are its turn.
+    const turnSends = sends;
+    const turnUnsaved = unsaved;
+    if (!send) { sends = []; unsaved = false; }
+    if (compactionArchiveOrder(row) !== null) { before.push(row); continue; }
+    const key = sourceId(row);
+    if (key !== null) {
+      const index = historyIndex(row);
+      if (send && index !== null) sends.push(index);
+      if (index !== null && index < start) { before.push(row); continue; }
+      if (index !== null && index >= end) { last.push(row); continue; }
+      const saved = bySource.get(key);
+      if (!saved || slots.has(key)) continue;              // gone from history, or shown twice
+      // The run's own reply keeps what it streamed: its tool calls sit inside it.
+      const streamed = reply && typeof row.metadata?.custom?.historySourceId !== "string";
+      slots.set(key, streamed || same(row, saved) ? row : displayRow(saved, row.id));
+      continue;
+    }
+    if (send) {
+      const saved = savedSend(row, loaded);
+      const savedKey = saved ? sourceId(saved) : null;
+      const index = saved ? historyIndex(saved) : null;
+      if (!saved || !savedKey || index === null) { unsaved = true; last.push(row); continue; }
+      sends.push(index);
+      // A row saved for two sends and shown whole takes the first of them.
+      if (!slots.has(savedKey)) slots.set(savedKey, drawnSend(saved, row));
+      continue;
+    }
+    if (!reply || !turnSends.length) { last.push(row); continue; }
+    const after = Math.min(...turnSends);
+    const parts = Array.isArray(row.content) ? row.content : [{ type: "text", text: String(row.content ?? "") }];
+    const blank = (part: unknown) => !!part && typeof part === "object" &&
+      (part as { type?: unknown }).type === "text" && !String((part as { text?: unknown }).text ?? "").trim();
+    if (parts.every(blank)) continue;                      // a reply that drew nothing
+    const turn = loaded.filter((saved) => transientRole(saved) === "assistant" && (historyIndex(saved) ?? -Infinity) > after);
+    // Saved calls, and whether each has its result: a call the reply shows
+    // finished is not held by a row saved before its result landed.
+    const calls = new Map(turn.flatMap(toolCalls));
+    const words = turn.map(wordsOf).join(" ");
+    const held = turn.length > 0 && toolCalls(row).every(([id, finished]) => calls.has(id) && (!finished || calls.get(id))) &&
+      parts.every((part) => {
+        if (!part || typeof part !== "object" || (part as { type?: unknown }).type !== "text") return true;
+        const text = String((part as { text?: unknown }).text ?? "").replace(/\s+/g, " ").trim();
+        return !text || words.includes(text);
+      });
+    if (held && !turnUnsaved) continue;                    // history shows the whole reply
+    waiting.push({ row, after });
+    stands.push({ reply: row, after });
+  }
+
+  const settled = ownTurns([...slots.values()]).filter((turn) => turn.before !== Infinity);
+  const used = new Set<string | undefined>([...before, ...slots.values(), ...waiting.map((item) => item.row), ...last]
+    .map((row) => row.id));
+  waiting.sort((left, right) => left.after - right.after);
+  const rows: T[] = [...before];
+  for (const row of loaded) {
+    const key = sourceId(row);
+    const index = historyIndex(row);
+    if (!key || index === null) continue;
+    while (waiting.length && waiting[0].after < index) rows.push(waiting.shift()!.row);
+    const slot = slots.get(key);
+    if (slot) { rows.push(slot); continue; }
+    if (transientRole(row) === "assistant" && (drawnInOwnTurn(settled, row) ||
+      stands.some((item) => item.after < index && drawnBy(item.reply, row)))) continue;
+    rows.push(reserveRow(row, used));
+  }
+  return [...rows, ...waiting.map((item) => item.row), ...last];
 }

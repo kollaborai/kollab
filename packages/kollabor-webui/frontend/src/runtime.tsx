@@ -45,10 +45,13 @@ import {
   mergeCompactionHistorySnapshot,
   mergeMissingHistoryMessages,
   reconcileBoundaryToolResults,
+  hasUnsettledRows,
   inFlightSendIdsFor,
   shownMessagesChanged,
   withoutInFlightSends,
   withSavedCopies,
+  rebaseOntoHistory,
+  withoutOwnTurnRows,
 } from "./history-merge";
 import { historyContentToThreadContent } from "./history-content";
 import {
@@ -754,7 +757,9 @@ const converter = (
     messages: messageConverter.toThreadMessages(
       apartFromLive(withMidTurnRows([...stored, ...optimistic], midTurn)),
       metadata.isSending,
-      { error: state.error },
+      // The engine clears an error with an empty string, which assistant-ui
+      // would draw as an empty error box.
+      { error: state.error || undefined },
     ),
     isRunning: metadata.isSending,
   };
@@ -1254,7 +1259,10 @@ export function EngineRuntimeProvider({
           const index = historyMessageIndex(message);
           return index !== null && index >= from.history;
         });
-        const tail = withoutInFlightSends(thread.messages, newRows, inFlightSendIds.current);
+        // Nor do the rows of the turn its stream is drawing, and the saved
+        // copies of sends an earlier run left on screen (#1359).
+        const tail = withoutOwnTurnRows(thread.messages, initialState.messages,
+          withoutInFlightSends(thread.messages, newRows, inFlightSendIds.current));
         const merged = { added: [] as ThreadMessageLike[], messages: [] as ThreadMessageLike[] };
         merged.messages = aroundLive(shown.messages, (rows) => {
           const result = mergeMissingHistoryMessages(rows, tail);
@@ -1304,6 +1312,50 @@ export function EngineRuntimeProvider({
     const shown = (thread.extras as { state?: EngineState } | undefined)?.state;
     const from = shown?.synced;
     if (from?.start !== undefined) reloadedWindowStart.current = from.start;
+    /**
+     * Rebuilds the thread on the loaded history where it stands (see
+     * rebaseOntoHistory); false when this history cannot prove what is gone.
+     */
+    const rebase = (): boolean => {
+      const loaded = initialState.synced;
+      if (!shown || !loaded || loaded.authoritative === false || loaded.olderWindow || deferred ||
+          shown.sessionId !== initialState.sessionId ||
+          (shown.conversationUid && initialState.conversationUid &&
+            shown.conversationUid !== initialState.conversationUid)) return false;
+      const known = new Set(shown.messages);
+      let added: ThreadMessageLike[] = [];
+      const rebuilt = aroundLive(shown.messages, (rows) => {
+        const next = rebaseOntoHistory(rows, initialState.messages, loaded.history);
+        added = next.filter((row) => !known.has(row) && historyMessageIndex(row) !== null);
+        return next;
+      });
+      // A live turn this page is watching gives way to its saved reply.
+      const replaced = historyReplacesLiveTurn(liveTurn.current, added);
+      if (replaced) liveTurn.current = replacedLiveTurn(liveTurn.current);
+      const held = replaced ? liveMessage(liveTurn.current) : null;
+      const messages = replaced
+        ? [...rebuilt.filter((row) => !isLiveMessage(row)), ...(held ? [held] : [])] : rebuilt;
+      deferredOlderWindow.current = null;
+      // Rows history has not taken yet keep the thread off its sync point, so
+      // the next load rebuilds it again.
+      const settledNow = !hasUnsettledRows(messages);
+      const unchanged = messages.length === shown.messages.length &&
+        messages.every((row, index) => row === shown.messages[index]);
+      if (unchanged && (from ? from.messages === messages.length : !settledNow)) return true;
+      const shownStart = messages.reduce((first, row) => Math.min(first, historyMessageIndex(row) ?? first), Infinity);
+      runtime.thread.importExternalState({
+        ...shown,
+        // The error a dropped stream left belongs to rows the history replaced.
+        ...(settledNow && hasUnsettledRows(shown.messages) ? { error: undefined } : {}),
+        messages,
+        synced: settledNow ? {
+          history: Math.max(from?.history ?? 0, loaded.history),
+          start: Math.min(from?.start ?? (Number.isFinite(shownStart) ? shownStart : loaded.start ?? 0), loaded.start ?? 0),
+          messages: messages.length,
+        } : undefined,
+      });
+      return true;
+    };
     // A failed alignment leaves the local tail unproven. A cursor-validated
     // older page can still extend the prefix strictly before the known window.
     // Preserve every local row and leave the sync watermark unclaimed.
@@ -1327,6 +1379,11 @@ export function EngineRuntimeProvider({
     if (!shown || !from || shown.messages.length !== from.messages || !initialState.synced) {
       deferredOlderWindow.current = null;
       reloaded.current = initialState.messages;
+      // A run that ended without the engine matching its rows (its stream
+      // dropped, or its final state claimed no sync) leaves the thread off its
+      // sync point: take the saved history in place (#1359). A turn parked
+      // at a permission prompt is off it too, and stays as it is.
+      if (!waiting(thread.messages.at(-1))) rebase();
       return;
     }
     if ((initialState.synced.olderWindow || deferred) && reconcileBoundaryToolResults(
@@ -1411,7 +1468,8 @@ export function EngineRuntimeProvider({
       initialState.synced.authoritative !== false && !deferred
     ) {
       reloaded.current = initialState.messages;
-      onStale?.();
+      // In place: a whole reload blanks the chat and moves the reader (#1358).
+      if (!rebase()) onStale?.();
       return;
     }
     deferredOlderWindow.current = null;
