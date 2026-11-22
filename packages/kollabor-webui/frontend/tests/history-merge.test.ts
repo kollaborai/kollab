@@ -12,6 +12,7 @@ import {
   hasUnsettledRows,
   inFlightSendIdsFor,
   rebaseOntoHistory,
+  rememberSavedSends,
   shownMessagesChanged,
   withoutInFlightSends,
   withoutOwnTurnRows,
@@ -1170,4 +1171,37 @@ test("an earlier turn the page ran ends where its next one starts", () => {
   const own = reply(5, [call]);
   const answer = reply(6, words("done"));
   assert.deepEqual(mergeMissingHistoryMessages(shown, [first, unseen, own, answer]).added, [unseen]);
+});
+
+// The page loads only the newest saved rows. A turn with many tool calls pushes
+// its own send out of that window (#1359).
+test("a long turn keeps its saved rows out after its send left the loaded window", () => {
+  const sent = mine("user-s1-4", "hello", "r1");
+  const writing = { id: "assistant-s1-5", role: "assistant", content: [{ type: "tool-call", toolCallId: "c1" }] };
+  const savedAt = new Map<string, number>();
+  rememberSavedSends(savedAt, [named(saved(10, "hello"), { requestIds: ["r1"] })]);
+  assert.deepEqual([...savedAt], [["r1", 10]]);
+  // A later load starts past the send.
+  const window = [reply(40, [{ type: "tool-call", toolCallId: "c7", result: "ok" }]), named(saved(41, "ping"), { requestIds: ["r9"] })];
+  assert.deepEqual(withoutOwnTurnRows([sent, writing], window, window, savedAt), [window[1]]);
+  // Without the remembered position nothing places the turn.
+  assert.deepEqual(withoutOwnTurnRows([sent, writing], window, window), window);
+});
+
+test("a send saved before the loaded window keeps its place when the thread is rebuilt", () => {
+  const before = { id: "history-3", role: "assistant", content: words("earlier") };
+  const first = mine("user-s1-1", "one", "r1");
+  const drawnCalls = { id: "assistant-s1-2", role: "assistant", content: [{ type: "tool-call", toolCallId: "c1", result: "ok" }] };
+  const shown = [before, first, drawnCalls, mine("user-s1-3", "two", "r2"), { id: "assistant-s1-4", role: "assistant", content: words("done") }];
+  // The window starts past the first send (saved at 10) and its calls.
+  const loaded = [reply(40, [{ type: "tool-call", toolCallId: "c9", result: "ok" }]),
+    named({ id: "history-41", role: "user", content: words("two") }, { requestIds: ["r2"] }), reply(42, words("done"))];
+  const rows = rebaseOntoHistory(shown, loaded, 43, new Map([["r1", 10]]));
+  // The first send and what its run drew stay where they were, ahead of the
+  // window; the second send and its reply take their saved rows.
+  assert.deepEqual(rows.map((row) => row.id), ["history-3", "user-s1-1", "assistant-s1-2", "history-40", "user-s1-3", "assistant-s1-4"]);
+  assert.equal(rows[1], first);
+  assert.equal(rows[2], drawnCalls);
+  // Not knowing where the first send is saved, it reads as not saved yet and goes last.
+  assert.deepEqual(rebaseOntoHistory(shown, loaded, 43).map((row) => row.id).at(-1), "assistant-s1-2");
 });

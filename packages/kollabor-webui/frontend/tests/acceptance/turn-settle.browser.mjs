@@ -77,7 +77,7 @@ try {
       errors: await page.locator("#errors").innerText(),
       tools: await page.locator("#tools").innerText(),
     });
-    const setHistory = (messages) => page.evaluate((m) => window.setHistory(m), messages);
+    const setHistory = (messages, shown) => page.evaluate(([m, w]) => window.setHistory(m, w ?? undefined), [messages, shown ?? null]);
     const waitFor = async (check, label) => {
       for (let n = 0; n < 100; n++) {
         if (check(await read())) return;
@@ -208,6 +208,53 @@ try {
       await t.setHistory([...history, row(4, "user", "later"), row(5, "assistant", "Later answer")]);
       await t.waitFor((s) => s.users === "hello|what|later" && s.assistant.includes("Later answer") && s.remounts === "0",
         "a later sync");
+      await t.page.close();
+    },
+    // The page loads only the newest saved rows. A turn with many tool calls
+    // pushes its own send out of that window while it runs: the send keeps its
+    // place, its saved rows do not land above it, and a later send's rows do
+    // not move it to the end (#1359).
+    async "keeps a long turn's first message in place after it left the loaded history"() {
+      const t = await open();
+      const done = { type: "complete", reason: "stop" };
+      const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
+      const call = (id) => ({ type: "tool-call", toolCallId: id, toolName: "terminal", args: {}, argsText: "{}", result: "ok" });
+      const saved = (index, content, requestId) => ({ id: `history-${index}`, role: "user",
+        content: [{ type: "text", text: content }], metadata: { custom: { requestIds: [requestId] } } });
+      await t.send();
+      const first = await t.sending();
+      const drawn = (calls) => state([{ type: "set", path: ["messages"], value: [...first.sent,
+        { id: "user-s1-0", role: "user", content: "hello", metadata: { custom: { requestId: first.id } } },
+        { id: "assistant-s1-1", role: "assistant", content: calls.map(call) },
+      ] }]);
+      await t.push(drawn(["c1"]));
+      // The send is saved at 0; its first call follows.
+      await t.setHistory([saved(0, "hello", first.id), { id: "history-1", role: "assistant", content: [call("c1")], status: done }]);
+      await t.waitFor((s) => s.tools === "c1" && s.users === "hello", "the first call");
+      // The turn goes on, and the newest rows no longer reach back to the send.
+      await t.push(drawn(["c1", "c2", "c3"]));
+      await t.setHistory([{ id: "history-40", role: "assistant", content: [call("c2")], status: done },
+        { id: "history-42", role: "assistant", content: [call("c3")], status: done }], { start: 40, total: 44 });
+      await t.waitFor((s) => s.tools === "c1|c2|c3", "the run's calls");
+      await t.holds((s) => s.tools === "c1|c2|c3" && s.users === "hello", "a window past the send, while the run streams");
+      // The stream drops; the page sends again and the agent takes it into the turn.
+      await t.page.evaluate(() => window.transport.close());
+      await t.page.waitForFunction(() => document.getElementById("running")?.textContent === "idle");
+      await t.page.evaluate(() => { window.transport = undefined; });
+      await t.page.locator("#send-what").click();
+      const second = await t.sending();
+      const tail = [{ id: "history-42", role: "assistant", content: [call("c3")], status: done },
+        saved(44, "what", second.id), { ...row(45, "assistant", "done"), status: done }];
+      await t.push(state([{ type: "set", path: ["messages"], value: [...second.sent,
+        { id: `user-s1-${second.sent.length}`, role: "user", content: "what", metadata: { custom: { requestId: second.id } } },
+        { id: `assistant-s1-${second.sent.length + 1}`, role: "assistant", content: text("done"), status: done },
+      ] }, { type: "set", path: ["synced"], value: null }]));
+      await t.end();
+      await t.setHistory(tail, { start: 42, total: 46 });
+      const settled = (s) => s.users === "hello|what" && s.tools === "c1|c2|c3" &&
+        s.assistant.split("done").length === 2 && s.remounts === "0";
+      await t.waitFor(settled, "both messages in the order they were sent");
+      await t.holds(settled, "after it settles");
       await t.page.close();
     },
     // The page's request dropped mid-turn and the page only watches from then

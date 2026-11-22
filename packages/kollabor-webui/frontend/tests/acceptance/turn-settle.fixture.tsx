@@ -6,7 +6,7 @@ import { EngineRuntimeProvider, type EngineState } from "../../src/runtime";
 
 declare global {
   interface Window {
-    setHistory: (messages: EngineState["messages"]) => void;
+    setHistory: (messages: EngineState["messages"], window?: { start: number; total: number }) => void;
     liveEvent: (event: SessionEvent) => void;
     transport?: { request: { state?: EngineState }; push: (frame: string) => void; close: () => void };
   }
@@ -92,8 +92,12 @@ function Probe() {
 function Fixture() {
   const [state, setState] = useState(initialState);
   const [remounts, setRemounts] = useState(0);
-  window.setHistory = (messages) => setState({
-    ...initialState, messages, synced: { history: messages.length, messages: messages.length },
+  // `window` says the rows are only the newest of a longer history: its first
+  // row's position and the history's row count.
+  window.setHistory = (messages, window) => setState({
+    ...initialState, messages,
+    synced: window ? { history: window.total, start: window.start, messages: messages.length }
+      : { history: messages.length, messages: messages.length },
   });
   return (
     <>
