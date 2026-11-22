@@ -15,9 +15,10 @@ const endsEvent = (tail: readonly number[]) => {
 
 /**
  * A run's event stream that the page can end. `stream` passes `source` on as
- * it comes. `end()` finishes it as the engine does when a turn ends, after the
- * event now arriving (an event cut short reads as a broken stream), and lets
- * `source` go: whatever the engine sends after that is not read.
+ * its reader takes it, one chunk at a time: it reads nothing ahead. `end()`
+ * finishes it as the engine does when a turn ends, after the event now
+ * arriving (an event cut short reads as a broken stream), and lets `source`
+ * go: nothing the engine sent after that event is passed on.
  */
 export function endableStream(source: ReadableStream<Uint8Array>): {
   stream: ReadableStream<Uint8Array>;
@@ -40,45 +41,36 @@ export function endableStream(source: ReadableStream<Uint8Array>): {
   };
   const stream = new ReadableStream<Uint8Array>({
     start: (streamController) => { controller = streamController; },
+    // A read that fails fails the stream.
+    pull: async () => {
+      const { done, value } = await reader.read();
+      if (closed) return;
+      if (done) {
+        closed = true;
+        controller.close();
+        return;
+      }
+      if (!ending) {
+        controller.enqueue(value);
+        value.subarray(-4).forEach(note);
+        return;
+      }
+      const at = value.findIndex((byte) => {
+        note(byte);
+        return endsEvent(tail);
+      });
+      if (at < 0) {
+        controller.enqueue(value);
+        return;
+      }
+      controller.enqueue(value.subarray(0, at + 1));
+      finish();
+    },
     cancel: (reason) => {
       closed = true;
       return reader.cancel(reason);
     },
-  });
-  void (async () => {
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (closed) return;
-        if (done) {
-          closed = true;
-          controller.close();
-          return;
-        }
-        if (!ending) {
-          controller.enqueue(value);
-          value.subarray(-4).forEach(note);
-          continue;
-        }
-        const at = value.findIndex((byte) => {
-          note(byte);
-          return endsEvent(tail);
-        });
-        if (at < 0) {
-          controller.enqueue(value);
-          continue;
-        }
-        controller.enqueue(value.subarray(0, at + 1));
-        finish();
-        return;
-      }
-    } catch (error) {
-      if (!closed) {
-        closed = true;
-        controller.error(error);
-      }
-    }
-  })();
+  }, { highWaterMark: 0 });
   return {
     stream,
     end: () => {
