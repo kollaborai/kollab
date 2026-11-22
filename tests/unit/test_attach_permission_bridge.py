@@ -73,7 +73,6 @@ def test_attach_bridge_publishes_prompt_and_waits_for_rpc_response():
                     "permission_id": "owner-terminal-0",
                     "tool_type": "terminal",
                     "risk_level": "MEDIUM",
-                    "parked": False,
                 },
                 timeout=1,
             )
@@ -89,6 +88,7 @@ def test_attach_bridge_publishes_prompt_and_waits_for_rpc_response():
                     "permission_id": "owner-terminal-0",
                     "tool_type": "terminal",
                     "risk_level": "MEDIUM",
+                    "parked": False,
                 },
             }
         ]
