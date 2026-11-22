@@ -214,6 +214,34 @@ try {
       bTransport: { closed: false, aborted: false, pushCount: 0 },
       branches: 0,
     }, "request A's filtered-from-B tool/text events render once from the session stream before B completes");
+
+    // Once B itself is named, its assistant POST becomes the one output path.
+    // The session event must not append a duplicate beside that POST snapshot.
+    const bOwnedEvent = {
+      type: "token", request_id: first.id, request_ids: [first.id, second.id], text: "B-owned text.",
+    };
+    assert.deepEqual(engineForeignOutput([bOwnedEvent], [second.id], true), [false],
+      "the engine's current predicate allows a steered event through B's assistant stream");
+    await t.page.evaluate((event) => window.sessionEventTransport.push(event), bOwnedEvent);
+    await t.waitFor((s) => s.eventCount === 3, "the shared event stream reports B's accepted request id");
+    const b = await t.request(1);
+    await t.pushResponse(1, "B-owned text.");
+    const afterBState = await t.read();
+    assert.deepEqual({
+      running: afterBState.running,
+      lateToolOccurrences: afterBState.tools.split("|").filter((id) => id === "late-a-tool").length,
+      lateTextOccurrences: occurrences(afterBState.assistant, "A late session text."),
+      bTextOccurrences: occurrences(afterBState.assistant, "B-owned text."),
+      liveBeforeB: afterBState.ids.indexOf(`live-turn:${first.id}`) < afterBState.ids.indexOf(`user-s1-${b.sent.length}`),
+      branches: afterBState.branches,
+    }, {
+      running: "running",
+      lateToolOccurrences: 1,
+      lateTextOccurrences: 1,
+      bTextOccurrences: 1,
+      liveBeforeB: true,
+      branches: 0,
+    }, "the handover row stays in order while B's own stream takes over without a duplicate");
     assert.deepEqual(browserErrors, [], "the browser reports no runtime errors");
     await t.page.close();
     console.log(`PASS ${scenario}`);

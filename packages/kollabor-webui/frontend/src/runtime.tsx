@@ -46,6 +46,7 @@ import {
   mergeMissingHistoryMessages,
   reconcileBoundaryToolResults,
   hasUnsettledRows,
+  insertLiveMessage,
   inFlightSendIdsFor,
   pendingSendIds,
   rememberSavedSends,
@@ -732,7 +733,7 @@ const converter = (
   // Stream timing rides on the assistant message's metadata, where
   // `useMessageTiming` reads it (see turn-timing.ts).
   const live = midTurn.live;
-  const stored = state.messages.flatMap((message) => {
+  let stored = state.messages.flatMap((message) => {
     if (live && message.id === live.id) return live.message ? [live.message] : [];
     const timing =
       message.role === "assistant" && message.id
@@ -742,6 +743,11 @@ const converter = (
       ? { ...message, metadata: { ...message.metadata, timing } }
       : message];
   });
+  if (live && !state.messages.some((message) => message.id === live.id)) {
+    stored = live.message
+      ? insertLiveMessage(stored, live.message as ThreadMessageLike)
+      : stored.filter((message) => message.id !== live.id);
+  }
   // A send in flight keeps the id its request was sent with: rows a sync adds
   // meanwhile change the row count, and a new id makes assistant-ui take the
   // row for a new turn and scroll it to the top under the reader (#1364).
@@ -912,6 +918,12 @@ export function EngineRuntimeProvider({
   const midTurnLive = useRef<MidTurn["live"]>(null);
   // The row ids of the sends waiting behind this page's running turn (see MidTurn.waiting).
   const waitingSendIds = useRef(new Map<string, string>());
+  // Request ids of the page's current assistant POST, and the old/new requests
+  // whose events straddle a Send Now handover (#1367).
+  const pageRequestIds = useRef<ReadonlySet<string>>(new Set());
+  const handoverFromIds = useRef<ReadonlySet<string>>(new Set());
+  const handoverToIds = useRef<ReadonlySet<string>>(new Set());
+  const handoverLive = useRef(false);
   // The commands of the request now streaming, from the moment it is sent
   // until it ends; null between requests (see the hand-over below).
   const streamingRun = useRef<WeakSet<object> | null>(null);
@@ -965,6 +977,10 @@ export function EngineRuntimeProvider({
       streamingRun.current = new WeakSet<object>(body.commands);
       endRun.current = null;
       sendNow.current = false;   // this request takes every message that waited
+      const requestIds = body.commands.flatMap((command) =>
+        command.type === "add-message" && "id" in command.message && typeof command.message.id === "string"
+          ? [command.message.id] : []);
+      if (requestIds.length) pageRequestIds.current = new Set(requestIds);
       inFlightSendIds.current = inFlightSendIdsFor(body, sessionId, inFlightSendIds.current, waitingSendIds.current);
       // Each message names its row: one that waited keeps the row it has on screen.
       const rowIds = [...inFlightSendIds.current];
@@ -1071,6 +1087,12 @@ export function EngineRuntimeProvider({
       if (!runtime.thread.getState().isRunning) return;
       handOverDue.current = false;
       sendNow.current = false;
+      handoverFromIds.current = new Set(pageRequestIds.current);
+      handoverToIds.current = new Set(waitingSendIds.current.keys());
+      handoverLive.current = handoverFromIds.current.size > 0;
+      if (handoverLive.current) {
+        liveTurn.current = { parts: [], requestId: handoverFromIds.current.values().next().value };
+      }
       const end = endRun.current;
       endRun.current = null;
       end?.();
@@ -1172,8 +1194,12 @@ export function EngineRuntimeProvider({
       // A live row already shown is updated where it is: moved to the end it
       // would change the turn the chat anchors and scroll the reader (#1364).
       const at = shown.messages.findIndex(isLiveMessage);
-      importLiveState(!live ? kept : at < 0 ? [...kept, live]
-        : [...kept.slice(0, at), live, ...kept.slice(at)]);
+      const messages = live ? insertLiveMessage(kept, live) : kept;
+      if (runtime.thread.getState().isRunning) {
+        const id = live?.id ?? String(shown.messages[at]?.id ?? "");
+        if (id) midTurnLive.current = { id, message: live };
+      }
+      importLiveState(messages);
       // Completed replies stay visible until canonical history catches up.
       // Preserve the prior bounded cleanup for cancellation and error states.
       clearTimeout(settleTimer.current);
@@ -1206,6 +1232,28 @@ export function EngineRuntimeProvider({
         // goal handle, and the ensuing history refresh remounts the new one.
         runtime.thread.cancelRun();
         return;
+      }
+      if (handoverFromIds.current.size) {
+        const belongsToPrior = [...handoverFromIds.current].some((id) => eventNamesRequest(event, id));
+        const belongsToWaiting = [...handoverToIds.current].some((id) => eventNamesRequest(event, id));
+        const priorEnds = belongsToPrior &&
+          (endsLiveTurn(String(event.type ?? "")) || event.type === "turn_cancelled");
+        if (belongsToWaiting && !priorEnds) {
+          // The next send now owns these events too; its assistant stream is
+          // the single display path after admission.
+          handoverLive.current = false;
+          return;
+        }
+        if (belongsToPrior) {
+          if (!handoverLive.current && !priorEnds) return;
+          const folded = applyLiveEvent(liveTurn.current, event);
+          if (folded !== liveTurn.current) {
+            liveTurn.current = folded;
+            showLiveTurn(folded);
+          }
+          return;
+        }
+        if (belongsToWaiting) return;
       }
       if (thread.isRunning) {
         // This page's own submission is pending (a held steering admission, a
