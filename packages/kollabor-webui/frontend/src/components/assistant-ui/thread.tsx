@@ -1584,7 +1584,7 @@ const QueuedMessageNote: FC = () => {
               <Button
                 type="button"
                 variant="link"
-                className="text-foreground h-auto p-0 text-xs pointer-coarse:-my-3.5 pointer-coarse:py-3.5"
+                className="text-foreground h-auto p-0 text-xs any-pointer-coarse:-my-[14px] any-pointer-coarse:min-h-[44px] any-pointer-coarse:min-w-[44px]"
                 onClick={sendWaitingNow}
               >
                 Send Now
