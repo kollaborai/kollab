@@ -886,8 +886,10 @@ export function rebaseOntoHistory<T extends Message>(
 
   const before: T[] = [];                                  // older pages and archived rows
   const slots = new Map<string, T>();                      // saved row -> the row shown for it
+  // A turn can hold several sends (one sent while it ran): it starts at the
+  // first, and the reply the page drew for it came after the last.
   const waiting: Array<{ row: T; after: number }> = [];   // replies history does not hold yet, behind their sends
-  const taken: Array<{ id: T["id"]; after: number }> = []; // replies history holds whole, and where their turns start
+  const taken: Array<{ id: T["id"]; after: number }> = []; // replies history holds whole, and the last of their sends
   const last: T[] = [];                                    // rows history does not hold, in the order shown
   // A row history does not hold stays ahead of the rows it was shown ahead
   // of: a message the daemon never saved (its turn was stopped at once) is
@@ -962,8 +964,9 @@ export function rebaseOntoHistory<T extends Message>(
         const text = String((part as { text?: unknown }).text ?? "").replace(/\s+/g, " ").trim();
         return !text || words.includes(text);
       });
-    if (held && !turnUnsaved) { taken.push({ id: row.id, after }); continue; }   // history shows the whole reply
-    waiting.push({ row, after });
+    const behind = Math.max(...turnSends);
+    if (held && !turnUnsaved) { taken.push({ id: row.id, after: behind }); continue; }   // history shows the whole reply
+    waiting.push({ row, after: behind });
     stands.push({ reply: row, after });
   }
 
