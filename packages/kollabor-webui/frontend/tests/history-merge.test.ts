@@ -1243,3 +1243,17 @@ test("a waiting send gives up a kept id that a row of the state took", () => {
   const rows = [{ id: "user-s1-0" }, { id: "assistant-s1-1" }, { id: "user-s1-2" }];
   assert.deepEqual(pendingSendIds(["r2"], [], rows, "s1", waiting), ["user-s1-3"]);
 });
+
+test("a settled reply stands for its saved rows when its send is saved before the loaded window", () => {
+  // A long turn the engine matched to history: its send at row 1, its reply's last row at 72.
+  const call = (id: string) => ({ type: "tool-call", toolCallId: id, result: "ok" });
+  const sent = drawn("user-s1-0", "user", "go", 1);
+  const answer = drawn("assistant-s1-1", "assistant", [call("c1"), call("c2"), call("c3"), ...words("All done")], 72);
+  // The page reloads the newest rows only: the turn's last rounds, then a message another client sent.
+  const loaded = [reply(70, [call("c2")]), reply(71, [call("c3")]), reply(72, words("All done")), saved(73, "next")];
+  const rows = rebaseOntoHistory([sent, answer], loaded, 74);
+  // The reply already shows the rows of its turn: added again they join it
+  // under the first one's id, and the chat builds the whole reply anew.
+  assert.deepEqual(rows.map((row) => row.id), ["user-s1-0", "assistant-s1-1", "history-73"]);
+  assert.equal(rows[1], answer);
+});
