@@ -447,35 +447,26 @@ try {
       assert.deepEqual(after, { cancels: 1, requests: 1 });
       await t.page.close();
     },
-    // A message sent while the page's turn runs waits behind it. A history
-    // sync then adds another sender's message to the thread, and the turn's
-    // next state is built without it: the waiting message keeps its row both
-    // times. A row whose id changes is taken down and built again, with the
-    // typing dots under it, and the chat scrolls to it anew (#1359).
-    async "keeps a waiting message's row while the turn ahead of it goes on"() {
+    // A message sent before the engine has answered the page's last request
+    // waits behind that request (see the scenario above for one sent after).
+    // A history sync then adds other senders' messages to the thread: the
+    // waiting message keeps its row. A row whose id changes is taken down and
+    // built again, with the typing dots under it, and the chat scrolls to it
+    // anew (#1359).
+    async "keeps a waiting message's row while rows are added ahead of it"() {
       const t = await open();
-      const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
       await t.send();
-      const sent = await t.sending();
-      const reply = (words) => ({ id: "assistant-s1-1", role: "assistant", content: text(words) });
-      await t.push(state([{ type: "set", path: ["messages"], value: [
-        { id: "user-s1-0", role: "user", content: "hello", metadata: { custom: { requestId: sent.id } } }, reply("Wor"),
-      ] }]));
-      await t.waitFor((s) => s.assistant.includes("Wor"), "the run's reply");
+      await t.sending();
       await t.page.locator("#send-what").click();
       await t.waitFor((s) => s.users === "hello|what", "the waiting message");
-      const waiting = (await t.read()).ids.slice(2);
-      assert.equal(waiting.length, 2, `the waiting message and the dots under it: ${waiting}`);
+      const waiting = (await t.read()).ids;
+      assert.equal(waiting.length, 3, `the message on its way, the waiting one and the dots under it: ${waiting}`);
       const kept = (s) => waiting.every((id) => s.ids.includes(id));
-      // Another client's message is saved after the page's.
-      await t.setHistory([
-        { ...row(0, "user", "hello"), metadata: { custom: { requestIds: [sent.id] } } }, row(1, "user", "ping"),
-      ]);
-      await t.waitFor((s) => s.users.includes("ping"), "the other sender's message");
-      await t.holds((s) => kept(s) && s.users === "ping|hello|what", "the waiting message's row after the sync", 300);
-      await t.push(state([{ type: "set", path: ["messages", "1"], value: reply("Working") }]));
-      await t.waitFor((s) => s.assistant.includes("Working"), "the run's next state");
-      await t.holds((s) => kept(s) && s.users === "ping|hello|what", "the waiting message's row after the next state", 300);
+      await t.setHistory([row(0, "user", "ping"), row(1, "user", "pong")]);
+      await t.waitFor((s) => s.users.includes("pong"), "the other senders' messages");
+      await t.holds((s) => kept(s) && s.users === "ping|pong|hello|what" &&
+        s.remounts === "0", "the waiting message's row after the sync", 300);
+      assert.equal(await t.page.evaluate(() => window.transports.length), 1, "the first request still streams");
       await t.page.close();
     },
     async "takes a changed row in place, without reloading the chat"() {

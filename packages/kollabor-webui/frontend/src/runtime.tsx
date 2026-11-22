@@ -890,11 +890,23 @@ export function EngineRuntimeProvider({
   const midTurnLive = useRef<MidTurn["live"]>(null);
   // The row ids of the sends waiting behind this page's running turn (see MidTurn.waiting).
   const waitingSendIds = useRef(new Map<string, string>());
-  const convert = useCallback((state: EngineState, metadata: AssistantTransportConnectionMetadata) =>
-    converter(state, metadata, {
+  // The commands of the request now streaming, from the moment it is sent
+  // until it ends; null between requests (see the hand-over below).
+  const streamingRun = useRef<WeakSet<object> | null>(null);
+  // A message waits behind the streaming request, and all that request sent has arrived.
+  const handOverDue = useRef(false);
+  // The page let its request go to send the message waiting behind it (see onCancel).
+  const handingOver = useRef(false);
+  const convert = useCallback((state: EngineState, metadata: AssistantTransportConnectionMetadata) => {
+    const run = streamingRun.current;
+    const pending = metadata.pendingCommands;
+    handOverDue.current = !!run && metadata.isSending && pending.length > 0 &&
+      pending.every((command) => command.type === "add-message" && !run.has(command));
+    return converter(state, metadata, {
       rows: midTurnRows.current, sendIds: [...inFlightSendIds.current], live: midTurnLive.current,
       waiting: waitingSendIds.current,
-    }), []);
+    });
+  }, []);
   const reloadRequestedAt = useRef<number | null>(null);
   const [settledRuns, setSettledRuns] = useState(0);
   const [permissionCancellationPending, setPermissionCancellationPending] = useState(false);
@@ -923,6 +935,8 @@ export function EngineRuntimeProvider({
     },
     prepareSendCommandsRequest: (body) => {
       runVersion.current += 1;
+      streamingRun.current = new WeakSet<object>(body.commands);
+      handingOver.current = false;
       inFlightSendIds.current = inFlightSendIdsFor(body, sessionId, inFlightSendIds.current);
       // A new message starts a new turn; a tool answer continues the last one.
       if (body.commands.some((command) => command.type === "add-message")) {
@@ -956,12 +970,23 @@ export function EngineRuntimeProvider({
       }
     },
     onError: async (error, { updateState }) => {
+      streamingRun.current = null;
       inFlightSendIds.current = new Set();
       pendingDraftSubmissions.current.shift();
       updateState((state) => ({ ...state, error: error.message }));
     },
     onCancel: ({ commands, updateState, error }) => {
+      streamingRun.current = null;
       inFlightSendIds.current = new Set();
+      // The page let its request go so the message waiting behind it reaches
+      // the agent now (see the hand-over below). The agent's turn goes on:
+      // send the message, and stop nothing.
+      if (handingOver.current && !error) {
+        const send = (runtime.thread.getState().extras as { sendCommand?: (command: unknown) => void } | undefined)
+          ?.sendCommand;
+        for (const command of commands) send?.(command);
+        return;
+      }
       // A failed request lands here too, after onError: keep the error it
       // set, and leave the daemon's turn alone (a dropped phone connection
       // must not stop the agent's work).
@@ -978,12 +1003,35 @@ export function EngineRuntimeProvider({
       updateState((state) => ({ ...state, error: "Run cancelled" }));
     },
     onFinish: () => {
+      streamingRun.current = null;
+      handingOver.current = false;
       const last = runtime.thread.getState().messages.at(-1);
       if (last?.status?.type !== "requires-action") inFlightSendIds.current = new Set();
       goalCancellation.current.finish();
       setSettledRuns((count) => count + 1);
     },
   });
+
+  // A message sent while this page's turn runs waits behind the request that
+  // streams the turn: assistant-ui sends it when that request ends, which is
+  // when the whole turn does. The daemon takes a message into the running
+  // turn at its next step, as it does for another client's, so let the
+  // request go and send the message now (#1365). The engine closes a request
+  // the page drops without stopping the daemon; the next request streams the
+  // rest of the turn under the new message, and the part the dropped request
+  // had not shown comes with saved history. Only once all the streaming
+  // request sent has arrived: a message of its own still on its way would be
+  // lost with it.
+  useEffect(() => runtime.thread.subscribe(() => {
+    if (!handOverDue.current || handingOver.current) return;
+    queueMicrotask(() => {
+      if (!mounted.current || !handOverDue.current || handingOver.current) return;
+      if (!runtime.thread.getState().isRunning) return;
+      handOverDue.current = false;
+      handingOver.current = true;
+      runtime.thread.cancelRun();
+    });
+  }), [runtime]);
 
   useEffect(() => {
     // A goal's result is private to its requesting stream, but its history can
