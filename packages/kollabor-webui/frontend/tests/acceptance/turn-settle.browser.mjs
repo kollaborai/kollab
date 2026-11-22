@@ -316,6 +316,35 @@ try {
         "the saved reply in its place");
       await t.page.close();
     },
+    // The page watches a turn that starts right after another one. The earlier
+    // turn's reply reaches the page late, in a sync that lands after the new
+    // reply's first words, and it contains them. The live reply keeps its
+    // words: the saved row is the turn before it (#1359).
+    async "keeps a watched reply's first words when the turn before it is saved late"() {
+      const t = await open();
+      const done = { type: "complete", reason: "stop" };
+      await t.setHistory([row(0, "user", "one")]);
+      await t.waitFor((s) => s.users === "one", "seeded");
+      await t.emit({ type: "token", text: "The", request_ids: ["s2"] });
+      await t.waitFor((s) => s.assistant === "The", "the live reply");
+      await t.setHistory([
+        row(0, "user", "one"), { ...row(1, "assistant", "The answer is 4"), status: done },
+        { ...row(2, "user", "two"), metadata: { custom: { requestIds: ["s2"] } } },
+      ]);
+      await t.waitFor((s) => s.users === "one|two", "the late sync");
+      await t.holds((s) => s.assistant === "The answer is 4|The", "the live reply after the sync", 300);
+      await t.emit({ type: "token", text: " sky", request_ids: ["s2"] });
+      await t.waitFor((s) => s.assistant === "The answer is 4|The sky", "the live reply going on");
+      // Its own row, saved after its message, takes its place.
+      await t.emit({ type: "turn_complete", request_ids: ["s2"] });
+      await t.setHistory([
+        row(0, "user", "one"), { ...row(1, "assistant", "The answer is 4"), status: done },
+        { ...row(2, "user", "two"), metadata: { custom: { requestIds: ["s2"] } } },
+        { ...row(3, "assistant", "The sky"), status: done },
+      ]);
+      await t.holds((s) => s.assistant === "The answer is 4|The sky" && s.remounts === "0", "the saved reply in its place");
+      await t.page.close();
+    },
     // The page watches a turn, then sends into it. The run's states carry the
     // rows its request sent, the watched turn's live row among them: the tool
     // call history saved meanwhile shows once, during the run and after it, and

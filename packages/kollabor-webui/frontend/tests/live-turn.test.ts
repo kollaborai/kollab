@@ -302,3 +302,17 @@ test("a save notice stays when history takes the reply it came with", () => {
   assert.deepEqual(liveMessage(trimmed)?.content,
     [{ type: "text", text: "ℹ Conversation history not saved for this reply." }]);
 });
+
+test("a watched turn keeps the parts another request's saved row repeats", () => {
+  let turn = applyLiveEvent(emptyLiveTurn(), tool("c1"));
+  turn = applyLiveEvent(turn, sent("current reply", "s1"));
+  const content = [{ type: "tool-call", toolCallId: "c1", result: "ok" }, { type: "text", text: "current reply" }];
+  const named = (custom: Record<string, unknown>) => ({ role: "assistant", content, metadata: { custom } });
+  // A provider can reuse a call id and two replies can read alike: a row
+  // that names another request, or another voice turn, is not this turn's.
+  assert.equal(withoutSavedParts(turn, [named({ requestId: "other" })]), turn);
+  assert.equal(withoutSavedParts(turn, [named({ voiceTurnId: "v9" })]), turn);
+  // The turn's own row takes them, named by its request or its voice turn.
+  assert.equal(liveMessage(withoutSavedParts(turn, [named({ requestId: "s1" })])), null);
+  assert.equal(liveMessage(withoutSavedParts(turn, [named({ voiceTurnId: "s1" })])), null);
+});
