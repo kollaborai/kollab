@@ -77,6 +77,7 @@ import {
 } from "./live-turn";
 import { parseHubMessageHeader, splitAgentHud, splitObservationReplies, type HubNote } from "./hub-notes";
 import { PermissionToolUI } from "./components/PermissionTool";
+import { endableStream } from "./run-stream";
 import {
   historyTurnTiming,
   newTurnClock,
@@ -895,8 +896,8 @@ export function EngineRuntimeProvider({
   const streamingRun = useRef<WeakSet<object> | null>(null);
   // A message waits behind the streaming request, and all that request sent has arrived.
   const handOverDue = useRef(false);
-  // The page let its request go to send the message waiting behind it (see onCancel).
-  const handingOver = useRef(false);
+  // Ends the stream of the request now streaming (see the hand-over below).
+  const endRun = useRef<(() => void) | null>(null);
   const convert = useCallback((state: EngineState, metadata: AssistantTransportConnectionMetadata) => {
     const run = streamingRun.current;
     const pending = metadata.pendingCommands;
@@ -936,7 +937,7 @@ export function EngineRuntimeProvider({
     prepareSendCommandsRequest: (body) => {
       runVersion.current += 1;
       streamingRun.current = new WeakSet<object>(body.commands);
-      handingOver.current = false;
+      endRun.current = null;
       inFlightSendIds.current = inFlightSendIdsFor(body, sessionId, inFlightSendIds.current);
       // A new message starts a new turn; a tool answer continues the last one.
       if (body.commands.some((command) => command.type === "add-message")) {
@@ -959,34 +960,39 @@ export function EngineRuntimeProvider({
       // The transport drops text deltas (the thread renders turn-end state),
       // so read the wire frames off a clone for real stream timing. Timing is
       // a nicety: nothing here may fail the run.
+      const timing = new AbortController();
       try {
         observeRun(
           response.clone(),
           turnRef.current,
           runStartRef.current,
+          timing.signal,
         ).catch(() => undefined);
       } catch {
         // A body that cannot be cloned just has no timing.
       }
+      // assistant-ui reads `response.body` after this hook: give it a stream
+      // the page can end (see the hand-over below). The request is let go
+      // once the timing reader stops too.
+      if (!response.body) return;
+      const run = endableStream(response.body);
+      Object.defineProperty(response, "body", { value: run.stream });
+      endRun.current = () => {
+        run.end();
+        timing.abort();
+      };
     },
     onError: async (error, { updateState }) => {
       streamingRun.current = null;
+      endRun.current = null;
       inFlightSendIds.current = new Set();
       pendingDraftSubmissions.current.shift();
       updateState((state) => ({ ...state, error: error.message }));
     },
     onCancel: ({ commands, updateState, error }) => {
       streamingRun.current = null;
+      endRun.current = null;
       inFlightSendIds.current = new Set();
-      // The page let its request go so the message waiting behind it reaches
-      // the agent now (see the hand-over below). The agent's turn goes on:
-      // send the message, and stop nothing.
-      if (handingOver.current && !error) {
-        const send = (runtime.thread.getState().extras as { sendCommand?: (command: unknown) => void } | undefined)
-          ?.sendCommand;
-        for (const command of commands) send?.(command);
-        return;
-      }
       // A failed request lands here too, after onError: keep the error it
       // set, and leave the daemon's turn alone (a dropped phone connection
       // must not stop the agent's work).
@@ -1004,7 +1010,7 @@ export function EngineRuntimeProvider({
     },
     onFinish: () => {
       streamingRun.current = null;
-      handingOver.current = false;
+      endRun.current = null;
       const last = runtime.thread.getState().messages.at(-1);
       if (last?.status?.type !== "requires-action") inFlightSendIds.current = new Set();
       goalCancellation.current.finish();
@@ -1021,15 +1027,19 @@ export function EngineRuntimeProvider({
   // rest of the turn under the new message, and the part the dropped request
   // had not shown comes with saved history. Only once all the streaming
   // request sent has arrived: a message of its own still on its way would be
-  // lost with it.
+  // lost with it. The page ends the request's stream as the engine ends a
+  // turn's, so assistant-ui sends the waiting message as it does after any
+  // run. Cancelling the run instead takes the message's row and the typing
+  // dots down for a draw.
   useEffect(() => runtime.thread.subscribe(() => {
-    if (!handOverDue.current || handingOver.current) return;
+    if (!handOverDue.current) return;
     queueMicrotask(() => {
-      if (!mounted.current || !handOverDue.current || handingOver.current) return;
+      if (!mounted.current || !handOverDue.current) return;
       if (!runtime.thread.getState().isRunning) return;
       handOverDue.current = false;
-      handingOver.current = true;
-      runtime.thread.cancelRun();
+      const end = endRun.current;
+      endRun.current = null;
+      end?.();
     });
   }), [runtime]);
 
