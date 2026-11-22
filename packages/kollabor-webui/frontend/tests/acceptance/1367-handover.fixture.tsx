@@ -217,7 +217,10 @@ const startupPermissions = (() => {
     : kind === "parked"
       ? [startupPermission("shared-tool-id", "owner-parked", "parent-parked", "terminal", true)]
       : kind === "outcome"
-        ? [startupPermission("shared-tool-id", "owner-outcome", "parent-outcome", "terminal")]
+        ? [
+          startupPermission("shared-tool-id", "owner-outcome", "parent-outcome", "terminal"),
+          startupPermission("shared-tool-id", "owner-sibling", "parent-sibling", "file_write"),
+        ]
         : kind === "live" ? [live] : [];
   window.permissionSnapshot.s1 = prompts;
   return prompts;
@@ -260,6 +263,7 @@ function BranchProbe() {
 function Fixture() {
   const [sessionId, setSessionId] = useState("s1");
   const [state, setState] = useState(initialState);
+  const [runtimeEpoch, setRuntimeEpoch] = useState(0);
   window.setPermissionSnapshot = (forSessionId, prompts) => {
     window.permissionSnapshot[forSessionId] = prompts;
   };
@@ -293,11 +297,15 @@ function Fixture() {
 
   return (
     <EngineRuntimeProvider
-      key={sessionId}
+      key={`${sessionId}:${runtimeEpoch}`}
       api={api}
       sessionId={sessionId}
       initialState={state}
       liveEvents={liveEvents}
+      onStale={() => {
+        setState(buildInitialState(sessionId, [], [], window.permissionSnapshot[sessionId] ?? []));
+        setRuntimeEpoch((epoch) => epoch + 1);
+      }}
     >
       <Probe />
     </EngineRuntimeProvider>

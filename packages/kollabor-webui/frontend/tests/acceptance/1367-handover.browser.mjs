@@ -156,7 +156,20 @@ try {
     const outcome = await open("?permissions=outcome");
     const prompt = outcome.page.getByText("Permission required: terminal", { exact: true });
     await prompt.waitFor();
-    await outcome.page.evaluate(() => window.setPermissionSnapshot("s1", []));
+    await outcome.page.evaluate(() => window.setPermissionSnapshot("s1", [{
+      tool_id: "shared-tool-id",
+      permission_id: "owner-sibling",
+      request_id: "parent-sibling",
+      tool_name: "file_write",
+      tool_type: "command",
+      input: { command: "echo other prompt" },
+      details: {
+        source: "acp",
+        request_id: "provider-owner-sibling",
+        parked: false,
+        acp_options: [{ optionId: "allow-once", name: "Allow once", kind: "allow_once" }],
+      },
+    }]));
     await outcome.page.evaluate((event) => window.sessionEventTransport.push(event), {
       type: "permission_denied",
       tool_id: "shared-tool-id",
@@ -164,8 +177,9 @@ try {
       request_id: "parent-outcome",
     });
     await prompt.waitFor({ state: "detached", timeout: 3000 });
-    assert.equal(await outcome.page.getByRole("button", { name: "Allow once", exact: true }).count(), 0,
-      "an exact foreign permission outcome removes the resolved answer card");
+    await outcome.page.getByText("Permission required: file_write", { exact: true }).waitFor();
+    assert.equal(await outcome.page.getByRole("button", { name: "Allow once", exact: true }).count(), 1,
+      "an outcome removes only the exact permission owner when tool IDs are reused");
     assert.deepEqual(browserErrors, [], "the browser reports no runtime errors");
     await outcome.page.close();
     console.log(`PASS ${scenario}`);
