@@ -2,9 +2,9 @@ import { ThreadPrimitive, useAuiState } from "@assistant-ui/react";
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "../../src/styles.css";
-import { EngineApi, type SessionEvent } from "../../src/api";
+import { EngineApi, type PermissionPrompt, type SessionEvent } from "../../src/api";
 import { Thread } from "../../src/components/assistant-ui/thread";
-import { EngineRuntimeProvider, type EngineState } from "../../src/runtime";
+import { buildInitialState, EngineRuntimeProvider, type EngineState } from "../../src/runtime";
 
 type AssistantTransport = {
   request: { commands?: Array<{ type?: string; message?: { id?: string; parts?: Array<{ text?: string }> } }>; state?: EngineState };
@@ -30,6 +30,8 @@ declare global {
     sessionEventOpen: boolean;
     sessionEventsDelivered: SessionEvent[];
     mockEngineRequests: string[];
+    refreshPermissions: (prompts: PermissionPrompt[]) => void;
+    switchSession: (sessionId: string) => void;
   }
 }
 
@@ -49,7 +51,8 @@ window.fetch = async (input, init) => {
   window.mockEngineRequests.push(pathname);
   const encoder = new TextEncoder();
 
-  if (pathname === "/sessions/s1/events") {
+  const eventsSession = /^\/sessions\/([^/]+)\/events$/.exec(pathname)?.[1];
+  if (eventsSession) {
     let stream!: ReadableStreamDefaultController<Uint8Array>;
     const body = new ReadableStream<Uint8Array>({
       start: (controller) => { stream = controller; },
@@ -57,7 +60,7 @@ window.fetch = async (input, init) => {
     });
     window.sessionEventTransport = {
       push: (event) => {
-        const payload = { ...event, session_id: "s1" };
+        const payload = { ...event, session_id: eventsSession };
         stream.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
         window.sessionEventTransport!.pushCount += 1;
       },
@@ -72,7 +75,7 @@ window.fetch = async (input, init) => {
     return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
   }
 
-  if (pathname !== "/sessions/s1/assistant") return realFetch(input, init);
+  if (!/^\/sessions\/[^/]+\/assistant$/.test(pathname)) return realFetch(input, init);
 
   let stream!: ReadableStreamDefaultController<Uint8Array>;
   let transport!: AssistantTransport;
@@ -147,22 +150,33 @@ function BranchProbe() {
 }
 
 function Fixture() {
-  const [state] = useState(initialState);
+  const [sessionId, setSessionId] = useState("s1");
+  const [state, setState] = useState(initialState);
+  window.refreshPermissions = (prompts) => setState(buildInitialState(
+    sessionId, initialState.sessions, [], prompts,
+  ));
+  window.switchSession = (nextSessionId) => {
+    window.sessionEventOpen = false;
+    window.sessionEventTransport = undefined;
+    setSessionId(nextSessionId);
+    setState(buildInitialState(nextSessionId, [], [], []));
+  };
   useEffect(() => {
     const controller = new AbortController();
-    void api.streamEvents("s1", controller.signal, (event) => {
+    void api.streamEvents(sessionId, controller.signal, (event) => {
       window.sessionEventsDelivered.push(event);
       liveEvents.current?.(event);
     }, () => {
       window.sessionEventOpen = true;
     }).catch(() => undefined);
     return () => controller.abort();
-  }, []);
+  }, [sessionId]);
 
   return (
     <EngineRuntimeProvider
+      key={sessionId}
       api={api}
-      sessionId="s1"
+      sessionId={sessionId}
       initialState={state}
       liveEvents={liveEvents}
     >

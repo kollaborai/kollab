@@ -24,7 +24,7 @@ const repoRoot = path.resolve(frontendRoot, "../../..");
 const browserErrors = [];
 const browserConsole = [];
 const scenario = process.argv[2] ?? "target";
-assert.ok(["target", "queue-control"].includes(scenario), `unknown scenario: ${scenario}`);
+assert.ok(["target", "queue-control", "permission-handover"].includes(scenario), `unknown scenario: ${scenario}`);
 
 const vite = await createServer({
   root: frontendRoot,
@@ -245,7 +245,7 @@ try {
     assert.deepEqual(browserErrors, [], "the browser reports no runtime errors");
     await t.page.close();
     console.log(`PASS ${scenario}`);
-  } else {
+  } else if (scenario === "queue-control") {
     const t = await open();
     await t.send("request A");
     await t.page.waitForFunction(() => window.transports.length === 1);
@@ -274,6 +274,126 @@ try {
     await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 4000 });
     const second = await t.request(1);
     assert.equal(second.text, "request B", "normal queue starts B after A's finish frame");
+    assert.deepEqual(browserErrors, [], "the browser reports no runtime errors");
+    await t.page.close();
+    console.log(`PASS ${scenario}`);
+  } else {
+    const t = await open();
+    await t.send("request A");
+    await t.page.waitForFunction(() => window.transports.length === 1);
+    const first = await t.request(0);
+    assert.ok(first.id, "the local request A has a message/request id");
+    await t.pushResponse(0, "A continues while B waits.");
+    await t.waitFor((s) => s.running === "running" && s.assistant.includes("A continues while B waits."),
+      "request A remains visibly active");
+
+    await t.send("request B");
+    await t.page.getByText("Queued", { exact: true }).waitFor();
+    await t.page.getByRole("button", { name: "Send Now" }).click();
+    await t.page.waitForFunction(() => window.transports.length === 2);
+    const second = await t.request(1);
+    assert.ok(second.id && second.id !== first.id, "Send Now starts local request B with its own id");
+
+    const foreignEvent = {
+      type: "permission_request", request_id: "foreign-request", tool_id: "foreign-tool-id",
+      tool_name: "foreign-tool", input: { cmd: "echo foreign" },
+    };
+    const promptEvent = {
+      type: "permission_request", request_id: first.id, tool_id: "permission-tool-a",
+      tool_name: "terminal", tool_type: "command", input: { cmd: "echo needs approval" },
+      risk_level: "medium", risk_reason: "This command needs approval.",
+      details: { source: "acp", request_id: "permission-owner-a" },
+    };
+    assert.deepEqual(engineForeignOutput([promptEvent], [second.id], true), [true],
+      "the engine filters request A's permission event from request B's assistant stream");
+    await t.page.evaluate((events) => {
+      for (const event of events) window.sessionEventTransport.push(event);
+    }, [foreignEvent, promptEvent]);
+    await t.waitFor((s) => s.eventCount === 2, "foreign and prior-request permission events cross the session stream");
+    await t.page.getByText("Permission required: terminal", { exact: true }).waitFor({ state: "detached" });
+    assert.equal(await t.page.getByText("Permission required: foreign-tool", { exact: true }).count(), 0,
+      "a foreign permission event does not create a prompt");
+
+    // App's permission refresh builds this synthetic requires-action row
+    // without a history index; publishing it through the provider reproduces
+    // the exact mid-turn snapshot that the running thread must retain.
+    const pendingPermission = {
+      tool_id: "permission-tool-a",
+      tool_name: "terminal",
+      tool_type: "command",
+      input: { cmd: "echo needs approval" },
+      risk_level: "medium",
+      risk_reason: "This command needs approval.",
+      details: { source: "acp", request_id: "permission-owner-a" },
+    };
+    await t.page.evaluate((prompt) => window.refreshPermissions([prompt]), pendingPermission);
+    const prompt = t.page.getByText("Permission required: terminal", { exact: true });
+    await prompt.waitFor();
+    assert.equal(await prompt.count(), 1, "the pending prompt is rendered exactly once");
+    for (let refresh = 0; refresh < 2; refresh += 1) {
+      await t.page.evaluate((value) => window.refreshPermissions([value]), pendingPermission);
+      await t.page.waitForTimeout(50);
+      assert.equal(await prompt.count(), 1, "repeated authoritative refreshes do not duplicate the prompt");
+    }
+    assert.equal(await t.page.getByText("Permission required: foreign-tool", { exact: true }).count(), 0,
+      "the refresh does not invent a prompt for a foreign event");
+    for (const label of ["Allow once", "Allow session", "Deny"]) {
+      const button = t.page.getByRole("button", { name: label, exact: true });
+      assert.equal(await button.count(), 1, `${label} appears once on the prompt`);
+      assert.equal(await button.isEnabled(), true, `${label} requires an explicit user choice`);
+    }
+    const beforeAnswer = await t.read();
+    assert.equal(beforeAnswer.running, "running", "request B remains active while the permission prompt is shown");
+    assert.equal(await t.page.getByText("Allowed (once)", { exact: true }).count(), 0,
+      "the permission remains unanswered until the user chooses");
+    assert.deepEqual(beforeAnswer.transports[1], { closed: false, aborted: false, pushCount: 0 },
+      "B's assistant transport remains open and does not receive A's filtered event");
+
+    const allowOnce = t.page.getByRole("button", { name: "Allow once", exact: true });
+    await allowOnce.click();
+    await t.page.getByText("Allowed (once)", { exact: true }).waitFor();
+    assert.equal(await prompt.count(), 1, "answering does not duplicate the permission row");
+    assert.equal(await allowOnce.isDisabled(), true, "the same prompt cannot be answered twice");
+    const afterAnswer = await t.read();
+    assert.equal(await t.page.getByText("Allowed (once)", { exact: true }).count(), 1,
+      "the explicit choice is shown on the permission prompt");
+    assert.equal(afterAnswer.running, "running", "B remains active after the explicit answer");
+    assert.equal(afterAnswer.transports.length, 2, "answering does not silently start another request");
+
+    // The next authoritative permissions refresh says this prompt is resolved.
+    // Its transient row must be removed from both the thread and the replay
+    // rows that every later B snapshot merges back in.
+    await t.page.evaluate(() => window.refreshPermissions([]));
+    await prompt.waitFor({ state: "detached" });
+    assert.equal(await t.page.getByRole("button", { name: "Allow once", exact: true }).count(), 0,
+      "a resolved synthetic prompt is no longer answerable");
+    assert.ok(!(await t.read()).tools.includes("permission_permission-tool-a"),
+      "a resolved prompt is removed from the thread state");
+
+    const stalePermission = {
+      ...pendingPermission,
+      tool_id: "permission-tool-stale",
+      tool_name: "file_write",
+      details: { source: "acp", request_id: "permission-owner-stale" },
+    };
+    await t.page.evaluate((value) => window.refreshPermissions([value]), stalePermission);
+    const stalePrompt = t.page.getByText("Permission required: file_write", { exact: true });
+    await stalePrompt.waitFor();
+    assert.equal(await t.page.getByRole("button", { name: "Allow once", exact: true }).isEnabled(), true,
+      "a later pending prompt is answerable before switching sessions");
+
+    // App keys the runtime by session. A later session must not inherit this
+    // permission card or its answer control from the prior run.
+    await t.page.evaluate(() => window.switchSession("s2"));
+    await t.page.waitForFunction(() => window.sessionEventOpen && window.sessionEventTransport !== undefined);
+    await prompt.waitFor({ state: "detached" });
+    await stalePrompt.waitFor({ state: "detached" });
+    assert.equal(await t.page.getByRole("button", { name: "Allow once", exact: true }).count(), 0,
+      "the next session has no stale answer control");
+    const afterSwitch = await t.read();
+    assert.equal(afterSwitch.running, "idle", "the next session starts idle");
+    assert.ok(!afterSwitch.ids.some((id) => id.startsWith("permission-")),
+      "the next session starts without the prior synthetic prompt row");
     assert.deepEqual(browserErrors, [], "the browser reports no runtime errors");
     await t.page.close();
     console.log(`PASS ${scenario}`);
