@@ -24,9 +24,11 @@
     "test:e2e:profile-rows": "node tests/acceptance/profile-rows.browser.mjs",
     "test:e2e:llm-provider-remove": "node tests/llm-provider-removal.browser.mjs",
     "test:e2e:live-pending-input": "node tests/acceptance/live-pending-input.browser.mjs",
+    "test:e2e:turn-settle": "node tests/acceptance/turn-settle.browser.mjs",
     "test:e2e:runner": "node --test tests/browser-acceptance-runner.test.mjs tests/inventory-webui-controls.test.mjs",
     "test:e2e:parallel": "node scripts/browser-acceptance-runner.mjs",
-    "inventory:controls": "node scripts/inventory-webui-controls.mjs"
+    "inventory:controls": "node scripts/inventory-webui-controls.mjs",
+    "record:chat": "node scripts/chat-recorder.mjs"
   },
   "dependencies": {
     "@assistant-ui/react": "^0.15.27",

@@ -36,7 +36,7 @@ import type {
   SessionEvent,
   TurnError,
 } from "./api";
-import { isToolOutputBatch } from "./api";
+import { isToolOutputBatch, stripAgentHud } from "./api";
 import { GoalCancellationTracker } from "./utils/goal-cancel";
 import {
   dropTransientTurnDuplicates,
@@ -45,7 +45,15 @@ import {
   mergeCompactionHistorySnapshot,
   mergeMissingHistoryMessages,
   reconcileBoundaryToolResults,
+  hasUnsettledRows,
+  inFlightSendIdsFor,
+  pendingSendIds,
+  rememberSavedSends,
   shownMessagesChanged,
+  withoutInFlightSends,
+  withSavedCopies,
+  rebaseOntoHistory,
+  withoutOwnTurnRows,
 } from "./history-merge";
 import { historyContentToThreadContent } from "./history-content";
 import {
@@ -58,14 +66,18 @@ import {
   apartFromLive,
   applyLiveEvent,
   emptyLiveTurn,
+  endsLiveTurn,
+  eventNamesRequest,
   historyReplacesLiveTurn,
   isLiveMessage,
   liveMessage,
   replacedLiveTurn,
+  withoutSavedParts,
   type LiveTurn,
 } from "./live-turn";
 import { parseHubMessageHeader, splitAgentHud, splitObservationReplies, type HubNote } from "./hub-notes";
 import { PermissionToolUI } from "./components/PermissionTool";
+import { endableStream } from "./run-stream";
 import {
   historyTurnTiming,
   newTurnClock,
@@ -106,6 +118,15 @@ const PermissionCancellationContext = createContext<{
   cancel: (expected: readonly PendingPermission[]) => Promise<void>;
   cancelling: boolean;
 } | null>(null);
+
+const SendWaitingNowContext = createContext<(() => void) | null>(null);
+
+/**
+ * Sends the messages waiting behind the running turn at once: the agent takes
+ * them in at its next step. Without it they go out when the turn ends (#1102).
+ * Null where the session cannot take a message that way (a harness session).
+ */
+export const useSendWaitingNow = () => useContext(SendWaitingNowContext);
 
 export function usePendingPermissionCancellation() {
   const control = useContext(PermissionCancellationContext);
@@ -460,11 +481,89 @@ function historyToMessages(
       const media = Array.isArray(message.media)
         ? message.media.filter((entry) => entry && typeof entry.ref === "string")
         : [];
+      // The sends this row holds, by the ids their pages made (#1359): one per
+      // operator input, or the row's own id (an ACP admission).
+      const operatorInputs = Array.isArray(metadata?.operator_inputs) ? metadata.operator_inputs : [];
+      const requestIds = [...new Set([
+        ...operatorInputs.map((record) => asString(asRecord(record)?.request_id)),
+        asString(metadata?.request_id),
+      ].filter((id): id is string => id !== null))];
+      // The daemon saves sends that arrive together as one row: show a row
+      // per send, as each was sent, when the row reads as exactly their words.
+      const sends = operatorInputs.flatMap((record) => {
+        const text = asString(asRecord(record)?.text);
+        return text ? [{ text, requestId: asString(asRecord(record)?.request_id) }] : [];
+      });
+      // The row as the daemon wrote each send's words (content_to_text): its
+      // parts on lines of their own, each picture as a token, after the agent
+      // HUD. Pictures are counted from the saved row itself, not its shown
+      // text: once shown, a typed [image1] reads like a stored picture. Each send
+      // numbers its own pictures from 1, so tokens compare as [image]. In
+      // order, the row's pictures as shown: an image part, or null for a token.
+      const TOKEN = /\[image\d+\]/g;
+      const pictures: Array<ImageMessagePart | null> = [];
+      const rawLines = (Array.isArray(message.content) ? message.content : [message.content]).map((rawPart) => {
+        if (typeof rawPart === "string") return rawPart;
+        const part = asRecord(rawPart);
+        if (part?.type === "text" && typeof part.text === "string") return part.text;
+        if (part?.type !== "image") return null;
+        const shown = historyContentToThreadContent([part]);
+        pictures.push(Array.isArray(shown) && shown[0]?.type === "image" ? shown[0] as ImageMessagePart : null);
+        return "[image]";
+      });
+      // As the engine binds media (count_image_tokens): image parts are the
+      // pictures; a row with none keeps them as tokens, its media list bound
+      // one entry per token.
+      if (!pictures.length) pictures.push(...media.map(() => null));
+      const shownText = rawLines.every((line) => line !== null)
+        ? stripAgentHud(rawLines.join("\n")).replace(TOKEN, "[image]") : null;
+      const sentText = sends.map((send) => send.text.replace(TOKEN, "[image]")).join("\n");
+      // Every token a send wrote is one of the row's pictures, in order: a
+      // typed [image1] with no picture of its own leaves the row whole.
+      const tokens = sends.reduce((count, send) => count + (send.text.match(TOKEN)?.length ?? 0), 0);
+      let pictureAt = 0;
+      const pieceContent = (text: string) => text.split(/(\[image\d+\])/).reduce<Array<TextMessagePart | ImageMessagePart>>(
+        (parts, segment) => {
+          const token = /^\[image\d+\]$/.test(segment);
+          const picture = token ? pictures[pictureAt] : undefined;
+          // A token keeps its number across the whole row, where the media list is.
+          const words = token ? `[image${++pictureAt}]` : segment;
+          const last = parts.at(-1);
+          if (picture) parts.push(picture);
+          else if (last?.type === "text") parts[parts.length - 1] = { type: "text", text: last.text + words };
+          else if (words) parts.push({ type: "text", text: words });
+          return parts;
+        }, []);
+      if (sends.length > 1 && sends.length === operatorInputs.length && tokens === pictures.length &&
+          shownText?.trim() === sentText.trim()) {
+        sends.forEach((send, index) => {
+          const piece = pieceContent(send.text);
+          // A piece showing a picture as its token keeps the row's media list.
+          const custom = {
+            ...(media.length && piece.some((part) => part.type === "text" && /\[image\d+\]/.test(part.text))
+              ? { media } : {}),
+            ...(send.requestId ? { requestIds: [send.requestId] } : {}),
+          };
+          messages.push({
+            // Every piece has an id of its own: the engine maps a send's row to
+            // the saved row's index, so history-<n> would read as shown.
+            id: `history-${sourceIndex}-send-${index}`,
+            role: "user",
+            content: piece,
+            ...(Object.keys(custom).length ? { metadata: { custom } } : {}),
+          });
+        });
+        return;
+      }
+      const custom = {
+        ...(media.length ? { media } : {}),
+        ...(requestIds.length ? { requestIds } : {}),
+      };
       messages.push({
         id: `history-${sourceIndex}`,
         role: "user",
         content,
-        ...(media.length ? { metadata: { custom: { media } } } : {}),
+        ...(Object.keys(custom).length ? { metadata: { custom } } : {}),
       });
       return;
     }
@@ -595,41 +694,83 @@ function historyToMessages(
   return messages;
 }
 
+type MidTurn = {
+  rows: readonly ThreadMessageLike[];
+  /** The provisional ids of the sends in flight, in order (inFlightSendIdsFor). */
+  sendIds?: readonly string[];
+  /**
+   * The watched turn's live row as it stands now, or null once history shows
+   * all of it. The run's states carry the row its request sent, which would
+   * bring back the parts a sync took (#1359).
+   */
+  live?: { id: string; message: ThreadMessageLike | null } | null;
+  /** The row id of each send still waiting behind the running turn, by request id (pendingSendIds). */
+  waiting?: Map<string, string>;
+  /** The request ids of the sends that wait for the streaming request to end. */
+  queued?: ReadonlySet<string>;
+};
+const NO_MID_TURN: MidTurn = { rows: [] };
+
+/**
+ * Rows a history sync added while this page's run owned the thread, merged
+ * around the run's own rows, which stay last (#1358, #1364).
+ */
+const withMidTurnRows = (messages: ThreadMessageLike[], midTurn: MidTurn): ThreadMessageLike[] => {
+  if (!midTurn.rows.length) return messages;
+  // The sync imported them too: take them out and merge them back in order,
+  // so a pending send's row is placed after them.
+  const midTurnIds = new Set(midTurn.rows.map((row) => row.id));
+  return aroundLive(messages.filter((row) => !midTurnIds.has(row.id)),
+    (rows) => mergeMissingHistoryMessages(rows, [...midTurn.rows]).messages);
+};
+
 const converter = (
   state: EngineState,
   metadata: AssistantTransportConnectionMetadata,
+  midTurn: MidTurn = NO_MID_TURN,
 ) => {
   // Stream timing rides on the assistant message's metadata, where
   // `useMessageTiming` reads it (see turn-timing.ts).
-  const stored = apartFromLive(state.messages).map((message) => {
+  const live = midTurn.live;
+  const stored = state.messages.flatMap((message) => {
+    if (live && message.id === live.id) return live.message ? [live.message] : [];
     const timing =
       message.role === "assistant" && message.id
         ? turnTimings.get(message.id)
         : undefined;
-    return timing
+    return [timing
       ? { ...message, metadata: { ...message.metadata, timing } }
-      : message;
+      : message];
   });
-  let optimisticIndex = state.messages.length;
-  const optimistic = metadata.pendingCommands.flatMap((command) => {
-    if (command.type !== "add-message") return [];
+  // A send in flight keeps the id its request was sent with: rows a sync adds
+  // meanwhile change the row count, and a new id makes assistant-ui take the
+  // row for a new turn and scroll it to the top under the reader (#1364).
+  // That id is the one the engine gives the row, so it stays through the
+  // first streamed state. Sends still waiting number after it and keep their
+  // ids while they wait (pendingSendIds).
+  const inFlight = (midTurn.sendIds ?? []).filter((id) => !state.messages.some((message) => message.id === id));
+  const sends = metadata.pendingCommands.flatMap((command) => (command.type === "add-message" ? [command] : []));
+  const requestIds = sends.map((command) =>
+    ("id" in command.message && typeof command.message.id === "string" ? command.message.id : undefined));
+  const ids = pendingSendIds(requestIds, inFlight, state.messages, state.sessionId, midTurn.waiting ?? new Map());
+  const optimistic = sends.map((command, index) => {
     const parts: Array<TextMessagePart | ImageMessagePart> = command.message.parts.map(
       (part) =>
         part.type === "text"
           ? { type: "text" as const, text: part.text }
           : { type: "image" as const, image: part.image },
     );
-    // Match the id the engine uses for this provisional row. Keeping the
-    // anchor id through the first streamed state update prevents assistant-ui
-    // from treating the same turn as a new top-anchored message.
-    return [
-      {
-        id: `user-${state.sessionId}-${optimisticIndex++}`,
-        role: "user" as const,
-        content: parts,
-        metadata: { isOptimistic: true },
-      } satisfies ThreadMessageLike,
-    ];
+    const requestId = requestIds[index];
+    return {
+      id: ids[index],
+      role: "user" as const,
+      content: parts,
+      // The engine follows the send by this id into saved history (#1359).
+      // `queued` draws the message as waiting, with Send Now (#1102).
+      metadata: { isOptimistic: true, ...(requestId === undefined ? {} : {
+        custom: { requestId, ...(midTurn.queued?.has(requestId) ? { queued: true } : {}) },
+      }) },
+    } satisfies ThreadMessageLike;
   });
 
   return {
@@ -638,9 +779,13 @@ const converter = (
     // than the transport's structural JSON type.
     state: JSON.parse(JSON.stringify(state)),
     messages: messageConverter.toThreadMessages(
-      [...stored, ...optimistic],
+      apartFromLive(withMidTurnRows([...stored, ...optimistic], midTurn)),
       metadata.isSending,
-      { error: state.error },
+      // The engine clears an error with an empty string, which assistant-ui
+      // would draw as an empty error box. An error still there while a request
+      // is out belongs to the run before it: the engine clears it on admission,
+      // and until then it would sit under the new message.
+      { error: metadata.isSending ? undefined : state.error || undefined },
     ),
     isRunning: metadata.isSending,
   };
@@ -651,6 +796,24 @@ type ThreadReadyRuntime = {
     getState: () => { messages: readonly ThreadMessageLike[] };
     subscribe: (callback: () => void) => () => void;
   };
+};
+
+/**
+ * Merges rows as if a watched turn's live row were not there, then puts it
+ * back before the row that followed it. The state a page's own send carries
+ * keeps that row before the send's rows: merged around it, history rows would
+ * land ahead of the send out of order (#1359); moved to the end, it would
+ * change the turn the chat anchors to the top and scroll the reader (#1364).
+ */
+const aroundLive = <T extends { id?: unknown }>(messages: readonly T[], merge: (rows: T[]) => T[]): T[] => {
+  const live = messages.flatMap((message, index) => isLiveMessage(message)
+    ? [{ row: message, next: messages.slice(index + 1).find((later) => !isLiveMessage(later)) }] : []);
+  const merged = merge(messages.filter((message) => !isLiveMessage(message)));
+  for (const { row, next } of live) {
+    const at = next ? merged.indexOf(next) : -1;
+    if (at < 0) merged.push(row); else merged.splice(at, 0, row);
+  }
+  return merged;
 };
 
 const ownsPendingInput = (thread: {
@@ -705,6 +868,7 @@ export function EngineRuntimeProvider({
   api,
   sessionId,
   agentIdentity,
+  harness = false,
   initialState,
   onStale,
   liveEvents,
@@ -713,6 +877,12 @@ export function EngineRuntimeProvider({
   api: EngineApi;
   sessionId: string;
   agentIdentity?: string;
+  /**
+   * The session runs on a harness (Codex CLI, Claude Code). It gets no Send
+   * Now: the harness steers a message into its running turn, and the engine
+   * does not end the stream of such a message, so the chat would stay busy.
+   */
+  harness?: boolean;
   initialState: EngineState;
   /** Reload the thread whole, optionally only while a caller's guard holds. */
   onStale?: (stillCurrent?: () => boolean) => void | Promise<void>;
@@ -728,6 +898,42 @@ export function EngineRuntimeProvider({
   const runVersion = useRef(0);
   const draftKey = composerDraftStorageKey(agentIdentity, sessionId);
   const pendingDraftSubmissions = useRef<ComposerDraftSubmission[]>([]);
+  // The provisional row ids of the messages this page's running turn sent
+  // (#1356). A turn that stops at a permission prompt keeps them for the
+  // request that answers it; any other end clears them.
+  const inFlightSendIds = useRef<ReadonlySet<string>>(new Set());
+  // History rows a sync added while this page's run owned the thread (#1358).
+  // Each state the run streams is built from what its request sent, so it
+  // leaves them out: drawn without them for a frame, and assistant-ui keeps the
+  // dropped rows as a second branch (the "2 / 2" picker). The converter adds
+  // them back until the run lets go and they are folded into the state.
+  const midTurnRows = useRef<ThreadMessageLike[]>([]);
+  // The live row a sync changed while this page's run owned the thread (see MidTurn.live).
+  const midTurnLive = useRef<MidTurn["live"]>(null);
+  // The row ids of the sends waiting behind this page's running turn (see MidTurn.waiting).
+  const waitingSendIds = useRef(new Map<string, string>());
+  // The commands of the request now streaming, from the moment it is sent
+  // until it ends; null between requests (see the hand-over below).
+  const streamingRun = useRef<WeakSet<object> | null>(null);
+  // A message waits behind the streaming request, and all that request sent has arrived.
+  const handOverDue = useRef(false);
+  // The user asked for the waiting messages to go now (Send Now, #1102).
+  const sendNow = useRef(false);
+  // Ends the stream of the request now streaming (see the hand-over below).
+  const endRun = useRef<(() => void) | null>(null);
+  const convert = useCallback((state: EngineState, metadata: AssistantTransportConnectionMetadata) => {
+    const run = streamingRun.current;
+    const pending = metadata.pendingCommands;
+    handOverDue.current = !!run && metadata.isSending && pending.length > 0 &&
+      pending.every((command) => command.type === "add-message" && !run.has(command));
+    const queued = new Set(run ? pending.flatMap((command) =>
+      command.type === "add-message" && !run.has(command) && "id" in command.message &&
+        typeof command.message.id === "string" ? [command.message.id] : []) : []);
+    return converter(state, metadata, {
+      rows: midTurnRows.current, sendIds: [...inFlightSendIds.current], live: midTurnLive.current,
+      waiting: waitingSendIds.current, queued,
+    });
+  }, []);
   const reloadRequestedAt = useRef<number | null>(null);
   const [settledRuns, setSettledRuns] = useState(0);
   const [permissionCancellationPending, setPermissionCancellationPending] = useState(false);
@@ -741,7 +947,7 @@ export function EngineRuntimeProvider({
     initialState,
     api: api.assistantUrl(sessionId),
     protocol: "assistant-transport",
-    converter,
+    converter: convert,
     adapters: { attachments: imageAttachmentAdapter },
     headers: async () => {
       // Refresh before every transport request. Engine restarts rotate the
@@ -756,6 +962,15 @@ export function EngineRuntimeProvider({
     },
     prepareSendCommandsRequest: (body) => {
       runVersion.current += 1;
+      streamingRun.current = new WeakSet<object>(body.commands);
+      endRun.current = null;
+      sendNow.current = false;   // this request takes every message that waited
+      inFlightSendIds.current = inFlightSendIdsFor(body, sessionId, inFlightSendIds.current, waitingSendIds.current);
+      // Each message names its row: one that waited keeps the row it has on screen.
+      const rowIds = [...inFlightSendIds.current];
+      let sent = 0;
+      const commands = body.commands.map((command) =>
+        (command.type === "add-message" && rowIds[sent] ? { ...command, rowId: rowIds[sent++] } : command));
       // A new message starts a new turn; a tool answer continues the last one.
       if (body.commands.some((command) => command.type === "add-message")) {
         turnRef.current = newTurnClock();
@@ -764,7 +979,7 @@ export function EngineRuntimeProvider({
       }
       runStartRef.current = performance.now();
       const goalReplyId = goalCancellation.current.prepare(body.commands);
-      return { ...body, sessionId, ...(goalReplyId ? { goal_reply_id: goalReplyId } : {}) };
+      return { ...body, commands, sessionId, ...(goalReplyId ? { goal_reply_id: goalReplyId } : {}) };
     },
     onResponse: (response) => {
       const draftSubmission = pendingDraftSubmissions.current.shift();
@@ -777,21 +992,40 @@ export function EngineRuntimeProvider({
       // The transport drops text deltas (the thread renders turn-end state),
       // so read the wire frames off a clone for real stream timing. Timing is
       // a nicety: nothing here may fail the run.
+      const timing = new AbortController();
       try {
         observeRun(
           response.clone(),
           turnRef.current,
           runStartRef.current,
+          timing.signal,
         ).catch(() => undefined);
       } catch {
         // A body that cannot be cloned just has no timing.
       }
+      // assistant-ui reads `response.body` after this hook: give it a stream
+      // the page can end (see the hand-over below). The request is let go
+      // once the timing reader stops too.
+      if (!response.body) return;
+      const run = endableStream(response.body);
+      Object.defineProperty(response, "body", { value: run.stream });
+      endRun.current = () => {
+        run.end();
+        timing.abort();
+      };
     },
     onError: async (error, { updateState }) => {
+      streamingRun.current = null;
+      endRun.current = null;
+      inFlightSendIds.current = new Set();
       pendingDraftSubmissions.current.shift();
       updateState((state) => ({ ...state, error: error.message }));
     },
     onCancel: ({ commands, updateState, error }) => {
+      streamingRun.current = null;
+      endRun.current = null;
+      sendNow.current = false;
+      inFlightSendIds.current = new Set();
       // A failed request lands here too, after onError: keep the error it
       // set, and leave the daemon's turn alone (a dropped phone connection
       // must not stop the agent's work).
@@ -808,10 +1042,45 @@ export function EngineRuntimeProvider({
       updateState((state) => ({ ...state, error: "Run cancelled" }));
     },
     onFinish: () => {
+      streamingRun.current = null;
+      endRun.current = null;
+      const last = runtime.thread.getState().messages.at(-1);
+      if (last?.status?.type !== "requires-action") inFlightSendIds.current = new Set();
       goalCancellation.current.finish();
       setSettledRuns((count) => count + 1);
     },
   });
+
+  // A message sent while this page's turn runs waits behind the request that
+  // streams the turn: assistant-ui sends it when that request ends, which is
+  // when the whole turn does. Send Now sends it at once (#1102, #1365): the
+  // daemon takes a message into the running turn at its next step, as it does
+  // for another client's, so the page lets its request go and sends the
+  // waiting messages. The engine closes a request the page drops without
+  // stopping the daemon; the next request streams the rest of the turn under
+  // the new message, and the part the dropped request had not shown comes
+  // with saved history. Only once all the streaming request sent has arrived:
+  // a message of its own still on its way would be lost with it. The page
+  // ends the request's stream as the engine ends a turn's, so assistant-ui
+  // sends the waiting messages as it does after any run. Cancelling the run
+  // instead takes the message's row and the typing dots down for a draw.
+  const handOver = useCallback(() => {
+    if (!sendNow.current || !handOverDue.current) return;
+    queueMicrotask(() => {
+      if (!mounted.current || !sendNow.current || !handOverDue.current) return;
+      if (!runtime.thread.getState().isRunning) return;
+      handOverDue.current = false;
+      sendNow.current = false;
+      const end = endRun.current;
+      endRun.current = null;
+      end?.();
+    });
+  }, [runtime]);
+  useEffect(() => runtime.thread.subscribe(handOver), [runtime, handOver]);
+  const sendWaitingNow = useCallback(() => {
+    sendNow.current = true;
+    handOver();
+  }, [handOver]);
 
   useEffect(() => {
     // A goal's result is private to its requesting stream, but its history can
@@ -900,7 +1169,11 @@ export function EngineRuntimeProvider({
       const kept = shown.messages.filter((message) => !isLiveMessage(message));
       const live = liveMessage(next);
       if (!live && kept.length === shown.messages.length) return;
-      importLiveState(live ? [...kept, live] : kept);
+      // A live row already shown is updated where it is: moved to the end it
+      // would change the turn the chat anchors and scroll the reader (#1364).
+      const at = shown.messages.findIndex(isLiveMessage);
+      importLiveState(!live ? kept : at < 0 ? [...kept, live]
+        : [...kept.slice(0, at), live, ...kept.slice(at)]);
       // Completed replies stay visible until canonical history catches up.
       // Preserve the prior bounded cleanup for cancellation and error states.
       clearTimeout(settleTimer.current);
@@ -941,7 +1214,12 @@ export function EngineRuntimeProvider({
         // state and show them when the run ends. Save notices are accepted
         // before the streamed reply has established its request id.
         const visible = liveTurn.current;
-        if (event.type !== "notice" && (!visible.requestId || event.request_id !== visible.requestId)) return;
+        // The turn this page was watching when it sent ends with the page's
+        // own: its terminal event settles the live row, whose output the
+        // page's stream draws from here on (#1362).
+        const ends = !!visible.requestId && (endsLiveTurn(String(event.type ?? "")) || event.type === "turn_cancelled") &&
+          eventNamesRequest(event, visible.requestId);
+        if (!ends && event.type !== "notice" && (!visible.requestId || event.request_id !== visible.requestId)) return;
         if (event.type === "notice" && visible.requestId && event.request_id
             && event.request_id !== visible.requestId) return;
         const folded = applyLiveEvent(visible, event);
@@ -959,6 +1237,36 @@ export function EngineRuntimeProvider({
     };
     return () => { liveEvents.current = null; clearTimeout(settleTimer.current); };
   }, [runtime, liveEvents, initialState.conversationUid]);
+
+  // Where saved history holds each send this page has seen saved (see SavedSends).
+  const savedSends = useRef(new Map<string, number>());
+
+  /**
+   * The thread after a history sync added `rows`: the live turn gives up the
+   * parts those rows now show (a tool call drawn twice otherwise), and its row
+   * follows (#1359).
+   */
+  const withLiveSynced = useCallback((messages: ThreadMessageLike[], rows: readonly ThreadMessageLike[]) => {
+    // Only the rows saved after the message that started the turn are its
+    // own: the reply of the turn before can reach the page late, after this
+    // one's first words, and contain them. A turn whose message the page has
+    // not seen saved is a long one, and the rows a sync adds are its own.
+    const startedAt = liveTurn.current.requestId ? savedSends.current.get(liveTurn.current.requestId) : undefined;
+    const own = startedAt === undefined ? rows
+      : rows.filter((row) => (historyMessageIndex(row) ?? Number.POSITIVE_INFINITY) > startedAt);
+    const synced = withoutSavedParts(liveTurn.current, own);
+    if (synced === liveTurn.current) return messages;
+    liveTurn.current = synced;
+    const live = liveMessage(synced);
+    const at = messages.findIndex(isLiveMessage);
+    if (at >= 0 && runtime.thread.getState().isRunning) {
+      // The run's next state brings the row its request sent: keep this one.
+      midTurnLive.current = { id: String(messages[at].id), message: live };
+      unshownLive.current = true;
+    }
+    const kept = messages.filter((message) => !isLiveMessage(message));
+    return !live ? kept : at < 0 ? [...kept, live] : [...kept.slice(0, at), live, ...kept.slice(at)];
+  }, [runtime]);
 
   // Output folded in while this page's own run was pending shows once it ends.
   useEffect(() => runtime.thread.subscribe(() => {
@@ -979,7 +1287,27 @@ export function EngineRuntimeProvider({
   const deferredHistorySync = useRef(false);
   const deferredOlderWindow = useRef<EngineState | null>(null);
   useEffect(() => runtime.thread.subscribe(() => {
-    if (!deferredHistorySync.current || ownsPendingInput(runtime.thread.getState())) return;
+    if (ownsPendingInput(runtime.thread.getState())) return;
+    // The run let go: its states no longer bring the sent live row back.
+    midTurnLive.current = null;
+    if (midTurnRows.current.length) {
+      const midTurn = { rows: midTurnRows.current };
+      midTurnRows.current = [];
+      const current = (runtime.thread.getState().extras as { state?: EngineState } | undefined)?.state;
+      if (current) {
+        // The run's last state carries the live row its request sent: show the
+        // watched turn as it stands now.
+        const live = liveMessage(liveTurn.current);
+        const messages = withMidTurnRows(current.messages, midTurn)
+          .flatMap((row) => !isLiveMessage(row) ? [row] : live && live.id === row.id ? [live] : []);
+        runtime.thread.importExternalState({
+          ...current,
+          messages,
+          synced: current.synced ? { ...current.synced, messages: messages.length } : current.synced,
+        });
+      }
+    }
+    if (!deferredHistorySync.current) return;
     deferredHistorySync.current = false;
     setHistorySyncRevision((revision) => revision + 1);
   }), [runtime]);
@@ -994,6 +1322,9 @@ export function EngineRuntimeProvider({
       initialState.synced && initialState.synced.authoritative !== false
       ? mergeCompactionHistorySnapshot(currentShown.messages, initialState.messages)
       : null;
+    // A compaction renumbers the rows: positions from before it mean nothing.
+    if (compacted) savedSends.current.clear();
+    rememberSavedSends(savedSends.current, initialState.messages);
     if (compacted) {
       if (ownsPendingInput(thread)) {
         deferredHistorySync.current = true;
@@ -1081,19 +1412,32 @@ export function EngineRuntimeProvider({
         // Publish only newly arrived canonical history rows while this page's
         // turn is active. Preserve its in-flight messages and defer any full
         // reconciliation until settlement, when the engine mirror has caught up.
-        const tail = initialState.messages.filter((message) => {
+        // The saved copy of this page's own send stays out: its in-flight row
+        // already shows it (#1356).
+        const newRows = initialState.messages.filter((message) => {
           const index = historyMessageIndex(message);
           return index !== null && index >= from.history;
         });
-        const merged = mergeMissingHistoryMessages(shown.messages, tail);
+        // Nor do the rows of the turn its stream is drawing, and the saved
+        // copies of sends an earlier run left on screen (#1359).
+        const tail = withoutOwnTurnRows(thread.messages, initialState.messages,
+          withoutInFlightSends(thread.messages, newRows, inFlightSendIds.current), savedSends.current);
+        const merged = { added: [] as ThreadMessageLike[], messages: [] as ThreadMessageLike[] };
+        merged.messages = aroundLive(shown.messages, (rows) => {
+          const result = mergeMissingHistoryMessages(rows, tail);
+          merged.added = result.added;
+          return result.messages;
+        });
         if (merged.added.length) {
+          midTurnRows.current = mergeMissingHistoryMessages(midTurnRows.current, merged.added).messages;
+          const messages = withLiveSynced(merged.messages, merged.added);
           runtime.thread.importExternalState({
             ...shown,
-            messages: merged.messages,
+            messages,
             synced: {
               ...from,
               history: Math.max(from.history, initialState.synced.history),
-              messages: merged.messages.length,
+              messages: messages.length,
             },
           });
         }
@@ -1128,6 +1472,51 @@ export function EngineRuntimeProvider({
     const shown = (thread.extras as { state?: EngineState } | undefined)?.state;
     const from = shown?.synced;
     if (from?.start !== undefined) reloadedWindowStart.current = from.start;
+    /**
+     * Rebuilds the thread on the loaded history where it stands (see
+     * rebaseOntoHistory); false when this history cannot prove what is gone.
+     */
+    const rebase = (): boolean => {
+      const loaded = initialState.synced;
+      if (!shown || !loaded || loaded.authoritative === false || loaded.olderWindow || deferred ||
+          shown.sessionId !== initialState.sessionId ||
+          (shown.conversationUid && initialState.conversationUid &&
+            shown.conversationUid !== initialState.conversationUid)) return false;
+      const known = new Set(shown.messages);
+      let added: ThreadMessageLike[] = [];
+      const rebuilt = aroundLive(shown.messages, (rows) => {
+        const next = rebaseOntoHistory(rows, initialState.messages, loaded.history, savedSends.current);
+        added = next.filter((row) => !known.has(row) && historyMessageIndex(row) !== null);
+        return next;
+      });
+      // A live turn this page is watching gives way to its saved reply.
+      const replaced = historyReplacesLiveTurn(liveTurn.current, added);
+      if (replaced) liveTurn.current = replacedLiveTurn(liveTurn.current);
+      const held = replaced ? liveMessage(liveTurn.current) : null;
+      const messages = replaced
+        ? [...rebuilt.filter((row) => !isLiveMessage(row)), ...(held ? [held] : [])]
+        : withLiveSynced(rebuilt, added);
+      deferredOlderWindow.current = null;
+      // Rows history has not taken yet keep the thread off its sync point, so
+      // the next load rebuilds it again.
+      const settledNow = !hasUnsettledRows(messages);
+      const unchanged = messages.length === shown.messages.length &&
+        messages.every((row, index) => row === shown.messages[index]);
+      if (unchanged && (from ? from.messages === messages.length : !settledNow)) return true;
+      const shownStart = messages.reduce((first, row) => Math.min(first, historyMessageIndex(row) ?? first), Infinity);
+      runtime.thread.importExternalState({
+        ...shown,
+        // The error a dropped stream left belongs to rows the history replaced.
+        ...(settledNow && hasUnsettledRows(shown.messages) ? { error: undefined } : {}),
+        messages,
+        synced: settledNow ? {
+          history: Math.max(from?.history ?? 0, loaded.history),
+          start: Math.min(from?.start ?? (Number.isFinite(shownStart) ? shownStart : loaded.start ?? 0), loaded.start ?? 0),
+          messages: messages.length,
+        } : undefined,
+      });
+      return true;
+    };
     // A failed alignment leaves the local tail unproven. A cursor-validated
     // older page can still extend the prefix strictly before the known window.
     // Preserve every local row and leave the sync watermark unclaimed.
@@ -1151,6 +1540,11 @@ export function EngineRuntimeProvider({
     if (!shown || !from || shown.messages.length !== from.messages || !initialState.synced) {
       deferredOlderWindow.current = null;
       reloaded.current = initialState.messages;
+      // A run that ended without the engine matching its rows (its stream
+      // dropped, or its final state claimed no sync) leaves the thread off its
+      // sync point: take the saved history in place (#1359). A turn parked
+      // at a permission prompt is off it too, and stays as it is.
+      if (!waiting(thread.messages.at(-1))) rebase();
       return;
     }
     if ((initialState.synced.olderWindow || deferred) && reconcileBoundaryToolResults(
@@ -1223,30 +1617,33 @@ export function EngineRuntimeProvider({
       }, 0);
       return () => window.clearTimeout(timer);
     }
+    // The run's own rows take their saved copies in place (#1358).
+    const settled = withSavedCopies(shown.messages, initialState.messages);
     // A non-authoritative window (older-focused merge, or a cache fallback
     // while a fresh sync was unavailable) cannot prove that rows missing
     // from it were deleted: merging keeps the shown rows instead of
     // resetting the thread on every such publish. Only a fresh
     // latest-window claim may declare shown rows gone.
     if (
-      shownMessagesChanged(shown.messages, initialState.messages) &&
+      shownMessagesChanged(settled, initialState.messages, initialState.synced.history) &&
       initialState.synced.authoritative !== false && !deferred
     ) {
       reloaded.current = initialState.messages;
-      onStale?.();
+      // In place: a whole reload blanks the chat and moves the reader (#1358).
+      if (!rebase()) onStale?.();
       return;
     }
     deferredOlderWindow.current = null;
     reloaded.current = initialState.messages;
     const currentStart = from.start ?? 0;
     const nextStart = initialState.synced.start ?? currentStart;
-    const kept = shown.messages.filter((message) => !isLiveMessage(message));
+    const kept = settled.filter((message) => !isLiveMessage(message));
     const merged = mergeMissingHistoryMessages(kept, initialState.messages);
     const tail = merged.added.filter((message) => {
       const index = historyMessageIndex(message);
       return index !== null && index >= from.history;
     });
-    if (!merged.added.length && nextStart >= currentStart) return;
+    if (!merged.added.length && nextStart >= currentStart && settled === shown.messages) return;
     // A live turn this page is only watching rides at the end, outside the
     // synced bookkeeping, until the history carries its reply (replaced above).
     const replaced = historyReplacesLiveTurn(liveTurn.current, tail);
@@ -1257,7 +1654,10 @@ export function EngineRuntimeProvider({
     // ones it already drew (#666); drop the transient block when the tail
     // carries the same turn, proven row by row before anything is hidden.
     const deduped = dropTransientTurnDuplicates(merged.messages, tail);
-    const messages = [...(deduped ?? merged.messages), ...liveShown];
+    // A live row that history did not replace keeps its place (#1364), without
+    // the parts the new rows show.
+    const messages = replaced ? [...(deduped ?? merged.messages), ...liveShown]
+      : withLiveSynced(aroundLive(settled, () => [...(deduped ?? merged.messages)]), tail);
     runtime.thread.importExternalState({
       ...shown,
       messages,
@@ -1274,15 +1674,17 @@ export function EngineRuntimeProvider({
       <PermissionCancellationContext.Provider
         value={{ cancel: cancelPermission, cancelling: permissionCancellationPending }}
       >
-        <InitialMessagesGate
-          runtime={runtime}
-          messages={initialState.messages}
-        >
-          <PermissionToolUI />
-          <VoiceModeProvider api={api} sessionId={sessionId}>
-            {children}
-          </VoiceModeProvider>
-        </InitialMessagesGate>
+        <SendWaitingNowContext.Provider value={harness ? null : sendWaitingNow}>
+          <InitialMessagesGate
+            runtime={runtime}
+            messages={initialState.messages}
+          >
+            <PermissionToolUI />
+            <VoiceModeProvider api={api} sessionId={sessionId}>
+              {children}
+            </VoiceModeProvider>
+          </InitialMessagesGate>
+        </SendWaitingNowContext.Provider>
       </PermissionCancellationContext.Provider>
     </AssistantRuntimeProvider>
   );
