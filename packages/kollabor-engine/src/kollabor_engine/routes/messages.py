@@ -1796,6 +1796,11 @@ async def assistant_transport(
                         "toolName": "request_permission",
                         "args": {
                             "tool_id": source_tool_id,
+                            **(
+                                {"request_id": event["request_id"]}
+                                if isinstance(event.get("request_id"), str) and event["request_id"]
+                                else {}
+                            ),
                             "permission_id": event.get("permission_id")
                             or (event.get("details") or {}).get("permission_id"),
                             "tool_name": event.get("tool_name"),

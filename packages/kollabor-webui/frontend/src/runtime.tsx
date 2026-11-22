@@ -168,7 +168,7 @@ export function usePendingPermissionCancellation() {
   const control = useContext(PermissionCancellationContext);
   const messages = useAuiState((state) => state.thread.messages);
   const expected = pendingPermissions(messages);
-  return control && expected.length ? {
+  return control && expected.length === 1 && expected[0].parked === false ? {
     cancel: () => control.cancel(expected),
     cancelling: control.cancelling,
   } : null;
@@ -1344,7 +1344,69 @@ export function EngineRuntimeProvider({
       unshownLive.current = false;
       showLiveTurn(liveTurn.current);
     };
+    const reconcilePermissionLifecycle = (event: SessionEvent) => {
+      const type = String(event.type ?? "");
+      if (!new Set(["permission_parked", "permission_granted", "permission_denied", "permission_cancelled"]).has(type)) return;
+      const toolId = typeof event.tool_id === "string" ? event.tool_id : "";
+      const permissionId = typeof event.permission_id === "string" ? event.permission_id : "";
+      if (!toolId || !permissionId) return;
+      const requestId = typeof event.request_id === "string" ? event.request_id : "";
+      const settled = type !== "permission_parked";
+      const reconcile = (rows: readonly ThreadMessageLike[]): ThreadMessageLike[] | null => {
+        let changed = false;
+        const next = rows.flatMap((message): ThreadMessageLike[] => {
+          if (message.role !== "assistant" || !Array.isArray(message.content)) return [message];
+          let rowChanged = false;
+          const content = message.content.flatMap((part) => {
+            if (part.type !== "tool-call" || part.toolName !== "request_permission" || part.result !== undefined) return [part];
+            const args = part.args && typeof part.args === "object" ? part.args as Record<string, unknown> : null;
+            const details = args?.details && typeof args.details === "object"
+              ? args.details as Record<string, unknown> : {};
+            const partPermissionId = typeof args?.permission_id === "string"
+              ? args.permission_id : typeof details.permission_id === "string" ? details.permission_id : "";
+            if (args?.tool_id !== toolId || partPermissionId !== permissionId) return [part];
+            const partRequestId = typeof args.request_id === "string" ? args.request_id : "";
+            if (requestId && partRequestId && requestId !== partRequestId) return [part];
+            if (!settled) {
+              if (details.parked === true) return [part];
+              const nextArgs = { ...args, details: { ...details, parked: true } };
+              changed = rowChanged = true;
+              return [{ ...part, args: nextArgs, argsText: JSON.stringify(nextArgs) }];
+            }
+            changed = rowChanged = true;
+            if (isSyntheticPermissionRow(message)) return [];
+            return [{
+              ...part,
+              result: {
+                decision: type === "permission_granted" ? "approve" : "deny",
+                scope: typeof event.scope === "string" ? event.scope : "once",
+                permission_id: permissionId,
+                ...(typeof event.option_id === "string" ? { option_id: event.option_id } : {}),
+                ...(event.vendor_saved === true ? { vendor_saved: true } : {}),
+                ...(typeof event.warning === "string" ? { warning: event.warning } : {}),
+              },
+            }];
+          });
+          if (!rowChanged) return [message];
+          return content.length ? [{ ...message, content }] : [];
+        });
+        return changed ? next : null;
+      };
+
+      const shown = (runtime.thread.getState().extras as { state?: EngineState } | undefined)?.state;
+      const messages = shown ? reconcile(shown.messages) : null;
+      const midTurn = reconcile(midTurnRows.current);
+      if (midTurn) midTurnRows.current = midTurn;
+      if (messages && shown) {
+        runtime.thread.importExternalState({
+          ...shown,
+          messages,
+          synced: shown.synced ? { ...shown.synced, messages: messages.length } : undefined,
+        });
+      }
+    };
     liveEvents.current = (event: SessionEvent) => {
+      reconcilePermissionLifecycle(event);
       const thread = runtime.thread.getState();
       if (thread.isRunning && goalCancellation.current.isActive()
           && event.type === "history_updated"

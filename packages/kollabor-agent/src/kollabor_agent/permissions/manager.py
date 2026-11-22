@@ -88,8 +88,8 @@ class PermissionManager:
         self._confirmation_callback: Optional[
             Callable[[Dict[str, Any]], Awaitable[PermissionDecision]]
         ] = None
-        # Answers every prompt the callback has open cancelled (cancel_confirmations)
-        self._cancel_confirmations: Optional[Callable[[], None]] = None
+        # Answers only the prompts owned by the request being stopped.
+        self._cancel_confirmations: Optional[Callable[[str | None], None]] = None
         # A parked prompt: terminals close it (tool and permission ids); its card stays open.
         self._park_prompt: Optional[Callable[[str, str], None]] = None
         # Answers one open prompt (tool id, permission id, ConfirmationResponse).
@@ -222,7 +222,7 @@ class PermissionManager:
     def set_confirmation_callback(
         self,
         callback: Callable[[Dict[str, Any]], Awaitable[PermissionDecision]],
-        cancel: Optional[Callable[[], None]] = None,
+        cancel: Optional[Callable[[str | None], None]] = None,
         park: Optional[Callable[[str, str], None]] = None,
         settle: Optional[Callable[[str, str, Any], Any]] = None,
     ) -> None:
@@ -231,7 +231,7 @@ class PermissionManager:
 
         Args:
             callback: Async function that shows confirmation and returns decision
-            cancel: Answers every prompt the callback has open cancelled
+            cancel: Cancels only prompts owned by the stopped parent request
             park: Its turn went on without an answer: terminals close this
                 prompt (tool id, permission id), its card stays open
             settle: Answers one open prompt (tool id, permission id, response)
@@ -242,10 +242,10 @@ class PermissionManager:
         self._settle_prompt = settle
         logger.debug("Confirmation callback set")
 
-    def cancel_confirmations(self) -> None:
-        """An ACP Stop ends the turn: its open prompts are answered cancelled."""
+    def cancel_confirmations(self, request_id: str | None = None) -> None:
+        """An ACP Stop cancels only that parent request's open prompts."""
         if self._cancel_confirmations is not None:
-            self._cancel_confirmations()
+            self._cancel_confirmations(request_id)
 
     def park_confirmations(self) -> None:
         """A Stop leaves its turn's open prompts open: the card or a yes answers them.

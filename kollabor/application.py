@@ -817,8 +817,10 @@ class TerminalLLMChat:
                     }
                 return decision
 
-            def cancel_confirmations() -> None:  # an ACP Stop
-                self._attach_permission_bridge.cancel_pending()
+            def cancel_confirmations(request_id: str | None = None) -> None:  # an ACP Stop
+                if not request_id:
+                    return
+                self._attach_permission_bridge.cancel_pending(request_id)
                 self.renderer.layout_manager.cancel_permission_prompt()
 
             def park_confirmation(tool_id: str, permission_id: str) -> None:
@@ -1403,6 +1405,13 @@ class TerminalLLMChat:
             details["thread_id"] = active.thread_id
         if request.display:
             details.update(request.display)
+        # Provider display metadata can include its own request_id. Permission
+        # ownership belongs to the parent chat turn, so restore it after merge.
+        if active is not None:
+            details["request_id"] = active.request_id
+            details["turn_id"] = active.turn_id
+            details["input_source"] = active.source
+            details["thread_id"] = active.thread_id
         try:
             decision = await callback(details)
         except (asyncio.CancelledError, TimeoutError):
@@ -4326,6 +4335,9 @@ class TerminalLLMChat:
             return
         logger.info("Application shutting down")
         self.running = False
+        permission_bridge = getattr(self, "_attach_permission_bridge", None)
+        if permission_bridge is not None:
+            permission_bridge.cancel_all_pending()
 
         # Emit SYSTEM_SHUTDOWN event for config hooks
         try:

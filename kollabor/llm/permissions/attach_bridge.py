@@ -8,6 +8,7 @@ import uuid
 from typing import Any, Callable, Dict, Optional
 
 from kollabor_events.permissions_models import ConfirmationResponse
+from kollabor_tui.turn_context import current_turn
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +35,11 @@ def resolution_event(
     """Resolve the offered choice without losing its explicit turn owner."""
     event = _permission_resolution(tool_id, response, details)
     if details:
-        for key in ("permission_id", "request_id", "turn_id", "input_source", "generation", "thread_id", "parked"):
+        for key in ("permission_id", "request_id", "turn_id", "input_source", "generation", "thread_id"):
             if details.get(key) is not None:
                 event[key] = details[key]
+        if details.get("parked") is True:
+            event["parked"] = True
     return event
 
 
@@ -105,6 +108,7 @@ class AttachPermissionBridge:
         self._pending: Dict[tuple[str, str], asyncio.Future[ConfirmationResponse | str]] = {}
         self._pending_option_ids: Dict[tuple[str, str], set[str]] = {}
         self._pending_details: Dict[tuple[str, str], dict[str, Any]] = {}
+        self._pending_request_ids: Dict[tuple[str, str], str | None] = {}
         self._pending_taps: Dict[tuple[str, str], Any] = {}
         self._registered_rpc_servers: set[int] = set()
         # Attach-client side: one prompt on screen at a time, and the prompts
@@ -187,8 +191,16 @@ class AttachPermissionBridge:
         future.set_result(response)
         return True
 
-    def cancel_pending(self) -> None:
-        """Answer every open prompt cancelled: an ACP Stop is ending its turn."""
+    def cancel_pending(self, request_id: str | None = None) -> None:
+        """Cancel only prompts owned by this request; an unknown owner is a no-op."""
+        if not isinstance(request_id, str) or not request_id:
+            return
+        for (tool_id, permission_id), owner in list(self._pending_request_ids.items()):
+            if owner == request_id:
+                self.try_settle_response(tool_id, permission_id, ConfirmationResponse.CANCEL)
+
+    def cancel_all_pending(self) -> None:
+        """Answer every open prompt cancelled during explicit application shutdown."""
         for tool_id, permission_id in list(self._pending):
             self.try_settle_response(tool_id, permission_id, ConfirmationResponse.CANCEL)
 
@@ -200,7 +212,12 @@ class AttachPermissionBridge:
         if details is None or tap is None or details.get("parked"):
             return
         details["parked"] = True
-        tap.publish({"type": "permission_parked", "tool_id": tool_id, "permission_id": permission_id})
+        tap.publish({
+            "type": "permission_parked",
+            "tool_id": tool_id,
+            "permission_id": permission_id,
+            **({"request_id": details["request_id"]} if details.get("request_id") else {}),
+        })
 
     async def request_confirmation(
         self,
@@ -220,10 +237,18 @@ class AttachPermissionBridge:
         details["tool_id"] = tool_id
         permission_id = str(details.get("permission_id") or uuid.uuid4().hex)
         details["permission_id"] = permission_id
+        details.setdefault("parked", False)
+        request_id = details.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            context_request_id = current_turn.get().get("request_id")
+            request_id = context_request_id if isinstance(context_request_id, str) and context_request_id else None
+        if request_id:
+            details["request_id"] = request_id
         key = (tool_id, permission_id)
         future = asyncio.get_running_loop().create_future()
         self._pending[key] = future
         self._pending_details[key] = details
+        self._pending_request_ids[key] = request_id
         self._pending_taps[key] = display_tap
         self._pending_option_ids[key] = {
             str(option.get("optionId"))
@@ -260,6 +285,7 @@ class AttachPermissionBridge:
             self._pending.pop(key, None)
             self._pending_option_ids.pop(key, None)
             self._pending_details.pop(key, None)
+            self._pending_request_ids.pop(key, None)
             self._pending_taps.pop(key, None)
             if not details.pop("_acp_resolution_published", False):
                 display_tap.publish(resolution_event(tool_id, response, details))
