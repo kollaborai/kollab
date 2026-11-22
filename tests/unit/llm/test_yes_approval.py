@@ -57,6 +57,48 @@ def test_parked_cards_with_reused_tool_id_keep_distinct_permission_owners():
     }
     assert approvals.answered_on_card(call, True, "permission-A") == "gh pr list"
     assert set(approvals._cards) == {("call-1", "permission-B")}
+
+
+def test_a_yes_closes_only_the_parked_card_from_the_reply_it_answers():
+    approvals = YesApprovals()
+    call = dict(CHECK_PRS)
+    closed = []
+    approvals.close_card = lambda tool_id, permission_id, allowed: closed.append(
+        (tool_id, permission_id, allowed)
+    )
+
+    approvals.park(call, "permission-A")
+    approvals.ask(call)
+    approvals.on_reply_done()
+    approvals.on_human_input("check the issues instead")
+
+    approvals.park(call, "permission-B")
+    approvals.ask(call)
+    approvals.on_reply_done()
+    approvals.on_human_input("yes")
+
+    assert closed == [("call-1", "permission-B", True)]
+    assert set(approvals._cards) == {("call-1", "permission-A")}
+
+
+def test_a_later_yes_does_not_close_an_older_card_for_the_same_call():
+    approvals = YesApprovals()
+    call = dict(CHECK_PRS)
+    closed = []
+    approvals.close_card = lambda tool_id, permission_id, allowed: closed.append(
+        (tool_id, permission_id, allowed)
+    )
+
+    approvals.park(call, "permission-A")
+    approvals.ask(call)
+    approvals.on_reply_done()
+    approvals.on_human_input("start another turn")
+    approvals.ask(call)  # the later reply asks again, but it has no card of its own
+    approvals.on_reply_done()
+    approvals.on_human_input("yes")
+
+    assert closed == []
+    assert set(approvals._cards) == {("call-1", "permission-A")}
     assert approvals.answered_on_card(call, True) == ""
     assert set(approvals._cards) == {("call-1", "permission-B")}
 ASKING_MODES = pytest.mark.parametrize("mode", ["confirm_all", "default", "auto_approve_edits"])

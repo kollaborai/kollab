@@ -5,6 +5,7 @@ import "../../src/styles.css";
 import { EngineApi, type PermissionPrompt, type SessionEvent } from "../../src/api";
 import { Thread } from "../../src/components/assistant-ui/thread";
 import { buildInitialState, EngineRuntimeProvider, type EngineState } from "../../src/runtime";
+import { refreshesOnEvent } from "../../src/live-follow";
 
 type AssistantTransport = {
   request: { commands?: Array<{ type?: string; message?: { id?: string; parts?: Array<{ text?: string }> } }>; state?: EngineState };
@@ -30,6 +31,12 @@ type PermissionResponseRecord = {
   handoverTransportOpen: boolean;
 };
 
+type PermissionCancellationRecord = {
+  sessionId: string;
+  authorization: string | null;
+  body: Record<string, unknown>;
+};
+
 type PermissionReadGate = {
   sessionId: string;
   wait: Promise<void>;
@@ -46,6 +53,7 @@ declare global {
     mockEngineRequests: string[];
     permissionSnapshot: Record<string, PermissionPrompt[]>;
     permissionResponses: PermissionResponseRecord[];
+    permissionCancellations: PermissionCancellationRecord[];
     permissionReads: Array<{ sessionId: string; authorization: string | null }>;
     refreshPermissions: (prompts: PermissionPrompt[]) => void;
     setPermissionSnapshot: (sessionId: string, prompts: PermissionPrompt[]) => void;
@@ -61,6 +69,7 @@ window.sessionEventsDelivered = [];
 window.mockEngineRequests = [];
 window.permissionSnapshot = { s1: [], s2: [] };
 window.permissionResponses = [];
+window.permissionCancellations = [];
 window.permissionReads = [];
 let permissionReadGate: PermissionReadGate | null = null;
 window.pausePermissionRead = (sessionId) => {
@@ -111,6 +120,17 @@ window.fetch = async (input, init) => {
     if (index < 0) return Response.json({ detail: "No pending permission" }, { status: 404 });
     window.permissionSnapshot[permissionSession] = prompts.filter((_, at) => at !== index);
     return Response.json({ ok: true, tool_id: body.tool_id, decision: body.decision });
+  }
+
+  const cancellationSession = /^\/sessions\/([^/]+)\/cancel-owned$/.exec(pathname)?.[1];
+  if (cancellationSession && init?.method === "POST") {
+    const body = JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>;
+    window.permissionCancellations.push({
+      sessionId: cancellationSession,
+      authorization: new Headers(init.headers).get("Authorization"),
+      body,
+    });
+    return Response.json({ ok: true, cancelled: true, request_id: body.request_id });
   }
 
   const eventsSession = /^\/sessions\/([^/]+)\/events$/.exec(pathname)?.[1];
@@ -175,9 +195,34 @@ const api = new EngineApi(window.location.origin);
 api.setToken("fixture-token");
 api.loadConfig = async () => null;
 api.refreshToken = async () => false;
-const initialState: EngineState = {
-  sessionId: "s1", sessions: [], messages: [], synced: { history: 0, messages: 0 },
-};
+const startupPermission = (toolId: string, permissionId: string, requestId: string, toolName: string, parked = false): PermissionPrompt => ({
+  tool_id: toolId,
+  permission_id: permissionId,
+  request_id: requestId,
+  tool_name: toolName,
+  tool_type: "command",
+  input: { command: "echo prompt" },
+  details: {
+    source: "acp",
+    request_id: `provider-${permissionId}`,
+    ...(parked ? { parked: true } : {}),
+    acp_options: [{ optionId: "allow-once", name: "Allow once", kind: "allow_once" }],
+  },
+});
+const startupPermissions = (() => {
+  const kind = new URLSearchParams(window.location.search).get("permissions");
+  const live = startupPermission("shared-tool-id", "owner-live", "parent-live", "terminal");
+  const prompts = kind === "ambiguous"
+    ? [live, startupPermission("other-tool-id", "owner-sibling", "parent-sibling", "file_write")]
+    : kind === "parked"
+      ? [startupPermission("shared-tool-id", "owner-parked", "parent-parked", "terminal", true)]
+      : kind === "outcome"
+        ? [startupPermission("shared-tool-id", "owner-outcome", "parent-outcome", "terminal")]
+        : kind === "live" ? [live] : [];
+  window.permissionSnapshot.s1 = prompts;
+  return prompts;
+})();
+const initialState: EngineState = buildInitialState("s1", [], [], startupPermissions);
 const liveEvents: { current: ((event: SessionEvent) => void) | null } = { current: null };
 
 function Probe() {
@@ -234,6 +279,12 @@ function Fixture() {
     void api.streamEvents(sessionId, controller.signal, (event) => {
       window.sessionEventsDelivered.push(event);
       liveEvents.current?.(event);
+      const type = event.type ?? "";
+      if (refreshesOnEvent(type) && ["permission_granted", "permission_denied", "permission_cancelled"].includes(type)) {
+        void api.getPermissions(sessionId).then((snapshot) => {
+          setState(buildInitialState(sessionId, [], [], snapshot.pending_prompts));
+        });
+      }
     }, () => {
       window.sessionEventOpen = true;
     }).catch(() => undefined);

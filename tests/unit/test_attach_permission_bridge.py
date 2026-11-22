@@ -830,14 +830,13 @@ def _confirm_all_manager():
 SHELL_CALL = {"id": "t1", "type": "terminal", "name": "terminal", "command": "ls"}
 
 
-def test_an_acp_stop_answers_every_open_prompt_cancelled():
-    # An ACP Stop ends the turn, so no prompt may keep holding it, and every
-    # window closes the prompt it shows.
+def test_global_cancel_all_answers_every_open_prompt_cancelled():
+    # Shutdown is explicitly global: no prompt may keep holding the bridge.
     async def run_bridge():
         bridge, display_tap = AttachPermissionBridge(), FakeDisplayTap()
         prompts = [_prompt(bridge, display_tap, "terminal_0"), _prompt(bridge, display_tap, "terminal_1")]
         await asyncio.sleep(0)
-        bridge.cancel_pending()
+        bridge.cancel_all_pending()
         answers = await asyncio.gather(*prompts)
         return answers, [event for event in display_tap.events if event["type"] != "permission_request"]
 
@@ -846,6 +845,48 @@ def test_an_acp_stop_answers_every_open_prompt_cancelled():
     assert closed == [
         {"type": "permission_denied", "tool_id": "terminal_0", "outcome": "cancelled", "permission_id": "owner-terminal_0"},
         {"type": "permission_denied", "tool_id": "terminal_1", "outcome": "cancelled", "permission_id": "owner-terminal_1"},
+    ]
+
+
+def test_an_acp_stop_cancels_only_its_exact_request_owner():
+    async def run_bridge():
+        bridge, display_tap = AttachPermissionBridge(), FakeDisplayTap()
+        rpc_server = FakeRpcServer()
+
+        async def open_prompt(permission_id, request_id):
+            return asyncio.create_task(bridge.request_confirmation(
+                display_tap=display_tap,
+                rpc_server=rpc_server,
+                details={
+                    "tool_id": "reused-tool",
+                    "permission_id": permission_id,
+                    **({"request_id": request_id} if request_id else {}),
+                    "source": "acp",
+                    "acp_options": [],
+                },
+                timeout=None,
+            ))
+
+        parked_a = await open_prompt("owner-A", "request-A")
+        active_b = await open_prompt("owner-B", "request-B")
+        unowned = await open_prompt("owner-unowned", None)
+        await asyncio.sleep(0)
+        assert len(bridge._pending) == 3
+
+        bridge.cancel_pending("request-B")
+        await asyncio.sleep(0)
+        assert active_b.done()
+        assert not parked_a.done()
+        assert not unowned.done()
+
+        assert bridge.try_settle_response("reused-tool", "owner-A", ConfirmationResponse.APPROVE_ONCE)
+        assert bridge.try_settle_response("reused-tool", "owner-unowned", ConfirmationResponse.APPROVE_ONCE)
+        return await asyncio.gather(parked_a, active_b, unowned)
+
+    assert asyncio.run(run_bridge()) == [
+        ConfirmationResponse.APPROVE_ONCE,
+        ConfirmationResponse.CANCEL,
+        ConfirmationResponse.APPROVE_ONCE,
     ]
 
 

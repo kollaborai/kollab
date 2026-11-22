@@ -15,6 +15,12 @@ test("a turn's end, an error and a permission prompt still reload", () => {
   assert.deepEqual(refreshed(["turn_complete", "error", "permission_request"]), ["turn_complete", "error", "permission_request"]);
 });
 
+test("permission outcomes reload the pending prompt snapshot", () => {
+  assert.deepEqual(refreshed(["permission_granted", "permission_denied", "permission_cancelled"]), [
+    "permission_granted", "permission_denied", "permission_cancelled",
+  ]);
+});
+
 test("an accepted user message reloads so external voice transcripts reach the thread", () => {
   assert.deepEqual(refreshed(["user_message"]), ["user_message"]);
 });

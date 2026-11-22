@@ -24,7 +24,7 @@ const repoRoot = path.resolve(frontendRoot, "../../..");
 const browserErrors = [];
 const browserConsole = [];
 const scenario = process.argv[2] ?? "target";
-assert.ok(["target", "queue-control", "permission-handover"].includes(scenario), `unknown scenario: ${scenario}`);
+assert.ok(["target", "queue-control", "permission-handover", "permission-stop-owner", "permission-outcome"].includes(scenario), `unknown scenario: ${scenario}`);
 
 const vite = await createServer({
   root: frontendRoot,
@@ -76,11 +76,11 @@ try {
     executablePath: process.env.CHROME_PATH ?? chromium.executablePath(),
   });
 
-  async function open() {
+  async function open(query = "") {
     const page = await browser.newPage();
     page.on("pageerror", (error) => browserErrors.push(error.message));
     page.on("console", (message) => browserConsole.push(`${message.type()}: ${message.text()}`));
-    await page.goto(`${origin}/tests/acceptance/1367-handover.html`, { waitUntil: "domcontentloaded" });
+    await page.goto(`${origin}/tests/acceptance/1367-handover.html${query}`, { waitUntil: "domcontentloaded" });
     await page.getByLabel("Message input").waitFor({ timeout: 5000 });
     await page.waitForFunction(() => window.sessionEventOpen && window.sessionEventTransport !== undefined,
       null, { timeout: 5000 }).catch(async (error) => {
@@ -152,7 +152,55 @@ try {
     return { page, waitFor, send, request, pushResponse, read };
   }
 
-  if (scenario === "target") {
+  if (scenario === "permission-outcome") {
+    const outcome = await open("?permissions=outcome");
+    const prompt = outcome.page.getByText("Permission required: terminal", { exact: true });
+    await prompt.waitFor();
+    await outcome.page.evaluate(() => window.setPermissionSnapshot("s1", []));
+    await outcome.page.evaluate((event) => window.sessionEventTransport.push(event), {
+      type: "permission_denied",
+      tool_id: "shared-tool-id",
+      permission_id: "owner-outcome",
+      request_id: "parent-outcome",
+    });
+    await prompt.waitFor({ state: "detached", timeout: 3000 });
+    assert.equal(await outcome.page.getByRole("button", { name: "Allow once", exact: true }).count(), 0,
+      "an exact foreign permission outcome removes the resolved answer card");
+    assert.deepEqual(browserErrors, [], "the browser reports no runtime errors");
+    await outcome.page.close();
+    console.log(`PASS ${scenario}`);
+  } else if (scenario === "permission-stop-owner") {
+    const t = await open("?permissions=live");
+    await t.page.getByText("Permission required: terminal", { exact: true }).waitFor();
+
+    const stop = t.page.getByRole("button", { name: "Stop generating", exact: true });
+    await stop.waitFor({ timeout: 3000 });
+    await stop.click();
+    await t.page.waitForFunction(() => window.permissionCancellations.length === 1);
+    assert.deepEqual(await t.page.evaluate(() => window.permissionCancellations), [{
+      sessionId: "s1",
+      authorization: "Bearer fixture-token",
+      body: { request_id: "parent-live" },
+    }], "the permission Stop uses the top-level live/restored parent owner");
+
+    const ambiguous = await open("?permissions=ambiguous");
+    await ambiguous.page.getByText("Permission required: terminal", { exact: true }).waitFor();
+    assert.equal(await ambiguous.page.getByRole("button", { name: "Stop generating", exact: true }).count(), 0,
+      "the unqualified Stop control is unavailable when distinct request owners coexist");
+
+    const parked = await open("?permissions=parked");
+    await parked.page.getByText("Permission required: terminal", { exact: true }).waitFor();
+    assert.equal(await parked.page.getByRole("button", { name: "Stop generating", exact: true }).count(), 0,
+      "a parked prompt does not show a Stop control that cannot cancel its completed turn");
+    assert.equal(await parked.page.getByRole("button", { name: "Allow once", exact: true }).count(), 1,
+      "the parked permission card remains explicitly answerable");
+
+    assert.deepEqual(browserErrors, [], "the browser reports no runtime errors");
+    await t.page.close();
+    await ambiguous.page.close();
+    await parked.page.close();
+    console.log(`PASS ${scenario}`);
+  } else if (scenario === "target") {
     const t = await open();
     await t.send("request A");
     await t.page.waitForFunction(() => window.transports.length === 1);
