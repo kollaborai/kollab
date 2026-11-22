@@ -973,6 +973,27 @@ const Composer: FC<{
     event.preventDefault();
   };
 
+  // While a turn runs the kit leaves Enter alone (it has no queue to put the
+  // message in), and the message box starts a new line. Send the message as
+  // the Send button does (#1365). This runs after the message box's own
+  // handler: an Enter the slash or @ menu took has its default prevented, and
+  // Shift+Enter still starts a new line.
+  const handleBusyEnter = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (
+      event.key !== "Enter" ||
+      event.shiftKey ||
+      event.defaultPrevented ||
+      !isRunning ||
+      event.nativeEvent.isComposing ||
+      event.nativeEvent.keyCode === 229 ||
+      !(event.target instanceof HTMLTextAreaElement)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.target.form?.requestSubmit();
+  };
+
   const agentItems = useMemo<readonly ComposerPaletteItem[]>(() => {
     // A hub mesh is one project folder: a live agent in another folder never hears this chat.
     const folder = (path: string) => path.replace(/\/+$/, "");
@@ -1095,7 +1116,10 @@ const Composer: FC<{
               <VoiceStatus activity={terminalVoice.activity} />
             ) : null}
             {voiceAvailable ? <VoiceRoomBar /> : null}
-            <div className="aui-composer-row flex items-end gap-1.5">
+            <div
+              className="aui-composer-row flex items-end gap-1.5"
+              onKeyDown={handleBusyEnter}
+            >
               {attachmentsEnabled ? <ComposerAddAttachment /> : null}
               <ComposerPrimitive.Input
                 placeholder={lock || placeholder}
