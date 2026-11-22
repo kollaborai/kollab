@@ -361,6 +361,91 @@ async def test_repeated_live_source_ids_are_unique_and_permission_replies_keep_s
 
 
 @pytest.mark.asyncio
+async def test_permission_outcomes_cancel_only_the_matching_owner_when_tool_id_reused(
+    engine_factory, tmp_path,
+):
+    agent = KollabACPAgent()
+    agent.on_connect(sdk_connection())
+    await agent.initialize(1)
+    session_id = (await agent.new_session(str(tmp_path))).sessionId
+    engine = engine_factory.instances[-1]
+    responses = []
+    response_calls = []
+    both_prompts_open = asyncio.Event()
+
+    async def wait_for_permission_answer(**_kwargs):
+        response = asyncio.get_running_loop().create_future()
+        responses.append(response)
+        if len(responses) == 2:
+            both_prompts_open.set()
+        return await response
+
+    agent.connection.request_permission.side_effect = wait_for_permission_answer
+
+    async def rpc(name, params):
+        if name == "state.acp_submit":
+            for permission_id in ("owner-A", "owner-B"):
+                engine.events.put_nowait({
+                    "request_id": params["request_id"],
+                    "type": "permission_request",
+                    "tool_id": "reused-tool",
+                    "permission_id": permission_id,
+                    "tool_name": "terminal",
+                })
+            return {"accepted": True}
+        if name == "permission.respond_owned":
+            response_calls.append(params)
+        return {"ok": True}
+
+    engine.daemon.rpc.call.side_effect = rpc
+    prompt_task = asyncio.create_task(
+        agent.prompt(session_id, [TextContentBlock(type="text", text="run tools")])
+    )
+    session = agent._session(session_id)
+    try:
+        await asyncio.wait_for(both_prompts_open.wait(), 1)
+        request_id = session.requests[0]
+        assert set(session.permission_tasks) == {
+            (request_id, "reused-tool", "owner-A"),
+            (request_id, "reused-tool", "owner-B"),
+        }
+
+        engine.events.put_nowait({
+            "request_id": request_id,
+            "type": "permission_granted",
+            "tool_id": "reused-tool",
+            "permission_id": "owner-A",
+        })
+        await asyncio.sleep(0)
+        assert set(session.permission_tasks) == {(request_id, "reused-tool", "owner-B")}
+
+        responses[1].set_result(RequestPermissionResponse.model_validate({
+            "outcome": {"outcome": "selected", "optionId": "once"},
+        }))
+        for _ in range(50):
+            if response_calls:
+                break
+            await asyncio.sleep(0.01)
+        assert response_calls == [{
+            "tool_id": "reused-tool",
+            "permission_id": "owner-B",
+            "control": "APPROVE_ONCE",
+        }]
+
+        engine.events.put_nowait({
+            "request_id": request_id,
+            "type": "turn_complete",
+            "stop_reason": "end_turn",
+        })
+        assert (await asyncio.wait_for(prompt_task, 1)).stopReason == "end_turn"
+    finally:
+        if not prompt_task.done():
+            prompt_task.cancel()
+            await asyncio.gather(prompt_task, return_exceptions=True)
+        await agent.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("wrapped", [False, True])
 async def test_replay_tool_ids_are_unique_stable_and_disjoint_from_new_work_after_restart(
     engine_factory, tmp_path, monkeypatch, wrapped,
