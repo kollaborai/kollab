@@ -64,7 +64,7 @@ async def test_multisend_false_permission_rpc_reconciles_through_engine_session(
         profile=SimpleNamespace(name="test", model="test", provider="custom"),
     )
     session.daemon = daemon
-    session._pending_permissions["shell-first"] = {
+    session._pending_permissions[("shell-first", permission_id)] = {
         "type": "permission_request",
         "tool_id": "shell-first",
         "request_id": "first",
