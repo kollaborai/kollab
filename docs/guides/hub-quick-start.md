@@ -293,7 +293,8 @@ kollab --agent coder --as lapis
 /hub bridge enable
 ```
 
-Voice messages on Telegram get transcribed locally via whisper.
+Send text messages; Telegram voice notes and audio attachments receive a
+transcription-unavailable notice in the hub.
 See [Telegram Bridge Setup](telegram-bridge-setup.md) for the
 full walkthrough.
 

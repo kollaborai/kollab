@@ -1,20 +1,18 @@
 ---
 title: "Telegram Bridge Setup"
 created: 2026-04-05
-modified: 2026-08-06
+modified: 2026-11-23
 status: active
 ---
 # Telegram Bridge Setup
 
 Bidirectional messaging between your kollabor agents and Telegram.
-Send messages from your phone, receive agent responses, voice notes
-transcribed locally via whisper.
+Send text messages from your phone and receive agent responses.
 
 ## Prerequisites
 
 - A Telegram account (mobile or desktop app)
 - `kollab` installed and working
-- For voice messages: [openai-whisper](https://github.com/openai/whisper) installed locally
 
 ## Step 1: Create a Telegram Bot
 
@@ -88,28 +86,14 @@ To check the current state:
 
 ## Voice Messages
 
-When you send a voice note on Telegram, the bridge downloads the
-audio file and transcribes it locally using OpenAI's whisper CLI.
-The audio and transcript stay in a private temporary directory. Cleanup removes
-it after transcription finishes and communication reaches EOF. After a timeout
-or cancellation, the bridge also waits for descendants it observed while the
-transcriber was still running. A descendant keeps the directory on disk until it
-exits, even if it closed stdout and stderr. If a descendant never exits, cleanup
-remains pending. If the bridge cannot verify descendant status, it retains the
-directory and logs the cleanup failure.
+Telegram voice notes and audio attachments are not transcribed. The bridge
+forwards `[voice message - transcription unavailable; please send text]` to the
+agent instead. Send a text message to communicate its contents.
 
-**Install whisper:**
-
-```bash
-pip install openai-whisper
-```
-
-Voice messages appear in the hub as `[voice] transcribed text here`
-and are routed to agents like any other message.
-The transcript itself is not written to application logs.
-
-The bridge uses the `base` model by default for fast transcription.
-No API key or cloud service needed -- it runs entirely on your machine.
+The bridge does not download the audio, create temporary audio or transcript
+files, or launch Whisper. Local CLI transcription was removed because detached
+descendants can keep writing after the parent exits, preventing reliable cleanup
+of private voice artifacts. Installing Whisper does not enable this capability.
 
 ## Configuration Reference
 
@@ -177,12 +161,10 @@ the other instance.
 - Verify the chat ID matches your user: check with @userinfobot
 - Check that the token is correct: `/hub bridge setup` validates it
 
-### Voice Transcription Fails
+### Voice Message Shows Transcription Unavailable
 
-- Ensure `whisper` CLI is installed: `which whisper`
-- Check that the `base` model is downloaded (whisper downloads it
-  on first use, needs internet)
-- Voice messages time out after 60 seconds of transcription
+Send the message as text. Telegram audio transcription is unavailable, so the
+bridge forwards a notice to the agent and continues processing text messages.
 
 ### Bridge Stops Working After Restart
 
