@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -87,6 +89,20 @@ def test_open_media_roundtrip_and_rejects_bad_refs(tmp_path: Path) -> None:
     for bad in ("../s1/x.png", "x.txt", "", "a/b.png"):
         with pytest.raises(FileNotFoundError):
             open_media(tmp_path, bad)
+
+
+def test_open_media_rejects_changed_bytes_for_a_persisted_ref(tmp_path: Path) -> None:
+    """A durable queue handoff must not verify a ref after its bytes change."""
+    record = save(tmp_path, "s1", PNG)
+    index_path = tmp_path / "media" / "s1" / "index.json"
+    entries = json.loads(index_path.read_text())
+    assert entries[-1]["sha256"] == hashlib.sha256(bytes([1, 2, 3])).hexdigest()
+
+    image_path = next((tmp_path / "media" / "s1").glob(f"{record.ref}.*"))
+    image_path.write_bytes(b"different bytes")
+
+    with pytest.raises(ValueError, match="integrity"):
+        open_media(tmp_path, record.ref)
 
 
 def test_non_ascii_digit_tokens_are_not_tokens_and_bind_nothing(tmp_path: Path) -> None:
