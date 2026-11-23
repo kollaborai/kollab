@@ -76,6 +76,12 @@ function DetailsList({ label, values }: { label: string; values: unknown }) {
   return <div className="grid min-w-0 gap-1 sm:grid-cols-[8rem_minmax(0,1fr)] sm:gap-3"><h3 className="text-muted-foreground text-sm">{label}</h3><ul className="min-w-0 space-y-1 text-sm">{lines.map((item, index) => <li className="break-words" key={index}>{typeof item === "string" ? item : JSON.stringify(item)}</li>)}</ul></div>;
 }
 
+/** Which source and Review controls the dialog shows for a job state. */
+export function reviewFormState(action: "install" | "update", job: Pick<Job, "status"> | null): { source: boolean; review: boolean } {
+  const open = action === "install" && !job;
+  return { source: open, review: open };
+}
+
 /** Preview stages untrusted source; only the explicit second action confirms its exact bytes. */
 export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied }: {
   api: EngineApi; action: "install" | "update"; pluginId?: string; onClose: () => void; onApplied: () => Promise<void>;
@@ -148,12 +154,13 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
       return secrets.length ? [`Background process ${name} receives: ${secrets.join(", ")}.`] : [];
     }),
   ];
+  const form = reviewFormState(action, job);
   return <Dialog open onOpenChange={open => { if (!open) close(); }}>
     <DialogContent className="flex max-h-[100dvh] min-h-0 flex-col overflow-hidden sm:max-w-[640px] max-sm:h-[100dvh] max-sm:max-w-none max-sm:rounded-none">
       <DialogHeader><DialogTitle>{action === "install" ? "Add Plugin" : "Update Plugin"}</DialogTitle>
         <DialogDescription>Review the exact source and permissions before anything is installed or run.</DialogDescription></DialogHeader>
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
-        {action === "install" && !job ? <div className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
+        {form.source ? <div className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
           <label className="text-muted-foreground flex min-w-0 flex-col gap-2 text-sm">Git URL<Input value={url} onChange={event => setUrl(event.target.value)} placeholder="https://github.com/owner/plugin.git" autoComplete="url" /></label>
           <label className="text-muted-foreground flex min-w-0 flex-col gap-2 text-sm">Branch or Tag<Input value={gitRef} onChange={event => setGitRef(event.target.value)} placeholder="Default branch" /></label>
         </div> : null}
@@ -180,7 +187,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
       </div>
       <DialogFooter><Button type="button" variant="outline" disabled={busy} onClick={close}>Cancel</Button>
         {job?.status === "staging" && error ? <Button type="button" disabled={busy} onClick={() => { setError(null); setPollVersion(value => value + 1); }}>Retry</Button> : null}
-        {!job && action === "install" ? <Button type="button" disabled={busy || !url.trim()} onClick={() => { void start(); }}>Review</Button> : null}
+        {form.review ? <Button type="button" disabled={busy || !url.trim()} onClick={() => { void start(); }}>Review</Button> : null}
         {ready ? <Button type="button" disabled={busy} onClick={() => { void confirm(); }}>{action === "install" ? "Install" : "Update"}</Button> : null}
       </DialogFooter>
     </DialogContent>
