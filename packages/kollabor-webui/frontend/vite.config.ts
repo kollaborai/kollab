@@ -250,7 +250,6 @@ const mainConfig = defineConfig({
       "src/plugins/surfaces.test.tsx",
       "src/plugins/wiring.test.tsx",
       "src/plugins/tagged-text.test.ts",
-      "src/plugins/heartbeat.test.ts",
       "src/plugins/renderer-select.test.ts",
       "src/plugins/composer-commands.test.ts",
       "src/plugins/renderers.test.tsx",
