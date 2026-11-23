@@ -3,8 +3,8 @@
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
-from plugins.agent_orchestrator.message_injector import MessageInjector
 from kollabor_events.models import EventType
+from plugins.agent_orchestrator.message_injector import MessageInjector
 
 
 class TestMessageInjector(unittest.IsolatedAsyncioTestCase):

@@ -208,6 +208,14 @@ export function mergeRecentHistoryPage(
     merged.history = history;
     merged.start_index = startIndex;
   }
+  // The refresh page is a slice that can start mid-chat, so it says older
+  // messages exist and carries a cursor for them. A window that holds the
+  // first message has none: a load from that cursor returns rows the window
+  // already holds, and reads as a failed load.
+  if (merged.start_index === 0) {
+    merged.has_more_older = false;
+    merged.older_cursor = null;
+  }
   if (
     globalErrorIndex !== null &&
     globalErrorIndex >= startIndex &&
