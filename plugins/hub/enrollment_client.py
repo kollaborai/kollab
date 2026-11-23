@@ -103,19 +103,62 @@ _PATH = re.compile(
 ENROLLMENT_LOOKUP_PATH = "/relay/v1/enrollment/lookup"
 
 
+_CONNECT_OFFER_LOCAL_UNAUTHORIZED = (
+    "Local access denied. Use Connect on owner device."
+)
+_CONNECT_OFFER_COORDINATOR_REFUSAL = (
+    "Not the network coordinator. Create the code there."
+)
+_CONNECT_OFFER_TURN_REFUSAL = (
+    "Create join codes in Connect, not from an agent turn."
+)
+_CONNECT_OFFER_RELAY_UNAUTHORIZED = (
+    "Relay denied authorization. Reconnect the network owner."
+)
+_CONNECT_OFFER_SAFE_REFUSALS = frozenset(
+    {
+        _CONNECT_OFFER_LOCAL_UNAUTHORIZED,
+        _CONNECT_OFFER_COORDINATOR_REFUSAL,
+        _CONNECT_OFFER_TURN_REFUSAL,
+        _CONNECT_OFFER_RELAY_UNAUTHORIZED,
+    }
+)
+
+
+def connect_offer_unauthorized_refusal(source: str) -> str:
+    """Return fixed, actionable copy for a local or relay auth refusal."""
+    if source == "relay":
+        return _CONNECT_OFFER_RELAY_UNAUTHORIZED
+    return _CONNECT_OFFER_LOCAL_UNAUTHORIZED
+
+
+def is_safe_connect_offer_refusal(value: object) -> bool:
+    """Whether a typed private Connect reply contains one of our fixed lines."""
+    return isinstance(value, str) and value in _CONNECT_OFFER_SAFE_REFUSALS
+
+
 class EnrollmentProtocolError(ValueError):
     """A safe fixed enrollment-protocol failure code.
 
-    `refusal` is an optional person-facing line naming the local cause (#693).
+    `refusal` is an optional person-facing line naming a known cause (#693).
     It is built from fixed text and our own parsed values, never from exception
-    text, and it never carries a join code.
+    text, and it never carries a join code. `source` distinguishes a local
+    check from a refusal returned by the relay.
     """
 
-    def __init__(self, code: str, *, retry_after_seconds: float | None = None, refusal: str = ""):
+    def __init__(
+        self,
+        code: str,
+        *,
+        retry_after_seconds: float | None = None,
+        refusal: str = "",
+        source: str = "local",
+    ):
         local_codes = {"transport", "invalid_response", "session_changed", "internal", "network_mismatch"}
         self.code = code if code in _ALLOWED_ERRORS | local_codes else "transport"
         self.retry_after_seconds = retry_after_seconds
         self.refusal = refusal if isinstance(refusal, str) else ""
+        self.source = source if source in {"local", "relay"} else "local"
         super().__init__(self.code)
 
 
@@ -355,13 +398,15 @@ class EnrollmentHTTPClient:
                 if response.status == 410:
                     # This relay retired the route this version speaks
                     # (docs/specs/agent-public-beacon.md#versioning).
-                    raise EnrollmentProtocolError("update_required")
+                    raise EnrollmentProtocolError("update_required", source="relay")
                 if response.status not in expected_statuses:
                     code = await self._error_code(response)
                     retry_after = (
                         _parse_retry_after(response.headers.get("Retry-After")) if code == "rate_limited" else None
                     )
-                    raise EnrollmentProtocolError(code, retry_after_seconds=retry_after)
+                    raise EnrollmentProtocolError(
+                        code, retry_after_seconds=retry_after, source="relay"
+                    )
                 if (
                     response.content_type != "application/json"
                     or response.headers.get("Content-Encoding", "identity").lower() != "identity"
@@ -3037,7 +3082,9 @@ class EnrollmentIssuer:
         """Create an expiring one-device offer and start its bounded worker."""
         bridge = self.bridge
         if bridge._turn.get() is not None:
-            raise EnrollmentProtocolError("unauthorized")
+            raise EnrollmentProtocolError(
+                "unauthorized", refusal=_CONNECT_OFFER_TURN_REFUSAL
+            )
         if bridge.commands is None:
             raise EnrollmentProtocolError("unavailable")
         commands = bridge.commands
@@ -3074,13 +3121,14 @@ class EnrollmentIssuer:
         manager = getattr(bridge.plugin, "_dns_identity", None)
         identity = bridge.identity
         designation = getattr(identity, "identity", None)
-        if (
-            manager is None
-            or getattr(identity, "is_coordinator", False) is not True
-            or not isinstance(designation, str)
-            or not designation
-        ):
-            raise EnrollmentProtocolError("unauthorized")
+        if manager is None or not isinstance(designation, str) or not designation:
+            raise EnrollmentProtocolError(
+                "unauthorized", refusal=_CONNECT_OFFER_LOCAL_UNAUTHORIZED
+            )
+        if getattr(identity, "is_coordinator", False) is not True:
+            raise EnrollmentProtocolError(
+                "unauthorized", refusal=_CONNECT_OFFER_COORDINATOR_REFUSAL
+            )
         # The issuing agent's key owns its private network; the discovery
         # domain only locates the relay.
         owner_private_hex, owner_public_hex = manager.get_or_create_keypair(designation)
@@ -3208,7 +3256,13 @@ class EnrollmentIssuer:
                 except Exception:
                     pass
             raise
-        except EnrollmentProtocolError:
+        except EnrollmentProtocolError as exc:
+            if (
+                exc.code == "unauthorized"
+                and exc.source == "relay"
+                and not exc.refusal
+            ):
+                exc.refusal = connect_offer_unauthorized_refusal("relay")
             if delegated:
                 store.revoke(human_action_id)
             raise
