@@ -70,7 +70,7 @@ async def test_detached_parent_reports_deferred_startup_failure(monkeypatch):
             ready_event.set()
 
         async def cleanup(self):
-            pass
+            return True
 
     args = SimpleNamespace(
         mcp_hub=False,

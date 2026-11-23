@@ -26,11 +26,9 @@ async def _noop(*args, **kwargs):
     return None
 
 
-@pytest.mark.asyncio
-async def test_start_surfaces_unconfirmed_cleanup(monkeypatch):
-    monkeypatch.setattr(application, "EventDrivenRenderLoop", _RenderLoop)
+def _build_start_app(args, cleanup_results, cleanup_calls):
     app = object.__new__(application.TerminalLLMChat)
-    app.args = SimpleNamespace(_help_pending=False, _unknown_args=[])
+    app.args = args
     app.pipe_mode = False
     app._attach_to = None
     app._startup_complete = True
@@ -45,13 +43,26 @@ async def test_start_surfaces_unconfirmed_cleanup(monkeypatch):
     app.create_background_task = MethodType(
         lambda self, coro, name: asyncio.create_task(coro, name=name), app
     )
+    results = list(cleanup_results)
+
+    async def cleanup(self):
+        result = results.pop(0)
+        cleanup_calls.append(result)
+        self.running = False
+        self.input_handler.running = False
+        return result
+
+    app.cleanup = MethodType(cleanup, app)
+    return app
+
+
+@pytest.mark.asyncio
+async def test_start_surfaces_unconfirmed_cleanup(monkeypatch):
+    monkeypatch.setattr(application, "EventDrivenRenderLoop", _RenderLoop)
     cleanup_calls = []
-
-    async def cleanup_false(self):
-        cleanup_calls.append(False)
-        return False
-
-    app.cleanup = MethodType(cleanup_false, app)
+    app = _build_start_app(
+        SimpleNamespace(_help_pending=False, _unknown_args=[]), [False], cleanup_calls
+    )
 
     with pytest.raises(RuntimeError, match="cleanup"):
         await app.start()
@@ -63,6 +74,7 @@ async def test_start_surfaces_unconfirmed_cleanup(monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup_result", [False, True])
 async def test_cli_retries_incomplete_start_cleanup(monkeypatch, cleanup_result):
+    monkeypatch.setattr(application, "EventDrivenRenderLoop", _RenderLoop)
     args = SimpleNamespace(
         mcp_hub=False,
         acp_prompt=None,
@@ -96,19 +108,7 @@ async def test_cli_retries_incomplete_start_cleanup(monkeypatch, cleanup_result)
     )
     discovery = SimpleNamespace(plugins_dir="plugins")
     cleanup_calls = []
-
-    class _App:
-        pipe_mode = False
-        _startup_complete = False
-
-        async def start(self, initial_message=None):
-            raise application.ApplicationCleanupIncompleteError(
-                "first cleanup attempt did not settle"
-            )
-
-        async def cleanup(self):
-            cleanup_calls.append(cleanup_result)
-            return cleanup_result
+    app = _build_start_app(args, [False, cleanup_result], cleanup_calls)
 
     monkeypatch.setattr(cli, "setup_bootstrap_logging", lambda: None)
     monkeypatch.setattr(cli, "discover_plugin_args", lambda: ([], discovery))
@@ -121,7 +121,7 @@ async def test_cli_retries_incomplete_start_cleanup(monkeypatch, cleanup_result)
         SimpleNamespace(isatty=lambda: True, read=lambda: ""),
     )
     monkeypatch.setattr("kollabor_plugins.PluginRegistry", lambda _: SimpleNamespace())
-    monkeypatch.setattr(cli, "TerminalLLMChat", lambda **_: _App())
+    monkeypatch.setattr(cli, "TerminalLLMChat", lambda **_: app)
 
     if cleanup_result:
         await cli.async_main()
@@ -129,4 +129,4 @@ async def test_cli_retries_incomplete_start_cleanup(monkeypatch, cleanup_result)
         with pytest.raises(RuntimeError, match="cleanup"):
             await cli.async_main()
 
-    assert cleanup_calls == [cleanup_result]
+    assert cleanup_calls == [False, cleanup_result]
