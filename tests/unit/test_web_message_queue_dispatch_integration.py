@@ -327,6 +327,10 @@ async def test_jsonl_partial_write_rolls_back_exact_native_admission(tmp_path, m
     queue, attachments, _scope, request_id, _staged, snapshot = await _queue_with_image()
     state, llm, logger, uid = await _real_local_state(tmp_path)
     identity = ConversationIdentity(uid, state.get_conversation_revision())
+    from kollabor_agent.queue_processor import TaggedInput
+
+    older = TaggedInput("older queued work", ("older-request",))
+    llm.processing_queue.put_nowait(older)
     original_commit = llm._queue_processor.commit_admission_slot
     commits = 0
 
@@ -358,7 +362,9 @@ async def test_jsonl_partial_write_rolls_back_exact_native_admission(tmp_path, m
 
     assert commits == 1, "the injected append fault must occur after provider commit"
     assert result.status is WorkerStatus.NOT_SENT
-    assert llm.processing_queue.empty()
+    assert len(llm.processing_queue._queue) == 1
+    assert llm.processing_queue._queue[0] is older
+    assert llm.processing_queue._queue[0].request_ids == ("older-request",)
     rows = [json.loads(line) for line in logger.session_file.read_text().splitlines()]
     assert not any(row.get("type") == "user" for row in rows)
     queued = await queue.snapshot()
