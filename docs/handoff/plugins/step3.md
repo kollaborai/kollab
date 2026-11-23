@@ -69,11 +69,8 @@
   `kollab-plugin.d.ts`, the `add`/`dev` own-React check in Python, `Stopping · <n> min left`, per-chat
   memory of the open tab, the full-screen phone dialog variant, plugins over PhoneLink, an import map for
   `vite dev`, a committed browser acceptance suite (`frontend/tests/acceptance/plugins.browser.mjs`).
-- The own-React check reads only the entry file, not the files it imports.
-- `k.ui` dialogs, sheets, select lists and tooltips render in portals under `<body>`, outside the plugin's
-  `[data-plugin]` mount, so neither the 44 px touch rule nor the plugin's scoped CSS reaches them. Fix:
-  a portal container per plugin mount and a `container` prop on `dialog.tsx`, `sheet.tsx`, `select.tsx` and
-  `tooltip.tsx` (open; found by the independent review).
+- The own-React check reads the entry and its literal relative imports under the plugin's web directory, so
+  React bundled into a local chunk is refused before the plugin runs.
 - The menu count fetch (`k.menu` `count.path` through `useRemote`) is not exercised by a test that runs
   effects or by the live run (the fixtures have no engine router); `remoteView` and `k.api` are.
 - A throwaway HOME does not hide the machine's other live agents in the web UI sidebar (hub presence lives
@@ -128,7 +125,8 @@ Evidence is under `~/backups/claude-1028-step3-work/` (`baseline/`, `red/`, `gre
   stretched switches and that the stylesheet `<link>` shared the `data-plugin` attribute; both fixed.
   Codex re-reviewed the fixes (`review/codex-rereview.md`): the stale count is fixed; `k.copy` still worked
   after dispose (fixed red-first: `b48e3c1e8` failing test alone, `0c530aaa8` fix, test unchanged); and
-  controls in plugin dialogs, sheets and selects render in portals outside `[data-plugin]` (open; see Limitations).
+  controls in plugin dialogs, sheets and selects rendered outside `[data-plugin]`. This PR scopes dialog,
+  sheet, select and tooltip portals to the owning plugin mount.
   Codex could not run vitest in its read-only sandbox; its review is source-level. The final fix was not
   re-reviewed.
 
