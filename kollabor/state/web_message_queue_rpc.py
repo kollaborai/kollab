@@ -12,11 +12,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
 import inspect
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import Any
+
+from kollabor_rpc import RpcCallerContext, current_rpc_caller_context
 
 from .web_message_queue import (
     DEFAULT_MAX_BATCH_ITEMS,
@@ -37,12 +41,88 @@ class QueueRpcAuthorizationError(PermissionError):
     """The trusted daemon context did not authorize queue access."""
 
 
+class StaleQueueScopeError(QueueRpcAuthorizationError):
+    """A valid caller UID precondition no longer matches daemon state."""
+
+
 class QueueScopeCapacityExceeded(RuntimeError):
     """The bounded scoped-queue registry cannot safely admit another scope."""
 
 
-ScopeResolver = Callable[[dict[str, Any]], str | Awaitable[str]]
+@dataclass(frozen=True, slots=True)
+class QueueScopeBinding:
+    """Trusted resolver output carrying the canonical conversation UID."""
+
+    scope_id: str
+    conversation_uid: str = field(repr=False)
+
+
+ScopeResolution = str | QueueScopeBinding
+ScopeResolver = Callable[
+    [dict[str, Any], RpcCallerContext], ScopeResolution | Awaitable[ScopeResolution]
+]
 RpcChangeNotifier = Callable[[dict[str, Any]], Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedQueueScope:
+    scope_id: str
+    principal_id: str
+    conversation_uid: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _QueueScopeOwner:
+    principal_id: str
+    conversation_uid: str | None
+
+
+def daemon_conversation_scope_resolver(state_service: Any) -> ScopeResolver:
+    """Bind queue access to the authenticated operator and daemon conversation.
+
+    Every queue request must include ``expected_conversation_uid`` from the
+    caller's current conversation snapshot. It is a compare-only precondition:
+    the actual UID comes from this daemon's ``StateService`` and RPC parameters
+    such as ``scope_id``, ``session_id``, or ``principal_id`` never choose it.
+    The UID read and scope derivation are synchronous, so one request captures
+    one immutable scope before any queue lock can yield. A request racing with a
+    conversation switch can only touch the captured old scope; a later stale
+    request is classified separately from other authorization failures so only
+    claim cleanup can consult the retained old scope. Same-UID processes share one
+    operator trust domain; this resolver does not distinguish users sharing an
+    OS account or a shared Engine bearer token.
+    """
+
+    def resolve(
+        params: dict[str, Any], caller_context: RpcCallerContext
+    ) -> QueueScopeBinding:
+        if (
+            not caller_context.is_local_operator
+            or not isinstance(caller_context.principal_id, str)
+            or not caller_context.principal_id
+        ):
+            raise QueueRpcAuthorizationError("queue access denied")
+        expected_uid = params.get("expected_conversation_uid")
+        if not isinstance(expected_uid, str) or not expected_uid:
+            raise QueueRpcAuthorizationError("queue access denied")
+        getter = getattr(state_service, "get_conversation_uid", None)
+        if not callable(getter):
+            raise QueueRpcAuthorizationError("queue access denied")
+        try:
+            current_uid = getter()
+        except Exception:
+            raise QueueRpcAuthorizationError("queue access denied") from None
+        if not isinstance(current_uid, str) or not current_uid:
+            raise QueueRpcAuthorizationError("queue access denied")
+        if expected_uid != current_uid:
+            raise StaleQueueScopeError("queue access denied")
+        scope_material = f"{caller_context.principal_id}\0{current_uid}".encode("utf-8")
+        return QueueScopeBinding(
+            "scope-" + hashlib.sha256(scope_material).hexdigest(),
+            current_uid,
+        )
+
+    return resolve
 
 
 def _validate_change_notifier(
@@ -98,6 +178,7 @@ class WebMessageQueueRegistry:
         )
         self._queues: OrderedDict[str, WebMessageQueue] = OrderedDict()
         self._leases: dict[str, int] = {}
+        self._scope_owners: dict[str, _QueueScopeOwner] = {}
         self._lock = asyncio.Lock()
 
     @property
@@ -114,17 +195,70 @@ class WebMessageQueueRegistry:
             if await queue.can_retire():
                 del self._queues[scope_id]
                 del self._leases[scope_id]
+                self._scope_owners.pop(scope_id, None)
                 if len(self._queues) < self._max_scopes:
                     return
         raise QueueScopeCapacityExceeded(
             "queue scope capacity is full; retained work or retry leases prevent retirement"
         )
 
+    @staticmethod
+    def _validate_scope_owner(
+        principal_id: str | None,
+        conversation_uid: str | None,
+    ) -> None:
+        if principal_id is None:
+            if conversation_uid is not None:
+                raise ValueError("conversation UID requires an authenticated principal")
+            return
+        if not isinstance(principal_id, str) or not principal_id:
+            raise QueueRpcAuthorizationError("queue access denied")
+        if conversation_uid is not None and (
+            not isinstance(conversation_uid, str) or not conversation_uid
+        ):
+            raise QueueRpcAuthorizationError("queue access denied")
+
+    def _bind_scope_owner_unlocked(
+        self,
+        scope_id: str,
+        principal_id: str | None,
+        conversation_uid: str | None,
+    ) -> None:
+        if principal_id is None:
+            return
+        existing = self._scope_owners.get(scope_id)
+        if existing is None:
+            self._scope_owners[scope_id] = _QueueScopeOwner(
+                principal_id,
+                conversation_uid,
+            )
+            return
+        if existing.principal_id != principal_id:
+            raise QueueRpcAuthorizationError("queue access denied")
+        if (
+            conversation_uid is not None
+            and existing.conversation_uid is not None
+            and existing.conversation_uid != conversation_uid
+        ):
+            raise QueueRpcAuthorizationError("queue access denied")
+        if existing.conversation_uid is None and conversation_uid is not None:
+            self._scope_owners[scope_id] = _QueueScopeOwner(
+                principal_id,
+                conversation_uid,
+            )
+
     @asynccontextmanager
-    async def acquire(self, scope_id: str) -> AsyncIterator[WebMessageQueue]:
+    async def acquire(
+        self,
+        scope_id: str,
+        *,
+        principal_id: str | None = None,
+        conversation_uid: str | None = None,
+    ) -> AsyncIterator[WebMessageQueue]:
         """Hold a registry lease while operating on a trusted scope's queue."""
         if not isinstance(scope_id, str) or not scope_id:
             raise InvalidIdentifier("invalid queue scope")
+        self._validate_scope_owner(principal_id, conversation_uid)
         async with self._lock:
             queue = self._queues.get(scope_id)
             if queue is None:
@@ -132,6 +266,11 @@ class WebMessageQueueRegistry:
                 queue = WebMessageQueue(scope_id=scope_id, **self._queue_options)
                 self._queues[scope_id] = queue
                 self._leases[scope_id] = 0
+            self._bind_scope_owner_unlocked(
+                scope_id,
+                principal_id,
+                conversation_uid,
+            )
             self._queues.move_to_end(scope_id)
             self._leases[scope_id] += 1
         try:
@@ -143,6 +282,38 @@ class WebMessageQueueRegistry:
                     self._leases[scope_id] = remaining
                 elif scope_id in self._leases:
                     self._leases[scope_id] = 0
+
+    @asynccontextmanager
+    async def _acquire_existing_scope_candidates(
+        self,
+        principal_id: str,
+        conversation_uid: str,
+    ) -> AsyncIterator[tuple[tuple[str, WebMessageQueue], ...]]:
+        """Lease only known queues already bound to this trusted identity."""
+        if (
+            not isinstance(principal_id, str)
+            or not principal_id
+            or not isinstance(conversation_uid, str)
+            or not conversation_uid
+        ):
+            yield ()
+            return
+        async with self._lock:
+            candidates = tuple(
+                (scope_id, queue)
+                for scope_id, queue in self._queues.items()
+                if self._scope_owners.get(scope_id)
+                == _QueueScopeOwner(principal_id, conversation_uid)
+            )
+            for scope_id, _ in candidates:
+                self._leases[scope_id] = self._leases.get(scope_id, 0) + 1
+        try:
+            yield candidates
+        finally:
+            async with self._lock:
+                for scope_id, _ in candidates:
+                    remaining = self._leases.get(scope_id, 0) - 1
+                    self._leases[scope_id] = max(0, remaining)
 
 
 def _receipt_to_wire(receipt: QueueReceipt) -> dict[str, Any]:
@@ -271,9 +442,10 @@ def register_web_message_queue_handlers(
 ) -> None:
     """Register JSON-safe queue RPC handlers on an existing ``RpcServer``.
 
-    The required resolver is responsible for authorizing the caller and
-    returning a canonical opaque scope ID. Handler parameters never select a
-    scope directly. The optional notifier must be the built-in ``put_nowait``
+    The required resolver receives a trusted, in-process caller context and
+    must return a canonical opaque scope ID or ``QueueScopeBinding``. Queue handlers reject requests
+    without a local-operator transport context before calling it. Handler
+    parameters never select a scope directly. The optional notifier must be the built-in ``put_nowait``
     method of a finite ``asyncio.Queue``. It receives only
     scope/incarnation/revision metadata, never message bytes. Full buffers drop
     invalidation hints; snapshots remain authoritative.
@@ -281,16 +453,40 @@ def register_web_message_queue_handlers(
 
     change_queue, change_queue_limit = _validate_change_notifier(on_change)
 
-    async def _scope(params: dict[str, Any]) -> str:
+    async def _scope(params: dict[str, Any]) -> _ResolvedQueueScope:
+        caller_context = current_rpc_caller_context()
+        if (
+            not isinstance(caller_context, RpcCallerContext)
+            or not caller_context.is_local_operator
+            or not isinstance(caller_context.principal_id, str)
+            or not caller_context.principal_id
+        ):
+            raise QueueRpcAuthorizationError("queue access denied")
         try:
-            value = resolve_scope(params)
+            value = resolve_scope(params, caller_context)
             if inspect.isawaitable(value):
                 value = await value
+        except StaleQueueScopeError:
+            raise
         except Exception:
             raise QueueRpcAuthorizationError("queue access denied") from None
-        if not isinstance(value, str) or not value:
+        if isinstance(value, QueueScopeBinding):
+            scope_id = value.scope_id
+            conversation_uid = value.conversation_uid
+            if not isinstance(conversation_uid, str) or not conversation_uid:
+                raise QueueRpcAuthorizationError("queue access denied")
+        elif isinstance(value, str):
+            scope_id = value
+            conversation_uid = None
+        else:
             raise QueueRpcAuthorizationError("queue access denied")
-        return value
+        if not isinstance(scope_id, str) or not scope_id:
+            raise QueueRpcAuthorizationError("queue access denied")
+        return _ResolvedQueueScope(
+            scope_id,
+            caller_context.principal_id,
+            conversation_uid,
+        )
 
     async def _notify(queue: WebMessageQueue) -> None:
         if change_queue is None:
@@ -312,8 +508,105 @@ def register_web_message_queue_handlers(
     async def _with_queue(
         params: dict[str, Any], operation: Callable[[WebMessageQueue], Any]
     ) -> Any:
-        scope_id = await _scope(params)
-        async with registry.acquire(scope_id) as queue:
+        try:
+            resolved = await _scope(params)
+        except StaleQueueScopeError:
+            raise QueueRpcAuthorizationError("queue access denied") from None
+        async with registry.acquire(
+            resolved.scope_id,
+            principal_id=resolved.principal_id,
+            conversation_uid=resolved.conversation_uid,
+        ) as queue:
+            result = operation(queue)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+
+    async def _with_cleanup_queue(
+        params: dict[str, Any],
+        operation_id: str,
+        target_operation_id: str,
+        operation_kind: str,
+        operation_fingerprint: str,
+        operation: Callable[[WebMessageQueue], Any],
+    ) -> Any:
+        try:
+            resolved = await _scope(params)
+        except StaleQueueScopeError:
+            caller_context = current_rpc_caller_context()
+            expected_uid = params.get("expected_conversation_uid")
+            if (
+                not isinstance(caller_context, RpcCallerContext)
+                or not caller_context.is_local_operator
+                or not isinstance(caller_context.principal_id, str)
+                or not caller_context.principal_id
+                or not isinstance(expected_uid, str)
+                or not expected_uid
+            ):
+                raise QueueRpcAuthorizationError("queue access denied") from None
+
+            async with registry._acquire_existing_scope_candidates(
+                caller_context.principal_id,
+                expected_uid,
+            ) as candidates:
+                matches: list[WebMessageQueue] = []
+                for _scope_id, queue in candidates:
+                    try:
+                        async with queue._lock:
+                            # Read-only HMAC and retry-lease checks must come
+                            # first. Queue mutation methods prune receipts
+                            # before validating their operation IDs, so they
+                            # cannot be used as probes.
+                            queue._validate_operation_id(operation_id)
+                            queue._validate_operation_id(target_operation_id)
+                            prior = queue._operations.get(operation_id)
+                            if prior is not None:
+                                if (
+                                    prior.kind == operation_kind
+                                    and prior.fingerprint == operation_fingerprint
+                                ):
+                                    matches.append(queue)
+                                continue
+                            if operation_kind == "settle_item":
+                                if (
+                                    queue._active_item_attempt_id == target_operation_id
+                                    and queue._active_claim is not None
+                                    and queue._active_batch_id is not None
+                                ):
+                                    matches.append(queue)
+                            elif operation_kind == "release_claim":
+                                claim_id = target_operation_id
+                                reservation = queue._claim_reservations.get(claim_id)
+                                batch = queue._batches.get(queue._active_batch_id or "")
+                                if (
+                                    queue._active_claim == claim_id
+                                    and batch is not None
+                                    and batch.claim_id == claim_id
+                                    and reservation is not None
+                                    and not reservation.dispatched
+                                    and queue._active_item_attempt_id is None
+                                    and batch.status.value != "in_doubt"
+                                ):
+                                    matches.append(queue)
+                    except Exception:
+                        continue
+                if len(matches) != 1:
+                    raise QueueRpcAuthorizationError("queue access denied") from None
+                try:
+                    result = operation(matches[0])
+                    if inspect.isawaitable(result):
+                        result = await result
+                    return result
+                except Exception:
+                    # Do not disclose which retained scope authenticated a
+                    # partial or state-invalid capability pair.
+                    raise QueueRpcAuthorizationError("queue access denied") from None
+
+        async with registry.acquire(
+            resolved.scope_id,
+            principal_id=resolved.principal_id,
+            conversation_uid=resolved.conversation_uid,
+        ) as queue:
             result = operation(queue)
             if inspect.isawaitable(result):
                 result = await result
@@ -426,7 +719,18 @@ def register_web_message_queue_handlers(
             await _notify(queue)
             return _receipt_to_wire(receipt)
 
-        return await _with_queue(params, settle)
+        return await _with_cleanup_queue(
+            params,
+            operation_id,
+            attempt_id,
+            "settle_item",
+            WebMessageQueue._fingerprint(
+                "settle_item",
+                attempt_id,
+                outcome.value,
+            ),
+            settle,
+        )
 
     async def _remove_item(params: dict[str, Any]) -> dict[str, Any]:
         operation_id = _required_text(params, "operation_id")
@@ -448,7 +752,14 @@ def register_web_message_queue_handlers(
             await _notify(queue)
             return _receipt_to_wire(receipt)
 
-        return await _with_queue(params, release)
+        return await _with_cleanup_queue(
+            params,
+            operation_id,
+            claim_id,
+            "release_claim",
+            WebMessageQueue._fingerprint("release_claim", claim_id),
+            release,
+        )
 
     handlers = {
         "state.web_queue.allocate_ids": _allocate_ids,

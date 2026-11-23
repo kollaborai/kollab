@@ -22,6 +22,13 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from itertools import islice
 
+from .web_message_attachments import (
+    DEFAULT_MAX_ATTACHMENTS_PER_ITEM,
+    AttachmentAuthorizationError,
+    InvalidAttachment,
+    _BoundAttachmentScope,
+)
+
 DEFAULT_MAX_ITEMS = 100
 DEFAULT_MAX_BATCH_ITEMS = 20
 DEFAULT_MAX_PAYLOAD_BYTES = 1024 * 1024
@@ -128,20 +135,22 @@ class ItemStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class WebMessage:
-    """One opaque queued message. Payload is excluded from repr by design."""
+    """One opaque queued message and its ordered staged attachment refs."""
 
     request_id: str
     payload: bytes = field(repr=False)
+    attachment_refs: tuple[str, ...] = field(default=(), repr=False)
 
 
 @dataclass(frozen=True, slots=True)
 class QueueItemSnapshot:
-    """Visible per-item progress; payload bytes stay out of reprs."""
+    """Visible per-item progress; message bytes and refs stay out of reprs."""
 
     request_id: str
     status: ItemStatus
     attempt_id: str | None
     payload: bytes = field(repr=False)
+    attachment_refs: tuple[str, ...] = field(default=(), repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +224,13 @@ class _OperationRecord:
     expires_at_ns: int
 
 
+@dataclass(frozen=True, slots=True)
+class _WorkerSettlementPin:
+    attempt_id: str
+    outcome: ClaimOutcome
+    receipt: QueueReceipt
+
+
 @dataclass(slots=True)
 class _ClaimReservation:
     release_slots: int
@@ -226,6 +242,7 @@ class _ClaimReservation:
 class _StoredItem:
     request_id: str
     payload: bytes = field(repr=False)
+    attachment_refs: tuple[str, ...] = field(default=(), repr=False)
     status: ItemStatus = ItemStatus.QUEUED
     attempt_id: str | None = None
 
@@ -292,6 +309,8 @@ class WebMessageQueue:
         self._batches: dict[str, _StoredBatch] = {}
         self._operations: dict[str, _OperationRecord] = {}
         self._claim_reservations: dict[str, _ClaimReservation] = {}
+        self._worker_settlement_pin: _WorkerSettlementPin | None = None
+        self._last_acknowledged_worker_settlement: _WorkerSettlementPin | None = None
         self._reserved_operations = 0
         self._claim_states: dict[str, str] = {}
         self._item_attempt_states: dict[str, str] = {}
@@ -399,7 +418,15 @@ class WebMessageQueue:
         return hashlib.sha256(raw).hexdigest()
 
     def _is_operation_pinned(self, operation_id: str) -> bool:
-        return operation_id in (self._active_claim, self._active_item_attempt_id)
+        pending_settlement = self._worker_settlement_pin
+        return operation_id in (self._active_claim, self._active_item_attempt_id) or (
+            pending_settlement is not None
+            and pending_settlement.receipt.operation_id == operation_id
+        )
+
+    def _ensure_no_unacknowledged_worker_settlement(self) -> None:
+        if self._worker_settlement_pin is not None:
+            raise ClaimBusy("a worker settlement receipt is awaiting acknowledgement")
 
     def _prune_expired(self) -> None:
         now_ns = time.monotonic_ns()
@@ -585,6 +612,7 @@ class WebMessageQueue:
                             status=item.status,
                             attempt_id=item.attempt_id,
                             payload=item.payload,
+                            attachment_refs=item.attachment_refs,
                         )
                         for item in batch.items
                     ),
@@ -632,6 +660,7 @@ class WebMessageQueue:
                 and self._active_batch_id is None
                 and self._active_item_attempt_id is None
                 and self._active_item_request_id is None
+                and self._worker_settlement_pin is None
             )
 
     def _validate_messages(self, items: Sequence[WebMessage]) -> tuple[WebMessage, ...]:
@@ -656,7 +685,15 @@ class WebMessageQueue:
                 raise CapacityExceeded("payload must be non-empty bytes")
             if len(item.payload) > self._max_payload_bytes:
                 raise CapacityExceeded("payload byte bound exceeded")
-            copied.append(WebMessage(item.request_id, bytes(item.payload)))
+            refs = item.attachment_refs
+            if (
+                not isinstance(refs, (list, tuple))
+                or len(refs) > DEFAULT_MAX_ATTACHMENTS_PER_ITEM
+                or any(not isinstance(ref, str) for ref in refs)
+                or len(set(refs)) != len(refs)
+            ):
+                raise InvalidAttachment("invalid attachment reference list")
+            copied.append(WebMessage(item.request_id, bytes(item.payload), tuple(refs)))
         return tuple(copied)
 
     async def enqueue_batch(
@@ -669,6 +706,10 @@ class WebMessageQueue:
         self._validate_identifier(operation_id)
         self._validate_identifier(batch_id)
         messages = self._validate_messages(items)
+        if any(item.attachment_refs for item in messages):
+            raise InvalidAttachment(
+                "attachment references require atomic queue admission"
+            )
         input_fingerprint = self._fingerprint(
             "enqueue_batch",
             batch_id,
@@ -723,6 +764,121 @@ class WebMessageQueue:
             )
             return self._record(input_fingerprint, receipt, kind="enqueue")
 
+    def _validate_attachment_scope(
+        self, attachment_scope: _BoundAttachmentScope
+    ) -> None:
+        if not isinstance(attachment_scope, _BoundAttachmentScope):
+            raise AttachmentAuthorizationError("attachment scope denied")
+        binding = attachment_scope.binding
+        if (
+            binding.scope_id != self.scope_id
+            or binding.queue_incarnation != self.incarnation
+        ):
+            raise AttachmentAuthorizationError("attachment scope denied")
+
+    async def enqueue_batch_with_attachments(
+        self,
+        operation_id: str,
+        batch_id: str,
+        items: Sequence[WebMessage],
+        *,
+        attachment_scope: _BoundAttachmentScope,
+    ) -> QueueReceipt:
+        """Atomically enqueue a batch and pin each item's staged attachments.
+
+        Lock order is always queue then attachment store. All queue and store
+        validation completes before either retained ownership or queue state is
+        mutated; both commits then run synchronously without an await.
+        """
+        self._validate_identifier(operation_id)
+        self._validate_identifier(batch_id)
+        messages = self._validate_messages(items)
+        self._validate_attachment_scope(attachment_scope)
+        owner_refs = tuple(
+            (item.request_id, item.attachment_refs)
+            for item in messages
+            if item.attachment_refs
+        )
+        if not owner_refs:
+            raise InvalidAttachment("attachment references are required")
+        input_fingerprint = self._fingerprint(
+            "enqueue_batch_with_attachments",
+            batch_id,
+            tuple(
+                (item.request_id, self._payload_fingerprint(item.payload))
+                for item in messages
+            ),
+            tuple((item.request_id, item.attachment_refs) for item in messages),
+        )
+
+        async with self._lock:
+            replay = self._replay(operation_id, input_fingerprint)
+            if replay is not None:
+                return replay
+            self._validate_new_entity_id(batch_id, "batch")
+            for item in messages:
+                self._validate_new_entity_id(item.request_id, "item")
+            self._ensure_operation_capacity()
+            if batch_id in self._batch_owners:
+                raise BatchConflict("batch ID is already in use")
+            for item in messages:
+                if item.request_id in self._item_owners:
+                    raise ItemConflict("request ID is already in use")
+            batch_bytes = sum(len(item.payload) for item in messages)
+            if (
+                self._pending_items + len(messages) > self._max_items
+                or self._pending_bytes + batch_bytes > self._max_queue_bytes
+            ):
+                raise CapacityExceeded("pending queue capacity exceeded")
+            if (
+                len(self._batch_owners) + len(self._item_owners) + 1 + len(messages)
+                > self._max_entity_ids
+            ):
+                raise IdentifierLedgerFull("batch and item identifier capacity is full")
+
+            batch = _StoredBatch(
+                batch_id=batch_id,
+                sequence=self._next_sequence,
+                items=[
+                    _StoredItem(item.request_id, item.payload, item.attachment_refs)
+                    for item in messages
+                ],
+            )
+            receipt = replace(
+                self._receipt(
+                    operation_id,
+                    BatchStatus.QUEUED.value,
+                    batch_id=batch_id,
+                    request_ids=tuple(item.request_id for item in messages),
+                ),
+                revision=self._revision + 1,
+            )
+            operation_issue_time = self._token_issue_time(operation_id, "op")
+            operation = _OperationRecord(
+                fingerprint=input_fingerprint,
+                receipt=receipt,
+                kind="enqueue",
+                expires_at_ns=(operation_issue_time + self._operation_retry_lease_ns),
+            )
+
+            async with attachment_scope._queue_transaction():
+                retention_plan = attachment_scope._prepare_owner_retention_unlocked(
+                    owner_refs
+                )
+                # No await or validation follows this point. The two ledgers
+                # commit together from the event loop's perspective.
+                attachment_scope._commit_owner_retention_unlocked(retention_plan)
+                self._next_sequence += 1
+                self._batches[batch_id] = batch
+                self._batch_owners[batch_id] = operation_id
+                for item in messages:
+                    self._item_owners[item.request_id] = batch_id
+                self._pending_items += len(messages)
+                self._pending_bytes += batch_bytes
+                self._revision = receipt.revision
+                self._operations[operation_id] = operation
+            return receipt
+
     def _claim_receipt(
         self,
         operation_id: str,
@@ -753,6 +909,7 @@ class WebMessageQueue:
             replay = self._replay(operation_id, input_fingerprint)
             if replay is not None:
                 return replay
+            self._ensure_no_unacknowledged_worker_settlement()
             if self._active_claim is not None:
                 active = self._batches.get(self._active_batch_id or "")
                 if active is not None and active.status is BatchStatus.IN_DOUBT:
@@ -791,6 +948,7 @@ class WebMessageQueue:
             replay = self._replay(operation_id, input_fingerprint)
             if replay is not None:
                 return replay
+            self._ensure_no_unacknowledged_worker_settlement()
             self._token_issue_time(batch_id, "batch")
             if self._active_claim is not None:
                 active = self._batches.get(self._active_batch_id or "")
@@ -831,6 +989,7 @@ class WebMessageQueue:
             replay = self._replay(operation_id, input_fingerprint)
             if replay is not None:
                 return replay
+            self._ensure_no_unacknowledged_worker_settlement()
             self._token_issue_time(claim_id, "op")
             if self._active_claim != claim_id or self._active_batch_id is None:
                 raise ClaimNotFound("claim is not active")
@@ -911,7 +1070,9 @@ class WebMessageQueue:
                 claim_id=self._active_claim,
                 attempt_id=attempt_id,
                 batch_id=batch.batch_id,
-                items=(WebMessage(item.request_id, item.payload),),
+                items=(
+                    WebMessage(item.request_id, item.payload, item.attachment_refs),
+                ),
             )
 
     async def settle_item(
@@ -940,107 +1101,308 @@ class WebMessageQueue:
             if replay is not None:
                 return replay
             self._token_issue_time(attempt_id, "op")
-            if (
-                self._active_item_attempt_id != attempt_id
-                or self._active_claim is None
-                or self._active_batch_id is None
-                or self._active_item_request_id is None
-            ):
+            pending_settlement = self._worker_settlement_pin
+            if pending_settlement is not None:
+                if pending_settlement.attempt_id == attempt_id:
+                    if pending_settlement.outcome is not normalized_outcome:
+                        raise IdempotencyConflict(
+                            "attempt has a different unacknowledged worker outcome"
+                        )
+                    raise ClaimBusy(
+                        "worker settlement receipt is awaiting acknowledgement"
+                    )
+                raise ClaimBusy(
+                    "another worker settlement receipt is awaiting acknowledgement"
+                )
+            return self._settle_item_unlocked(
+                operation_id,
+                attempt_id,
+                normalized_outcome,
+                input_fingerprint,
+            )
+
+    async def settle_item_from_worker(
+        self,
+        attempt_id: str,
+        outcome: ClaimOutcome,
+    ) -> QueueReceipt:
+        """Settle an active attempt from trusted in-process daemon code.
+
+        This method is intentionally not registered as an RPC. Its caller must
+        be the trusted worker that retained this queue and attempt when dispatch
+        began. The worker may choose `accepted` or `not_sent` only from
+        definitive provider evidence; ambiguous evidence must remain
+        `in_doubt`.
+
+        A fresh operation ID is minted only after authenticating the attempt and
+        matching active queue state. The settlement receipt remains pinned in
+        the existing bounded operation ledger until the worker validates it and
+        acknowledges it. At most one receipt can be pinned per queue, and new
+        claims are blocked while it is pending.
+        """
+        self._validate_identifier(attempt_id)
+        self._token_issue_time(attempt_id, "op")
+        try:
+            normalized_outcome = ClaimOutcome(outcome)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid claim outcome") from exc
+        input_fingerprint = self._fingerprint(
+            "settle_item", attempt_id, normalized_outcome.value
+        )
+
+        async with self._lock:
+            # The target token remains authenticatable while active, even after
+            # its retry lease. An exact pending settlement is replayable beyond
+            # that lease until the worker acknowledges the receipt.
+            self._token_issue_time(attempt_id, "op")
+            pending_settlement = self._worker_settlement_pin
+            if pending_settlement is not None:
+                if pending_settlement.attempt_id == attempt_id:
+                    if pending_settlement.outcome is not normalized_outcome:
+                        raise IdempotencyConflict(
+                            "attempt has a different unacknowledged worker outcome"
+                        )
+                    return pending_settlement.receipt
+                raise ClaimBusy(
+                    "another worker settlement receipt is awaiting acknowledgement"
+                )
+            self._prune_expired()
+            replay = self._find_settlement_receipt_unlocked(
+                attempt_id, normalized_outcome
+            )
+            if replay is not None:
+                self._worker_settlement_pin = _WorkerSettlementPin(
+                    attempt_id=attempt_id,
+                    outcome=normalized_outcome,
+                    receipt=replay,
+                )
+                return replay
+
+            accepted = self._find_settlement_receipt_unlocked(
+                attempt_id, ClaimOutcome.ACCEPTED
+            )
+            not_sent = self._find_settlement_receipt_unlocked(
+                attempt_id, ClaimOutcome.NOT_SENT
+            )
+            if normalized_outcome is ClaimOutcome.IN_DOUBT:
+                if accepted is not None or not_sent is not None:
+                    raise IdempotencyConflict(
+                        "attempt already has a definitive settlement"
+                    )
+            elif normalized_outcome is ClaimOutcome.ACCEPTED and not_sent is not None:
+                raise IdempotencyConflict("attempt was already settled as not sent")
+            elif normalized_outcome is ClaimOutcome.NOT_SENT and accepted is not None:
+                raise IdempotencyConflict("attempt was already settled as accepted")
+
+            if self._active_item_attempt_id != attempt_id:
                 raise ClaimNotFound("item attempt is not active")
-            batch = self._batches.get(self._active_batch_id)
-            if batch is None or batch.claim_id != self._active_claim:
-                raise ClaimNotFound("item attempt is not active")
-            item = next(
-                (
-                    candidate
-                    for candidate in batch.items
-                    if candidate.request_id == self._active_item_request_id
-                    and candidate.attempt_id == attempt_id
-                ),
+
+            return self._settle_item_unlocked(
                 None,
+                attempt_id,
+                normalized_outcome,
+                input_fingerprint,
+                pin_for_worker=True,
             )
-            if item is None or item.status not in (
-                ItemStatus.DISPATCHING,
-                ItemStatus.IN_DOUBT,
-            ):
-                raise ClaimNotFound("item attempt is not active")
 
-            claim_id = self._active_claim
-            reservation = self._claim_reservations.get(claim_id)
-            remaining_slots = (
-                reservation.item_slots.get(item.request_id, 0)
-                if reservation is not None
-                else 0
-            )
+    async def acknowledge_worker_settlement(
+        self,
+        attempt_id: str,
+        outcome: ClaimOutcome,
+        receipt: QueueReceipt,
+    ) -> None:
+        """Release the one bounded receipt pin after worker-side validation.
+
+        This trusted in-process acknowledgement is not an RPC. The most recent
+        acknowledgement is kept as one bounded confirmation tombstone, making
+        its exact repeat a no-op. A mismatched receipt or outcome never clears a
+        pending pin.
+        """
+        self._validate_identifier(attempt_id)
+        try:
+            normalized_outcome = ClaimOutcome(outcome)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid claim outcome") from exc
+        if not isinstance(receipt, QueueReceipt):
+            raise ValueError("invalid worker settlement receipt")
+        async with self._lock:
+            pending_settlement = self._worker_settlement_pin
+            if pending_settlement is not None:
+                if (
+                    pending_settlement.attempt_id == attempt_id
+                    and pending_settlement.outcome is normalized_outcome
+                    and pending_settlement.receipt == receipt
+                ):
+                    self._worker_settlement_pin = None
+                    self._last_acknowledged_worker_settlement = pending_settlement
+                    return
+
+            last_acknowledged = self._last_acknowledged_worker_settlement
             if (
-                item.status is ItemStatus.IN_DOUBT
-                and normalized_outcome is ClaimOutcome.IN_DOUBT
+                last_acknowledged is not None
+                and last_acknowledged.attempt_id == attempt_id
+                and last_acknowledged.outcome is normalized_outcome
+                and last_acknowledged.receipt == receipt
             ):
-                raise QueueInDoubt("in-doubt item requires explicit resolution")
-            if remaining_slots <= 0:
-                raise OperationLedgerFull("claim has no reserved settlement capacity")
+                return
 
-            batch_claim_id = claim_id
-            batch_id = batch.batch_id
-            request_id = item.request_id
-            self._consume_item_reservation(batch_claim_id, request_id)
-            changed = False
-            if normalized_outcome is ClaimOutcome.ACCEPTED:
-                batch.items.remove(item)
-                self._pending_items -= 1
-                self._pending_bytes -= len(item.payload)
-                self._item_attempt_states[attempt_id] = ClaimOutcome.ACCEPTED.value
-                self._active_item_attempt_id = None
-                self._active_item_request_id = None
-                status = ClaimOutcome.ACCEPTED.value
-                changed = True
-                if batch.items:
-                    # The confirmed item is gone; the reserved envelope keeps
-                    # its suffix and sequence until every item is settled.
-                    batch.status = BatchStatus.DISPATCHING
-                    self._claim_states[batch_claim_id] = BatchStatus.DISPATCHING.value
-                    self._free_item_reservation(batch_claim_id, request_id)
-                else:
-                    del self._batches[batch.batch_id]
-                    self._active_claim = None
-                    self._active_batch_id = None
-                    self._claim_states[batch_claim_id] = ClaimOutcome.ACCEPTED.value
-                    self._free_item_reservation(batch_claim_id, request_id)
-                    self._free_claim_reservation(batch_claim_id)
-            elif normalized_outcome is ClaimOutcome.NOT_SENT:
-                item.status = ItemStatus.QUEUED
-                item.attempt_id = None
-                batch.status = BatchStatus.QUEUED
-                batch.claim_id = None
-                batch.priority_rank = None
+            if pending_settlement is not None:
+                if (
+                    pending_settlement.attempt_id != attempt_id
+                    or pending_settlement.outcome is not normalized_outcome
+                    or pending_settlement.receipt != receipt
+                ):
+                    if pending_settlement.attempt_id == attempt_id:
+                        raise IdempotencyConflict(
+                            "worker settlement acknowledgement conflicts with its receipt"
+                        )
+                    raise ClaimBusy(
+                        "another worker settlement receipt is awaiting acknowledgement"
+                    )
+
+            raise ClaimNotFound("worker settlement receipt is not pending")
+
+    def _find_settlement_receipt_unlocked(
+        self,
+        attempt_id: str,
+        outcome: ClaimOutcome,
+    ) -> QueueReceipt | None:
+        fingerprint = self._fingerprint("settle_item", attempt_id, outcome.value)
+        return next(
+            (
+                record.receipt
+                for record in self._operations.values()
+                if record.kind == "settle_item" and record.fingerprint == fingerprint
+            ),
+            None,
+        )
+
+    def _settle_item_unlocked(
+        self,
+        operation_id: str | None,
+        attempt_id: str,
+        normalized_outcome: ClaimOutcome,
+        input_fingerprint: str,
+        *,
+        pin_for_worker: bool = False,
+    ) -> QueueReceipt:
+        """Commit a settlement after the caller resolved replay under lock."""
+        if (
+            self._active_item_attempt_id != attempt_id
+            or self._active_claim is None
+            or self._active_batch_id is None
+            or self._active_item_request_id is None
+        ):
+            raise ClaimNotFound("item attempt is not active")
+        batch = self._batches.get(self._active_batch_id)
+        if batch is None or batch.claim_id != self._active_claim:
+            raise ClaimNotFound("item attempt is not active")
+        item = next(
+            (
+                candidate
+                for candidate in batch.items
+                if candidate.request_id == self._active_item_request_id
+                and candidate.attempt_id == attempt_id
+            ),
+            None,
+        )
+        if item is None or item.status not in (
+            ItemStatus.DISPATCHING,
+            ItemStatus.IN_DOUBT,
+        ):
+            raise ClaimNotFound("item attempt is not active")
+
+        claim_id = self._active_claim
+        reservation = self._claim_reservations.get(claim_id)
+        remaining_slots = (
+            reservation.item_slots.get(item.request_id, 0)
+            if reservation is not None
+            else 0
+        )
+        if (
+            item.status is ItemStatus.IN_DOUBT
+            and normalized_outcome is ClaimOutcome.IN_DOUBT
+        ):
+            raise QueueInDoubt("in-doubt item requires explicit resolution")
+        if remaining_slots <= 0:
+            raise OperationLedgerFull("claim has no reserved settlement capacity")
+
+        # Worker recovery gets a fresh operation token only after active state
+        # and its pre-reserved settlement slot are confirmed under this lock.
+        if operation_id is None:
+            operation_id = self._new_token("op")
+
+        batch_claim_id = claim_id
+        batch_id = batch.batch_id
+        request_id = item.request_id
+        self._consume_item_reservation(batch_claim_id, request_id)
+        changed = False
+        if normalized_outcome is ClaimOutcome.ACCEPTED:
+            batch.items.remove(item)
+            self._pending_items -= 1
+            self._pending_bytes -= len(item.payload)
+            self._item_attempt_states[attempt_id] = ClaimOutcome.ACCEPTED.value
+            self._active_item_attempt_id = None
+            self._active_item_request_id = None
+            status = ClaimOutcome.ACCEPTED.value
+            changed = True
+            if batch.items:
+                # The confirmed item is gone; the reserved envelope keeps
+                # its suffix and sequence until every item is settled.
+                batch.status = BatchStatus.DISPATCHING
+                self._claim_states[batch_claim_id] = BatchStatus.DISPATCHING.value
+                self._free_item_reservation(batch_claim_id, request_id)
+            else:
+                del self._batches[batch.batch_id]
                 self._active_claim = None
                 self._active_batch_id = None
-                self._active_item_attempt_id = None
-                self._active_item_request_id = None
-                status = BatchStatus.QUEUED.value
-                self._claim_states[batch_claim_id] = status
-                self._item_attempt_states[attempt_id] = status
+                self._claim_states[batch_claim_id] = ClaimOutcome.ACCEPTED.value
+                self._free_item_reservation(batch_claim_id, request_id)
                 self._free_claim_reservation(batch_claim_id)
+        elif normalized_outcome is ClaimOutcome.NOT_SENT:
+            item.status = ItemStatus.QUEUED
+            item.attempt_id = None
+            batch.status = BatchStatus.QUEUED
+            batch.claim_id = None
+            batch.priority_rank = None
+            self._active_claim = None
+            self._active_batch_id = None
+            self._active_item_attempt_id = None
+            self._active_item_request_id = None
+            status = BatchStatus.QUEUED.value
+            self._claim_states[batch_claim_id] = status
+            self._item_attempt_states[attempt_id] = status
+            self._free_claim_reservation(batch_claim_id)
+            changed = True
+        else:
+            if item.status is not ItemStatus.IN_DOUBT:
+                item.status = ItemStatus.IN_DOUBT
+                batch.status = BatchStatus.IN_DOUBT
                 changed = True
-            else:
-                if item.status is not ItemStatus.IN_DOUBT:
-                    item.status = ItemStatus.IN_DOUBT
-                    batch.status = BatchStatus.IN_DOUBT
-                    changed = True
-                status = ItemStatus.IN_DOUBT.value
-                self._claim_states[batch_claim_id] = status
-                self._item_attempt_states[attempt_id] = status
-            if changed:
-                self._revision += 1
-            receipt = self._receipt(
-                operation_id,
-                status,
-                batch_id=batch_id,
-                request_ids=(request_id,),
-                claim_id=batch_claim_id,
+            status = ItemStatus.IN_DOUBT.value
+            self._claim_states[batch_claim_id] = status
+            self._item_attempt_states[attempt_id] = status
+        if changed:
+            self._revision += 1
+        receipt = self._receipt(
+            operation_id,
+            status,
+            batch_id=batch_id,
+            request_ids=(request_id,),
+            claim_id=batch_claim_id,
+            attempt_id=attempt_id,
+        )
+        recorded = self._record(input_fingerprint, receipt, kind="settle_item")
+        if pin_for_worker:
+            # This is in the same queue-lock critical section as the settlement
+            # commit, before any caller can observe or lose its acknowledgement.
+            assert self._worker_settlement_pin is None
+            self._worker_settlement_pin = _WorkerSettlementPin(
                 attempt_id=attempt_id,
+                outcome=normalized_outcome,
+                receipt=recorded,
             )
-            return self._record(input_fingerprint, receipt, kind="settle_item")
+        return recorded
 
     async def remove_item(
         self,
@@ -1072,6 +1434,10 @@ class WebMessageQueue:
             )
             if removed is None:
                 raise ItemNotFound("item is not pending")
+            if removed.attachment_refs:
+                raise InvalidAttachment(
+                    "attachment-bearing items require atomic queue removal"
+                )
             batch.items.remove(removed)
             self._pending_items -= 1
             self._pending_bytes -= len(removed.payload)
@@ -1085,6 +1451,71 @@ class WebMessageQueue:
                 request_ids=(request_id,),
             )
             return self._record(input_fingerprint, receipt, kind="remove")
+
+    async def remove_item_with_attachments(
+        self,
+        operation_id: str,
+        request_id: str,
+        *,
+        attachment_scope: _BoundAttachmentScope,
+    ) -> QueueReceipt:
+        """Remove one queued item and release only its attachment refs."""
+        self._validate_identifier(operation_id)
+        self._validate_identifier(request_id)
+        self._validate_attachment_scope(attachment_scope)
+        input_fingerprint = self._fingerprint(
+            "remove_item_with_attachments", request_id
+        )
+        async with self._lock:
+            replay = self._replay(operation_id, input_fingerprint)
+            if replay is not None:
+                return replay
+            self._token_issue_time(request_id, "item")
+            self._ensure_operation_capacity()
+            owner = self._item_owners.get(request_id)
+            if owner is None:
+                raise ItemNotFound("item is not pending")
+            batch = self._batches.get(owner)
+            if batch is None:
+                raise ItemNotFound("item is not pending")
+            if batch.status is not BatchStatus.QUEUED:
+                raise ItemNotQueued("item is claimed or in doubt")
+            removed = next(
+                (item for item in batch.items if item.request_id == request_id),
+                None,
+            )
+            if removed is None:
+                raise ItemNotFound("item is not pending")
+
+            receipt = replace(
+                self._receipt(
+                    operation_id,
+                    "removed",
+                    batch_id=owner,
+                    request_ids=(request_id,),
+                ),
+                revision=self._revision + 1,
+            )
+            operation_issue_time = self._token_issue_time(operation_id, "op")
+            operation = _OperationRecord(
+                fingerprint=input_fingerprint,
+                receipt=receipt,
+                kind="remove_with_attachments",
+                expires_at_ns=(operation_issue_time + self._operation_retry_lease_ns),
+            )
+
+            async with attachment_scope._queue_transaction():
+                # Releasing a missing owner is a safe no-op. Store pruning and
+                # release run before the queue's non-throwing synchronous edit.
+                attachment_scope._release_owner_unlocked(request_id)
+                batch.items.remove(removed)
+                self._pending_items -= 1
+                self._pending_bytes -= len(removed.payload)
+                if not batch.items:
+                    del self._batches[owner]
+                self._revision = receipt.revision
+                self._operations[operation_id] = operation
+            return receipt
 
     async def release_claim(
         self,

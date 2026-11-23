@@ -18,6 +18,11 @@ import json
 import logging
 from typing import Any, Callable
 
+from .context import (
+    RpcCallerContext,
+    _reset_rpc_caller_context,
+    _set_rpc_caller_context,
+)
 from .models import RpcRequest, RpcResponse
 
 logger = logging.getLogger(__name__)
@@ -66,7 +71,12 @@ class RpcServer:
         """Return the sorted list of currently registered method names."""
         return sorted(self._handlers.keys())
 
-    async def handle_request(self, request: RpcRequest) -> RpcResponse:
+    async def handle_request(
+        self,
+        request: RpcRequest,
+        *,
+        caller_context: RpcCallerContext | None = None,
+    ) -> RpcResponse:
         """Dispatch a single request to its handler.
 
         Never raises. All failure modes become ``RpcResponse`` objects with a
@@ -86,6 +96,7 @@ class RpcServer:
                 error_kind="not_found",
             )
 
+        token = _set_rpc_caller_context(caller_context)
         try:
             result = handler(request.params)
             if inspect.iscoroutine(result) or asyncio.iscoroutine(result):
@@ -99,6 +110,8 @@ class RpcServer:
                 error=repr(exc),
                 error_kind="handler",
             )
+        finally:
+            _reset_rpc_caller_context(token)
 
         try:
             json.dumps(result, default=str)
@@ -116,12 +129,17 @@ class RpcServer:
 
         return RpcResponse(request_id=request.request_id, result=result)
 
-    async def handle_wire(self, msg_data: dict[str, Any]) -> dict[str, Any]:
+    async def handle_wire(
+        self,
+        msg_data: dict[str, Any],
+        *,
+        caller_context: RpcCallerContext | None = None,
+    ) -> dict[str, Any]:
         """Wire-level convenience: accept a wire dict, return a wire dict.
 
         Transport adapters (hub messenger, loopback bridge) use this to avoid
         reaching into ``RpcRequest``/``RpcResponse`` themselves.
         """
         request = RpcRequest.from_wire(msg_data)
-        response = await self.handle_request(request)
+        response = await self.handle_request(request, caller_context=caller_context)
         return response.to_wire()
