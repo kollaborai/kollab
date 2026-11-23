@@ -7097,15 +7097,43 @@ class HubPlugin(BasePlugin):
 
     async def _deliver_inbox_message(self, msg: HubMessage) -> bool:
         """Deliver one mailbox message; refusal leaves its file unacknowledged."""
+        delivery = asyncio.create_task(self._on_message_received(msg))
         try:
-            return await self._on_message_received(msg) is not False
+            return await asyncio.shield(delivery) is not False
         except asyncio.CancelledError as exc:
             task = asyncio.current_task()
-            if task is not None and task.cancelling() == 0:
+            accepted = False
+            if task is not None and task.cancelling() > 0:
+                # Cancellation of the poll must not interrupt a receiver after
+                # it has begun applying the message. Let that delivery settle,
+                # then persist its acknowledgment before propagating cancel.
+                while not delivery.done():
+                    try:
+                        await asyncio.shield(delivery)
+                    except asyncio.CancelledError:
+                        if delivery.done():
+                            break
+                    except Exception:
+                        break
+                if delivery.cancelled():
+                    accepted = delivery.cancelling() == 0
+                elif delivery.done():
+                    try:
+                        accepted = delivery.result() is not False
+                    except Exception as delivery_error:
+                        logger.warning(
+                            "Mailbox delivery failed for %s (%s); leaving it queued for retry",
+                            msg.id,
+                            type(delivery_error).__name__,
+                        )
+            elif delivery.cancelled() and delivery.cancelling() == 0:
                 # A receiver may raise CancelledError after applying its effect
-                # without a cancellation request against this delivery task.
-                # Treat that callback outcome as completed so the durable
-                # mailbox does not replay the effect after a restart.
+                # without a cancellation request against either task.
+                accepted = True
+
+            if accepted:
+                # Persist its receipt before propagating cancellation so a
+                # restart does not replay the effect.
                 self._acknowledge_inbox_delivery({msg.id}, [msg.to])
                 exc.acknowledged_message_ids = {msg.id}
             raise
