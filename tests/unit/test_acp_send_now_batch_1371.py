@@ -324,6 +324,38 @@ async def test_send_now_batch_renews_timeout_when_later_member_is_admitted():
 
 
 @pytest.mark.asyncio
+async def test_injected_send_now_member_renews_batch_admission_lease():
+    runner = ACPRunner(ACPProfile("injected-send-now-lease", ("unused",)))
+    runner.session_id = "session-A"
+    runner.generation = 7
+    runner._connection = object()
+    runner.send_now_batch_timeout_seconds = 0.5
+    active_context = SimpleNamespace(request_id="active-A")
+    assert runner.begin_send_now_batch(
+        "batch-BC",
+        2,
+        session_id="session-A",
+        generation=7,
+        active_context=active_context,
+        active_turn_id=12,
+    )
+    try:
+        initial_expiry = runner._send_now_batches["batch-BC"].expiry_handle.when()
+        await asyncio.sleep(0.15)
+        assert runner.record_send_now_batch_injected("batch-BC")
+        renewed_expiry = runner._send_now_batches["batch-BC"].expiry_handle.when()
+        assert renewed_expiry > initial_expiry
+
+        # A later batch member may arrive after the original deadline because
+        # the accepted injected member refreshed the reservation lease.
+        await asyncio.sleep(0.4)
+        assert runner.has_send_now_batch("batch-BC")
+        assert not runner._queue_release.is_set()
+    finally:
+        runner.finish_send_now_batch("batch-BC")
+
+
+@pytest.mark.asyncio
 async def test_expired_send_now_lease_stops_captured_owner_before_running_batch():
     runner = ACPRunner(ACPProfile("send-now-expiry-cancel", ("unused",)))
     runner.session_id = "session-A"
