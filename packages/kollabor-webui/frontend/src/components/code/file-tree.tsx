@@ -15,7 +15,7 @@ import {
 } from "react";
 import { ChevronsDownUp, FilePlus, Folder, FolderOpen, FolderPlus, Loader2, LocateFixed } from "lucide-react";
 import { useEditorStore } from "@/components/code/editor-store";
-import { codeFetch, OUTDATED_NOTICE, unwrapCodeData } from "@/lib/code-fetch";
+import { codeFetch, getCodeSessionGeneration, OUTDATED_NOTICE, unwrapCodeData } from "@/lib/code-fetch";
 import { DaemonNotice, type DaemonNoticeProps } from "@/components/code/DaemonNotice";
 import { cn } from "@/lib/utils";
 import {
@@ -38,6 +38,7 @@ interface FileNode {
 }
 
 interface FileTreeProps {
+  sessionId: string;
   workspace: string;
   daemonNotice: DaemonNoticeProps;
   filterOpen?: boolean;
@@ -163,6 +164,7 @@ function useTreeActions(): TreeActions {
 }
 
 export function FileTree({
+  sessionId,
   workspace,
   daemonNotice,
   filterOpen: externalFilterOpen,
@@ -183,6 +185,7 @@ export function FileTree({
   const [gitStatus, setGitStatus] = useState<Record<string, string>>({});
   const [gitStatusError, setGitStatusError] = useState("");
   const gitStatusSeq = useRef(0);
+  const treeRequestSeq = useRef(0);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const filterRef = useRef<HTMLInputElement>(null);
   const treeRef = useRef<HTMLDivElement>(null);
@@ -208,6 +211,8 @@ export function FileTree({
   }, [expanded, workspace, initialized]);
 
   const fetchTree = useCallback(async () => {
+    const requestSeq = ++treeRequestSeq.current;
+    const requestGeneration = getCodeSessionGeneration(sessionId);
     setLoading(true);
     setError("");
     setLargeTree(false);
@@ -215,6 +220,11 @@ export function FileTree({
       const res = await codeFetch(`/api/fs/tree?workspace=${encodeURIComponent(workspace)}`);
       const raw: unknown = await res.json();
       if (!res.ok) {
+        // Ignore an older refusal after this session has successfully handled a newer code call.
+        if (
+          requestSeq !== treeRequestSeq.current ||
+          (requestGeneration !== null && getCodeSessionGeneration(sessionId) !== requestGeneration)
+        ) return;
         if (typeof raw === "object" && raw !== null && "error" in raw &&
             typeof raw.error === "object" && raw.error !== null && "code" in raw.error && raw.error.code === "tree_too_large") {
           setLargeTree(true);
@@ -227,11 +237,11 @@ export function FileTree({
       setTree(data.tree || []);
       if (!initialized) setInitialized(true);
     } catch {
-      setError("Failed to load file tree");
+      if (requestSeq === treeRequestSeq.current) setError("Failed to load file tree");
     } finally {
-      setLoading(false);
+      if (requestSeq === treeRequestSeq.current) setLoading(false);
     }
-  }, [workspace, initialized]);
+  }, [sessionId, workspace, initialized]);
 
   useEffect(() => {
     fetchTree();

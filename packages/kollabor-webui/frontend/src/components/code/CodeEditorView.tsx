@@ -286,6 +286,7 @@ function CodeEditorFolder({
               </div>
 
               {sidebarView === "files" && <FileTree
+                sessionId={sessionId}
                 workspace={workspace}
                 daemonNotice={daemonNotice}
                 filterOpen={fileFilterOpen}

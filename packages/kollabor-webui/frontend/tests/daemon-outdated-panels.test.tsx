@@ -134,7 +134,7 @@ describe("Code and Git panels against a daemon_outdated engine", () => {
   });
 
   it("Code: the real FileTree shows the notice", async () => {
-    const text = await mount(<FileTree workspace="/w" daemonNotice={daemonNotice} />);
+    const text = await mount(<FileTree sessionId="s1" workspace="/w" daemonNotice={daemonNotice} />);
     expect(text).toContain(stopAndStart);
     expect(text).not.toContain("Retry");
   });
