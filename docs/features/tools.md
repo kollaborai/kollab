@@ -1,7 +1,7 @@
 ---
 title: "Tool Calling"
 created: 2026-02-24
-modified: 2026-09-20
+modified: 2026-11-17
 status: active
 ---
 # Tool Calling
@@ -96,6 +96,12 @@ foreground, use `<hub_spawn>` to start peers, and use `/hub stop all` to stop
 agents owned by the current caller. The `kollab` CLI applies the same setting
 to agent launches started from a tool shell.
 
+When this setting is enabled, the terminal tool's shell-text guard scans
+commands before quote context is lost. Quoted command and process-substitution
+examples are treated as literal text; shell-executed substitutions remain
+checked for blocked launches. This guard is a shell-text heuristic, not an OS
+sandbox.
+
 Execution methods:
 - tmux sessions (preferred, supports background jobs)
 - direct subprocess (fallback)
@@ -120,6 +126,20 @@ untrusted executables, and working directories outside the project are refused
 with a reason. The existing `terminal` tool keeps its normal behavior. See the
 [read-only terminal specification](../specs/agent-read-only-terminal.md) for
 the full policy.
+
+A bundle that needs Git inspection without general terminal access can grant
+`git` instead:
+
+```json
+{"tools": ["file-read", "file-grep", "git"]}
+```
+
+This permits one read-only Git command at a time, such as `git status --short`,
+including through XML `<terminal>` requests. The command uses the same
+parsed-argv policy; aliases, shell syntax, pager or external-helper options,
+credential commands, Git writes (including commits that could run repository
+hooks), remote transports, and other terminal commands are refused. Grant
+`terminal` separately when the bundle needs shell commands or Git writes.
 
 ### Workspace Switching
 
@@ -333,6 +353,10 @@ Tool registry format:
     }
 }
 ```
+
+The Web UI shows completed Hub MCP calls with readable tool labels. Hub tool
+rows show the recipient in the collapsed row; thread and reply ids remain in
+the expanded call details.
 
 ## On-demand Tool Loading
 

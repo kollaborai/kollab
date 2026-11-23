@@ -817,14 +817,16 @@ class TerminalLLMChat:
                     }
                 return decision
 
-            def cancel_confirmations() -> None:  # an ACP Stop
-                self._attach_permission_bridge.cancel_pending()
+            def cancel_confirmations(request_id: str | None = None) -> None:  # an ACP Stop
+                if not request_id:
+                    return
+                self._attach_permission_bridge.cancel_pending(request_id)
                 self.renderer.layout_manager.cancel_permission_prompt()
 
-            def park_confirmation(tool_id: str) -> None:
+            def park_confirmation(tool_id: str, permission_id: str) -> None:
                 # Its turn went on: the terminal's prompt would answer the next
                 # message's keys, so it closes; the card stays open.
-                self._attach_permission_bridge.park(tool_id)
+                self._attach_permission_bridge.park(tool_id, permission_id)
                 self.renderer.layout_manager.cancel_permission_prompt()
 
             self.permission_manager.set_confirmation_callback(
@@ -1403,6 +1405,13 @@ class TerminalLLMChat:
             details["thread_id"] = active.thread_id
         if request.display:
             details.update(request.display)
+        # Provider display metadata can include its own request_id. Permission
+        # ownership belongs to the parent chat turn, so restore it after merge.
+        if active is not None:
+            details["request_id"] = active.request_id
+            details["turn_id"] = active.turn_id
+            details["input_source"] = active.source
+            details["thread_id"] = active.thread_id
         try:
             decision = await callback(details)
         except (asyncio.CancelledError, TimeoutError):
@@ -2809,6 +2818,9 @@ class TerminalLLMChat:
                                 layout_manager=self.renderer.layout_manager,
                                 event=event,
                                 wait_for_rpc_reply=False,
+                                on_response_failure=lambda message: coordinator.display_message_sequence(
+                                    [("error", message, {"display_type": "error"})]
+                                ),
                             ),
                             name="attach-permission-prompt",
                         )
@@ -4323,6 +4335,9 @@ class TerminalLLMChat:
             return
         logger.info("Application shutting down")
         self.running = False
+        permission_bridge = getattr(self, "_attach_permission_bridge", None)
+        if permission_bridge is not None:
+            permission_bridge.cancel_all_pending()
 
         # Emit SYSTEM_SHUTDOWN event for config hooks
         try:

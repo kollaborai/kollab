@@ -410,6 +410,12 @@ The installer verifies the executable and version produced by its selected metho
 checks that a new shell resolves that same executable. If another `kollab` comes first
 on PATH or the install directory is missing, it reports the location and PATH change
 needed instead of claiming success.
+To also take
+nightly builds of `main` (binary installs only), set
+`kollabor.updates.include_prereleases` to `true` in the global
+`~/.kollab/config.json`; the newer of nightly or stable is installed. pip, uv,
+pipx and Kollab.app installs ignore that setting
+([Nightly builds](docs/configuration.md#nightly-builds)).
 
 Python package managers:
 
