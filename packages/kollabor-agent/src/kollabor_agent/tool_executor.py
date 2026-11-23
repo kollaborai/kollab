@@ -1397,7 +1397,19 @@ def _terminal_find_escapes_workspace(
                 commands[-1].append(token)
 
         shells = {"bash", "dash", "fish", "ksh", "sh", "zsh"}
-        interpreters = {"node", "perl", "php", "python", "python2", "python3", "ruby"}
+        interpreters = {
+            "awk",
+            "gawk",
+            "mawk",
+            "nawk",
+            "node",
+            "perl",
+            "php",
+            "python",
+            "python2",
+            "python3",
+            "ruby",
+        }
         prefixes = {
             "busybox", "command", "doas", "env", "exec", "nice", "nohup",
             "stdbuf", "sudo", "time", "timeout", "xargs",
@@ -1436,6 +1448,23 @@ def _terminal_find_escapes_workspace(
                     return script_index is not None and script_index + 1 < len(words) and contains_find_token(
                         words[script_index + 1], depth + 1
                     )
+                if executable in {"awk", "gawk", "mawk", "nawk"}:
+                    arguments = words[index + 1 :]
+                    script = " ".join(arguments)
+                    if any(
+                        argument in {"-f", "--file", "--exec"}
+                        or argument.startswith(("--file=", "--exec="))
+                        for argument in arguments
+                    ):
+                        return True
+                    # AWK can launch shell commands through system() or a pipe
+                    # feeding getline. Refuse those programs because their
+                    # command names can be assembled without a literal find.
+                    if re.search(r"\bsystem\s*\(|\|\s*getline\b", script):
+                        return True
+                    if re.search(r"\b(?:find|gfind)\b", script):
+                        return True
+                    break
                 if executable == "env":
                     arguments = words[index + 1 :]
                     split_index = next(
