@@ -93,6 +93,24 @@ async def test_finished_turn_update_keeps_its_generation():
 
 
 @pytest.mark.asyncio
+async def test_permission_updates_keep_the_active_generation():
+    runner, updates = _active_runner()
+    runner.permission_bridge.request = AsyncMock(return_value="allow")
+
+    await runner._request_permission(
+        "session-A",
+        SimpleNamespace(toolCallId="tool-A"),
+        [],
+    )
+
+    assert [update["kind"] for update in updates] == [
+        "permission_request",
+        "permission_resolved",
+    ]
+    assert all(update.get("generation") == 7 for update in updates)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("owner_change", ["request", "turn", "generation", "session"])
 async def test_steering_rejects_receipt_if_the_active_owner_changes_in_flight(
     owner_change,
