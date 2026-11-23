@@ -307,3 +307,98 @@ async def test_reconnect_does_not_render_a_queued_private_reply_twice(monkeypatc
     ] == ["goal-command", "next", "later"]
     assert token not in messages._assistant_handover_ledger(session)
     assert session.subscriptions == []
+
+
+@pytest.mark.asyncio
+async def test_replayed_goal_in_resumed_run_keeps_the_retained_reply(monkeypatch):
+    """A replayed goal must not orphan the handover's retained queue (#1368)."""
+    session = _FanoutSession([])
+    first_poll_started = asyncio.Event()
+    poll_count = 0
+
+    async def poll_goal_reply(reply_id):
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            first_poll_started.set()
+            return {"status": "pending"}
+        return {
+            "status": "complete",
+            "success": True,
+            "conversation_uid": "conversation-1",
+            "message": "private goal result",
+        }
+
+    sends = 0
+
+    async def send_message(_content, *, request_id, **kwargs):
+        nonlocal sends
+        sends += 1
+        if sends == 1:
+            return {
+                "accepted": True,
+                "request_id": "goal-request",
+                "goal_request_id": "goal-request",
+                "goal_reply_id": "private-reply",
+            }
+        return {
+            "accepted": True,
+            "completed": True,
+            "replayed": True,
+            "request_id": "goal-request",
+            "message": "replayed goal",
+        }
+
+    session.poll_goal_reply = AsyncMock(side_effect=poll_goal_reply)
+    session.send_message = AsyncMock(side_effect=send_message)
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+
+    def goal_request(state):
+        return messages.AssistantRequest(
+            commands=[
+                {
+                    "type": "add-message",
+                    "message": {
+                        "id": "goal-command",
+                        "parts": [{"type": "text", "text": "/goal show"}],
+                    },
+                }
+            ],
+            state=state,
+        )
+
+    first = await messages.assistant_transport(
+        session.session_id,
+        goal_request({"messages": [], "conversationUid": "conversation-1"}),
+    )
+    first_chunks: list[bytes] = []
+    first_task = asyncio.create_task(_drain_real_response(first, first_chunks))
+    await asyncio.wait_for(first_poll_started.wait(), timeout=1)
+    first_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(first_task, timeout=1)
+    token = next(iter(messages._assistant_handover_ledger(session)))
+
+    resumed = await messages.assistant_transport(
+        session.session_id,
+        goal_request(
+            {
+                "messages": [],
+                "conversationUid": "conversation-1",
+                messages._ASSISTANT_HANDOVER_STATE_KEY: token,
+            }
+        ),
+    )
+    chunks: list[bytes] = []
+    task = asyncio.create_task(_drain_real_response(resumed, chunks))
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=2)
+    except asyncio.TimeoutError:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        pytest.fail("replayed goal orphaned the retained reply; the run never ended")
+    wire = b"".join(chunks)
+    assert b"private goal result" in wire
+    assert b"data: [DONE]" in wire
