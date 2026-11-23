@@ -25,7 +25,6 @@ from kollabor.state.web_message_queue_worker import (
 )
 from kollabor_rpc import RpcCallerContext
 
-
 PNG = b"\x89PNG\r\n\x1a\nqueue-test-image"
 
 
@@ -130,9 +129,10 @@ async def _real_local_state(tmp_path):
 async def test_real_dispatch_writes_history_and_binds_exact_image_before_releasing_owner(
     tmp_path,
 ):
-    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
     from kollabor_engine import media_store
     from kollabor_engine.history_store import _wire_message
+
+    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
 
     queue, attachments, _scope, request_id, staged, snapshot = await _queue_with_image()
     state, llm, logger, uid = await _real_local_state(tmp_path)
@@ -175,8 +175,9 @@ async def test_real_dispatch_writes_history_and_binds_exact_image_before_releasi
 @pytest.mark.asyncio
 async def test_failed_native_queue_commit_does_not_leave_a_phantom_history_row(tmp_path):
     """A failed provider-queue commit must not leave a durable user message."""
-    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
     from kollabor_engine import media_store
+
+    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
 
     queue, attachments, _scope, request_id, _staged, snapshot = await _queue_with_image()
     state, llm, logger, uid = await _real_local_state(tmp_path)
@@ -213,8 +214,9 @@ async def test_failed_native_queue_commit_does_not_leave_a_phantom_history_row(t
 async def test_history_bind_failure_rolls_back_unconsumed_native_admission(
     tmp_path, monkeypatch
 ):
-    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
     from kollabor_engine import media_store
+
+    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
 
     queue, attachments, _scope, request_id, _staged, snapshot = await _queue_with_image()
     state, llm, logger, uid = await _real_local_state(tmp_path)
@@ -422,11 +424,12 @@ async def test_real_dispatch_rejects_stale_revision_before_history_or_provider_c
 
 @pytest.mark.asyncio
 async def test_real_acp_admission_records_and_binds_the_exact_queue_image(tmp_path):
+    from kollabor_engine import media_store
+    from kollabor_engine.history_store import read_history_from_disk
+
     from kollabor.llm.acp_bridge import ACPAdmission
     from kollabor.llm.acp_orchestrator import ACPOrchestrator
     from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
-    from kollabor_engine import media_store
-    from kollabor_engine.history_store import read_history_from_disk
 
     class PendingRunner:
         generation = 3
