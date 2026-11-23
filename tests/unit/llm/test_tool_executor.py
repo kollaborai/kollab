@@ -305,6 +305,7 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
             commands = [
                 'f=fi; n=nd; "$f$n" ../outside -name marker.txt -print',
                 "bash -c 'f=fi; n=nd; \"$f$n\" ../outside -name marker.txt -print'",
+                "timeout 2 bash -c 'f=fi; n=nd; \"$f$n\" ../outside -name marker.txt -print'",
             ]
             for command in commands:
                 with self.subTest(command=command):
