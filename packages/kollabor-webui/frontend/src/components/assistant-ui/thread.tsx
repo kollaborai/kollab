@@ -26,6 +26,7 @@ import {
   ToolGroupTrigger,
 } from "@/components/assistant-ui/tool-group";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { resolveMediaSegment, splitMediaSegments } from "@/components/media/media-tokens";
 import { MediaThumb, useMediaViewer, useSessionMedia } from "@/components/media/media-view";
 import { agentStatus, bundleName } from "@/components/panels/panel-model";
@@ -56,6 +57,7 @@ import { useRoomVoiceMode, useVoiceRoomLive, VoiceRoomBar } from "@/voice/voice-
 import {
   imageAttachmentAdapter,
   usePendingPermissionCancellation,
+  useSendWaitingNow,
 } from "@/runtime";
 import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/api";
 import {
@@ -67,7 +69,6 @@ import {
   ActionBarPrimitive,
   AuiIf,
   type AssistantState,
-  BranchPickerPrimitive,
   ComposerPrimitive,
   ErrorPrimitive,
   groupPartByType,
@@ -84,8 +85,6 @@ import {
   ArrowDownIcon,
   ArrowUpIcon,
   CheckIcon,
-  ChevronLeftIcon,
-  ChevronRightIcon,
   CopyIcon,
   DownloadIcon,
   MicIcon,
@@ -531,6 +530,9 @@ const Composer: FC<{
     (command) => command.name === "voice" && command.enabled !== false,
   );
   const permissionStop = usePendingPermissionCancellation();
+  const sendWaitingNow = useSendWaitingNow();
+  // The submit under way came from Cmd/Ctrl+Enter: the message goes at once.
+  const submitSendsNow = useRef(false);
   const slotMode = useAuiState((s) =>
     composerSlotMode(s, voiceAvailable ? voice : null, Boolean(permissionStop)),
   );
@@ -701,6 +703,7 @@ const Composer: FC<{
     defaultPrevented?: boolean;
   }) => {
     if (!isRunning || event.defaultPrevented) return;
+    const sendsNow = submitSendsNow.current;
     const state = aui.composer.getState();
     if (!state.text.trim() && state.attachments.length === 0) return;
 
@@ -753,12 +756,14 @@ const Composer: FC<{
       if (parts.length === 0) throw new Error("Message has no sendable content");
       queueComposerDraftSubmission(draftKey, state.text);
       if (state.text.length > 0) skipEmptyDraftPersist.current = true;
+      // The message waits for the turn to end, as a queued message (#1102).
       sendTransportCommand({
         type: "add-message",
         message: { role: "user", parts },
         parentId: null,
         sourceId: null,
       });
+      if (sendsNow) sendWaitingNow?.();
       const currentState = aui.composer.getState();
       const currentFingerprint = `${currentState.text}\u0000${currentState.attachments
         .map((attachment) => attachment.id)
@@ -982,6 +987,32 @@ const Composer: FC<{
     event.preventDefault();
   };
 
+  // While a turn runs the kit leaves Enter alone (it has no queue to put the
+  // message in), and the message box starts a new line. Send the message as
+  // the Send button does (#1365): it waits for the turn to end. Cmd+Enter
+  // (Ctrl+Enter off a Mac) sends it, and every message waiting before it, at
+  // once (#1102). This runs after the message box's own handler: an Enter the
+  // slash or @ menu took has its default prevented, and Shift+Enter still
+  // starts a new line.
+  const handleBusyEnter = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (
+      event.key !== "Enter" ||
+      event.shiftKey ||
+      event.defaultPrevented ||
+      !isRunning ||
+      event.nativeEvent.isComposing ||
+      event.nativeEvent.keyCode === 229 ||
+      !(event.target instanceof HTMLTextAreaElement)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    // The submit handler runs inside requestSubmit and reads this at once.
+    submitSendsNow.current = sendWaitingNow !== null && (event.metaKey || event.ctrlKey);
+    event.target.form?.requestSubmit();
+    submitSendsNow.current = false;
+  };
+
   const agentItems = useMemo<readonly ComposerPaletteItem[]>(() => {
     // A hub mesh is one project folder: a live agent in another folder never hears this chat.
     const folder = (path: string) => path.replace(/\/+$/, "");
@@ -1104,7 +1135,10 @@ const Composer: FC<{
               <VoiceStatus activity={terminalVoice.activity} />
             ) : null}
             {voiceAvailable ? <VoiceRoomBar /> : null}
-            <div className="aui-composer-row flex items-end gap-1.5">
+            <div
+              className="aui-composer-row flex items-end gap-1.5"
+              onKeyDown={handleBusyEnter}
+            >
               {attachmentsEnabled ? <ComposerAddAttachment /> : null}
               <ComposerPrimitive.Input
                 placeholder={lock || placeholder}
@@ -1150,6 +1184,10 @@ function prettyCommandName(name: string): string {
 }
 
 type ComposerSlotMode = "mic" | "send" | "listening" | "stop";
+
+// The keys that send a message into the running turn at once (#1102).
+const SEND_NOW_KEYS = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform)
+  ? "⌘+Enter" : "Ctrl+Enter";
 
 // One trailing button slot that morphs: stop while a run is going, send once
 // there is something to send, otherwise the voice mic (a mic, or the
@@ -1218,6 +1256,7 @@ const ComposerSlot: FC<{
   onBeforeSend: (event: { preventDefault: () => void }) => void;
   onSteer: (event: { preventDefault: () => void }) => void;
 }> = ({ voice, running, permissionStop, onBeforeSend, onSteer }) => {
+  const sendsNow = useSendWaitingNow() !== null;
   return (
     <div className="aui-composer-slot relative size-9 shrink-0">
       {voice && (
@@ -1250,7 +1289,7 @@ const ComposerSlot: FC<{
       )}
       {running ? (
         <TooltipIconButton
-          tooltip="Send while generating"
+          tooltip={sendsNow ? `Queue Message (${SEND_NOW_KEYS} Sends Now)` : "Queue Message"}
           side="top"
           type="button"
           variant="default"
@@ -1414,7 +1453,6 @@ const AssistantMessage: FC = () => {
         data-slot="aui_assistant-message-footer"
         className={cn("ms-2 flex items-center", ACTION_BAR_HEIGHT)}
       >
-        <BranchPicker />
         <AssistantActionBar />
       </div>
     </MessagePrimitive.Root>
@@ -1531,7 +1569,52 @@ export const UserText: FC<{ text?: string }> = ({ text }) => {
   );
 };
 
+// The row under a message that waits for the running turn to end. The thread's
+// rows clip what hangs outside them, so the note has a row of its own. On a
+// touch screen the row is taller: Send Now's 44px target reaches 14px above
+// the line and 14px under it.
+const QUEUED_NOTE_ROW = "col-start-2 h-4 any-pointer-coarse:h-[30px]";
+
+// What the message is waiting for, and the way to send it into the turn at
+// once (#1102). A session that cannot take a message that way (a harness
+// session) gets the word alone.
+const QueuedMessageNote: FC = () => {
+  const sendWaitingNow = useSendWaitingNow();
+  return (
+    <TooltipProvider delayDuration={600}>
+      <div className={cn("aui-user-message-queued text-muted-foreground flex items-start justify-end gap-2 text-xs leading-4", QUEUED_NOTE_ROW)}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span>Queued</span>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">Sent when the agent finishes this turn</TooltipContent>
+        </Tooltip>
+        {sendWaitingNow ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="link"
+                className="text-foreground h-4 p-0 text-xs leading-4 any-pointer-coarse:-mt-[14px] any-pointer-coarse:h-[44px] any-pointer-coarse:min-w-[44px]"
+                onClick={sendWaitingNow}
+              >
+                Send Now
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">The agent reads it at its next step</TooltipContent>
+          </Tooltip>
+        ) : null}
+      </div>
+    </TooltipProvider>
+  );
+};
+
 const UserMessage: FC = () => {
+  const queued = useAuiState((s) => s.message.metadata.custom?.queued === true);
+  // A message that was queued keeps the note's row, empty, once it is sent:
+  // the rows under it stay where they are.
+  const [wasQueued, setWasQueued] = useState(queued);
+  if (queued && !wasQueued) setWasQueued(true);
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
@@ -1548,11 +1631,7 @@ const UserMessage: FC = () => {
           <UserActionBar />
         </div>
       </div>
-
-      <BranchPicker
-        data-slot="aui_user-branch-picker"
-        className="col-span-full col-start-1 row-start-3 -me-1 justify-end"
-      />
+      {queued ? <QueuedMessageNote /> : wasQueued ? <div aria-hidden className={QUEUED_NOTE_ROW} /> : null}
     </MessagePrimitive.Root>
   );
 };
@@ -1614,35 +1693,5 @@ const EditComposer: FC = () => {
         </div>
       </ComposerPrimitive.Root>
     </MessagePrimitive.Root>
-  );
-};
-
-const BranchPicker: FC<BranchPickerPrimitive.Root.Props> = ({
-  className,
-  ...rest
-}) => {
-  return (
-    <BranchPickerPrimitive.Root
-      hideWhenSingleBranch
-      className={cn(
-        "aui-branch-picker-root text-muted-foreground -ms-2 me-2 inline-flex items-center text-xs",
-        className,
-      )}
-      {...rest}
-    >
-      <BranchPickerPrimitive.Previous asChild>
-        <TooltipIconButton tooltip="Previous">
-          <ChevronLeftIcon />
-        </TooltipIconButton>
-      </BranchPickerPrimitive.Previous>
-      <span className="aui-branch-picker-state font-medium">
-        <BranchPickerPrimitive.Number /> / <BranchPickerPrimitive.Count />
-      </span>
-      <BranchPickerPrimitive.Next asChild>
-        <TooltipIconButton tooltip="Next">
-          <ChevronRightIcon />
-        </TooltipIconButton>
-      </BranchPickerPrimitive.Next>
-    </BranchPickerPrimitive.Root>
   );
 };
