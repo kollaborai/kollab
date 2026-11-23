@@ -43,11 +43,13 @@ async function pendingImage() {
 function harness(
   state: { text: string; attachments: unknown[] },
   attachmentAdapter = new SimpleImageAttachmentAdapter(),
+  sendNow = false,
 ) {
   let currentState = state;
   const sendTransportCommand = vi.fn();
   const reset = vi.fn();
   const setBusySubmitError = vi.fn();
+  const enqueueBusyMessage = vi.fn(async () => ({ admitted: true, sendNowAccepted: true }));
   const lastBusySubmit = { current: undefined as unknown };
   const skipEmptyDraftPersist = { current: false };
   const sendBusyMessage = loadSendBusyMessage({
@@ -58,8 +60,8 @@ function harness(
     queueComposerDraftSubmission: vi.fn(),
     skipEmptyDraftPersist,
     sendTransportCommand,
-    // A plain send: the message waits for the turn to end (#1102).
-    submitSendsNow: { current: false },
+    enqueueBusyMessage,
+    submitSendsNow: { current: sendNow },
     sendWaitingNow: vi.fn(),
     imageAttachmentAdapter: attachmentAdapter,
     setBusySubmitError,
@@ -67,6 +69,7 @@ function harness(
   return {
     sendBusyMessage,
     sendTransportCommand,
+    enqueueBusyMessage,
     reset,
     setBusySubmitError,
     setState: (nextState: { text: string; attachments: unknown[] }) => {
@@ -76,6 +79,27 @@ function harness(
 }
 
 describe("sendBusyMessage pending image attachments", () => {
+  it("uses the daemon queue for busy composer sends and never sends a legacy add-message", async () => {
+    const image = await pendingImage();
+    const { sendBusyMessage, sendTransportCommand, enqueueBusyMessage, reset } = harness(
+      { text: "inspect", attachments: [image] },
+      new SimpleImageAttachmentAdapter(),
+      true,
+    );
+    const event = { preventDefault: vi.fn() };
+
+    await sendBusyMessage(event);
+
+    expect(enqueueBusyMessage).toHaveBeenCalledOnce();
+    expect(enqueueBusyMessage.mock.calls[0]?.[0]).toMatchObject({
+      text: "inspect",
+      sendNow: true,
+      attachments: [expect.objectContaining({ name: "synthetic.png", type: "image" })],
+    });
+    expect(sendTransportCommand).not.toHaveBeenCalled();
+    expect(reset).toHaveBeenCalledOnce();
+  });
+
   it("sends a pending image together with text while a turn is running", async () => {
     const image = await pendingImage();
     expect(image.content).toBeUndefined();
