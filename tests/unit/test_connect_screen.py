@@ -700,3 +700,51 @@ async def test_a_refused_offer_shows_its_reason_not_the_generic_line(monkeypatch
     assert refusal in text
     assert "could not create a code" not in text
     await view.on_complete()
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_offer_reason_reaches_connect_screen(monkeypatch, caplog):
+    import logging
+    from types import SimpleNamespace
+
+    from kollabor.state.local import LocalStateService
+    from plugins.hub.enrollment_client import EnrollmentProtocolError
+    from plugins.hub.plugin import HubPlugin
+
+    monkeypatch.setattr(_TIME, lambda: 1_000)
+    expected = "Local access denied. Use Connect on owner device."
+    error = EnrollmentProtocolError("unauthorized")
+
+    async def refuse(_domain):
+        raise error
+
+    async def start():
+        return None
+
+    async def no_owner(_op, _args):
+        return False, None
+
+    hub = HubPlugin.__new__(HubPlugin)
+    hub._identity = object()
+    hub._rpc_server = object()
+    hub._connect_via_owner = no_owner
+    hub._start_relay_agent = start
+    hub._relay_agent = SimpleNamespace(
+        create_enrollment_offer=refuse,
+        commands=SimpleNamespace(
+            client=SimpleNamespace(control=SimpleNamespace(admit_refusal=lambda: ""))
+        ),
+    )
+    state = LocalStateService.__new__(LocalStateService)
+    state._resolve_hub_plugin = lambda: hub
+
+    with caplog.at_level(logging.WARNING, logger="plugins.hub.plugin"):
+        view, renderer, _ = await _open(
+            None, create=state.hub_enrollment_offer, size=(72, 30)
+        )
+    text = await _text(view, renderer)
+
+    assert expected in text
+    assert "could not create a code" not in text
+    assert "connect offer refused (local): unauthorized" in caplog.text
+    await view.on_complete()
