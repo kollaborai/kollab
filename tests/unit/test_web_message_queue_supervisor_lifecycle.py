@@ -327,5 +327,121 @@ async def test_application_closes_queue_runtime_before_shutting_down_llm():
     assert order.index("queue.close") < order.index("llm.shutdown")
 
 
+def _shutdown_app(order, queue_results, *, acp=None):
+    from kollabor.application import TerminalLLMChat
+
+    class _QueueRuntime:
+        def __init__(self):
+            self.results = list(queue_results)
+
+        async def close(self):
+            order.append("queue.close")
+            return self.results.pop(0)
+
+    class _Hub:
+        async def stop_message_intake(self):
+            order.append("hub.stop_intake")
+
+    class _Service:
+        def __init__(self, name):
+            self.name = name
+
+        async def shutdown(self):
+            order.append(f"{self.name}.shutdown")
+
+    class _EventBus:
+        async def emit_with_hooks(self, *args, **kwargs):
+            order.append("event.shutdown")
+
+        def get_service(self, name):
+            return {
+                "hub_plugin": _Hub(),
+                "web_message_queue_runtime": queue_runtime,
+            }.get(name)
+
+    class _InputHandler:
+        running = True
+
+        async def stop(self):
+            order.append("input.stop")
+
+    class _ScriptWidgetManager:
+        async def shutdown_refresh_scheduler(self):
+            order.append("scripts.shutdown")
+
+    queue_runtime = _QueueRuntime()
+    app = object.__new__(TerminalLLMChat)
+    app.event_bus = _EventBus()
+    app.script_widget_manager = _ScriptWidgetManager()
+    app.input_handler = _InputHandler()
+    app.llm_service = _Service("llm")
+    app.conversation_logger = _Service("logger")
+    app.mcp_integration = _Service("mcp")
+    app.plugin_instances = {}
+    app.running = True
+    app._background_tasks = []
+    if acp is not None:
+        app.acp_orchestrator = acp
+    return app
+
+
+@pytest.mark.asyncio
+async def test_shutdown_leaves_provider_open_when_queue_close_is_unconfirmed():
+    order = []
+    app = _shutdown_app(order, [False, True])
+
+    first = await app.shutdown()
+
+    assert first is False
+    assert "llm.shutdown" not in order
+    assert "logger.shutdown" not in order
+    assert "mcp.shutdown" not in order
+    assert getattr(app, "_shutdown_complete", False) is False
+
+    second = await app.shutdown()
+
+    assert second is True
+    assert order.index("queue.close") < order.index("llm.shutdown")
+    assert order.count("llm.shutdown") == 1
+    assert app._shutdown_complete is True
+
+
+@pytest.mark.asyncio
+async def test_cleanup_closes_queue_before_acp_and_retries_after_unconfirmed_close(
+    monkeypatch,
+):
+    from kollabor import code_service
+
+    order = []
+
+    class _ACP:
+        async def shutdown(self):
+            order.append("acp.shutdown")
+
+    app = _shutdown_app(order, [False, True], acp=_ACP())
+
+    async def fake_code_service_shutdown():
+        order.append("code_service.shutdown")
+
+    monkeypatch.setattr(code_service, "shutdown", fake_code_service_shutdown)
+
+    first = await app.cleanup()
+
+    assert first is False
+    assert order.index("hub.stop_intake") < order.index("queue.close")
+    assert "acp.shutdown" not in order
+    assert "llm.shutdown" not in order
+    assert getattr(app, "_cleanup_complete", False) is False
+    assert getattr(app, "_shutdown_complete", False) is False
+
+    second = await app.cleanup()
+
+    assert second is True
+    assert order.index("queue.close") < order.index("acp.shutdown")
+    assert order.index("acp.shutdown") < order.index("llm.shutdown")
+    assert app._cleanup_complete is True
+    assert app._shutdown_complete is True
+
+
 async def _async_record(order, label):
     order.append(label)
