@@ -363,3 +363,45 @@ async def test_branch_sync_failure_restores_all_session_owners():
     assert manager.conversation_logger.session_id == "current-before"
     assert api_service.current_session_id == "current-before"
     assert [message.content for message in history] == ["current"]
+
+
+@pytest.mark.asyncio
+async def test_branch_acp_restore_failure_restores_current_conversation():
+    class ConversationManager:
+        current_session_id = "current-before"
+        messages = [{"role": "user", "content": "current"}]
+
+        def save_conversation(self) -> None:
+            pass
+
+        def branch_session(self, session_id: str, index: int) -> dict:
+            self.current_session_id = "branch-created"
+            self.messages = [{"role": "user", "content": "branch"}]
+            return {"success": True, "session_id": "branch-created", "branch_point": index}
+
+    manager = ConversationManager()
+    history = [SimpleNamespace(content="current")]
+    state = object.__new__(LocalStateService)
+    state._llm_service = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_history=history,
+        api_service=SimpleNamespace(current_session_id="current-before"),
+    )
+
+    @asynccontextmanager
+    async def ownership(_action: str):
+        yield object(), True, lambda: None
+
+    async def fail_restore(_acp: object, _session_id: str | None = None) -> None:
+        raise OSError("ACP storage unavailable")
+
+    state._conversation_ownership = ownership
+    state._restore_conversation_acp = fail_restore
+
+    with pytest.raises(ValueError, match="failed to restore ACP conversation"):
+        await state.branch_conversation("saved-source", 0)
+
+    assert manager.current_session_id == "current-before"
+    assert manager.messages == [{"role": "user", "content": "current"}]
+    assert [message.content for message in history] == ["current"]
+    assert state._llm_service.api_service.current_session_id == "current-before"
