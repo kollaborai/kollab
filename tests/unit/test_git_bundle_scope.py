@@ -125,3 +125,20 @@ def test_git_only_scope_rejects_shellouts_helpers_and_non_read_commands(tmp_path
         assert result.metadata.get("scope_denied"), command
 
     executor.shell_executor.run_argv.assert_not_awaited()
+
+
+def test_git_only_bundle_scope_is_command_aware(tmp_path):
+    executor = _make_git_scoped_executor(tmp_path)
+
+    assert (
+        executor._check_bundle_scope(
+            "terminal", command="git status --short", cwd=str(tmp_path)
+        )
+        is None
+    )
+    assert executor._check_bundle_scope(
+        "terminal", command="git credential fill", cwd=str(tmp_path)
+    )
+    assert executor._check_bundle_scope(
+        "terminal", command="printf hello", cwd=str(tmp_path)
+    )
