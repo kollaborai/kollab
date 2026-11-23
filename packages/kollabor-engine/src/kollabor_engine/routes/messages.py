@@ -1730,10 +1730,16 @@ async def assistant_transport(
         ) from exc
 
     completion: Dict[str, Any] = {"completed": False}
+    handover_delivery: Dict[str, Any] = {
+        "enabled": False,
+        "token": None,
+        "sent": asyncio.Event(),
+    }
 
     async def run_callback(controller: RunController):
         state_blob = body.state if isinstance(body.state, dict) else {}
         handover_token = state_blob.get(_ASSISTANT_HANDOVER_STATE_KEY)
+        handover_token_from_request = handover_token is not None
         handover_record: Optional[Dict[str, Any]] = None
         handover_claim_id: Optional[str] = None
         handover_error = ""
@@ -2030,6 +2036,57 @@ async def assistant_transport(
                     controller, _ASSISTANT_HANDOVER_STATE_KEY, None
                 )
             handover_record = None
+
+        async def wait_for_handover_capability_delivery() -> bool:
+            """Wait boundedly for the ASGI send callback before admitting work."""
+            if (
+                handover_token_from_request
+                or not handover_token
+                or not handover_delivery["enabled"]
+            ):
+                return True
+            handover_delivery["token"] = handover_token
+            state_manager = getattr(controller, "_state_manager", None)
+            flush = getattr(state_manager, "flush", None)
+            if callable(flush):
+                flush()
+
+            deadline = time.monotonic() + EVENT_IDLE_TIMEOUT_SECONDS
+            while True:
+                if (read_context and read_context.revoked) or getattr(
+                    shared_queue, "revoked", False
+                ):
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    message = (
+                        "Cannot submit assistant messages because the handover "
+                        "capability ASGI send timed out. No messages were submitted. "
+                        "Retry the request."
+                    )
+                    controller.add_error(message)
+                    completion["error"] = {"message": message}
+                    completion["usage"] = {
+                        **usage_totals,
+                        "stopReason": "error",
+                    }
+                    completion["completed"] = True
+                    _assistant_set_state_value(
+                        controller, _ASSISTANT_HANDOVER_STATE_KEY, None
+                    )
+                    _assistant_set_usage(controller, completion["usage"])
+                    return False
+                try:
+                    await asyncio.wait_for(
+                        handover_delivery["sent"].wait(),
+                        timeout=min(remaining, 0.05),
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                return not (
+                    (read_context and read_context.revoked)
+                    or getattr(shared_queue, "revoked", False)
+                )
 
         def publish_progress() -> None:
             """Publish the in-flight turn so its parts reach the browser.
@@ -2864,7 +2921,7 @@ async def assistant_transport(
                         "sends were left owned by this capability."
                     )
                     return
-            if handover_token is None and add_message_count > 1:
+            if handover_token is None and add_message_count > 0:
                 if shared_queue is None:
                     message = (
                         "Cannot submit assistant messages because the event "
@@ -2880,11 +2937,19 @@ async def assistant_transport(
                     session, shared_queue, read_context
                 )
                 if handover_token is None:
+                    unsent = [
+                        command_message_label(command, index)
+                        for index, command in enumerate(body.commands)
+                        if _assistant_command_type(command) == "add-message"
+                    ]
+                    unsent_clause = (
+                        f"Not submitted: {', '.join(unsent)}. " if unsent else ""
+                    )
                     message = (
                         "Cannot submit assistant messages: the session already "
                         f"has {_ASSISTANT_HANDOVER_MAX_ENTRIES} active or expired "
-                        "multi-send handover records. "
-                        "No messages were submitted. Retry after an active handover "
+                        "assistant handover records; handover capacity is full. "
+                        f"{unsent_clause}No messages were submitted. Retry after an active handover "
                         "completes or an expired record is released."
                     )
                     controller.add_error(message)
@@ -2897,6 +2962,12 @@ async def assistant_transport(
                 _assistant_set_state_value(
                     controller, _ASSISTANT_HANDOVER_STATE_KEY, handover_token
                 )
+                if not await wait_for_handover_capability_delivery():
+                    return
+                if (read_context and read_context.revoked) or getattr(
+                    shared_queue, "revoked", False
+                ):
+                    return
             if len(body.commands) > 1 and any(
                 _assistant_command_type(command) == "add-message"
                 and _is_goal_message(_assistant_message_content(command))
@@ -2931,6 +3002,10 @@ async def assistant_transport(
                         kwargs.update(private_goal_reply=True, goal_conversation_uid=uid)
                         if body.goal_reply_id is not None:
                             kwargs["private_goal_reply_id"] = body.goal_reply_id
+                    if (read_context and read_context.revoked) or getattr(
+                        shared_queue, "revoked", False
+                    ):
+                        return
                     try:
                         accepted = await session.send_message(message_content, **kwargs)
                     except asyncio.CancelledError:
@@ -4094,8 +4169,23 @@ async def assistant_transport(
 
     class _OwnedAssistantTransportResponse(AssistantTransportResponse):
         async def stream_response(self, send):
+            handover_delivery["enabled"] = True
+
+            async def send_with_handover_tracking(message):
+                await send(message)
+                token = handover_delivery.get("token")
+                if token and message.get("type") == "http.response.body":
+                    payload = message.get("body", b"")
+                    wire = (
+                        payload
+                        if isinstance(payload, bytes)
+                        else str(payload).encode("utf-8")
+                    )
+                    if str(token).encode("ascii") in wire:
+                        handover_delivery["sent"].set()
+
             try:
-                await super().stream_response(send)
+                await super().stream_response(send_with_handover_tracking)
             finally:
                 # Cancellation can arrive during downstream send, outside the
                 # generators. Close every owned layer explicitly so create_run
@@ -4106,7 +4196,8 @@ async def assistant_transport(
                         closing.push_async_callback(protocol_stream.aclose)
                         closing.push_async_callback(self.body_iterator.aclose)
 
-    return _OwnedAssistantTransportResponse(protocol_stream)
+    response = _OwnedAssistantTransportResponse(protocol_stream)
+    return response
 
 
 class CancelRequest(BaseModel):

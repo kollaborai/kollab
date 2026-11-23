@@ -337,20 +337,18 @@ async def test_single_ambiguous_send_reports_full_handover_capacity(monkeypatch)
     await asyncio.wait_for(drain(response.stream), timeout=1)
 
     error = "\n".join(captured["controller"].errors)
-    assert session.send_message.await_count == 1
+    assert session.send_message.await_count == 0
     assert len(ledger) == messages._ASSISTANT_HANDOVER_MAX_ENTRIES
-    assert session.subscriptions == [], "no capability can retain a full ledger slot"
+    assert session.subscriptions == []
     assert "single" in error
-    assert "may still be running" in error
     assert "handover capacity" in error
-    assert "late events cannot be guaranteed" in error
-    assert "No messages were resubmitted." in error
+    assert "No messages were submitted" in error
     assert messages._ASSISTANT_HANDOVER_STATE_KEY not in captured["controller"].state
     assert captured["controller"].state["usage"]["stopReason"] == "error"
 
 
 @pytest.mark.asyncio
-async def test_successful_single_send_does_not_need_a_full_ledger_slot(monkeypatch):
+async def test_successful_single_send_releases_its_handover_at_terminal(monkeypatch):
     session = _FakeSession(
         [
             {"type": "token", "text": "single reply", "request_id": "single"},
@@ -358,7 +356,7 @@ async def test_successful_single_send_does_not_need_a_full_ledger_slot(monkeypat
         ]
     )
     ledger = messages._assistant_handover_ledger(session)
-    for index in range(messages._ASSISTANT_HANDOVER_MAX_ENTRIES):
+    for index in range(messages._ASSISTANT_HANDOVER_MAX_ENTRIES - 1):
         token = f"{index:032x}"
         ledger[token] = {
             "expires_at": 3600.0,
@@ -367,13 +365,19 @@ async def test_successful_single_send_does_not_need_a_full_ledger_slot(monkeypat
             "queue": None,
             "context": None,
         }
-    session.send_message = AsyncMock(
-        return_value={"accepted": True, "request_id": "single"}
-    )
     monkeypatch.setattr(
         messages, "get_session_registry", lambda: _FakeRegistry(session)
     )
     captured, _, drain = _install_fake_assistant_stream(monkeypatch)
+
+    async def accept_after_reservation(_content, *, request_id):
+        assert request_id == "single"
+        token = captured["controller"].state[messages._ASSISTANT_HANDOVER_STATE_KEY]
+        assert token in ledger
+        assert len(ledger) == messages._ASSISTANT_HANDOVER_MAX_ENTRIES
+        return {"accepted": True, "request_id": request_id}
+
+    session.send_message = AsyncMock(side_effect=accept_after_reservation)
 
     response = await messages.assistant_transport(
         session.session_id,
@@ -393,9 +397,9 @@ async def test_successful_single_send_does_not_need_a_full_ledger_slot(monkeypat
     await asyncio.wait_for(drain(response.stream), timeout=1)
 
     assert session.send_message.await_count == 1
-    assert len(ledger) == messages._ASSISTANT_HANDOVER_MAX_ENTRIES
+    assert len(ledger) == messages._ASSISTANT_HANDOVER_MAX_ENTRIES - 1
     assert session.subscriptions == []
-    assert messages._ASSISTANT_HANDOVER_STATE_KEY not in captured["controller"].state
+    assert captured["controller"].state.get(messages._ASSISTANT_HANDOVER_STATE_KEY) is None
     assert captured["controller"].state["usage"]["stopReason"] == "end_turn"
     assert captured["controller"].errors == []
 
