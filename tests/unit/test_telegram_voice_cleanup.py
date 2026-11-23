@@ -15,6 +15,12 @@ from kollabor_config import proc_ctl
 from plugins.hub.messaging_bridge import TelegramBridge
 
 
+_REAL_PROCESS_CHILDREN = psutil.Process.children
+
+
+_REAL_PROCESS_CHILDREN = psutil.Process.children
+
+
 @pytest.fixture(autouse=True)
 def _isolate_process_tree_enumeration(monkeypatch):
     monkeypatch.setattr(psutil.Process, "children", lambda *_args, **_kwargs: [])
@@ -515,3 +521,69 @@ async def test_timeout_kills_pipe_holder_after_transcriber_exits(tmp_path, monke
                 pass
         if not task.done():
             await asyncio.wait({task}, timeout=10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX detached child lifecycle")
+async def test_success_defers_cleanup_for_detached_writer(tmp_path, monkeypatch):
+    monkeypatch.setattr(psutil.Process, "children", _REAL_PROCESS_CHILDREN)
+    temp_root = tmp_path / "temporary"
+    temp_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp_root))
+    whisper = tmp_path / "whisper"
+    writer = tmp_path / "writer.py"
+    started = tmp_path / "writer.started"
+    outcome = tmp_path / "writer.outcome"
+    writer.write_text(
+        textwrap.dedent(
+            f"""\
+            import pathlib, sys, time
+            pathlib.Path({str(started)!r}).write_text("ready")
+            time.sleep(0.5)
+            try:
+                pathlib.Path(sys.argv[1]).write_text("late output")
+            except OSError as exc:
+                pathlib.Path({str(outcome)!r}).write_text(type(exc).__name__)
+            else:
+                pathlib.Path({str(outcome)!r}).write_text("written")
+            """
+        )
+    )
+    whisper.write_text(
+        "#!/usr/bin/env python3\n"
+        + textwrap.dedent(
+            f"""\
+            import pathlib, subprocess, sys, time
+            audio = pathlib.Path(sys.argv[1])
+            subprocess.Popen(
+                [sys.executable, {str(writer)!r},
+                 str(audio.parent / "late.txt")],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True,
+            )
+            while not pathlib.Path({str(started)!r}).exists():
+                time.sleep(0.005)
+            time.sleep(0.05)
+            """
+        )
+    )
+    whisper.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    task = asyncio.create_task(_bridge()._transcribe_voice("synthetic-file-id"))
+    try:
+        result = await task
+        assert result == "[voice] [voice message - whisper returned empty]"
+        run_dirs = list(temp_root.glob("kollab-telegram-voice-*"))
+        assert len(run_dirs) == 1, "successful communication removed artifacts while detached writer ran"
+        deadline = time.monotonic() + 2
+        while not outcome.exists() and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        assert outcome.exists(), "detached writer did not finish"
+        assert outcome.read_text() == "written"
+        deadline = time.monotonic() + 2
+        while list(temp_root.iterdir()) and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        assert list(temp_root.iterdir()) == []
+    finally:
+        if not task.done():
+            task.cancel()
