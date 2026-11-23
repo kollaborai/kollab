@@ -9,10 +9,14 @@ Mocks aiohttp to avoid real network calls.
 """
 
 import asyncio
+import gzip
 import os
+import re
 import sys
 import unittest
+import zlib
 from contextlib import contextmanager
+from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -20,7 +24,9 @@ import aiohttp
 # Ensure we can import kollabor_agent
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from kollabor_agent.tool_generators.xml_regex import build_regex_for_tool
 from kollabor_agent.tool_registry import ToolRegistry
+from kollabor_ai.response_parser import ResponseParser
 
 
 def _run(coro):
@@ -145,6 +151,18 @@ def _make_mock_aiohttp_response(status=200, text="", url="https://example.com"):
     resp.status = status
     resp.reason = "OK" if status < 400 else "Error"
     resp.text = AsyncMock(return_value=text)
+    encoded = text.encode() if isinstance(text, str) else text
+
+    class MockContent:
+        def __init__(self):
+            self.offset = 0
+
+        async def read(self, size):
+            chunk = encoded[self.offset : self.offset + size]
+            self.offset += len(chunk)
+            return chunk
+
+    resp.content = MockContent()
     resp.headers = {}
     resp.url = url
     resp.__aenter__ = AsyncMock(return_value=resp)
@@ -233,6 +251,748 @@ class TestWebFetchExecution(unittest.TestCase):
                 f"Output should be roughly truncated, got {len(result.output)} chars"
             )
 
+    def test_web_fetch_bounds_output_and_streams_response(self):
+        """The public fetch path must cap output and consume a bounded stream."""
+        body = b"<html><body>" + (b"A" * 1_000_000) + b"</body></html>"
+
+        class BoundedContent:
+            def __init__(self):
+                self.bytes_read = 0
+                self.offset = 0
+
+            async def read(self, size):
+                chunk = body[self.offset : self.offset + size]
+                self.offset += len(chunk)
+                self.bytes_read += len(chunk)
+                return chunk
+
+        mock_resp = _make_mock_aiohttp_response(text=body.decode())
+        mock_resp.content = BoundedContent()
+        mock_resp.headers = {"Content-Length": str(len(body))}
+        tool_data = {
+            "id": "web_fetch_bound",
+            "url": "https://example.com/article?token=secret",
+            "max_chars": 100,
+            "extract_main": False,
+        }
+
+        with _patch_aiohttp_session(mock_get=mock_resp):
+            result = _run(self.executor._execute_web_fetch(tool_data))
+
+        self.assertLessEqual(len(result.output), 100)
+        self.assertLessEqual(mock_resp.content.bytes_read, 500_000)
+        self.assertFalse(result.success)
+        self.assertIn("download limit", result.error)
+        mock_resp.text.assert_not_awaited()
+
+    def test_web_fetch_rejects_invalid_output_limit(self):
+        """Invalid output limits fail clearly instead of being coerced."""
+        for value in (0, -1, 1.5, True, 10**100):
+            with self.subTest(max_chars=value):
+                result = _run(
+                    self.executor._execute_web_fetch(
+                        {
+                            "id": "web_fetch_invalid_limit",
+                            "url": "https://example.com",
+                            "max_chars": value,
+                        }
+                    )
+                )
+                self.assertFalse(result.success)
+                self.assertIn("max_chars", result.error)
+
+    def test_web_fetch_accepts_numeric_limit_from_text_tag(self):
+        """Nested XML extraction passes numeric fields as strings."""
+        ToolRegistry.reset()
+        tool = ToolRegistry.get_global().get("web-fetch")
+        parser = ResponseParser()
+        parser.register_plugin_tag(
+            "web-fetch",
+            re.compile(build_regex_for_tool(tool), re.IGNORECASE | re.DOTALL),
+            "web-fetch",
+            lambda match: {
+                parameter.name: value.group(1).strip()
+                for parameter in tool.parameters
+                if (value := re.search(
+                    rf"<{re.escape(parameter.name)}>(.*?)</{re.escape(parameter.name)}>",
+                    match.group(1),
+                    re.IGNORECASE | re.DOTALL,
+                ))
+            },
+        )
+        (tool_data,) = parser._extract_plugin_tools(
+            "<web-fetch><url>https://example.com</url>"
+            "<max_chars>5000</max_chars></web-fetch>"
+        )
+        response = _make_mock_aiohttp_response(
+            text="<html><body><p>Text form works</p></body></html>"
+        )
+
+        with _patch_aiohttp_session(mock_get=response):
+            result = _run(self.executor._execute_web_fetch(tool_data))
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn("Text form works", result.output)
+
+    def test_web_fetch_falls_back_for_unknown_charset(self):
+        """An unrecognized server charset must not turn extraction into an error."""
+        response = _make_mock_aiohttp_response(
+            text="<html><body><p>Charset fallback works</p></body></html>"
+        )
+        response.charset = "utf8mb4"
+
+        with _patch_aiohttp_session(mock_get=response):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"id": "web_fetch_charset", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn("Charset fallback works", result.output)
+
+    def test_web_fetch_decodes_both_deflate_wire_formats(self):
+        """The deflate content encoding appears with and without a zlib wrapper."""
+        body = b"<html><body><p>Deflate decoding works</p></body></html>"
+        for window_bits in (zlib.MAX_WBITS, -zlib.MAX_WBITS):
+            with self.subTest(window_bits=window_bits):
+                compressor = zlib.compressobj(wbits=window_bits)
+                compressed = compressor.compress(body) + compressor.flush()
+                response = _make_mock_aiohttp_response(
+                    text=compressed, url="https://example.com"
+                )
+                response.headers = {"Content-Encoding": "deflate"}
+
+                with _patch_aiohttp_session(mock_get=response):
+                    result = _run(
+                        self.executor._execute_web_fetch(
+                            {
+                                "id": "web_fetch_deflate",
+                                "url": "https://example.com",
+                            }
+                        )
+                    )
+
+                self.assertTrue(result.success, result.error)
+                self.assertIn("Deflate decoding works", result.output)
+
+    def test_web_fetch_rejects_incomplete_deflate_response(self):
+        """Invalid or truncated deflate streams must not return partial text."""
+        complete = zlib.compress(b"partial deflate text")
+        for body in (b"x", complete[:-1]):
+            with self.subTest(body_length=len(body)):
+                response = _make_mock_aiohttp_response(
+                    text=body, url="https://example.com"
+                )
+                response.headers = {"Content-Encoding": "deflate"}
+
+                with _patch_aiohttp_session(mock_get=response):
+                    result = _run(
+                        self.executor._execute_web_fetch(
+                            {
+                                "id": "web_fetch_incomplete_deflate",
+                                "url": "https://example.com",
+                                "extract_main": False,
+                            }
+                        )
+                    )
+
+                self.assertFalse(result.success, result.output)
+                self.assertIn("incomplete deflate", result.error)
+
+    def test_web_fetch_decodes_concatenated_gzip_members(self):
+        """Valid gzip members concatenated in one response must all be decoded."""
+        body = gzip.compress(b"A" * 600) + gzip.compress(b"SECOND_MEMBER_SENTINEL")
+        response = _make_mock_aiohttp_response(text=body, url="https://example.com")
+        response.headers = {"Content-Encoding": "gzip"}
+
+        with _patch_aiohttp_session(mock_get=response):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {
+                        "id": "web_fetch_multi_member_gzip",
+                        "url": "https://example.com",
+                        "extract_main": False,
+                    }
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn("SECOND_MEMBER_SENTINEL", result.output)
+
+    def test_web_fetch_rejects_truncated_gzip_response(self):
+        """A missing gzip trailer must not produce successful partial text."""
+        body = gzip.compress(b"partial text " * 100)[:-8]
+        response = _make_mock_aiohttp_response(text=body, url="https://example.com")
+        response.headers = {"Content-Encoding": "gzip"}
+
+        with _patch_aiohttp_session(mock_get=response):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {
+                        "id": "web_fetch_truncated_gzip",
+                        "url": "https://example.com",
+                        "extract_main": False,
+                    }
+                )
+            )
+
+        self.assertFalse(result.success, result.output)
+        self.assertIn("incomplete gzip", result.error)
+
+    def test_web_fetch_local_http_redirect_chunked_and_compressed_limits(self):
+        """Exercise redirects, unknown lengths and gzip expansion over real HTTP."""
+
+        async def run_case():
+            large_body = b"Z" * 2_100_000
+            compressed_body = gzip.compress(large_body)
+
+            async def handle(reader, writer):
+                request = await reader.readuntil(b"\r\n\r\n")
+                path = request.split(b" ", 2)[1].split(b"?", 1)[0]
+                if path == b"/redirect":
+                    writer.write(
+                        b"HTTP/1.1 302 Found\r\n"
+                        b"Location: /chunked\r\nContent-Length: 0\r\n"
+                        b"Connection: close\r\n\r\n"
+                    )
+                elif path == b"/chunked":
+                    writer.write(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                        b"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                    )
+                    for offset in range(0, len(large_body), 32_768):
+                        chunk = large_body[offset : offset + 32_768]
+                        writer.write(f"{len(chunk):X}\r\n".encode() + chunk + b"\r\n")
+                        await writer.drain()
+                    writer.write(b"0\r\n\r\n")
+                elif path == b"/malformed":
+                    writer.write(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: invalid\r\n"
+                        b"Connection: close\r\n\r\nhello"
+                    )
+                elif path == b"/normal":
+                    normal_body = b'{"headline":"' + (b"news " * 120) + b'"}'
+                    writer.write(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                        + f"Content-Length: {len(normal_body)}\r\n".encode()
+                        + b"Connection: close\r\n\r\n"
+                        + normal_body
+                    )
+                else:
+                    writer.write(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                        + f"Content-Length: {len(compressed_body)}\r\n".encode()
+                        + b"Content-Encoding: gzip\r\nConnection: close\r\n\r\n"
+                        + compressed_body
+                    )
+                try:
+                    await writer.drain()
+                except ConnectionError:
+                    pass
+                writer.close()
+                await writer.wait_closed()
+
+            server = await asyncio.start_server(handle, "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+            try:
+                redirected = await self.executor._execute_web_fetch(
+                    {
+                        "id": "web_fetch_chunked",
+                        "url": f"http://127.0.0.1:{port}/redirect",
+                        "extract_main": False,
+                    }
+                )
+                compressed = await self.executor._execute_web_fetch(
+                    {
+                        "id": "web_fetch_compressed",
+                        "url": f"http://127.0.0.1:{port}/compressed",
+                        "extract_main": False,
+                    }
+                )
+                malformed = await self.executor._execute_web_fetch(
+                    {
+                        "id": "web_fetch_malformed",
+                        "url": f"http://127.0.0.1:{port}/malformed?token=secret",
+                    }
+                )
+                normal = await self.executor._execute_web_fetch(
+                    {
+                        "id": "web_fetch_normal",
+                        "url": f"http://127.0.0.1:{port}/normal?token=secret",
+                        "extract_main": False,
+                    }
+                )
+                return redirected, compressed, malformed, normal
+            finally:
+                server.close()
+                await server.wait_closed()
+
+        redirected, compressed, malformed, normal = _run(run_case())
+        self.assertFalse(redirected.success)
+        self.assertIn("download limit", redirected.error)
+        self.assertFalse(compressed.success)
+        self.assertIn("decoded limit", compressed.error)
+        self.assertFalse(malformed.success)
+        self.assertNotIn("token=secret", malformed.error)
+        self.assertTrue(normal.success)
+        self.assertIn('"headline"', normal.output)
+        self.assertLessEqual(len(normal.output), 5000)
+        self.assertNotIn("token=secret", normal.metadata["url"])
+
+    def test_web_fetch_bounds_playwright_fallback_output(self):
+        """Fallback text is subject to the same total output budget."""
+        response = _make_mock_aiohttp_response(
+            text="<html><body>x</body></html>", url="https://example.com/page"
+        )
+        tool_data = {
+            "id": "web_fetch_fallback",
+            "url": "https://example.com/page",
+            "max_chars": 100,
+        }
+        fallback = AsyncMock(return_value="fallback " * 1000)
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                self.executor,
+                "_playwright_fetch",
+                new=fallback,
+            ),
+        ):
+            result = _run(self.executor._execute_web_fetch(tool_data))
+
+        self.assertTrue(result.success)
+        self.assertLessEqual(len(result.output), 100)
+        self.assertIn("...[truncated]", result.output)
+        fallback.assert_awaited_once()
+        fallback_call = fallback.await_args
+        self.assertEqual(fallback_call.args, ("<html><body>x</body></html>",))
+        self.assertEqual(fallback_call.kwargs["page_url"], tool_data["url"])
+        self.assertEqual(fallback_call.kwargs["max_chars"], 2_000_000)
+        self.assertLess(fallback_call.kwargs["max_download_bytes"], 500_000)
+        self.assertLess(fallback_call.kwargs["max_decoded_bytes"], 2_000_000)
+        self.assertIn("deadline", fallback_call.kwargs)
+
+    def test_web_fetch_playwright_fallback_loads_external_script_with_budget(self):
+        """Fallback scripts render when their bodies fit the shared byte cap."""
+
+        async def run_case():
+            requests = []
+            page_body = (
+                b'<html><body><div id="app"></div>'
+                b'<script src="/redirect.js"></script></body></html>'
+            )
+            large_page_prefix = (
+                b'<html><body><div id="app"></div>'
+                b'<script src="/oversized.js"></script>'
+            )
+            large_page_suffix = b"</body></html>"
+            large_page_body = (
+                large_page_prefix
+                + b" " * (499_900 - len(large_page_prefix) - len(large_page_suffix))
+                + large_page_suffix
+            )
+            decoded_page_prefix = (
+                b'<html><body><div id="app"></div>'
+                b'<script src="/compressed.js"></script>'
+            )
+            decoded_page_body = (
+                decoded_page_prefix
+                + b" " * (400_000 - len(decoded_page_prefix) - len(large_page_suffix))
+                + large_page_suffix
+            )
+            script_body = (
+                b'document.getElementById("app").textContent = '
+                b'"BUNDLE RENDERED TEXT";'
+            )
+            oversized_script_body = script_body + b" " * 2_000
+            compressed_script_body = gzip.compress(script_body + b" " * 1_700_000)
+
+            async def handle(reader, writer):
+                request = await reader.readuntil(b"\r\n\r\n")
+                path = request.split(b" ", 2)[1].split(b"?", 1)[0].decode()
+                requests.append(path)
+                if path == "/page":
+                    body = page_body
+                    content_type = "text/html; charset=utf-8"
+                elif path == "/large":
+                    body = large_page_body
+                    content_type = "text/html; charset=utf-8"
+                elif path == "/decoded":
+                    body = decoded_page_body
+                    content_type = "text/html; charset=utf-8"
+                elif path == "/bundle.js":
+                    body = script_body
+                    content_type = "application/javascript"
+                elif path == "/redirect.js":
+                    body = b"redirect body"
+                    content_type = "application/javascript"
+                elif path == "/compressed.js":
+                    body = compressed_script_body
+                    content_type = "application/javascript"
+                else:
+                    body = oversized_script_body
+                    content_type = "application/javascript"
+                if path == "/redirect.js":
+                    response = (
+                        b"HTTP/1.1 302 Found\r\n"
+                        b"Location: /bundle.js\r\n"
+                        + f"Content-Length: {len(body)}\r\n".encode()
+                        + f"Content-Type: {content_type}\r\n".encode()
+                        + b"Connection: close\r\n\r\n"
+                        + body
+                    )
+                elif path == "/oversized.js":
+                    response = (
+                        b"HTTP/1.1 200 OK\r\n"
+                        b"Transfer-Encoding: chunked\r\n"
+                        b"Content-Type: application/javascript\r\n"
+                        b"Connection: close\r\n\r\n"
+                        + f"{len(body):X}\r\n".encode()
+                        + body
+                        + b"\r\n0\r\n\r\n"
+                    )
+                elif path == "/compressed.js":
+                    response = (
+                        b"HTTP/1.1 200 OK\r\n"
+                        + f"Content-Length: {len(body)}\r\n".encode()
+                        + f"Content-Type: {content_type}\r\n".encode()
+                        + b"Content-Encoding: gzip\r\n"
+                        + b"Connection: close\r\n\r\n"
+                        + body
+                    )
+                else:
+                    response = (
+                        b"HTTP/1.1 200 OK\r\n"
+                        + f"Content-Length: {len(body)}\r\n".encode()
+                        + f"Content-Type: {content_type}\r\n".encode()
+                        + b"Connection: close\r\n\r\n"
+                        + body
+                    )
+                writer.write(response)
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+
+            server = await asyncio.start_server(handle, "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+            page_url = f"http://127.0.0.1:{port}/page"
+
+            class FakeRequest:
+                def __init__(self, url, resource_type, navigation=False):
+                    self.url = url
+                    self.resource_type = resource_type
+                    self._navigation = navigation
+
+                def is_navigation_request(self):
+                    return self._navigation
+
+            class FakeRoute:
+                def __init__(self, request):
+                    self.request = request
+                    self.fulfilled = None
+                    self.aborted = False
+
+                async def fulfill(self, **kwargs):
+                    self.fulfilled = kwargs
+
+                async def abort(self):
+                    self.aborted = True
+
+            class FakePage:
+                def __init__(self):
+                    self.route_handler = None
+                    self.rendered_text = ""
+
+                async def route(self, _pattern, handler):
+                    self.route_handler = handler
+
+                async def _load_external_script(self, html):
+                    sources = re.findall(
+                        r'<script[^>]+src=["\']([^"\']+)', html
+                    )
+                    for source in sources:
+                        route = FakeRoute(
+                            FakeRequest(
+                                f"http://127.0.0.1:{port}{source}", "script"
+                            )
+                        )
+                        await self.route_handler(route)
+                        if route.fulfilled is not None:
+                            body = route.fulfilled.get("body", b"")
+                            if isinstance(body, str):
+                                body = body.encode()
+                            if b"BUNDLE RENDERED TEXT" in body:
+                                self.rendered_text = "BUNDLE RENDERED TEXT"
+                    image_route = FakeRoute(
+                        FakeRequest(
+                            f"http://127.0.0.1:{port}/pixel.png", "image"
+                        )
+                    )
+                    await self.route_handler(image_route)
+                    self.image_request_aborted = image_route.aborted
+
+                async def set_content(self, html, **_kwargs):
+                    await self._load_external_script(html)
+
+                async def goto(self, url, **_kwargs):
+                    document = FakeRoute(
+                        FakeRequest(url, "document", navigation=True)
+                    )
+                    await self.route_handler(document)
+                    if document.fulfilled is None:
+                        return
+                    body = document.fulfilled.get("body", b"")
+                    if isinstance(body, bytes):
+                        body = body.decode("utf-8")
+                    await self._load_external_script(body)
+
+                def locator(self, _selector):
+                    return self
+
+                async def evaluate(self, _expression, _limit):
+                    return self.rendered_text
+
+            class FakeBrowser:
+                def __init__(self, page):
+                    self.page = page
+
+                async def new_page(self):
+                    return self.page
+
+                async def close(self):
+                    pass
+
+            class FakeChromium:
+                def __init__(self, page):
+                    self.page = page
+
+                async def launch(self, **_kwargs):
+                    return FakeBrowser(self.page)
+
+            class FakePlaywrightContext:
+                def __init__(self, page):
+                    self.chromium = FakeChromium(page)
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    pass
+
+            pages = []
+
+            def fake_async_playwright():
+                page = FakePage()
+                pages.append(page)
+                return FakePlaywrightContext(page)
+
+            async_api = ModuleType("playwright.async_api")
+            async_api.async_playwright = fake_async_playwright
+            playwright = ModuleType("playwright")
+            playwright.__path__ = []
+            try:
+                with patch.dict(
+                    sys.modules,
+                    {
+                        "playwright": playwright,
+                        "playwright.async_api": async_api,
+                    },
+                ):
+                    normal = await self.executor._execute_web_fetch(
+                        {"id": "web_fetch_script", "url": page_url}
+                    )
+                    large = await self.executor._execute_web_fetch(
+                        {
+                            "id": "web_fetch_script_over_budget",
+                            "url": f"http://127.0.0.1:{port}/large",
+                        }
+                    )
+                    decoded = await self.executor._execute_web_fetch(
+                        {
+                            "id": "web_fetch_script_decoded_over_budget",
+                            "url": f"http://127.0.0.1:{port}/decoded",
+                        }
+                    )
+            finally:
+                server.close()
+                await server.wait_closed()
+
+            return normal, large, decoded, requests, pages
+
+        normal, large, decoded, requests, pages = _run(run_case())
+        self.assertTrue(normal.success)
+        self.assertIn("BUNDLE RENDERED TEXT", normal.output)
+        self.assertTrue(large.success)
+        self.assertNotIn("BUNDLE RENDERED TEXT", large.output)
+        self.assertTrue(decoded.success)
+        self.assertNotIn("BUNDLE RENDERED TEXT", decoded.output)
+        self.assertEqual(requests.count("/redirect.js"), 1)
+        self.assertEqual(requests.count("/bundle.js"), 1)
+        self.assertEqual(requests.count("/oversized.js"), 1)
+        self.assertEqual(requests.count("/compressed.js"), 1)
+        self.assertTrue(pages[0].image_request_aborted)
+        self.assertEqual(pages[1].rendered_text, "")
+        self.assertEqual(pages[2].rendered_text, "")
+
+    def test_web_fetch_accepts_exact_download_limit_without_content_length(self):
+        """A body exactly at the download cap is allowed without a length header."""
+
+        async def run_case():
+            body = b"x" * 500_000
+
+            async def handle(reader, writer):
+                request = await reader.readuntil(b"\r\n\r\n")
+                path = request.split(b" ", 2)[1]
+                if path == b"/redirect":
+                    response = b"HTTP/1.1 302 Found\r\nLocation: /empty\r\n"
+                    response_body = body
+                elif path == b"/empty":
+                    response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                    response_body = b""
+                else:
+                    response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                    response_body = body
+                writer.write(
+                    response + b"Connection: close\r\n\r\n" + response_body
+                )
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+
+            server = await asyncio.start_server(handle, "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+            try:
+                direct = await self.executor._execute_web_fetch(
+                    {
+                        "id": "web_fetch_exact_cap",
+                        "url": f"http://127.0.0.1:{port}/body",
+                        "extract_main": False,
+                    }
+                )
+                redirected = await self.executor._execute_web_fetch(
+                    {
+                        "id": "web_fetch_exact_redirect_cap",
+                        "url": f"http://127.0.0.1:{port}/redirect",
+                        "extract_main": False,
+                    }
+                )
+                return direct, redirected
+            finally:
+                server.close()
+                await server.wait_closed()
+
+        direct, redirected = _run(run_case())
+        self.assertTrue(direct.success, direct.error)
+        self.assertTrue(redirected.success, redirected.error)
+
+    def test_web_fetch_overflow_check_reads_at_most_one_extra_byte(self):
+        """Unknown-length oversized bodies stop after one overflow byte."""
+        body = b"x" * 1_000_000
+
+        class BoundedContent:
+            def __init__(self):
+                self.offset = 0
+
+            async def read(self, size):
+                chunk = body[self.offset : self.offset + size]
+                self.offset += len(chunk)
+                return chunk
+
+        response = _make_mock_aiohttp_response()
+        response.content = BoundedContent()
+        response.headers = {}
+        with _patch_aiohttp_session(mock_get=response):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"id": "web_fetch_overflow", "url": "https://example.com"}
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertIn("download limit", result.error)
+        self.assertEqual(response.content.offset, 500_001)
+
+    def test_web_fetch_cancellation_closes_response(self):
+        """Cancellation during streaming propagates and closes the response."""
+
+        async def run_case():
+            started = asyncio.Event()
+            response = _make_mock_aiohttp_response()
+
+            class BlockingContent:
+                async def read(self, _size):
+                    started.set()
+                    await asyncio.Event().wait()
+
+            response.content = BlockingContent()
+            with _patch_aiohttp_session(mock_get=response):
+                task = asyncio.create_task(
+                    self.executor._execute_web_fetch(
+                        {"id": "web_fetch_cancel", "url": "https://example.com"}
+                    )
+                )
+                await started.wait()
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            return response.__aexit__.await_count
+
+        self.assertEqual(_run(run_case()), 1)
+
+    def test_web_fetch_redirects_share_total_timeout(self):
+        """The timeout covers the complete redirect chain, not each hop."""
+        import aiohttp
+
+        async def run_case():
+            body = b"<html><body>done " + b"x" * 600 + b"</body></html>"
+
+            async def handle(reader, writer):
+                request = await reader.readuntil(b"\r\n\r\n")
+                path = request.split(b" ", 2)[1]
+                await asyncio.sleep(0.06)
+                if path == b"/one":
+                    response = (
+                        b"HTTP/1.1 302 Found\r\nLocation: /two\r\n"
+                        b"Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                elif path == b"/two":
+                    response = (
+                        b"HTTP/1.1 302 Found\r\nLocation: /three\r\n"
+                        b"Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                else:
+                    response = (
+                        b"HTTP/1.1 200 OK\r\nContent-Length: "
+                        + str(len(body)).encode()
+                        + b"\r\nConnection: close\r\n\r\n"
+                        + body
+                    )
+                writer.write(response)
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+
+            server = await asyncio.start_server(handle, "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+            timeout = aiohttp.ClientTimeout(total=0.15)
+            try:
+                with patch("aiohttp.ClientTimeout", return_value=timeout):
+                    return await self.executor._execute_web_fetch(
+                        {
+                            "id": "web_fetch_redirect_timeout",
+                            "url": f"http://127.0.0.1:{port}/one",
+                            "extract_main": False,
+                        }
+                    )
+            finally:
+                server.close()
+                await server.wait_closed()
+
+        result = _run(run_case())
+        self.assertFalse(result.success, result.output)
+        self.assertIn("timeout", result.error.lower())
+
     def test_web_fetch_invalid_url(self):
         """Test error handling for invalid URLs."""
         tool_data = {
@@ -315,6 +1075,42 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertNotIn("evil()", text)
         self.assertNotIn("color:red", text)
         self.assertNotIn("Copyright", text)
+
+    def test_html_extraction_falls_back_when_lxml_is_unavailable(self):
+        """HTML extraction should work without the optional lxml parser."""
+        class FeatureNotFound(Exception):
+            pass
+
+        class ParsedHtml:
+            def find_all(self, *_args):
+                return []
+
+            def get_text(self):
+                return "Parser fallback works"
+
+        parser_calls = []
+
+        def without_lxml(markup, features):
+            parser_calls.append(features)
+            if features == "lxml":
+                raise FeatureNotFound("lxml parser is unavailable")
+            return ParsedHtml()
+
+        fake_bs4 = ModuleType("bs4")
+        fake_bs4.BeautifulSoup = without_lxml
+        fake_exceptions = ModuleType("bs4.exceptions")
+        fake_exceptions.FeatureNotFound = FeatureNotFound
+        fake_bs4.exceptions = fake_exceptions
+
+        html = "<html><body><main>Parser fallback works</main></body></html>"
+        with patch.dict(
+            sys.modules,
+            {"bs4": fake_bs4, "bs4.exceptions": fake_exceptions},
+        ):
+            text = self.executor._extract_main_content(html, extract_main=False)
+
+        self.assertEqual(text, "Parser fallback works")
+        self.assertEqual(parser_calls, ["lxml", "html.parser"])
 
 
 class TestWebSearchExecution(unittest.TestCase):
