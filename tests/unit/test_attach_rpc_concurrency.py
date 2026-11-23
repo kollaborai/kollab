@@ -22,7 +22,7 @@ from kollabor.state.handlers import register_state_handlers
 from kollabor.state.local import LocalStateService
 from kollabor_agent.queue_processor import QueueProcessor
 from kollabor_events.data_models import ConversationMessage
-from kollabor_rpc import RpcServer
+from kollabor_rpc import RpcServer, current_rpc_caller_context
 from kollabor_tui.display_tap import DisplayTap
 from plugins.hub.messenger import AgentSocketServer
 
@@ -106,6 +106,37 @@ async def test_a_stop_sent_after_a_send_runs_after_it(socket_dir):
         # A request sent right before a detach still gets its answer.
         await send(request("r3", "state.cancel"), {"type": "detach"})
         assert (await replies(reader, 1))[0]["result"] == {"cancelled": True}
+
+
+@pytest.mark.asyncio
+async def test_attached_transport_sets_authenticated_local_principal(socket_dir):
+    rpc = RpcServer()
+
+    def inspect_context(_params):
+        context = current_rpc_caller_context()
+        if context is None:
+            return {"principal_id": None, "transport": None}
+        return {
+            "principal_id": context.principal_id,
+            "transport": context.transport,
+        }
+
+    rpc.register("context.inspect", inspect_context)
+    async with attached(rpc) as (reader, send):
+        await send(
+            request(
+                "r-context",
+                "context.inspect",
+                principal_id="uid:attacker-controlled",
+                expected_conversation_uid="forged",
+            )
+        )
+        response = (await replies(reader, 1))[0]
+
+    assert response["result"] == {
+        "principal_id": f"uid:{os.getuid()}",
+        "transport": "unix-peer-uid",
+    }
 
 
 class Turns(SimpleNamespace):

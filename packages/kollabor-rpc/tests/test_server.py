@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
 
+from kollabor_rpc import RpcCallerContext, current_rpc_caller_context
 from kollabor_rpc.models import RpcRequest
 from kollabor_rpc.server import RpcServer
 
@@ -81,6 +83,81 @@ async def test_handle_request_success_async_handler() -> None:
     assert response.error is None
     assert response.error_kind is None
     assert response.result == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_wire_dispatch_scopes_trusted_caller_context_per_request() -> None:
+    server = RpcServer()
+    entered = 0
+    both_entered = asyncio.Event()
+    release = asyncio.Event()
+    seen: dict[str, RpcCallerContext | None] = {}
+
+    async def handler(params: dict[str, Any]) -> dict[str, bool]:
+        nonlocal entered
+        seen[params["label"]] = current_rpc_caller_context()
+        entered += 1
+        if entered == 2:
+            both_entered.set()
+        await release.wait()
+        return {"ok": True}
+
+    server.register("context.inspect", handler)
+    first = RpcCallerContext.from_unix_peer(501)
+    second = RpcCallerContext.from_unix_peer(502)
+    first_task = asyncio.create_task(
+        server.handle_wire(
+            {
+                "action": "rpc_request",
+                "request_id": "first",
+                "method": "context.inspect",
+                "params": {"label": "first", "principal_id": "uid:999"},
+            },
+            caller_context=first,
+        )
+    )
+    second_task = asyncio.create_task(
+        server.handle_wire(
+            {
+                "action": "rpc_request",
+                "request_id": "second",
+                "method": "context.inspect",
+                "params": {"label": "second", "principal_id": "uid:999"},
+            },
+            caller_context=second,
+        )
+    )
+
+    await asyncio.wait_for(both_entered.wait(), timeout=1)
+    assert current_rpc_caller_context() is None
+    release.set()
+    assert (await first_task)["error"] is None
+    assert (await second_task)["error"] is None
+    assert seen == {"first": first, "second": second}
+    assert current_rpc_caller_context() is None
+
+
+@pytest.mark.asyncio
+async def test_wire_dispatch_without_context_does_not_inherit_prior_context() -> None:
+    server = RpcServer()
+    seen: list[RpcCallerContext | None] = []
+
+    def handler(_params: dict[str, Any]) -> dict[str, bool]:
+        seen.append(current_rpc_caller_context())
+        return {"ok": True}
+
+    server.register("context.inspect", handler)
+    context = RpcCallerContext.from_unix_peer(501)
+    request = {
+        "action": "rpc_request",
+        "request_id": "context",
+        "method": "context.inspect",
+        "params": {},
+    }
+    await server.handle_wire(request, caller_context=context)
+    await server.handle_wire(request)
+
+    assert seen == [context, None]
 
 
 @pytest.mark.asyncio
