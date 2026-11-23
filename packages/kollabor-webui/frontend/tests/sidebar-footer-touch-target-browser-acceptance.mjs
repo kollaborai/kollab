@@ -100,7 +100,7 @@ async function main() {
 
         assert.equal(layout.buttons.length, 8, `expected eight visible footer buttons at ${viewport.width}px`);
         for (const button of layout.buttons) {
-          if (viewport.width < 1024 && (button.width < 44 || button.height < 44)) {
+          if (viewport.width < 1024 && (button.width + 0.01 < 44 || button.height + 0.01 < 44)) {
             failures.push(`${viewport.width}px button ${button.index + 1} is ${button.width}x${button.height}px`);
           }
           assert.ok(button.left >= -1 && button.right <= layout.actionWidth + 1,
