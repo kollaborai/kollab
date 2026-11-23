@@ -149,8 +149,11 @@ async def test_cli_retries_incomplete_start_cleanup(monkeypatch, cleanup_result)
     if cleanup_result:
         await cli.async_main()
     else:
-        with pytest.raises(RuntimeError, match="cleanup"):
+        with pytest.raises(
+            application.ApplicationCleanupIncompleteError, match="cleanup"
+        ) as exc:
             await cli.async_main()
+        assert isinstance(exc.value.__cause__, application.ApplicationCleanupIncompleteError)
 
     assert cleanup_calls == [False, cleanup_result]
 
@@ -179,11 +182,14 @@ async def test_cli_preserves_original_start_failure_after_cleanup_retry(
 
 
 @pytest.mark.asyncio
-async def test_cli_preserves_original_pipe_failure_after_cleanup_retry(monkeypatch):
+@pytest.mark.parametrize("retry_result", [False, True])
+async def test_cli_preserves_original_pipe_failure_after_cleanup_retry(
+    monkeypatch, retry_result
+):
     monkeypatch.setattr(application, "EventDrivenRenderLoop", _FailingRenderLoop)
     args = _cli_args(pipe=True)
     cleanup_calls = []
-    app = _build_start_app(args, [False, True], cleanup_calls)
+    app = _build_start_app(args, [False, retry_result], cleanup_calls)
 
     async def fail_config_hooks(self):
         raise RuntimeError("original pipe startup failure")
@@ -191,21 +197,36 @@ async def test_cli_preserves_original_pipe_failure_after_cleanup_retry(monkeypat
     app._load_config_hooks = MethodType(fail_config_hooks, app)
     _configure_cli(monkeypatch, args, app)
 
-    with pytest.raises(RuntimeError, match="original pipe startup failure"):
-        await cli.async_main()
+    if retry_result:
+        with pytest.raises(RuntimeError, match="original pipe startup failure"):
+            await cli.async_main()
+    else:
+        with pytest.raises(application.ApplicationCleanupIncompleteError) as exc:
+            await cli.async_main()
+        assert isinstance(exc.value.__cause__, RuntimeError)
+        assert "original pipe startup failure" in str(exc.value.__cause__)
 
-    assert cleanup_calls == [False, True]
+    assert cleanup_calls == [False, retry_result]
 
 
 @pytest.mark.asyncio
-async def test_cli_preserves_cancellation_after_cleanup_retry(monkeypatch):
+@pytest.mark.parametrize("retry_result", [False, True])
+async def test_cli_preserves_cancellation_after_cleanup_retry(
+    monkeypatch, retry_result
+):
     monkeypatch.setattr(application, "EventDrivenRenderLoop", _CancelledRenderLoop)
     args = _cli_args()
     cleanup_calls = []
-    app = _build_start_app(args, [False, True], cleanup_calls)
+    app = _build_start_app(args, [False, retry_result], cleanup_calls)
     _configure_cli(monkeypatch, args, app)
 
-    with pytest.raises(asyncio.CancelledError, match="injected cancellation"):
-        await cli.async_main()
+    if retry_result:
+        with pytest.raises(asyncio.CancelledError, match="injected cancellation"):
+            await cli.async_main()
+    else:
+        with pytest.raises(application.ApplicationCleanupIncompleteError) as exc:
+            await cli.async_main()
+        assert isinstance(exc.value.__cause__, asyncio.CancelledError)
+        assert "injected cancellation" in str(exc.value.__cause__)
 
-    assert cleanup_calls == [False, True]
+    assert cleanup_calls == [False, retry_result]
