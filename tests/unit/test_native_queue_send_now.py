@@ -68,6 +68,7 @@ def _processor_with_older_input() -> QueueProcessor:
     processor._cancel_processing = False
     processor._cancel_origin = None
     processor._is_processing = True
+    processor.active_request_ids = ("active-a",)
     processor._chain_idle_event = asyncio.Event()
     processor._chain_idle_event.clear()
     processor.note_chain_end = lambda: None
@@ -230,4 +231,92 @@ async def test_forced_batch_priority_admissions_keep_fifo_ahead_of_older_queue_w
         ("older-d",),
     ]
     assert processor.end_forced_send(token)
+
+
+@pytest.mark.asyncio
+async def test_forced_batch_stops_matching_owner_before_admitting_all_members_once():
+    processor = _processor_with_older_input()
+    terminal = asyncio.Event()
+    events = ["start:A"]
+    old_task = asyncio.create_task(
+        _settle_forced_test_turn(processor, terminal, events)
+    )
+
+    llm = object.__new__(LLMService)
+    llm._queue_processor = processor
+    llm.is_processing = True
+    llm.create_background_task = MagicMock(side_effect=lambda *_a, **_k: events.append("process:B,C"))
+
+    def cancel_current_request(*, origin="human", preserve_queued=False):
+        events.append("cancel:A")
+        return processor.request_cancellation(
+            origin=origin, preserve_queued=preserve_queued
+        )
+
+    llm.cancel_current_request = MagicMock(side_effect=cancel_current_request)
+
+    async def wait_for_stop(_generation):
+        await terminal.wait()
+        events.append("terminal:A")
+        processor.is_processing = False
+        return True
+
+    llm._await_forced_native_stop = wait_for_stop
+
+    async def admit(index, reservation, gate_token):
+        label = ("B", "C")[index]
+        request_id = ("forced-b", "forced-c")[index]
+        assert processor.owns_forced_send(gate_token)
+        events.append(f"admit:{label}")
+        assert processor.commit_admission_slot(
+            reservation, TaggedInput(label, (request_id,)), priority=True
+        )
+        return {"accepted": True, "request_id": request_id}
+
+    admission = asyncio.create_task(
+        llm.submit_forced_human_batch(
+            count=2,
+            expected_active_request_ids=("active-a",),
+            submit_one=admit,
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert events == ["start:A", "cancel:A"]
+    assert [item.request_ids for item in processor.processing_queue._queue] == [
+        ("older-d",),
+    ]
+
+    terminal.set()
+    await asyncio.wait_for(old_task, timeout=1)
+    result = await asyncio.wait_for(admission, timeout=1)
+
+    assert result == {
+        "accepted": True,
+        "results": [
+            {"accepted": True, "request_id": "forced-b"},
+            {"accepted": True, "request_id": "forced-c"},
+        ],
+    }
+    assert events == [
+        "start:A",
+        "cancel:A",
+        "terminal:A",
+        "admit:B",
+        "admit:C",
+        "process:B,C",
+    ]
+    assert [item.request_ids for item in processor.processing_queue._queue] == [
+        ("forced-b",),
+        ("forced-c",),
+        ("older-d",),
+    ]
+    llm.cancel_current_request.assert_called_once_with(
+        origin="human", preserve_queued=True
+    )
+
+
+async def _settle_forced_test_turn(processor, terminal, events):
+    await terminal.wait()
+    processor.is_processing = False
 
