@@ -31,6 +31,7 @@ import { NetworkPanel, type NetworkSection } from "./NetworkPanel";
 import { PickerList } from "./PickerList";
 import { PromptsPage } from "@/components/prompts/PromptsPage";
 import { PromptsApi } from "@/prompts-api";
+import { PluginsSettings } from "@/plugins/settings";
 import { SessionSettings } from "./SessionSettings";
 import { PanelDialogSurface } from "./PanelDialogSurface";
 import {
@@ -286,6 +287,7 @@ export function PanelHost({
       tab !== "session" &&
       tab !== "prompts" &&
       tab !== "phonelink" &&
+      tab !== "plugins" &&
       tabs[tab].status === "idle"
     ) {
       void loadRoot(tab);
@@ -493,14 +495,14 @@ export function PanelHost({
     onTabChange(next as SettingsTab);
   };
 
-  const state = tab === "session" || tab === "prompts" || tab === "phonelink" ? null : tabs[tab];
+  const state = tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "plugins" ? null : tabs[tab];
   const top = state?.views[state.views.length - 1];
   const activeTab =
     SETTINGS_TABS.find((item) => item.id === tab) ?? SETTINGS_TABS[0];
   const message = top?.message ?? null;
 
   const refresh = async () => {
-    if (tab === "session" || tab === "prompts" || tab === "phonelink") return;
+    if (tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "plugins") return;
     if (tab === "network" && top?.panel.panel === "connect-knocks") {
       const mine = epoch.current;
       setBusy(true);
@@ -527,7 +529,7 @@ export function PanelHost({
     patchTab(tab, () => IDLE);
   };
   const back = () => {
-    if (tab === "session" || tab === "prompts" || tab === "phonelink") return;
+    if (tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "plugins") return;
     setReveal(null);
     patchTab(tab, (current) => ({
       ...current,
@@ -556,7 +558,7 @@ export function PanelHost({
   };
 
   const panelBody = () => {
-    if (!state || tab === "session" || tab === "prompts" || tab === "phonelink") return null;
+    if (!state || tab === "session" || tab === "prompts" || tab === "phonelink" || tab === "plugins") return null;
     if (state.status === "error") {
       return (
         <div className="flex flex-col items-start gap-3 px-4 py-4 sm:px-6">
@@ -803,12 +805,22 @@ export function PanelHost({
           >
             {sessionId ? <PromptsPage api={promptsApi} /> : null}
           </div>
+          <div
+            role="tabpanel"
+            aria-label="Plugins"
+            className={cn(
+              "min-h-0 flex-1 flex-col",
+              tab === "plugins" ? "flex" : "hidden",
+            )}
+          >
+            {sessionId ? <PluginsSettings api={api} /> : null}
+          </div>
           {tab === "phonelink" && open ? (
             <div role="tabpanel" aria-label="PhoneLink" className="flex min-h-0 w-full flex-1 flex-col">
               <PhoneLinkPanel api={api} onOpenNetwork={() => changeTab("network")} />
             </div>
           ) : null}
-          {tab !== "session" && tab !== "prompts" && tab !== "phonelink" ? (
+          {tab !== "session" && tab !== "prompts" && tab !== "phonelink" && tab !== "plugins" ? (
             <div
               role="tabpanel"
               aria-label={activeTab.label}
@@ -824,7 +836,7 @@ export function PanelHost({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      {isMobile ? (
+      {isMobile && tab !== "plugins" ? (
         <SheetContent
           side="right"
           className="h-dvh w-full max-w-full gap-0 overflow-hidden p-0 sm:max-w-full"
@@ -832,7 +844,7 @@ export function PanelHost({
           {body}
         </SheetContent>
       ) : (
-        <PanelDialogSurface>
+        <PanelDialogSurface responsive={tab === "plugins"}>
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             {body}
           </div>
