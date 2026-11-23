@@ -109,11 +109,11 @@ function ServiceRow({ service, api, id, canControl, enabled, onError }: {
   );
 }
 
-/** The controls a plugin's Settings detail offers. Built-in services and removal 404 on the engine. */
+/** The controls a plugin's Settings detail offers. Every plugin gets the switch; built-in services and removal 404 on the engine. */
 export function pluginRowControls(entry: Pick<PluginEntry, "kind" | "shadowed" | "state">) {
   const managed = entry.kind !== "built-in";
-  const manageable = managed && !entry.shadowed && entry.state !== "stopping";
-  return { managed, switchEnabled: manageable, services: manageable, updateRemove: manageable && entry.kind === "installed" };
+  const live = !entry.shadowed && entry.state !== "stopping";
+  return { managed, switchEnabled: live, services: managed && live, updateRemove: managed && live && entry.kind === "installed" };
 }
 
 function PluginDetail({ entry, record, api, onUpdate, detailRef }: {
@@ -152,15 +152,13 @@ function PluginDetail({ entry, record, api, onUpdate, detailRef }: {
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <h2 className="min-w-0 truncate font-semibold">{entry.name}</h2>
         <span className={`text-xs font-medium ${failure !== null || entry.state === "changed-on-disk" ? "text-destructive" : "text-muted-foreground"}`}>{status}</span>
-        {managed ? (
-          <Switch
-            className="relative max-sm:before:absolute max-sm:before:left-1/2 max-sm:before:top-1/2 max-sm:before:h-[44px] max-sm:before:w-[44px] max-sm:before:-translate-x-1/2 max-sm:before:-translate-y-1/2 max-sm:before:content-['']"
-            aria-label={`${entry.name} enabled`}
-            checked={entry.enabled}
-            disabled={!switchEnabled || busy}
-            onCheckedChange={(checked) => { if (checked) void perform("enable"); else setConfirmation("disable"); }}
-          />
-        ) : null}
+        <Switch
+          className="relative max-sm:before:absolute max-sm:before:left-1/2 max-sm:before:top-1/2 max-sm:before:h-[44px] max-sm:before:w-[44px] max-sm:before:-translate-x-1/2 max-sm:before:-translate-y-1/2 max-sm:before:content-['']"
+          aria-label={`${entry.name} enabled`}
+          checked={entry.enabled}
+          disabled={!switchEnabled || busy}
+          onCheckedChange={(checked) => { if (checked) void perform("enable"); else setConfirmation("disable"); }}
+        />
         {updateRemove ? (
           <div className="ml-auto flex flex-wrap gap-2">
             <Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => onUpdate(entry.id)}>Update</Button>
