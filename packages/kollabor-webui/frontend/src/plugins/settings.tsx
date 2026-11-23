@@ -5,6 +5,7 @@ import { serializeDraft, type Draft } from "@/components/panels/FieldRenderer";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
+import { inPhoneApp } from "@/utils/page-route";
 import { PLUGIN_TRUST_NOTICE, PluginInstallDialog, describeUses } from "./install";
 import { listedPluginEntries, refreshPlugins, retryPlugin, usePluginInventory } from "./loader";
 import { PluginBoundary, PluginFailure } from "./mount";
@@ -109,20 +110,23 @@ function ServiceRow({ service, api, id, canControl, enabled, onError }: {
   );
 }
 
-/** The controls a plugin's Settings detail offers. Every plugin gets the switch; built-in services and removal 404 on the engine. */
-export function pluginRowControls(entry: Pick<PluginEntry, "kind" | "shadowed" | "state">) {
+/**
+ * The controls a plugin's Settings detail offers. Every plugin gets the switch; built-in services and removal 404
+ * on the engine. Over PhoneLink (`remote`) every row is read-only.
+ */
+export function pluginRowControls(entry: Pick<PluginEntry, "kind" | "shadowed" | "state">, remote = false) {
   const managed = entry.kind !== "built-in";
-  const live = !entry.shadowed && entry.state !== "stopping";
+  const live = !remote && !entry.shadowed && entry.state !== "stopping";
   return { managed, switchEnabled: live, services: managed && live, updateRemove: managed && live && entry.kind === "installed" };
 }
 
-function PluginDetail({ entry, record, api, onUpdate, detailRef }: {
-  entry: PluginEntry; record: PluginRecord | undefined; api: EngineApi; onUpdate: (id: string) => void; detailRef: RefObject<HTMLElement | null>;
+function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
+  entry: PluginEntry; record: PluginRecord | undefined; api: EngineApi; remote: boolean; onUpdate: (id: string) => void; detailRef: RefObject<HTMLElement | null>;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<"disable" | "remove" | null>(null);
-  const { managed, switchEnabled, services, updateRemove } = pluginRowControls(entry);
+  const { managed, switchEnabled, services, updateRemove } = pluginRowControls(entry, remote);
   const stopping = entry.state === "stopping";
   const failure = failureOf(entry, record);
   const uses = describeUses(entry.uses);
@@ -247,9 +251,11 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
     { title: "Built In", entries: entries.filter((entry) => entry.kind === "built-in") },
   ];
   const selected = entries.find((entry) => entryKey(entry) === selectedKey) ?? entries[0];
+  const remote = inPhoneApp(window.location.pathname);
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
       {snapshot.off ? <p className="text-muted-foreground mb-4 text-sm">Plugins are off for this page. Remove <code>?plugins=off</code> and reload.</p> : null}
+      {remote ? <p className="text-muted-foreground mb-4 text-sm">Manage plugins on this computer</p> : null}
       {inventory.error ? <p role="alert" className="text-destructive mb-4 text-sm">{inventory.error}</p> : null}
       {!snapshot.listed && !snapshot.off ? <p className="text-muted-foreground mb-4 text-sm">Loading plugins…</p> : null}
       <div className="grid min-w-0 gap-5 md:grid-cols-[minmax(10rem,15rem)_minmax(0,1fr)] md:gap-6">
@@ -258,7 +264,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
             <section key={group.title} className="mb-5">
               <div className="mb-2 flex items-center justify-between gap-2">
                 <h2 className="text-muted-foreground text-xs font-semibold">{group.title}</h2>
-                {group.title === "Installed" && !snapshot.off ? (
+                {group.title === "Installed" && !snapshot.off && !remote ? (
                   <Button type="button" size="xs" variant="outline" onClick={() => setOperation({ action: "install" })}>
                     <Plus className="size-3" /> Add Plugin
                   </Button>
@@ -318,6 +324,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
             entry={selected}
             record={records.get(selected.id)}
             api={api}
+            remote={remote}
             detailRef={detailRef}
             onUpdate={(pluginId) => setOperation({ action: "update", pluginId })}
           />

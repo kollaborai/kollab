@@ -148,6 +148,8 @@ export type LoaderDeps = {
   addStyle?(id: string, href: string): () => void;
   api: Pick<PluginApiDeps, "request" | "stream">;
   timeoutMs?: number;
+  /** False lists the plugins but imports and styles none of them (PhoneLink). Defaults to true. */
+  loadCode?: boolean;
 };
 
 /** What the app lends plugins: switching the open chat's tab and opening a chat. */
@@ -292,7 +294,8 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
       return;
     }
     setInventory({ entries, error: null });
-    const active = entries.filter(isActive);
+    // With loadCode off (PhoneLink) the list still fills, and no plugin is imported or styled.
+    const active = deps.loadCode === false ? [] : entries.filter(isActive);
     const keep = new Set(active.map((entry) => entry.id));
     for (const { id } of registry.getSnapshot().plugins) if (!keep.has(id)) drop(id);
     for (const entry of active) {
@@ -359,16 +362,17 @@ export function refreshPlugins(): Promise<void> {
 
 /**
  * Starts plugins for this page: lists them, loads them, and follows `GET /plugins/events` for
- * `plugins-changed` and engine notices. Returns the stop. PhoneLink's phone app loads no plugin code yet: it
- * cannot `import()` from the computer.
+ * `plugins-changed` and engine notices. Returns the stop. PhoneLink's phone app lists the plugins but loads none
+ * of their code: it cannot `import()` from the computer.
  */
 export function startPluginRuntime(api: EngineApi, where: Pick<Location, "pathname" | "search"> = window.location): () => void {
-  if (pluginsOff(where.search) || inPhoneApp(where.pathname)) {
+  if (pluginsOff(where.search)) {
     pluginRegistry.setOff();
     return () => {};
   }
   const loader = createPluginLoader(pluginRegistry, {
     list: () => api.json<{ plugins?: unknown }>("/plugins", { cache: "no-store" }),
+    loadCode: !inPhoneApp(where.pathname),
     importModule: (url) => import(/* @vite-ignore */ url),
     async fetchText(url) {
       const response = await fetch(url);
