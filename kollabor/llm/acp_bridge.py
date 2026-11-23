@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -34,6 +35,8 @@ from acp.schema import (
 from kollabor.version import __version__
 
 from .acp_state import ACPBinding
+
+logger = logging.getLogger(__name__)
 
 _ACP_OWNER_TOKEN_ENV = "KOLLAB_ACP_OWNER_TOKEN"
 
@@ -468,6 +471,7 @@ class ACPSendNowBatch:
     admissions: list[ACPAdmission] = field(default_factory=list)
     reserved_count: int = 0
     injected_count: int = 0
+    expiry_handle: asyncio.TimerHandle | None = field(default=None, repr=False)
 
 
 def _turn_usage_payload(usage: Any) -> dict[str, int] | None:
@@ -769,6 +773,9 @@ class ACPRunner:
         self._queue: asyncio.Queue[ACPAdmission | None] = asyncio.Queue(maxsize=10)
         self._send_now_batches: dict[str, ACPSendNowBatch] = {}
         self._send_now_reserved = 0
+        # A lost engine finalization RPC must not wedge the runner forever.
+        # Each successfully admitted member renews this lease.
+        self.send_now_batch_timeout_seconds = 60.0
         self._worker: asyncio.Task[None] | None = None
         self._updates: list[dict[str, Any]] = []
         self._active_generation = 0
@@ -1394,6 +1401,7 @@ class ACPRunner:
             batch.admissions.append(admission)
             batch.reserved_count -= 1
             self._send_now_reserved -= 1
+            self._renew_send_now_batch_expiry(batch)
         self._next_turn_id = turn_id
         return admission
 
@@ -1664,6 +1672,10 @@ class ACPRunner:
             or expected_count > self._queue.maxsize
         ):
             return False
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
         existing = self._send_now_batches.get(batch_id)
         if existing is not None:
             return (
@@ -1688,10 +1700,37 @@ class ACPRunner:
         )
         self._send_now_batches[batch_id] = batch
         self._send_now_reserved += expected_count
+        self._renew_send_now_batch_expiry(batch, loop=loop)
         # The active request continues. If it ends before the engine sends the
         # rest of this batch, its finally block must leave D behind the gate.
         self._queue_release.clear()
         return True
+
+    def _renew_send_now_batch_expiry(
+        self, batch: ACPSendNowBatch, *, loop: asyncio.AbstractEventLoop | None = None
+    ) -> None:
+        """Bound abandoned reservations while allowing time between members."""
+        if batch.expiry_handle is not None:
+            batch.expiry_handle.cancel()
+        loop = loop or asyncio.get_running_loop()
+        batch.expiry_handle = loop.call_later(
+            max(0.0, float(self.send_now_batch_timeout_seconds)),
+            self._expire_send_now_batch,
+            batch.batch_id,
+        )
+
+    def _expire_send_now_batch(self, batch_id: str) -> None:
+        """Release an abandoned group, preserving admitted members ahead of D."""
+        batch = self._send_now_batches.get(batch_id)
+        if batch is None:
+            return
+        logger.warning(
+            "Send Now batch admission lease expired for ACP session %s (%d/%d members admitted)",
+            self.session_id or "unknown",
+            len(batch.admissions),
+            batch.expected_count,
+        )
+        self.finish_send_now_batch(batch_id)
 
     def has_send_now_batch(self, batch_id: str) -> bool:
         """Whether an open batch still owns a queue reservation."""
@@ -1715,6 +1754,9 @@ class ACPRunner:
         batch = self._send_now_batches.pop(batch_id, None)
         if batch is None:
             return None
+        if batch.expiry_handle is not None:
+            batch.expiry_handle.cancel()
+            batch.expiry_handle = None
         self._send_now_reserved -= batch.reserved_count
         batch.reserved_count = 0
         queued = self._queue._queue
@@ -2256,6 +2298,11 @@ class ACPRunner:
         for task in cancel_tasks:
             task.cancel()
         self._queue_release.set()
+        for batch in self._send_now_batches.values():
+            if batch.expiry_handle is not None:
+                batch.expiry_handle.cancel()
+        self._send_now_batches.clear()
+        self._send_now_reserved = 0
 
         def settle_queued() -> None:
             while True:

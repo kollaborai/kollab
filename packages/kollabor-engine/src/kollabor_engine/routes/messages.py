@@ -69,6 +69,7 @@ EVENT_IDLE_TIMEOUT_SECONDS = 600.0
 STREAM_PUBLISH_INTERVAL = 0.15
 _ASSISTANT_HANDOVER_STATE_KEY = "_kollabAssistantHandover"
 _ASSISTANT_HANDOVER_LEDGER_ATTR = "_assistant_transport_handover_ledger"
+_ASSISTANT_ACTIVE_REQUEST_IDS_ATTR = "_assistant_transport_active_request_ids"
 _ASSISTANT_HANDOVER_TTL_SECONDS = 24 * 60 * 60
 _ASSISTANT_HANDOVER_TOMBSTONE_TTL_SECONDS = 24 * 60 * 60
 _ASSISTANT_HANDOVER_MAX_ENTRIES = 64
@@ -86,6 +87,48 @@ def _assistant_handover_ledger(session: Any) -> Dict[str, Dict[str, Any]]:
         ledger = {}
         setattr(session, _ASSISTANT_HANDOVER_LEDGER_ATTR, ledger)
     return ledger
+
+
+def _assistant_reserve_active_request_ids(
+    session: Any, request_ids: set[str], owner: str
+) -> Optional[str]:
+    """Atomically reserve client ids across concurrent streams for one session."""
+    active = getattr(session, _ASSISTANT_ACTIVE_REQUEST_IDS_ATTR, None)
+    if not isinstance(active, dict):
+        active = {}
+        setattr(session, _ASSISTANT_ACTIVE_REQUEST_IDS_ATTR, active)
+
+    handovers = getattr(session, _ASSISTANT_HANDOVER_LEDGER_ATTR, {})
+    retained: set[str] = set()
+    if isinstance(handovers, dict):
+        for entry in handovers.values():
+            record = entry.get("record") if isinstance(entry, dict) else None
+            if not isinstance(record, dict):
+                continue
+            for field in ("request_ids", "possibly_accepted_request_ids"):
+                values = record.get(field) or ()
+                retained.update(
+                    str(value) for value in values if value is not None and str(value)
+                )
+
+    for request_id in request_ids:
+        if request_id in active or request_id in retained:
+            return request_id
+    for request_id in request_ids:
+        active[request_id] = owner
+    return None
+
+
+def _assistant_release_active_request_ids(
+    session: Any, request_ids: set[str], owner: str
+) -> None:
+    """Release only ids still owned by this assistant stream."""
+    active = getattr(session, _ASSISTANT_ACTIVE_REQUEST_IDS_ATTR, None)
+    if not isinstance(active, dict):
+        return
+    for request_id in request_ids:
+        if active.get(request_id) == owner:
+            active.pop(request_id, None)
 
 
 def _assistant_cancel_handover_expiry(entry: Dict[str, Any]) -> None:
@@ -1892,6 +1935,8 @@ async def assistant_transport(
         send_now_batch_id: Optional[str] = None
         send_now_batch_indexes: Dict[int, int] = {}
         send_now_batch_size = 0
+        active_request_id_owner: Optional[str] = None
+        active_client_request_ids: set[str] = set()
         usage_totals = {"inputTokens": 0, "outputTokens": 0, "toolCalls": 0}
         final_stop_reason = "end_turn"
         handover_drop_baseline = int(getattr(queue, "dropped_count", 0) or 0)
@@ -2962,6 +3007,55 @@ async def assistant_transport(
                 _assistant_command_type(command) == "add-message"
                 for command in body.commands
             )
+            client_request_ids: set[str] = set()
+            for command in body.commands:
+                if _assistant_command_type(command) != "add-message":
+                    continue
+                message = command.get("message")
+                client_id = message.get("id") if isinstance(message, dict) else None
+                if not (
+                    isinstance(client_id, str)
+                    and _CLIENT_REQUEST_ID.fullmatch(client_id)
+                ):
+                    continue
+                if (
+                    client_id in client_request_ids
+                    or client_id in admitted_turn_request_ids
+                ):
+                    message = (
+                        "Duplicate add-message request ids are not allowed. "
+                        "No messages were submitted."
+                    )
+                    controller.add_error(message)
+                    completion["error"] = {"message": message}
+                    completion["usage"] = {
+                        **usage_totals,
+                        "stopReason": "error",
+                    }
+                    completion["completed"] = True
+                    _assistant_set_usage(controller, completion["usage"])
+                    return
+                client_request_ids.add(client_id)
+            if client_request_ids:
+                active_request_id_owner = uuid.uuid4().hex
+                active_client_request_ids = client_request_ids
+                conflict_id = _assistant_reserve_active_request_ids(
+                    session, active_client_request_ids, active_request_id_owner
+                )
+                if conflict_id is not None:
+                    message = (
+                        "Duplicate assistant request id is already active or retained. "
+                        "No messages were submitted."
+                    )
+                    controller.add_error(message)
+                    completion["error"] = {"message": message}
+                    completion["usage"] = {
+                        **usage_totals,
+                        "stopReason": "error",
+                    }
+                    completion["completed"] = True
+                    _assistant_set_usage(controller, completion["usage"])
+                    return
             if handover_record is not None and has_add_message:
                 if event_loss_seen:
                     pending_ids = sorted(
@@ -3480,6 +3574,37 @@ async def assistant_transport(
                         f"Unsupported assistant command: {command_type or 'unknown'}"
                     )
                     return
+
+            if send_now_batch_id is not None:
+                try:
+                    finish_result = await session.finish_send_now_batch(
+                        send_now_batch_id
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Send Now batch admission finalization failed for %s (%s)",
+                        session_id,
+                        type(exc).__name__,
+                    )
+                    finish_result = {"finished": False}
+                if not (
+                    isinstance(finish_result, dict)
+                    and finish_result.get("finished") is True
+                ):
+                    message = (
+                        "Send Now batch admission could not be finalized. Accepted "
+                        "messages may still be queued; no messages were resubmitted."
+                    )
+                    controller.add_error(message)
+                    completion["error"] = {"message": message}
+                    completion["usage"] = {
+                        **usage_totals,
+                        "stopReason": "error",
+                    }
+                    completion["completed"] = True
+                    _assistant_set_usage(controller, completion["usage"])
+                    return
+                send_now_batch_id = None
 
             if not saw_action and not submitted_contents:
                 if not admission_error:
@@ -4255,6 +4380,12 @@ async def assistant_transport(
             logger.exception("assistant transport failed for %s", session_id)
             controller.add_error(str(exc))
         finally:
+            if active_request_id_owner is not None:
+                _assistant_release_active_request_ids(
+                    session,
+                    active_client_request_ids,
+                    active_request_id_owner,
+                )
             if send_now_batch_id is not None:
                 try:
                     await session.finish_send_now_batch(send_now_batch_id)

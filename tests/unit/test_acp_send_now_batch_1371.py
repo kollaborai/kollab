@@ -113,6 +113,9 @@ def _cleanup_runner(runner: ACPRunner, active_task: asyncio.Task) -> None:
     runner._cancel_hold = False
     runner._cancel_target = None
     runner._cancel_active_task = None
+    for batch in getattr(runner, "_send_now_batches", {}).values():
+        if batch.expiry_handle is not None:
+            batch.expiry_handle.cancel()
     getattr(runner, "_send_now_batches", {}).clear()
     runner._send_now_reserved = 0
     runner._queue_release.set()

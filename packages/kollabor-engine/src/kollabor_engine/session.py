@@ -1035,7 +1035,10 @@ class EngineSession:
             if not isinstance(capability, dict) or capability.get("send_now") is not True:
                 return {"accepted": False, "reason": "daemon does not support Send Now; restart it after updating"}
             if send_now_batch_id is not None and capability.get("send_now_batch") is not True:
-                return {"accepted": False, "reason": "daemon does not support Send Now batches; restart it after updating"}
+                return {
+                    "accepted": False,
+                    "reason": "daemon does not support Send Now batches; restart it after updating",
+                }
         if private_goal_reply:
             # Check before sending: an older daemon would otherwise accept the
             # command and publish its result on the shared event stream.
