@@ -69,13 +69,14 @@ export function startGlass(
   polys: ReadonlyArray<ReadonlyArray<readonly [number, number]>>,
 ): { stop: () => void; flare: () => void } | null {
   let renderer: WebGLRenderer;
+  let context: WebGL2RenderingContext | null = null;
   try {
     const attrs = {
       alpha: true,
       antialias: true,
       failIfMajorPerformanceCaveat: true,
     };
-    const context = canvas.getContext(
+    context = canvas.getContext(
       "webgl2",
       attrs,
     ) as WebGL2RenderingContext | null;
@@ -92,6 +93,11 @@ export function startGlass(
     }
     renderer = new WebGLRenderer({ canvas, context, ...attrs });
   } catch {
+    try {
+      context?.getExtension("WEBGL_lose_context")?.loseContext();
+    } catch {
+      // A failed context cleanup must not break the flat SVG fallback.
+    }
     return null;
   }
 
