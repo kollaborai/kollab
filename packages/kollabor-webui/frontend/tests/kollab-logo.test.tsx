@@ -88,10 +88,10 @@ describe("startGlass", () => {
       devicePixelRatio: 2,
       matchMedia: () => ({ matches: false }),
     });
-    expect(() =>
-      startGlass(fakeCanvas("Apple M3").canvas, K_POLYS),
-    ).not.toThrow();
-    expect(startGlass(fakeCanvas("Apple M3").canvas, K_POLYS)).toBeNull();
+    const { canvas, lost } = fakeCanvas("Apple M3");
+    expect(() => startGlass(canvas, K_POLYS)).not.toThrow();
+    expect(startGlass(canvas, K_POLYS)).toBeNull();
+    expect(lost).toEqual(["lost", "lost"]);
   });
 
   it("draws one still frame without scheduling work for reduced motion", async () => {
