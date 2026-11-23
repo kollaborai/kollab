@@ -374,24 +374,25 @@ pip_scripts_dir() {
 run_version_check() {
     local executable="$1" output_file pid elapsed grace status
     output_file=$(mktemp) || return 1
+    set -m
     env -u SCIE -u SCIE_ARGV0 -u PEX "$executable" --version >"$output_file" 2>&1 &
     pid=$!
     for ((elapsed = 0; elapsed < VERSION_CHECK_TIMEOUT_SECONDS * 10; elapsed++)); do
-        if [[ " $(jobs -pr) " != *" $pid "* ]]; then
+        if ! kill -0 -- "-$pid" 2>/dev/null; then
             break
         fi
         sleep 0.1
     done
-    if [[ " $(jobs -pr) " == *" $pid "* ]]; then
-        kill "$pid" 2>/dev/null || true
+    if kill -0 -- "-$pid" 2>/dev/null; then
+        kill -TERM -- "-$pid" 2>/dev/null || true
         for ((grace = 0; grace < VERSION_CHECK_TERM_GRACE_SECONDS * 10; grace++)); do
-            if [[ " $(jobs -pr) " != *" $pid "* ]]; then
+            if ! kill -0 -- "-$pid" 2>/dev/null; then
                 break
             fi
             sleep 0.1
         done
-        if [[ " $(jobs -pr) " == *" $pid "* ]]; then
-            kill -KILL "$pid" 2>/dev/null || true
+        if kill -0 -- "-$pid" 2>/dev/null; then
+            kill -KILL -- "-$pid" 2>/dev/null || true
         fi
         wait "$pid" 2>/dev/null || true
         printf 'timed out after %s seconds' "$VERSION_CHECK_TIMEOUT_SECONDS"
