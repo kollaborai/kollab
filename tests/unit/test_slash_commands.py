@@ -152,6 +152,11 @@ class TestSlashCommandParser(unittest.TestCase):
                 self.assertIsNotNone(command)
                 self.assertEqual(command.args, expected_args)
 
+    def test_rooted_path_punctuation_escape_keeps_shlex_behavior(self):
+        parsed = self.parser.parse_command(r"/open \%draft\tail.txt")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.args, ["%drafttail.txt"])
+
     def test_escaped_punctuation_after_path_separators_keeps_shlex_behavior(self):
         path_prefix = "reports\\archive\\file\\"
         punctuation = ("%", ":", "=", "+", ",", "^", "@", ".", "_")
