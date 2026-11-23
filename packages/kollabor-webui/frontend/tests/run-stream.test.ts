@@ -317,3 +317,55 @@ test("an oversized unterminated SSE line fails within the decoder's bound", asyn
   assert.match("message" in result ? result.message : "", /SSE event exceeds/);
   assert.equal(cancelled, true, "the oversized source is cancelled");
 });
+
+test("an oversized trailing partial event still fails after an earlier complete event", async () => {
+  const limit = 16 * 1024 * 1024;
+  const first = new TextEncoder().encode("data: first\n\n");
+  const partial = new Uint8Array(limit + 1);
+  partial.set(new TextEncoder().encode("data: "));
+  const bytes = new Uint8Array(first.length + partial.length);
+  bytes.set(first);
+  bytes.set(partial, first.length);
+  const source = new ReadableStream<Uint8Array>({
+    start: (controller) => {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+  const reader = endableStream(source).stream.getReader();
+  assert.equal(new TextDecoder().decode((await reader.read()).value), "data: first\n\n");
+
+  const result = await Promise.race([
+    reader.read().then(
+      ({ done, value }) => ({ kind: done ? "done" : "value", length: value?.length ?? 0 }),
+      (error: Error) => ({ kind: "error", message: error.message }),
+    ),
+    new Promise<{ kind: string }>((resolve) =>
+      setTimeout(() => resolve({ kind: "stalled" }), 1500),
+    ),
+  ]);
+  await reader.cancel().catch(() => undefined);
+
+  assert.equal(result.kind, "error", "the trailing event is checked at EOF instead of being emitted unchecked");
+  assert.match("message" in result ? result.message : "", /SSE event exceeds/);
+});
+
+test("a live CR-terminated SSE event dispatches without another source byte", async () => {
+  const from = engine();
+  const run = endableStream(from.source);
+  const reader = run.stream.getReader();
+  from.send("data: first\r");
+  const first = reader.read();
+  from.send("\r");
+  const result = await Promise.race([
+    first.then(({ done, value }) => ({ kind: done ? "done" : "value", text: value ? new TextDecoder().decode(value) : "" })),
+    new Promise<{ kind: string; text: string }>((resolve) =>
+      setTimeout(() => resolve({ kind: "stalled", text: "" }), 100),
+    ),
+  ]);
+
+  assert.deepEqual(result, { kind: "value", text: "data: first\r\r" });
+  run.end();
+  assert.equal(new TextDecoder().decode((await reader.read()).value), FINISH);
+  assert.equal(from.state.let, true);
+});
