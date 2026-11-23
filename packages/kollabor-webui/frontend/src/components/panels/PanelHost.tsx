@@ -347,7 +347,7 @@ export function PanelHost({
         }
         views[views.length - 1] = {
           ...top,
-          panel: result.ok && result.panel ? result.panel : top.panel,
+          panel: result.panel ?? top.panel,
           draft: settled?.draft ?? (result.ok && reset ? {} : top.draft),
           step: result.ok && reset ? 0 : step,
           errors,
