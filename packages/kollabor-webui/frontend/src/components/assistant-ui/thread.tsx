@@ -1196,7 +1196,10 @@ const Composer: FC<{
                 voice={voiceAvailable ? voice : null}
                 running={isRunning}
                 permissionStop={permissionStop}
-                onBeforeSend={openPanelFromComposer}
+                onBeforeSend={(event) => {
+                  if (runPluginCommand(event)) return;
+                  openPanelFromComposer(event);
+                }}
                 onSteer={submitBusyMessage}
               />
             </div>
