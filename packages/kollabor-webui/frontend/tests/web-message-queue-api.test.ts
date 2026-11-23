@@ -2,6 +2,18 @@ import assert from "node:assert/strict";
 import { afterEach, expect, test, vi } from "vitest";
 import { ApiError, EngineApi, type WebMessageQueueSnapshot } from "../src/api.ts";
 import { WebQueuePanelController } from "../src/components/web-queue/WebQueuePanelMount.tsx";
+import {
+  submitBusyWebMessage,
+  type BusyWebMessageAttachment,
+  type BusyWebMessageInput,
+} from "../src/components/web-queue/submit.ts";
+
+class MemoryStorage {
+  values = new Map<string, string>();
+  getItem(key: string) { return this.values.get(key) ?? null; }
+  setItem(key: string, value: string) { this.values.set(key, value); }
+  removeItem(key: string) { this.values.delete(key); }
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -359,4 +371,98 @@ test("failed background refresh marks the visible queue stale until a fresh snap
   expect(controller.getState().snapshot?.revision).toBe(2);
   expect(controller.getState().stale).toBe(false);
   expect(controller.getState().refreshError).toBe(false);
+});
+
+function busyInput(overrides: Partial<BusyWebMessageInput> = {}): BusyWebMessageInput {
+  return {
+    sessionId: "session-a",
+    conversationUid: "conversation-a",
+    draftKey: "draft-a",
+    text: "inspect this",
+    attachments: [],
+    sendNow: false,
+    ...overrides,
+  };
+}
+
+function busyApiHarness() {
+  const allocateWebMessageQueueIds = vi.fn(async (_sessionId: string, _uid: string, _items: number, _ops: number, attachmentCount: number) => ({
+    scope_id: "scope-a",
+    incarnation: "inc-a",
+    operation_ids: ["operation-a"],
+    batch_id: "batch-a",
+    request_ids: ["request-a"],
+    attachment_operation_ids: Array.from({ length: attachmentCount }, (_, i) => `attachment-op-${i}`),
+  }));
+  const stageWebMessageQueueAttachment = vi.fn(async (_sessionId: string, _uid: string, operationId: string, image: Blob) => ({
+    ref: `ref-${operationId}`,
+    mime: image.type,
+    size: image.size,
+    filename: image instanceof File ? image.name : "Image",
+  }));
+  const enqueueWebMessageBatch = vi.fn(async (_sessionId: string, body: { operation_id: string; batch_id: string; items: Array<{ request_id: string }> }) => ({
+    scope_id: "scope-a",
+    incarnation: "inc-a",
+    operation_id: body.operation_id,
+    revision: 1,
+    status: "queued",
+    batch_id: body.batch_id,
+    request_ids: body.items.map((item) => item.request_id),
+  }));
+  const sendWebMessageQueueBatchNow = vi.fn(async () => ({ accepted: false, status: "busy" }));
+  return {
+    api: { allocateWebMessageQueueIds, stageWebMessageQueueAttachment, enqueueWebMessageBatch, sendWebMessageQueueBatchNow } as unknown as EngineApi,
+    allocateWebMessageQueueIds,
+    stageWebMessageQueueAttachment,
+    enqueueWebMessageBatch,
+    sendWebMessageQueueBatchNow,
+  };
+}
+
+test("busy composer admission stages images before enqueue and retains accepted Send Now batches", async () => {
+  const storage = new MemoryStorage();
+  const { api, allocateWebMessageQueueIds, stageWebMessageQueueAttachment, enqueueWebMessageBatch, sendWebMessageQueueBatchNow } = busyApiHarness();
+  const imageBytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]);
+  const attachment: BusyWebMessageAttachment = {
+    id: "image-1",
+    type: "image",
+    name: "diagram.png",
+    contentType: "image/png",
+    file: new File([imageBytes], "diagram.png", { type: "image/png" }),
+  };
+
+  const result = await submitBusyWebMessage(api, busyInput({ attachments: [attachment], sendNow: true }), storage);
+
+  expect(allocateWebMessageQueueIds).toHaveBeenCalledWith("session-a", "conversation-a", 1, 1, 1);
+  expect(stageWebMessageQueueAttachment.mock.calls.map((call) => call[2])).toEqual(["attachment-op-0"]);
+  expect(enqueueWebMessageBatch.mock.calls[0]?.[1]).toMatchObject({
+    conversation_uid: "conversation-a",
+    operation_id: "operation-a",
+    batch_id: "batch-a",
+    items: [{ request_id: "request-a", text: "inspect this", attachment_refs: ["ref-attachment-op-0"] }],
+  });
+  expect(sendWebMessageQueueBatchNow).toHaveBeenCalledWith("session-a", "conversation-a", "batch-a");
+  expect(result).toMatchObject({ admitted: true, sendNowStatus: "not-accepted", batchId: "batch-a" });
+  expect(storage.values.size).toBe(1);
+});
+
+test("busy composer retries an ambiguous enqueue with the same daemon IDs and blocks changed content", async () => {
+  const storage = new MemoryStorage();
+  const { api, allocateWebMessageQueueIds, enqueueWebMessageBatch } = busyApiHarness();
+  enqueueWebMessageBatch.mockRejectedValueOnce(new Error("connection closed after admission"));
+
+  await expect(submitBusyWebMessage(api, busyInput(), storage)).rejects.toThrow(/confirm queue admission/);
+  const result = await submitBusyWebMessage(api, busyInput(), storage);
+  expect(result.admitted).toBe(true);
+  expect(allocateWebMessageQueueIds).toHaveBeenCalledOnce();
+  expect(enqueueWebMessageBatch.mock.calls.map((call) => call[1].operation_id)).toEqual([
+    "operation-a",
+    "operation-a",
+  ]);
+
+  const otherStorage = new MemoryStorage();
+  enqueueWebMessageBatch.mockRejectedValueOnce(new Error("response lost"));
+  await expect(submitBusyWebMessage(api, busyInput({ draftKey: "draft-b" }), otherStorage)).rejects.toThrow(/confirm queue admission/);
+  await expect(submitBusyWebMessage(api, busyInput({ draftKey: "draft-b", text: "changed" }), otherStorage))
+    .rejects.toThrow(/previous queue submission/);
 });
