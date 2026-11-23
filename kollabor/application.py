@@ -1310,7 +1310,23 @@ class TerminalLLMChat:
         finally:
             # Guaranteed cleanup - always runs regardless of how we exit
             logger.info("Executing guaranteed cleanup")
-            await self._cleanup_or_raise()
+            pending_error = sys.exception()
+            try:
+                await self._cleanup_or_raise()
+            except BaseException as cleanup_error:
+                if pending_error is None or (
+                    isinstance(pending_error, SystemExit)
+                    and pending_error.code in (None, 0)
+                ):
+                    raise
+                pending_error.add_note(
+                    "Application cleanup also failed: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+                logger.error(
+                    "Application cleanup failed while preserving %s",
+                    type(pending_error).__name__,
+                )
 
     async def _acp_permission_decider(self, request: Any) -> str | None:
         """Adapt ACP permission cards to the existing human confirmation owner.
@@ -2039,7 +2055,23 @@ class TerminalLLMChat:
             # Cleanup
             self.running = False
             # Keep pipe_mode=True during cleanup so cancellation messages can be suppressed
-            await self._cleanup_or_raise()
+            pending_error = sys.exception()
+            try:
+                await self._cleanup_or_raise()
+            except BaseException as cleanup_error:
+                if pending_error is None or (
+                    isinstance(pending_error, SystemExit)
+                    and pending_error.code in (None, 0)
+                ):
+                    raise
+                pending_error.add_note(
+                    "Pipe mode cleanup also failed: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+                logger.error(
+                    "Pipe mode cleanup failed while preserving %s",
+                    type(pending_error).__name__,
+                )
             # DON'T reset pipe_mode here - let main.py's finally block check it to avoid double cleanup
 
     async def _display_banner(self) -> None:
