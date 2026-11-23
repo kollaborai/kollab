@@ -88,3 +88,63 @@ async def test_cancelled_single_send_handover_token_reaches_real_transport_clien
         f"token={token}, status={entry.get('status')}, "
         f"queue_owned={original_queue in session.subscriptions}, body={wire!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_revocation_while_capability_send_is_blocked_prevents_admission(
+    monkeypatch,
+):
+    session = _FanoutSession([])
+    session.send_message = AsyncMock(
+        return_value={"accepted": True, "request_id": "revoked-before-send"}
+    )
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[
+                {
+                    "type": "add-message",
+                    "message": {
+                        "id": "revoked-before-send",
+                        "parts": [{"type": "text", "text": "must not submit"}],
+                    },
+                }
+            ],
+            state={"messages": []},
+        ),
+    )
+    token_frame_started = asyncio.Event()
+    release_send = asyncio.Event()
+    response_body: list[bytes] = []
+
+    async def revoke_and_block_token_frame(message):
+        if message["type"] == "http.response.body":
+            payload = message.get("body", b"")
+            wire = payload if isinstance(payload, bytes) else str(payload).encode()
+            response_body.append(wire)
+            ledger = getattr(session, messages._ASSISTANT_HANDOVER_LEDGER_ATTR, {})
+            if ledger:
+                token = next(iter(ledger))
+                if token.encode("ascii") in wire:
+                    assert session.subscriptions
+                    session.subscriptions[0].revoked = True
+                    token_frame_started.set()
+                    await release_send.wait()
+
+    stream_task = asyncio.create_task(
+        response.stream_response(revoke_and_block_token_frame)
+    )
+    await asyncio.wait_for(token_frame_started.wait(), timeout=1)
+    assert session.send_message.await_count == 0
+    release_send.set()
+    await asyncio.wait_for(stream_task, timeout=1)
+
+    assert session.send_message.await_count == 0
+    assert session.subscriptions == []
+    assert getattr(session, messages._ASSISTANT_HANDOVER_LEDGER_ATTR, {}) == {}
+    wire = b"".join(response_body)
+    assert b"must not submit" not in wire
