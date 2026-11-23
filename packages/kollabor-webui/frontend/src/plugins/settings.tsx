@@ -156,13 +156,14 @@ function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <h2 className="min-w-0 truncate font-semibold">{entry.name}</h2>
         <span className={`text-xs font-medium ${failure !== null || entry.state === "changed-on-disk" ? "text-destructive" : "text-muted-foreground"}`}>{status}</span>
-        <Switch
-          className="relative pointer-coarse:before:absolute pointer-coarse:before:left-1/2 pointer-coarse:before:top-1/2 pointer-coarse:before:h-[44px] pointer-coarse:before:w-[44px] pointer-coarse:before:-translate-x-1/2 pointer-coarse:before:-translate-y-1/2 pointer-coarse:before:content-['']"
-          aria-label={`${entry.name} enabled`}
-          checked={entry.enabled}
-          disabled={!switchEnabled || busy}
-          onCheckedChange={(checked) => { if (checked) void perform("enable"); else setConfirmation("disable"); }}
-        />
+        <label className="inline-flex pointer-coarse:flex pointer-coarse:size-11 pointer-coarse:items-center pointer-coarse:justify-center">
+          <Switch
+            aria-label={`${entry.name} enabled`}
+            checked={entry.enabled}
+            disabled={!switchEnabled || busy}
+            onCheckedChange={(checked) => { if (checked) void perform("enable"); else setConfirmation("disable"); }}
+          />
+        </label>
         {updateRemove ? (
           <div className="ml-auto flex flex-wrap gap-2">
             <Button type="button" size="xs" variant="outline" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => onUpdate(entry.id)}>Update</Button>

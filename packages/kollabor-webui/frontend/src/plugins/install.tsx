@@ -77,9 +77,26 @@ function DetailsList({ label, values }: { label: string; values: unknown }) {
 }
 
 /** Which source and Review controls the dialog shows. A failed review keeps both open so the URL can be edited and reviewed again. */
-export function reviewFormState(action: "install" | "update", job: Pick<Job, "status"> | null): { source: boolean; review: boolean } {
-  const open = action === "install" && (!job || job.status === "error");
+export function reviewFormState(action: "install" | "update", job: Pick<Job, "status"> | null, failed = false): { source: boolean; review: boolean } {
+  const open = action === "install" && (!job || job.status === "error" || (job.status === "staging" && failed));
   return { source: open, review: open };
+}
+
+/** The progress line is for a review that is really still working, never one that already failed. */
+export function showFetching(job: Pick<Job, "status"> | null, failed: boolean): boolean {
+  return job?.status === "staging" && !failed;
+}
+
+/** Ask the engine to stage a review of the source as it is now typed. */
+export async function startReview(api: EngineApi, { action, pluginId, url, gitRef }: {
+  action: "install" | "update"; pluginId?: string; url: string; gitRef: string;
+}): Promise<Job> {
+  if (action === "install" && gitRef.trim() && url.includes("#")) throw new Error("Put the branch or tag in one field, not both.");
+  const endpoint = action === "install" ? "/plugins/install" : `/plugins/${encodeURIComponent(pluginId ?? "")}/update`;
+  const source = `${url.trim()}${gitRef.trim() ? `#${gitRef.trim()}` : ""}`;
+  const result = await api.json<Job>(endpoint, { method: "POST", body: JSON.stringify(action === "install" ? { source } : {}) });
+  if (!result.job_id) throw new Error("The plugin manager did not return a review job.");
+  return result;
 }
 
 /** Preview stages untrusted source; only the explicit second action confirms its exact bytes. */
@@ -96,11 +113,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
   const start = async () => {
     setBusy(true); setError(null); setJob(null);
     try {
-      if (action === "install" && gitRef.trim() && url.includes("#")) throw new Error("Put the branch or tag in one field, not both.");
-      const endpoint = action === "install" ? "/plugins/install" : `/plugins/${encodeURIComponent(pluginId ?? "")}/update`;
-      const source = `${url.trim()}${gitRef.trim() ? `#${gitRef.trim()}` : ""}`;
-      const result = await api.json<Job>(endpoint, { method: "POST", body: JSON.stringify(action === "install" ? { source } : {}) });
-      if (!result.job_id) throw new Error("The plugin manager did not return a review job.");
+      const result = await startReview(api, { action, pluginId, url, gitRef });
       setJob(result);
     } catch (caught) { setError(errorText(caught)); } finally { setBusy(false); }
   };
@@ -154,7 +167,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
       return secrets.length ? [`Background process ${name} receives: ${secrets.join(", ")}.`] : [];
     }),
   ];
-  const form = reviewFormState(action, job);
+  const form = reviewFormState(action, job, error !== null);
   return <Dialog open onOpenChange={open => { if (!open) close(); }}>
     <DialogContent className="flex max-h-[100dvh] min-h-0 flex-col overflow-hidden sm:max-w-[640px] max-sm:h-[100dvh] max-sm:max-w-none max-sm:rounded-none">
       <DialogHeader><DialogTitle>{action === "install" ? "Add Plugin" : "Update Plugin"}</DialogTitle>
@@ -164,7 +177,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
           <label className="text-muted-foreground flex min-w-0 flex-col gap-2 text-sm">Git URL<Input value={url} onChange={event => setUrl(event.target.value)} placeholder="https://github.com/owner/plugin.git" autoComplete="url" /></label>
           <label className="text-muted-foreground flex min-w-0 flex-col gap-2 text-sm">Branch or Tag<Input value={gitRef} onChange={event => setGitRef(event.target.value)} placeholder="Default branch" /></label>
         </div> : null}
-        {job?.status === "staging" ? <p role="status" className="text-muted-foreground text-sm">Fetching and checking the plugin…</p> : null}
+        {showFetching(job, error !== null) ? <p role="status" className="text-muted-foreground text-sm">Fetching and checking the plugin…</p> : null}
         {job?.status === "error" ? <p role="alert" className="text-destructive text-sm">{job.error || "Plugin review failed."}</p> : null}
         {ready && job ? <>
           <p className="text-sm font-semibold">{job.manifest?.name ?? job.plugin_id ?? "Plugin"}</p>
@@ -186,8 +199,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
         {error ? <p role="alert" className="text-destructive break-words text-sm">{error}</p> : null}
       </div>
       <DialogFooter><Button type="button" variant="outline" className="pointer-coarse:min-h-11" disabled={busy} onClick={close}>Cancel</Button>
-        {job?.status === "staging" && error ? <Button type="button" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { setError(null); setPollVersion(value => value + 1); }}>Retry</Button> : null}
-        {form.review ? <Button type="button" className="pointer-coarse:min-h-11" disabled={busy || !url.trim()} onClick={() => { void start(); }}>Review</Button> : null}
+                {form.review ? <Button type="button" className="pointer-coarse:min-h-11" disabled={busy || !url.trim()} onClick={() => { void start(); }}>Review</Button> : null}
         {ready ? <Button type="button" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { void confirm(); }}>{action === "install" ? "Install" : "Update"}</Button> : null}
       </DialogFooter>
     </DialogContent>
