@@ -1,6 +1,11 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { SimpleImageAttachmentAdapter } from "@assistant-ui/react";
+import {
+  acknowledgeBusyWebMessage as acknowledgeQueueMessage,
+  type BusyWebMessageResult,
+  type QueueSubmissionLocks,
+} from "../src/components/web-queue/submit.ts";
 
 const productionFile = new URL(
   "../src/components/assistant-ui/thread.tsx",
@@ -45,6 +50,7 @@ function harness(
   state: { text: string; attachments: unknown[] },
   attachmentAdapter = new SimpleImageAttachmentAdapter(),
   sendNow = false,
+  acknowledge: (result: BusyWebMessageResult) => Promise<boolean> | boolean = () => true,
 ) {
   let currentState = state;
   const sendTransportCommand = vi.fn();
@@ -61,7 +67,7 @@ function harness(
     planKey: "plan-1",
     sendNowStatus: input.sendNow ? "accepted" as const : "not-requested" as const,
   }));
-  const acknowledgeBusyWebMessage = vi.fn(() => true);
+  const acknowledgeBusyWebMessage = vi.fn(acknowledge);
   const saveComposerDraft = vi.fn();
   const lastBusySubmit = { current: undefined as unknown };
   const skipEmptyDraftPersist = { current: false };
@@ -271,5 +277,39 @@ describe("sendBusyMessage pending image attachments", () => {
     expect(reset).not.toHaveBeenCalled();
     expect(setQueueAdmissionLock.mock.calls.at(-1)?.[0]).toEqual({ draftKey: "test-draft", locked: true });
     expect(setBusySubmitError).toHaveBeenCalledWith(expect.stringMatching(/exact message unchanged and retry/));
+  });
+
+  it("reports confirmed admission and unlocks after asynchronous ack-lock denial", async () => {
+    let rejectLock!: (reason?: unknown) => void;
+    const lockGate = new Promise<void>((_resolve, reject) => { rejectLock = reject; });
+    const locks: QueueSubmissionLocks = {
+      request: async <T>() => {
+        await lockGate;
+        throw new Error("NotAllowedError");
+      },
+    };
+    const storage = {
+      getItem: () => null,
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    };
+    const acknowledge = (result: BusyWebMessageResult) =>
+      acknowledgeQueueMessage(result, storage, locks);
+    const { sendBusyMessage, reset, setBusySubmitError, setQueueAdmissionLock } = harness(
+      { text: "already queued", attachments: [] },
+      new SimpleImageAttachmentAdapter(),
+      false,
+      acknowledge,
+    );
+
+    const sending = sendBusyMessage({ preventDefault: vi.fn() });
+    rejectLock(new Error("lock request denied asynchronously"));
+    await sending;
+
+    expect(reset).toHaveBeenCalledOnce();
+    expect(setBusySubmitError).toHaveBeenLastCalledWith(
+      "Message was queued, but the local retry guard could not be cleared. Check the queue before reusing this draft.",
+    );
+    expect(setQueueAdmissionLock.mock.calls.at(-1)?.[0]).toEqual({ draftKey: "test-draft", locked: false });
   });
 });

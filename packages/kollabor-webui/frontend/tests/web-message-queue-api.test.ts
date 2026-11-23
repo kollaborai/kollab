@@ -680,6 +680,29 @@ test("a late acknowledgement cannot erase a newer ambiguous submission in anothe
   expect(admittedOperations).toEqual(new Set(["operation-1", "operation-2"]));
 });
 
+test("an asynchronously rejected acknowledgement lock preserves the admitted retry plan", async () => {
+  const storage = new MemoryStorage();
+  const submissionLocks = new SerialQueueLocks();
+  const { api, enqueueWebMessageBatch } = busyApiHarness();
+  const result = await submitBusyWebMessage(api, busyInput(), storage, submissionLocks);
+  const lockGate = deferred<void>();
+  const deniedLocks: QueueSubmissionLocks = {
+    request: async <T>() => {
+      await lockGate.promise;
+      throw new Error("NotAllowedError");
+    },
+  };
+
+  const acknowledgement = acknowledgeBusyWebMessage(result, storage, deniedLocks);
+  lockGate.reject(new Error("lock request denied asynchronously"));
+
+  await expect(acknowledgement).resolves.toBe(false);
+  expect(storage.getItem(result.planKey)).not.toBeNull();
+  const retry = await submitBusyWebMessage(api, busyInput(), storage, submissionLocks);
+  expect(retry.operationId).toBe(result.operationId);
+  expect(enqueueWebMessageBatch).toHaveBeenCalledOnce();
+});
+
 test("Web Locks denial fails closed before allocating queue identities", async () => {
   const { api, allocateWebMessageQueueIds } = busyApiHarness();
   const denied: QueueSubmissionLocks = {
