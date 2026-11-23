@@ -4165,6 +4165,15 @@ class ToolExecutor:
                                 success=False,
                                 error="Response contained an incomplete gzip stream",
                             )
+                        if encoding == "deflate" and (
+                            decompressor is None or not decompressor.eof
+                        ):
+                            return ToolExecutionResult(
+                                tool_id=tool_id,
+                                tool_type="web_fetch",
+                                success=False,
+                                error="Response contained an incomplete deflate stream",
+                            )
 
                         if decompressor is not None:
                             tail = decompressor.flush()
