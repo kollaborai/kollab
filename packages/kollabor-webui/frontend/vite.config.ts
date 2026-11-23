@@ -6,6 +6,7 @@ import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { learnPhoneMediaPlugin } from "./scripts/learn-phone-media-plugin";
+import { pluginRuntimePlugin } from "./scripts/plugin-runtime-plugin.ts";
 import pkg from "./package.json";
 
 
@@ -153,7 +154,7 @@ export default defineConfig(({ mode }) => {
 });
 
 const mainConfig = defineConfig({
-  plugins: [kollabCanonicalChangelogPlugin(), phoneLearnMedia(false), react(), tailwindcss()],
+  plugins: [kollabCanonicalChangelogPlugin(), phoneLearnMedia(false), react(), tailwindcss(), pluginRuntimePlugin()],
   base: "./",
   define: {
     __APP_VERSION__: __APP_VERSION__,
@@ -240,6 +241,14 @@ const mainConfig = defineConfig({
       "tests/setup-guide-close.test.tsx",
       "tests/setup-guide-first-run-persistence.test.tsx",
       "tests/setup-guide-followups.test.tsx",
+      "tests/plugin-runtime.test.ts",
+      "tests/plugin-touch-size.test.ts",
+      "src/plugins/registry.test.ts",
+      "src/plugins/sdk.test.ts",
+      "src/plugins/loader.test.ts",
+      "src/plugins/mount.test.tsx",
+      "src/plugins/surfaces.test.tsx",
+      "src/plugins/wiring.test.tsx",
     ],
     environment: "node",
   },
