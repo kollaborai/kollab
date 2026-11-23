@@ -7092,6 +7092,13 @@ class HubPlugin(BasePlugin):
         try:
             return await self._on_message_received(msg) is not False
         except asyncio.CancelledError:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling() == 0:
+                # A receiver may raise CancelledError after applying its effect
+                # without a cancellation request against this delivery task.
+                # Treat that callback outcome as completed so the durable
+                # mailbox does not replay the effect after a restart.
+                return True
             raise
         except Exception as exc:
             logger.warning(
