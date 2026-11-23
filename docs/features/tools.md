@@ -1,7 +1,6 @@
 ---
 title: "Tool Calling"
 created: 2026-02-24
-<<<<<<< HEAD
 modified: 2026-11-17
 status: active
 ---
