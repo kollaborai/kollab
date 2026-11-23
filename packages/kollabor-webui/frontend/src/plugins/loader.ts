@@ -9,6 +9,7 @@
  * `plugins-changed` event reads `GET /plugins` again and adds or removes plugins without a reload, and
  * `?plugins=off` in the page URL loads no plugin code at all.
  */
+import { useSyncExternalStore } from "react";
 import type { EngineApi } from "@/api";
 import { inPhoneApp, navigateToPluginPage } from "@/utils/page-route";
 import {
@@ -32,6 +33,36 @@ const OWN_REACT =
   /__(?:CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE|SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED)\s*=(?!=)/;
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+export type PluginInventory = { entries: readonly PluginEntry[]; error: string | null };
+
+// Every listed plugin, including off, shadowed and failed ones. The registry holds only the loaded ones.
+let inventory: PluginInventory = { entries: [], error: null };
+const inventoryListeners = new Set<() => void>();
+
+function setInventory(next: PluginInventory): void {
+  inventory = next;
+  for (const listener of inventoryListeners) listener();
+}
+
+/** Every listed plugin as the last successful read returned it. */
+export const listedPluginEntries = (): readonly PluginEntry[] => inventory.entries;
+
+function subscribeInventory(listener: () => void): () => void {
+  inventoryListeners.add(listener);
+  return () => {
+    inventoryListeners.delete(listener);
+  };
+}
+
+/** The listed plugins and the error of the last read; a failed read keeps the last good list. */
+export function usePluginInventory(): PluginInventory {
+  return useSyncExternalStore(
+    subscribeInventory,
+    () => inventory,
+    () => inventory,
+  );
+}
 
 /** `?plugins=off`: the way back in when a plugin freezes the page. */
 export function pluginsOff(search: string): boolean {
@@ -256,9 +287,11 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
         .filter((item): item is PluginEntry => Boolean(item) && typeof item.id === "string" && typeof item.name === "string")
         .map((item) => ({ ...item, contributes: item.contributes ?? {}, services: Array.isArray(item.services) ? item.services : [] }));
     } catch (error) {
+      setInventory({ entries: inventory.entries, error: message(error) });
       registry.setListed(message(error));
       return;
     }
+    setInventory({ entries, error: null });
     const active = entries.filter(isActive);
     const keep = new Set(active.map((entry) => entry.id));
     for (const { id } of registry.getSnapshot().plugins) if (!keep.has(id)) drop(id);
@@ -317,6 +350,11 @@ let runtime: PluginLoader | null = null;
 /** Retry from a Failed to Load or Failed to Render panel. */
 export function retryPlugin(id: string): void {
   void runtime?.retry(id);
+}
+
+/** Reads `GET /plugins` again; resolves once the list has been updated. */
+export function refreshPlugins(): Promise<void> {
+  return runtime?.refresh() ?? Promise.resolve();
 }
 
 /**
