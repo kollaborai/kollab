@@ -8,7 +8,9 @@ from kollabor.llm.llm_coordinator import LLMService
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reserve_cancel", [True, False], ids=["cancel-reserved", "cancel-refused"])
+@pytest.mark.parametrize(
+    "reserve_cancel", [True, False], ids=["cancel-reserved", "cancel-refused"]
+)
 async def test_send_now_fences_owner_claimed_before_turn_start_marker(reserve_cancel):
     runner = ACPRunner(ACPProfile("startup-owner", ("unused",)))
     runner.session_id = "session-A"
@@ -45,16 +47,22 @@ async def test_send_now_fences_owner_claimed_before_turn_start_marker(reserve_ca
                 supports_image_input=False,
                 voice_rules_epochs=set(),
                 steer=lambda text, *, origin, thread_id, request_id, **kw: runner.steer(
-                    text, origin=origin, thread_id=thread_id, images=kw.get("images", ())
+                    text,
+                    origin=origin,
+                    thread_id=thread_id,
+                    images=kw.get("images", ()),
                 ),
                 admit=runner.admit,
                 prioritize_queued=runner.prioritize_queued,
                 prepare_cancel=lambda *, session_id, generation: (
-                    runner.prepare_cancel(expected_session_id=session_id, expected_generation=generation)
+                    runner.prepare_cancel(
+                        expected_session_id=session_id, expected_generation=generation
+                    )
                     if reserve_cancel
                     else False
                 ),
-                schedule_prepared_cancel=lambda **kw: cancel_scheduled.append(kw) or True,
+                schedule_prepared_cancel=lambda **kw: cancel_scheduled.append(kw)
+                or True,
             ),
             {"message": "send now B", "request_id": "client-B", "send_now": True},
             "state_rpc",
@@ -69,7 +77,10 @@ async def test_send_now_fences_owner_claimed_before_turn_start_marker(reserve_ca
         await asyncio.wait_for(started.wait(), timeout=1)
         assert getattr(runner, "_active_context", None) is owner_admission
         assert runner._active_turn_id == owner_admission.turn_id
-        assert [item.request_id for item in runner._queue._queue] == ["client-B", "older-D"]
+        assert [item.request_id for item in runner._queue._queue] == [
+            "client-B",
+            "older-D",
+        ]
         assert [item.request_id for item in runner._queue._queue].count("client-B") == 1
         assert runner._cancel_hold is reserve_cancel
         assert len(cancel_scheduled) == int(reserve_cancel)
@@ -79,7 +90,9 @@ async def test_send_now_fences_owner_claimed_before_turn_start_marker(reserve_ca
         await asyncio.gather(worker, return_exceptions=True)
 
 
-@pytest.mark.parametrize("owner_change", ["gone", "replaced"], ids=["owner-gone", "owner-replaced"])
+@pytest.mark.parametrize(
+    "owner_change", ["gone", "replaced"], ids=["owner-gone", "owner-replaced"]
+)
 @pytest.mark.asyncio
 async def test_send_now_rejects_when_startup_owner_changes_after_snapshot(owner_change):
     runner = ACPRunner(ACPProfile("startup-owner-switch", ("unused",)))
@@ -122,7 +135,9 @@ async def test_send_now_rejects_when_startup_owner_changes_after_snapshot(owner_
             return True
 
         def prepare_cancel(self, **_kwargs):
-            return runner.prepare_cancel(expected_session_id="session-A", expected_generation=7)
+            return runner.prepare_cancel(
+                expected_session_id="session-A", expected_generation=7
+            )
 
         def schedule_prepared_cancel(self, **kwargs):
             scheduled_cancels.append(kwargs)
@@ -166,5 +181,8 @@ async def test_send_now_rejects_when_startup_owner_changes_after_snapshot(owner_
         if replacement_task is not None:
             replacement_task.cancel()
         await asyncio.gather(
-            request, original_task, *([replacement_task] if replacement_task else []), return_exceptions=True
+            request,
+            original_task,
+            *([replacement_task] if replacement_task else []),
+            return_exceptions=True,
         )
