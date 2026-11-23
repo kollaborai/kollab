@@ -307,3 +307,59 @@ async def test_branch_aborts_when_saving_current_conversation_fails():
     assert manager.messages == [
         {"role": "user", "content": "unsaved current turn"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_branch_sync_failure_restores_all_session_owners():
+    class ConversationLogger:
+        session_id = "current-before"
+
+        def reset_session(self, session_id: str) -> None:
+            self.session_id = session_id
+
+    class ApiService:
+        current_session_id = "current-before"
+
+        def set_session_id(self, session_id: str) -> None:
+            self.current_session_id = session_id
+            raise OSError("generated artifact store unavailable")
+
+    class ConversationManager:
+        current_session_id = "current-before"
+        messages = [{"role": "user", "content": "current"}]
+
+        def __init__(self) -> None:
+            self.conversation_logger = ConversationLogger()
+
+        def save_conversation(self) -> None:
+            pass
+
+        def branch_session(self, session_id: str, index: int) -> dict:
+            self.current_session_id = "branch-created"
+            self.messages = [{"role": "user", "content": "branch"}]
+            return {"success": True, "session_id": "branch-created", "branch_point": index}
+
+    manager = ConversationManager()
+    api_service = ApiService()
+    history = [SimpleNamespace(content="current")]
+    state = object.__new__(LocalStateService)
+    state._llm_service = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_history=history,
+        api_service=api_service,
+    )
+
+    @asynccontextmanager
+    async def ownership(_action: str):
+        yield object(), False, lambda: None
+
+    state._conversation_ownership = ownership
+
+    with pytest.raises(ValueError, match="failed to name branch session"):
+        await state.branch_conversation("saved-source", 0)
+
+    assert manager.current_session_id == "current-before"
+    assert manager.messages == [{"role": "user", "content": "current"}]
+    assert manager.conversation_logger.session_id == "current-before"
+    assert api_service.current_session_id == "current-before"
+    assert [message.content for message in history] == ["current"]
