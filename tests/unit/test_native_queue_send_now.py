@@ -340,4 +340,3 @@ async def test_forced_batch_stops_matching_owner_before_admitting_all_members_on
 async def _settle_forced_test_turn(processor, terminal, events):
     await terminal.wait()
     processor.is_processing = False
-

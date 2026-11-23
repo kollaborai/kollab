@@ -847,4 +847,3 @@ async def test_acp_bind_failure_cancels_exact_deferred_admission_before_completi
     assert attachments.attachment_count == 1
     queued = await queue.snapshot()
     assert queued.batches[0].items[0].request_id == request_id
-
