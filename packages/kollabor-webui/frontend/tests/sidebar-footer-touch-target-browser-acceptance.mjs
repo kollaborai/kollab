@@ -41,6 +41,11 @@ async function main() {
         isMobile: viewport.isMobile,
       });
       try {
+        await view.page.route("**/pr-chain", (route) => route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ root_found: true, items: [], events: [], truncated: false }),
+        }));
         if (viewport.savedSidebarWidth) {
           await view.page.addInitScript(() => localStorage.setItem("kollab.sidebar.width", "220"));
         }
