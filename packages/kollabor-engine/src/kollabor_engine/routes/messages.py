@@ -1993,6 +1993,14 @@ async def assistant_transport(
                     _assistant_correlation_monotonic()
                     + EVENT_IDLE_TIMEOUT_SECONDS
                 )
+            if possibly_accepted_request_ids - completed_request_ids:
+                # An earlier admission response may have been lost. Keep the
+                # resumed receive loop bounded even when a later accepted turn
+                # completes and the uncertain request never emits anything.
+                correlation_deadline = (
+                    _assistant_correlation_monotonic()
+                    + EVENT_IDLE_TIMEOUT_SECONDS
+                )
 
         def reject_handover(message: str) -> None:
             nonlocal handover_record, handover_claim_id
@@ -3816,7 +3824,16 @@ async def assistant_transport(
                         if not completed_now:
                             continue
                         completed_request_ids.update(completed_now)
-                        if not untagged_request_ids - completed_request_ids:
+                        pending_correlation_ids = (
+                            (untagged_request_ids | possibly_accepted_request_ids)
+                            - completed_request_ids
+                        )
+                        pending_gap_ids = (
+                            admitted_turn_request_ids - completed_request_ids
+                            if event_loss_seen
+                            else set()
+                        )
+                        if not pending_correlation_ids and not pending_gap_ids:
                             correlation_deadline = None
                         turn_status = (
                             {
