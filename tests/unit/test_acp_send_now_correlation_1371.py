@@ -107,7 +107,13 @@ async def test_permission_updates_keep_the_active_generation():
         "permission_request",
         "permission_resolved",
     ]
-    assert all(update.get("generation") == 7 for update in updates)
+    assert all(
+        update.get("request_id") == "tool-A"
+        and update.get("owner_request_id") == "active-request-A"
+        and update.get("turn_id") == 12
+        and update.get("generation") == 7
+        for update in updates
+    )
 
 
 @pytest.mark.asyncio
@@ -180,6 +186,26 @@ async def test_orchestrator_steering_preserves_the_client_id_and_joined_owner():
         "joined_turn_id": 12,
         "joined_generation": 7,
     }
+
+
+@pytest.mark.asyncio
+async def test_legacy_steering_call_still_returns_bool():
+    runner, _ = _active_runner()
+    runner.steer = AsyncMock(return_value=True)
+    orchestrator = object.__new__(ACPOrchestrator)
+    orchestrator._runner = runner
+    orchestrator._parents = {}
+    recorded: list[tuple] = []
+    orchestrator._record_user = lambda *args: recorded.append(args)
+
+    result = await orchestrator.steer(
+        "message B",
+        origin={"operator": True},
+    )
+
+    assert result is True
+    assert len(recorded) == 1
+    assert recorded[0][0].startswith("steering-")
 
 
 @pytest.mark.asyncio
