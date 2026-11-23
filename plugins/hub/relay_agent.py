@@ -128,6 +128,17 @@ def _safe_enrollment_result(value) -> dict[str, str]:
 
 
 def _safe_enrollment_offer_result(value) -> dict[str, str]:
+    if (
+        isinstance(value, dict)
+        and value.get("error") == "connect offer could not be created"
+        and value.keys() <= {"error", "reason"}
+    ):
+        from .enrollment_client import is_safe_connect_offer_refusal
+
+        reason = value.get("reason")
+        if is_safe_connect_offer_refusal(reason):
+            return {"error": "connect offer could not be created", "reason": reason}
+        return {"error": "connect offer could not be created"}
     if not isinstance(value, dict) or not value.keys() >= {
         "status",
         "offer_id",
@@ -1596,9 +1607,27 @@ class RelayAgentBridge:
             raise RelayError("invalid local enrollment offer")
         self._local_agent(params["agent_id"])
         self._admit_refusal()
-        return _safe_enrollment_offer_result(
-            await self._ensure_enrollment_issuer().create_offer(params["domain"])
+        from .enrollment_client import (
+            EnrollmentProtocolError,
+            connect_offer_unauthorized_refusal,
+            is_safe_connect_offer_refusal,
         )
+
+        try:
+            result = await self._ensure_enrollment_issuer().create_offer(params["domain"])
+        except EnrollmentProtocolError as exc:
+            if exc.code != "unauthorized":
+                raise
+            source = exc.source if exc.source in {"local", "relay"} else "local"
+            logger.warning("connect offer refused (%s): %s", source, exc.code)
+            reason = exc.refusal
+            if not is_safe_connect_offer_refusal(reason):
+                reason = connect_offer_unauthorized_refusal(source)
+            result = {
+                "error": "connect offer could not be created",
+                "reason": reason,
+            }
+        return _safe_enrollment_offer_result(result)
 
     async def _rpc_command(self, params):
         self._require_human_network_context(

@@ -393,10 +393,11 @@ class TestResumeCommand:
         sessions = commands["sessions"]
         assert sessions.handler == plugin.handle_sessions
         assert sessions.description == "Browse, search, and resume conversations"
-        assert sessions.aliases == ["history"]
+        assert sessions.aliases == ["history", "fork", "forks"]
         aliases = {alias for command in commands.values() for alias in command.aliases}
-        assert "fork" not in commands and "fork" not in aliases
-        assert "forks" not in aliases
+        assert "fork" not in commands and "fork" in aliases
+        assert "forks" in aliases
+        assert commands["sessions"].handler == plugin.handle_sessions
         assert commands["resume"].handler == plugin.handle_resume
 
         result = await plugin.handle_sessions(
