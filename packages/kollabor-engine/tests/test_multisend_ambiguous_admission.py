@@ -285,6 +285,71 @@ async def test_single_send_lost_admission_response_drains_exact_turn_without_led
 
 
 @pytest.mark.asyncio
+async def test_single_ambiguous_send_reports_full_handover_capacity(monkeypatch):
+    session = _FakeSession([])
+    clock = type("Clock", (), {"now": 0.0})()
+    monkeypatch.setattr(messages, "EVENT_IDLE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        messages, "_assistant_correlation_monotonic", lambda: clock.now
+    )
+    original_next_event = messages._assistant_next_event
+
+    async def expire_requested_timeout(queue, controller, timeout=None):
+        if timeout is not None and queue.empty():
+            clock.now += timeout
+            return {}
+        return await original_next_event(queue, controller, timeout)
+
+    monkeypatch.setattr(messages, "_assistant_next_event", expire_requested_timeout)
+    ledger = messages._assistant_handover_ledger(session)
+    for index in range(messages._ASSISTANT_HANDOVER_MAX_ENTRIES):
+        token = f"{index:032x}"
+        ledger[token] = {
+            "expires_at": 3600.0,
+            "status": "available",
+            "record": {"request_ids": [f"parked-{index}"]},
+            "queue": None,
+            "context": None,
+        }
+
+    session.send_message = AsyncMock(
+        side_effect=ConnectionError("admission response lost before events")
+    )
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, drain = _install_fake_assistant_stream(monkeypatch)
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[
+                {
+                    "type": "add-message",
+                    "message": {
+                        "id": "single",
+                        "parts": [{"type": "text", "text": "one"}],
+                    },
+                }
+            ],
+            state={"messages": []},
+        ),
+    )
+    await asyncio.wait_for(drain(response.stream), timeout=1)
+
+    error = "\n".join(captured["controller"].errors)
+    assert session.send_message.await_count == 1
+    assert len(ledger) == messages._ASSISTANT_HANDOVER_MAX_ENTRIES
+    assert session.subscriptions == [], "no capability can retain a full ledger slot"
+    assert "single" in error
+    assert "may still be running" in error
+    assert "handover capacity" in error
+    assert "late events cannot be guaranteed" in error
+    assert "No messages were resubmitted." in error
+    assert messages._ASSISTANT_HANDOVER_STATE_KEY not in captured["controller"].state
+    assert captured["controller"].state["usage"]["stopReason"] == "error"
+
+
+@pytest.mark.asyncio
 async def test_revocation_after_ambiguous_admission_does_not_publish_or_persist(
     monkeypatch,
 ):
