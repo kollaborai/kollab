@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import sysconfig
+import time
 from pathlib import Path
 
 import pytest
@@ -796,3 +797,57 @@ def test_timeout_kills_a_version_command_that_ignores_term(tmp_path: Path) -> No
 
     assert process.returncode != 0
     assert "timed out" in stdout
+
+
+def test_timeout_kills_version_command_children(tmp_path: Path) -> None:
+    functions = tmp_path / "installer-functions.sh"
+    functions.write_text(
+        INSTALL_SCRIPT.read_text().split('\nmain "$@"')[0] + "\n",
+        encoding="utf-8",
+    )
+    installed_dir = tmp_path / "install-bin"
+    child_pid_file = tmp_path / "child.pid"
+    _write_executable(
+        installed_dir / "kollab",
+        '#!/bin/sh\ntrap "" TERM\nsh -c \'trap "" TERM; exec sleep 30\' &\n'
+        f'echo $! > "{child_pid_file}"\nwait\n',
+    )
+    env = os.environ.copy()
+    env.update({"HOME": str(tmp_path), "PATH": f"{installed_dir}:/usr/bin:/bin"})
+    process = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            'source "$1"; INSTALLED_DIR="$2"; VERSION_CHECK_TIMEOUT_SECONDS=1; verify_install',
+            "installer-test",
+            str(functions),
+            str(installed_dir),
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+    try:
+        assert process.returncode != 0
+        assert "timed out" in process.stdout
+        state = ""
+        for _ in range(20):
+            state = subprocess.run(
+                ["/bin/ps", "-o", "stat=", "-p", str(child_pid)],
+                capture_output=True,
+                check=False,
+                text=True,
+            ).stdout.strip()
+            if not state or state.startswith("Z"):
+                break
+            time.sleep(0.05)
+        assert not state or state.startswith("Z"), f"version child still running: {state}"
+    finally:
+        try:
+            os.kill(child_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
