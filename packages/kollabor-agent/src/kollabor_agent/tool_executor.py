@@ -3279,7 +3279,12 @@ class ToolExecutor:
 
             # Playwright fallback: if aiohttp got suspiciously little text
             # from a valid response, the page may be JS-rendered.
-            if len(text) < 500:
+            json_ld_body = (
+                self._extract_json_ld_article_body(raw)
+                if extract_main and 200 < len(text) < 500
+                else ""
+            )
+            if len(text) < 500 and text != json_ld_body:
                 pw_text = await self._playwright_fetch(url)
                 if pw_text and len(pw_text) > len(text):
                     text = pw_text
@@ -3552,6 +3557,18 @@ class ToolExecutor:
             if len(description) > len(text):
                 return description
         return text
+
+    @staticmethod
+    def _extract_json_ld_article_body(html: str) -> str:
+        """Return a usable JSON-LD article body when the parser is available."""
+        try:
+            from bs4 import BeautifulSoup
+        except ImportError:
+            return ""
+
+        soup = BeautifulSoup(html, "html.parser")
+        article_body, _ = ToolExecutor._extract_json_ld(soup)
+        return article_body if len(article_body) > 200 else ""
 
     @staticmethod
     def _extract_json_ld(soup) -> tuple[str, str]:
