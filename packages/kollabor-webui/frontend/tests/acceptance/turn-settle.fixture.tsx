@@ -109,6 +109,7 @@ function Probe() {
     <div>
       <button id="send" onClick={() => aui.thread().append("hello")}>send</button>
       <button id="send-what" onClick={() => aui.thread().append("what")}>send what</button>
+      <button id="send-more" onClick={() => aui.thread().append("again")}>send again</button>
       <button id="stop" onClick={() => aui.thread().cancelRun()}>stop</button>
       <div id="running">{running ? "running" : "idle"}</div>
       <div id="assistant">{assistant}</div>

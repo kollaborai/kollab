@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from kollabor.llm.acp_bridge import ACPProfile, ACPRunner
+from kollabor.llm.acp_bridge import ACPProfile, ACPResult, ACPRunner
 from kollabor.llm.llm_coordinator import LLMService
 
 
@@ -14,14 +14,21 @@ class _BatchACP:
     supports_image_input = False
     voice_rules_epochs: set[object] = set()
 
-    def __init__(self, runner: ACPRunner, *, refuse_cancel: bool = False):
+    def __init__(
+        self,
+        runner: ACPRunner,
+        *,
+        refuse_cancel: bool = False,
+        steer_results: list[object] | None = None,
+    ):
         self.runner = runner
         self.refuse_cancel = refuse_cancel
+        self.steer_results = list(steer_results or [])
         self.calls: list[str] = []
 
     async def steer(self, *_args, **_kwargs):
         self.calls.append("steer")
-        return False
+        return self.steer_results.pop(0) if self.steer_results else False
 
     def begin_send_now_batch(self, batch_id, expected_count, **owner):
         self.calls.append("begin_batch")
@@ -40,6 +47,15 @@ class _BatchACP:
     def finish_send_now_batch(self, batch_id):
         self.calls.append("finish_batch")
         return self.runner.finish_send_now_batch(batch_id)
+
+    def has_send_now_batch(self, batch_id):
+        return self.runner.has_send_now_batch(batch_id)
+
+    def send_now_batch_has_admissions(self, batch_id):
+        return self.runner.send_now_batch_has_admissions(batch_id)
+
+    def record_send_now_batch_injected(self, batch_id):
+        return self.runner.record_send_now_batch_injected(batch_id)
 
     def prepare_cancel(self, *, session_id, generation):
         self.calls.append("prepare_cancel")
@@ -115,7 +131,7 @@ async def test_send_now_batch_admits_b_and_c_contiguously_before_older_d_once():
 
         second = await _send_batch_message(service, acp, "client-C", "message C", 1)
         assert second["status"] == "queued"
-        finished = service.finish_send_now_batch(acp, "batch-BC")
+        finished = service.finish_send_now_batch("batch-BC", acp=acp)
 
         assert finished is True
         assert [item.request_id for item in runner._queue._queue] == [
@@ -125,6 +141,7 @@ async def test_send_now_batch_admits_b_and_c_contiguously_before_older_d_once():
         assert [item.request_id for item in runner._queue._queue].count("client-C") == 1
         assert acp.calls.count("admit:client-B") == 1
         assert acp.calls.count("admit:client-C") == 1
+        assert acp.calls.count("steer") == 1, "after B queues, C must not be injected into the owner being stopped"
         assert acp.calls.count("schedule_cancel") == 1
         assert runner._cancel_hold is True
     finally:
@@ -144,13 +161,144 @@ async def test_send_now_batch_partial_admission_is_not_resent_when_cancel_fence_
 
         # C is rejected before ACP admission. Finalization must still release B
         # ahead of D and must not retry B when the active-owner fence refuses.
-        finished = service.finish_send_now_batch(acp, "batch-BC")
+        finished = service.finish_send_now_batch("batch-BC", acp=acp)
 
         assert finished is True
         queued = [item.request_id for item in runner._queue._queue]
         assert queued == ["client-B", "older-D"]
         assert queued.count("client-B") == 1
         assert acp.calls.count("admit:client-B") == 1
+        assert acp.calls.count("schedule_cancel") == 0
+        assert runner._cancel_hold is False
+    finally:
+        release_active.set()
+        _cleanup_runner(runner, active_task)
+        await asyncio.gather(active_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_runner_holds_older_work_if_original_owner_ends_between_batch_messages():
+    runner = ACPRunner(ACPProfile("send-now-batch-gate", ("unused",)))
+    runner.session_id = "session-A"
+    runner.generation = 7
+    runner._connection = object()
+    started: asyncio.Queue[str] = asyncio.Queue()
+    release = {name: asyncio.Event() for name in ("active-A", "client-B", "client-C", "older-D")}
+
+    async def fake_run_prompt(admission, generation):
+        runner._active_turn_id = admission.turn_id
+        runner._active_generation = generation
+        started.put_nowait(admission.request_id)
+        await release[admission.request_id].wait()
+        return ACPResult(
+            generation=generation,
+            session_id="session-A",
+            text="",
+            stop_reason="end_turn",
+            updates=(),
+            end_frame={},
+            turn_id=admission.turn_id,
+            request_id=admission.request_id,
+            source=admission.source,
+        )
+
+    runner._run_prompt = fake_run_prompt
+    runner.admit("active", request_id="active-A", source="rpc")
+    runner.admit("older", request_id="older-D", source="rpc")
+    worker = asyncio.create_task(runner._drain_queue())
+    try:
+        assert await asyncio.wait_for(started.get(), timeout=1) == "active-A"
+        owner = runner._active_context
+        assert runner.begin_send_now_batch(
+            "batch-BC", 2,
+            session_id="session-A",
+            generation=runner._active_generation,
+            active_context=owner,
+            active_turn_id=runner._active_turn_id,
+        )
+        runner.admit(
+            "message B", request_id="client-B", source="rpc",
+            send_now_batch_id="batch-BC",
+        )
+
+        # A can finish before the engine submits C. The worker must park here;
+        # D cannot slip between the two messages while C is still in flight.
+        release["active-A"].set()
+        await runner._active_done.wait()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert started.empty()
+        assert runner._queue_release.is_set() is False
+
+        runner.admit(
+            "message C", request_id="client-C", source="rpc",
+            send_now_batch_id="batch-BC",
+        )
+        batch = runner.finish_send_now_batch("batch-BC")
+        assert batch is not None
+        assert [item.request_id for item in runner._queue._queue] == [
+            "client-B", "client-C", "older-D",
+        ]
+
+        for expected in ("client-B", "client-C", "older-D"):
+            assert await asyncio.wait_for(started.get(), timeout=1) == expected
+            release[expected].set()
+        assert runner._queue.empty()
+    finally:
+        for event in release.values():
+            event.set()
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_send_now_batch_does_not_cancel_owner_after_one_member_was_injected():
+    runner, active_task, release_active = _active_runner()
+    service = object.__new__(LLMService)
+    acp = _BatchACP(runner, steer_results=[{
+        "joined_request_id": "active-A",
+        "joined_turn_id": 12,
+        "joined_generation": 7,
+    }, False])
+    try:
+        injected = await _send_batch_message(
+            service, acp, "client-B", "message B", 0, first=True
+        )
+        assert injected["status"] == "injected"
+        queued = await _send_batch_message(service, acp, "client-C", "message C", 1)
+        assert queued["status"] == "queued"
+
+        finished = service.finish_send_now_batch("batch-BC", acp=acp)
+
+        assert finished is True
+        assert [item.request_id for item in runner._queue._queue] == [
+            "client-C", "older-D",
+        ]
+        assert acp.calls.count("schedule_cancel") == 0
+        assert runner._cancel_hold is False
+    finally:
+        release_active.set()
+        _cleanup_runner(runner, active_task)
+        await asyncio.gather(active_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_send_now_batch_does_not_cancel_a_replacement_owner():
+    runner, active_task, release_active = _active_runner()
+    service = object.__new__(LLMService)
+    acp = _BatchACP(runner)
+    try:
+        await _send_batch_message(service, acp, "client-B", "message B", 0, first=True)
+        await _send_batch_message(service, acp, "client-C", "message C", 1)
+        runner._active_context = SimpleNamespace(request_id="replacement-owner")
+        runner._active_turn_id = 14
+        runner._active_generation = 8
+
+        assert service.finish_send_now_batch("batch-BC", acp=acp) is True
+
+        assert [item.request_id for item in runner._queue._queue] == [
+            "client-B", "client-C", "older-D",
+        ]
         assert acp.calls.count("schedule_cancel") == 0
         assert runner._cancel_hold is False
     finally:

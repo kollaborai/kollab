@@ -452,6 +452,22 @@ class ACPAdmission:
     future: asyncio.Future["ACPResult"]
     origin: dict[str, Any] = field(default_factory=dict)
     images: tuple[dict[str, str], ...] = field(default_factory=tuple, repr=False)
+    send_now_batch_id: str | None = None
+
+
+@dataclass
+class ACPSendNowBatch:
+    """A reserved, ordered group of messages being handed to the harness."""
+
+    batch_id: str
+    expected_count: int
+    session_id: str | None
+    generation: int | None
+    active_context: Any
+    active_turn_id: int
+    admissions: list[ACPAdmission] = field(default_factory=list)
+    reserved_count: int = 0
+    injected_count: int = 0
 
 
 def _turn_usage_payload(usage: Any) -> dict[str, int] | None:
@@ -751,6 +767,8 @@ class ACPRunner:
         self._process_group_id: int | None = None
         self._teardown_lock = asyncio.Lock()
         self._queue: asyncio.Queue[ACPAdmission | None] = asyncio.Queue(maxsize=10)
+        self._send_now_batches: dict[str, ACPSendNowBatch] = {}
+        self._send_now_reserved = 0
         self._worker: asyncio.Task[None] | None = None
         self._updates: list[dict[str, Any]] = []
         self._active_generation = 0
@@ -780,6 +798,7 @@ class ACPRunner:
             or self._active_future is not None
             or not self._queue.empty()
             or self._cancel_hold
+            or bool(self._send_now_batches)
             or not self._active_done.is_set()
         )
 
@@ -1326,6 +1345,7 @@ class ACPRunner:
         thread_id: str | None = None,
         origin: dict[str, Any] | None = None,
         images: tuple[dict[str, str], ...] = (),
+        send_now_batch_id: str | None = None,
     ) -> ACPAdmission:
         # While the harness restarts (after a failed or cancelled prompt) its
         # connection is briefly gone; a request then waits in the queue like one
@@ -1339,13 +1359,29 @@ class ACPRunner:
             raise ACPError(
                 "This harness can't take images.", error_class="images_unsupported"
             )
+        batch = None
+        if send_now_batch_id is not None:
+            batch = self._send_now_batches.get(send_now_batch_id)
+            if batch is None:
+                raise ACPError(
+                    "Send Now batch is no longer active",
+                    error_class="invalid_send_now_batch",
+                )
+            if batch.reserved_count <= 0:
+                raise ACPError(
+                    "Send Now batch queue reservation is exhausted",
+                    error_class="queue_full",
+                )
+        elif self._queue.qsize() >= self._queue.maxsize - self._send_now_reserved:
+            raise ACPError("ACP prompt queue is full", error_class="queue_full")
         generation = self.generation
         # A rejected queue admission is not a turn and must not create a hole
         # in the orchestrator's compact completed-turn frontier.
         turn_id = self._next_turn_id + 1
         future: asyncio.Future[ACPResult] = asyncio.get_running_loop().create_future()
         admission = ACPAdmission(
-            request_id, source, thread_id, generation, turn_id, text, future, dict(origin or {}), images
+            request_id, source, thread_id, generation, turn_id, text, future,
+            dict(origin or {}), images, send_now_batch_id,
         )
         try:
             self._queue.put_nowait(admission)
@@ -1354,6 +1390,10 @@ class ACPRunner:
                 "ACP prompt queue is full", error_class="queue_full",
                 cause=type(exc).__name__,
             ) from exc
+        if batch is not None:
+            batch.admissions.append(admission)
+            batch.reserved_count -= 1
+            self._send_now_reserved -= 1
         self._next_turn_id = turn_id
         return admission
 
@@ -1420,7 +1460,7 @@ class ACPRunner:
                     if not item.future.done():
                         item.future.set_exception(exc)
             finally:
-                if not self._cancel_hold:
+                if not self._cancel_hold and not self._send_now_batches:
                     self._queue_release.set()
 
     async def _restart_process(self) -> None:
@@ -1593,6 +1633,103 @@ class ACPRunner:
                 f"{self.profile.name}: turn changed before steering was confirmed"
             )
         return True
+
+    def prioritize_queued(self, admission: ACPAdmission) -> bool:
+        """Move this exact admitted request ahead of waiting turns."""
+        queue = self._queue._queue
+        for index, queued in enumerate(queue):
+            if queued is admission:
+                del queue[index]
+                queue.appendleft(admission)
+                return True
+        return False
+
+    def begin_send_now_batch(
+        self,
+        batch_id: str,
+        expected_count: int,
+        *,
+        session_id: str | None,
+        generation: int | None,
+        active_context: Any,
+        active_turn_id: int,
+    ) -> bool:
+        """Reserve queue capacity and hold the worker until the batch closes."""
+        if (
+            not isinstance(batch_id, str)
+            or not batch_id
+            or len(batch_id) > 128
+            or type(expected_count) is not int
+            or expected_count < 2
+            or expected_count > self._queue.maxsize
+        ):
+            return False
+        existing = self._send_now_batches.get(batch_id)
+        if existing is not None:
+            return (
+                existing.expected_count == expected_count
+                and existing.session_id == session_id
+                and existing.generation == generation
+                and existing.active_context is active_context
+                and existing.active_turn_id == active_turn_id
+            )
+        if self._send_now_batches:
+            return False
+        if self._queue.qsize() + self._send_now_reserved + expected_count > self._queue.maxsize:
+            return False
+        batch = ACPSendNowBatch(
+            batch_id=batch_id,
+            expected_count=expected_count,
+            session_id=session_id,
+            generation=generation,
+            active_context=active_context,
+            active_turn_id=active_turn_id,
+            reserved_count=expected_count,
+        )
+        self._send_now_batches[batch_id] = batch
+        self._send_now_reserved += expected_count
+        # The active request continues. If it ends before the engine sends the
+        # rest of this batch, its finally block must leave D behind the gate.
+        self._queue_release.clear()
+        return True
+
+    def has_send_now_batch(self, batch_id: str) -> bool:
+        """Whether an open batch still owns a queue reservation."""
+        return batch_id in self._send_now_batches
+
+    def send_now_batch_has_admissions(self, batch_id: str) -> bool:
+        """Whether this group already has queued messages to preserve."""
+        batch = self._send_now_batches.get(batch_id)
+        return bool(batch and batch.admissions)
+
+    def record_send_now_batch_injected(self, batch_id: str) -> bool:
+        """Remember that stopping the captured owner could discard accepted text."""
+        batch = self._send_now_batches.get(batch_id)
+        if batch is None:
+            return False
+        batch.injected_count += 1
+        return True
+
+    def finish_send_now_batch(self, batch_id: str) -> ACPSendNowBatch | None:
+        """Place every admitted member contiguously, then release the worker."""
+        batch = self._send_now_batches.pop(batch_id, None)
+        if batch is None:
+            return None
+        self._send_now_reserved -= batch.reserved_count
+        batch.reserved_count = 0
+        queued = self._queue._queue
+        members = [
+            admission
+            for admission in batch.admissions
+            if any(item is admission for item in queued)
+        ]
+        member_ids = {id(admission) for admission in members}
+        remaining = [item for item in queued if id(item) not in member_ids]
+        queued.clear()
+        queued.extend([*members, *remaining])
+        if not self._send_now_batches:
+            self._queue_release.set()
+        return batch
 
     def cancel_queued(self, request_id: str, admission: ACPAdmission | None = None) -> bool:
         """Cancel one queued admission: that exact admission if given, else the first with this id."""
@@ -1977,7 +2114,8 @@ class ACPRunner:
                 self._cancel_hold = False
                 self._cancel_target = None
                 self._cancel_active_task = None
-                self._queue_release.set()
+                if not self._send_now_batches:
+                    self._queue_release.set()
 
     async def _terminate_process(self) -> None:
         async with self._teardown_lock:

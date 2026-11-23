@@ -333,6 +333,36 @@ def _event_request_ids(event: Dict[str, Any]) -> set[str]:
     ) | {str(value) for value in values if value is not None and str(value)}
 
 
+def _joined_event_key(
+    request_id: Any, turn_id: Any, generation: Any
+) -> tuple[str, int, int] | None:
+    if (
+        not isinstance(request_id, str)
+        or not request_id
+        or isinstance(turn_id, bool)
+        or not isinstance(turn_id, int)
+        or isinstance(generation, bool)
+        or not isinstance(generation, int)
+    ):
+        return None
+    return request_id, turn_id, generation
+
+
+def _with_joined_request_ids(
+    event: Dict[str, Any], joined: Dict[tuple[str, int, int], set[str]]
+) -> Dict[str, Any]:
+    """Alias output only from the exact active turn an injected send joined."""
+    key = _joined_event_key(
+        event.get("request_id"), event.get("turn_id"), event.get("generation")
+    )
+    aliases = joined.get(key) if key is not None else None
+    if not aliases:
+        return event
+    request_ids = _event_request_ids(event)
+    request_ids.update(aliases)
+    return {**event, "request_ids": sorted(request_ids)}
+
+
 def _foreign_completion(event: Dict[str, Any], request_ids: set[str], tagged: bool = False) -> bool:
     """Another request's turn_complete never finishes this stream.
 
@@ -532,6 +562,15 @@ async def send_message(
         raise HTTPException(status_code=502, detail="daemon did not provide a private goal reply")
     tagged = bool(accepted.get("request_id"))
     request_ids = {str(accepted.get("request_id") or request_id)}
+    joined: Dict[tuple[str, int, int], set[str]] = {}
+    join_key = _joined_event_key(
+        accepted.get("joined_request_id"),
+        accepted.get("joined_turn_id"),
+        accepted.get("joined_generation"),
+    )
+    if join_key is not None:
+        joined.setdefault(join_key, set()).add(request_id)
+        request_ids.add(join_key[0])
     if reply_id:
         request_ids.add(str(reply_id))  # the private reply's events name it
 
@@ -578,6 +617,7 @@ async def send_message(
                 if event is PHONE_STREAM_REVOKED or (read_context and read_context.revoked):
                     return
                 event.setdefault("session_id", session_id)
+                event = _with_joined_request_ids(event, joined)
                 if _foreign_completion(event, request_ids, tagged):
                     continue
                 if _foreign_error(event, request_ids) or _foreign_output(event, request_ids, tagged):
@@ -675,6 +715,7 @@ class AssistantRequest(BaseModel):
     tools: Optional[Dict[str, Any]] = None
     system: Optional[Any] = None
     goal_reply_id: Optional[str] = None
+    send_now: bool = False
 
 
 def _assistant_command_type(command: Dict[str, Any]) -> str:
@@ -1822,6 +1863,7 @@ async def assistant_transport(
         resumed_prompt_permission_ids: Dict[str, set[str]] = {}
         resumed_permission_request_ids: Dict[str, set[str]] = {}
         request_ids: set[str] = set()
+        joined_request_aliases: Dict[tuple[str, int, int], set[str]] = {}
         admitted_turn_request_ids: set[str] = set()
         private_goal_reply_ids: set[str] = set()
         possibly_accepted_request_ids: set[str] = set()
@@ -1846,6 +1888,10 @@ async def assistant_transport(
         run_error: Optional[Dict[str, Any]] = None
         admission_error = ""
         correlation_deadline: Optional[float] = None
+        send_now_pending = body.send_now
+        send_now_batch_id: Optional[str] = None
+        send_now_batch_indexes: Dict[int, int] = {}
+        send_now_batch_size = 0
         usage_totals = {"inputTokens": 0, "outputTokens": 0, "toolCalls": 0}
         final_stop_reason = "end_turn"
         handover_drop_baseline = int(getattr(queue, "dropped_count", 0) or 0)
@@ -2990,6 +3036,28 @@ async def assistant_transport(
             ):
                 controller.add_error("Send a goal command on its own.")
                 return
+            batch_commands = [
+                (index, command)
+                for index, command in enumerate(body.commands)
+                if _assistant_command_type(command) == "add-message"
+            ]
+            if (
+                body.send_now
+                and len(batch_commands) > 1
+                and len(batch_commands) == len(body.commands)
+            ):
+                if any(
+                    not content_to_text(_assistant_message_content(command)).strip()
+                    for _, command in batch_commands
+                ):
+                    controller.add_error("Send Now batch contains a message with no text.")
+                    return
+                send_now_batch_id = uuid.uuid4().hex
+                send_now_batch_size = len(batch_commands)
+                send_now_batch_indexes = {
+                    command_index: batch_index
+                    for batch_index, (command_index, _) in enumerate(batch_commands)
+                }
             for command_index, command in enumerate(body.commands):
                 command_type = _assistant_command_type(command)
                 if command_type == "add-message":
@@ -3012,6 +3080,16 @@ async def assistant_transport(
                                   and _CLIENT_REQUEST_ID.fullmatch(client_id) else uuid.uuid4().hex)
                     private_goal = _is_goal_message(message_content)
                     kwargs = {"request_id": request_id}
+                    if send_now_batch_id is not None:
+                        kwargs.update(
+                            send_now_batch_id=send_now_batch_id,
+                            send_now_batch_size=send_now_batch_size,
+                            send_now_batch_index=send_now_batch_indexes[command_index],
+                        )
+                    if send_now_pending:
+                        send_now_pending = False
+                        if not private_goal:
+                            kwargs["send_now"] = True
                     if private_goal:
                         uid = body.state.get("conversationUid") if isinstance(body.state, dict) else None
                         kwargs.update(private_goal_reply=True, goal_conversation_uid=uid)
@@ -3124,6 +3202,15 @@ async def assistant_transport(
                         if not private_goal and not replayed:
                             turn_request_id = accepted_request_id
                             untagged_request_ids.add(accepted_request_id)
+                    join_key = _joined_event_key(
+                        accepted.get("joined_request_id"),
+                        accepted.get("joined_turn_id"),
+                        accepted.get("joined_generation"),
+                    )
+                    if join_key is not None and not private_goal and not replayed:
+                        joined_request_aliases.setdefault(join_key, set()).add(request_id)
+                        request_ids.add(join_key[0])
+                        turn_request_id = join_key[0]
                     admitted_turn_request_ids.add(turn_request_id)
                     submitted_turn_request_ids.append(turn_request_id)
                     submitted_contents.append(message_content)
@@ -3507,6 +3594,7 @@ async def assistant_transport(
                     # turn_complete): publish the text the throttle held.
                     publish_progress()
                     continue
+                event = _with_joined_request_ids(event, joined_request_aliases)
                 event_type = str(event.get("type") or "")
                 named_event_ids = _event_request_ids(event)
                 correlated_pending_ids = named_event_ids & (
@@ -4167,6 +4255,15 @@ async def assistant_transport(
             logger.exception("assistant transport failed for %s", session_id)
             controller.add_error(str(exc))
         finally:
+            if send_now_batch_id is not None:
+                try:
+                    await session.finish_send_now_batch(send_now_batch_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Send Now batch finalization failed for %s (%s)",
+                        session_id,
+                        type(exc).__name__,
+                    )
             tasks = [*goal_pumps]
             if revocation_watch is not None:
                 tasks.append(revocation_watch)

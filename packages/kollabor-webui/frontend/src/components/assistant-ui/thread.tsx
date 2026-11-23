@@ -1574,9 +1574,7 @@ export const UserText: FC<{ text?: string }> = ({ text }) => {
 // the line and 14px under it.
 const QUEUED_NOTE_ROW = "col-start-2 h-4 any-pointer-coarse:h-[30px]";
 
-// What the message is waiting for, and the way to send it into the turn at
-// once (#1102). A session that cannot take a message that way (a harness
-// session) gets the word alone.
+// What the message is waiting for, and the way to send it at once (#1102).
 const QueuedMessageNote: FC = () => {
   const sendWaitingNow = useSendWaitingNow();
   return (
@@ -1600,7 +1598,7 @@ const QueuedMessageNote: FC = () => {
                 Send Now
               </Button>
             </TooltipTrigger>
-            <TooltipContent side="bottom">The agent reads it at its next step</TooltipContent>
+            <TooltipContent side="bottom">Sends now; may stop the current harness turn</TooltipContent>
           </Tooltip>
         ) : null}
       </div>

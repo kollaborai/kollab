@@ -3432,6 +3432,10 @@ class LocalStateService(StateService):
         private_goal_reply: bool = False,
         private_goal_reply_id: str | None = None,
         goal_conversation_uid: str | None = None,
+        send_now: bool = False,
+        send_now_batch_id: str | None = None,
+        send_now_batch_size: int | None = None,
+        send_now_batch_index: int | None = None,
     ) -> dict[str, Any]:
         """Submit a user turn, running it in the background.
 
@@ -3560,6 +3564,12 @@ class LocalStateService(StateService):
                 submit_kwargs["thread_id"] = thread_id or metadata["thread_id"]
             if input_context is not None:
                 submit_kwargs["origin_context"] = dict(input_context)
+            if send_now:
+                submit_kwargs["send_now"] = True
+            if send_now_batch_id is not None:
+                submit_kwargs["send_now_batch_id"] = send_now_batch_id
+                submit_kwargs["send_now_batch_size"] = send_now_batch_size
+                submit_kwargs["send_now_batch_index"] = send_now_batch_index
             submission = await llm.submit_human_input(message, **submit_kwargs)
         except Exception as exc:
             logger.warning("state input submission failed (%s)", type(exc).__name__)
@@ -3571,7 +3581,13 @@ class LocalStateService(StateService):
             "injected",
         }:
             accepted = {"accepted": True, "reason": ""}
-            for key in ("request_id", "turn_id"):
+            for key in (
+                "request_id",
+                "turn_id",
+                "joined_request_id",
+                "joined_turn_id",
+                "joined_generation",
+            ):
                 if submission.get(key) is not None:
                     accepted[key] = submission[key]
             return accepted
@@ -3587,6 +3603,14 @@ class LocalStateService(StateService):
                     char for char in message if char.isprintable() or char == "\n"
                 )[:4096]
         return rejected
+
+    async def finish_send_now_batch(self, batch_id: str) -> dict[str, Any]:
+        """Release one assistant-transport Send Now group after admission."""
+        llm = self._llm_service
+        finish = getattr(llm, "finish_send_now_batch", None)
+        if not callable(finish):
+            return {"finished": False}
+        return {"finished": bool(finish(batch_id))}
 
     def _goal_service(self):
         event_bus = getattr(self, "_event_bus", None)

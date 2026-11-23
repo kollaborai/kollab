@@ -496,10 +496,12 @@ try {
       await t.waitFor((s) => s.assistant.includes("Wor"), "the run's reply");
       const box = t.page.getByLabel("Message input");
       await box.fill("what");
-      await box.press("Control+Enter");
-      await t.waitFor((s) => s.users === "hello|what", "the message Ctrl+Enter sent");
-      await t.page.getByText("Queued", { exact: true }).waitFor({ timeout: 3000 });
-      const sendNow = t.page.getByRole("button", { name: "Send Now" });
+      await box.press("Enter");
+      await t.waitFor((s) => s.users === "hello|what", "the waiting message");
+      await t.page.locator("#send-more").click();
+      await t.waitFor((s) => s.users === "hello|what|again", "the second waiting message");
+      await t.page.getByText("Queued", { exact: true }).first().waitFor({ timeout: 3000 });
+      const sendNow = t.page.getByRole("button", { name: "Send Now" }).first();
       await sendNow.waitFor({ timeout: 3000 });
       await sendNow.click();
       await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
@@ -510,8 +512,13 @@ try {
         cancels: window.cancels,
       }));
       assert.equal(handover.requests[1].send_now, true, "the new request asks the daemon for Send Now");
-      assert.equal(handover.requests[1].commands.length, 1, "the waiting message is sent once");
-      assert.equal(handover.requests[1].commands[0].message.parts[0].text, "what");
+      assert.equal(handover.requests[1].commands.length, 2, "the waiting batch is sent in one request");
+      assert.deepEqual(
+        handover.requests[1].commands.map((command) => command.message.parts[0].text),
+        ["what", "again"],
+        "both waiting messages are submitted once and in order",
+      );
+      assert.equal(new Set(handover.requests[1].commands.map((command) => command.message.id)).size, 2);
       assert.deepEqual(handover.aborted, [true, false], "the page hands over only its old stream");
       assert.equal(handover.cancels, 0, "the page does not race a separate daemon cancellation");
       await t.page.close();

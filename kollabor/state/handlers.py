@@ -690,11 +690,26 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
                 "thread_id": params.get("thread_id"),
                 "origin_context": params.get("origin_context"),
             }
+            if params.get("send_now") is True:
+                kwargs["send_now"] = True
+            if isinstance(params.get("send_now_batch_id"), str):
+                kwargs["send_now_batch_id"] = params["send_now_batch_id"]
+                kwargs["send_now_batch_size"] = params.get("send_now_batch_size")
+                kwargs["send_now_batch_index"] = params.get("send_now_batch_index")
             if params.get("private_goal_reply") is True:
                 kwargs["private_goal_reply"] = True
                 kwargs["private_goal_reply_id"] = params.get("private_goal_reply_id")
                 kwargs["goal_conversation_uid"] = params.get("goal_conversation_uid")
             return await state_service.send_message(params.get("message", ""), **kwargs)
+        except Exception as e:
+            return _error_result(e)
+
+    async def _finish_send_now_batch(params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            batch_id = params.get("batch_id")
+            if not isinstance(batch_id, str):
+                return {"finished": False}
+            return await state_service.finish_send_now_batch(batch_id)
         except Exception as e:
             return _error_result(e)
 
@@ -793,6 +808,9 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.poll_goal_reply": _poll_goal_reply,
         "state.cancel_goal_reply": _cancel_goal_reply,
         "state.goal_reply_capabilities": lambda _params: {"private_goal_reply": True},
+        "state.send_now_capabilities": lambda _params: {
+            "send_now": True, "send_now_batch": True,
+        },
         "state.compact_command": _compact_command,
         "state.list_commands": _list_commands,
         "state.open_generated_artifact": _open_generated_artifact,
@@ -852,6 +870,7 @@ def register_state_handlers(rpc_server: Any, state_service: LocalStateService) -
         "state.cancel_current_request": _cancel_current_request,
         # Input: submit a user turn (engine / web UI clients)
         "state.send_message": _send_message,
+        "state.finish_send_now_batch": _finish_send_now_batch,
     }
 
     async def _acp_submit(params):

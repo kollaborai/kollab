@@ -964,9 +964,8 @@ export function EngineRuntimeProvider({
   sessionId: string;
   agentIdentity?: string;
   /**
-   * The session runs on a harness (Codex CLI, Claude Code). It gets no Send
-   * Now: the harness steers a message into its running turn, and the engine
-   * does not end the stream of such a message, so the chat would stay busy.
+   * The session runs on an ACP harness (Codex CLI, Claude Code). Send Now
+   * passes an explicit admission flag so the daemon can join or stop its turn.
    */
   harness?: boolean;
   initialState: EngineState;
@@ -1012,6 +1011,9 @@ export function EngineRuntimeProvider({
   const handOverDue = useRef(false);
   // The user asked for the waiting messages to go now (Send Now, #1102).
   const sendNow = useRef(false);
+  // The harness needs an explicit daemon admission mode after the old stream
+  // is handed over; native sessions keep the existing same-turn behavior.
+  const forceNextSend = useRef(false);
   // Pauses the old response after its first state-changing event until the
   // thread has applied that state and the handover has ended the request.
   const handoverEventWait = useRef<{ promise: Promise<void>; release: () => void } | null>(null);
@@ -1087,7 +1089,15 @@ export function EngineRuntimeProvider({
       }
       runStartRef.current = performance.now();
       const goalReplyId = goalCancellation.current.prepare(body.commands);
-      return { ...body, commands, sessionId, ...(goalReplyId ? { goal_reply_id: goalReplyId } : {}) };
+      const sendNowForHarness = forceNextSend.current && harness;
+      forceNextSend.current = false;
+      return {
+        ...body,
+        commands,
+        sessionId,
+        ...(sendNowForHarness ? { send_now: true } : {}),
+        ...(goalReplyId ? { goal_reply_id: goalReplyId } : {}),
+      };
     },
     onResponse: (response) => {
       const draftSubmission = pendingDraftSubmissions.current.shift();
@@ -1135,6 +1145,7 @@ export function EngineRuntimeProvider({
       releaseHandoverEventWait();
       streamingRun.current = null;
       endRun.current = null;
+      forceNextSend.current = false;
       inFlightSendIds.current = new Set();
       pendingDraftSubmissions.current.shift();
       updateState((state) => ({ ...state, error: error.message }));
@@ -1144,6 +1155,7 @@ export function EngineRuntimeProvider({
       streamingRun.current = null;
       endRun.current = null;
       sendNow.current = false;
+      forceNextSend.current = false;
       inFlightSendIds.current = new Set();
       // A failed request lands here too, after onError: keep the error it
       // set, and leave the daemon's turn alone (a dropped phone connection
@@ -1200,9 +1212,10 @@ export function EngineRuntimeProvider({
       releaseHandoverEventWait();
       const end = endRun.current;
       endRun.current = null;
+      if (end && harness) forceNextSend.current = true;
       end?.();
     });
-  }, [runtime]);
+  }, [runtime, harness]);
   useEffect(() => runtime.thread.subscribe(handOver), [runtime, handOver]);
   const sendWaitingNow = useCallback(() => {
     sendNow.current = true;
@@ -1964,7 +1977,7 @@ export function EngineRuntimeProvider({
         <PermissionCancellationContext.Provider
           value={{ cancel: cancelPermission, cancelling: permissionCancellationPending }}
         >
-          <SendWaitingNowContext.Provider value={harness ? null : sendWaitingNow}>
+          <SendWaitingNowContext.Provider value={sendWaitingNow}>
             <InitialMessagesGate
               runtime={runtime}
               messages={initialState.messages}

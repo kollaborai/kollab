@@ -1322,6 +1322,58 @@ async def test_send_now_stream_joins_the_exact_injected_acp_turn(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_send_now_batch_passes_order_and_finishes_after_all_messages(monkeypatch):
+    """A UI batch carries one shared identity and an explicit finalizer (#1371)."""
+    session = _FakeSession([])
+    session.finish_send_now_batch = AsyncMock(return_value={"finished": True})
+
+    async def admit(_content, *, request_id, **kwargs):
+        session._events.put_nowait({
+            "type": "turn_complete",
+            "stop_reason": "end_turn",
+            "request_id": request_id,
+        })
+        return {"accepted": True, "request_id": request_id}
+
+    session.send_message = AsyncMock(side_effect=admit)
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    _captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[
+                {
+                    "type": "add-message",
+                    "message": {"id": "client-B", "parts": [{"type": "text", "text": "B"}]},
+                },
+                {
+                    "type": "add-message",
+                    "message": {"id": "client-C", "parts": [{"type": "text", "text": "C"}]},
+                },
+            ],
+            state={"messages": []},
+            send_now=True,
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    assert len(session.send_message.await_args_list) == 2
+    first, second = session.send_message.await_args_list
+    batch_id = first.kwargs["send_now_batch_id"]
+    assert batch_id
+    assert first.kwargs["send_now"] is True
+    assert first.kwargs["send_now_batch_size"] == 2
+    assert first.kwargs["send_now_batch_index"] == 0
+    assert second.kwargs["send_now_batch_id"] == batch_id
+    assert second.kwargs["send_now_batch_size"] == 2
+    assert second.kwargs["send_now_batch_index"] == 1
+    assert "send_now" not in second.kwargs
+    session.finish_send_now_batch.assert_awaited_once_with(batch_id)
+
+
+@pytest.mark.asyncio
 async def test_assistant_transport_shows_none_of_a_running_turn_typed_in_the_terminal(monkeypatch):
     """Chalcedony on #554 round 5: a turn typed in the terminal names no
     request, and its text and permission prompt became this message's."""

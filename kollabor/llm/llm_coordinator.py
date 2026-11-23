@@ -2513,6 +2513,10 @@ class LLMService:
         request_id: str | None = None,
         thread_id: str | None = None,
         origin_context: dict[str, Any] | None = None,
+        send_now: bool = False,
+        send_now_batch_id: str | None = None,
+        send_now_batch_size: int | None = None,
+        send_now_batch_index: int | None = None,
     ) -> Dict[str, Any]:
         """Submit trusted human input through the canonical hook pipeline.
 
@@ -2543,6 +2547,10 @@ class LLMService:
                     "request_id": request_id,
                     "thread_id": thread_id,
                     "origin_context": dict(origin_context or {}),
+                    "send_now": send_now is True,
+                    "send_now_batch_id": send_now_batch_id,
+                    "send_now_batch_size": send_now_batch_size,
+                    "send_now_batch_index": send_now_batch_index,
                 },
                 source_value,
             )
@@ -2647,6 +2655,23 @@ class LLMService:
         request_id = data.get("request_id") or uuid.uuid4().hex
         origin = dict(data.get("origin_context") or {})
         origin.setdefault("operator", source != "agent")
+        send_now = (
+            data.get("send_now") is True
+            and source in HUMAN_USER_INPUT_SOURCES
+            and origin.get("operator") is True
+        )
+        batch_id = data.get("send_now_batch_id")
+        batch_member = (
+            isinstance(batch_id, str)
+            and bool(batch_id)
+            and source in HUMAN_USER_INPUT_SOURCES
+            and origin.get("operator") is True
+        )
+        runner = getattr(acp, "runner", None) if send_now or batch_member else None
+        target_context = getattr(runner, "_active_context", None)
+        target_turn_id = getattr(runner, "_active_turn_id", 0)
+        target_generation = getattr(runner, "_active_generation", None)
+        target_session_id = getattr(runner, "session_id", None)
         if not self._manual_relay_origin_authorized(origin):
             return {
                 "status": "rejected",
@@ -2700,6 +2725,29 @@ class LLMService:
         message = content_to_text(content)
         if not message.strip():
             return {"status": "rejected", "reason": "empty message"}
+        if batch_member:
+            if send_now:
+                expected_count = data.get("send_now_batch_size")
+                batch_index = data.get("send_now_batch_index")
+                begin_batch = getattr(acp, "begin_send_now_batch", None)
+                if (
+                    batch_index != 0
+                    or type(expected_count) is not int
+                    or not callable(begin_batch)
+                    or not begin_batch(
+                        batch_id,
+                        expected_count,
+                        session_id=target_session_id,
+                        generation=target_generation,
+                        active_context=target_context,
+                        active_turn_id=target_turn_id,
+                    )
+                ):
+                    return {"status": "rejected", "reason": "acp_queue_full"}
+            else:
+                has_batch = getattr(acp, "has_send_now_batch", None)
+                if not callable(has_batch) or not has_batch(batch_id):
+                    return {"status": "rejected", "reason": "invalid_send_now_batch"}
         voice = data.get("voice")
         if voice is None and is_voice_origin(origin) and validate_voice_admission_context(origin):
             # A LiveKit room's mic turn carries no voice dict (#1079): the
@@ -2724,10 +2772,15 @@ class LLMService:
             epoch = voice.get("epoch")
             message = voice_preamble(voice, epoch in acp.voice_rules_epochs) + message
             acp.voice_rules_epochs.add(epoch)
-        else:
+        batch_force_queue = False
+        if batch_member:
+            has_queued = getattr(acp, "send_now_batch_has_admissions", None)
+            batch_force_queue = callable(has_queued) and has_queued(batch_id)
+        if not voice and not batch_force_queue:
             try:
                 steered = await acp.steer(
                     message, origin=origin, thread_id=data.get("thread_id"),
+                    request_id=request_id,
                     **({"images": images} if images else {}),
                 )
             except ACPSteeringUnconfirmed:
@@ -2741,7 +2794,32 @@ class LLMService:
                     return {"status": "rejected", "reason": "This harness can't take images."}
                 raise
             if steered:
-                return {"status": "injected", "request_id": request_id}
+                if batch_member:
+                    record_injected = getattr(acp, "record_send_now_batch_injected", None)
+                    if callable(record_injected):
+                        record_injected(batch_id)
+                joined = {
+                    key: steered[key]
+                    for key in (
+                        "joined_request_id",
+                        "joined_turn_id",
+                        "joined_generation",
+                    )
+                    if isinstance(steered, dict) and key in steered
+                }
+                return {"status": "injected", "request_id": request_id, **joined}
+            if target_turn_id:
+                # Steering may yield while the turn ends or the runner is
+                # replaced. A Send Now request must never cancel that next
+                # owner by mistake.
+                if send_now and (
+                    getattr(acp, "runner", None) is not runner
+                    or getattr(runner, "_active_context", None) is not target_context
+                    or getattr(runner, "_active_turn_id", None) != target_turn_id
+                    or getattr(runner, "_active_generation", None) != target_generation
+                    or getattr(runner, "session_id", None) != target_session_id
+                ):
+                    return {"status": "rejected", "reason": "turn_changed"}
         # `steer` above can await while a relay is revoked; re-check at the
         # actual queue-admission boundary before sending anything to ACP.
         if not self._manual_relay_origin_authorized(origin):
@@ -2761,6 +2839,7 @@ class LLMService:
                     else {}
                 ),
                 **({"images": images} if images else {}),
+                **({"send_now_batch_id": batch_id} if batch_member else {}),
             )
         except (RuntimeError, ValueError) as exc:
             error_class = getattr(exc, "error_class", None)
@@ -2783,11 +2862,70 @@ class LLMService:
             # caller request ID (#597), and the orchestrator pops by the
             # same (request_id, turn_id) key when the turn finishes.
             acp.voice_turns[(admission.request_id, admission.turn_id)] = voice
+        if send_now and target_turn_id and not batch_member:
+            # Admission, queue placement, cancellation fencing, and task
+            # ownership all happen without yielding. The admitted message is
+            # therefore in front of older waiting turns before this exact
+            # active owner can be stopped.
+            prioritize = getattr(acp, "prioritize_queued", None)
+            prepare_cancel = getattr(acp, "prepare_cancel", None)
+            schedule_cancel = getattr(acp, "schedule_prepared_cancel", None)
+            if (
+                callable(prioritize)
+                and prioritize(admission)
+                and callable(prepare_cancel)
+                and callable(schedule_cancel)
+                and prepare_cancel(
+                    session_id=target_session_id,
+                    generation=target_generation,
+                )
+            ):
+                schedule_cancel(
+                    session_id=target_session_id,
+                    generation=target_generation,
+                )
         return {
             "status": "queued",
             "request_id": admission.request_id,
             "turn_id": admission.turn_id,
         }
+
+    def finish_send_now_batch(self, batch_id: str, *, acp=None) -> bool:
+        """Close an admitted batch, prioritize it, then stop only its old owner."""
+        acp = acp or self._acp_service()
+        finish = getattr(acp, "finish_send_now_batch", None)
+        if not callable(finish):
+            return False
+        batch = finish(batch_id)
+        if batch is None:
+            return False
+        if not batch.admissions:
+            return True
+        runner = getattr(acp, "runner", None)
+        if (
+            runner is not None
+            and getattr(acp, "active", False) is True
+            and getattr(runner, "_active_context", None) is batch.active_context
+            and getattr(runner, "_active_turn_id", None) == batch.active_turn_id
+            and getattr(runner, "_active_generation", None) == batch.generation
+            and getattr(runner, "session_id", None) == batch.session_id
+            and batch.injected_count == 0
+        ):
+            prepare_cancel = getattr(acp, "prepare_cancel", None)
+            schedule_cancel = getattr(acp, "schedule_prepared_cancel", None)
+            if (
+                callable(prepare_cancel)
+                and callable(schedule_cancel)
+                and prepare_cancel(
+                    session_id=batch.session_id,
+                    generation=batch.generation,
+                )
+            ):
+                schedule_cancel(
+                    session_id=batch.session_id,
+                    generation=batch.generation,
+                )
+        return True
 
     async def _handle_cancel_request(
         self, data: Dict[str, Any], event

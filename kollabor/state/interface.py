@@ -835,6 +835,10 @@ class StateService(Protocol):
         private_goal_reply: bool = False,
         private_goal_reply_id: str | None = None,
         goal_conversation_uid: str | None = None,
+        send_now: bool = False,
+        send_now_batch_id: str | None = None,
+        send_now_batch_size: int | None = None,
+        send_now_batch_index: int | None = None,
     ) -> dict[str, Any]:
         """Submit a user turn to the daemon.
 
@@ -850,4 +854,8 @@ class StateService(Protocol):
             {"accepted": bool, "reason": str}. `accepted` is False when no LLM
             service is wired or a turn is already in flight.
         """
+        ...
+
+    async def finish_send_now_batch(self, batch_id: str) -> dict[str, Any]:
+        """Close one multi-message Send Now admission group."""
         ...

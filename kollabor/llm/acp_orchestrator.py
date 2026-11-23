@@ -704,6 +704,7 @@ class ACPOrchestrator:
         record: bool = True,
         images: tuple[dict[str, str], ...] = (),
         operator_inputs: tuple[dict[str, str], ...] = (),
+        send_now_batch_id: str | None = None,
     ) -> ACPAdmission:
         if self.closing_reason:
             raise ACPError(self.closing_reason)
@@ -713,6 +714,8 @@ class ACPOrchestrator:
         if source == "agent" and (origin or {}).get("sender"):
             text = f"Message from {origin['sender']} [thread:{thread_id or ''}]\n{text}"
         kwargs = {"images": images} if images else {}
+        if send_now_batch_id is not None:
+            kwargs["send_now_batch_id"] = send_now_batch_id
         admission = self._runner.admit(
             text, request_id=request_id, source=source, thread_id=thread_id, origin=origin,
             **kwargs,
@@ -1150,6 +1153,63 @@ class ACPOrchestrator:
         profile = self._selected_profile
         if profile is not None:
             await self.start(profile, resume_conversation=conversation_id)
+
+    def prioritize_queued(self, admission: ACPAdmission) -> bool:
+        """Place an admitted Send Now request ahead of older queued turns."""
+        runner = self._runner
+        return bool(runner and runner.prioritize_queued(admission))
+
+    def begin_send_now_batch(
+        self,
+        batch_id: str,
+        expected_count: int,
+        *,
+        session_id: str | None,
+        generation: int | None,
+        active_context: Any,
+        active_turn_id: int,
+    ) -> bool:
+        """Reserve the runner queue for one Send Now command batch."""
+        runner = self._runner
+        begin = getattr(runner, "begin_send_now_batch", None)
+        return bool(
+            callable(begin)
+            and not self._closed
+            and begin(
+                batch_id,
+                expected_count,
+                session_id=session_id,
+                generation=generation,
+                active_context=active_context,
+                active_turn_id=active_turn_id,
+            )
+        )
+
+    def has_send_now_batch(self, batch_id: str) -> bool:
+        """Whether this live runner still owns a Send Now group."""
+        runner = self._runner
+        check = getattr(runner, "has_send_now_batch", None)
+        return bool(callable(check) and check(batch_id))
+
+    def send_now_batch_has_admissions(self, batch_id: str) -> bool:
+        """Whether a previous member already fell back to the runner queue."""
+        runner = self._runner
+        check = getattr(runner, "send_now_batch_has_admissions", None)
+        return bool(callable(check) and check(batch_id))
+
+    def record_send_now_batch_injected(self, batch_id: str) -> bool:
+        """Record an accepted steer so finalization never cancels it away."""
+        runner = self._runner
+        record = getattr(runner, "record_send_now_batch_injected", None)
+        return bool(callable(record) and record(batch_id))
+
+    def finish_send_now_batch(self, batch_id: str):
+        """Finalize the group and return its captured owner and admissions."""
+        runner = self._runner
+        finish = getattr(runner, "finish_send_now_batch", None)
+        if runner is None or not callable(finish) or self._closed:
+            return None
+        return finish(batch_id)
 
     async def cancel_request(self, request_id: str) -> dict[str, Any]:
         runner = self._runner
@@ -1758,6 +1818,19 @@ class ACPOrchestrator:
         if self._runner is None or self._closed:
             return False
         if not self.prepare_cancel(session_id=session_id, generation=generation):
+            return False
+        return self.schedule_prepared_cancel(
+            session_id=session_id, generation=generation
+        )
+
+    def schedule_prepared_cancel(
+        self,
+        *,
+        session_id: str | None = None,
+        generation: int | None = None,
+    ) -> bool:
+        """Own the async half of a cancellation already fenced by prepare_cancel."""
+        if self._runner is None or self._closed:
             return False
         task = asyncio.create_task(
             self.cancel(session_id=session_id, generation=generation)

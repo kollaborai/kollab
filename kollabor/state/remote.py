@@ -1149,6 +1149,10 @@ class RemoteStateService(StateService):
         private_goal_reply: bool = False,
         private_goal_reply_id: str | None = None,
         goal_conversation_uid: str | None = None,
+        send_now: bool = False,
+        send_now_batch_id: str | None = None,
+        send_now_batch_size: int | None = None,
+        send_now_batch_index: int | None = None,
     ) -> dict[str, Any]:
         """Submit a user turn to the daemon. Returns once accepted, not done."""
         logger.debug(
@@ -1162,6 +1166,12 @@ class RemoteStateService(StateService):
                 "request_id": request_id,
                 "thread_id": thread_id,
                 "origin_context": origin_context,
+                **({"send_now": True} if send_now else {}),
+                **({
+                    "send_now_batch_id": send_now_batch_id,
+                    "send_now_batch_size": send_now_batch_size,
+                    "send_now_batch_index": send_now_batch_index,
+                } if send_now_batch_id is not None else {}),
                 **({"private_goal_reply": True, "private_goal_reply_id": private_goal_reply_id,
                     "goal_conversation_uid": goal_conversation_uid} if private_goal_reply else {}),
             },
@@ -1172,6 +1182,20 @@ class RemoteStateService(StateService):
                 f"state.send_message expected dict, got {type(result).__name__}"
             )
         if "error" in result and result.get("error"):
+            _raise_for_error(result)
+        return result
+
+    async def finish_send_now_batch(self, batch_id: str) -> dict[str, Any]:
+        """Close one multi-message Send Now admission group."""
+        result = await self._rpc.call(
+            "state.finish_send_now_batch", {"batch_id": batch_id}, timeout=self._timeout
+        )
+        if not isinstance(result, dict):
+            raise TypeError(
+                "state.finish_send_now_batch expected dict, "
+                f"got {type(result).__name__}"
+            )
+        if result.get("error"):
             _raise_for_error(result)
         return result
 

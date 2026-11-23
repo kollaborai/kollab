@@ -1017,8 +1017,25 @@ class EngineSession:
         private_goal_reply: bool = False,
         private_goal_reply_id: str | None = None,
         goal_conversation_uid: str | None = None,
+        send_now: bool = False,
+        send_now_batch_id: str | None = None,
+        send_now_batch_size: int | None = None,
+        send_now_batch_index: int | None = None,
     ) -> Dict[str, Any]:
         """Submit a user turn. Returns once accepted, not once complete."""
+        if send_now or send_now_batch_id is not None:
+            # An older daemon would ignore this parameter and either queue the
+            # message or steer it without a correlated terminal event.
+            if self.daemon is None or self.daemon.rpc is None:
+                return {"accepted": False, "reason": "daemon does not support Send Now; restart it after updating"}
+            try:
+                capability = await self.daemon.rpc.call("state.send_now_capabilities", {})
+            except Exception:
+                return {"accepted": False, "reason": "daemon does not support Send Now; restart it after updating"}
+            if not isinstance(capability, dict) or capability.get("send_now") is not True:
+                return {"accepted": False, "reason": "daemon does not support Send Now; restart it after updating"}
+            if send_now_batch_id is not None and capability.get("send_now_batch") is not True:
+                return {"accepted": False, "reason": "daemon does not support Send Now batches; restart it after updating"}
         if private_goal_reply:
             # Check before sending: an older daemon would otherwise accept the
             # command and publish its result on the shared event stream.
@@ -1044,6 +1061,12 @@ class EngineSession:
                 return {"accepted": False, "reason": "invalid voice admission capability"}
         try:
             kwargs = {"request_id": request_id, "thread_id": thread_id, "origin_context": origin_context}
+            if send_now:
+                kwargs["send_now"] = True
+            if send_now_batch_id is not None:
+                kwargs["send_now_batch_id"] = send_now_batch_id
+                kwargs["send_now_batch_size"] = send_now_batch_size
+                kwargs["send_now_batch_index"] = send_now_batch_index
             if private_goal_reply:
                 kwargs["private_goal_reply"] = True
                 kwargs["private_goal_reply_id"] = private_goal_reply_id
@@ -1089,6 +1112,15 @@ class EngineSession:
         if thread_id and isinstance(result, dict) and result.get("accepted"):
             self.__dict__.setdefault("known_thread_ids", set()).add(thread_id)
         return result
+
+    async def finish_send_now_batch(self, batch_id: str) -> Dict[str, Any]:
+        """Tell the daemon that this transport request admitted its whole batch."""
+        if self.daemon is None or self.daemon.rpc is None:
+            return {"finished": False}
+        result = await self.daemon.rpc.call(
+            "state.finish_send_now_batch", {"batch_id": batch_id}
+        )
+        return result if isinstance(result, dict) else {"finished": False}
 
     async def poll_goal_reply(self, reply_id: str) -> Dict[str, Any]:
         """Poll one private goal reply without blocking the daemon RPC loop."""

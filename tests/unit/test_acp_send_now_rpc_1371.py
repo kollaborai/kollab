@@ -36,9 +36,12 @@ async def test_state_rpc_preserves_send_now_and_joined_turn_receipt():
         "message": "message B",
         "request_id": "client-B",
         "send_now": True,
+        "send_now_batch_id": "batch-BC",
+        "send_now_batch_size": 2,
+        "send_now_batch_index": 0,
     })
 
-    assert capability == {"send_now": True}
+    assert capability == {"send_now": True, "send_now_batch": True}
     assert result["joined_request_id"] == "active-A"
     state.send_message.assert_awaited_once_with(
         "message B",
@@ -46,6 +49,9 @@ async def test_state_rpc_preserves_send_now_and_joined_turn_receipt():
         thread_id=None,
         origin_context=None,
         send_now=True,
+        send_now_batch_id="batch-BC",
+        send_now_batch_size=2,
+        send_now_batch_index=0,
     )
 
 
@@ -63,7 +69,9 @@ async def test_local_state_preserves_join_metadata_and_send_now_flag():
     state._event_bus = None
 
     result = await state.send_message(
-        "message B", request_id="client-B", send_now=True
+        "message B", request_id="client-B", send_now=True,
+        send_now_batch_id="batch-BC", send_now_batch_size=2,
+        send_now_batch_index=0,
     )
 
     assert result == {
@@ -75,6 +83,9 @@ async def test_local_state_preserves_join_metadata_and_send_now_flag():
         "joined_generation": 7,
     }
     assert llm.submit_human_input.await_args.kwargs["send_now"] is True
+    assert llm.submit_human_input.await_args.kwargs["send_now_batch_id"] == "batch-BC"
+    assert llm.submit_human_input.await_args.kwargs["send_now_batch_size"] == 2
+    assert llm.submit_human_input.await_args.kwargs["send_now_batch_index"] == 0
 
 
 @pytest.mark.asyncio
@@ -88,12 +99,16 @@ async def test_engine_session_checks_send_now_capability_before_forwarding():
         "joined_turn_id": 12,
         "joined_generation": 7,
     }))
-    rpc = SimpleNamespace(call=AsyncMock(return_value={"send_now": True}))
+    rpc = SimpleNamespace(call=AsyncMock(return_value={
+        "send_now": True, "send_now_batch": True,
+    }))
     session = EngineSession.__new__(EngineSession)
     session.daemon = SimpleNamespace(rpc=rpc, state=state)
 
     result = await session.send_message(
-        "message B", request_id="client-B", send_now=True
+        "message B", request_id="client-B", send_now=True,
+        send_now_batch_id="batch-BC", send_now_batch_size=2,
+        send_now_batch_index=0,
     )
 
     assert result["joined_request_id"] == "active-A"
@@ -104,6 +119,9 @@ async def test_engine_session_checks_send_now_capability_before_forwarding():
         thread_id=None,
         origin_context=None,
         send_now=True,
+        send_now_batch_id="batch-BC",
+        send_now_batch_size=2,
+        send_now_batch_index=0,
     )
 
 
@@ -121,3 +139,37 @@ async def test_engine_session_rejects_send_now_when_daemon_lacks_capability():
     assert result["accepted"] is False
     assert "does not support Send Now" in result["reason"]
     state.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_engine_session_rejects_batch_when_daemon_only_supports_single_send_now():
+    from kollabor_engine.session import EngineSession
+
+    state = SimpleNamespace(send_message=AsyncMock())
+    rpc = SimpleNamespace(call=AsyncMock(return_value={"send_now": True}))
+    session = EngineSession.__new__(EngineSession)
+    session.daemon = SimpleNamespace(rpc=rpc, state=state)
+
+    result = await session.send_message(
+        "message B", send_now=True, send_now_batch_id="batch-BC",
+        send_now_batch_size=2, send_now_batch_index=0,
+    )
+
+    assert result["accepted"] is False
+    assert "does not support Send Now batches" in result["reason"]
+    state.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_state_rpc_finishes_batch_after_partial_or_complete_admission():
+    state = SimpleNamespace(
+        send_message=AsyncMock(),
+        finish_send_now_batch=AsyncMock(return_value={"finished": True}),
+    )
+    rpc = _Rpc()
+    register_state_handlers(rpc, state)
+
+    result = await rpc.handlers["state.finish_send_now_batch"]({"batch_id": "batch-BC"})
+
+    assert result == {"finished": True}
+    state.finish_send_now_batch.assert_awaited_once_with("batch-BC")
