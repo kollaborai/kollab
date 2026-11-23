@@ -22,8 +22,9 @@ The Gallery sits under Terminal in the session panel and shows for every chat, w
   saves it.
 
 In the chat itself, an image you sent shows as a thumbnail in your message instead of a `[imageN]` token;
-clicking it opens the same viewer. The engine keeps a copy of each sent image (up to 10 MB, common web
-formats) under the session's `media/` folder, so thumbnails survive restarts and reloads.
+clicking it opens that exact image, even while the session image list is loading or unavailable. The engine
+keeps a copy of each sent image (up to 10 MB, common web formats) under the session's `media/` folder, so
+thumbnails survive restarts and reloads.
 
 ## Settings
 
