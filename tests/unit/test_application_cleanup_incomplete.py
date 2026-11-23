@@ -297,7 +297,9 @@ async def test_pipe_successful_command_exits_zero_only_after_cleanup(
     _configure_cli(monkeypatch, args, app)
 
     if expected_calls[-1]:
-        assert await cli.async_main() is None
+        with pytest.raises(SystemExit) as exc:
+            await cli.async_main()
+        assert exc.value.code == 0
     else:
         with pytest.raises(application.ApplicationCleanupIncompleteError):
             await cli.async_main()
