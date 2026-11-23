@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from kollabor.panels.setup import SetupPanel
+from kollabor.panels.setup import load_model_suggestions
 
 
 class FakeOAuthClient:
@@ -62,6 +63,10 @@ async def test_setup_panel_offers_chatgpt_sign_in_and_oauth_steps():
     )
     assert "Run /login in a terminal" not in str(panel)
     assert "Azure and advanced setups" in str(panel)
+
+
+def test_chatgpt_model_suggestions_use_openai_registry():
+    assert "gpt-5.6-luna" in load_model_suggestions("openai_responses")
 
 
 @pytest.mark.asyncio
