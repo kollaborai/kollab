@@ -1,6 +1,7 @@
 """Main application orchestrator for Kollab."""
 
 import asyncio
+import inspect
 import logging
 import math
 import os
@@ -3986,7 +3987,7 @@ class TerminalLLMChat:
         else:
             print(f"Error: {message}", file=sys.stderr)
 
-    async def cleanup(self) -> None:
+    async def cleanup(self) -> bool:
         """Run cleanup at most once, serializing concurrent callers."""
         lock = getattr(self, "_cleanup_lock", None)
         if lock is None:
@@ -3995,17 +3996,96 @@ class TerminalLLMChat:
         async with lock:
             if getattr(self, "_cleanup_complete", False):
                 logger.debug("Application cleanup already complete")
-                return
-            await self._cleanup_impl()
-            self._cleanup_complete = True
+                return True
+            completed = await self._cleanup_impl()
+            if completed:
+                self._cleanup_complete = True
+            return completed
 
-    async def _cleanup_impl(self) -> None:
+    async def _stop_hub_message_intake(self) -> None:
+        """Stop accepting Hub messages once application teardown begins."""
+        if getattr(self, "_hub_message_intake_stopped", False):
+            return
+        hub_plugin = self._get_shutdown_service("hub_plugin")
+        stop_message_intake = getattr(hub_plugin, "stop_message_intake", None)
+        if callable(stop_message_intake):
+            await stop_message_intake()
+        self._hub_message_intake_stopped = True
+
+    def _get_shutdown_service(self, name: str) -> Any:
+        """Read the synchronous EventBus service registry during teardown."""
+        event_bus = getattr(self, "event_bus", None)
+        get_service = getattr(event_bus, "get_service", None)
+        if not callable(get_service):
+            return None
+        service = get_service(name)
+        if inspect.isawaitable(service):
+            # EventBus.get_service is synchronous. Treat an async mock or a
+            # miswired alternate bus as no registered service, and close its
+            # unused coroutine to avoid teardown warnings.
+            close = getattr(service, "close", None)
+            if callable(close):
+                close()
+            return None
+        return service
+
+    async def _close_web_message_queue_runtime_before_providers(self) -> bool:
+        """Keep provider teardown behind a confirmed queue-worker close."""
+        if getattr(self, "_web_message_queue_runtime_closed", False):
+            return True
+        if getattr(self, "event_bus", None) is None:
+            self._web_message_queue_runtime_closed = True
+            return True
+        try:
+            runtime = self._get_shutdown_service("web_message_queue_runtime")
+            if runtime is None:
+                hub_plugin = self._get_shutdown_service("hub_plugin")
+                runtime = getattr(hub_plugin, "_web_message_queue_runtime", None)
+        except Exception:
+            logger.warning(
+                "WebUI queue runtime lookup failed before provider shutdown",
+                exc_info=True,
+            )
+            return False
+        if runtime is None:
+            self._web_message_queue_runtime_closed = True
+            return True
+        close_queue_runtime = getattr(runtime, "close", None)
+        if not callable(close_queue_runtime):
+            logger.warning(
+                "WebUI queue runtime cannot confirm worker shutdown; providers remain open"
+            )
+            return False
+        try:
+            if await close_queue_runtime() is not True:
+                logger.warning(
+                    "WebUI queue worker did not confirm clean shutdown; providers remain open"
+                )
+                return False
+        except Exception:
+            logger.warning(
+                "WebUI queue worker shutdown failed; providers remain open",
+                exc_info=True,
+            )
+            return False
+        self._web_message_queue_runtime_closed = True
+        return True
+
+    async def _cleanup_impl(self) -> bool:
         """Clean up all resources and cancel background tasks.
 
         This method is guaranteed to run on all exit paths via finally block.
-        Ensures no orphaned tasks or resources remain.
+        A failed queue close leaves cleanup incomplete so it can be retried.
         """
         logger.info("Starting application cleanup...")
+        self.running = False
+        input_handler = getattr(self, "input_handler", None)
+        if input_handler is not None:
+            input_handler.running = False
+        await self._stop_hub_message_intake()
+        if not await self._close_web_message_queue_runtime_before_providers():
+            return False
+
         acp_orchestrator = getattr(self, "acp_orchestrator", None)
         client_turn_broker = self.event_bus.get_service("client_turn_broker") if self.event_bus else None
         if client_turn_broker is not None:
@@ -4033,10 +4113,6 @@ class TerminalLLMChat:
                         exc,
                     )
             self.acp_orchestrator = None
-        self.running = False
-        if hasattr(self, "input_handler"):
-            self.input_handler.running = False
-
         # Stop the WidgetStateRefresher background task if running
         # (phase 5 of daemon transparency refactor)
         refresher = getattr(self, "_widget_state_refresher", None)
@@ -4095,10 +4171,12 @@ class TerminalLLMChat:
         # Mark startup as incomplete
         self._startup_complete = False
 
-        # Call full shutdown to cleanup other resources
-        await self.shutdown()
+        # Call full shutdown to cleanup other resources.
+        if not await self.shutdown():
+            return False
 
         logger.info("Application cleanup complete")
+        return True
 
     def _apply_renderer_config(self) -> None:
         """Apply thinking effect and shimmer config to renderer.
@@ -4327,12 +4405,12 @@ class TerminalLLMChat:
             )
             return {"success": False, "error": str(e)}
 
-    async def shutdown(self) -> None:
-        """Shutdown the application gracefully."""
+    async def shutdown(self) -> bool:
+        """Shutdown gracefully, preserving providers if queue settlement fails."""
         # The attach client shuts down in the background, then cleanup() calls
         # this again. Run once; a shutdown cancelled midway still reruns.
         if getattr(self, "_shutdown_complete", False):
-            return
+            return True
         logger.info("Application shutting down")
         self.running = False
         permission_bridge = getattr(self, "_attach_permission_bridge", None)
@@ -4364,33 +4442,12 @@ class TerminalLLMChat:
 
         # Close hub intake before providers shut down. Late peer messages are
         # put back in the mailbox by HubPlugin for the next process start.
-        hub_plugin = (
-            self.event_bus.get_service("hub_plugin") if self.event_bus else None
-        )
-        stop_message_intake = getattr(hub_plugin, "stop_message_intake", None)
-        if callable(stop_message_intake):
-            await stop_message_intake()
+        await self._stop_hub_message_intake()
 
         # Queue workers may still be admitting input through the active
-        # provider. Settle them before shutting down the LLM service that owns
-        # those admission calls; HubPlugin.shutdown repeats this idempotently.
-        queue_runtime = (
-            self.event_bus.get_service("web_message_queue_runtime")
-            if self.event_bus
-            else None
-        )
-        close_queue_runtime = getattr(queue_runtime, "close", None)
-        if callable(close_queue_runtime):
-            try:
-                if not await close_queue_runtime():
-                    logger.warning(
-                        "WebUI queue worker did not confirm clean shutdown before LLM shutdown"
-                    )
-            except Exception:
-                logger.warning(
-                    "WebUI queue worker shutdown failed before LLM shutdown",
-                    exc_info=True,
-                )
+        # provider. Do not start provider teardown without confirmed settlement.
+        if not await self._close_web_message_queue_runtime_before_providers():
+            return False
 
         # Shutdown LLM core service
         await self.llm_service.shutdown()
@@ -4431,3 +4488,4 @@ class TerminalLLMChat:
 
         self._shutdown_complete = True
         logger.info("Application shutdown complete")
+        return True
