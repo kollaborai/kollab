@@ -1431,8 +1431,16 @@ class ToolExecutor:
             )
 
         # Check bundle scope — reject tools not in the agent's allowed set
+        # Registered Git calls already carry the narrow ``git`` capability;
+        # XML <terminal> calls have no registered name and must pass the
+        # command-aware exception in _check_bundle_scope.
+        scope_type = (
+            "git"
+            if git_bundle_read_only and tool_data.get("name") == "git"
+            else tool_type
+        )
         scope_error = self._check_bundle_scope(
-            tool_type,
+            scope_type,
             tool_data.get("name"),
             tool_data.get("command"),
             tool_data.get("cwd"),
