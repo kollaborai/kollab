@@ -90,6 +90,57 @@ async def test_send_now_fences_owner_claimed_before_turn_start_marker(reserve_ca
         await asyncio.gather(worker, return_exceptions=True)
 
 
+@pytest.mark.asyncio
+async def test_send_now_prioritizes_when_active_owner_has_just_finished():
+    runner = ACPRunner(ACPProfile("settled-owner", ("unused",)))
+    runner.session_id = "session-A"
+    runner.generation = 8
+    runner._connection = object()
+    runner.admit("older D", request_id="older-D", source="rpc")
+    prepare_cancel_calls = []
+
+    async def steer(text, *, origin, thread_id, request_id, **kwargs):
+        return await runner.steer(
+            text,
+            origin=origin,
+            thread_id=thread_id,
+            images=kwargs.get("images", ()),
+        )
+
+    acp = SimpleNamespace(
+        active=True,
+        runner=runner,
+        supports_image_input=False,
+        voice_rules_epochs=set(),
+        steer=steer,
+        admit=runner.admit,
+        prioritize_queued=runner.prioritize_queued,
+        prepare_cancel=lambda **kwargs: prepare_cancel_calls.append(kwargs) or False,
+        schedule_prepared_cancel=lambda **kwargs: pytest.fail(
+            "there is no active owner to cancel"
+        ),
+    )
+
+    # This is the boundary after _run_prompt cleared its turn markers and
+    # _drain_queue has not yet released the waiting queue. The old context is
+    # stale; Send Now still has to become the next turn ahead of D.
+    runner._active_context = SimpleNamespace(request_id="finished-A", turn_id=12)
+    runner._active_turn_id = 0
+    runner._active_generation = 0
+    runner._active_rpc_task = None
+
+    result = await LLMService._admit_acp(
+        object.__new__(LLMService),
+        acp,
+        {"message": "send now B", "request_id": "client-B", "send_now": True},
+        "state_rpc",
+    )
+
+    assert result["status"] == "queued"
+    assert [item.request_id for item in runner._queue._queue] == ["client-B", "older-D"]
+    assert prepare_cancel_calls == []
+
+
 @pytest.mark.parametrize(
     "owner_change", ["gone", "replaced"], ids=["owner-gone", "owner-replaced"]
 )
