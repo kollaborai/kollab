@@ -1273,9 +1273,109 @@ def _terminal_find_escapes_workspace(
     """Return whether a find command can escape or cannot be scoped safely."""
     find_names = {"find", "gfind"}
 
+    def mask_heredoc_bodies(text: str) -> str | None:
+        """Hide heredoc bodies so their literal text is not parsed as shell code."""
+        masked = list(text)
+        pending: list[tuple[str, bool, bool]] = []
+        quote: str | None = None
+        index = 0
+        while index < len(text):
+            char = text[index]
+            if quote is not None:
+                if char == "\\":
+                    index += 2
+                    continue
+                if char == quote:
+                    quote = None
+                index += 1
+                continue
+            if char == "\\":
+                index += 2
+                continue
+            if char in "'\"":
+                quote = char
+                index += 1
+                continue
+            if char == "#":
+                newline = text.find("\n", index)
+                if newline < 0:
+                    break
+                index = newline
+                continue
+            if text.startswith("<<<", index):
+                index += 3
+                continue
+            if text.startswith("<<", index):
+                cursor = index + 2
+                strip_tabs = cursor < len(text) and text[cursor] == "-"
+                if strip_tabs:
+                    cursor += 1
+                while cursor < len(text) and text[cursor] in " \t":
+                    cursor += 1
+                delimiter: list[str] = []
+                delimiter_quote: str | None = None
+                quoted_delimiter = False
+                while cursor < len(text):
+                    item = text[cursor]
+                    if delimiter_quote is not None:
+                        if item == delimiter_quote:
+                            delimiter_quote = None
+                        else:
+                            delimiter.append(item)
+                        cursor += 1
+                        continue
+                    if item in "'\"":
+                        quoted_delimiter = True
+                        delimiter_quote = item
+                        cursor += 1
+                        continue
+                    if item == "\\" and cursor + 1 < len(text):
+                        quoted_delimiter = True
+                        delimiter.append(text[cursor + 1])
+                        cursor += 2
+                        continue
+                    if item.isspace() or item in ";|&()<>":
+                        break
+                    delimiter.append(item)
+                    cursor += 1
+                if delimiter_quote is not None or not delimiter:
+                    return None
+                pending.append(("".join(delimiter), strip_tabs, quoted_delimiter))
+                index = cursor
+                continue
+            if char == "\n" and pending:
+                body_start = index + 1
+                body_cursor = body_start
+                for delimiter, strip_tabs, quoted_delimiter in pending:
+                    while body_cursor <= len(text):
+                        line_end = text.find("\n", body_cursor)
+                        if line_end < 0:
+                            line_end = len(text)
+                        line = text[body_cursor:line_end]
+                        candidate = line.lstrip("\t") if strip_tabs else line
+                        if candidate == delimiter:
+                            if quoted_delimiter:
+                                for position in range(body_start, body_cursor):
+                                    if masked[position] != "\n":
+                                        masked[position] = " "
+                            body_cursor = line_end + (line_end < len(text))
+                            body_start = body_cursor
+                            break
+                        if line_end == len(text):
+                            return None
+                        body_cursor = line_end + 1
+                    else:
+                        return None
+                pending.clear()
+                index = body_cursor
+                continue
+            index += 1
+        return "".join(masked) if not pending else None
+
     def contains_find_token(text: str, depth: int = 0) -> bool:
         if depth > 8:
             return False
+        text = mask_heredoc_bodies(text) or ""
         for nested in re.findall(r"(?:\$\(|[<>]\()(.*?)\)", text):
             if contains_find_token(nested, depth + 1):
                 return True
@@ -1385,6 +1485,10 @@ def _terminal_find_escapes_workspace(
         """Fail closed when shell expansion can choose the executable name."""
         if depth > 8:
             return True
+        masked = mask_heredoc_bodies(text)
+        if masked is None:
+            return True
+        text = masked
         try:
             lexer = shlex.shlex(
                 text.replace("\n", ";"), posix=True, punctuation_chars=";&|()"
