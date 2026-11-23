@@ -218,6 +218,7 @@ const mainConfig = defineConfig({
       "tests/kollab-logo.test.tsx",
       "tests/agent-version-notice.test.tsx",
       "tests/daemon-outdated-panels.test.tsx",
+      "tests/daemon-outdated-file-tree.test.tsx",
       "tests/daemon-outdated-recovery.test.tsx",
       "tests/mobile-invite.test.mjs",
       "tests/phonelink-app-shell.test.ts",
