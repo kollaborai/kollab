@@ -152,4 +152,27 @@ describe("QueuePanel", () => {
     expect(html).toContain("aria-label=\"Remove queued message 1\"");
     expect((html.match(/<button[^>]*disabled=""/g) ?? []).length).toBe(2);
   });
+
+  it("offers one Send Now control for only the earliest queued batch", () => {
+    const html = render(snapshot([
+      batch("later", 2, ["r2"], [item("r2", "Later batch")]),
+      batch("first", 1, ["r1"], [item("r1", "First batch")]),
+    ]));
+    expect(html.match(/aria-label="Send 1 queued message now"/g) ?? []).toHaveLength(1);
+    expect(html.indexOf("Send 1 queued message now")).toBeLessThan(html.indexOf("First batch"));
+    expect(html.indexOf("First batch")).toBeLessThan(html.indexOf("Later batch"));
+  });
+
+  it("does not bypass an ambiguous first batch to send a later batch", () => {
+    const html = render(snapshot([
+      batch("first", 1, ["r1"], [item("r1", "Uncertain first batch", "in_doubt")], "in_doubt"),
+      batch("later", 2, ["r2"], [item("r2", "Held later batch")]),
+    ]));
+    const sendLabels = html.match(/aria-label="Send 1 queued message now"/g) ?? [];
+    expect(sendLabels).toHaveLength(1);
+    expect(html).toMatch(/<button[^>]*aria-label="Send 1 queued message now"[^>]*disabled=""/);
+    expect(html).toContain("held to avoid sending twice");
+    expect(html.match(/data-slot="web-queue-status-dot"/g) ?? []).toHaveLength(2);
+    expect(html).toContain('data-status="in_doubt"');
+  });
 });

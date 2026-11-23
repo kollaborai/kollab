@@ -66,8 +66,89 @@ try {
   await page.evaluate(() => window.__queuePanelTest?.setBusy(false));
   await page.waitForFunction(() => document.querySelector('[aria-label="Send 1 queued message now"]') === null);
 
+  await page.evaluate(() => {
+    window.__queuePanelTest?.setDispatchAvailable(true);
+    window.__queuePanelTest?.setBusy(true);
+    window.__queuePanelTest?.setSnapshot({
+      scope_id: "fixture-scope",
+      incarnation: "fixture-incarnation",
+      revision: 2,
+      batches: [1, 2].map((n) => ({
+        batch_id: `fixture-batch-${n}`,
+        sequence: n,
+        status: "queued",
+        request_ids: [`fixture-request-${n}`],
+        claim_id: null,
+        items: [{
+          request_id: `fixture-request-${n}`,
+          status: "queued",
+          attempt_id: null,
+          text_preview: `Queued message ${n}`,
+          attachment_labels: [],
+        }],
+      })),
+    });
+  });
+  const batchSendNow = page.getByRole("button", { name: "Send 1 queued message now" });
+  await page.waitForFunction(() => document.querySelectorAll('[data-slot="web-queue-batch"]').length === 2);
+  assert.equal(await batchSendNow.count(), 1, "multiple batches must expose one FIFO Send Now control");
+  await batchSendNow.click();
+  await page.waitForFunction(() => window.__queuePanelTest?.calls().length === 4);
+  assert.deepEqual(await page.evaluate(() => window.__queuePanelTest?.calls()[3]), {
+    kind: "send",
+    id: "fixture-batch-1",
+  }, "Send Now must target the first queued batch");
+  assert.equal(await batchSendNow.isDisabled(), true, "a pending batch action must be globally serialized");
+  assert.equal(await page.getByRole("button", { name: "Remove queued message 1" }).isDisabled(), true,
+    "removal must not race an in-flight batch action");
+  await page.evaluate(() => window.__queuePanelTest?.settleAction());
+  await page.waitForFunction(() => !document.querySelector('[aria-label="Send 1 queued message now"]')?.hasAttribute("disabled"));
+
+  await page.evaluate(() => window.__queuePanelTest?.setSnapshot({
+    scope_id: "fixture-scope",
+    incarnation: "fixture-incarnation",
+    revision: 3,
+    batches: [
+      {
+        batch_id: "fixture-ambiguous-first",
+        sequence: 1,
+        status: "in_doubt",
+        request_ids: ["fixture-request-ambiguous"],
+        claim_id: "fixture-claim-ambiguous",
+        items: [{
+          request_id: "fixture-request-ambiguous",
+          status: "in_doubt",
+          attempt_id: "fixture-attempt-ambiguous",
+          text_preview: "Ambiguous earlier message",
+          attachment_labels: [],
+        }],
+      },
+      {
+        batch_id: "fixture-later-batch",
+        sequence: 2,
+        status: "queued",
+        request_ids: ["fixture-request-later"],
+        claim_id: null,
+        items: [{
+          request_id: "fixture-request-later",
+          status: "queued",
+          attempt_id: null,
+          text_preview: "Later queued message",
+          attachment_labels: [],
+        }],
+      },
+    ],
+  }));
+  await page.waitForFunction(() => document.querySelector('[data-slot="web-queue-status-dot"][data-status="in_doubt"]') !== null);
+  const heldSendNow = page.getByRole("button", { name: "Send 1 queued message now" });
+  assert.equal(await heldSendNow.count(), 1, "ambiguous head must block all later batch Send Now actions");
+  assert.equal(await heldSendNow.isDisabled(), true);
+  assert.equal(await page.locator('[data-slot="web-queue-status-dot"][data-status="queued"]').count(), 1);
+  assert.equal((await page.evaluate(() => window.__queuePanelTest?.calls())).length, 4,
+    "an ambiguous head must not submit a later batch");
+
   assert.deepEqual(pageErrors, [], `browser errors: ${pageErrors.join(" | ")}`);
-  console.log("PASS: queue callbacks, pending guards, safe error, disabled states, idle state");
+  console.log("PASS: queue callbacks, FIFO send gate, global pending guard, ambiguity hold, status dots");
 } finally {
   if (page) await page.close();
   if (browser) await browser.close();
