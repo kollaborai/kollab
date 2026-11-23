@@ -196,6 +196,50 @@ async def test_cancel_after_receiver_effect_does_not_replay_effect(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cancel_after_coalesced_replay_effect_does_not_redeliver(tmp_path):
+    effects = []
+    plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
+
+    async def inject(block, subtype=""):
+        effects.append(block)
+        if len(effects) == 1:
+            raise asyncio.CancelledError
+
+    async def receive(message):
+        effects.append(message.content)
+
+    llm = SimpleNamespace(inject_system_message=inject)
+    plugin.event_bus = SimpleNamespace(get_service=lambda _name: llm)
+    plugin._on_message_received = receive
+
+    with patch.object(HubPlugin, "_agent_dispatch_mode", return_value="native"):
+        with patch("plugins.hub.messenger.get_messages_dir", return_value=tmp_path):
+            for index in range(2):
+                await messenger_module.AgentMessenger.send_to_file(
+                    "receiver",
+                    HubMessage(
+                        action="message",
+                        from_identity="peer",
+                        to="receiver",
+                        content=f"message-{index}",
+                    ),
+                )
+            batch = messenger_module.AgentMessenger.read_mailboxes(
+                ["receiver"], max_replay=1, consume=False
+            )
+            with pytest.raises(asyncio.CancelledError):
+                await plugin._deliver_inbox_batch(batch)
+
+            replay = messenger_module.AgentMessenger.read_mailboxes(
+                ["receiver"], max_replay=1, consume=False
+            )
+            await plugin._deliver_inbox_batch(replay)
+
+    assert len(effects) == 1
+
+
+@pytest.mark.asyncio
 async def test_delivery_failure_leaves_message_for_replay_after_restart(
     tmp_path, caplog
 ):
