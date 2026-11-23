@@ -103,7 +103,9 @@ function RadixHorizontal() {
 function DialogSurface() {
   const [open, setOpen] = useState(false);
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    // Keep the document scroller observable while probing the portaled content.
+    // A modal dialog's body scroll lock would hide document chrome by itself.
+    <Dialog open={open} onOpenChange={setOpen} modal={false}>
       <DialogTrigger>open-dialog</DialogTrigger>
       <DialogContent>
         <DialogTitle>scrollbar dialog</DialogTitle>
