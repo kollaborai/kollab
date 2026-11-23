@@ -42,7 +42,7 @@ async def _noop(*args, **kwargs):
     return None
 
 
-def _cli_args(*, pipe=False):
+def _cli_args(*, pipe=False, query=None):
     return SimpleNamespace(
         mcp_hub=False,
         acp_prompt=None,
@@ -60,7 +60,7 @@ def _cli_args(*, pipe=False):
         _unknown_args=[],
         _help_pending=False,
         pipe=pipe,
-        query="probe" if pipe else None,
+        query=(query or "probe") if pipe else None,
         detached=False,
         system_prompt=None,
         agent=None,
@@ -92,7 +92,14 @@ def _configure_cli(monkeypatch, args, app):
     monkeypatch.setattr(cli, "TerminalLLMChat", lambda **_: app)
 
 
-def _build_start_app(args, cleanup_results, cleanup_calls):
+def _build_start_app(
+    args,
+    cleanup_results,
+    cleanup_calls,
+    *,
+    parsed_command=None,
+    command_result=None,
+):
     app = object.__new__(application.TerminalLLMChat)
     app.args = args
     app.pipe_mode = False
@@ -100,12 +107,28 @@ def _build_start_app(args, cleanup_results, cleanup_calls):
     app._startup_complete = True
     app._startup_ready = asyncio.Event()
     app.event_bus = _EventBus()
-    app.renderer = SimpleNamespace()
-    app.input_handler = SimpleNamespace(running=False, start=_noop)
-    app.llm_service = SimpleNamespace(register_hooks=_noop)
+    async def execute_command(*args, **kwargs):
+        return command_result
+
+    app.renderer = SimpleNamespace(pipe_mode=False)
+    app.input_handler = SimpleNamespace(
+        running=False,
+        start=_noop,
+        slash_parser=SimpleNamespace(parse_command=lambda text: parsed_command),
+        command_executor=SimpleNamespace(execute_command=execute_command),
+    )
+    app.llm_service = SimpleNamespace(
+        register_hooks=_noop,
+        api_service=SimpleNamespace(is_provider_available=lambda: True),
+    )
     app._start_plugin_supervisor = MethodType(lambda self: None, app)
     app._display_banner = MethodType(_noop, app)
     app._deferred_startup = MethodType(_noop, app)
+    app._load_config_hooks = MethodType(_noop, app)
+    app._initialize_llm_core = MethodType(_noop, app)
+    app._display_provider_warning = MethodType(_noop, app)
+    app._initialize_plugins = MethodType(_noop, app)
+    app._initialize_acp_orchestrator = MethodType(_noop, app)
     app.create_background_task = MethodType(
         lambda self, coro, name: asyncio.create_task(coro, name=name), app
     )
@@ -116,6 +139,7 @@ def _build_start_app(args, cleanup_results, cleanup_calls):
         cleanup_calls.append(result)
         self.running = False
         self.input_handler.running = False
+        self._cleanup_complete = result
         return result
 
     app.cleanup = MethodType(cleanup, app)
@@ -230,3 +254,77 @@ async def test_cli_preserves_cancellation_after_cleanup_retry(
         assert "injected cancellation" in str(exc.value.__cause__)
 
     assert cleanup_calls == [False, retry_result]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cleanup_results", "expected_calls"),
+    [([False, True], [False, True]), ([False, False, False], [False, False, False])],
+)
+async def test_pipe_unknown_command_preserves_exit_status(
+    cleanup_results, expected_calls, monkeypatch
+):
+    args = _cli_args(pipe=True, query="/unknown")
+    cleanup_calls = []
+    app = _build_start_app(args, cleanup_results, cleanup_calls)
+    _configure_cli(monkeypatch, args, app)
+
+    with pytest.raises(SystemExit) as exc:
+        await cli.async_main()
+
+    assert exc.value.code == 2
+    assert cleanup_calls == expected_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cleanup_results", "expected_calls"),
+    [([False, True], [False, True]), ([False, False, False], [False, False, False])],
+)
+async def test_pipe_successful_command_exits_zero_only_after_cleanup(
+    cleanup_results, expected_calls, monkeypatch
+):
+    args = _cli_args(pipe=True, query="/success")
+    cleanup_calls = []
+    command_result = SimpleNamespace(success=True, message=None, ui_config=None)
+    app = _build_start_app(
+        args,
+        cleanup_results,
+        cleanup_calls,
+        parsed_command=object(),
+        command_result=command_result,
+    )
+    _configure_cli(monkeypatch, args, app)
+
+    if expected_calls[-1]:
+        assert await cli.async_main() is None
+    else:
+        with pytest.raises(application.ApplicationCleanupIncompleteError):
+            await cli.async_main()
+
+    assert cleanup_calls == expected_calls
+
+
+@pytest.mark.asyncio
+async def test_interactive_command_preserves_exit_status_if_cleanup_is_uncertain():
+    args = SimpleNamespace(_help_pending=False, _unknown_args=[], stay=False)
+    cleanup_calls = []
+    app = _build_start_app(args, [False], cleanup_calls)
+    app._boot_projects_sweep = lambda: None
+    app._start_parent_watchdog = lambda: None
+    app._check_for_updates = _noop
+
+    async def process_cli_command():
+        return {"name": "test", "command_def": None}
+
+    async def execute_cli_command(command):
+        return 2
+
+    app._process_cli_command = process_cli_command
+    app._execute_cli_command = execute_cli_command
+
+    with pytest.raises(SystemExit) as exc:
+        await app._deferred_startup()
+
+    assert exc.value.code == 2
+    assert cleanup_calls == [False]
