@@ -258,6 +258,7 @@ async def test_assistant_transport_preserves_image_part_in_submitted_message(
 
 @pytest.mark.asyncio
 async def test_assistant_transport_maps_permission_result(monkeypatch):
+    permission_id = "owner-shell-1"
     session = _FakeSession([{"type": "turn_complete"}])
     monkeypatch.setattr(
         messages, "get_session_registry", lambda: _FakeRegistry(session)
@@ -270,16 +271,20 @@ async def test_assistant_transport_maps_permission_result(monkeypatch):
             commands=[
                 {
                     "type": "add-tool-result",
-                    "toolCallId": "permission_shell-1",
-                    "result": {"decision": "approve", "scope": "session"},
+                    "toolCallId": f"permission_shell-1_{permission_id}",
+                    "result": {"decision": "approve", "scope": "session", "permission_id": permission_id},
                 }
-            ]
+            ],
+            state={"messages": [{"role": "assistant", "content": [{
+                "type": "tool-call", "toolCallId": f"permission_shell-1_{permission_id}",
+                "toolName": "request_permission", "args": {"tool_id": "shell-1", "permission_id": permission_id},
+            }]}]},
         ),
     )
     async for _chunk in response.stream:
         pass
 
-    session.resolve_permission.assert_awaited_once_with("shell-1", "approve", "session")
+    session.resolve_permission.assert_awaited_once_with("shell-1", "approve", "session", permission_id=permission_id)
 
 
 @pytest.mark.asyncio
@@ -459,11 +464,14 @@ async def test_assistant_stream_close_leaves_daemon_turn_running(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_assistant_transport_exposes_and_resolves_permission_prompt(monkeypatch):
+    permission_id = "owner-shell-2"
     session = _FakeSession(
         [
             {
                 "type": "permission_request",
+                "request_id": "parent-turn-shell-2",
                 "tool_id": "shell-2",
+                "permission_id": permission_id,
                 "tool_name": "terminal",
                 "tool_type": "terminal",
                 "risk_level": "high",
@@ -473,11 +481,12 @@ async def test_assistant_transport_exposes_and_resolves_permission_prompt(monkey
         ]
     )
 
-    async def resolve_permission(tool_id: str, decision: str, scope: str) -> bool:
+    async def resolve_permission(tool_id: str, decision: str, scope: str, *, permission_id: str) -> bool:
         session._events.put_nowait(
             {
                 "type": "permission_denied",
                 "tool_id": tool_id,
+                "permission_id": permission_id,
                 "option_id": "vendor-denied",
                 "vendor_saved": True,
                 "warning": "Saved by the ACP provider; Kollab cannot undo it.",
@@ -495,16 +504,18 @@ async def test_assistant_transport_exposes_and_resolves_permission_prompt(monkey
     first = await messages.assistant_transport(
         session.session_id,
         messages.AssistantRequest(
-            commands=[{"type": "add-message", "content": "run command"}]
+            commands=[{"type": "add-message", "content": "run command"}],
+            state={"messages": []},
         ),
     )
     async for _chunk in first.stream:
         pass
     first_controller = captured["controller"]
     assert [(tool.name, tool.tool_call_id) for tool in first_controller.tool_calls] == [
-        ("request_permission", "permission_shell-2")
+        ("request_permission", f"permission_shell-2_{permission_id}")
     ]
     assert '"tool_id": "shell-2"' in first_controller.tool_calls[0].args
+    assert '"request_id": "parent-turn-shell-2"' in first_controller.tool_calls[0].args
 
     second = await messages.assistant_transport(
         session.session_id,
@@ -512,25 +523,27 @@ async def test_assistant_transport_exposes_and_resolves_permission_prompt(monkey
             commands=[
                 {
                     "type": "add-tool-result",
-                    "toolCallId": "permission_shell-2",
-                    "result": {"decision": "deny", "scope": "once"},
+                    "toolCallId": f"permission_shell-2_{permission_id}",
+                    "result": {"decision": "deny", "scope": "once", "permission_id": permission_id},
                 }
-            ]
+            ],
+            state=first_controller.state,
         ),
     )
     async for _chunk in second.stream:
         pass
-    session.resolve_permission.assert_awaited_once_with("shell-2", "deny", "once")
+    session.resolve_permission.assert_awaited_once_with("shell-2", "deny", "once", permission_id=permission_id)
     assert captured["controller"].errors == []
 
 
 async def _answer_parked_prompt(monkeypatch, decision, events):
     """Answer a prompt a Stop left open; the daemon answers with ``events``."""
+    permission_id = "owner-shell-3"
     session = _FakeSession([])
 
-    async def resolve_permission(tool_id: str, decision: str, scope: str) -> bool:
+    async def resolve_permission(tool_id: str, decision: str, scope: str, *, permission_id: str) -> bool:
         for event in events:
-            session._events.put_nowait(event)
+            session._events.put_nowait({**event, "permission_id": permission_id})
         return True
 
     session.resolve_permission = AsyncMock(side_effect=resolve_permission)
@@ -544,10 +557,14 @@ async def _answer_parked_prompt(monkeypatch, decision, events):
             commands=[
                 {
                     "type": "add-tool-result",
-                    "toolCallId": "permission_shell-3",
-                    "result": {"decision": decision, "scope": "once"},
+                    "toolCallId": f"permission_shell-3_{permission_id}",
+                    "result": {"decision": decision, "scope": "once", "permission_id": permission_id},
                 }
-            ]
+            ],
+            state={"messages": [{"role": "assistant", "content": [{
+                "type": "tool-call", "toolCallId": f"permission_shell-3_{permission_id}",
+                "toolName": "request_permission", "args": {"tool_id": "shell-3", "permission_id": permission_id},
+            }], "status": {"type": "requires-action", "reason": "tool-calls"}}]},
         ),
     )
 
@@ -587,8 +604,8 @@ async def test_a_parked_prompts_allow_streams_the_turn_it_goes_on_with(monkeypat
 @pytest.mark.parametrize(
     ("event", "decision"),
     [
-        ({"type": "permission_granted", "scope": "once"}, "approve"),
-        ({"type": "permission_denied"}, "deny"),
+        ({"type": "permission_granted", "scope": "once", "permission_id": "owner-shell-3"}, "approve"),
+        ({"type": "permission_denied", "permission_id": "owner-shell-3"}, "deny"),
     ],
 )
 @pytest.mark.asyncio
@@ -603,9 +620,9 @@ async def test_a_message_that_answers_a_shown_card_closes_it(monkeypatch, event,
     )
     card = {
         "type": "tool-call",
-        "toolCallId": "permission_shell-3",
+        "toolCallId": "permission_shell-3_owner-shell-3",
         "toolName": "request_permission",
-        "args": {"tool_id": "shell-3", "details": {"parked": True}},
+        "args": {"tool_id": "shell-3", "permission_id": "owner-shell-3", "details": {"parked": True}},
         "argsText": "{}",
     }
     state = {
@@ -631,7 +648,9 @@ async def test_a_message_that_answers_a_shown_card_closes_it(monkeypatch, event,
     assert sets[0][0] == ["messages", "2"] and sets[0][1]["content"] == "yes"
     path, message = sets[1]
     assert path == ["messages", "1"]
-    assert message["content"][0]["result"] == {"decision": decision, "scope": "once"}
+    assert message["content"][0]["result"] == {
+        "decision": decision, "scope": "once", "permission_id": "owner-shell-3",
+    }
     assert message["content"][0]["isError"] is (decision == "deny")
     # Turn end: the card stays answered above the message that answered it.
     final = sets[-3][1]
@@ -820,13 +839,18 @@ async def test_assistant_transport_progress_extends_continued_assistant_message(
         ]
     )
     earlier = {"type": "tool-call", "toolCallId": "call-1", "toolName": "terminal"}
+    permission_part = {
+        "type": "tool-call", "toolCallId": "permission_call-1_owner-call-1",
+        "toolName": "request_permission",
+        "args": {"tool_id": "call-1", "permission_id": "owner-call-1"},
+    }
     state = {
         "messages": [
             {"id": "u", "role": "user", "content": "go"},
             {
                 "id": "a",
                 "role": "assistant",
-                "content": [earlier],
+                "content": [earlier, permission_part],
                 "status": {"type": "requires-action", "reason": "tool-calls"},
             },
         ]
@@ -837,8 +861,8 @@ async def test_assistant_transport_progress_extends_continued_assistant_message(
         [
             {
                 "type": "add-tool-result",
-                "toolCallId": "permission_call-1",
-                "result": True,
+                "toolCallId": "permission_call-1_owner-call-1",
+                "result": {"decision": "approve", "permission_id": "owner-call-1"},
             }
         ],
         state,
@@ -846,7 +870,9 @@ async def test_assistant_transport_progress_extends_continued_assistant_message(
 
     path, message = sets[0]
     assert path == ["messages", "1"]
-    assert [part["toolCallId"] for part in message["content"]] == ["call-1", "call-2"]
+    assert [part["toolCallId"] for part in message["content"]] == [
+        "call-1", "permission_call-1_owner-call-1", "call-2",
+    ]
     assert "status" not in message
     # The final publish keeps one assistant message with an explicit status.
     assert [m["role"] for m in sets[-3][1]] == ["user", "assistant"]
@@ -856,9 +882,10 @@ async def test_assistant_transport_progress_extends_continued_assistant_message(
 @pytest.mark.asyncio
 async def test_assistant_transport_finishes_gated_tool_in_place(monkeypatch):
     """A tool gated by a prompt gets its result and duration in the answering run."""
+    permission_id = "owner-call-1"
     session = _FakeSession(
         [
-            {"type": "permission_granted", "tool_id": "call-1", "scope": "once"},
+            {"type": "permission_granted", "tool_id": "call-1", "permission_id": permission_id, "scope": "once"},
             {
                 "type": "tool_result",
                 "tool_id": "call-1",
@@ -887,10 +914,10 @@ async def test_assistant_transport_finishes_gated_tool_in_place(monkeypatch):
                     },
                     {
                         "type": "tool-call",
-                        "toolCallId": "permission_call-1",
+                        "toolCallId": f"permission_call-1_{permission_id}",
                         "toolName": "request_permission",
-                        "args": {"tool_id": "call-1"},
-                        "argsText": '{"tool_id": "call-1"}',
+                        "args": {"tool_id": "call-1", "permission_id": permission_id},
+                        "argsText": json.dumps({"tool_id": "call-1", "permission_id": permission_id}),
                     },
                 ],
                 "status": {"type": "requires-action", "reason": "tool-calls"},
@@ -903,8 +930,8 @@ async def test_assistant_transport_finishes_gated_tool_in_place(monkeypatch):
         [
             {
                 "type": "add-tool-result",
-                "toolCallId": "permission_call-1",
-                "result": {"decision": "approve", "scope": "once"},
+                "toolCallId": f"permission_call-1_{permission_id}",
+                "result": {"decision": "approve", "scope": "once", "permission_id": permission_id},
             }
         ],
         state,
@@ -913,7 +940,7 @@ async def test_assistant_transport_finishes_gated_tool_in_place(monkeypatch):
     # permission_granted: the prompt card is answered and the message runs again.
     path, message = sets[0]
     assert path == ["messages", "1"] and "status" not in message
-    assert message["content"][1]["result"] == {"decision": "approve", "scope": "once"}
+    assert message["content"][1]["result"] == {"decision": "approve", "scope": "once", "permission_id": permission_id}
     # tool_result: the same row finishes with its output and a measured duration.
     path, message = sets[1]
     row = message["content"][0]
@@ -924,7 +951,7 @@ async def test_assistant_transport_finishes_gated_tool_in_place(monkeypatch):
     final = sets[-3][1]
     assert [m["role"] for m in final] == ["user", "assistant"]
     tools = [p for p in final[1]["content"] if p["type"] == "tool-call"]
-    assert [p["toolCallId"] for p in tools] == ["call-1", "permission_call-1"]
+    assert [p["toolCallId"] for p in tools] == ["call-1", "permission_call-1_owner-call-1"]
     assert tools[0]["timing"] == {"startedAt": 1000, "completedAt": 3000}
     # The continued run's text lands after the finished rows, not above them.
     assert final[1]["content"][-1] == {"type": "text", "text": "done"}
@@ -1064,9 +1091,10 @@ async def test_assistant_transport_orders_text_and_tools_chronologically(monkeyp
 @pytest.mark.asyncio
 async def test_assistant_transport_continued_run_keeps_text_order(monkeypatch):
     """Answering a prompt finishes its row in place; later text and tools follow it."""
+    permission_id = "owner-call-1"
     session = _FakeSession(
         [
-            {"type": "permission_granted", "tool_id": "call-1", "scope": "once"},
+            {"type": "permission_granted", "tool_id": "call-1", "permission_id": permission_id, "scope": "once"},
             {
                 "type": "tool_result",
                 "tool_id": "call-1",
@@ -1105,8 +1133,9 @@ async def test_assistant_transport_continued_run_keeps_text_order(monkeypatch):
                     },
                     {
                         "type": "tool-call",
-                        "toolCallId": "permission_call-1",
+                        "toolCallId": f"permission_call-1_{permission_id}",
                         "toolName": "request_permission",
+                        "args": {"tool_id": "call-1", "permission_id": permission_id},
                     },
                 ],
                 "status": {"type": "requires-action", "reason": "tool-calls"},
@@ -1119,8 +1148,8 @@ async def test_assistant_transport_continued_run_keeps_text_order(monkeypatch):
         [
             {
                 "type": "add-tool-result",
-                "toolCallId": "permission_call-1",
-                "result": True,
+                "toolCallId": f"permission_call-1_{permission_id}",
+                "result": {"decision": "approve", "permission_id": permission_id},
             }
         ],
         state,
@@ -1131,7 +1160,7 @@ async def test_assistant_transport_continued_run_keeps_text_order(monkeypatch):
     assert [part.get("text") or part["toolCallId"] for part in final[1]["content"]] == [
         "before",
         "call-1",
-        "permission_call-1",
+        f"permission_call-1_{permission_id}",
         "x",
         "call-2",
         "y",
@@ -1220,7 +1249,7 @@ async def test_assistant_transport_shows_none_of_a_running_turn_typed_in_the_ter
     def admit(content, request_id=None):
         for event in (
             {"type": "token", "text": "THEIRS"},
-            {"type": "permission_request", "tool_id": "their-tool", "tool_name": "terminal",
+            {"type": "permission_request", "tool_id": "their-tool", "permission_id": "owner-their-tool", "tool_name": "terminal",
              "input": {"command": "echo hi"}},
             {"type": "turn_complete", "stop_reason": "end_turn"},
             {"type": "token", "text": "B-OK", "request_ids": [request_id]},
@@ -1896,21 +1925,23 @@ async def test_an_answer_to_a_parked_card_reaches_the_message_that_gives_it(monk
             bridge.request_confirmation(
                 display_tap=tap,
                 rpc_server=rpc,
-                details={"tool_id": "shell-3", "tool_type": "shell"},
+                details={"tool_id": "shell-3", "permission_id": "owner-shell-3", "tool_type": "shell"},
                 timeout=None,
             )
         )
     finally:
         turn._stamp_turn(None)  # turn A ends; its parked prompt keeps A's context
     await asyncio.sleep(0)
-    assert events.get_nowait()["request_ids"] == ["request-A"]
-    bridge.park("shell-3")
+    permission_event = events.get_nowait()
+    assert permission_event["request_ids"] == ["request-A"]
+    permission_id = permission_event["details"]["permission_id"]
+    bridge.park("shell-3", permission_id)
     assert events.get_nowait()["type"] == "permission_parked"
     answers = []
 
     async def submit(content, *, request_id=None, **kwargs):
         # This message's "no" answers the card.
-        assert (await rpc.handler({"tool_id": "shell-3", "response": "DENY"}))["ok"]
+        assert (await rpc.handler({"tool_id": "shell-3", "permission_id": permission_id, "response": "DENY"}))["ok"]
         await asyncio.wait_for(prompt, 1)
         answers.append(events.get_nowait())
         session._events.put_nowait(_normalize_event(answers[-1]))
@@ -1924,9 +1955,9 @@ async def test_an_answer_to_a_parked_card_reaches_the_message_that_gives_it(monk
     session.send_message = AsyncMock(side_effect=submit)
     card = {
         "type": "tool-call",
-        "toolCallId": "permission_shell-3",
+        "toolCallId": f"permission_shell-3_{permission_id}",
         "toolName": "request_permission",
-        "args": {"tool_id": "shell-3"},
+        "args": {"tool_id": "shell-3", "permission_id": permission_id},
     }
     state = {"messages": [{"id": "old-assistant", "role": "assistant", "content": [card]}]}
     response = await messages.assistant_transport(
@@ -1936,6 +1967,7 @@ async def test_an_answer_to_a_parked_card_reaches_the_message_that_gives_it(monk
     try:
         await asyncio.wait_for(drain(response.stream), 1)
         assert answers[0]["type"] == "permission_denied" and answers[0]["request_ids"] == ["request-A"]
+        assert answers[0]["permission_id"] == permission_id
         shown = captured["controller"].state["messages"][0]["content"][0]
         assert shown.get("result", {}).get("decision") == "deny", shown
     finally:
