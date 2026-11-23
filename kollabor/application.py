@@ -1116,6 +1116,10 @@ class TerminalLLMChat:
         self._pending_skill_display: list[tuple[str, str, dict[str, Any]]] = []
         self._task_lock = asyncio.Lock()
 
+        # Hub self/remote stop must enter the application cleanup path so queue
+        # workers settle before provider and plugin teardown begins.
+        self.event_bus.register_service("app", self)
+
         logger.info("Kollab initialized")
 
     @staticmethod
