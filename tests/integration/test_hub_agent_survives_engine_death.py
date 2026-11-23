@@ -154,13 +154,12 @@ async def _check_survival(parent, home: Path) -> None:
     sock = await _wait_for_socket(home, timeout=90)
     assert sock.exists()
 
-    # Find the agent pid via its presence record dir (isolated HOME).
-    # Project dir keys on the spawn cwd (REPO_ROOT), not the isolated HOME.
-    presence_dir = home / ".kollab" / "projects"
+    # Presence records are colocated with this daemon's socket.
+    presence_dir = sock.parent
     agent_pid = None
     deadline = time.monotonic() + 30
     while agent_pid is None and time.monotonic() < deadline:
-        for pfile in presence_dir.rglob("hub/presence/*.json"):
+        for pfile in presence_dir.glob("*.json"):
             try:
                 import json
 

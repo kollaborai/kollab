@@ -34,6 +34,7 @@ from .acp_bridge import (
     ACPProfile,
     ACPResult,
     ACPRunner,
+    ACPSteeringUnconfirmed,
 )
 from .acp_state import ACPBindingStore
 from .agent_hud import AgentHudEntry, format_agent_hud
@@ -1103,14 +1104,46 @@ class ACPOrchestrator:
 
     async def steer(
         self, text: str, *, origin: dict[str, Any], thread_id: str | None = None,
+        request_id: str | None = None,
         images: tuple[dict[str, str], ...] = (),
-    ) -> bool:
-        kwargs = {"images": images} if images else {}
-        if not self._runner or not await self._runner.steer(text, origin=origin, thread_id=thread_id, **kwargs):
+    ) -> dict[str, Any] | bool:
+        runner = self._runner
+        active = getattr(runner, "_active_context", None)
+        turn_id = getattr(runner, "_active_turn_id", 0)
+        generation = getattr(runner, "_active_generation", 0)
+        session_id = getattr(runner, "session_id", None)
+        owner_correlatable = bool(
+            active is not None
+            and turn_id
+            and generation
+            and session_id
+            and getattr(active, "request_id", None)
+            and getattr(active, "turn_id", None) == turn_id
+        )
+        if not runner or (request_id and not owner_correlatable):
             return False
-        request_id = f"steering-{uuid.uuid4().hex}"
-        self._record_user(request_id, text, "steering", thread_id)
-        self._parents.pop(request_id, None)
+        kwargs = {"images": images} if images else {}
+        if not await runner.steer(text, origin=origin, thread_id=thread_id, **kwargs):
+            return False
+        if owner_correlatable and (
+            self._runner is not runner
+            or getattr(runner, "_active_context", None) is not active
+            or getattr(runner, "_active_turn_id", None) != turn_id
+            or getattr(runner, "_active_generation", None) != generation
+            or getattr(runner, "session_id", None) != session_id
+        ):
+            raise ACPSteeringUnconfirmed(
+                "ACP turn changed before steering was confirmed"
+            )
+        record_request_id = request_id or f"steering-{uuid.uuid4().hex}"
+        self._record_user(record_request_id, text, "steering", thread_id)
+        self._parents.pop(record_request_id, None)
+        if request_id and owner_correlatable:
+            return {
+                "joined_request_id": active.request_id,
+                "joined_turn_id": active.turn_id,
+                "joined_generation": generation,
+            }
         return True
 
     async def restore(self, conversation_id: str | None = None) -> None:
@@ -1584,7 +1617,8 @@ class ACPOrchestrator:
                 publish_semantic(self.event_bus, "tool_start", tool_id=tool_id,
                     tool_name=payload.get("title") or payload.get("kind") or "Harness Tool",
                     tool_type=payload.get("kind") or "acp", input=payload.get("rawInput") or {},
-                    request_id=update.get("request_id"), turn_id=update.get("turn_id"), acp_passthrough=True)
+                    request_id=update.get("request_id"), turn_id=update.get("turn_id"),
+                    generation=update.get("generation"), acp_passthrough=True)
             if payload.get("status") in {"completed", "failed"}:
                 output = payload.get("rawOutput") or payload.get("content") or ""
                 if not isinstance(output, str):
@@ -1593,7 +1627,8 @@ class ACPOrchestrator:
                     tool_name=payload.get("title") or "Harness Tool", success=payload.get("status") == "completed",
                     output=output,
                     metadata={"acp": payload}, request_id=update.get("request_id"),
-                    turn_id=update.get("turn_id"), acp_passthrough=True)
+                    turn_id=update.get("turn_id"), generation=update.get("generation"),
+                    acp_passthrough=True)
                 if display is not None:
                     display.display_tool_row(
                         str(payload.get("title") or "Harness Tool"),
@@ -1615,27 +1650,33 @@ class ACPOrchestrator:
             self.event_bus.register_service("acp_plan", dict(payload))
         if kind in {"tool_call", "tool_call_update", "agent_thought_chunk", "plan", "usage_update"}:
             publish_semantic(self.event_bus, "acp_update", update=payload,
-                             request_id=update.get("request_id"), turn_id=update.get("turn_id"))
+                             request_id=update.get("request_id"), turn_id=update.get("turn_id"),
+                             generation=update.get("generation"))
         if kind == "agent_thought_chunk":
             publish_semantic(self.event_bus, "thinking", text=str((payload.get("content") or {}).get("text") or ""),
-                             request_id=update.get("request_id"), turn_id=update.get("turn_id"), acp_passthrough=True)
+                             request_id=update.get("request_id"), turn_id=update.get("turn_id"),
+                             generation=update.get("generation"), acp_passthrough=True)
         if kind == "permission_request":
+            owner_request_id = update.get("owner_request_id") or update.get("request_id")
             publish_semantic(self.event_bus, "acp_waiting", waiting=True, harness=self._profile_name,
-                             tool_id=update.get("request_id"), title=payload.get("title") or "Tool permission")
+                             tool_id=update.get("request_id"), title=payload.get("title") or "Tool permission",
+                             request_id=owner_request_id, turn_id=update.get("turn_id"),
+                             generation=update.get("generation"))
             if self.hub_plugin is not None:
                 callback = getattr(self.hub_plugin, "on_acp_waiting", None)
                 if callback is not None:
-                    active = getattr(self._runner, "_active_context", None)
-                    callback(getattr(active, "request_id", ""), True, payload)
+                    callback(str(owner_request_id or ""), True, payload)
         elif kind in {"permission_resolved", "turn_finished"}:
             # A stopped prompt can finish before its SDK permission callback
             # resumes. Clear its waiting state at this still-owned turn boundary.
-            publish_semantic(self.event_bus, "acp_waiting", waiting=False, harness=self._profile_name)
+            owner_request_id = update.get("owner_request_id") or update.get("request_id")
+            publish_semantic(self.event_bus, "acp_waiting", waiting=False, harness=self._profile_name,
+                             request_id=owner_request_id, turn_id=update.get("turn_id"),
+                             generation=update.get("generation"))
             if self.hub_plugin is not None:
                 callback = getattr(self.hub_plugin, "on_acp_waiting", None)
                 if callback is not None:
-                    active = getattr(self._runner, "_active_context", None)
-                    callback(getattr(active, "request_id", ""), False, {})
+                    callback(str(owner_request_id or ""), False, {})
         if kind in {"permission_request", "permission_resolved", "turn_finished"}:
             return
         publish_semantic(
