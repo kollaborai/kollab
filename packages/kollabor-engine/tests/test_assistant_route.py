@@ -1374,6 +1374,213 @@ async def test_send_now_batch_passes_order_and_finishes_after_all_messages(monke
 
 
 @pytest.mark.asyncio
+async def test_send_now_batch_releases_runner_before_waiting_for_terminal_events(monkeypatch):
+    """Queued batch members must start before their route can observe completion (#1371)."""
+    from kollabor.llm.acp_bridge import ACPProfile, ACPResult, ACPRunner
+    from kollabor.llm.llm_coordinator import LLMService
+
+    monkeypatch.setattr(messages, "EVENT_IDLE_TIMEOUT_SECONDS", 1.0)
+    session = _FakeSession([])
+    runner = ACPRunner(ACPProfile("route-batch-integration", ("unused",)))
+    runner.session_id = session.session_id
+    runner.generation = 7
+    runner._connection = object()
+    runner.admit("active prompt", request_id="active-A", source="rpc")
+    runner.admit("older queued", request_id="older-D", source="rpc")
+    started: list[str] = []
+    started_ids: asyncio.Queue[str] = asyncio.Queue()
+    release_active = asyncio.Event()
+    release_batch = asyncio.Event()
+    all_done = asyncio.Event()
+
+    async def run_prompt(admission, generation):
+        runner._active_turn_id = admission.turn_id
+        runner._active_generation = generation
+        started.append(admission.request_id)
+        started_ids.put_nowait(admission.request_id)
+        if admission.request_id == "active-A":
+            await release_active.wait()
+        else:
+            await release_batch.wait()
+        session._events.put_nowait({
+            "type": "token",
+            "text": admission.request_id,
+            "request_id": admission.request_id,
+            "turn_id": admission.turn_id,
+            "generation": generation,
+        })
+        session._events.put_nowait({
+            "type": "turn_complete",
+            "stop_reason": "end_turn",
+            "request_id": admission.request_id,
+            "turn_id": admission.turn_id,
+            "generation": generation,
+        })
+        if len(started) == 4:
+            all_done.set()
+        return ACPResult(
+            generation=generation,
+            session_id=session.session_id,
+            text=admission.request_id,
+            stop_reason="end_turn",
+            updates=(),
+            end_frame={},
+            turn_id=admission.turn_id,
+            request_id=admission.request_id,
+            source=admission.source,
+        )
+
+    runner._run_prompt = run_prompt
+    worker = asyncio.create_task(runner._drain_queue())
+    assert await asyncio.wait_for(started_ids.get(), timeout=1) == "active-A"
+    llm = object.__new__(LLMService)
+    submitted = 0
+    all_admitted = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def steer(*_args, **_kwargs):
+        return False
+
+    acp = types.SimpleNamespace(
+        active=True,
+        runner=runner,
+        supports_image_input=False,
+        voice_rules_epochs=set(),
+        steer=steer,
+        begin_send_now_batch=runner.begin_send_now_batch,
+        has_send_now_batch=runner.has_send_now_batch,
+        send_now_batch_has_admissions=runner.send_now_batch_has_admissions,
+        record_send_now_batch_injected=runner.record_send_now_batch_injected,
+        finish_send_now_batch=runner.finish_send_now_batch,
+        admit=runner.admit,
+        # The active owner is allowed to finish naturally in this race probe.
+        prepare_cancel=lambda **_kwargs: False,
+        schedule_prepared_cancel=lambda **_kwargs: True,
+    )
+
+    async def submit(content, **kwargs):
+        nonlocal submitted
+        result = await llm._admit_acp(acp, {"message": content, **kwargs}, "state_rpc")
+        submitted += 1
+        if submitted == 2:
+            all_admitted.set()
+        return {
+            "accepted": result.get("status") in {"queued", "injected"},
+            "request_id": result.get("request_id"),
+            "reason": result.get("reason", ""),
+        }
+
+    session.send_message = AsyncMock(side_effect=submit)
+    async def finish_batch(batch_id):
+        session.finish_calls = getattr(session, "finish_calls", 0) + 1
+        result = llm.finish_send_now_batch(batch_id, acp=acp)
+        finished.set()
+        return {"finished": result}
+
+    session.finish_send_now_batch = AsyncMock(side_effect=finish_batch)
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    _captured, _response_type, drain_stream = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[
+                {"type": "add-message", "message": {"id": "client-B", "parts": [{"type": "text", "text": "B"}]}},
+                {"type": "add-message", "message": {"id": "client-C", "parts": [{"type": "text", "text": "C"}]}},
+            ],
+            state={"messages": []},
+            send_now=True,
+        ),
+    )
+    route_task = asyncio.create_task(drain_stream(response.stream))
+    try:
+        await asyncio.wait_for(all_admitted.wait(), timeout=0.2)
+        # The last admission must close the queue gate before the stream waits
+        # for terminal events from B and C.
+        await asyncio.wait_for(finished.wait(), timeout=0.2)
+        assert started == ["active-A"]
+        assert [item.request_id for item in runner._queue._queue] == [
+            "client-B", "client-C", "older-D",
+        ]
+
+        release_active.set()
+        assert await asyncio.wait_for(started_ids.get(), timeout=1) == "client-B"
+        release_batch.set()
+        assert await asyncio.wait_for(started_ids.get(), timeout=1) == "client-C"
+        assert await asyncio.wait_for(started_ids.get(), timeout=1) == "older-D"
+        await asyncio.wait_for(route_task, timeout=1.0)
+        await asyncio.wait_for(all_done.wait(), timeout=1.0)
+        assert started == ["active-A", "client-B", "client-C", "older-D"]
+        session.finish_send_now_batch.assert_awaited_once()
+    finally:
+        release_active.set()
+        release_batch.set()
+        if not route_task.done():
+            route_task.cancel()
+            await asyncio.gather(route_task, return_exceptions=True)
+        for batch_id in tuple(runner._send_now_batches):
+            runner.finish_send_now_batch(batch_id)
+        runner._queue_release.set()
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_assistant_transport_rejects_duplicate_batch_request_ids_before_admission(
+    monkeypatch,
+):
+    """Duplicate client ids alias independent turn completions (#1371)."""
+    session = _FakeSession([])
+    submitted: list[str] = []
+
+    async def submit(content, **kwargs):
+        request_id = kwargs["request_id"]
+        submitted.append(content)
+        # Model two independently accepted sends whose client-controlled ids
+        # collide. The route currently tracks completion by a set of ids.
+        session._events.put_nowait(
+            {"type": "turn_complete", "stop_reason": "end_turn", "request_id": request_id}
+        )
+        return {"accepted": True, "request_id": request_id}
+
+    session.send_message = AsyncMock(side_effect=submit)
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, drain_stream = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[
+                {
+                    "type": "add-message",
+                    "message": {
+                        "id": "same-id",
+                        "parts": [{"type": "text", "text": "first"}],
+                    },
+                },
+                {
+                    "type": "add-message",
+                    "message": {
+                        "id": "same-id",
+                        "parts": [{"type": "text", "text": "second"}],
+                    },
+                },
+            ],
+            state={"messages": []},
+            send_now=True,
+        ),
+    )
+    await drain_stream(response.stream)
+
+    assert submitted == []
+    session.send_message.assert_not_awaited()
+    assert session._events.empty()
+    assert any("duplicate" in error.lower() for error in captured["controller"].errors)
+
+
+@pytest.mark.asyncio
 async def test_assistant_transport_shows_none_of_a_running_turn_typed_in_the_terminal(monkeypatch):
     """Chalcedony on #554 round 5: a turn typed in the terminal names no
     request, and its text and permission prompt became this message's."""
