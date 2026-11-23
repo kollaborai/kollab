@@ -618,10 +618,12 @@ def env_report(settings: CodeSettings = DEFAULTS) -> dict[str, Any]:
     }
 
 
-# The shell starts from this one-line program, not from a fork inside the multi-threaded engine (a fork there can
+# The shell starts from this isolated launcher, not from a fork inside the multi-threaded engine (a fork there can
 # deadlock before exec). os.login_tty makes the PTY (fd 0) the controlling terminal, so Ctrl-C reaches the shell's
 # foreground job. Python ignores SIGPIPE and SIGXFSZ and exec keeps ignored signals, so both are reset first.
 # -I ignores PYTHON* variables and never puts the working directory on sys.path.
+# Inherited descriptors cannot establish ownership: a detached job can close any of them. Leave the shell's
+# descriptor table and resource limits alone; Darwin discovery remains bounded by the evidence it can inspect.
 _SHELL_LAUNCHER = (
     "import os, signal, sys\n"
     "os.login_tty(0)\n"
