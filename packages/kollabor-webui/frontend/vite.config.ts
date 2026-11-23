@@ -204,6 +204,7 @@ const mainConfig = defineConfig({
       "tests/build-provenance.test.ts",
       "tests/voice-turn-groups.test.ts",
       "tests/history-reconciliation.test.ts",
+      "tests/user-row-request-ids.test.ts",
       "tests/path-text.test.ts",
       "tests/todo-list-cache.test.ts",
       "tests/gem-headshot.test.ts",

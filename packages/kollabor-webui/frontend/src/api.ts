@@ -199,6 +199,8 @@ export function stripAgentHud(text: string): string {
 export type PermissionPrompt = {
   type?: "permission_request";
   tool_id: string;
+  permission_id?: string;
+  request_id?: string;
   tool_name: string;
   tool_type?: string;
   input?: Record<string, unknown>;
@@ -672,6 +674,8 @@ export type SessionEvent = {
   type?: string;
   session_id?: string;
   tool_id?: string;
+  permission_id?: string;
+  request_id?: string;
   tool_name?: string;
   scope?: string;
   message?: string;
@@ -1488,6 +1492,7 @@ export class EngineApi {
   respondPermission(
     sessionId: string,
     toolId: string,
+    permissionId: string,
     decision: "approve" | "deny",
     scope = "once",
   ) {
@@ -1495,7 +1500,7 @@ export class EngineApi {
       `/sessions/${encodeURIComponent(sessionId)}/permission`,
       {
         method: "POST",
-        body: JSON.stringify({ tool_id: toolId, decision, scope }),
+        body: JSON.stringify({ tool_id: toolId, permission_id: permissionId, decision, scope }),
       },
     );
   }

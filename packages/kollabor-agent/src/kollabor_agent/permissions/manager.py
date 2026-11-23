@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
@@ -87,12 +88,12 @@ class PermissionManager:
         self._confirmation_callback: Optional[
             Callable[[Dict[str, Any]], Awaitable[PermissionDecision]]
         ] = None
-        # Answers every prompt the callback has open cancelled (cancel_confirmations)
-        self._cancel_confirmations: Optional[Callable[[], None]] = None
-        # A parked prompt: terminals close it (tool id); its card stays open.
-        self._park_prompt: Optional[Callable[[str], None]] = None
-        # Answers one open prompt (tool id, ConfirmationResponse).
-        self._settle_prompt: Optional[Callable[[str, Any], Any]] = None
+        # Answers only the prompts owned by the request being stopped.
+        self._cancel_confirmations: Optional[Callable[[str | None], None]] = None
+        # A parked prompt: terminals close it (tool and permission ids); its card stays open.
+        self._park_prompt: Optional[Callable[[str, str], None]] = None
+        # Answers one open prompt (tool id, permission id, ConfirmationResponse).
+        self._settle_prompt: Optional[Callable[[str, str, Any], Any]] = None
         self._parking: Set[asyncio.Event] = set()  # prompts waiting now (park_confirmations)
         self._late_answers: Set[asyncio.Task] = set()
 
@@ -221,19 +222,19 @@ class PermissionManager:
     def set_confirmation_callback(
         self,
         callback: Callable[[Dict[str, Any]], Awaitable[PermissionDecision]],
-        cancel: Optional[Callable[[], None]] = None,
-        park: Optional[Callable[[str], None]] = None,
-        settle: Optional[Callable[[str, Any], Any]] = None,
+        cancel: Optional[Callable[[str | None], None]] = None,
+        park: Optional[Callable[[str, str], None]] = None,
+        settle: Optional[Callable[[str, str, Any], Any]] = None,
     ) -> None:
         """
         Set callback for showing confirmation UI.
 
         Args:
             callback: Async function that shows confirmation and returns decision
-            cancel: Answers every prompt the callback has open cancelled
+            cancel: Cancels only prompts owned by the stopped parent request
             park: Its turn went on without an answer: terminals close this
-                prompt (tool id), its card stays open
-            settle: Answers one open prompt (tool id, ConfirmationResponse)
+                prompt (tool id, permission id), its card stays open
+            settle: Answers one open prompt (tool id, permission id, response)
         """
         self._confirmation_callback = callback
         self._cancel_confirmations = cancel
@@ -241,10 +242,10 @@ class PermissionManager:
         self._settle_prompt = settle
         logger.debug("Confirmation callback set")
 
-    def cancel_confirmations(self) -> None:
-        """An ACP Stop ends the turn: its open prompts are answered cancelled."""
+    def cancel_confirmations(self, request_id: str | None = None) -> None:
+        """An ACP Stop cancels only that parent request's open prompts."""
         if self._cancel_confirmations is not None:
-            self._cancel_confirmations()
+            self._cancel_confirmations(request_id)
 
     def park_confirmations(self) -> None:
         """A Stop leaves its turn's open prompts open: the card or a yes answers them.
@@ -255,7 +256,7 @@ class PermissionManager:
         for waiting in list(self._parking):
             waiting.set()
 
-    def _close_card(self, tool_id: str, allowed: Optional[bool]) -> None:
+    def _close_card(self, tool_id: str, permission_id: str | None, allowed: Optional[bool]) -> None:
         """The user's typed yes or no answered a parked prompt: close its card."""
         if self._settle_prompt is None:
             return
@@ -264,7 +265,8 @@ class PermissionManager:
         else:
             response = ConfirmationResponse.APPROVE_ONCE if allowed else ConfirmationResponse.DENY
         try:
-            self._settle_prompt(tool_id, response)
+            if permission_id:
+                self._settle_prompt(tool_id, permission_id, response)
         except Exception:
             logger.warning("could not close the approval card", exc_info=True)
 
@@ -281,20 +283,27 @@ class PermissionManager:
         card stays open. The card, or the user's typed yes, answers it later
         (_answered_late, YesApprovals).
         """
+        permission_id = str(details.get("permission_id") or "")
         details["parked"] = True
         approvals = getattr(getattr(self, "_tool_executor", None), "yes_approvals", None)
         if isinstance(approvals, YesApprovals):
-            approvals.park(tool_data)
+            approvals.park(tool_data, permission_id or None)
         if self._park_prompt is not None:
             try:
-                self._park_prompt(str(details.get("tool_id")))
+                if permission_id:
+                    self._park_prompt(str(details.get("tool_id")), permission_id)
             except Exception:
                 logger.warning("could not park the approval prompt", exc_info=True)
-        prompt.add_done_callback(lambda done: self._answered_late(done, tool_data))
+        prompt.add_done_callback(
+            lambda done: self._answered_late(done, tool_data, permission_id or None)
+        )
         return PermissionDecision(allowed=False, reason=NEEDS_YES, risk_level=risk_level, needs_yes=True)
 
     def _answered_late(
-        self, prompt: "asyncio.Future[PermissionDecision]", tool_data: Dict[str, Any]
+        self,
+        prompt: "asyncio.Future[PermissionDecision]",
+        tool_data: Dict[str, Any],
+        permission_id: str | None = None,
     ) -> None:
         """A parked prompt was answered: Allow runs its call, Deny drops it quietly."""
         if prompt.cancelled():
@@ -310,7 +319,7 @@ class PermissionManager:
         allowed = None
         if decision is not None and decision.reason != "User cancelled operation":
             allowed = bool(decision.allowed)
-        what = approvals.answered_on_card(tool_data, allowed)
+        what = approvals.answered_on_card(tool_data, allowed, permission_id)
         if what:
             task = asyncio.ensure_future(self._go_on(what))
             self._late_answers.add(task)
@@ -500,6 +509,9 @@ class PermissionManager:
             confirmation_details = self._build_confirmation_details(
                 tool_data, risk_result
             )
+            # This id names one prompt instance, so a stale answer cannot
+            # settle a later prompt that reused the daemon's tool_id.
+            confirmation_details["permission_id"] = uuid.uuid4().hex
 
             # Emit PERMISSION_CONFIRMATION event before requesting user input
             logger.debug(f"Requesting user confirmation for tool: {tool_name}")
@@ -552,12 +564,14 @@ class PermissionManager:
                 if confirmation_details.get("approval_scope") == "session":
                     self._record_approval(tool_type, tool_name, tool_data, "session")
                 await self._emit_permission_granted(
-                    tool_id, tool_type, tool_name, risk_result.level, decision.reason
+                    tool_id, tool_type, tool_name, risk_result.level, decision.reason,
+                    permission_id=confirmation_details["permission_id"],
                 )
             else:
                 self._stats["denied"] += 1
                 await self._emit_permission_denied(
-                    tool_id, tool_type, tool_name, risk_result.level, decision.reason
+                    tool_id, tool_type, tool_name, risk_result.level, decision.reason,
+                    permission_id=confirmation_details["permission_id"],
                 )
 
             return decision
@@ -1042,6 +1056,7 @@ class PermissionManager:
         tool_name: str,
         risk_level: ToolRiskLevel,
         reason: str,
+        permission_id: str | None = None,
     ) -> None:
         """Emit PERMISSION_GRANTED event."""
         logger.debug(f"Permission granted for tool: {tool_name} - {reason}")
@@ -1053,6 +1068,7 @@ class PermissionManager:
                 "tool_name": tool_name,
                 "risk_level": risk_level.name,
                 "reason": reason,
+                **({"permission_id": permission_id} if permission_id else {}),
             },
             source="permission_manager",
         )
@@ -1064,6 +1080,7 @@ class PermissionManager:
         tool_name: str,
         risk_level: ToolRiskLevel,
         reason: str,
+        permission_id: str | None = None,
     ) -> None:
         """Emit PERMISSION_DENIED event."""
         logger.debug(f"Permission denied for tool: {tool_name} - {reason}")
@@ -1075,6 +1092,7 @@ class PermissionManager:
                 "tool_name": tool_name,
                 "risk_level": risk_level.name,
                 "reason": reason,
+                **({"permission_id": permission_id} if permission_id else {}),
             },
             source="permission_manager",
         )

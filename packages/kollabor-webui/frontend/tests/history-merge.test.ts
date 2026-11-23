@@ -5,11 +5,20 @@ import {
   dropTransientTurnDuplicates,
   historyHasAssistantRequestId,
   historyMessageIndex,
+  insertLiveMessage,
   isCompactionMarker,
   mergeCompactionHistorySnapshot,
   mergeMissingHistoryMessages,
   reconcileBoundaryToolResults,
+  hasUnsettledRows,
+  inFlightSendIdsFor,
+  pendingSendIds,
+  rebaseOntoHistory,
+  rememberSavedSends,
   shownMessagesChanged,
+  withoutInFlightSends,
+  withoutOwnTurnRows,
+  withSavedCopies,
 } from "../src/history-merge.ts";
 import { historyContentToThreadContent } from "../src/history-content.ts";
 
@@ -63,6 +72,27 @@ test("same-index note rows retain the engine's order during a partial merge", ()
   const later = { id: "history-5", content: "reply" };
   const merged = mergeMissingHistoryMessages([user, later], [note, user, later]);
   assert.deepEqual(merged.messages.map((message) => message.id), [note.id, user.id, later.id]);
+});
+
+test("a handed-over live reply stays after its request and before the next send", () => {
+  const firstSend = { id: "history-0", role: "user", content: "request A",
+    metadata: { custom: { requestId: "A" } } };
+  const firstReply = { id: "assistant-s1-1", role: "assistant", content: "before handover",
+    metadata: { custom: { requestId: "A" } } };
+  const nextSend = { id: "user-s1-2", role: "user", content: "request B",
+    metadata: { isOptimistic: true, custom: { requestId: "B" } } };
+  const live = { id: "live-turn:A", role: "assistant", content: "late output",
+    metadata: { isOptimistic: true, custom: { requestId: "A" } } };
+
+  const inserted = insertLiveMessage([firstSend, firstReply, nextSend], live);
+  assert.deepEqual(inserted.map((row) => row.id), [firstSend.id, firstReply.id, live.id, nextSend.id]);
+  assert.equal(inserted[0], firstSend);
+  assert.equal(inserted[1], firstReply);
+  assert.equal(inserted[3], nextSend);
+
+  // A later assistant snapshot that omitted the ephemeral row can add it once.
+  const restored = insertLiveMessage([firstSend, firstReply, nextSend], live);
+  assert.equal(restored.filter((row) => row.id === live.id).length, 1);
 });
 
 test("new history stays before an existing pending permission", () => {
@@ -706,4 +736,656 @@ test("compaction keeps visible display IDs unique and releases archived source p
   const older = { id: "history-3", role: "user", content: "different at three" };
   const merged = mergeMissingHistoryMessages(result.messages, [...loaded, older]);
   assert.deepEqual(merged.added.map(m => m.content), [older.content]);
+});
+
+// #1356: this page's own send is on screen as a transient row (pending, then
+// the engine's) while a history sync brings the same send as a saved row. The
+// page names its in-flight sends by id; other user-<session>-<n> rows are
+// settled rows of earlier turns.
+const sent = (id: string, text: string) => ({ id, role: "user", content: [{ type: "text", text }] });
+const saved = (index: number, text: string) => ({ id: `history-${index}`, role: "user", content: text });
+const ids = (...values: string[]) => new Set(values);
+
+test("a history sync leaves out the saved copy of an in-flight send", () => {
+  const shown = [sent("user-s1-38", "message B"), { id: "assistant-s1-39", role: "assistant", content: "" }];
+  const busy = { id: "history-50", role: "user", content: "busy turn" };
+  const work = { id: "history-51", role: "assistant", content: "working" };
+  const tail = [busy, work, saved(53, "message B")];
+  assert.deepEqual(withoutInFlightSends(shown, tail, ids("user-s1-38")), [busy, work]);
+});
+
+test("a history sync keeps user rows no in-flight send covers", () => {
+  const tail = [saved(4, "another message"), saved(5, "message B")];
+  assert.deepEqual(withoutInFlightSends([], tail, ids()), tail);
+  assert.deepEqual(withoutInFlightSends([sent("user-s1-3", "message B")], tail, ids("user-s1-3")), [tail[0]]);
+  // A row already in history is not an in-flight send, even with the same words.
+  assert.deepEqual(withoutInFlightSends([sent("history-2", "message B")], tail, ids("history-2")), tail);
+});
+
+test("a settled row of an earlier turn is not an in-flight send", () => {
+  // The engine keeps user-<session>-<n> on a settled row; only the page's own
+  // send ids count.
+  const tail = [saved(9, "yes")];
+  assert.deepEqual(withoutInFlightSends([sent("user-s1-3", "yes")], tail, ids()), tail);
+  const shown = [sent("user-s1-3", "yes"), sent("user-s1-8", "yes")];
+  const two = [saved(9, "yes"), saved(10, "yes")];
+  assert.deepEqual(withoutInFlightSends(shown, two, ids("user-s1-8")), two);
+});
+
+test("a pending copy is an in-flight send whatever its id", () => {
+  // assistant-ui renumbers a pending copy as rows sync in; the request sent it
+  // as user-s1-10.
+  const pending = (id: string, text: string) => ({ ...sent(id, text), metadata: { isOptimistic: true } });
+  const tail = [saved(12, "hello")];
+  assert.deepEqual(withoutInFlightSends([pending("user-s1-12", "hello")], tail, ids("user-s1-10")), []);
+  // A copy still queued behind the one in flight was not sent: it covers nothing.
+  const queued = [pending("user-s1-12", "first"), pending("user-s1-13", "yes")];
+  const other = [saved(14, "yes")];
+  assert.deepEqual(withoutInFlightSends(queued, other, ids("user-s1-10")), other);
+});
+
+test("saved rows that outnumber the in-flight sends with their words are all kept", () => {
+  // Another sender's "yes" and this page's "yes" land in one sync: the words
+  // cannot tell which is which, so hiding either could hide the other sender.
+  const tail = [saved(7, "yes"), saved(8, "yes")];
+  assert.deepEqual(withoutInFlightSends([sent("user-s1-6", "yes")], tail, ids("user-s1-6")), tail);
+});
+
+test("each in-flight send covers one saved row with its words", () => {
+  const tail = [saved(7, "yes"), saved(8, "yes"), saved(9, "no")];
+  const shown = [sent("user-s1-5", "yes"), sent("user-s1-6", "yes")];
+  assert.deepEqual(withoutInFlightSends(shown, tail, ids("user-s1-5", "user-s1-6")), [tail[2]]);
+});
+
+test("a picture placeholder does not prove a saved row is the in-flight send", () => {
+  const tail = [saved(9, "[image1] look")];
+  assert.deepEqual(withoutInFlightSends([sent("user-s1-8", "[image1] look")], tail, ids("user-s1-8")), tail);
+});
+
+test("a request's messages are in flight as rows after the state it sent", () => {
+  const request = {
+    commands: [{ type: "add-message" }, { type: "add-message" }],
+    state: { messages: [{}, {}, {}] },
+  };
+  assert.deepEqual([...inFlightSendIdsFor(request, "s1", ids())], ["user-s1-3", "user-s1-4"]);
+});
+
+test("a request without a message keeps the sends already in flight", () => {
+  // Approving a tool continues the turn that carries the send; its saved copy
+  // can still arrive during that request.
+  const previous = ids("user-s1-3");
+  assert.equal(inFlightSendIdsFor({ commands: [{ type: "add-tool-result" }], state: { messages: [] } }, "s1", previous), previous);
+  assert.equal(inFlightSendIdsFor({ commands: [] }, "s1", previous), previous);
+  // A message that waited keeps the row it was drawn with: rows that joined
+  // the state while it waited do not renumber it (#1102).
+  const waited = { commands: [{ type: "add-message", message: { id: "r1" } }, { type: "add-message", message: { id: "r2" } }],
+    state: { messages: [{ id: "history-0" }, { id: "user-s1-0" }, { id: "assistant-s1-1" }] } };
+  assert.deepEqual([...inFlightSendIdsFor(waited, "s1", ids(), new Map([["r1", "user-s1-1"]]))], ["user-s1-1", "user-s1-4"]);
+  // A kept row the state has taken, or the message before it, is numbered anew.
+  assert.deepEqual([...inFlightSendIdsFor(waited, "s1", ids(), new Map([["r1", "user-s1-0"], ["r2", "user-s1-3"]]))],
+    ["user-s1-3", "user-s1-4"]);
+});
+
+// #1359: rows that name their send pair by id, not by words.
+const named = <T extends { metadata?: unknown }>(row: T, custom: Record<string, unknown>) =>
+  ({ ...row, metadata: { custom } });
+const pending = (id: string, text: string, requestId: string) =>
+  ({ ...sent(id, text), metadata: { isOptimistic: true, custom: { requestId } } });
+
+test("another sender's identical words, saved first, stay while this page's send is in flight", () => {
+  const theirs = named(saved(9, "hello"), { requestIds: ["their-send"] });
+  assert.deepEqual(withoutInFlightSends([pending("user-s1-8", "hello", "my-send")], [theirs], ids("user-s1-8")), [theirs]);
+  const mine = named(saved(10, "hello"), { requestIds: ["my-send"] });
+  assert.deepEqual(withoutInFlightSends([pending("user-s1-8", "hello", "my-send")], [theirs, mine], ids("user-s1-8")), [theirs]);
+});
+
+test("the engine's row of a send finds its saved copy by id", () => {
+  const engineRow = named(sent("user-s1-8", "hello"), { requestId: "my-send" });
+  const mine = named(saved(10, "hello"), { requestIds: ["my-send"] });
+  const theirs = named(saved(11, "hello"), { requestIds: ["their-send"] });
+  assert.deepEqual(withoutInFlightSends([engineRow], [mine, theirs], ids("user-s1-8")), [theirs]);
+});
+
+test("a send with a picture finds its saved copy by id", () => {
+  const mine = named(saved(9, "[image1] look"), { requestIds: ["my-send"] });
+  assert.deepEqual(withoutInFlightSends([pending("user-s1-8", "[image1] look", "my-send")], [mine], ids("user-s1-8")), []);
+});
+
+test("a saved row holding this page's send and another sender's shows each send once", () => {
+  // The daemon saves sends that arrive together as one row; history shows a
+  // row per send (history-<n>, history-<n>-send-<i>), each naming its send.
+  // This page's piece is left out while its send is in flight, the other
+  // sender's piece shows next to it (#1359).
+  const theirs = named({ ...saved(9, "hello"), id: "history-9-send-0" }, { requestIds: ["their-send"] });
+  const mine = named({ ...saved(9, "hello"), id: "history-9-send-1" }, { requestIds: ["my-send"] });
+  const shown = [pending("user-s1-8", "hello", "my-send")];
+  assert.deepEqual(withoutInFlightSends(shown, [theirs, mine], ids("user-s1-8")), [theirs]);
+  // At settle the engine maps the send's row to saved row 9; it takes its own
+  // piece, so the other sender's piece is still added beside it.
+  const sent = named(drawn("user-s1-8", "user", "hello", 9), { requestId: "my-send", historySourceIndex: 9 });
+  // Before settle the row names saved row 9 only: that is no piece's id, so
+  // the other sender's piece is not taken as shown.
+  assert.deepEqual(mergeMissingHistoryMessages([sent], [theirs]).added, [theirs]);
+  const [settled] = withSavedCopies([sent], [theirs, mine]);
+  assert.equal(settled.id, "user-s1-8");
+  assert.equal(settled.metadata?.custom?.historySourceId, "history-9-send-1");
+  assert.deepEqual(mergeMissingHistoryMessages([settled], [theirs, mine]).added, [theirs]);
+  assert.deepEqual(mergeMissingHistoryMessages([settled], [theirs, mine]).messages.map((row) => row.id),
+    ["history-9-send-0", "user-s1-8"]);
+});
+
+test("a saved row that names no send still pairs by its words", () => {
+  const unnamed = saved(9, "hello");
+  assert.deepEqual(withoutInFlightSends([pending("user-s1-8", "hello", "my-send")], [unnamed], ids("user-s1-8")), []);
+});
+
+test("a replayed turn's transient rows drop when their saved copies name the same send", () => {
+  const stored = [
+    named({ id: "history-0", role: "user", content: "[image1] look" }, { requestIds: ["r1"] }),
+    { id: "history-1", role: "assistant", content: "seen" },
+  ];
+  const transient = [
+    named({ id: "user-s1-2", role: "user", content: "[image1] look" }, { requestId: "r1" }),
+    { id: "assistant-s1-3", role: "assistant", content: "seen" },
+  ];
+  assert.deepEqual(dropTransientTurnDuplicates([...stored, ...transient], stored), stored);
+  const other = [named(transient[0], { requestId: "r2" }), transient[1]];
+  assert.equal(dropTransientTurnDuplicates([...stored, ...other], stored), null);
+});
+
+// #1358: the rows the page's own run drew carry the saved row the engine
+// matched them to (custom.historySourceIndex).
+const drawn = (id: string, role: string, content: unknown, index: number) =>
+  ({ id, role, content, metadata: { custom: { historySourceIndex: index } } });
+
+test("the run's own user rows take their saved copies under the ids they were drawn with", () => {
+  const shown = [
+    { id: "history-0", role: "user", content: [{ type: "text", text: "busy" }] },
+    drawn("user-s1-1", "user", "hello", 1),
+    drawn("assistant-s1-2", "assistant", [{ type: "tool-call", toolCallId: "t1" }, { type: "text", text: "Working" }], 3),
+  ];
+  const loaded = [
+    shown[0],
+    { id: "history-1", role: "user", content: [{ type: "text", text: "hello" }] },
+    { id: "history-2", role: "assistant", content: [{ type: "tool-call", toolCallId: "t1" }] },
+    { id: "history-3", role: "assistant", content: [{ type: "text", text: "Working" }], metadata: { custom: { requestId: "r1" } } },
+  ];
+  const settled = withSavedCopies(shown, loaded);
+  assert.deepEqual(settled.map((message) => message.id), ["history-0", "user-s1-1", "assistant-s1-2"]);
+  // The reply keeps the tool call it drew: history saves the call as a row of
+  // its own, and taking the words-only row would drop the card (#1358).
+  assert.deepEqual(settled.map((message) => message.content), [shown[0].content, loaded[1].content, shown[2].content]);
+  assert.deepEqual(settled.map(historyMessageIndex), [0, 1, 3]);
+  assert.equal(settled[0], shown[0]);
+  assert.equal(settled[2], shown[2]);
+  // Already reading as saved: nothing to swap.
+  assert.equal(withSavedCopies(settled, loaded), settled);
+});
+
+test("a row without a saved copy yet, or a history row, is left as shown", () => {
+  const pending = drawn("user-s1-1", "user", "hello", 1);
+  const older = { id: "history-0", role: "assistant", content: "old words" };
+  const shown = [older, pending];
+  assert.equal(withSavedCopies(shown, [{ id: "history-0", role: "assistant", content: "new words" }]), shown);
+});
+
+test("a run's row saved after the loaded history was read is not gone from it", () => {
+  const busy = { id: "history-0", role: "user", content: "busy" };
+  const sent = drawn("user-s1-1", "user", "hello", 1);
+  assert.equal(shownMessagesChanged([busy, sent], [busy], 1), false);
+  // Without the loaded row count nothing says when it was read.
+  assert.equal(shownMessagesChanged([busy, sent], [busy]), true);
+  // A history row past it is still gone (a talk-over took the reply away).
+  const heard = { id: "history-1", role: "assistant", content: "Let me check" };
+  assert.equal(shownMessagesChanged([busy, heard], [busy], 1), true);
+});
+
+// #1358: a turn that ran a tool draws its calls inside the run's reply row.
+test("a saved calls row the run's reply already draws is not added again", () => {
+  const call = { type: "tool-call", toolCallId: "c1", result: "ok" };
+  const reply = drawn("assistant-s1-1", "assistant", [call, { type: "text", text: "Working" }], 2);
+  const shown = [drawn("user-s1-0", "user", "hello", 0), reply];
+  const loaded = [
+    { id: "history-0", role: "user", content: [{ type: "text", text: "hello" }] },
+    { id: "history-1", role: "assistant", content: [call] },
+    { id: "history-2", role: "assistant", content: [{ type: "text", text: "Working" }] },
+  ];
+  assert.deepEqual(mergeMissingHistoryMessages(shown, loaded).added, []);
+  // A calls row with a call the reply does not draw is added.
+  const other = { id: "history-3", role: "assistant", content: [{ ...call, toolCallId: "c2" }] };
+  assert.deepEqual(mergeMissingHistoryMessages(shown, [...loaded, other]).added, [other]);
+  // The reply keeps what it drew, so its saved copy does not change the thread.
+  assert.equal(withSavedCopies(shown, loaded)[1], reply);
+  assert.equal(shownMessagesChanged(withSavedCopies(shown, loaded), loaded, 3), false);
+});
+
+test("a later turn's calls row is added even when an earlier reply drew the same call id", () => {
+  // Some providers number calls per turn (call_0 each time): only calls rows
+  // saved before the reply that drew them are taken as drawn (#1358).
+  const call = { type: "tool-call", toolCallId: "call_0", result: "ok" };
+  // The earlier turn: its send saved at 0, its reply at 2.
+  const sent = drawn("user-s1-0", "user", "go", 0);
+  const earlier = drawn("assistant-s1-1", "assistant", [call, { type: "text", text: "first" }], 2);
+  const later = { id: "history-4", role: "assistant", content: [{ ...call, result: "again" }] };
+  assert.deepEqual(mergeMissingHistoryMessages([sent, earlier], [later]).added, [later]);
+  const before = { id: "history-1", role: "assistant", content: [call] };
+  assert.deepEqual(mergeMissingHistoryMessages([sent, earlier], [before]).added, []);
+});
+
+test("rows saved while this page's turn runs go above that turn", () => {
+  // assistant-ui takes the last user row with a reply after it for the turn it
+  // keeps at the top: a row landing between this page's send and its reply
+  // would scroll the reader to it (#1364). The page's own turn stays last.
+  const a = named({ ...saved(9, "A"), id: "history-9-send-0" }, { requestIds: ["my-send"] });
+  const b = named({ ...saved(9, "B"), id: "history-9-send-1" }, { requestIds: ["their-send"] });
+  const sent = pending("user-s1-8", "A", "my-send");
+  assert.deepEqual(mergeMissingHistoryMessages([sent], [b]).messages.map((row) => row.id), ["history-9-send-1", "user-s1-8"]);
+  // Once the run's reply has its saved position, rows saved before it go above
+  // the turn and rows saved after it below.
+  const turn = [drawn("user-s1-8", "user", "A", 9), drawn("assistant-s1-9", "assistant", "done", 12)];
+  const during = { id: "history-11", role: "user", content: "ping" };
+  const after = { id: "history-13", role: "user", content: "later" };
+  assert.deepEqual(mergeMissingHistoryMessages(turn, [b, during, after]).messages.map((row) => row.id),
+    ["history-9-send-1", "history-11", "user-s1-8", "assistant-s1-9", "history-13"]);
+  // An earlier turn the page ran is history like any other.
+  const earlier = [drawn("user-s1-2", "user", "old", 2), drawn("assistant-s1-3", "assistant", "ok", 3),
+    { id: "history-4", role: "user", content: "next" }];
+  assert.deepEqual(mergeMissingHistoryMessages(earlier, [{ id: "history-5", role: "assistant", content: "x" }])
+    .messages.map((row) => row.id), ["user-s1-2", "assistant-s1-3", "history-4", "history-5"]);
+  // Pieces of one saved row sort by their number.
+  assert.deepEqual(mergeMissingHistoryMessages([b], [a]).messages.map((row) => row.id), ["history-9-send-0", "history-9-send-1"]);
+});
+
+test("an earlier turn the page ran keeps its saved place behind its last one", () => {
+  // The engine keeps user-/assistant-<session>-<n> on rows of turns that
+  // ended: only the page's last turn stays last (#1364).
+  const shown = [
+    drawn("user-s1-2", "user", "first", 2), drawn("assistant-s1-3", "assistant", "one", 3),
+    drawn("user-s1-4", "user", "second", 5), drawn("assistant-s1-5", "assistant", "two", 7),
+  ];
+  const between = { id: "history-4", role: "user", content: "theirs" };
+  assert.deepEqual(mergeMissingHistoryMessages(shown, [between]).messages.map((row) => row.id),
+    ["user-s1-2", "assistant-s1-3", "history-4", "user-s1-4", "assistant-s1-5"]);
+});
+
+test("an older calls row sharing a call id with the running reply is still added", () => {
+  // Providers that reuse call ids (call_0 each turn): a calls row saved
+  // before the rows shown ahead of the running turn is not that turn's (#1358).
+  const call = { type: "tool-call", toolCallId: "call_0", result: "ok" };
+  const shown = [
+    { id: "history-10", role: "user", content: "earlier" },
+    { id: "history-11", role: "assistant", content: "answer" },
+    drawn("user-s1-2", "user", "now", 12),
+    { id: "assistant-s1-3", role: "assistant", content: [call, { type: "text", text: "Working" }] },
+  ];
+  const older = { id: "history-3", role: "assistant", content: [{ ...call, result: "old" }] };
+  const own = { id: "history-13", role: "assistant", content: [call] };
+  assert.deepEqual(mergeMissingHistoryMessages(shown, [older, own]).added.map((row) => row.id), ["history-3"]);
+});
+
+test("with nothing saved above the running turn, a calls row is not hidden on a call id alone", () => {
+  // No history row shown above the reply and no saved position for the send:
+  // nothing bounds the reply's turn, so a reused call id hides nothing (#1358).
+  const call = { type: "tool-call", toolCallId: "call_0", result: "ok" };
+  const reply = { id: "assistant-s1-1", role: "assistant", content: [call, { type: "text", text: "Working" }] };
+  const older = { id: "history-3", role: "assistant", content: [{ ...call, result: "old" }] };
+  assert.deepEqual(mergeMissingHistoryMessages([{ id: "user-s1-0", role: "user", content: "now" }, reply], [older])
+    .added.map((row) => row.id), ["history-3"]);
+  // Once the send has its saved position, the turn's own calls row is drawn.
+  const placed = [drawn("user-s1-0", "user", "now", 5), drawn("assistant-s1-1", "assistant", reply.content, 7)];
+  const own = { id: "history-6", role: "assistant", content: [call] };
+  assert.deepEqual(mergeMissingHistoryMessages(placed, [older, own]).added.map((row) => row.id), ["history-3"]);
+});
+
+test("a saved send the page already draws, in flight or not, is not added again", () => {
+  // The page's own row of a send names its request id; its saved copy names
+  // the same id. A run that ended before the engine matched them must not
+  // leave the send drawn twice (#1359).
+  const sent = { id: "user-s1-0", role: "user", content: "hello", metadata: { custom: { requestId: "r1" } } };
+  const copy = named(saved(0, "hello"), { requestIds: ["r1"] });
+  const other = named(saved(1, "hello"), { requestIds: ["r2"] });
+  assert.deepEqual(mergeMissingHistoryMessages([sent], [copy, other]).added, [other]);
+});
+
+// #1359: the words of a turn the page ran show once, whatever its run did.
+const words = (text: string) => [{ type: "text", text }];
+const reply = (index: number, content: unknown) => ({ id: `history-${index}`, role: "assistant", content });
+const mine = (id: string, text: string, requestId: string) =>
+  ({ id, role: "user", content: text, metadata: { custom: { requestId } } });
+
+test("a saved text row the settled reply already shows is not added again", () => {
+  // The agent answered, then went on (another message was steered in): the
+  // run's reply drew both answers, and history saves the first as a row of its
+  // own inside the turn.
+  const call = { type: "tool-call", toolCallId: "c1", result: "ok" };
+  const shown = [drawn("user-s1-0", "user", "go", 0),
+    drawn("assistant-s1-1", "assistant", [{ type: "text", text: "First answer." }, call, { type: "text", text: "Second answer." }], 4)];
+  const first = reply(2, words("First answer."));
+  const calls = reply(3, [call]);
+  assert.deepEqual(mergeMissingHistoryMessages(shown, [first, calls]).added, []);
+  // Words the reply does not show are another row's.
+  const other = reply(2, words("Something else."));
+  assert.deepEqual(mergeMissingHistoryMessages(shown, [other]).added, [other]);
+});
+
+test("while the page's run streams, the saved rows of its turn stay out", () => {
+  const sent = mine("user-s1-4", "hello", "r1");
+  const writing = { id: "assistant-s1-5", role: "assistant", content: words("Wor") };
+  const copy = named(saved(10, "hello"), { requestIds: ["r1"] });
+  const answer = reply(11, words("Working"));
+  const theirs = named(saved(12, "ping"), { requestIds: ["r9"] });
+  const older = reply(9, words("earlier turn"));
+  // The reply was saved a moment before its last words reached the page.
+  assert.deepEqual(withoutOwnTurnRows([sent, writing], [older, copy, answer, theirs], [older, copy, answer, theirs]),
+    [older, theirs]);
+  // Before the send is saved nothing places the turn: every row is another's.
+  assert.deepEqual(withoutOwnTurnRows([sent, writing], [older], [older]), [older]);
+  // A page with no row of its own takes them all.
+  assert.deepEqual(withoutOwnTurnRows([saved(1, "x")], [copy, answer], [copy, answer]), [copy, answer]);
+});
+
+test("a send left by a run that ended early keeps its saved copy out while a later send runs", () => {
+  // The first run's stream dropped; its rows stayed. A second send is now in flight.
+  const first = mine("user-s1-4", "one", "r1");
+  const partial = { id: "assistant-s1-5", role: "assistant", content: [{ type: "tool-call", toolCallId: "c1" }] };
+  const second = { ...mine("user-s1-6", "two", "r2"), metadata: { isOptimistic: true, custom: { requestId: "r2" } } };
+  const history = [named(saved(10, "one"), { requestIds: ["r1"] }), reply(11, [{ type: "tool-call", toolCallId: "c1", result: "ok" }]),
+    named(saved(12, "two"), { requestIds: ["r2"] }), reply(13, words("done"))];
+  assert.deepEqual(withoutOwnTurnRows([first, partial, second], history, history), []);
+});
+
+test("a run that ended before its turn is rebuilt on the saved history under the ids it drew", () => {
+  const call = { type: "tool-call", toolCallId: "c1", result: "ok" };
+  const before = { id: "history-0", role: "user", content: words("earlier") };
+  const shown = [before, mine("user-s1-1", "one", "r1"),
+    { id: "assistant-s1-2", role: "assistant", content: [{ type: "tool-call", toolCallId: "c1" }] },
+    mine("user-s1-3", "two", "r2"), { id: "assistant-s1-4", role: "assistant", content: words("done") }];
+  const loaded = [before, named({ id: "history-1", role: "user", content: words("one") }, { requestIds: ["r1"] }),
+    reply(2, [call]), named({ id: "history-3", role: "user", content: words("two") }, { requestIds: ["r2"] }),
+    reply(4, words("done"))];
+  const rows = rebaseOntoHistory(shown, loaded, 5);
+  // Each send keeps the id it was drawn with, and so does each reply: its
+  // saved words, or its saved calls when it drew no words.
+  assert.deepEqual(rows.map((row) => row.id), ["history-0", "user-s1-1", "assistant-s1-2", "user-s1-3", "assistant-s1-4"]);
+  assert.deepEqual(rows.map(historyMessageIndex), [0, 1, 2, 3, 4]);
+  assert.deepEqual(rows.map((row) => row.content), loaded.map((row) => row.content));
+  assert.equal(rows[0], before);
+  assert.equal(hasUnsettledRows(rows), false);
+  // Already rebuilt: the same rows again.
+  assert.deepEqual(rebaseOntoHistory(rows, loaded, 5), rows);
+});
+
+test("a reply history does not hold yet stays behind its send, without the rows it already shows", () => {
+  // The stream dropped mid-reply: the page shows a call and half an answer,
+  // history has the call's row only.
+  const call = { type: "tool-call", toolCallId: "c1", result: "ok" };
+  const half = { id: "assistant-s1-2", role: "assistant", content: [call, { type: "text", text: "Half an ans" }] };
+  const shown = [mine("user-s1-1", "one", "r1"), half];
+  const sent = named({ id: "history-1", role: "user", content: words("one") }, { requestIds: ["r1"] });
+  const rows = rebaseOntoHistory(shown, [sent, reply(2, [call])], 3);
+  assert.deepEqual(rows.map((row) => row.id), ["user-s1-1", "assistant-s1-2"]);
+  assert.equal(rows[1], half);
+  assert.equal(hasUnsettledRows(rows), true);
+  // A row the reply does not show is added behind it.
+  const more = reply(3, [{ type: "tool-call", toolCallId: "c2", result: "ok" }]);
+  assert.deepEqual(rebaseOntoHistory(shown, [sent, reply(2, [call]), more], 4).map((row) => row.id),
+    ["user-s1-1", "assistant-s1-2", "history-3"]);
+  // Once history holds the whole answer, it replaces the reply, where the
+  // reply stands: the first of its saved rows keeps the reply's id.
+  const whole = reply(3, words("Half an answer."));
+  assert.deepEqual(rebaseOntoHistory(shown, [sent, reply(2, [call]), whole], 4).map((row) => row.id),
+    ["user-s1-1", "assistant-s1-2", "history-3"]);
+  // A turn saved as words alone keeps the reply's id, and reads as saved from then on.
+  const plain = [mine("user-s1-1", "one", "r1"), { id: "assistant-s1-2", role: "assistant", content: words("An answer") }];
+  const answered = rebaseOntoHistory(plain, [sent, reply(2, words("An answer."))], 3);
+  assert.deepEqual(answered.map((row) => row.id), ["user-s1-1", "assistant-s1-2"]);
+  assert.deepEqual(answered[1].content, words("An answer."));
+  assert.equal(historyMessageIndex(answered[1]), 2);
+  assert.equal(shownMessagesChanged(answered, [sent, reply(2, words("An edited answer."))], 3), true);
+});
+
+test("a send history does not hold yet stays last, with its reply", () => {
+  const before = { id: "history-0", role: "user", content: words("earlier") };
+  const sent = mine("user-s1-1", "one", "r1");
+  const answer = { id: "assistant-s1-2", role: "assistant", content: words("done") };
+  const rows = rebaseOntoHistory([before, sent, answer], [before], 1);
+  assert.deepEqual(rows, [before, sent, answer]);
+  assert.equal(rows[1], sent);
+});
+
+test("a reply that drew nothing goes once its send is saved", () => {
+  const sent = named({ id: "history-1", role: "user", content: words("one") }, { requestIds: ["r1"] });
+  const rows = rebaseOntoHistory([mine("user-s1-1", "one", "r1"), { id: "assistant-s1-2", role: "assistant", content: "" }], [sent], 2);
+  assert.deepEqual(rows.map((row) => row.id), ["user-s1-1"]);
+});
+
+test("a rebuilt thread takes changed rows in place and drops rows history no longer has", () => {
+  const user = { id: "history-0", role: "user", content: words("go") };
+  const pendingCall = reply(1, [{ type: "tool-call", toolCallId: "t1" }]);
+  const heard = reply(2, words("Let me check"));
+  const shown = [user, pendingCall, heard];
+  const done = reply(1, [{ type: "tool-call", toolCallId: "t1", result: "ok" }]);
+  const next = { id: "history-2", role: "user", content: words("stop") };
+  // The call got its result; a talk-over took the reply away and a new row has its place.
+  const rows = rebaseOntoHistory(shown, [user, done, next], 3);
+  assert.deepEqual(rows, [user, done, next]);
+  assert.equal(rows[0], user);
+  // Older pages and rows saved after the history was read stay as they are.
+  const older = { id: "history-0", role: "user", content: words("old page") };
+  const late = drawn("user-s1-9", "user", "late", 7);
+  assert.deepEqual(rebaseOntoHistory([older, reply(5, words("a")), late], [reply(5, words("b"))], 6).map((row) => row.id),
+    ["history-0", "history-5", "user-s1-9"]);
+});
+
+test("a rebuilt thread keeps a settled turn as the run drew it", () => {
+  const call = { type: "tool-call", toolCallId: "c1", result: "ok" };
+  const answer = drawn("assistant-s1-1", "assistant", [call, { type: "text", text: "Working" }], 2);
+  const shown = [drawn("user-s1-0", "user", "hello", 0), answer, { id: "history-3", role: "user", content: words("old words") }];
+  const loaded = [{ id: "history-0", role: "user", content: words("hello") }, reply(1, [call]), reply(2, words("Working")),
+    { id: "history-3", role: "user", content: words("new words") }];
+  const rows = rebaseOntoHistory(shown, loaded, 4);
+  assert.deepEqual(rows.map((row) => row.id), ["user-s1-0", "assistant-s1-1", "history-3"]);
+  assert.equal(rows[1], answer);
+  assert.deepEqual(rows[2].content, words("new words"));
+});
+
+test("an earlier turn the page ran ends where its next one starts", () => {
+  // The earlier reply has no saved row (its run ended early) and the page's
+  // next send is saved at 4: only the last reply may still be streaming.
+  const call = { type: "tool-call", toolCallId: "call_0", result: "ok" };
+  const shown = [
+    drawn("user-s1-0", "user", "a", 0), { id: "assistant-s1-1", role: "assistant", content: [call] },
+    drawn("user-s1-2", "user", "b", 4), { id: "assistant-s1-3", role: "assistant", content: [call] },
+  ];
+  const first = reply(1, [call]);
+  // Saved in the earlier turn, and nothing the earlier reply shows: it is added.
+  const unseen = reply(2, [{ type: "tool-call", toolCallId: "call_7", result: "ok" }]);
+  const own = reply(5, [call]);
+  const answer = reply(6, words("done"));
+  assert.deepEqual(mergeMissingHistoryMessages(shown, [first, unseen, own, answer]).added, [unseen]);
+});
+
+// The page loads only the newest saved rows. A turn with many tool calls pushes
+// its own send out of that window (#1359).
+test("a long turn keeps its saved rows out after its send left the loaded window", () => {
+  const sent = mine("user-s1-4", "hello", "r1");
+  const writing = { id: "assistant-s1-5", role: "assistant", content: [{ type: "tool-call", toolCallId: "c1" }] };
+  const savedAt = new Map<string, number>();
+  rememberSavedSends(savedAt, [named(saved(10, "hello"), { requestIds: ["r1"] })]);
+  assert.deepEqual([...savedAt], [["r1", 10]]);
+  // A later load starts past the send.
+  const window = [reply(40, [{ type: "tool-call", toolCallId: "c7", result: "ok" }]), named(saved(41, "ping"), { requestIds: ["r9"] })];
+  assert.deepEqual(withoutOwnTurnRows([sent, writing], window, window, savedAt), [window[1]]);
+  // Without the remembered position nothing places the turn.
+  assert.deepEqual(withoutOwnTurnRows([sent, writing], window, window), window);
+});
+
+test("a send saved before the loaded window keeps its place when the thread is rebuilt", () => {
+  const before = { id: "history-3", role: "assistant", content: words("earlier") };
+  const first = mine("user-s1-1", "one", "r1");
+  const drawnCalls = { id: "assistant-s1-2", role: "assistant", content: [{ type: "tool-call", toolCallId: "c1", result: "ok" }] };
+  const shown = [before, first, drawnCalls, mine("user-s1-3", "two", "r2"), { id: "assistant-s1-4", role: "assistant", content: words("done") }];
+  // The window starts past the first send (saved at 10) and its calls.
+  const loaded = [reply(40, [{ type: "tool-call", toolCallId: "c9", result: "ok" }]),
+    named({ id: "history-41", role: "user", content: words("two") }, { requestIds: ["r2"] }), reply(42, words("done"))];
+  const rows = rebaseOntoHistory(shown, loaded, 43, new Map([["r1", 10]]));
+  // The first send and what its run drew stay where they were, ahead of the
+  // window; the second send and its reply take their saved rows.
+  assert.deepEqual(rows.map((row) => row.id), ["history-3", "user-s1-1", "assistant-s1-2", "history-40", "user-s1-3", "assistant-s1-4"]);
+  assert.equal(rows[1], first);
+  assert.equal(rows[2], drawnCalls);
+  // Not knowing where the first send is saved, it reads as not saved: it and
+  // what its run drew stay ahead of the second send, as they were shown, and
+  // nothing places the saved row of its turn.
+  assert.deepEqual(rebaseOntoHistory(shown, loaded, 43).map((row) => row.id),
+    ["history-3", "history-40", "user-s1-1", "assistant-s1-2", "user-s1-3", "assistant-s1-4"]);
+});
+
+test("a send waiting behind the running turn keeps its row id while the rows ahead of it change", () => {
+  const waiting = new Map<string, string>();
+  const turn = [{ id: "user-s1-0" }, { id: "assistant-s1-1" }];
+  assert.deepEqual(pendingSendIds(["r2"], [], turn, "s1", waiting), ["user-s1-2"]);
+  // A sync adds another sender's row to the state; the turn's next state is built without it.
+  const synced = [{ id: "history-1" }, ...turn];
+  assert.deepEqual(pendingSendIds(["r2"], [], synced, "s1", waiting), ["user-s1-2"]);
+  // A second send queued then is numbered after the rows and after the first.
+  assert.deepEqual(pendingSendIds(["r2", "r3"], [], synced, "s1", waiting), ["user-s1-2", "user-s1-3"]);
+  assert.deepEqual(pendingSendIds(["r2", "r3"], [], turn, "s1", waiting), ["user-s1-2", "user-s1-3"]);
+  // A third never takes an id one of them holds.
+  assert.deepEqual(pendingSendIds(["r2", "r3", "r4"], [], turn, "s1", waiting), ["user-s1-2", "user-s1-3", "user-s1-4"]);
+  // One without a request id has nothing to be kept by: it follows the rows, clear of the kept ids.
+  assert.deepEqual(pendingSendIds(["r2", undefined], [], synced, "s1", waiting), ["user-s1-2", "user-s1-3"]);
+});
+
+test("a waiting send takes the id its request sends it with and is forgotten", () => {
+  const waiting = new Map<string, string>();
+  const turn = [{ id: "user-s1-0" }, { id: "assistant-s1-1" }];
+  pendingSendIds(["r2", "r3"], [], turn, "s1", waiting);
+  // Both go out in one request after a four-row state; a send queued meanwhile follows them.
+  const rows = [{ id: "history-1" }, ...turn, { id: "history-2" }];
+  assert.deepEqual(pendingSendIds(["r2", "r3", "r4"], ["user-s1-4", "user-s1-5"], rows, "s1", waiting),
+    ["user-s1-4", "user-s1-5", "user-s1-6"]);
+  assert.deepEqual([...waiting], [["r4", "user-s1-6"]]);
+  // The engine's rows are there and the sends are no longer pending.
+  assert.deepEqual(pendingSendIds([], [], [...rows, { id: "user-s1-4" }, { id: "user-s1-5" }], "s1", waiting), []);
+  assert.equal(waiting.size, 0);
+});
+
+test("a waiting send gives up a kept id that a row of the state took", () => {
+  const waiting = new Map<string, string>();
+  assert.deepEqual(pendingSendIds(["r2"], [], [{ id: "user-s1-0" }, { id: "assistant-s1-1" }], "s1", waiting), ["user-s1-2"]);
+  const rows = [{ id: "user-s1-0" }, { id: "assistant-s1-1" }, { id: "user-s1-2" }];
+  assert.deepEqual(pendingSendIds(["r2"], [], rows, "s1", waiting), ["user-s1-3"]);
+});
+
+test("a settled reply stands for its saved rows when its send is saved before the loaded window", () => {
+  // A long turn the engine matched to history: its send at row 1, its reply's last row at 72.
+  const call = (id: string) => ({ type: "tool-call", toolCallId: id, result: "ok" });
+  const sent = drawn("user-s1-0", "user", "go", 1);
+  const answer = drawn("assistant-s1-1", "assistant", [call("c1"), call("c2"), call("c3"), ...words("All done")], 72);
+  // The page reloads the newest rows only: the turn's last rounds, then a message another client sent.
+  const loaded = [reply(70, [call("c2")]), reply(71, [call("c3")]), reply(72, words("All done")), saved(73, "next")];
+  const rows = rebaseOntoHistory([sent, answer], loaded, 74);
+  // The reply already shows the rows of its turn: added again they join it
+  // under the first one's id, and the chat builds the whole reply anew.
+  assert.deepEqual(rows.map((row) => row.id), ["user-s1-0", "assistant-s1-1", "history-73"]);
+  assert.equal(rows[1], answer);
+});
+
+test("a message another sender put into the turn does not end the turn its reply stands for", () => {
+  // The page's send (row 1), a message another client sent mid-turn (row 28)
+  // and the reply the page streamed, which the engine matched to row 72.
+  const call = (id: string) => ({ type: "tool-call", toolCallId: id, result: "ok" });
+  const sent = drawn("user-s1-0", "user", "go", 1);
+  const other = saved(28, "Hello");
+  const answer = drawn("assistant-s1-1", "assistant", [call("c1"), call("c2"), call("c3"), ...words("All done")], 72);
+  const shown = [sent, other, answer];
+  const rounds = [reply(27, [call("c1")]), reply(70, [call("c2")]), reply(71, [call("c3")]), reply(72, words("All done"))];
+  // A sync while the page's next run streams: the turn's saved rows are the reply's.
+  assert.deepEqual(mergeMissingHistoryMessages(shown, rounds).added, []);
+  // Rebuilt on a reload that holds only the newest rows.
+  const rows = rebaseOntoHistory(shown, [...rounds.slice(1), saved(73, "next")], 74);
+  assert.deepEqual(rows.map((row) => row.id), ["user-s1-0", "history-28", "assistant-s1-1", "history-73"]);
+});
+
+test("a reply cut short keeps its turn when another sender's message sits before it", () => {
+  // The stream dropped: the send and the reply are as the page drew them.
+  const call = (id: string) => ({ type: "tool-call", toolCallId: id, result: "ok" });
+  const sent = mine("user-s1-0", "go", "r1");
+  const answer = { id: "assistant-s1-1", role: "assistant", content: [call("c1"), ...words("Working")] };
+  const loaded = [
+    named(saved(4, "go"), { requestIds: ["r1"] }), reply(5, [call("c1")]),
+    named(saved(6, "Hello"), { requestIds: ["r9"] }), reply(7, words("Working on it")),
+  ];
+  // Shown in saved order, the other sender's message between the send and the reply.
+  // History holds all the reply shows: the turn's saved rows take its place,
+  // once, and the first of them keeps the reply's id.
+  assert.deepEqual(rebaseOntoHistory([sent, loaded[2], answer], loaded, 8).map((row) => row.id),
+    ["user-s1-0", "assistant-s1-1", "history-6", "history-7"]);
+  // Words history does not hold yet: the reply stays after its send and
+  // stands for the saved call it drew.
+  const ahead = { ...answer, content: [call("c1"), ...words("Working hard")] };
+  assert.deepEqual(rebaseOntoHistory([sent, loaded[2], ahead], loaded, 8).map((row) => row.id),
+    ["user-s1-0", "assistant-s1-1", "history-6", "history-7"]);
+});
+
+test("a message history never held keeps its place when newer rows are saved", () => {
+  // The page sent "lost" and the daemon never saved it (the turn was stopped
+  // at once). The page then sent "next", which history holds with its reply.
+  const lost = mine("user-s1-4", "lost", "r-lost");
+  const next = mine("user-s1-5", "next", "r-next");
+  const answer = { id: "assistant-s1-6", role: "assistant", content: words("Sure") };
+  const shown = [saved(0, "first"), reply(1, words("Hi")), lost, next, answer];
+  const loaded = [saved(0, "first"), reply(1, words("Hi")), named(saved(2, "next"), { requestIds: ["r-next"] }), reply(3, words("Sure"))];
+  // Not after the newer turn: it was sent before it.
+  assert.deepEqual(rebaseOntoHistory(shown, loaded, 4).map((row) => row.id),
+    ["history-0", "history-1", "user-s1-4", "user-s1-5", "assistant-s1-6"]);
+  // With nothing newer saved it is the last row, as a message on its way is.
+  assert.deepEqual(rebaseOntoHistory(shown.slice(0, 3), loaded.slice(0, 2), 2).map((row) => row.id),
+    ["history-0", "history-1", "user-s1-4"]);
+});
+
+test("a reply still being saved stays under the last message of its turn", () => {
+  // The page sent "go", then "also" while the turn ran; the reply it drew
+  // came after "also". History holds the turn's calls, not its words yet.
+  const call = (id: string) => ({ type: "tool-call", toolCallId: id, result: "ok" });
+  const first = mine("user-s1-0", "go", "r1");
+  const second = mine("user-s1-1", "also", "r2");
+  const answer = { id: "assistant-s1-2", role: "assistant", content: [call("c2"), ...words("zebra")] };
+  const loaded = [
+    named(saved(4, "go"), { requestIds: ["r1"] }), reply(5, [call("c1")]),
+    named(saved(6, "also"), { requestIds: ["r2"] }), reply(7, [call("c2")]),
+  ];
+  // Not above the second message: the call saved before it is, as its own row.
+  assert.deepEqual(rebaseOntoHistory([first, second, answer], loaded, 8).map((row) => row.id),
+    ["user-s1-0", "history-5", "user-s1-1", "assistant-s1-2"]);
+  // Once history holds the words too, the rows saved after the second message
+  // take the reply's place, and the first of them keeps the reply's id.
+  const whole = [...loaded, reply(8, words("zebra"))];
+  assert.deepEqual(rebaseOntoHistory([first, second, answer], whole, 9).map((row) => row.id),
+    ["user-s1-0", "history-5", "user-s1-1", "assistant-s1-2", "history-8"]);
+  // A row with words saved before the second message is not the reply's: it keeps its own id.
+  const spoke = [loaded[0], reply(5, words("On it")), loaded[2], reply(7, [call("c2")]), reply(8, words("zebra"))];
+  assert.deepEqual(rebaseOntoHistory([first, second, answer], spoke, 9).map((row) => row.id),
+    ["user-s1-0", "history-5", "user-s1-1", "assistant-s1-2", "history-8"]);
+});
+
+test("a reply that starts with a tool call keeps its row when its turn is saved (#1359)", () => {
+  // A row under a new id is taken down and built again: the reply fades in
+  // anew and the chat jumps. The reply's first saved row is its calls alone.
+  const call = { type: "tool-call", toolCallId: "c1", result: "ok" };
+  const sent = mine("user-s1-1", "one", "r1");
+  const answer = { id: "assistant-s1-2", role: "assistant", content: [call, ...words("done")] };
+  const loaded = [named(saved(1, "one"), { requestIds: ["r1"] }), reply(2, [call]), reply(3, words("done"))];
+  const rows = rebaseOntoHistory([sent, answer], loaded, 4);
+  assert.deepEqual(rows.map((row) => row.id), ["user-s1-1", "assistant-s1-2", "history-3"]);
+  // It is the saved row from here on: the engine knows it by its calls.
+  assert.deepEqual(rows[1].content, [call]);
+  assert.deepEqual(rows.map(historyMessageIndex), [1, 2, 3]);
+  assert.equal(hasUnsettledRows(rows), false);
+  assert.deepEqual(rebaseOntoHistory(rows, loaded, 4), rows);
+  // A first saved row with neither words nor calls keeps its own id: nothing proves it is the reply's.
+  const bare = [loaded[0], reply(2, []), reply(3, words("done"))];
+  assert.deepEqual(rebaseOntoHistory([sent, { ...answer, content: words("done") }], bare, 4).map((row) => row.id),
+    ["user-s1-1", "history-2", "history-3"]);
 });
