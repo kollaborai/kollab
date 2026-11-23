@@ -105,6 +105,7 @@ import {
   type FC,
   type KeyboardEvent,
   type PropsWithChildren,
+  type ReactNode,
 } from "react";
 
 export type ThreadGroupPart = MessagePrimitive.GroupedParts.GroupPart;
@@ -149,6 +150,8 @@ export type ThreadProps = {
   historyStartIndex?: number | undefined;
   /** Per-agent/conversation localStorage key for the unsent composer text. */
   draftKey?: string | null | undefined;
+  /** Daemon-backed queue shown in the sticky composer footer. */
+  queuePanel?: ReactNode | undefined;
 };
 
 
@@ -187,6 +190,7 @@ export const Thread: FC<ThreadProps> = ({
   onRetryHistory,
   historyStartIndex = 0,
   draftKey,
+  queuePanel,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
@@ -204,6 +208,7 @@ export const Thread: FC<ThreadProps> = ({
         onRetryHistory={onRetryHistory}
         historyStartIndex={historyStartIndex}
         draftKey={draftKey}
+        queuePanel={queuePanel}
       />
     </ThreadComponentsContext.Provider>
   );
@@ -221,6 +226,7 @@ const ThreadRoot: FC<{
   onRetryHistory: ThreadProps["onRetryHistory"];
   historyStartIndex: number;
   draftKey: ThreadProps["draftKey"];
+  queuePanel: ThreadProps["queuePanel"];
 }> = ({
   isEmpty,
   agents,
@@ -233,6 +239,7 @@ const ThreadRoot: FC<{
   onRetryHistory,
   historyStartIndex,
   draftKey,
+  queuePanel,
 }) => {
   const { Welcome = ThreadWelcome, ComposerLeading } = useContext(ThreadComponentsContext);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -387,6 +394,7 @@ const ThreadRoot: FC<{
                 : "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
             )}
           >
+            {queuePanel}
             {/* Keep transient status in the sticky footer so its mount/unmount
                 does not change the positions of transcript rows above it. */}
             {historyStatus ? (

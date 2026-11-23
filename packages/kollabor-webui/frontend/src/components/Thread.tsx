@@ -346,7 +346,9 @@ export const Thread: FC<{
   onLoadOlder?: () => Promise<boolean | void>;
   onRetryHistory?: () => void;
   historyStartIndex?: number;
-}> = ({ agents = [], commands = [], onOpenPanel, onOpenWelcome, attachmentsEnabled = true, identity, sessionId, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", historyStatus, onLoadOlder, onRetryHistory, historyStartIndex = 0 }) => (
+  /** Daemon-backed queue mounted above the composer. */
+  queuePanel?: ReactNode;
+}> = ({ agents = [], commands = [], onOpenPanel, onOpenWelcome, attachmentsEnabled = true, identity, sessionId, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", historyStatus, onLoadOlder, onRetryHistory, historyStartIndex = 0, queuePanel }) => (
   <PoolContext.Provider value={agents}>
   <WhereContext.Provider value={device || workspace}>
   <ComposerHubContext.Provider value={{ workspace, remote: remoteAgents }}>
@@ -377,6 +379,7 @@ export const Thread: FC<{
             onLoadOlder={onLoadOlder}
             onRetryHistory={onRetryHistory}
             historyStartIndex={historyStartIndex}
+            queuePanel={queuePanel}
           />
         </ComposerLockContext.Provider>
       </ComposerPlaceholderContext.Provider>

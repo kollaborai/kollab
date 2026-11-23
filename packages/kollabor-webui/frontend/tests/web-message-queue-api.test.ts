@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test, vi } from "vitest";
-import { ApiError, EngineApi } from "../src/api.ts";
+import { ApiError, EngineApi, type WebMessageQueueSnapshot } from "../src/api.ts";
+import { WebQueuePanelController } from "../src/components/web-queue/WebQueuePanelMount.tsx";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -17,7 +18,7 @@ test("queue API methods preserve Unicode text, opaque IDs, and staged image byte
       body: init?.body,
       headers: new Headers(init?.headers),
     });
-    if (url.endsWith("/send-now")) {
+    if (url.includes("/send-now?")) {
       return new Response(JSON.stringify({ detail: "Queue dispatch is unavailable; the message remains queued." }), {
         status: 503,
         headers: { "Content-Type": "application/json" },
@@ -102,4 +103,201 @@ test("Send Now exposes a truthful unavailable response until a dispatcher exists
       return true;
     },
   );
+});
+
+const queueSnapshot = (
+  scopeId: string,
+  incarnation: string,
+  revision: number,
+  batches: WebMessageQueueSnapshot["batches"] = [],
+  dispatchAvailable = true,
+): WebMessageQueueSnapshot => ({
+  scope_id: scopeId,
+  incarnation,
+  revision,
+  batches,
+  dispatch_available: dispatchAvailable,
+});
+
+const queuedBatch: WebMessageQueueSnapshot["batches"][number] = {
+  batch_id: "batch-1",
+  sequence: 1,
+  status: "queued",
+  request_ids: ["item-1"],
+  claim_id: null,
+  items: [{
+    request_id: "item-1",
+    status: "queued",
+    attempt_id: null,
+    text_preview: "Queued text",
+    attachment_labels: ["diagram.png"],
+  }],
+};
+
+test("queue panel controller refreshes on mount, polls, and fences old session responses", async () => {
+  const pending: Array<{ sessionId: string; uid: string; resolve: (snapshot: WebMessageQueueSnapshot) => void }> = [];
+  const api = {
+    getWebMessageQueue: vi.fn((sessionId: string, uid: string) => new Promise<WebMessageQueueSnapshot>((resolve) => {
+      pending.push({ sessionId, uid, resolve });
+    })),
+  } as unknown as EngineApi;
+  const scheduled = new Map<number, () => void>();
+  let timerId = 0;
+  const setTimer = ((callback: TimerHandler) => {
+    const id = ++timerId;
+    scheduled.set(id, callback as () => void);
+    return id;
+  }) as typeof globalThis.setInterval;
+  const clearTimer = ((id: ReturnType<typeof globalThis.setInterval>) => {
+    scheduled.delete(id as number);
+  }) as typeof globalThis.clearInterval;
+  const controller = new WebQueuePanelController(api, setTimer, clearTimer);
+
+  controller.setIdentity("session/old", "conversation-old");
+  await Promise.resolve();
+  controller.setIdentity("session/new", "conversation-new");
+  await Promise.resolve();
+  assert.deepEqual(pending.map(({ sessionId, uid }) => [sessionId, uid]), [
+    ["session/old", "conversation-old"],
+    ["session/new", "conversation-new"],
+  ]);
+  pending[1]!.resolve(queueSnapshot("scope-new", "inc-new", 2, [queuedBatch]));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(controller.getState().snapshot?.scope_id, "scope-new");
+  pending[0]!.resolve(queueSnapshot("scope-old", "inc-old", 99, [queuedBatch]));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(controller.getState().snapshot?.scope_id, "scope-new", "late response from a prior conversation replaced the current queue");
+
+  const activeTimer = [...scheduled.values()][0];
+  assert.ok(activeTimer, "the active conversation must poll for updates from other clients");
+  activeTimer();
+  await Promise.resolve();
+  assert.equal(pending.at(-1)?.sessionId, "session/new");
+  assert.equal(pending.at(-1)?.uid, "conversation-new");
+  pending.at(-1)!.resolve(queueSnapshot("scope-new", "inc-new", 3, [queuedBatch]));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(controller.getState().snapshot?.revision, 3);
+});
+
+test("queue controller removes one item with a daemon-minted operation and sends only the revalidated FIFO batch", async () => {
+  const requests: Array<{ url: string; method: string; auth: string | null; body: string | null }> = [];
+  let removed = false;
+  let dispatches = 0;
+  let revision = 2;
+  vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "/api/config") return new Response("{}", { status: 200 });
+    const method = init?.method ?? "GET";
+    requests.push({
+      url,
+      method,
+      auth: new Headers(init?.headers).get("Authorization"),
+      body: typeof init?.body === "string" ? init.body : null,
+    });
+    if (url.endsWith("/ids")) {
+      return Response.json({ scope_id: "scope-a", incarnation: "inc-a", operation_ids: ["op-remove"] });
+    }
+    if (method === "DELETE") {
+      removed = true;
+      return Response.json({ status: "removed", request_ids: ["item-1"] });
+    }
+    if (url.includes("/send-now?")) {
+      dispatches += 1;
+      return Response.json({ status: "admitted", accepted: true, request_ids: ["item-1"] });
+    }
+    if (method === "GET") {
+      const snapshot = queueSnapshot("scope-a", "inc-a", ++revision, removed ? [] : [queuedBatch]);
+      return Response.json(snapshot);
+    }
+    throw new Error(`Unexpected queue request: ${method} ${url}`);
+  });
+
+  const api = new EngineApi("http://engine");
+  api.setToken("test-auth-token");
+  const controller = new WebQueuePanelController(api, (() => 1) as unknown as typeof globalThis.setInterval);
+  controller.setIdentity("session/one", "conversation-a");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(controller.getState().snapshot?.scope_id, "scope-a");
+
+  await controller.removeItem("item-1");
+  assert.equal(controller.getState().snapshot?.batches.length, 0, "removal did not refresh the visible snapshot");
+  const operationRequest = requests.find(({ url }) => url.endsWith("/ids"));
+  assert.deepEqual(JSON.parse(operationRequest?.body ?? "{}"), {
+    conversation_uid: "conversation-a",
+    item_count: 1,
+    operation_count: 1,
+    attachment_operation_count: 0,
+  });
+  const deleteRequest = requests.find(({ method }) => method === "DELETE");
+  assert.match(deleteRequest?.url ?? "", /items\/item-1\?conversation_uid=conversation-a&operation_id=op-remove$/);
+  assert.equal(deleteRequest?.auth, "Bearer test-auth-token");
+
+  removed = false;
+  await controller.refresh(true);
+  await controller.sendNow("batch-1");
+  assert.equal(dispatches, 1, "Send Now was retried or omitted");
+  const sendRequest = requests.find(({ url }) => url.includes("/send-now?"));
+  assert.match(sendRequest?.url ?? "", /batches\/batch-1\/send-now\?conversation_uid=conversation-a$/);
+  assert.equal(sendRequest?.auth, "Bearer test-auth-token");
+  assert.equal(controller.getState().snapshot?.scope_id, "scope-a");
+});
+
+test("queue controller refuses to claim Send Now succeeded when dispatch was not accepted", async () => {
+  const requests: string[] = [];
+  vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url === "/api/config") return new Response("{}", { status: 200 });
+    requests.push(url);
+    if (url.includes("/send-now?")) return Response.json({ status: "busy", accepted: false });
+    return Response.json(queueSnapshot("scope-a", "inc-a", 1, [queuedBatch]));
+  });
+  const api = new EngineApi("http://engine");
+  const controller = new WebQueuePanelController(api, (() => 1) as unknown as typeof globalThis.setInterval);
+  controller.setIdentity("session-1", "conversation-a");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await assert.rejects(controller.sendNow("batch-1"), /did not accept/);
+  assert.equal(requests.filter((url) => url.includes("/send-now?")).length, 1, "an ambiguous/refused Send Now was automatically retried");
+});
+
+test("queue controller rechecks that Send Now still targets the FIFO head", async () => {
+  const requests: string[] = [];
+  let reads = 0;
+  const blockedHead = {
+    ...queuedBatch,
+    batch_id: "new-earlier-batch",
+    sequence: 1,
+    status: "in_doubt" as const,
+    claim_id: "uncertain-claim",
+    request_ids: ["uncertain-request"],
+    items: [{
+      request_id: "uncertain-request",
+      status: "in_doubt" as const,
+      attempt_id: "uncertain-attempt",
+      text_preview: "Earlier uncertain item",
+      attachment_labels: [],
+    }],
+  };
+  vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url === "/api/config") return new Response("{}", { status: 200 });
+    requests.push(url);
+    if (url.includes("/send-now?")) return Response.json({ status: "admitted", accepted: true });
+    if (url.includes("/web-message-queue?")) {
+      reads += 1;
+      return Response.json(queueSnapshot(
+        "scope-a",
+        "inc-a",
+        reads,
+        reads === 1 ? [queuedBatch] : [blockedHead, queuedBatch],
+      ));
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  });
+  const api = new EngineApi("http://engine");
+  const controller = new WebQueuePanelController(api, (() => 1) as unknown as typeof globalThis.setInterval);
+  controller.setIdentity("session-1", "conversation-a");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await assert.rejects(controller.sendNow("batch-1"), /no longer ready/);
+  assert.equal(requests.filter((url) => url.includes("/send-now?")).length, 0,
+    "a newly ambiguous FIFO head must block sending a later batch");
 });
