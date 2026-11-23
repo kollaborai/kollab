@@ -4209,7 +4209,7 @@ class ToolExecutor:
                 if extract_main and 0 < len(text) < 500
                 else ""
             )
-            if len(text) < 500 and text != json_ld_body:
+            if len(text) < 500 and (not json_ld_body or text != json_ld_body):
                 pw_text = await self._playwright_fetch(
                     raw,
                     page_url=final_url,
