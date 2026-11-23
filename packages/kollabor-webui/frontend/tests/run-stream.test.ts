@@ -371,3 +371,51 @@ test("a live CR-terminated SSE event dispatches without another source byte", as
   assert.equal(new TextDecoder().decode((await reader.read()).value), FINISH);
   assert.equal(from.state.let, true);
 });
+
+test("an oversized live suffix after a complete event errors before another source read", async () => {
+  const limit = 16 * 1024 * 1024;
+  const first = new TextEncoder().encode("data: first\n\n");
+  const partial = new Uint8Array(limit + 1);
+  partial.set(new TextEncoder().encode("data: "));
+  const bytes = new Uint8Array(first.length + partial.length);
+  bytes.set(first);
+  bytes.set(partial, first.length);
+  let cancelled = false;
+  const source = new ReadableStream<Uint8Array>({
+    start: (controller) => controller.enqueue(bytes),
+    cancel: () => { cancelled = true; },
+  });
+  const reader = endableStream(source).stream.getReader();
+  assert.equal(new TextDecoder().decode((await reader.read()).value), "data: first\n\n");
+
+  const result = await Promise.race([
+    reader.read().then(
+      ({ done, value }) => ({ kind: done ? "done" : "value", length: value?.length ?? 0 }),
+      (error: Error) => ({ kind: "error", message: error.message }),
+    ),
+    new Promise<{ kind: string }>((resolve) =>
+      setTimeout(() => resolve({ kind: "stalled" }), 1000),
+    ),
+  ]);
+
+  assert.equal(result.kind, "error", "an oversized pending suffix fails before another read");
+  assert.match("message" in result ? result.message : "", /SSE event exceeds/);
+  assert.equal(cancelled, true, "the still-open upstream source is cancelled");
+  await reader.cancel().catch(() => undefined);
+});
+
+test("a CRLF split after a valid CR-only boundary keeps both locked-decoder events", async () => {
+  const from = engine();
+  const run = endableStream(from.source);
+  const reader = run.stream.getReader();
+  const decoder = new SSEEventDecoder();
+  from.send("data: first\r\n\r");
+  const first = await reader.read();
+  assert.deepEqual(decoder.push(new TextDecoder().decode(first.value)), [{ data: "first" }]);
+
+  from.send("\ndata: second\r\n\r\n");
+  const second = await reader.read();
+  assert.deepEqual(decoder.push(new TextDecoder().decode(second.value)), [{ data: "second" }]);
+  run.end();
+  await reader.cancel().catch(() => undefined);
+});
