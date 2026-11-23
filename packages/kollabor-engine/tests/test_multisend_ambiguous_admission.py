@@ -184,7 +184,7 @@ async def test_first_ambiguous_send_without_events_times_out_and_keeps_handover(
     async def expire_requested_timeout(queue, controller, timeout=None):
         if timeout is not None:
             clock.now += timeout
-            return None
+            return {}
         return await original_next_event(queue, controller, timeout)
 
     monkeypatch.setattr(messages, "_assistant_next_event", expire_requested_timeout)
