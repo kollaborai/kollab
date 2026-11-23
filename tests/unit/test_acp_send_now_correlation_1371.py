@@ -257,6 +257,7 @@ async def test_orchestrator_does_not_record_steering_after_runner_replacement():
             {"acp_update", "tool_result"},
         ),
         ("permission_request", {"title": "Approval"}, {"acp_waiting"}),
+        ("permission_resolved", {"waiting": False}, {"acp_waiting"}),
         ("turn_finished", {}, {"acp_waiting"}),
     ],
 )
@@ -285,17 +286,22 @@ def test_orchestrator_forwards_generation_to_projected_acp_events(
     orchestrator.hub_plugin = None
     orchestrator._profile_name = "send-now-test"
 
-    orchestrator._on_runner_update(
-        {
-            "kind": kind,
-            "payload": payload,
-            "request_id": "active-request-A",
-            "turn_id": 12,
-            "generation": 7,
-            "source": "state_rpc",
-            "thread_id": "thread-A",
-        }
-    )
+    update = {
+        "kind": kind,
+        "payload": payload,
+        "request_id": (
+            "tool-A"
+            if kind in {"permission_request", "permission_resolved"}
+            else "active-request-A"
+        ),
+        "turn_id": 12,
+        "generation": 7,
+        "source": "state_rpc",
+        "thread_id": "thread-A",
+    }
+    if kind in {"permission_request", "permission_resolved"}:
+        update["owner_request_id"] = "active-request-A"
+    orchestrator._on_runner_update(update)
 
     for event_type in projected_events:
         event_payloads = [
@@ -305,3 +311,9 @@ def test_orchestrator_forwards_generation_to_projected_acp_events(
         ]
         assert event_payloads, f"missing {event_type} projection for {kind}"
         assert all(payload.get("generation") == 7 for payload in event_payloads)
+        if kind in {"permission_request", "permission_resolved"}:
+            assert all(
+                payload.get("request_id") == "active-request-A"
+                and payload.get("tool_id") == "tool-A"
+                for payload in event_payloads
+            )
