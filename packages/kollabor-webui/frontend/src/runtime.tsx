@@ -46,6 +46,7 @@ import {
   mergeMissingHistoryMessages,
   reconcileBoundaryToolResults,
   hasUnsettledRows,
+  insertLiveMessage,
   inFlightSendIdsFor,
   pendingSendIds,
   rememberSavedSends,
@@ -76,7 +77,12 @@ import {
   type LiveTurn,
 } from "./live-turn";
 import { parseHubMessageHeader, splitAgentHud, splitObservationReplies, type HubNote } from "./hub-notes";
-import { PermissionToolUI } from "./components/PermissionTool";
+import {
+  PermissionResponseContext,
+  PermissionToolUI,
+  type PermissionArgs,
+  type PermissionResult,
+} from "./components/PermissionTool";
 import { endableStream } from "./run-stream";
 import {
   historyTurnTiming,
@@ -114,6 +120,36 @@ const messageConverter = createMessageConverter<ThreadMessageLike>((message) => 
 type JoinableMessage = ThreadMessageLike & { convertConfig?: { joinStrategy?: "concat-content" | "none" } };
 export const imageAttachmentAdapter = new SimpleImageAttachmentAdapter();
 
+type PermissionResponseOwner = PendingPermission & { permissionId: string };
+
+const permissionResponseOwner = (payload: unknown): PermissionResponseOwner | null => {
+  const owner = permissionOwner(payload);
+  if (!owner || !payload || typeof payload !== "object") return null;
+  const value = payload as { request_id?: unknown; permission_id?: unknown; details?: unknown };
+  const details = value.details && typeof value.details === "object"
+    ? value.details as { permission_id?: unknown }
+    : undefined;
+  const permissionId = typeof value.permission_id === "string" && value.permission_id
+    ? value.permission_id
+    : typeof details?.permission_id === "string" && details.permission_id
+      ? details.permission_id
+      : "";
+  if (!permissionId) return null;
+  const requestId = value.request_id;
+  return {
+    ...owner,
+    ...(typeof requestId === "string" && requestId ? { requestId } : {}),
+    permissionId,
+  };
+};
+
+const samePermissionResponseOwner = (
+  expected: PermissionResponseOwner,
+  candidates: readonly PermissionResponseOwner[],
+) => candidates.some((candidate) => candidate.toolId === expected.toolId &&
+  candidate.requestId === expected.requestId && candidate.source === expected.source &&
+  candidate.permissionId === expected.permissionId);
+
 const PermissionCancellationContext = createContext<{
   cancel: (expected: readonly PendingPermission[]) => Promise<void>;
   cancelling: boolean;
@@ -132,7 +168,7 @@ export function usePendingPermissionCancellation() {
   const control = useContext(PermissionCancellationContext);
   const messages = useAuiState((state) => state.thread.messages);
   const expected = pendingPermissions(messages);
-  return control && expected.length ? {
+  return control && expected.length === 1 && expected[0].parked === false ? {
     cancel: () => control.cancel(expected),
     cancelling: control.cancelling,
   } : null;
@@ -663,29 +699,36 @@ function historyToMessages(
   closeTurn();
 
   // A daemon does not re-emit permission_request after a browser reload. Keep
-  // the prompt as a pending tool call so assistant-ui can render it and its
-  // addResult callback can submit the answer through assistant-transport.
+  // the prompt as a pending tool call so assistant-ui can render it. Preserve
+  // the top-level owner request id too: the original turn may have ended its
+  // POST at the prompt while a later send is still streaming.
   for (const [index, prompt] of pendingPermissions.entries()) {
-    const toolCallId = `permission_${prompt.tool_id}`;
+    const permissionId = prompt.permission_id ?? prompt.details?.permission_id;
+    const toolCallId = `permission_${prompt.tool_id}_${permissionId || index}`;
+    const requestId = (prompt as PermissionPrompt & { request_id?: unknown }).request_id;
+    const args = JSON.parse(JSON.stringify({
+      tool_id: prompt.tool_id,
+      ...(typeof permissionId === "string" && permissionId ? { permission_id: permissionId } : {}),
+      tool_name: prompt.tool_name,
+      tool_type: prompt.tool_type || null,
+      risk_level: prompt.risk_level || null,
+      risk_reason: prompt.risk_reason || null,
+      input: prompt.input || {},
+      details: prompt.details || {},
+      acp_options: prompt.details?.acp_options || [],
+      ...(typeof requestId === "string" && requestId ? { request_id: requestId } : {}),
+    }));
     messages.push({
       id: `permission-${prompt.tool_id}-${index}`,
       role: "assistant",
+      metadata: { custom: { pendingPermission: true } },
       content: [
         {
           type: "tool-call",
           toolCallId,
           toolName: "request_permission",
-          args: JSON.parse(JSON.stringify({
-            tool_id: prompt.tool_id,
-            tool_name: prompt.tool_name,
-            tool_type: prompt.tool_type || null,
-            risk_level: prompt.risk_level || null,
-            risk_reason: prompt.risk_reason || null,
-            input: prompt.input || {},
-            details: prompt.details || {},
-            acp_options: prompt.details?.acp_options || [],
-          })),
-          argsText: JSON.stringify(prompt),
+          args,
+          argsText: JSON.stringify(args),
         },
       ],
       status: { type: "requires-action", reason: "tool-calls" },
@@ -711,17 +754,41 @@ type MidTurn = {
 };
 const NO_MID_TURN: MidTurn = { rows: [] };
 
+const isPermissionPromptRow = (message: ThreadMessageLike): boolean =>
+  message.role === "assistant" && Array.isArray(message.content) && message.content.some((part) =>
+    part.type === "tool-call" && part.toolName === "request_permission");
+
+const isSyntheticPermissionRow = (message: ThreadMessageLike): boolean =>
+  isPermissionPromptRow(message) && historyMessageIndex(message) === null &&
+  String(message.id ?? "").startsWith("permission-");
+
+const mergeMidTurnRows = (
+  shown: readonly ThreadMessageLike[],
+  loaded: readonly ThreadMessageLike[],
+): { messages: ThreadMessageLike[]; added: ThreadMessageLike[] } => {
+  const historyRows = loaded.filter((row) => historyMessageIndex(row) !== null);
+  const merged = mergeMissingHistoryMessages(shown, historyRows);
+  const shownIds = new Set(merged.messages.map((row) => row.id));
+  const permissions = loaded.filter((row) => isPermissionPromptRow(row) && !shownIds.has(row.id));
+  return {
+    messages: [...merged.messages, ...permissions],
+    added: [...merged.added, ...permissions],
+  };
+};
+
 /**
  * Rows a history sync added while this page's run owned the thread, merged
  * around the run's own rows, which stay last (#1358, #1364).
  */
 const withMidTurnRows = (messages: ThreadMessageLike[], midTurn: MidTurn): ThreadMessageLike[] => {
   if (!midTurn.rows.length) return messages;
-  // The sync imported them too: take them out and merge them back in order,
-  // so a pending send's row is placed after them.
-  const midTurnIds = new Set(midTurn.rows.map((row) => row.id));
+  // Replace canonical history copies with these mid-turn rows to keep their
+  // position. Synthetic permission rows have no history identity: keep a
+  // current streamed copy when present, otherwise append the saved prompt.
+  const historyRows = midTurn.rows.filter((row) => historyMessageIndex(row) !== null);
+  const midTurnIds = new Set(historyRows.map((row) => row.id));
   return aroundLive(messages.filter((row) => !midTurnIds.has(row.id)),
-    (rows) => mergeMissingHistoryMessages(rows, [...midTurn.rows]).messages);
+    (rows) => mergeMidTurnRows(rows, midTurn.rows).messages);
 };
 
 const converter = (
@@ -732,7 +799,7 @@ const converter = (
   // Stream timing rides on the assistant message's metadata, where
   // `useMessageTiming` reads it (see turn-timing.ts).
   const live = midTurn.live;
-  const stored = state.messages.flatMap((message) => {
+  let stored = state.messages.flatMap((message) => {
     if (live && message.id === live.id) return live.message ? [live.message] : [];
     const timing =
       message.role === "assistant" && message.id
@@ -742,6 +809,11 @@ const converter = (
       ? { ...message, metadata: { ...message.metadata, timing } }
       : message];
   });
+  if (live && !state.messages.some((message) => message.id === live.id)) {
+    stored = live.message
+      ? insertLiveMessage(stored, live.message as ThreadMessageLike)
+      : stored.filter((message) => message.id !== live.id);
+  }
   // A send in flight keeps the id its request was sent with: rows a sync adds
   // meanwhile change the row count, and a new id makes assistant-ui take the
   // row for a new turn and scroll it to the top under the reader (#1364).
@@ -893,6 +965,7 @@ export function EngineRuntimeProvider({
   const turnRef = useRef<TurnClock>(newTurnClock());
   const runStartRef = useRef(0);
   const cancellingPermission = useRef(false);
+  const permissionResponsesInFlight = useRef(new Set<string>());
   const goalCancellation = useRef(new GoalCancellationTracker());
   const mounted = useRef(true);
   const runVersion = useRef(0);
@@ -912,6 +985,12 @@ export function EngineRuntimeProvider({
   const midTurnLive = useRef<MidTurn["live"]>(null);
   // The row ids of the sends waiting behind this page's running turn (see MidTurn.waiting).
   const waitingSendIds = useRef(new Map<string, string>());
+  // Request ids of the page's current assistant POST, and the old/new requests
+  // whose events straddle a Send Now handover (#1367).
+  const pageRequestIds = useRef<ReadonlySet<string>>(new Set());
+  const handoverFromIds = useRef<ReadonlySet<string>>(new Set());
+  const handoverToIds = useRef<ReadonlySet<string>>(new Set());
+  const handoverLive = useRef(false);
   // The commands of the request now streaming, from the moment it is sent
   // until it ends; null between requests (see the hand-over below).
   const streamingRun = useRef<WeakSet<object> | null>(null);
@@ -965,6 +1044,10 @@ export function EngineRuntimeProvider({
       streamingRun.current = new WeakSet<object>(body.commands);
       endRun.current = null;
       sendNow.current = false;   // this request takes every message that waited
+      const requestIds = body.commands.flatMap((command) =>
+        command.type === "add-message" && "id" in command.message && typeof command.message.id === "string"
+          ? [command.message.id] : []);
+      if (requestIds.length) pageRequestIds.current = new Set(requestIds);
       inFlightSendIds.current = inFlightSendIdsFor(body, sessionId, inFlightSendIds.current, waitingSendIds.current);
       // Each message names its row: one that waited keeps the row it has on screen.
       const rowIds = [...inFlightSendIds.current];
@@ -1071,6 +1154,12 @@ export function EngineRuntimeProvider({
       if (!runtime.thread.getState().isRunning) return;
       handOverDue.current = false;
       sendNow.current = false;
+      handoverFromIds.current = new Set(pageRequestIds.current);
+      handoverToIds.current = new Set(waitingSendIds.current.keys());
+      handoverLive.current = handoverFromIds.current.size > 0;
+      if (handoverLive.current) {
+        liveTurn.current = { parts: [], requestId: handoverFromIds.current.values().next().value };
+      }
       const end = endRun.current;
       endRun.current = null;
       end?.();
@@ -1139,6 +1228,63 @@ export function EngineRuntimeProvider({
     }
   }, [api, sessionId, onStale, runtime]);
 
+  const respondToPermission = useCallback(async (
+    toolCallId: string,
+    args: PermissionArgs,
+    result: PermissionResult,
+  ): Promise<"answered" | "stale" | "transport"> => {
+    const findPrompt = () => runtime.thread.getState().messages.flatMap((message) => {
+      if (!Array.isArray(message.content)) return [];
+      const part = message.content.find((content) => content.type === "tool-call" &&
+        content.toolName === "request_permission" && content.toolCallId === toolCallId &&
+        content.result === undefined);
+      return part ? [{ message, part }] : [];
+    })[0];
+    const initial = findPrompt();
+    if (!initial) return "stale";
+    if (initial.message.metadata?.custom?.pendingPermission !== true) {
+      return permissionResponseOwner(args) ? "transport" : "stale";
+    }
+    if (initial.message.status?.type !== "requires-action") return "stale";
+    const expected = permissionResponseOwner(initial.part.args);
+    const displayed = permissionResponseOwner(args);
+    if (!expected || !displayed || !samePermissionResponseOwner(expected, [displayed])) return "stale";
+    const key = `${sessionId}:${expected.permissionId}`;
+    if (permissionResponsesInFlight.current.has(key)) return "stale";
+    const isCurrent = () => {
+      if (!mounted.current) return false;
+      const current = findPrompt();
+      if (!current || current.message.id !== initial.message.id ||
+          current.message.status?.type !== "requires-action") return false;
+      const owner = permissionResponseOwner(current.part.args);
+      return !!owner && samePermissionResponseOwner(expected, [owner]);
+    };
+    if (!isCurrent()) return "stale";
+
+    permissionResponsesInFlight.current.add(key);
+    try {
+      const permissions = await api.getPermissions(sessionId);
+      const owners = permissions.pending_prompts.flatMap((prompt) => {
+        const owner = permissionResponseOwner(prompt);
+        return owner ? [owner] : [];
+      });
+      if (!isCurrent() || !samePermissionResponseOwner(expected, owners)) return "stale";
+      await api.request(`/sessions/${encodeURIComponent(sessionId)}/permission`, {
+        method: "POST",
+        body: JSON.stringify({
+          tool_id: expected.toolId,
+          permission_id: expected.permissionId,
+          decision: result.decision,
+          scope: result.scope ?? "once",
+          ...(result.option_id ? { option_id: result.option_id } : {}),
+        }),
+      });
+      return "answered";
+    } finally {
+      permissionResponsesInFlight.current.delete(key);
+    }
+  }, [api, runtime, sessionId]);
+
   // A turn this page did not start (another window, the agent's terminal, a
   // peer's message) streams through App's event subscription. Its events fold
   // into one ephemeral assistant message so a passive window watches the
@@ -1172,8 +1318,12 @@ export function EngineRuntimeProvider({
       // A live row already shown is updated where it is: moved to the end it
       // would change the turn the chat anchors and scroll the reader (#1364).
       const at = shown.messages.findIndex(isLiveMessage);
-      importLiveState(!live ? kept : at < 0 ? [...kept, live]
-        : [...kept.slice(0, at), live, ...kept.slice(at)]);
+      const messages = live ? insertLiveMessage(kept, live) : kept;
+      if (runtime.thread.getState().isRunning) {
+        const id = live?.id ?? String(shown.messages[at]?.id ?? "");
+        if (id) midTurnLive.current = { id, message: live };
+      }
+      importLiveState(messages);
       // Completed replies stay visible until canonical history catches up.
       // Preserve the prior bounded cleanup for cancellation and error states.
       clearTimeout(settleTimer.current);
@@ -1194,7 +1344,69 @@ export function EngineRuntimeProvider({
       unshownLive.current = false;
       showLiveTurn(liveTurn.current);
     };
+    const reconcilePermissionLifecycle = (event: SessionEvent) => {
+      const type = String(event.type ?? "");
+      if (!new Set(["permission_parked", "permission_granted", "permission_denied", "permission_cancelled"]).has(type)) return;
+      const toolId = typeof event.tool_id === "string" ? event.tool_id : "";
+      const permissionId = typeof event.permission_id === "string" ? event.permission_id : "";
+      if (!toolId || !permissionId) return;
+      const requestId = typeof event.request_id === "string" ? event.request_id : "";
+      const settled = type !== "permission_parked";
+      const reconcile = (rows: readonly ThreadMessageLike[]): ThreadMessageLike[] | null => {
+        let changed = false;
+        const next = rows.flatMap((message): ThreadMessageLike[] => {
+          if (message.role !== "assistant" || !Array.isArray(message.content)) return [message];
+          let rowChanged = false;
+          const content = message.content.flatMap((part) => {
+            if (part.type !== "tool-call" || part.toolName !== "request_permission" || part.result !== undefined) return [part];
+            const args = part.args && typeof part.args === "object" ? part.args as Record<string, unknown> : null;
+            const details = args?.details && typeof args.details === "object"
+              ? args.details as Record<string, unknown> : {};
+            const partPermissionId = typeof args?.permission_id === "string"
+              ? args.permission_id : typeof details.permission_id === "string" ? details.permission_id : "";
+            if (args?.tool_id !== toolId || partPermissionId !== permissionId) return [part];
+            const partRequestId = typeof args.request_id === "string" ? args.request_id : "";
+            if (requestId && partRequestId && requestId !== partRequestId) return [part];
+            if (!settled) {
+              if (details.parked === true) return [part];
+              const nextArgs = { ...args, details: { ...details, parked: true } };
+              changed = rowChanged = true;
+              return [{ ...part, args: nextArgs, argsText: JSON.stringify(nextArgs) }];
+            }
+            changed = rowChanged = true;
+            if (isSyntheticPermissionRow(message)) return [];
+            return [{
+              ...part,
+              result: {
+                decision: type === "permission_granted" ? "approve" : "deny",
+                scope: typeof event.scope === "string" ? event.scope : "once",
+                permission_id: permissionId,
+                ...(typeof event.option_id === "string" ? { option_id: event.option_id } : {}),
+                ...(event.vendor_saved === true ? { vendor_saved: true } : {}),
+                ...(typeof event.warning === "string" ? { warning: event.warning } : {}),
+              },
+            }];
+          });
+          if (!rowChanged) return [message];
+          return content.length ? [{ ...message, content }] : [];
+        });
+        return changed ? next : null;
+      };
+
+      const shown = (runtime.thread.getState().extras as { state?: EngineState } | undefined)?.state;
+      const messages = shown ? reconcile(shown.messages) : null;
+      const midTurn = reconcile(midTurnRows.current);
+      if (midTurn) midTurnRows.current = midTurn;
+      if (messages && shown) {
+        runtime.thread.importExternalState({
+          ...shown,
+          messages,
+          synced: shown.synced ? { ...shown.synced, messages: messages.length } : undefined,
+        });
+      }
+    };
     liveEvents.current = (event: SessionEvent) => {
+      reconcilePermissionLifecycle(event);
       const thread = runtime.thread.getState();
       if (thread.isRunning && goalCancellation.current.isActive()
           && event.type === "history_updated"
@@ -1206,6 +1418,28 @@ export function EngineRuntimeProvider({
         // goal handle, and the ensuing history refresh remounts the new one.
         runtime.thread.cancelRun();
         return;
+      }
+      if (handoverFromIds.current.size) {
+        const belongsToPrior = [...handoverFromIds.current].some((id) => eventNamesRequest(event, id));
+        const belongsToWaiting = [...handoverToIds.current].some((id) => eventNamesRequest(event, id));
+        const priorEnds = belongsToPrior &&
+          (endsLiveTurn(String(event.type ?? "")) || event.type === "turn_cancelled");
+        if (belongsToWaiting && !priorEnds) {
+          // The next send now owns these events too; its assistant stream is
+          // the single display path after admission.
+          handoverLive.current = false;
+          return;
+        }
+        if (belongsToPrior) {
+          if (!handoverLive.current && !priorEnds) return;
+          const folded = applyLiveEvent(liveTurn.current, event);
+          if (folded !== liveTurn.current) {
+            liveTurn.current = folded;
+            showLiveTurn(folded);
+          }
+          return;
+        }
+        if (belongsToWaiting) return;
       }
       if (thread.isRunning) {
         // This page's own submission is pending (a held steering admission, a
@@ -1413,23 +1647,40 @@ export function EngineRuntimeProvider({
         // turn is active. Preserve its in-flight messages and defer any full
         // reconciliation until settlement, when the engine mirror has caught up.
         // The saved copy of this page's own send stays out: its in-flight row
-        // already shows it (#1356).
+        // already shows it (#1356). Pending permission cards are the exception:
+        // App rebuilds them from /permissions without history indexes, and they
+        // must stay answerable while this page's new request is still running.
         const newRows = initialState.messages.filter((message) => {
           const index = historyMessageIndex(message);
-          return index !== null && index >= from.history;
+          const pendingPermission = isSyntheticPermissionRow(message) &&
+            message.status?.type === "requires-action" && Array.isArray(message.content) &&
+            message.content.some((part) => part.type === "tool-call" && part.toolName === "request_permission" &&
+              part.result === undefined);
+          return (index !== null && index >= from.history) || pendingPermission;
         });
         // Nor do the rows of the turn its stream is drawing, and the saved
         // copies of sends an earlier run left on screen (#1359).
         const tail = withoutOwnTurnRows(thread.messages, initialState.messages,
           withoutInFlightSends(thread.messages, newRows, inFlightSendIds.current), savedSends.current);
+        const pendingPermissionIds = new Set(initialState.messages
+          .filter(isSyntheticPermissionRow).map((message) => message.id));
+        const stalePermissionIds = new Set([...shown.messages, ...midTurnRows.current]
+          .filter((message) => isSyntheticPermissionRow(message) && !pendingPermissionIds.has(message.id))
+          .map((message) => message.id));
+        if (stalePermissionIds.size) {
+          midTurnRows.current = midTurnRows.current.filter((message) => !stalePermissionIds.has(message.id));
+        }
+        const shownRows = stalePermissionIds.size
+          ? shown.messages.filter((message) => !stalePermissionIds.has(message.id))
+          : shown.messages;
         const merged = { added: [] as ThreadMessageLike[], messages: [] as ThreadMessageLike[] };
-        merged.messages = aroundLive(shown.messages, (rows) => {
-          const result = mergeMissingHistoryMessages(rows, tail);
+        merged.messages = aroundLive(shownRows, (rows) => {
+          const result = mergeMidTurnRows(rows, tail);
           merged.added = result.added;
           return result.messages;
         });
-        if (merged.added.length) {
-          midTurnRows.current = mergeMissingHistoryMessages(midTurnRows.current, merged.added).messages;
+        if (merged.added.length || stalePermissionIds.size) {
+          midTurnRows.current = mergeMidTurnRows(midTurnRows.current, merged.added).messages;
           const messages = withLiveSynced(merged.messages, merged.added);
           runtime.thread.importExternalState({
             ...shown,
@@ -1671,21 +1922,23 @@ export function EngineRuntimeProvider({
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <PermissionCancellationContext.Provider
-        value={{ cancel: cancelPermission, cancelling: permissionCancellationPending }}
-      >
-        <SendWaitingNowContext.Provider value={harness ? null : sendWaitingNow}>
-          <InitialMessagesGate
-            runtime={runtime}
-            messages={initialState.messages}
-          >
-            <PermissionToolUI />
-            <VoiceModeProvider api={api} sessionId={sessionId}>
-              {children}
-            </VoiceModeProvider>
-          </InitialMessagesGate>
-        </SendWaitingNowContext.Provider>
-      </PermissionCancellationContext.Provider>
+      <PermissionResponseContext.Provider value={respondToPermission}>
+        <PermissionCancellationContext.Provider
+          value={{ cancel: cancelPermission, cancelling: permissionCancellationPending }}
+        >
+          <SendWaitingNowContext.Provider value={harness ? null : sendWaitingNow}>
+            <InitialMessagesGate
+              runtime={runtime}
+              messages={initialState.messages}
+            >
+              <PermissionToolUI />
+              <VoiceModeProvider api={api} sessionId={sessionId}>
+                {children}
+              </VoiceModeProvider>
+            </InitialMessagesGate>
+          </SendWaitingNowContext.Provider>
+        </PermissionCancellationContext.Provider>
+      </PermissionResponseContext.Provider>
     </AssistantRuntimeProvider>
   );
 }

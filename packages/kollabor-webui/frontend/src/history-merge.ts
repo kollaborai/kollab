@@ -483,6 +483,29 @@ const requestIdsOf = (message: Message): string[] => {
 };
 
 /**
+ * Keeps a live reply after the rows of the request that owns it and before a
+ * later user send. Assistant transport snapshots can omit an ephemeral row
+ * imported from the session stream, so the runtime inserts it again here.
+ */
+export function insertLiveMessage<T extends Message>(messages: ReadonlyArray<T>, live: T): T[] {
+  const existing = messages.findIndex((message) => message.id === live.id);
+  if (existing >= 0) return messages.map((message, index) => index === existing ? live : message);
+
+  const requestId = requestIdsOf(live)[0];
+  if (!requestId) return [...messages, live];
+  let send = -1;
+  for (let index = 0; index < messages.length; index += 1) {
+    if (transientRole(messages[index]) === "user" && requestIdsOf(messages[index]).includes(requestId)) send = index;
+  }
+  const nextSend = messages.findIndex((message, index) =>
+    transientRole(message) === "user" && !requestIdsOf(message).includes(requestId) &&
+      (send >= 0 ? index > send : message.metadata?.isOptimistic === true ||
+        (TRANSIENT_ROW_ID.test(String(message.id ?? "")) && historyIndex(message) === null)));
+  const at = nextSend < 0 ? messages.length : nextSend;
+  return [...messages.slice(0, at), live, ...messages.slice(at)];
+}
+
+/**
  * A picture the thread shows only as its placeholder text, [imageN]. The text
  * names no picture, so two placeholders with the same words prove nothing.
  */
