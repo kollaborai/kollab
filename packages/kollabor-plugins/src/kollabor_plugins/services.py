@@ -663,6 +663,87 @@ def control_service(
             raise ServiceSignalError("Could not signal verified service wrapper") from exc
 
 
+def _process_exited(identity: object) -> bool:
+    """True only when the recorded pid has no live process under that identity.
+
+    A missing pid, a zombie, or a reused pid (start time mismatch) counts as exited.
+    Without a start time a live pid is never counted as exited.
+    """
+    if not isinstance(identity, dict):
+        return False
+    pid = identity.get("pid")
+    if type(pid) is not int or pid <= 0:
+        return False
+    started = identity.get("start_time")
+    try:
+        process = psutil.Process(pid)
+        if process.status() == psutil.STATUS_ZOMBIE:
+            return True
+        return isinstance(started, (int, float)) and abs(process.create_time() - started) > 0.02
+    except psutil.NoSuchProcess:
+        return True
+    except psutil.AccessDenied:
+        return False
+
+
+def _identity_gone(identity: object, *, wrapper: bool = False) -> bool:
+    """True only when _identity_alive finds no live match and _process_exited confirms the pid is gone or reused."""
+    return not _identity_alive(identity, wrapper=wrapper) and _process_exited(identity)
+
+
+def _record_stop_state(state_path: Path, status: str, deadline: float | None, error: str | None = None) -> None:
+    """Write the stop state. A failed write is logged, not raised, so it cannot undo a stop."""
+    try:
+        if state_path.is_symlink():
+            raise ValueError("Service state file may not be a symlink")
+        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+        if not isinstance(state, dict):
+            raise ValueError("Invalid service state")
+        state.update({"desired": "stopped", "status": status, "stop_deadline": deadline})
+        state.pop("error", None)
+        if error is not None:
+            state["error"] = error
+        _write_state(state_path, state)
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("Could not record stop for %s: %s", state_path.name, exc)
+
+
+def _stop_unrecorded(run_dir: Path, pid_path: Path) -> bool:
+    """Stop one service after control_service raised. False means the stop could not be verified."""
+    state_path = run_dir / f"{pid_path.stem}.state"
+    unverified = "Could not verify the stop. Check the process before retrying."
+    try:
+        if pid_path.is_symlink():
+            raise ValueError("Service pid file may not be a symlink")
+        identity = json.loads(pid_path.read_text(encoding="utf-8"))
+        if not isinstance(identity, dict):
+            raise ValueError("Invalid service identity")
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("Could not read service %s: %s", pid_path.name, exc)
+        _record_stop_state(state_path, "stop-failed", None, unverified)
+        return False
+    wrapper, child = identity.get("wrapper"), identity.get("child")
+    if _verified_wrapper(wrapper):
+        # Record desired=stopped before the signal, as control_service does, so the supervisor cannot respawn it.
+        # 10 s is the default stop timeout control_service uses.
+        _record_stop_state(state_path, "stopping", time.time() + 10)
+        try:
+            os.kill(wrapper["pid"], signal.SIGTERM)
+        except ProcessLookupError:
+            _record_stop_state(state_path, "stopped", None)
+        except OSError as exc:
+            logger.warning("Could not signal service %s: %s", pid_path.name, exc)
+            _record_stop_state(state_path, "stop-failed", None, "Could not stop this process. Retry stopping it.")
+            return False
+        return True
+    if _identity_gone(wrapper, wrapper=True) and (child is None or _identity_gone(child)):
+        _record_stop_state(state_path, "stopped", None)
+        return True
+    logger.warning("Refusing to signal unverifiable service %s", pid_path.name)
+    _record_stop_state(state_path, "stop-failed", None, unverified)
+    return False
+
+
 def stop_services(plugin_id: str) -> list[str]:
     """Signal only verified wrappers belonging to the named plugin."""
     if not _ID.fullmatch(plugin_id):
@@ -679,43 +760,16 @@ def stop_services(plugin_id: str) -> list[str]:
             control_service(plugin_id, pid_path.stem, "stop")
             continue
         except ServiceSignalError as exc:
+            # control_service already recorded stop-failed for this wrapper; do not signal it twice.
             failures.append(pid_path.stem)
             logger.warning("Could not stop service %s: %s", pid_path.name, exc)
             continue
         except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
             # Stopping a verified wrapper remains necessary even when its files
             # or state are damaged; never let a display failure orphan it.
-            failures.append(pid_path.stem)
             logger.warning("Could not record stop for service %s: %s", pid_path.name, exc)
-        signalled = False
-        try:
-            if pid_path.is_symlink():
-                raise ValueError("Service pid file may not be a symlink")
-            identity = json.loads(pid_path.read_text(encoding="utf-8"))
-            wrapper = identity.get("wrapper")
-            if _verified_wrapper(wrapper):
-                os.kill(wrapper["pid"], signal.SIGTERM)
-                signalled = True
-            elif _identity_alive(wrapper, wrapper=True):
-                logger.warning("Refusing to signal unverifiable wrapper for %s", pid_path.name)
-        except ProcessLookupError:
-            failures.remove(pid_path.stem)
-            continue
-        except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
-            logger.warning("Could not stop service %s: %s", pid_path.name, exc)
-        state_path = run_dir / f"{pid_path.stem}.state"
-        try:
-            if state_path.is_symlink():
-                raise ValueError("Service state file may not be a symlink")
-            state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
-            if not isinstance(state, dict):
-                raise ValueError("Invalid service state")
-            state.update({"desired": "stopped", "status": "stopping" if signalled else "stop-failed",
-                          "stop_deadline": None,
-                          "error": "Could not verify the stop. Check the process before retrying."})
-            _write_state(state_path, state)
-        except (OSError, ValueError, TypeError) as exc:
-            logger.warning("Could not record failed stop for %s: %s", pid_path.name, exc)
+        if not _stop_unrecorded(run_dir, pid_path):
+            failures.append(pid_path.stem)
     return failures
 
 
