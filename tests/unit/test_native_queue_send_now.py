@@ -18,6 +18,7 @@ from kollabor.state.web_message_queue_worker import (
     WebMessageQueueWorker,
     WorkerStatus,
 )
+from kollabor.user_input_source import UserInputSource
 from kollabor_agent.queue_processor import QueueProcessor, TaggedInput
 
 
@@ -92,14 +93,29 @@ async def test_native_send_now_waits_for_old_turn_then_admits_once_ahead_of_back
     llm = object.__new__(LLMService)
     llm._queue_processor = processor
     llm._conversation_revision = 4
+    llm.conversation_manager = SimpleNamespace(conversation_uid="conversation-a")
     llm.claim_turn_serial = lambda: 8
     llm.current_parent_uuid = "parent-a"
     llm.publish_cursor = MagicMock()
-    llm.conversation_logger = SimpleNamespace(
-        log_user_message=AsyncMock(
-            side_effect=lambda *_args, **_kwargs: events.append("history:B") or "row-b"
-        )
-    )
+
+    async def append_transactional_user_history(
+        _content, *, parent_uuid, message_metadata, queue_transaction
+    ):
+        row = {
+            "uuid": "row-b",
+            "parentUuid": parent_uuid,
+            "message": {"metadata": message_metadata},
+        }
+        if queue_transaction["prepare"]("row-b", row) is not True:
+            from kollabor_ai.conversation_logger import ConversationAppendRejected
+
+            raise ConversationAppendRejected("admission rejected")
+        events.append("history:B")
+        queue_transaction["finalize"]("row-b", row)
+        return "row-b"
+
+    logger_mock = AsyncMock(side_effect=append_transactional_user_history)
+    llm.conversation_logger = SimpleNamespace(log_user_message=logger_mock)
     llm.message_display_service = SimpleNamespace(display_user_message=MagicMock())
     llm.create_background_task = MagicMock(side_effect=lambda *_args, **_kwargs: events.append("start:B"))
     llm.supports_image_input = MagicMock(return_value=True)
@@ -113,6 +129,33 @@ async def test_native_send_now_waits_for_old_turn_then_admits_once_ahead_of_back
         return generation
 
     llm.cancel_current_request = MagicMock(side_effect=cancel_current_request)
+
+    async def force_submit(
+        message,
+        *,
+        source,
+        pre_displayed,
+        request_id,
+        thread_id,
+        origin_context,
+        queue_handoff,
+        force_next_turn,
+        _force_gate_held,
+        _force_reservation,
+        _force_gate_token,
+    ):
+        assert source is UserInputSource.STATE_RPC
+        assert force_next_turn and _force_gate_held
+        assert _force_gate_token is not None
+        return await LLMService._admit_queue_handoff_native(
+            llm,
+            message,
+            "B",
+            queue_handoff,
+            force_reservation=_force_reservation,
+        )
+
+    llm.submit_human_input = force_submit
     original_commit = processor.commit_admission_slot
 
     def record_commit(*args, **kwargs):
@@ -129,13 +172,21 @@ async def test_native_send_now_waits_for_old_turn_then_admits_once_ahead_of_back
     )
 
     admission = asyncio.create_task(
-        llm._admit_queue_handoff_native("B", "B", handoff)
+        llm._submit_forced_human_input(
+            "B",
+            source=UserInputSource.STATE_RPC,
+            pre_displayed=False,
+            request_id="force-b",
+            thread_id=None,
+            origin_context=None,
+            queue_handoff=handoff,
+        )
     )
     await asyncio.wait_for(cancel_requested.wait(), timeout=1)
     await asyncio.sleep(0)
 
     assert events == ["start:A", "cancel:A"]
-    assert llm.conversation_logger.log_user_message.await_count == 0
+    assert logger_mock.await_count == 0
     assert [item.content for item in processor.processing_queue._queue] == ["older D"]
 
     settle_old_turn.set()
@@ -147,8 +198,8 @@ async def test_native_send_now_waits_for_old_turn_then_admits_once_ahead_of_back
         "start:A",
         "cancel:A",
         "terminal:A",
-        "history:B",
         "admit:B",
+        "history:B",
         "start:B",
     ]
     assert [item.request_ids for item in processor.processing_queue._queue] == [
