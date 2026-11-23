@@ -4158,6 +4158,14 @@ class ToolExecutor:
                                     )
                                 decoded_parts.append(chunk)
 
+                        if encoding == "gzip" and not decompressor.eof:
+                            return ToolExecutionResult(
+                                tool_id=tool_id,
+                                tool_type="web_fetch",
+                                success=False,
+                                error="Response contained an incomplete gzip stream",
+                            )
+
                         if decompressor is not None:
                             tail = decompressor.flush()
                             decoded_size += len(tail)
