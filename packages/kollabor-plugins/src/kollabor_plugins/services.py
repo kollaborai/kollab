@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -17,11 +18,21 @@ from urllib.parse import urlsplit
 import psutil
 
 from kollabor_config.atomic_write import write_text_atomic
-from kollabor_config.file_lock import try_lock, unlock
+from kollabor_config.file_lock import locked_file, try_lock, unlock
 
 from .packages import _ID, _SERVICE, _read_registry, files_sha256
 
 logger = logging.getLogger(__name__)
+
+
+class ServiceStopError(ValueError):
+    """The plugin was disabled, but one or more services could not be stopped."""
+
+
+class ServiceSignalError(OSError):
+    """A verified service wrapper could not be signalled."""
+
+
 _LOG_LIMIT = 10 * 1024 * 1024
 _DEFAULT_ENGINE_URL = "http://127.0.0.1:7433"
 
@@ -269,9 +280,16 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
 
     signal.signal(signal.SIGTERM, stop)
     try:
-        _write_state(pid_path, identity)
-        state = {"desired": "running", "status": "starting", "exit_history": []}
-        _write_state(state_path, state)
+        # Publish a signalable identity atomically with the enabled check. A
+        # concurrent disable holds this same registry lock before signalling
+        # wrappers, so it cannot miss a wrapper between approval and pid write.
+        with locked_file(home / "plugins.json.lock", private=True):
+            current_root, current = _approved_service_root(home, _read_registry(home / "plugins.json"), plugin_id)
+            if current_root != root or current != record:
+                raise ValueError("Plugin approval or files changed while starting service")
+            _write_state(pid_path, identity)
+            state = {"desired": "running", "status": "starting", "exit_history": []}
+            _write_state(state_path, state)
         # The engine and wrapper share one token-file writer. Mint only after
         # rechecking the approved plugin under its service lock.
         try:
@@ -328,12 +346,21 @@ def run_service(plugin_id: str, service_name: str, nonce: str) -> int:
                 selector.register(child.stdout, selectors.EVENT_READ)
                 while selector.get_map() or child.poll() is None:
                     if stopping and not term_sent:
+                        grace = float(service.get("stop_timeout_s", 10))
+                        state.update({"desired": "stopped", "status": "stopping", "stop_deadline": time.time() + grace})
+                        try:
+                            _write_state(state_path, state)
+                        except OSError as exc:
+                            # Failure to publish must never prevent the actual stop.
+                            logger.warning(
+                                "Could not publish service stopping state for %s/%s: %s", plugin_id, service_name, exc
+                            )
                         try:
                             os.killpg(child.pid, signal.SIGTERM)
                         except ProcessLookupError:
                             pass
                         term_sent = True
-                        deadline = time.monotonic() + float(service.get("stop_timeout_s", 10))
+                        deadline = time.monotonic() + grace
                     if deadline is not None and time.monotonic() >= deadline:
                         try:
                             os.killpg(child.pid, signal.SIGKILL)
@@ -544,8 +571,6 @@ def control_service(
     home = Path.home() / ".kollab"
     registry = _read_registry(home / "plugins.json")
     root, record = _approved_service_root(home, registry, plugin_id, stopping=action == "stop")
-    if action == "start" and not plugin_id.endswith("@dev") and record.get("enabled") is not True:
-        raise ValueError("Enable the plugin before starting its service")
     try:
         manifest = (
             {"services": record.get("services", {})}
@@ -569,6 +594,10 @@ def control_service(
         raise ValueError("Invalid service state")
     pid_path = run_dir / f"{service_name}.pid"
     if action == "start":
+        if state.get("status") == "stopping" and _recorded_process_alive(pid_path):
+            raise ValueError("Service is stopping; wait until it has stopped")
+        if not plugin_id.endswith("@dev") and record.get("enabled") is not True:
+            raise ValueError("Enable the plugin before starting its service")
         if _recorded_process_alive(pid_path):
             raise ValueError("Service is already running or has an unverifiable process")
         state.update({"desired": "running", "status": "starting"})
@@ -605,38 +634,89 @@ def control_service(
     verified = _verified_wrapper(wrapper)
     if not verified and (_identity_alive(wrapper, wrapper=True) or _identity_alive(child)):
         raise ValueError("Service is alive without a verified wrapper")
+    definition = manifest["services"][service_name]
+    timeout = definition.get("stop_timeout_s", 10) if isinstance(definition, dict) else 10
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+        timeout = 10
+    already_stopping = state.get("status") == "stopping" and state.get("desired") == "stopped"
     state.update(
         {
             "desired": "stopped",
             "status": "stopping" if verified else "stopped",
+            "stop_deadline": (state.get("stop_deadline") if already_stopping else time.time() + timeout)
+            if verified else None,
         }
     )
+    state.pop("error", None)
     _write_state(state_path, state)
     if verified:
         try:
             os.kill(wrapper["pid"], signal.SIGTERM)
         except ProcessLookupError:
             state["status"] = "stopped"
+            state["stop_deadline"] = None
             _write_state(state_path, state)
+        except OSError as exc:
+            state.update({"status": "stop-failed", "stop_deadline": None,
+                          "error": "Could not stop this process. Retry stopping it."})
+            _write_state(state_path, state)
+            raise ServiceSignalError("Could not signal verified service wrapper") from exc
 
 
-def stop_services(plugin_id: str) -> None:
+def stop_services(plugin_id: str) -> list[str]:
     """Signal only verified wrappers belonging to the named plugin."""
     if not _ID.fullmatch(plugin_id):
         raise ValueError("Invalid plugin id")
-    run_dir = Path.home() / ".kollab" / "plugin-data" / plugin_id / "run"
+    data_dir = Path.home() / ".kollab" / "plugin-data"
+    run_dir = data_dir / plugin_id / "run"
+    if any(path.is_symlink() for path in (data_dir, data_dir / plugin_id, run_dir)):
+        logger.warning("Refusing to inspect symlinked service run directory for %s", plugin_id)
+        return ["run directory"]
+    failures = []
     for pid_path in run_dir.glob("*.pid"):
         try:
+            # Record the shutdown interval for the inventory before signalling.
+            control_service(plugin_id, pid_path.stem, "stop")
+            continue
+        except ServiceSignalError as exc:
+            failures.append(pid_path.stem)
+            logger.warning("Could not stop service %s: %s", pid_path.name, exc)
+            continue
+        except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            # Stopping a verified wrapper remains necessary even when its files
+            # or state are damaged; never let a display failure orphan it.
+            failures.append(pid_path.stem)
+            logger.warning("Could not record stop for service %s: %s", pid_path.name, exc)
+        signalled = False
+        try:
+            if pid_path.is_symlink():
+                raise ValueError("Service pid file may not be a symlink")
             identity = json.loads(pid_path.read_text(encoding="utf-8"))
             wrapper = identity.get("wrapper")
             if _verified_wrapper(wrapper):
                 os.kill(wrapper["pid"], signal.SIGTERM)
+                signalled = True
             elif _identity_alive(wrapper, wrapper=True):
                 logger.warning("Refusing to signal unverifiable wrapper for %s", pid_path.name)
         except ProcessLookupError:
+            failures.remove(pid_path.stem)
             continue
         except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
             logger.warning("Could not stop service %s: %s", pid_path.name, exc)
+        state_path = run_dir / f"{pid_path.stem}.state"
+        try:
+            if state_path.is_symlink():
+                raise ValueError("Service state file may not be a symlink")
+            state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+            if not isinstance(state, dict):
+                raise ValueError("Invalid service state")
+            state.update({"desired": "stopped", "status": "stopping" if signalled else "stop-failed",
+                          "stop_deadline": None,
+                          "error": "Could not verify the stop. Check the process before retrying."})
+            _write_state(state_path, state)
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning("Could not record failed stop for %s: %s", pid_path.name, exc)
+    return failures
 
 
 async def supervise_services(*, engine_url: str | None = None) -> None:

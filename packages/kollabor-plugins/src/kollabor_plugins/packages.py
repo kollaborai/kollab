@@ -223,9 +223,11 @@ def resolve_git_commit(url: str, ref: str | None) -> str:
     return commit
 
 
-def files_sha256(root: Path) -> str:
-    """Hash relative paths, entry types, executable bits, and file contents."""
+def _hash_files(root: Path, capture: Path | None = None) -> tuple[str, bytes | None]:
     root = Path(root).resolve()
+    if capture is not None and not capture.is_relative_to(root):
+        raise ValueError("Asset is outside plugin folder")
+    captured = None
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix()):
         relative = path.relative_to(root).as_posix().encode("utf-8")
@@ -239,6 +241,8 @@ def files_sha256(root: Path) -> str:
         elif path.is_file():
             entry_type = b"x" if path.stat().st_mode & 0o111 else b"f"
             content = path.read_bytes()
+            if path == capture:
+                captured = content
         else:
             raise ValueError("Unsupported file type in plugin")
         digest.update(entry_type)
@@ -246,7 +250,20 @@ def files_sha256(root: Path) -> str:
         digest.update(relative)
         digest.update(len(content).to_bytes(8, "big"))
         digest.update(content)
-    return digest.hexdigest()
+    return digest.hexdigest(), captured
+
+
+def files_sha256(root: Path) -> str:
+    """Hash relative paths, entry types, executable bits, and file contents."""
+    return _hash_files(root)[0]
+
+
+def files_sha256_with_asset(root: Path, asset: Path) -> tuple[str, bytes]:
+    """Return the package hash and the exact asset bytes included in that hash."""
+    digest, captured = _hash_files(root, Path(asset))
+    if captured is None:
+        raise ValueError("Asset is not a regular file in plugin folder")
+    return digest, captured
 
 
 def stage_git_source(source: str, stage: Path, kollab_version: str) -> dict:
@@ -294,6 +311,32 @@ def _read_registry(path: Path) -> dict:
     if not isinstance(data, dict) or not isinstance(data.get("plugins"), dict) or not isinstance(data.get("dev"), dict):
         raise ValueError("Invalid plugin registry")
     return data
+
+
+_MAX_ENABLE_ORDER = (1 << 53) - 1  # Exactly representable in the browser's Number type.
+
+
+def _set_enable_order(registry: dict, plugin_id: str, enabled: bool) -> None:
+    """Update durable command priority while holding the plugin registry lock."""
+    current = registry.get("enable_order", {})
+    counter = registry.get("enable_counter", 0)
+    if not isinstance(current, dict) or type(counter) is not int or not 0 <= counter <= _MAX_ENABLE_ORDER:
+        raise ValueError("Invalid plugin enable order")
+    if any(
+        not isinstance(key, str) or type(value) is not int or not 0 < value <= _MAX_ENABLE_ORDER
+        for key, value in current.items()
+    ):
+        raise ValueError("Invalid plugin enable order")
+    order = dict(current)
+    if enabled:
+        counter = max(counter, *order.values(), 0) + 1
+        if counter > _MAX_ENABLE_ORDER:
+            raise ValueError("Plugin enable order exhausted")
+        order[plugin_id] = counter
+    else:
+        order.pop(plugin_id, None)
+    registry["enable_order"] = order
+    registry["enable_counter"] = counter
 
 
 def _write_json(path: Path, data: dict) -> None:
@@ -395,6 +438,8 @@ def install_stage(stage: Path, staged: dict, commit: str, digest: str, *, expect
                 "updated": now,
             }
             next_registry = {**registry, "plugins": {**registry["plugins"], plugin_id: record}}
+            if record["enabled"] and (not isinstance(prior, dict) or not prior.get("enabled")):
+                _set_enable_order(next_registry, plugin_id, True)
             _write_json(registry_path, next_registry)
             transaction["committed"] = True
             _write_json(journal, transaction)
@@ -434,7 +479,9 @@ def remove_package(plugin_id: str, *, expected_record: dict, purge: bool = False
             os.replace(live, old)
             next_plugins = dict(registry["plugins"])
             del next_plugins[plugin_id]
-            _write_json(registry_path, {**registry, "plugins": next_plugins})
+            next_registry = {**registry, "plugins": next_plugins}
+            _set_enable_order(next_registry, plugin_id, False)
+            _write_json(registry_path, next_registry)
             transaction["committed"] = True
             _write_json(journal, transaction)
             _recover_locked(home)
