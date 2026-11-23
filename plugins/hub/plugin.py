@@ -696,6 +696,9 @@ class HubPlugin(BasePlugin):
         self._startup_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._mailbox_task: Optional[asyncio.Task] = None
+        self._shutdown_in_progress = False
+        self._shutdown_complete = False
+        self._stop_watchdog_task: Optional[asyncio.Task] = None
         self._mailbox_stop_event = asyncio.Event()
         self._accepting_messages = True
         self._dreaming_task: Optional[asyncio.Task] = None
@@ -4642,6 +4645,14 @@ class HubPlugin(BasePlugin):
             f"{identity}: self-restart watchdog fired, "
             f"forcing execvp after graceful shutdown timeout"
         )
+        if not getattr(self, "_shutdown_complete", False):
+            logger.error(
+                "%s: refusing self-restart because queue/provider cleanup "
+                "was not confirmed",
+                identity,
+            )
+            os._exit(1)
+            return
         if not self._claim_self_restart_exec():
             return
         try:
@@ -4669,9 +4680,15 @@ class HubPlugin(BasePlugin):
             # The normal self-stop path exits from shutdown after cleanup.
             # Restart must preserve that cleanup but return so execvp can
             # replace the process image instead of terminating it.
-            await self.shutdown(exit_process=False)
+            if not await self.shutdown(exit_process=False):
+                logger.error(
+                    "Self-restart deferred because queue/provider cleanup "
+                    "was not confirmed"
+                )
+                return
         except Exception as e:
-            logger.error(f"Self-restart: shutdown error (continuing to exec): {e}")
+            logger.error(f"Self-restart: shutdown error; preserving process: {e}")
+            return
 
         self._cancel_self_restart_watchdog()
         if not self._claim_self_restart_exec():
@@ -15537,34 +15554,16 @@ class HubPlugin(BasePlugin):
         else:
             # Single agent
             if target == self._identity.identity:
-                # Self-stop: schedule clean shutdown + watchdog exit.
-                # The shutdown coroutine tries graceful teardown (save
-                # vault, release socket, announce departure) and calls
-                # os._exit(0) at the end. If it hangs on an await (e.g.
-                # stale peer socket, signal_shutdown timeout), the
-                # watchdog kills the process after 8s so self-stop is
-                # always terminal — matches the operator's mental model of
-                # "hub_stop means die."
+                # Let the application own provider shutdown ordering. Its
+                # cleanup gate must settle the WebUI queue worker before any
+                # provider teardown or clean process exit.
                 logger.info(
                     f"{self._identity.identity} requested self-stop via hub_stop"
                 )
-                self._self_stop_requested = True
-                asyncio.ensure_future(self.shutdown())
-
-                identity = self._identity
-
-                async def _self_stop_watchdog() -> None:
-                    try:
-                        await asyncio.sleep(8.0)
-                    except asyncio.CancelledError:
-                        return
-                    logger.warning(
-                        f"{identity.identity}: self-stop watchdog fired, "
-                        f"forcing os._exit after graceful shutdown timeout"
-                    )
-                    os._exit(0)
-
-                asyncio.ensure_future(_self_stop_watchdog())
+                self._begin_hub_stop(
+                    timeout=8.0,
+                    reason=f"self-stop requested by {self._identity.identity}",
+                )
                 return f"{self._identity.identity} shutting down..."
 
             # Scan without cleanup so we can still find dying agents
@@ -18271,60 +18270,113 @@ class HubPlugin(BasePlugin):
         """
         logger.info(f"Remote shutdown received: {reason}")
         try:
-            self._self_stop_requested = True
-
-            async def _remote_stop_watchdog() -> None:
-                try:
-                    await asyncio.sleep(REMOTE_SHUTDOWN_WATCHDOG_SECONDS)
-                except asyncio.CancelledError:
-                    return
-                logger.warning(
-                    "%s: remote-stop watchdog fired, forcing os._exit",
-                    self._identity.identity if self._identity else "agent",
-                )
-                os._exit(0)
-
-            asyncio.ensure_future(_remote_stop_watchdog())
-
-            app = self.event_bus.get_service("app") if self.event_bus else None
-            if app and hasattr(app, "running"):
-                app.running = False
-
-            # Cancel the main tasks so the event loop unblocks.
-            # This lets the finally: cleanup() chain run, which calls
-            # plugin.shutdown() for vault save + presence removal.
-            if app and hasattr(app, "_background_tasks"):
-                for task in list(app._background_tasks):
-                    if not task.done():
-                        task.cancel()
-
-            # Use the same terminal path as self-stop: run hub cleanup,
-            # remove presence/socket, then os._exit at the end. Detached
-            # agents may be blocked on stdin, so waiting for the app loop to
-            # wander into cleanup makes stop feel hung.
-            asyncio.ensure_future(self.shutdown())
+            self._begin_hub_stop(
+                timeout=REMOTE_SHUTDOWN_WATCHDOG_SECONDS,
+                reason=f"remote stop: {reason}" if reason else "remote stop",
+            )
         except Exception as e:
             logger.error(f"Failed to trigger shutdown: {e}")
 
-    async def shutdown(self, *, exit_process: bool = True) -> None:
-        """Clean shutdown - save vault, remove presence, close socket, release lock."""
-        # Guard against re-entry (SIGINT can fire multiple times during shutdown)
-        if getattr(self, "_shutdown_in_progress", False):
+    def _begin_hub_stop(self, *, timeout: float, reason: str) -> None:
+        """Request application cleanup, with a bounded failed-stop fallback."""
+        self._self_stop_requested = True
+        identity = self._identity.identity if self._identity else "agent"
+        self._schedule_stop_watchdog(timeout=timeout, identity=identity)
+
+        app = self.event_bus.get_service("app") if self.event_bus else None
+        if app is not None and hasattr(app, "running"):
+            app.running = False
+            current_task = asyncio.current_task()
+            for task in list(getattr(app, "_background_tasks", ()) or ()):
+                if task is not current_task and not task.done():
+                    task.cancel()
+            logger.info("Hub stop handed to application cleanup: %s", reason)
             return
+
+        # A standalone HubPlugin still retries within the same watchdog
+        # budget. A failed close leaves providers alive and the watchdog can
+        # only report a forced, nonzero exit after that bounded interval.
+        asyncio.ensure_future(self._retry_shutdown_until_deadline(timeout))
+
+    def _schedule_stop_watchdog(self, *, timeout: float, identity: str) -> None:
+        existing = getattr(self, "_stop_watchdog_task", None)
+        if isinstance(existing, asyncio.Task) and not existing.done():
+            return
+
+        async def watchdog() -> None:
+            try:
+                await asyncio.sleep(timeout)
+            except asyncio.CancelledError:
+                return
+            if getattr(self, "_shutdown_complete", False):
+                return
+            logger.error(
+                "%s: Hub stop grace period expired before queue/provider cleanup "
+                "was confirmed; forcing nonzero process exit",
+                identity,
+            )
+            os._exit(1)
+
+        self._stop_watchdog_task = asyncio.create_task(
+            watchdog(), name="hub-stop-watchdog"
+        )
+
+    def _cancel_stop_watchdog(self) -> None:
+        task = getattr(self, "_stop_watchdog_task", None)
+        current_task = asyncio.current_task()
+        if (
+            isinstance(task, asyncio.Task)
+            and task is not current_task
+            and not task.done()
+        ):
+            task.cancel()
+
+    async def _retry_shutdown_until_deadline(self, timeout: float) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not getattr(self, "_shutdown_complete", False):
+            try:
+                if await self.shutdown():
+                    return
+            except Exception:
+                logger.warning("Hub shutdown retry failed", exc_info=True)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(0.1, remaining))
+
+    async def shutdown(self, *, exit_process: bool = True) -> bool:
+        """Run retryable Hub cleanup and report whether it completed."""
+        if getattr(self, "_shutdown_complete", False):
+            return True
+        # Guard against re-entry (SIGINT can fire multiple times during shutdown).
+        if getattr(self, "_shutdown_in_progress", False):
+            return False
         self._shutdown_in_progress = True
+        try:
+            return await self._shutdown_impl(exit_process=exit_process)
+        finally:
+            self._shutdown_in_progress = False
+
+    async def _shutdown_impl(self, *, exit_process: bool) -> bool:
+        """Clean shutdown - save vault, remove presence, close socket, release lock."""
         await self.stop_message_intake()
         queue_runtime = getattr(self, "_web_message_queue_runtime", None)
         if queue_runtime is not None:
             try:
                 closed = await queue_runtime.close()
-                if not closed:
-                    logger.warning(
-                        "WebUI queue worker did not confirm clean shutdown"
-                    )
             except Exception:
                 logger.warning(
-                    "WebUI queue worker shutdown failed", exc_info=True
+                    "WebUI queue worker shutdown failed; Hub teardown remains pending",
+                    exc_info=True,
                 )
+                return False
+            if closed is not True:
+                logger.warning(
+                    "WebUI queue worker did not confirm clean shutdown; "
+                    "Hub providers remain open"
+                )
+                return False
         runtime = getattr(self, "_acp_hub_tools", None)
         if runtime is not None:
             runtime.stop()
@@ -18638,6 +18690,8 @@ class HubPlugin(BasePlugin):
                     pass
 
         logger.info("Hub plugin shut down")
+        self._shutdown_complete = True
+        self._cancel_stop_watchdog()
 
         # If this was a self-stop request, exit the process after clean teardown
         if getattr(self, "_self_stop_requested", False) and exit_process:
@@ -18645,3 +18699,4 @@ class HubPlugin(BasePlugin):
                 f"{self._identity.identity}: self-stop complete, exiting process"
             )
             os._exit(0)
+        return True
