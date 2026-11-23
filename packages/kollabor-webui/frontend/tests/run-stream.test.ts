@@ -247,3 +247,29 @@ test("end finishes after a complete event followed by an empty source chunk", as
 
   assert.deepEqual(result, { kind: "value", text: FINISH });
 });
+
+test("an oversized unterminated SSE line fails within the decoder's bound", async () => {
+  const limit = 16 * 1024 * 1024;
+  const bytes = new Uint8Array(limit + 1);
+  bytes.set(new TextEncoder().encode("data: "));
+  let cancelled = false;
+  const source = new ReadableStream<Uint8Array>({
+    start: (controller) => controller.enqueue(bytes),
+    cancel: () => { cancelled = true; },
+  });
+  const reader = endableStream(source).stream.getReader();
+  const result = await Promise.race([
+    reader.read().then(
+      ({ done }) => ({ kind: done ? "done" : "value" }),
+      (error: Error) => ({ kind: "error", message: error.message }),
+    ),
+    new Promise<{ kind: string }>((resolve) =>
+      setTimeout(() => resolve({ kind: "stalled" }), 1500),
+    ),
+  ]);
+  await reader.cancel().catch(() => undefined);
+
+  assert.equal(result.kind, "error", "the wrapper rejects instead of waiting for a delimiter");
+  assert.match("message" in result ? result.message : "", /SSE event exceeds/);
+  assert.equal(cancelled, true, "the oversized source is cancelled");
+});
