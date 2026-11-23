@@ -36,6 +36,10 @@ from .web_message_queue_worker import (
 logger = logging.getLogger(__name__)
 _TURN_IDLE_RETRY_SECONDS = 2.0
 _TURN_IDLE_RETRY_INTERVAL_SECONDS = 0.025
+# ACP emits turn_complete before awaiting its Hub completion callback, which is
+# bounded to 10 seconds by the orchestrator. Keep the queue wake attached to
+# that task's settlement, with a small scheduling margin.
+_ACP_COMPLETION_SETTLE_SECONDS = 10.5
 
 
 def _attachment_resolver(
@@ -106,6 +110,7 @@ class WebMessageQueueRuntime:
     ] = field(default_factory=dict, repr=False)
     _supervisor_task: asyncio.Task[None] | None = field(default=None, repr=False)
     _turn_idle_retry_task: asyncio.Task[None] | None = field(default=None, repr=False)
+    _turn_complete_generation: int = field(default=0, repr=False)
     _close_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _event_loop: asyncio.AbstractEventLoop | None = field(default=None, repr=False)
     _display_tap: Any = field(default=None, repr=False)
@@ -201,6 +206,7 @@ class WebMessageQueueRuntime:
     def _on_turn_complete(self) -> None:
         if self._closing:
             return
+        self._turn_complete_generation += 1
         self.wake_all()
         if not self._is_processing():
             return
@@ -212,16 +218,57 @@ class WebMessageQueueRuntime:
                     self._retry_until_idle(), name="web_message_queue_idle_retry"
                 )
 
+    def _active_acp_completion_tasks(self) -> tuple[asyncio.Future[Any], ...]:
+        llm = getattr(self.state_service, "_llm_service", None)
+        active = getattr(llm, "_active_acp", None)
+        if not callable(active):
+            return ()
+        try:
+            orchestrator = active()
+            tasks = getattr(orchestrator, "_completion_tasks", ())
+            return tuple(
+                task
+                for task in tasks
+                if isinstance(task, asyncio.Future) and not task.done()
+            )
+        except Exception:
+            logger.debug("WebUI queue could not inspect ACP completion tasks", exc_info=True)
+            return ()
+
     async def _retry_until_idle(self) -> None:
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + _TURN_IDLE_RETRY_SECONDS
+        generation = self._turn_complete_generation
+        pending = self._active_acp_completion_tasks()
+        deadline = loop.time() + (
+            _ACP_COMPLETION_SETTLE_SECONDS if pending else _TURN_IDLE_RETRY_SECONDS
+        )
         try:
-            while (
-                not self._closing
-                and self._is_processing()
-                and loop.time() < deadline
-            ):
-                await asyncio.sleep(_TURN_IDLE_RETRY_INTERVAL_SECONDS)
+            while not self._closing and self._is_processing():
+                pending = self._active_acp_completion_tasks()
+                if generation != self._turn_complete_generation:
+                    generation = self._turn_complete_generation
+                    deadline = max(
+                        deadline,
+                        loop.time()
+                        + (
+                            _ACP_COMPLETION_SETTLE_SECONDS
+                            if pending
+                            else _TURN_IDLE_RETRY_SECONDS
+                        ),
+                    )
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                if pending:
+                    await asyncio.wait(
+                        pending,
+                        timeout=remaining,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                else:
+                    await asyncio.sleep(
+                        min(_TURN_IDLE_RETRY_INTERVAL_SECONDS, remaining)
+                    )
             if not self._closing and not self._is_processing():
                 self.wake_all()
         except asyncio.CancelledError:
