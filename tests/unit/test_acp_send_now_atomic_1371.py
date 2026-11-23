@@ -42,18 +42,25 @@ async def test_injected_send_keeps_client_request_and_joined_turn_owner():
 @pytest.mark.asyncio
 async def test_send_now_admits_and_prioritizes_before_fencing_same_turn_cancel():
     calls = []
-    admission = SimpleNamespace(
-        request_id="client-B",
-        turn_id=13,
-        future=asyncio.get_running_loop().create_future(),
-    )
     owner = SimpleNamespace(request_id="active-A")
-    runner = SimpleNamespace(
-        _active_context=owner,
-        _active_turn_id=12,
-        _active_generation=7,
-        session_id="session-A",
-    )
+    runner = ACPRunner(ACPProfile("atomic-send-now", ("unused",)))
+    runner.session_id = "session-A"
+    runner.generation = 7
+    runner._connection = object()
+    runner._next_turn_id = 12
+    runner._active_context = owner
+    runner._active_turn_id = 12
+    runner._active_generation = 7
+    older = SimpleNamespace(request_id="older-queued")
+    runner._queue.put_nowait(older)
+    release_active = asyncio.Event()
+
+    async def active_turn():
+        await release_active.wait()
+
+    active_task = asyncio.create_task(active_turn())
+    runner._active_rpc_task = active_task
+    runner._active_future = asyncio.get_running_loop().create_future()
 
     class ACP:
         active = True
@@ -70,30 +77,43 @@ async def test_send_now_admits_and_prioritizes_before_fencing_same_turn_cancel()
         def admit(self, _message, **kwargs):
             calls.append("admit")
             assert kwargs["request_id"] == "client-B"
-            return admission
+            return runner.admit(_message, **kwargs)
 
         def prioritize_queued(self, admitted):
             calls.append("prioritize")
-            assert admitted is admission
-            return True
+            return runner.prioritize_queued(admitted)
 
         def prepare_cancel(self, *, session_id, generation):
             calls.append("prepare_cancel")
             assert (session_id, generation) == ("session-A", 7)
-            return True
+            return runner.prepare_cancel(
+                expected_session_id=session_id,
+                expected_generation=generation,
+            )
 
         def schedule_prepared_cancel(self, *, session_id, generation):
             calls.append("schedule_cancel")
             assert (session_id, generation) == ("session-A", 7)
 
-    result = await _service()._admit_acp(
-        ACP(),
-        {"message": "message B", "request_id": "client-B", "send_now": True},
-        "state_rpc",
-    )
+    try:
+        result = await _service()._admit_acp(
+            ACP(),
+            {"message": "message B", "request_id": "client-B", "send_now": True},
+            "state_rpc",
+        )
 
-    assert result == {"status": "queued", "request_id": "client-B", "turn_id": 13}
-    assert calls == ["steer", "admit", "prioritize", "prepare_cancel", "schedule_cancel"]
+        assert result == {"status": "queued", "request_id": "client-B", "turn_id": 13}
+        assert calls == ["steer", "admit", "prioritize", "prepare_cancel", "schedule_cancel"]
+        queued = tuple(runner._queue._queue)
+        assert [item.request_id for item in queued] == ["client-B", "older-queued"]
+        assert runner._cancel_hold is True
+    finally:
+        runner._cancel_hold = False
+        runner._cancel_target = None
+        runner._cancel_active_task = None
+        runner._queue_release.set()
+        active_task.cancel()
+        await asyncio.gather(active_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -159,3 +179,113 @@ async def test_runner_prioritizes_exact_admission_without_dropping_waiting_turns
     assert runner._queue.get_nowait() is send_now
     assert runner._queue.get_nowait() is first
     assert runner._queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_send_now_keeps_one_admission_when_cancel_fence_is_refused():
+    admitted = []
+    calls = []
+    runner = SimpleNamespace(
+        _active_context=SimpleNamespace(request_id="active-A"),
+        _active_turn_id=12,
+        _active_generation=7,
+        session_id="session-A",
+    )
+    admission = SimpleNamespace(
+        request_id="client-B", turn_id=13,
+        future=asyncio.get_running_loop().create_future(),
+    )
+
+    class ACP:
+        active = True
+        supports_image_input = False
+        voice_rules_epochs = set()
+
+        def __init__(self):
+            self.runner = runner
+
+        async def steer(self, *_args, **_kwargs):
+            return False
+
+        def admit(self, *_args, **_kwargs):
+            admitted.append(admission)
+            return admission
+
+        def prioritize_queued(self, item):
+            assert item is admission
+            return True
+
+        def prepare_cancel(self, **_kwargs):
+            calls.append("prepare")
+            return False
+
+        def schedule_prepared_cancel(self, **_kwargs):
+            calls.append("schedule")
+
+    result = await _service()._admit_acp(
+        ACP(),
+        {"message": "message B", "request_id": "client-B", "send_now": True},
+        "state_rpc",
+    )
+
+    assert result["status"] == "queued"
+    assert admitted == [admission]
+    assert calls == ["prepare"]
+
+
+@pytest.mark.asyncio
+async def test_send_now_does_not_resubmit_after_ambiguous_cancel_task():
+    admitted = []
+    runner = SimpleNamespace(
+        _active_context=SimpleNamespace(request_id="active-A"),
+        _active_turn_id=12,
+        _active_generation=7,
+        session_id="session-A",
+    )
+    admission = SimpleNamespace(
+        request_id="client-B", turn_id=13,
+        future=asyncio.get_running_loop().create_future(),
+    )
+    cancel_tasks = []
+
+    async def ambiguous_cancel():
+        raise TimeoutError("cancel receipt was lost")
+
+    class ACP:
+        active = True
+        supports_image_input = False
+        voice_rules_epochs = set()
+
+        def __init__(self):
+            self.runner = runner
+
+        async def steer(self, *_args, **_kwargs):
+            return False
+
+        def admit(self, *_args, **_kwargs):
+            admitted.append(admission)
+            return admission
+
+        def prioritize_queued(self, item):
+            assert item is admission
+            return True
+
+        def prepare_cancel(self, **_kwargs):
+            return True
+
+        def schedule_prepared_cancel(self, **_kwargs):
+            task = asyncio.create_task(ambiguous_cancel())
+            cancel_tasks.append(task)
+            return True
+
+    result = await _service()._admit_acp(
+        ACP(),
+        {"message": "message B", "request_id": "client-B", "send_now": True},
+        "state_rpc",
+    )
+    assert result["status"] == "queued"
+    assert admitted == [admission]
+
+    with pytest.raises(TimeoutError, match="receipt was lost"):
+        await cancel_tasks[0]
+    assert admitted == [admission], "ambiguous cancellation must not resend the user message"
