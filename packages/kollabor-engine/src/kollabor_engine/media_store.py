@@ -15,13 +15,16 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import re
 import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Tuple, TypeVar
+
+from kollabor_config.file_lock import locked_file
 
 # What a sent image may be, and how big decoded bytes may be. The cap guards
 # the engine's disk and the browser's memory, not the LLM seam (the daemon
@@ -38,6 +41,7 @@ MAX_DECODED_BYTES = 10 * 1024 * 1024
 
 REF_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{4}$")
 INDEX_NAME = "index.json"
+_IndexResult = TypeVar("_IndexResult")
 
 
 class MediaError(ValueError):
@@ -49,6 +53,7 @@ class MediaRecord:
     ref: str
     mime: str
     ts: float
+    sha256: str
 
 
 def session_media_dir(conversations_dir: Path, session_id: str) -> Path:
@@ -85,6 +90,22 @@ def _write_index(
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(entries, indent=1))
     temporary.replace(path)
+
+
+def _modify_index(
+    conversations_dir: Path,
+    session_id: str,
+    update: Callable[[List[Dict[str, object]]], _IndexResult],
+) -> _IndexResult:
+    """Serialize one read/modify/replace of a session media index."""
+    index_path = _index_path(conversations_dir, session_id)
+    index_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_path = index_path.with_name(f".{INDEX_NAME}.lock")
+    with locked_file(lock_path, "a+", private=True):
+        entries = _read_index(conversations_dir, session_id)
+        result = update(entries)
+        _write_index(conversations_dir, session_id, entries)
+        return result
 
 
 def decode_data_url(data_url: str) -> Tuple[str, bytes]:
@@ -130,10 +151,23 @@ def save(
     temporary.write_bytes(decoded)
     temporary.replace(target)
 
-    record = MediaRecord(ref=ref, mime=MIME_BY_EXT[ext], ts=time.time())
-    entries = _read_index(conversations_dir, session_id)
-    entries.append({"ref": record.ref, "mime": record.mime, "ts": record.ts})
-    _write_index(conversations_dir, session_id, entries)
+    record = MediaRecord(
+        ref=ref,
+        mime=MIME_BY_EXT[ext],
+        ts=time.time(),
+        sha256=hashlib.sha256(decoded).hexdigest(),
+    )
+    def add_record(entries: List[Dict[str, object]]) -> None:
+        entries.append(
+            {
+                "ref": record.ref,
+                "mime": record.mime,
+                "ts": record.ts,
+                "sha256": record.sha256,
+            }
+        )
+
+    _modify_index(conversations_dir, session_id, add_record)
     return record
 
 
@@ -150,11 +184,106 @@ def record_failed(
     per attempted part, so count and store stay aligned; listing and
     binding skip it.
     """
-    entries = _read_index(conversations_dir, session_id)
-    entries.append(
-        {"ref": "", "mime": mime, "ts": time.time(), "failed": True}
-    )
-    _write_index(conversations_dir, session_id, entries)
+    def add_failure(entries: List[Dict[str, object]]) -> None:
+        entries.append(
+            {"ref": "", "mime": mime, "ts": time.time(), "failed": True}
+        )
+
+    _modify_index(conversations_dir, session_id, add_failure)
+
+
+def bind_queue_handoff(
+    conversations_dir: Path,
+    session_id: str,
+    *,
+    request_id: str,
+    history_row_uuid: str,
+    source_media_refs: Tuple[Tuple[str, str], ...],
+) -> Tuple[Dict[str, object], ...]:
+    """Bind verified media refs to one exact queued request and history row.
+
+    This updates the existing per-session media index. It is idempotent for an
+    identical binding and rejects legacy or damaged entries without a digest.
+    """
+    if not isinstance(request_id, str) or not request_id or len(request_id) > 256:
+        raise MediaError("queue handoff request id is invalid")
+    if (
+        not isinstance(history_row_uuid, str)
+        or not history_row_uuid
+        or len(history_row_uuid) > 256
+    ):
+        raise MediaError("queue handoff history row id is invalid")
+    if (
+        not isinstance(source_media_refs, tuple)
+        or not source_media_refs
+        or len(source_media_refs) > 20
+    ):
+        raise MediaError("queue handoff media references are invalid")
+    pairs: List[Tuple[str, str]] = []
+    for pair in source_media_refs:
+        if (
+            not isinstance(pair, tuple)
+            or len(pair) != 2
+            or any(not isinstance(value, str) or not value or len(value) > 128 for value in pair)
+        ):
+            raise MediaError("queue handoff media references are invalid")
+        pairs.append((pair[0], pair[1]))
+    source_refs = tuple(source for source, _media in pairs)
+    media_refs = tuple(media for _source, media in pairs)
+    if len(set(source_refs)) != len(source_refs) or len(set(media_refs)) != len(media_refs):
+        raise MediaError("queue handoff media references are duplicated")
+
+    def bind(entries: List[Dict[str, object]]) -> Tuple[Dict[str, object], ...]:
+        if any(not isinstance(entry, dict) for entry in entries):
+            raise MediaError("queue handoff media index is malformed")
+        entry_positions: Dict[str, int] = {}
+        for index, entry in enumerate(entries):
+            ref = entry.get("ref")
+            if isinstance(ref, str) and ref:
+                if ref in entry_positions:
+                    raise MediaError("queue handoff media index has duplicate refs")
+                entry_positions[ref] = index
+
+        bound: List[Dict[str, object]] = []
+        for order, (source_ref, media_ref) in enumerate(pairs):
+            position = entry_positions.get(media_ref)
+            if position is None:
+                raise MediaError("queue handoff media ref is missing")
+            entry = entries[position]
+            digest = entry.get("sha256")
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise MediaError("queue handoff media digest is unavailable")
+            data, _mime = open_media(conversations_dir, media_ref)
+            if hashlib.sha256(data).hexdigest() != digest:
+                raise MediaError("queue handoff media integrity check failed")
+            expected = {
+                "queue_request_id": request_id,
+                "queue_source_ref": source_ref,
+                "history_row_uuid": history_row_uuid,
+                "queue_attachment_index": order,
+            }
+            for key, value in expected.items():
+                if key in entry and entry[key] != value:
+                    raise MediaError("queue handoff media binding conflicts")
+            entry.update(expected)
+            bound.append(
+                {
+                    "source_ref": source_ref,
+                    "ref": media_ref,
+                    "mime": entry.get("mime"),
+                    "sha256": digest,
+                    "index": order,
+                }
+            )
+        for entry in entries:
+            if (
+                entry.get("queue_request_id") == request_id
+                and entry.get("history_row_uuid") != history_row_uuid
+            ):
+                raise MediaError("queue handoff request is bound to another row")
+        return tuple(bound)
+
+    return _modify_index(conversations_dir, session_id, bind)
 
 
 def open_media(conversations_dir: Path, ref: str) -> Tuple[bytes, str]:
@@ -170,7 +299,26 @@ def open_media(conversations_dir: Path, ref: str) -> Tuple[bytes, str]:
     mime = MIME_BY_EXT.get(ext)
     if not mime:
         raise FileNotFoundError(ref)
-    return path.read_bytes(), mime
+    data = path.read_bytes()
+    # Older indexes predate content digests; continue to serve those media, but
+    # every record written by this version is checked before it can be used as
+    # durable attachment evidence.
+    indexed = [
+        entry
+        for entry in _read_index(Path(conversations_dir), path.parent.name)
+        if entry.get("ref") == ref
+    ]
+    if len(indexed) > 1:
+        raise MediaError("media integrity check failed: duplicate index refs")
+    if indexed and "sha256" in indexed[0]:
+        expected = indexed[0].get("sha256")
+        if (
+            not isinstance(expected, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected) is None
+            or hashlib.sha256(data).hexdigest() != expected
+        ):
+            raise MediaError("media integrity check failed")
+    return data, mime
 
 
 def list_for(conversations_dir: Path, session_id: str) -> List[Dict[str, object]]:
@@ -273,6 +421,43 @@ def attach_media_to_rows(
             continue
         tokens = count_image_tokens(row.get("content"))
         if not tokens:
+            continue
+        metadata = row.get("metadata")
+        handoff = metadata.get("queue_handoff") if isinstance(metadata, dict) else None
+        if isinstance(handoff, dict):
+            request_id = handoff.get("request_id")
+            if (
+                not isinstance(request_id, str)
+                or not request_id
+                or (row.get("sessionId") is not None and row.get("sessionId") != session_id)
+            ):
+                continue
+            handoff_entries = [
+                entry for entry in entries
+                if entry.get("queue_request_id") == request_id
+            ]
+            handoff_entries.sort(
+                key=lambda entry: entry.get("queue_attachment_index", -1)
+                if isinstance(entry.get("queue_attachment_index"), int)
+                and not isinstance(entry.get("queue_attachment_index"), bool)
+                else -1
+            )
+            if (
+                len(handoff_entries) != tokens
+                or any(
+                    entry.get("history_row_uuid") != row.get("uuid")
+                    or not isinstance(entry.get("queue_source_ref"), str)
+                    or not entry.get("queue_source_ref")
+                    or not isinstance(entry.get("sha256"), str)
+                    or re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]) is None
+                    for entry in handoff_entries
+                )
+            ):
+                continue
+            row["media"] = [
+                {"ref": entry.get("ref"), "mime": entry.get("mime")}
+                for entry in handoff_entries
+            ]
             continue
         taken = entries[cursor : cursor + tokens]
         cursor += len(taken)

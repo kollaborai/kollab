@@ -750,9 +750,16 @@ class KollaborConversationLogger:
         content: str,
         parent_uuid: Optional[str] = None,
         user_context: Optional[Dict] = None,
+        *,
+        message_metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Log user message with intelligence features."""
+        """Log user message with intelligence features and trusted metadata."""
         message_uuid = str(uuid4())
+        logged_message: Dict[str, Any] = {"role": "user", "content": content}
+        if message_metadata is not None:
+            if not isinstance(message_metadata, dict):
+                raise TypeError("message metadata must be a mapping")
+            logged_message["metadata"] = deepcopy(message_metadata)
 
         message: Dict[str, Any] = {
             "parentUuid": parent_uuid,
@@ -767,7 +774,7 @@ class KollaborConversationLogger:
             ),
             "gitBranch": self._get_git_branch(),
             "type": "user",
-            "message": {"role": "user", "content": content},
+            "message": logged_message,
             "uuid": message_uuid,
             "timestamp": utc_stamp(),
             "kollabor_intelligence": {
