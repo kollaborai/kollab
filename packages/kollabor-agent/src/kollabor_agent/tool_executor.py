@@ -729,7 +729,106 @@ def _terminal_find_escapes_workspace(
                 return True
         return False
 
+    def contains_dynamic_command_name(text: str, depth: int = 0) -> bool:
+        """Fail closed when shell expansion can choose the executable name."""
+        if depth > 8:
+            return True
+        try:
+            lexer = shlex.shlex(
+                text.replace("\n", ";"), posix=True, punctuation_chars=";&|()"
+            )
+            lexer.whitespace_split = True
+            lexer.commenters = "#"
+            tokens = list(lexer)
+        except ValueError:
+            return True
+
+        commands: list[list[str]] = [[]]
+        for token in tokens:
+            if token and all(char in ";&|()" for char in token):
+                commands.append([])
+            else:
+                commands[-1].append(token)
+
+        command_prefixes = {
+            "bash",
+            "busybox",
+            "command",
+            "dash",
+            "doas",
+            "env",
+            "exec",
+            "fish",
+            "ksh",
+            "nice",
+            "nohup",
+            "sh",
+            "stdbuf",
+            "sudo",
+            "time",
+            "timeout",
+            "xargs",
+            "zsh",
+        }
+        control_words = {"if", "then", "else", "elif", "do", "!", "--"}
+        expansions = "$`{}*?[]~"
+        for words in commands:
+            index = 0
+            while index < len(words):
+                word = words[index]
+                if word in control_words or re.fullmatch(
+                    r"[A-Za-z_][A-Za-z0-9_]*=.*", word
+                ):
+                    index += 1
+                    continue
+                if any(marker in word for marker in expansions):
+                    return True
+                command_name = Path(word).name.lower()
+                if command_name in {
+                    "busybox",
+                    "doas",
+                    "nice",
+                    "stdbuf",
+                    "sudo",
+                    "timeout",
+                    "xargs",
+                } and any(
+                    marker in argument
+                    for argument in words[index + 1 :]
+                    for marker in expansions
+                ):
+                    return True
+                if command_name in {"bash", "dash", "fish", "ksh", "sh", "zsh"}:
+                    script_option = next(
+                        (
+                            position
+                            for position in range(index + 1, len(words))
+                            if words[position] == "-c"
+                            or (
+                                words[position].startswith("-")
+                                and "c" in words[position][1:]
+                            )
+                        ),
+                        None,
+                    )
+                    if (
+                        script_option is not None
+                        and script_option + 1 < len(words)
+                        and contains_dynamic_command_name(
+                            words[script_option + 1], depth + 1
+                        )
+                    ):
+                        return True
+                    break
+                if command_name in command_prefixes:
+                    index += 1
+                    continue
+                break
+        return False
+
     if not contains_find_token(command):
+        if contains_dynamic_command_name(command):
+            return True
         return False
     if _depth > 8:
         return True
