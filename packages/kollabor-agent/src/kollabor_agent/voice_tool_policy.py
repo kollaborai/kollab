@@ -118,6 +118,7 @@ _HARD_BLOCKED_GIT_FLAGS = frozenset(
         "--receive-pack",
         "--exec",
         "--open-files-in-pager",
+        "--paginate",
     }
 )
 # What a spoken yes may run besides the read-only commands. The user heard only the
