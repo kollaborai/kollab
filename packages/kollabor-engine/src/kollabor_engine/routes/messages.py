@@ -122,6 +122,11 @@ def _foreign_output(event: Dict[str, Any], request_ids: set[str], tagged: bool =
     return bool(named and request_ids) and not named & request_ids
 
 
+# A message id the page made that may name its send (#1359): letters, digits,
+# dashes and underscores (assistant-ui's ids, uuids).
+_CLIENT_REQUEST_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
 def _is_goal_message(content: Any) -> bool:
     """Recognize authored goal text without synthetic image placeholders."""
     if isinstance(content, str):
@@ -506,6 +511,30 @@ def _assistant_tool_result(command: Dict[str, Any]) -> tuple[str, Any, str, str]
     return tool_call_id, result, decision, scope
 
 
+def _assistant_permission_identity(messages: List[Dict[str, Any]], call_id: str) -> tuple[str, str]:
+    """Find the tool id and owner token on the exact permission call in client state."""
+    for message in messages:
+        content = message.get("content")
+        if message.get("role") != "assistant" or not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("toolCallId") != call_id:
+                continue
+            if part.get("toolName") != "request_permission":
+                continue
+            args = part.get("args")
+            if not isinstance(args, dict):
+                continue
+            tool_id = args.get("tool_id")
+            value = args.get("permission_id")
+            if not isinstance(value, str) or not value:
+                details = args.get("details")
+                value = details.get("permission_id") if isinstance(details, dict) else None
+            if isinstance(tool_id, str) and tool_id and isinstance(value, str) and value:
+                return tool_id, value
+    return "", ""
+
+
 async def _assistant_next_event(queue, controller, timeout=None):
     """Wait for either a daemon event or assistant-stream cancellation.
 
@@ -554,7 +583,7 @@ def _permission_result_from_event(event: Dict[str, Any]) -> Dict[str, Any]:
     }
     if "scope" in event or not event.get("vendor_saved"):
         result["scope"] = event.get("scope", "once")
-    for key in ("option_id", "vendor_saved", "warning"):
+    for key in ("option_id", "vendor_saved", "warning", "permission_id"):
         if key in event:
             result[key] = event[key]
     return result
@@ -620,6 +649,8 @@ def _assistant_update_message_state(
     parts: List[Dict[str, Any]],
     status: Optional[Dict[str, str]],
     submitted_media: Optional[List[List[Dict[str, str]]]] = None,
+    submitted_request_ids: Optional[List[str]] = None,
+    submitted_row_ids: Optional[List[Optional[str]]] = None,
 ) -> List[Dict[str, Any]]:
     """Persist the completed or interrupted turn in assistant-ui state.
 
@@ -664,9 +695,22 @@ def _assistant_update_message_state(
                 message["status"] = status
             return messages
 
+    # Row L + i after an L-row state, the id the web client gives its pending
+    # copy of message i and tracks while the send is in flight (#1356). A
+    # message the page drew before it sent it (it waited behind a running
+    # turn) names the row it has on screen, and keeps it (#1102): a row under
+    # a new id is taken down and built again. The name must be one of this
+    # session's send rows and free.
+    first_row = len(messages)
+    taken = {message.get("id") for message in messages}
+    named_row = re.compile(rf"user-{re.escape(session_id)}-\d+")
     for index, submitted_content in enumerate(submitted_contents):
+        row_id = submitted_row_ids[index] if submitted_row_ids and index < len(submitted_row_ids) else None
+        if not isinstance(row_id, str) or row_id in taken or named_row.fullmatch(row_id) is None:
+            row_id = f"user-{session_id}-{first_row + index}"
+        taken.add(row_id)
         row: Dict[str, Any] = {
-            "id": f"user-{session_id}-{len(messages) + index}",
+            "id": row_id,
             "role": "user",
             # Keep data URLs out of assistant-ui state/history. The image
             # was already handed to the daemon; the visible token is the
@@ -677,6 +721,9 @@ def _assistant_update_message_state(
         # renders thumbnails from these refs instead of the raw tokens.
         if submitted_media and index < len(submitted_media) and submitted_media[index]:
             row["media"] = submitted_media[index]
+        # The send this row is: its saved copy names the same id (#1359).
+        if submitted_request_ids and index < len(submitted_request_ids):
+            row["metadata"] = {"custom": {"requestId": submitted_request_ids[index]}}
         messages.append(row)
 
     assistant_message: Dict[str, Any] = {
@@ -693,14 +740,14 @@ def _assistant_update_message_state(
 def _assistant_align_streamed_ids(
     messages: List[Dict[str, Any]], history: List[Dict[str, Any]]
 ) -> bool:
-    """Rename this turn's streamed row ids to the snapshot's history ids.
+    """Record this turn's history positions without replacing its row ids.
 
     Only a strict one-to-one match between the trailing stored rows and the
-    provisional rows justifies a rename, and the complete role/content
+    provisional rows justifies a source-index mapping, and the complete role/content
     alignment must be unique across refreshed history. Anything else (a
     refresh that missed the turn, ambiguous duplicate content, a content
-    mismatch, or an unexpected role) keeps the provisional ids for the next
-    full reload.
+    mismatch, or an unexpected role) keeps the provisional ids without a
+    synchronized claim, for the next full reload.
 
     Role order alone is not evidence: a stale [user, assistant] pair looks
     identical to this turn's rows by role. Every paired row must also match
@@ -709,12 +756,13 @@ def _assistant_align_streamed_ids(
     calls row may sit between pairs only when its call ids all appear in the
     streamed row's call cards, proving it was rendered inside this turn.
 
-    Returns whether the rename happened. ``True`` means every provisional
-    row now carries this snapshot's history id, so the caller may claim
-    incremental sync against exactly this snapshot. ``False`` means the
-    snapshot could not be reconciled (it missed the turn, or rows the
-    page already shows collide with it): the caller must claim nothing
-    and let the page take its next full load."""
+    Returns whether the mapping happened. ``True`` means every provisional
+    row now carries this snapshot's ``historySourceIndex`` metadata, so the
+    caller may claim incremental sync against exactly this snapshot while
+    keeping the row ids stable for the viewport. ``False`` means the snapshot
+    could not be reconciled (it missed the turn, or rows the page already shows
+    collide with it): the caller must claim nothing and let the page take its
+    next full load."""
 
     def _text(content: Any) -> str:
         """Comparable plain text of a content field (string or parts)."""
@@ -782,9 +830,38 @@ def _assistant_align_streamed_ids(
         streamed_ids = _streamed_call_ids(streamed_row)
         return bool(streamed_ids) and stored_ids.issubset(streamed_ids)
 
+    def _streamed_request_id(row: Dict[str, Any]) -> str:
+        """The request id of the send a streamed user row is (#1359)."""
+        metadata = row.get("metadata")
+        custom = metadata.get("custom") if isinstance(metadata, dict) else None
+        value = custom.get("requestId") if isinstance(custom, dict) else None
+        return value if isinstance(value, str) else ""
+
+    def _saved_request_ids(row: Dict[str, Any]) -> set[str]:
+        """The request ids of the sends a saved user row holds (#1359)."""
+        metadata = row.get("metadata")
+        if not isinstance(metadata, dict):
+            return set()
+        records = metadata.get("operator_inputs")
+        ids = {
+            record["request_id"]
+            for record in (records if isinstance(records, list) else [])
+            if isinstance(record, dict) and isinstance(record.get("request_id"), str) and record["request_id"]
+        }
+        if isinstance(metadata.get("request_id"), str) and metadata["request_id"]:
+            ids.add(metadata["request_id"])
+        return ids
+
     def _pairs_by_content(stored_row: Dict[str, Any], streamed_row: Dict[str, Any]) -> bool:
         """Content identity for a role-matched pair."""
         if stored_row.get("role") == "user":
+            # A saved row that names its sends pairs by id: the daemon saves
+            # sends that arrive together as one row, behind any agent HUD, and
+            # another sender's identical words are not this send.
+            request_id = _streamed_request_id(streamed_row)
+            saved_ids = _saved_request_ids(stored_row)
+            if request_id and saved_ids:
+                return request_id in saved_ids
             return _text(stored_row.get("content")) == _text(streamed_row.get("content"))
         stored_text = _text(stored_row.get("content"))
         if not stored_text:
@@ -810,6 +887,42 @@ def _assistant_align_streamed_ids(
         message_id = message.get("id")
         if role not in ("user", "assistant") or not isinstance(message_id, str):
             continue
+        if message_id == "live-turn" or message_id.startswith("live-turn:"):
+            # The page's copy of a turn it was only watching when it sent:
+            # a display row, never one of this turn's (#1359).
+            continue
+        metadata = message.get("metadata")
+        custom = metadata.get("custom") if isinstance(metadata, dict) else None
+        if isinstance(custom, dict) and "compactionArchiveOrder" in custom:
+            # These rows retain their display IDs but belong to a superseded snapshot.
+            continue
+        source_id = custom.get("historySourceId") if isinstance(custom, dict) else None
+        if isinstance(source_id, str) and re.fullmatch(r"history-\d+", source_id) is None:
+            # Derived display rows (error, Hub note, etc.) share the position
+            # of their source. They cannot prove the canonical row was shown.
+            continue
+        source_index = custom.get("historySourceIndex") if isinstance(custom, dict) else None
+        if isinstance(source_index, int) and not isinstance(source_index, bool):
+            if (
+                0 <= source_index < len(history)
+                and history[source_index].get("role") == role
+                and (
+                    _pairs_by_content(history[source_index], message)
+                    # A stored row of tool calls alone has no words to
+                    # compare: the row shown for it draws its calls.
+                    or (
+                        not _text(history[source_index].get("content"))
+                        and _rendered_inside(history[source_index], message)
+                    )
+                )
+            ):
+                shown.add(source_index)
+                continue
+            if source_id is not None:
+                # An aliased row's display ID can name an obsolete position.
+                return False
+            if isinstance(custom, dict):
+                custom.pop("historySourceIndex", None)
         if message_id.startswith("history-"):
             # Synthetic rows (``history-<n>-error``) are state-only; they
             # never carry a stored counterpart and are left untouched.
@@ -824,6 +937,20 @@ def _assistant_align_streamed_ids(
         (messages[i] for i in provisional if messages[i].get("role") == "assistant"),
         {},
     )
+    # The sends this turn's user rows are. When each names one, a saved user
+    # row naming only other sends is another client's message the daemon
+    # steered into the running turn: not one of these rows, so the walk passes
+    # it and the page adds it from history (#1359).
+    own_requests = [
+        _streamed_request_id(messages[i]) for i in provisional if messages[i].get("role") == "user"
+    ]
+
+    def _foreign_user(stored_row: Dict[str, Any]) -> bool:
+        if stored_row.get("role") != "user" or not own_requests or not all(own_requests):
+            return False
+        saved_ids = _saved_request_ids(stored_row)
+        return bool(saved_ids) and not saved_ids & set(own_requests)
+
     stored: List[int] = []
     cursor = len(provisional) - 1
     for index in range(len(history) - 1, -1, -1):
@@ -842,6 +969,8 @@ def _assistant_align_streamed_ids(
             continue
         if role not in ("user", "assistant") or index in shown:
             return False
+        if _foreign_user(stored_row):
+            continue
         streamed_row = messages[provisional[cursor]]
         if role == streamed_row.get("role") and _pairs_by_content(
             stored_row, streamed_row
@@ -889,6 +1018,8 @@ def _assistant_align_streamed_ids(
             if role not in ("user", "assistant") or history_index in shown:
                 alignment_counts[key] = 0
                 return 0
+            if _foreign_user(stored_row):
+                continue
 
             message_index = provisional[cursor]
             streamed_row = messages[message_index]
@@ -939,7 +1070,16 @@ def _assistant_align_streamed_ids(
         return False
 
     for message_index, history_index in zip(provisional, stored):
-        messages[message_index]["id"] = f"history-{history_index}"
+        message = messages[message_index]
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+            message["metadata"] = metadata
+        custom = metadata.get("custom")
+        if not isinstance(custom, dict):
+            custom = {}
+            metadata["custom"] = custom
+        custom["historySourceIndex"] = history_index
 
     return True
 
@@ -954,7 +1094,10 @@ def _assistant_set_messages(controller: Any, messages: List[Dict[str, Any]]) -> 
 
 
 def _assistant_close_shown_prompt(
-    messages: List[Dict[str, Any]], call_id: str, result: Dict[str, Any]
+    messages: List[Dict[str, Any]],
+    call_id: str,
+    result: Dict[str, Any],
+    permission_id: str | None,
 ) -> None:
     """Put the answer on a prompt card an earlier message shows.
 
@@ -966,7 +1109,18 @@ def _assistant_close_shown_prompt(
         if message.get("role") != "assistant" or not isinstance(content, list):
             continue
         for at, part in enumerate(content):
-            if isinstance(part, dict) and part.get("toolCallId") == call_id:
+            if not isinstance(part, dict) or part.get("toolCallId") != call_id:
+                continue
+            args = part.get("args")
+            current_id = args.get("permission_id") if isinstance(args, dict) else None
+            if not current_id and isinstance(args, dict):
+                details = args.get("details")
+                current_id = details.get("permission_id") if isinstance(details, dict) else None
+            if permission_id and current_id != permission_id:
+                continue
+            if not permission_id and current_id:
+                continue
+            if isinstance(part, dict):
                 parts = list(content)
                 parts[at] = {
                     **part,
@@ -1276,7 +1430,7 @@ async def assistant_transport(
         goal_pump = None
         revocation_watch = None
         tool_controllers: Dict[str, Any] = {}
-        permission_controllers: Dict[str, Any] = {}
+        permission_controllers: Dict[tuple[str, str], Any] = {}
         permission_tool_ids: Dict[str, str] = {}
         state_messages = _assistant_copy_messages(body.state)
         persist_message_state = isinstance(body.state, dict) and isinstance(
@@ -1286,9 +1440,12 @@ async def assistant_transport(
         # Per-submission stored-image refs (#1088), parallel to
         # submitted_contents: saved at send time so the bytes outlive the turn.
         submitted_media: List[List[Dict[str, str]]] = []
+        # The request id of each submission, parallel to submitted_contents (#1359).
+        submitted_request_ids: List[str] = []
+        submitted_row_ids: List[Optional[str]] = []  # the row each send names, if any (#1102)
         request_ids: set[str] = set()
         untagged = False  # an admission that echoed no id: its turn carries none (#551)
-        answered_prompts: set[str] = set()  # daemon tool ids this request answered
+        answered_prompts: set[tuple[str, str]] = set()  # exact permission owners this request answered
         assistant_tool_parts: Dict[str, Dict[str, Any]] = {}
         # Text, reasoning and tool-call parts in arrival order.
         assistant_parts: List[Dict[str, Any]] = []
@@ -1323,6 +1480,8 @@ async def assistant_transport(
                 copy.deepcopy(assistant_parts),
                 None,
                 copy.deepcopy(submitted_media),
+                list(submitted_request_ids),
+                list(submitted_row_ids),
             )
             published = controller.state["messages"]
             for index, message in enumerate(progress):
@@ -1373,8 +1532,11 @@ async def assistant_transport(
                         return
                     message = command.get("message")
                     client_id = message.get("id") if isinstance(message, dict) else None
-                    request_id = (client_id if _is_image_goal(message_content)
-                                  and isinstance(client_id, str) and client_id else uuid.uuid4().hex)
+                    # The page knows its send by the id it made, so that id
+                    # follows the send into saved history (#1359); an image goal
+                    # also replays by it. Anything unsafe gets a fresh id.
+                    request_id = (client_id if isinstance(client_id, str)
+                                  and _CLIENT_REQUEST_ID.fullmatch(client_id) else uuid.uuid4().hex)
                     private_goal = _is_goal_message(message_content)
                     kwargs = {"request_id": request_id}
                     if private_goal:
@@ -1425,6 +1587,8 @@ async def assistant_transport(
                         untagged = True
                     submitted_contents.append(message_content)
                     submitted_media.append(_save_sent_media(message_content, session_id))
+                    submitted_request_ids.append(request_id)
+                    submitted_row_ids.append(command.get("rowId"))
                 elif command_type == "add-tool-result":
                     call_id, result, decision, scope = _assistant_tool_result(command)
                     if not call_id:
@@ -1432,13 +1596,23 @@ async def assistant_transport(
                             "add-tool-result command has no toolCallId"
                         )
                         return
-                    source_tool_id = permission_tool_ids.get(call_id, call_id)
-                    # Permission tool-call IDs are stable across requests so the
-                    # browser can answer a prompt from a later add-tool-result
-                    # request. Recover the original daemon tool id when this
-                    # callback did not see the request_permission event itself.
-                    if source_tool_id == call_id and call_id.startswith("permission_"):
-                        source_tool_id = call_id.removeprefix("permission_")
+                    state_tool_id, state_permission_id = _assistant_permission_identity(state_messages, call_id)
+                    result_tool_id = result.get("tool_id") if isinstance(result, dict) else None
+                    result_permission_id = result.get("permission_id") if isinstance(result, dict) else None
+                    if (state_permission_id and result_permission_id and
+                            state_permission_id != result_permission_id):
+                        controller.add_error("permission response owner does not match the displayed prompt")
+                        return
+                    source_tool_id = (
+                        state_tool_id
+                        or (result_tool_id if isinstance(result_tool_id, str) else None)
+                        or permission_tool_ids.get(call_id)
+                    )
+                    if not source_tool_id:
+                        controller.add_error(
+                            "permission response is missing its tool owner; refresh the chat before answering"
+                        )
+                        return
                     if not decision:
                         decision = "approve" if result is True else "deny"
                     if decision not in ("approve", "deny"):
@@ -1447,22 +1621,34 @@ async def assistant_transport(
                         )
                         return
                     option_id = result.get("option_id") if isinstance(result, dict) else None
+                    permission_id = result_permission_id or state_permission_id
+                    if not isinstance(permission_id, str) or not permission_id:
+                        controller.add_error(
+                            "permission response is missing its owner; refresh the chat before answering"
+                        )
+                        return
                     if option_id is None:
-                        resolved = await session.resolve_permission(source_tool_id, decision, scope)
+                        resolved = await session.resolve_permission(
+                            source_tool_id,
+                            decision,
+                            scope,
+                            permission_id=permission_id,
+                        )
                     else:
                         resolved = await session.resolve_permission(
                             source_tool_id,
                             decision,
                             scope,
                             option_id=str(option_id),
+                            permission_id=permission_id,
                         )
                     saw_action = True
                     if not resolved:
                         controller.add_error(
-                            f"No pending permission for tool_id '{source_tool_id}'"
+                            f"Permission owner is stale or no longer pending for tool_id '{source_tool_id}'"
                         )
                         return
-                    answered_prompts.add(source_tool_id)
+                    answered_prompts.add((source_tool_id, permission_id))
                 else:
                     controller.add_error(
                         f"Unsupported assistant command: {command_type or 'unknown'}"
@@ -1481,6 +1667,26 @@ async def assistant_transport(
                     if part.get("toolCallId"):
                         assistant_tool_parts[part["toolCallId"]] = part
                         assistant_parts.append(part)
+            elif persist_message_state:
+                # The page drops its pending copy of a send at the first state
+                # it receives, and clearing the last turn's error above is one.
+                # A daemon busy with another turn stays quiet long after it
+                # admits the send, so show the send's row now (#1359). The
+                # reply's row follows with its first output: until then the
+                # page keeps the placeholder it already draws, and the first
+                # words still publish at once (the throttle has not started).
+                admitted = _assistant_update_message_state(
+                    [dict(message) for message in state_messages],
+                    session_id,
+                    submitted_contents,
+                    [],
+                    None,
+                    copy.deepcopy(submitted_media),
+                    list(submitted_request_ids),
+                    list(submitted_row_ids),
+                )[:-1]
+                controller.state["messages"].extend(admitted[len(sent_messages):])
+                sent_messages = admitted
 
             while True:
                 event = await _assistant_next_event(
@@ -1572,24 +1778,37 @@ async def assistant_transport(
                     source_tool_id = str(event.get("tool_id") or "")
                     if not source_tool_id:
                         continue
-                    permission_call_id = f"permission_{source_tool_id}"
+                    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+                    permission_id = event.get("permission_id") or details.get("permission_id")
+                    permission_call_id = (
+                        f"permission_{source_tool_id}_{permission_id}"
+                        if permission_id
+                        else f"permission_{source_tool_id}"
+                    )
                     permission_tool_ids[permission_call_id] = source_tool_id
                     permission_controller = await controller.add_tool_call(
                         "request_permission", permission_call_id
                     )
-                    permission_controllers[source_tool_id] = permission_controller
+                    permission_controllers[(source_tool_id, str(permission_id or ""))] = permission_controller
                     permission_part = {
                         "type": "tool-call",
                         "toolCallId": permission_call_id,
                         "toolName": "request_permission",
                         "args": {
                             "tool_id": source_tool_id,
+                            **(
+                                {"request_id": event["request_id"]}
+                                if isinstance(event.get("request_id"), str) and event["request_id"]
+                                else {}
+                            ),
+                            "permission_id": event.get("permission_id")
+                            or (event.get("details") or {}).get("permission_id"),
                             "tool_name": event.get("tool_name"),
                             "risk_level": event.get("risk_level"),
                             "risk_reason": event.get("risk_reason"),
                             "input": event.get("input") or {},
-                            "details": event.get("details") or {},
-                            "acp_options": (event.get("details") or {}).get("acp_options", []),
+                            "details": details,
+                            "acp_options": details.get("acp_options", []),
                         },
                     }
                     permission_part["argsText"] = json.dumps(
@@ -1605,6 +1824,8 @@ async def assistant_transport(
                         assistant_parts,
                         {"type": "requires-action", "reason": "tool-calls"},
                         submitted_media,
+                        submitted_request_ids,
+                        submitted_row_ids,
                     )
                     if persist_message_state:
                         _assistant_set_messages(controller, state_messages)
@@ -1646,11 +1867,18 @@ async def assistant_transport(
                     publish_progress()
                 elif event_type in ("permission_granted", "permission_denied", "permission_cancelled"):
                     source_tool_id = str(event.get("tool_id") or "")
+                    permission_id = event.get("permission_id")
                     permission_result = _permission_result_from_event(event)
-                    permission_part = assistant_tool_parts.get(
-                        f"permission_{source_tool_id}"
+                    permission_call_id = (
+                        f"permission_{source_tool_id}_{permission_id}"
+                        if permission_id else f"permission_{source_tool_id}"
                     )
-                    if permission_part is not None:
+                    permission_part = assistant_tool_parts.get(
+                        permission_call_id
+                    )
+                    part_args = permission_part.get("args") if isinstance(permission_part, dict) else None
+                    part_permission_id = part_args.get("permission_id") if isinstance(part_args, dict) else None
+                    if permission_part is not None and permission_id == part_permission_id:
                         permission_part.update(
                             {
                                 "result": permission_result,
@@ -1662,12 +1890,12 @@ async def assistant_transport(
                         # message (a typed yes or no answers a parked card).
                         _assistant_close_shown_prompt(
                             state_messages,
-                            f"permission_{source_tool_id}",
+                            permission_call_id,
                             permission_result,
+                            permission_id if isinstance(permission_id, str) else None,
                         )
-                    permission_controller = permission_controllers.pop(
-                        source_tool_id, None
-                    )
+                    permission_key = (source_tool_id, str(permission_id or ""))
+                    permission_controller = permission_controllers.pop(permission_key, None)
                     if permission_controller is not None:
                         _assistant_set_tool_result(
                             permission_controller,
@@ -1677,7 +1905,7 @@ async def assistant_transport(
                     if (
                         event.get("parked")
                         and event_type != "permission_granted"
-                        and source_tool_id in answered_prompts
+                        and permission_key in answered_prompts
                         and not submitted_contents
                     ):
                         # A prompt its turn left open, answered no: no turn
@@ -1689,6 +1917,8 @@ async def assistant_transport(
                             assistant_parts,
                             {"type": "complete", "reason": "stop"},
                             submitted_media,
+                            submitted_request_ids,
+                            submitted_row_ids,
                         )
                         if persist_message_state:
                             _assistant_set_messages(controller, state_messages)
@@ -1738,6 +1968,8 @@ async def assistant_transport(
                             else {"type": "complete", "reason": "stop"}
                         ),
                         submitted_media,
+                        submitted_request_ids,
+                        submitted_row_ids,
                     )
                     if persist_message_state:
                         if goal_pump is not None:
@@ -1758,12 +1990,12 @@ async def assistant_transport(
                             # worst case) to see the completed status — that
                             # spun the completion spinner on a slow daemon.
                             # Provisional ids are fine for this publish; the
-                            # refresh below aligns them and republishes the
-                            # aligned rows before any synced claim (#666:
-                            # never claim synced for rows the page has not
-                            # been shown). The snapshot only decides the sync
-                            # claim; alignment mutates these published rows
-                            # in place (#675).
+                            # refresh below records source indexes and
+                            # republishes the aligned rows before any synced
+                            # claim (#666: never claim synced for rows the page
+                            # has not been shown). The snapshot only decides
+                            # the sync claim; alignment mutates these published
+                            # rows in place (#675).
                             _assistant_set_messages(controller, state_messages)
                             refreshed = None
                             for _attempt in (0, 1):
@@ -1785,13 +2017,10 @@ async def assistant_transport(
                                     state_messages, refreshed
                                 )
                             if aligned:
-                                # The streamed ids were reconciled against
-                                # exactly this snapshot, so the page may
-                                # append canonical rows past it by id.
-                                # The early publish is JSON-encoded with
-                                # provisional ids; the synced chunk carries
-                                # no messages update, so republish the
-                                # aligned rows for the client before the
+                                # Each streamed row carries its source index
+                                # in exactly this snapshot, so the page can
+                                # recognize canonical rows without replacing
+                                # their ids. Republish the metadata before the
                                 # watermark is claimed (#767/#666).
                                 _assistant_set_messages(
                                     controller, state_messages

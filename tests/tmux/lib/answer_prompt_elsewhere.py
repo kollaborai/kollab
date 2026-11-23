@@ -30,12 +30,20 @@ async def main(response: str) -> None:
             event = await asyncio.wait_for(events.get(), timeout=10)
             if event.get("type") == "permission_request":
                 tool_id = event["tool_id"]
+                details = event.get("details") or {}
+                permission_id = event.get("permission_id") or details.get("permission_id")
+                if not permission_id:
+                    sys.exit("permission prompt has no owner token; update/restart the daemon")
                 break
         if response == "STOP":
             await handle.state.cancel_current_request()
             print(f"stopped the turn waiting on {tool_id}")
             return
-        reply = await handle.rpc.call("permission.respond", {"tool_id": tool_id, "response": response})
+        reply = await handle.rpc.call("permission.respond_owned", {
+            "tool_id": tool_id,
+            "permission_id": permission_id,
+            "response": response,
+        })
         print(f"answered {tool_id}: {reply}")
     finally:
         await pool.stop(rows[0]["session_id"])  # detaches; the agent keeps running
