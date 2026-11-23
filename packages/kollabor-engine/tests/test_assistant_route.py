@@ -1581,6 +1581,108 @@ async def test_assistant_transport_rejects_duplicate_batch_request_ids_before_ad
 
 
 @pytest.mark.asyncio
+async def test_assistant_transport_rejects_request_id_owned_by_another_active_stream(
+    monkeypatch,
+):
+    """A second stream cannot alias a client id already admitted in-session."""
+    session = _FakeSession([])
+    both_subscribed = asyncio.Event()
+    both_submitted = asyncio.Event()
+    submitted: list[str] = []
+    session.subscriptions = []
+
+    def subscribe():
+        queue: asyncio.Queue = asyncio.Queue()
+        session.subscriptions.append(queue)
+        if len(session.subscriptions) == 2:
+            both_subscribed.set()
+        return queue
+
+    session.subscribe = subscribe
+    session.unsubscribe = lambda queue: (
+        session.subscriptions.remove(queue) if queue in session.subscriptions else None
+    )
+
+    async def submit(content, **kwargs):
+        await both_subscribed.wait()
+        submitted.append(content)
+        if len(submitted) == 2:
+            both_submitted.set()
+        return {"accepted": True, "request_id": kwargs["request_id"]}
+
+    session.send_message = AsyncMock(side_effect=submit)
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    monkeypatch.setattr(messages, "EVENT_IDLE_TIMEOUT_SECONDS", 1.0)
+    captured, _, drain_stream = _install_fake_assistant_stream(monkeypatch)
+    def request(text):
+        return messages.AssistantRequest(
+            commands=[
+                {
+                    "type": "add-message",
+                    "message": {
+                        "id": "same-id",
+                        "parts": [{"type": "text", "text": text}],
+                    },
+                }
+            ],
+            state={"messages": []},
+        )
+
+    first_response = await messages.assistant_transport(
+        session.session_id, request("first")
+    )
+    first_task = asyncio.create_task(drain_stream(first_response.stream))
+    for _ in range(1000):
+        if session.send_message.await_count == 1:
+            break
+        await asyncio.sleep(0)
+    second_response = await messages.assistant_transport(
+        session.session_id, request("second")
+    )
+    second_task = asyncio.create_task(drain_stream(second_response.stream))
+
+    try:
+        for _ in range(1000):
+            if second_task.done() or len(submitted) == 2:
+                break
+            await asyncio.sleep(0)
+        if len(submitted) == 2:
+            assert both_submitted.is_set()
+
+        # In the broken case both independent sends are admitted under the
+        # same id; broadcast each reply to every active subscriber, matching
+        # the daemon fanout contract.
+        for index in range(len(submitted)):
+            for event in (
+                {
+                    "type": "token",
+                    "text": f"reply-{index + 1}",
+                    "request_id": "same-id",
+                },
+                {
+                    "type": "turn_complete",
+                    "stop_reason": "end_turn",
+                    "request_id": "same-id",
+                },
+            ):
+                for queue in tuple(session.subscriptions):
+                    queue.put_nowait(event)
+        await asyncio.gather(first_task, second_task)
+
+        assert submitted == ["first"]
+        assert session.send_message.await_count == 1
+        assert any("active" in error.lower() for error in captured["controller"].errors)
+        assert all(queue.empty() for queue in session.subscriptions)
+    finally:
+        for task in (first_task, second_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(first_task, second_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_assistant_transport_shows_none_of_a_running_turn_typed_in_the_terminal(monkeypatch):
     """Chalcedony on #554 round 5: a turn typed in the terminal names no
     request, and its text and permission prompt became this message's."""
