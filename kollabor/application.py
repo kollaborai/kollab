@@ -61,6 +61,10 @@ class UnknownLLMError(ValueError):
         super().__init__(f"--llm {name!r} is not a profile or loadout.{hint}")
 
 
+class ApplicationCleanupIncompleteError(RuntimeError):
+    """The application could not confirm that its owned work has settled."""
+
+
 def merge_widget_state_snapshot(
     current: dict[str, Any], event: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1306,7 +1310,7 @@ class TerminalLLMChat:
         finally:
             # Guaranteed cleanup - always runs regardless of how we exit
             logger.info("Executing guaranteed cleanup")
-            await self.cleanup()
+            await self._cleanup_or_raise()
 
     async def _acp_permission_decider(self, request: Any) -> str | None:
         """Adapt ACP permission cards to the existing human confirmation owner.
@@ -1747,7 +1751,7 @@ class TerminalLLMChat:
 
                 if not should_stay:
                     logger.info(f"CLI command complete, exiting with code {exit_code}")
-                    await self.cleanup()
+                    await self._cleanup_or_raise()
                     sys.exit(exit_code)
 
                 logger.info("CLI command complete, continuing to interactive mode")
@@ -1930,7 +1934,7 @@ class TerminalLLMChat:
                     print()
                     print("Use /setup to fix the configuration.")
                     # Clean up before exiting
-                    await self.cleanup()
+                    await self._cleanup_or_raise()
                     return
 
             # Initialize plugins (they should check self.pipe_mode if needed)
@@ -1951,7 +1955,7 @@ class TerminalLLMChat:
                 if command is None:
                     logger.warning("Pipe command failed to parse: %s", piped_input)
                     print(f"Unknown command: {piped_input.strip()}")
-                    await self.cleanup()
+                    await self._cleanup_or_raise()
                     sys.exit(2)
                 result = await self.input_handler.command_executor.execute_command(
                     command, self.event_bus
@@ -1964,7 +1968,7 @@ class TerminalLLMChat:
                 ):
                     self._print_command_result(result)
                 exit_code = 0 if result and result.success else 1
-                await self.cleanup()
+                await self._cleanup_or_raise()
                 sys.exit(exit_code)
 
             # Send input to LLM and wait for response
@@ -2035,7 +2039,7 @@ class TerminalLLMChat:
             # Cleanup
             self.running = False
             # Keep pipe_mode=True during cleanup so cancellation messages can be suppressed
-            await self.cleanup()
+            await self._cleanup_or_raise()
             # DON'T reset pipe_mode here - let main.py's finally block check it to avoid double cleanup
 
     async def _display_banner(self) -> None:
@@ -4000,7 +4004,17 @@ class TerminalLLMChat:
             completed = await self._cleanup_impl()
             if completed:
                 self._cleanup_complete = True
+            else:
+                self._startup_complete = False
             return completed
+
+    async def _cleanup_or_raise(self) -> None:
+        """Make incomplete cleanup visible to an exiting application caller."""
+        if not await self.cleanup():
+            self._startup_complete = False
+            raise ApplicationCleanupIncompleteError(
+                "Application cleanup did not complete; queue workers may still be active"
+            )
 
     async def _stop_hub_message_intake(self) -> None:
         """Stop accepting Hub messages once application teardown begins."""

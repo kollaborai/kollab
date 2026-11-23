@@ -40,7 +40,12 @@ if sys.platform == "win32":
 # Import from the same directory
 from kollabor_ai.profile_manager import EFFORT_LEVELS
 
-from .application import InvalidACPLoadoutError, TerminalLLMChat, UnknownLLMError
+from .application import (
+    ApplicationCleanupIncompleteError,
+    InvalidACPLoadoutError,
+    TerminalLLMChat,
+    UnknownLLMError,
+)
 from .hub_env import hub_disabled_by_env
 from .logging import setup_bootstrap_logging
 from .version import __version__, get_build_provenance
@@ -1353,6 +1358,7 @@ async def async_main() -> None:
             initial_message = args.query.strip()
 
     app = None
+    cleanup_incomplete = False
     try:
         logger.info("Creating application instance...")
 
@@ -1432,6 +1438,9 @@ async def async_main() -> None:
     except KeyboardInterrupt:
         # print("\n\nApplication interrupted by user")
         logger.info("Application interrupted by user")
+    except ApplicationCleanupIncompleteError as e:
+        cleanup_incomplete = True
+        logger.warning("Application cleanup incomplete; retrying before exit: %s", e)
     except (UnknownLLMError, InvalidACPLoadoutError) as e:
         print(f"Error: {e}", file=sys.stderr)
         from kollabor.daemon import report_detached_startup
@@ -1456,13 +1465,18 @@ async def async_main() -> None:
     finally:
         # Ensure cleanup happens even if startup fails (skip if in pipe mode and already cleaned up)
         pipe_mode = getattr(app, "pipe_mode", False) if app else False
-        if app and not app._startup_complete and not pipe_mode:
+        if app and not app._startup_complete and (
+            not pipe_mode or cleanup_incomplete
+        ):
             logger.info("Performing emergency cleanup after startup failure...")
             try:
-                await app.cleanup()
+                if not await app.cleanup():
+                    raise ApplicationCleanupIncompleteError(
+                        "Emergency cleanup did not complete; queue workers may still be active"
+                    )
             except Exception as cleanup_error:
                 logger.error(f"Emergency cleanup failed: {cleanup_error}")
-                # print("Warning: Some resources may not have been cleaned up properly")
+                raise
 
 
 def _hub_config_flag(key: str) -> bool:
