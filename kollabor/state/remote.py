@@ -1236,3 +1236,23 @@ class RemoteStateService(StateService):
         if "error" in result and result.get("error"):
             _raise_for_error(result)
         return result
+
+    async def branch_conversation(
+        self, session_id: str, branch_index: int
+    ) -> dict[str, Any]:
+        """Ask the daemon to create and activate a saved-session branch."""
+        logger.debug(
+            "state rpc: branch_conversation id=%r index=%r", session_id, branch_index
+        )
+        result = await self._rpc.call(
+            "state.branch_conversation",
+            {"session_id": session_id, "branch_index": branch_index},
+            timeout=self._timeout,
+        )
+        if not isinstance(result, dict):
+            raise TypeError(
+                f"state.branch_conversation expected dict, got {type(result).__name__}"
+            )
+        if "error" in result and result.get("error"):
+            _raise_for_error(result)
+        return result
