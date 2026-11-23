@@ -10,8 +10,8 @@ Mocks aiohttp to avoid real network calls.
 
 import asyncio
 import builtins
-import json
 import gzip
+import json
 import os
 import re
 import sys
