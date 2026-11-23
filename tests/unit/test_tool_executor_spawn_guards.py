@@ -409,12 +409,19 @@ def test_literal_backticks_are_not_shell_substitutions(command):
     assert not _is_blocked_kollab_spawn(command)
 
 
-def test_quoted_heredoc_backticks_are_not_dynamic_find_commands(tmp_path):
+@pytest.mark.parametrize(
+    ("command", "blocked"),
+    [
+        ("cat <<'EOF'\n`find /outside -type f`\nEOF", False),
+        ("cat <<EOF\n`find /outside -type f`\nEOF", True),
+    ],
+    ids=["quoted-heredoc-text", "unquoted-heredoc-substitution"],
+)
+def test_heredoc_find_text_is_scoped_by_shell_expansion(command, blocked, tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    command = "cat <<'EOF'\n`find /outside -type f`\nEOF"
 
-    assert not _terminal_find_escapes_workspace(command, workspace, workspace)
+    assert _terminal_find_escapes_workspace(command, workspace, workspace) is blocked
 
 
 @pytest.mark.parametrize("option", ["--ec", "--enc", "--encodedcommand"])
