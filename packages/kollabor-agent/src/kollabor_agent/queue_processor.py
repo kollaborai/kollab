@@ -28,6 +28,7 @@ from kollabor_ai.message_content import (
 )
 from kollabor_ai.providers.errors import (
     StructuredErrorInfo,
+    is_model_not_supported_error,
     structured_error_info,
 )
 from kollabor_ai.providers.errors import (
@@ -2050,8 +2051,61 @@ class QueueProcessor:
                 if self._after_turn:  # queued while this round ran: lands once the lock is free
                     self._after_turn_flush = asyncio.create_task(self._flush_after_turn())
                 raise
+            if (
+                getattr(self, "turn_completed", False)
+                and not getattr(self, "cancel_processing", False)
+                and not getattr(self, "last_turn_error", None)
+            ):
+                try:
+                    event_bus = getattr(self, "event_bus", None)
+                    get_service = getattr(event_bus, "get_service", None)
+                    profile_manager = (
+                        get_service("profile_manager")
+                        if callable(get_service)
+                        else None
+                    )
+                    profile_name = getattr(profile_manager, "active_profile_name", None)
+                    record_completed_turn = getattr(
+                        profile_manager, "record_completed_turn", None
+                    )
+                    api_service = getattr(self, "api_service", None)
+                    model = getattr(api_service, "model", None)
+                    provider = getattr(api_service, "_provider", None)
+                    provider_config = getattr(provider, "config", None)
+                    effort = getattr(provider_config, "effort", "")
+                    if profile_name and model and callable(record_completed_turn):
+                        if not record_completed_turn(profile_name, model, effort):
+                            logger.warning("Could not persist completed model history")
+                except Exception as exc:
+                    logger.warning(
+                        "Could not persist completed model history (%s)",
+                        type(exc).__name__,
+                    )
             await self._run_after_turn()  # and what was queued while this round ran
             return parent_uuid
+
+    def _mark_unsupported_model_if_needed(self, error: BaseException) -> None:
+        model = getattr(getattr(self, "api_service", None), "model", None)
+        if not is_model_not_supported_error(error, model):
+            return
+        try:
+            event_bus = getattr(self, "event_bus", None)
+            get_service = getattr(event_bus, "get_service", None)
+            profile_manager = (
+                get_service("profile_manager") if callable(get_service) else None
+            )
+            profile_name = getattr(profile_manager, "active_profile_name", None)
+            mark_model_unsupported = getattr(
+                profile_manager, "mark_model_unsupported", None
+            )
+            if profile_name and callable(mark_model_unsupported):
+                if not mark_model_unsupported(profile_name, model):
+                    logger.warning("Could not persist an unsupported model marker")
+        except Exception as exc:
+            logger.warning(
+                "Could not persist an unsupported model marker (%s)",
+                type(exc).__name__,
+            )
 
     async def _execute_llm_turn_inner(
         self,
@@ -3066,6 +3120,7 @@ class QueueProcessor:
             # Typed classification only: the parse boundary raises
             # APIFormatMismatchError; rendered text is display data (#720).
             info = structured_error_info(e)
+            self._mark_unsupported_model_if_needed(e)
             if info.error_class == "api_format_mismatch":
                 error_msg = _API_FORMAT_MISMATCH_MESSAGE
             elif "'str' object has no attribute 'get'" in error_msg:

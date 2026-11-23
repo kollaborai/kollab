@@ -323,6 +323,12 @@ export type Profile = {
   streaming?: boolean;
   supports_tools?: boolean;
   supports_vision?: boolean;
+  last_completed_turn?: {
+    model: string;
+    effort: string;
+    completed_at: string;
+  } | null;
+  unavailable_models?: string[];
 };
 
 /** One provider profile x model x effort a session can run on (`GET /profiles/choices`). */
@@ -1600,16 +1606,27 @@ export class EngineApi {
    * it answers): an event that fired earlier is gone, so a caller that may
    * have missed one reloads then.
    */
-  async streamEvents(
+  streamEvents(
     sessionId: string,
     signal?: AbortSignal,
     onEvent?: (event: SessionEvent) => void,
     onOpen?: () => void,
   ): Promise<void> {
-    const response = await this.request(
-      `/sessions/${encodeURIComponent(sessionId)}/events`,
-      { method: "GET", signal },
-    );
+    return this.streamSse<SessionEvent>(`/sessions/${encodeURIComponent(sessionId)}/events`, signal, onEvent, onOpen);
+  }
+
+  /**
+   * Reads an engine SSE stream (`path`), calling `onEvent` with each frame's JSON `data`; resolves when the
+   * stream ends. Shared by the session stream above and the plugin streams (`GET /plugins/events`,
+   * `GET /plugins/{id}/events`). onOpen runs once the engine answered, after it holds the subscription.
+   */
+  async streamSse<T = unknown>(
+    path: string,
+    signal?: AbortSignal,
+    onEvent?: (event: T) => void,
+    onOpen?: () => void,
+  ): Promise<void> {
+    const response = await this.request(path, { method: "GET", signal });
     if (!response.body) throw new Error("event stream response has no body");
     onOpen?.();
     const reader = response.body.getReader();
@@ -1630,7 +1647,7 @@ export class EngineApi {
             .join("\n");
           if (!data) continue;
           try {
-            onEvent?.(JSON.parse(data) as SessionEvent);
+            onEvent?.(JSON.parse(data) as T);
           } catch {
             // Ignore keepalive/non-JSON frames while preserving the stream.
           }
@@ -1645,7 +1662,7 @@ export class EngineApi {
           .join("\n");
         if (data) {
           try {
-            onEvent?.(JSON.parse(data) as SessionEvent);
+            onEvent?.(JSON.parse(data) as T);
           } catch {
             // Ignore a partial trailing frame.
           }
