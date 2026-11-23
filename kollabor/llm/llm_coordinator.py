@@ -60,7 +60,7 @@ from kollabor_events.data_models import ConversationMessage
 from kollabor_tui import MessageDisplayService
 from kollabor_tui.display_tap import publish_semantic
 
-from .acp_bridge import ACPSteeringUnconfirmed
+from .acp_bridge import ACPError, ACPSteeringUnconfirmed
 from .agent_hud import (
     AgentHudEntry,
     format_agent_hud,
@@ -441,6 +441,8 @@ class LLMService:
             event_bus,
             renderer,
         )
+        self._conversation_admission_lock = asyncio.Lock()
+        self._conversation_revision = 0
         self._init_conversation_system(config)
         self._init_tools_and_parsers(config, event_bus, renderer)
         self._init_api_service(config)
@@ -528,6 +530,72 @@ class LLMService:
         self.conversation_manager = ConversationManager(
             config=self.config, conversation_logger=self.conversation_logger
         )
+
+    def get_conversation_revision(self) -> int:
+        value = getattr(self, "_conversation_revision", 0)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    def _current_conversation_uid(self) -> str | None:
+        manager = getattr(self, "conversation_manager", None)
+        value = getattr(manager, "conversation_uid", None)
+        try:
+            value = value() if callable(value) else value
+        except Exception:
+            return None
+        return value if isinstance(value, str) and value else None
+
+    @asynccontextmanager
+    async def conversation_transition(self):
+        """Fence session replacement against queue provider admission."""
+        lock = getattr(self, "_conversation_admission_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._conversation_admission_lock = lock
+        async with lock:
+            changed = False
+
+            def mark_changed() -> None:
+                nonlocal changed
+                changed = True
+
+            try:
+                yield mark_changed
+            finally:
+                if changed:
+                    self._conversation_revision = self.get_conversation_revision() + 1
+                    self._notify_web_queue_identity_change()
+
+    def _notify_web_queue_identity_change(self) -> None:
+        try:
+            runtime = self.event_bus.get_service("web_message_queue_runtime")
+            wake = getattr(runtime, "wake_all", None)
+            if callable(wake):
+                wake()
+        except Exception:
+            logger.debug("WebUI queue wake after conversation transition failed")
+
+    async def submit_queued_human_input(
+        self, message: MessageContent, *, queue_handoff: Any
+    ) -> Dict[str, Any]:
+        """Admit one worker-owned item under the captured conversation fence."""
+        from .queue_handoff import QueueHandoffContext
+
+        if not isinstance(queue_handoff, QueueHandoffContext):
+            return {"status": "rejected", "reason": "invalid_queue_capability"}
+        async with self._conversation_admission_lock:
+            current_uid = self._current_conversation_uid()
+            current_revision = self.get_conversation_revision()
+            if (
+                current_uid != queue_handoff.conversation_uid
+                or current_revision != queue_handoff.conversation_revision
+            ):
+                return {"status": "rejected", "reason": "stale_conversation"}
+            return await self.submit_human_input(
+                message,
+                source=UserInputSource.STATE_RPC,
+                request_id=queue_handoff.request_id,
+                queue_handoff=queue_handoff,
+            )
 
     def _init_tools_and_parsers(self, config, event_bus, renderer):
         """Initialize hook system, MCP integration, response parser, tool executor, and display/context services."""
@@ -2265,6 +2333,7 @@ class LLMService:
         native_only: bool = False,
         request_id: str | None = None,
         operator_source: str | None = None,
+        queue_handoff: Any = None,
     ) -> Dict[str, Any]:
         """Process user input through the LLM.
 
@@ -2305,8 +2374,17 @@ class LLMService:
             return {"status": "rejected", "reason": str(exc)}
 
         display_text = content_to_text(normalized_message)
-        if not display_text.strip():
+        if not display_text.strip() and not contains_image_content(normalized_message):
             return {"status": "rejected", "reason": "empty message"}
+        if queue_handoff is not None:
+            from .queue_handoff import QueueHandoffContext
+
+            if (
+                not isinstance(queue_handoff, QueueHandoffContext)
+                or not isinstance(request_id, str)
+                or request_id != queue_handoff.request_id
+            ):
+                return {"status": "rejected", "reason": "invalid_queue_capability"}
         if (
             contains_image_content(normalized_message)
             and not self.supports_image_input()
@@ -2353,8 +2431,16 @@ class LLMService:
                     "voice": voice,
                     "origin_context": origin_context,
                     "operator_inputs": operator_inputs,
+                    "queue_handoff": queue_handoff,
                 },
                 input_source if operator_inputs else UserInputSource.TUI.value,
+            )
+
+        if queue_handoff is not None:
+            return await self._admit_queue_handoff_native(
+                normalized_message,
+                display_text,
+                queue_handoff,
             )
 
         trusted_origin_context = (
@@ -2472,6 +2558,73 @@ class LLMService:
             return {"status": "queued", "request_id": request_id}
         return {"status": "queued"}
 
+    async def _admit_queue_handoff_native(
+        self, message: MessageContent, display_text: str, queue_handoff: Any
+    ) -> Dict[str, Any]:
+        """Persist and atomically admit a worker-owned native queue item."""
+        from .queue_handoff import QueueHandoffContext
+
+        if not isinstance(queue_handoff, QueueHandoffContext):
+            return {"status": "rejected", "reason": "invalid_queue_capability"}
+        if contains_image_content(message) and not self.supports_image_input():
+            return {
+                "status": "rejected",
+                "reason": self.image_input_rejection_reason(),
+            }
+        processor = getattr(self, "_queue_processor", None)
+        reserve = getattr(processor, "reserve_admission_slot", None)
+        commit = getattr(processor, "commit_admission_slot", None)
+        release = getattr(processor, "release_admission_slot", None)
+        if not all(callable(method) for method in (reserve, commit, release)):
+            return {"status": "rejected", "reason": "queue_admission_unavailable"}
+        reservation = reserve()
+        if reservation is None:
+            return {"status": "rejected", "reason": "native_queue_full"}
+
+        try:
+            turn_serial = self.claim_turn_serial()
+            parent_uuid = self.current_parent_uuid
+            row_uuid = await queue_handoff.record_user_history(
+                self.conversation_logger,
+                display_text,
+                parent_uuid=parent_uuid,
+            )
+            self.publish_cursor(row_uuid, turn_serial)
+            item = TaggedInput(
+                message,
+                (queue_handoff.request_id,),
+                parent_uuid=row_uuid,
+                admission_serial=turn_serial,
+            )
+            # The reservation and cancellation generation make this
+            # synchronous put the native provider-queue custody boundary.
+            queue_handoff.provider_admission_started = True
+            if not commit(reservation, item):
+                queue_handoff.provider_admission_started = False
+                return {"status": "rejected", "reason": "native_queue_stopped"}
+            reservation = None  # commit consumed the one-use token
+            queue_handoff.provider_custody_id = (
+                f"native-queue:{queue_handoff.request_id}:{turn_serial}"
+            )
+        finally:
+            if reservation is not None:
+                release(reservation)
+
+        if not display_text.strip():
+            display_text = "[image attachment]"
+        try:
+            self.message_display_service.display_user_message(display_text)
+        except Exception:
+            logger.warning("Queue-admitted message display failed")
+        if not self.is_processing:
+            try:
+                self.create_background_task(
+                    lambda: self._process_queue(), name="process_queue"
+                )
+            except Exception:
+                logger.error("Queue-admitted message could not start the native drain")
+        return {"status": "queued", "request_id": queue_handoff.request_id}
+
     def _voice_aside_due(self, origin: dict) -> bool:
         """A spoken message while a turn runs gets an aside (#388): never the greeting,
         never while that turn is being stopped, never while the agent's ask is open
@@ -2513,6 +2666,7 @@ class LLMService:
         request_id: str | None = None,
         thread_id: str | None = None,
         origin_context: dict[str, Any] | None = None,
+        queue_handoff: Any = None,
     ) -> Dict[str, Any]:
         """Submit trusted human input through the canonical hook pipeline.
 
@@ -2523,6 +2677,14 @@ class LLMService:
         is_agent = source == "agent" and bool((origin_context or {}).get("authenticated"))
         if not isinstance(source, UserInputSource) and not is_agent:
             return {"status": "rejected", "reason": "invalid_input_source"}
+        if queue_handoff is not None:
+            from .queue_handoff import QueueHandoffContext
+
+            if (
+                not isinstance(queue_handoff, QueueHandoffContext)
+                or request_id != queue_handoff.request_id
+            ):
+                return {"status": "rejected", "reason": "invalid_queue_capability"}
         source_value = "agent" if is_agent else source.value
 
         acp = self._acp_service()
@@ -2543,6 +2705,7 @@ class LLMService:
                     "request_id": request_id,
                     "thread_id": thread_id,
                     "origin_context": dict(origin_context or {}),
+                    "queue_handoff": queue_handoff,
                 },
                 source_value,
             )
@@ -2645,6 +2808,15 @@ class LLMService:
     async def _admit_acp(self, acp, data: Dict[str, Any], source: str) -> Dict[str, Any]:
         """The one ACP admission: steer a running turn or queue a new one."""
         request_id = data.get("request_id") or uuid.uuid4().hex
+        queue_handoff = data.get("queue_handoff")
+        if queue_handoff is not None:
+            from .queue_handoff import QueueHandoffContext
+
+            if (
+                not isinstance(queue_handoff, QueueHandoffContext)
+                or queue_handoff.request_id != request_id
+            ):
+                return {"status": "rejected", "reason": "invalid_queue_capability"}
         origin = dict(data.get("origin_context") or {})
         origin.setdefault("operator", source != "agent")
         if not self._manual_relay_origin_authorized(origin):
@@ -2698,7 +2870,7 @@ class LLMService:
                                 image_store.remove(media_id)
                 return {"status": "rejected", "reason": "Image unavailable or unsupported; upload it and retry."}
         message = content_to_text(content)
-        if not message.strip():
+        if not message.strip() and not images:
             return {"status": "rejected", "reason": "empty message"}
         voice = data.get("voice")
         if voice is None and is_voice_origin(origin) and validate_voice_admission_context(origin):
@@ -2724,7 +2896,7 @@ class LLMService:
             epoch = voice.get("epoch")
             message = voice_preamble(voice, epoch in acp.voice_rules_epochs) + message
             acp.voice_rules_epochs.add(epoch)
-        else:
+        elif queue_handoff is None:
             try:
                 steered = await acp.steer(
                     message, origin=origin, thread_id=data.get("thread_id"),
@@ -2751,6 +2923,8 @@ class LLMService:
             }
 
         try:
+            if queue_handoff is not None:
+                queue_handoff.provider_admission_started = True
             admission = acp.admit(
                 message, request_id=request_id, source=source,
                 thread_id=data.get("thread_id"),
@@ -2761,20 +2935,39 @@ class LLMService:
                     else {}
                 ),
                 **({"images": images} if images else {}),
+                **({"queue_handoff": queue_handoff} if queue_handoff is not None else {}),
             )
         except (RuntimeError, ValueError) as exc:
             error_class = getattr(exc, "error_class", None)
             if error_class == "queue_full" or "full" in str(exc).lower():
+                if queue_handoff is not None:
+                    queue_handoff.provider_admission_started = False
                 return {"status": "rejected", "reason": "acp_queue_full"}
+            if queue_handoff is not None and isinstance(exc, (ACPError, ValueError)):
+                # ACPOrchestrator/ACPRunner validation and lifecycle failures
+                # occur before their synchronous queue put. They prove no
+                # provider custody was acquired for this item.
+                queue_handoff.provider_admission_started = False
             if images and (
                 error_class == "images_unsupported" or "can't take images" in str(exc)
             ):
+                if queue_handoff is not None:
+                    queue_handoff.provider_admission_started = False
                 return {"status": "rejected", "reason": "This harness can't take images."}
+            if queue_handoff is not None and isinstance(exc, ACPSteeringUnconfirmed):
+                return {"status": "rejected", "reason": "steering_unconfirmed"}
             return _acp_unavailable_result(acp)
         except Exception as exc:
             if "full" in str(exc).lower():
+                if queue_handoff is not None:
+                    queue_handoff.provider_admission_started = False
                 return {"status": "rejected", "reason": "acp_queue_full"}
             return {"status": "rejected", "reason": "acp_admission_failed"}
+        if queue_handoff is not None:
+            queue_handoff.provider_custody_id = (
+                f"acp:{admission.generation}:{admission.turn_id}"
+            )
+            await acp.wait_for_queue_handoff_history(admission, queue_handoff)
         if voice and not voice.get("room_turn"):
             # A /voice mic turn's reply is spoken by this process's voice
             # plugin; a LiveKit room turn's audio is the voice runtime's.

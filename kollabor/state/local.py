@@ -66,8 +66,14 @@ from .snapshots import (
     SystemInfoSnapshot,
     SystemPromptSnapshot,
 )
+from .web_message_queue_worker import ConversationIdentity
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _async_nullcontext():
+    yield None
 
 # `@lapis hi`, or `@lapis@devbox hi` for an agent on another computer.
 _HUB_MENTION_RE = re.compile(
@@ -437,6 +443,36 @@ class LocalStateService(StateService):
             return getter() if callable(getter) else getter
         except Exception:
             return None
+
+    def get_conversation_revision(self) -> int:
+        """In-process generation advanced by fenced session transitions."""
+        getter = getattr(self._llm_service, "get_conversation_revision", None)
+        try:
+            value = getter() if callable(getter) else 0
+        except Exception:
+            return 0
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return 0
+        return value
+
+    def get_conversation_identity(self) -> ConversationIdentity:
+        uid = self.get_conversation_uid()
+        if not isinstance(uid, str) or not uid:
+            raise ValueError("canonical conversation identity is unavailable")
+        return ConversationIdentity(uid, self.get_conversation_revision())
+
+    async def submit_queue_message(
+        self, message: Any, *, queue_handoff: Any
+    ) -> dict[str, Any]:
+        """Trusted in-process worker seam; the handoff object is never RPC data."""
+        from kollabor.llm.queue_handoff import QueueHandoffContext
+
+        if not isinstance(queue_handoff, QueueHandoffContext):
+            return {"status": "rejected", "reason": "invalid_queue_capability"}
+        submit = getattr(self._llm_service, "submit_queued_human_input", None)
+        if not callable(submit):
+            return {"status": "rejected", "reason": "queue_admission_unavailable"}
+        return await submit(message, queue_handoff=queue_handoff)
 
     async def save_conversation(self, format: str = "transcript") -> str:
         """Format the conversation as a string.
@@ -2793,29 +2829,34 @@ class LocalStateService(StateService):
         if callable(transition) and getattr(acp, "transitioning", False) is True:
             raise ValueError(ACP_CONVERSATION_BUSY)
         changed = False
+        llm_transition = getattr(self._llm_service, "conversation_transition", None)
+        fence_context = llm_transition() if callable(llm_transition) else _async_nullcontext()
 
-        def mark_changed() -> None:
-            nonlocal changed
-            changed = True
+        async with fence_context as mark_revision:
+            def mark_changed() -> None:
+                nonlocal changed
+                changed = True
+                if callable(mark_revision):
+                    mark_revision()
 
-        with transition() if callable(transition) else nullcontext():
-            uses_acp = self._conversation_uses_acp(acp)
-            if callable(transition):
-                acp._conversation_transition = True
-            try:
-                yield acp, uses_acp, mark_changed
-            except BaseException:
-                if changed and uses_acp:
-                    try:
-                        await acp.close()
-                    except BaseException as cleanup_exc:
-                        logger.warning("ACP conversation cleanup failed (%s)", type(cleanup_exc).__name__)
-                    if hasattr(acp, "startup_error"):
-                        acp.startup_error = f"Conversation {action} did not complete; retry."
-                raise
-            finally:
+            with transition() if callable(transition) else nullcontext():
+                uses_acp = self._conversation_uses_acp(acp)
                 if callable(transition):
-                    acp._conversation_transition = False
+                    acp._conversation_transition = True
+                try:
+                    yield acp, uses_acp, mark_changed
+                except BaseException:
+                    if changed and uses_acp:
+                        try:
+                            await acp.close()
+                        except BaseException as cleanup_exc:
+                            logger.warning("ACP conversation cleanup failed (%s)", type(cleanup_exc).__name__)
+                        if hasattr(acp, "startup_error"):
+                            acp.startup_error = f"Conversation {action} did not complete; retry."
+                    raise
+                finally:
+                    if callable(transition):
+                        acp._conversation_transition = False
 
     async def restart_agent(self) -> dict[str, Any]:
         """Restart this detached agent on the installed code, same conversation (#968)."""

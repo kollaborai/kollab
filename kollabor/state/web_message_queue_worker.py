@@ -95,6 +95,7 @@ class DispatchRequest:
     claim_id: str
     attempt_id: str
     payload: bytes = field(repr=False)
+    attachment_refs: tuple[str, ...] = field(default=(), repr=False)
 
 
 AdmissionResult: TypeAlias = AdmissionAccepted | AdmissionRejectedBeforeCustody
@@ -448,6 +449,7 @@ class WebMessageQueueWorker:
                     claim_id=claim.claim_id or "",
                     attempt_id=attempt_id,
                     payload=message.payload,
+                    attachment_refs=message.attachment_refs,
                 )
                 active.dispatch_boundary_crossed = True
                 try:

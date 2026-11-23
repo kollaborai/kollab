@@ -704,12 +704,24 @@ class ACPOrchestrator:
         record: bool = True,
         images: tuple[dict[str, str], ...] = (),
         operator_inputs: tuple[dict[str, str], ...] = (),
+        queue_handoff: Any = None,
     ) -> ACPAdmission:
         if self.closing_reason:
             raise ACPError(self.closing_reason)
         if (self._runner is None or self._closed or getattr(self, "_starting", False)
                 or (self.transitioning and not self.transition_owned_by_current_task)):
             raise ACPError(self.startup_error or "ACP runner is not active")
+        if queue_handoff is not None:
+            from .queue_handoff import QueueHandoffContext
+
+            if (
+                not isinstance(queue_handoff, QueueHandoffContext)
+                or queue_handoff.request_id != request_id
+            ):
+                raise ACPError("invalid queue handoff capability")
+            llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+            if getattr(llm, "conversation_logger", None) is None:
+                raise ACPError("queue history logger is unavailable")
         if source == "agent" and (origin or {}).get("sender"):
             text = f"Message from {origin['sender']} [thread:{thread_id or ''}]\n{text}"
         kwargs = {"images": images} if images else {}
@@ -739,6 +751,7 @@ class ACPOrchestrator:
                     thread_id,
                     track_completion=True,
                     operator_inputs=operator_inputs,
+                    queue_handoff=queue_handoff,
                 )
             except Exception as exc:
                 # Admission is already owned. Remove this admission (by identity,
@@ -752,6 +765,31 @@ class ACPOrchestrator:
                 return admission
         self._take_turn_history(turn_key, request_id)
         return admission
+
+    async def wait_for_queue_handoff_history(
+        self, admission: ACPAdmission, queue_handoff: Any
+    ) -> None:
+        """Wait for the durable user row and media binding for an accepted turn."""
+        from .queue_handoff import QueueHandoffContext
+
+        if (
+            not isinstance(queue_handoff, QueueHandoffContext)
+            or queue_handoff.request_id != admission.request_id
+        ):
+            raise ACPError("invalid queue handoff capability")
+        key = (admission.generation, admission.turn_id)
+        task = self._turn_user_tasks.get(key)
+        if task is not None:
+            await task
+        if queue_handoff.recording_status != "recorded" or not queue_handoff.history_row_uuid:
+            raise ACPError("queue history was not durably recorded")
+        llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+        manager = getattr(llm, "conversation_manager", None)
+        for message in reversed(getattr(manager, "messages", None) or []):
+            metadata = message.get("metadata") if isinstance(message, dict) else None
+            if isinstance(metadata, dict) and metadata.get("request_id") == admission.request_id:
+                metadata["queue_handoff"] = queue_handoff._history_metadata()
+                break
 
     def _take_turn_history(self, turn_key: tuple[int, int], request_id: str) -> None:
         """Move this row's parent and user-row write under the admission's own key."""
@@ -1037,6 +1075,7 @@ class ACPOrchestrator:
         track_completion: bool = False,
         retry: bool = False,
         operator_inputs: tuple[dict[str, str], ...] = (),
+        queue_handoff: Any = None,
     ) -> None:
         llm = self.event_bus.get_service("llm_service")
         manager = getattr(llm, "conversation_manager", None)
@@ -1064,6 +1103,16 @@ class ACPOrchestrator:
             ]
             if trusted_operator_inputs:
                 metadata["operator_inputs"] = trusted_operator_inputs
+        if queue_handoff is not None:
+            from .queue_handoff import QueueHandoffContext
+
+            if (
+                not isinstance(queue_handoff, QueueHandoffContext)
+                or queue_handoff.request_id != request_id
+            ):
+                raise ValueError("queue history capability does not match its request")
+            metadata["queue_handoff"] = queue_handoff._history_metadata()
+        landed = None
         if manager is not None:
             # A retry whose first save raised after the append reuses that row,
             # so the conversation holds it once. The log and mirror still run (#581).
@@ -1073,7 +1122,17 @@ class ACPOrchestrator:
             self._parents[request_id] = landed
         logger_service = getattr(llm, "conversation_logger", None)
         if logger_service is not None:
-            task = asyncio.create_task(logger_service.log_user_message(text))
+            if queue_handoff is not None:
+                task = asyncio.create_task(
+                    queue_handoff.record_user_history(
+                        logger_service,
+                        text,
+                        parent_uuid=landed,
+                        message_metadata=metadata,
+                    )
+                )
+            else:
+                task = asyncio.create_task(logger_service.log_user_message(text))
             self._history_tasks.add(task)
             if track_completion:
                 self._user_history_tasks[request_id] = task

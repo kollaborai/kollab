@@ -231,6 +231,16 @@ class MessageHandler:
         request_id = data.get("request_id")
         if isinstance(request_id, str) and request_id:
             origin_kwargs["request_id"] = request_id  # the client follows the turn by it (#551)
+        queue_handoff = data.get("queue_handoff")
+        if queue_handoff is not None:
+            from .queue_handoff import QueueHandoffContext
+
+            if (
+                not isinstance(queue_handoff, QueueHandoffContext)
+                or request_id != queue_handoff.request_id
+            ):
+                return {"status": "rejected", "reason": "invalid_queue_capability"}
+            origin_kwargs["queue_handoff"] = queue_handoff
         result = await self._coordinator.process_user_input(
             message, pre_displayed=pre_displayed, **origin_kwargs
         )

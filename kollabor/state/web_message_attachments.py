@@ -91,6 +91,31 @@ class StaleAttachmentOperation(WebMessageAttachmentError):
     """The operation retry lease expired; the ID cannot create new work."""
 
 
+def verified_image_mime(mime: object, payload: object) -> str:
+    """Return canonical MIME only when bytes carry its image signature."""
+    if not isinstance(mime, str):
+        raise InvalidAttachment("unsupported image MIME type")
+    normalized = _MIME_ALIASES.get(mime.strip().lower())
+    if normalized is None:
+        raise InvalidAttachment("unsupported image MIME type")
+    if type(payload) is not bytes or not payload:
+        raise InvalidAttachment("image bytes are invalid")
+
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        actual = "image/png"
+    elif payload.startswith(b"\xff\xd8\xff"):
+        actual = "image/jpeg"
+    elif len(payload) >= 12 and payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
+        actual = "image/webp"
+    elif payload.startswith((b"GIF87a", b"GIF89a")):
+        actual = "image/gif"
+    else:
+        raise InvalidAttachment("image bytes have no supported format signature")
+    if actual != normalized:
+        raise InvalidAttachment("image bytes do not match the declared MIME type")
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class AttachmentScopeBinding:
     """Trusted identity for one principal, conversation, and queue instance.
@@ -316,6 +341,17 @@ class WebMessageAttachmentRegistry:
             raise AttachmentAuthorizationError("attachment access denied") from None
         return _BoundAttachmentScope(self, self._validate_binding(binding))
 
+    def _bind_internal_scope(
+        self, binding: AttachmentScopeBinding
+    ) -> _BoundAttachmentScope:
+        """Create an in-process handle from trusted worker-captured queue IDs.
+
+        This method is deliberately private and accepts no RPC parameters or
+        caller-supplied principal. The owner validator still authenticates each
+        queue-minted item ID before any retained bytes are opened or released.
+        """
+        return _BoundAttachmentScope(self, self._validate_binding(binding))
+
     @staticmethod
     def _binding_key(binding: AttachmentScopeBinding) -> bytes:
         return (binding.scope_id + "\0" + binding.queue_incarnation).encode("ascii")
@@ -461,9 +497,7 @@ class WebMessageAttachmentRegistry:
         mime: object,
         payload: object,
     ) -> AttachmentReceipt:
-        normalized_mime = self._normalize_mime(mime)
-        if type(payload) is not bytes or not payload:
-            raise InvalidAttachment("image bytes are invalid")
+        normalized_mime = verified_image_mime(mime, payload)
         size = len(payload)
         if size > self._max_attachment_bytes:
             raise AttachmentCapacityExceeded("image exceeds the attachment size limit")

@@ -451,8 +451,12 @@ class KollaborConversationLogger:
                 raise
 
     async def _append_to_jsonl(
-        self, message: Dict[str, Any], session_id: Optional[str] = None
-    ):
+        self,
+        message: Dict[str, Any],
+        session_id: Optional[str] = None,
+        *,
+        idempotency_request_id: str | None = None,
+    ) -> str | None:
         """Append to the current or explicitly named conversation JSONL.
 
         Raises when the record is not on disk, and counts nothing then. A failed
@@ -490,6 +494,40 @@ class KollaborConversationLogger:
                         "conversation record not written: session replaced while "
                         f"the append waited ({bound_file.name})"
                     )
+                if idempotency_request_id is not None:
+                    existing = self._find_queue_user_row_unlocked(
+                        path, idempotency_request_id
+                    )
+                    if existing is not None:
+                        expected_message = message.get("message")
+                        existing_message = existing.get("message")
+                        expected_metadata = (
+                            expected_message.get("metadata")
+                            if isinstance(expected_message, dict)
+                            else None
+                        )
+                        existing_metadata = (
+                            existing_message.get("metadata")
+                            if isinstance(existing_message, dict)
+                            else None
+                        )
+                        if (
+                            not isinstance(expected_message, dict)
+                            or not isinstance(existing_message, dict)
+                            or expected_message.get("content")
+                            != existing_message.get("content")
+                            or not isinstance(expected_metadata, dict)
+                            or not isinstance(existing_metadata, dict)
+                            or expected_metadata.get("queue_handoff")
+                            != existing_metadata.get("queue_handoff")
+                        ):
+                            raise ValueError(
+                                "queue history request conflicts with its durable row"
+                            )
+                        existing_uuid = existing.get("uuid")
+                        if not isinstance(existing_uuid, str) or not existing_uuid:
+                            raise ValueError("queue history row has no durable ID")
+                        return existing_uuid
                 reparent = self._read_reparent(path)  # cuts for the destination session
                 parent = message.get("parentUuid")
                 seen = set()
@@ -519,6 +557,34 @@ class KollaborConversationLogger:
                     os.close(fd)
                 if own:
                     self.message_count += 1
+                row_uuid = message.get("uuid")
+                return row_uuid if isinstance(row_uuid, str) else None
+
+    @staticmethod
+    def _find_queue_user_row_unlocked(
+        path: Path, request_id: str
+    ) -> Dict[str, Any] | None:
+        """Find the one durable user row for a queue request while file-locked."""
+        if not path.exists():
+            return None
+        found = None
+        with open(path, "r", encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(row, dict) or row.get("type") != "user":
+                    continue
+                message = row.get("message")
+                metadata = message.get("metadata") if isinstance(message, dict) else None
+                handoff = metadata.get("queue_handoff") if isinstance(metadata, dict) else None
+                if not isinstance(handoff, dict) or handoff.get("request_id") != request_id:
+                    continue
+                if found is not None:
+                    raise ValueError("queue request has duplicate durable rows")
+                found = row
+        return found
 
     def _analyze_user_context(self, content: str) -> Dict[str, Any]:
         """Analyze user context from message content."""
@@ -784,7 +850,24 @@ class KollaborConversationLogger:
             },
         }
 
-        await self._append_to_jsonl(message)
+        queue_handoff = (
+            message_metadata.get("queue_handoff")
+            if isinstance(message_metadata, dict)
+            else None
+        )
+        request_id = (
+            queue_handoff.get("request_id")
+            if isinstance(queue_handoff, dict)
+            else None
+        )
+        persisted_uuid = await self._append_to_jsonl(
+            message,
+            idempotency_request_id=(
+                request_id if isinstance(request_id, str) and request_id else None
+            ),
+        )
+        if isinstance(persisted_uuid, str) and persisted_uuid:
+            message_uuid = persisted_uuid
 
         # Update conversation themes
         intent = message["kollabor_intelligence"]["user_context"].get("detected_intent")

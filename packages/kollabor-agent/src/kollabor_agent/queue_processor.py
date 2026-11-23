@@ -646,6 +646,10 @@ class QueueProcessor:
             maxsize=max_queue_size
         )
         self.max_queue_size = max_queue_size
+        # Trusted multi-step admissions reserve capacity while writing the
+        # matching durable user row. Ordinary producers count reservations as
+        # occupied, so they cannot steal a promised slot during an await.
+        self._admission_reservations: dict[object, int] = {}
         self.dropped_messages = 0
         self.is_processing = False
         self.turn_completed = False
@@ -748,6 +752,66 @@ class QueueProcessor:
         self._cancel_origin = origin
         self._end_queued_chat()
         return self._cancel_generation
+
+    def reserve_admission_slot(self) -> object | None:
+        """Reserve one bounded queue slot for a trusted admission path."""
+        queue = getattr(self, "processing_queue", None)
+        max_size = getattr(self, "max_queue_size", 0)
+        if queue is None or isinstance(max_size, bool) or not isinstance(max_size, int) or max_size <= 0:
+            return None
+        reservations = getattr(self, "_admission_reservations", None)
+        if not isinstance(reservations, dict):
+            reservations = self._admission_reservations = {}
+        if queue.qsize() + len(reservations) >= max_size:
+            return None
+        token = object()
+        reservations[token] = getattr(self, "_cancel_generation", 0)
+        return token
+
+    def release_admission_slot(self, reservation: object) -> bool:
+        """Release an uncommitted reservation; tokens are one-use."""
+        reservations = getattr(self, "_admission_reservations", None)
+        return isinstance(reservations, dict) and reservations.pop(
+            reservation, None
+        ) is not None
+
+    def commit_admission_slot(self, reservation: object, message: Any) -> bool:
+        """Consume a reservation and enqueue without an intervening await.
+
+        Stop advances the cancellation generation. A stale token is consumed
+        and refused before the message can enter the provider queue.
+        """
+        reservations = getattr(self, "_admission_reservations", None)
+        if not isinstance(reservations, dict) or reservation not in reservations:
+            return False
+        generation = reservations.pop(reservation)
+        if generation != getattr(self, "_cancel_generation", 0):
+            return False
+        queue = getattr(self, "processing_queue", None)
+        if queue is None:
+            return False
+        try:
+            queue.put_nowait(message)
+        except asyncio.QueueFull:
+            return False
+        self.mark_progress()
+        metrics = getattr(self, "_queue_metrics", None)
+        if isinstance(metrics, dict):
+            metrics["total_enqueue_attempts"] = metrics.get("total_enqueue_attempts", 0) + 1
+            metrics["total_enqueue_successes"] = metrics.get("total_enqueue_successes", 0) + 1
+        return True
+
+    def _has_unreserved_capacity(self) -> bool:
+        queue = getattr(self, "processing_queue", None)
+        max_size = getattr(self, "max_queue_size", 0)
+        reservations = getattr(self, "_admission_reservations", None)
+        reserved = len(reservations) if isinstance(reservations, dict) else 0
+        return (
+            queue is not None
+            and isinstance(max_size, int)
+            and not isinstance(max_size, bool)
+            and queue.qsize() + reserved < max_size
+        )
 
     def _end_queued_chat(self) -> None:
         """A cancel stops the drain, and the queue waits for the next message:
@@ -944,6 +1008,8 @@ class QueueProcessor:
         if isinstance(message, QueuedInput):
             # Voice admission must never acknowledge a message silently dropped
             # by an overflow strategy. Reject before modifying the queue.
+            if not self._has_unreserved_capacity():
+                raise asyncio.QueueFull
             self.processing_queue.put_nowait(message)
             return True
         self._queue_metrics["total_enqueue_attempts"] += 1
@@ -955,6 +1021,8 @@ class QueueProcessor:
 
         # Try immediate enqueue
         try:
+            if not self._has_unreserved_capacity():
+                raise asyncio.QueueFull
             self.processing_queue.put_nowait(message)
             self._queue_metrics["total_enqueue_successes"] += 1
             if self.task_config.queue.log_queue_events:
@@ -1038,6 +1106,8 @@ class QueueProcessor:
         await asyncio.sleep(0.01)
 
         try:
+            if not self._has_unreserved_capacity():
+                raise asyncio.QueueFull
             self.processing_queue.put_nowait(message)
             self._queue_metrics["total_enqueue_successes"] += 1
             return True
@@ -1067,7 +1137,7 @@ class QueueProcessor:
         poll_interval = 0.01
 
         while True:
-            if self.processing_queue.qsize() < self.max_queue_size:
+            if self._has_unreserved_capacity():
                 try:
                     self.processing_queue.put_nowait(message)
                     self._queue_metrics["total_enqueue_successes"] += 1
@@ -1100,10 +1170,12 @@ class QueueProcessor:
         )
         try:
             self._end_dropped(self.processing_queue.get_nowait())
+            if not self._has_unreserved_capacity():
+                raise asyncio.QueueFull
             self.processing_queue.put_nowait(message)
             self._queue_metrics["total_enqueue_successes"] += 1
             return True
-        except asyncio.QueueEmpty:
+        except (asyncio.QueueEmpty, asyncio.QueueFull):
             self.dropped_messages += 1
             self._end_dropped(message)
             return False

@@ -1,0 +1,264 @@
+"""Real queue-to-provider custody and durable attachment regressions for #1366."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
+
+from kollabor.state.web_message_attachments import (
+    AttachmentScopeBinding,
+    InvalidAttachment,
+    WebMessageAttachmentRegistry,
+)
+from kollabor.state.web_message_queue import WebMessage, WebMessageQueue
+from kollabor.state.web_message_queue_worker import (
+    AdmissionAccepted,
+    AdmissionRejectedBeforeCustody,
+    ConversationIdentity,
+    DispatchRequest,
+    WebMessageQueueWorker,
+    WorkerStatus,
+)
+from kollabor_rpc import RpcCallerContext
+
+
+PNG = b"\x89PNG\r\n\x1a\nqueue-test-image"
+
+
+async def _queue_with_image():
+    queue = WebMessageQueue(scope_id="conversation-scope")
+    request_id = queue.new_request_id()
+    owner_id = [request_id]
+    attachments = WebMessageAttachmentRegistry(
+        resolve_scope=lambda _params, _caller: AttachmentScopeBinding(
+            queue.scope_id, queue.incarnation
+        ),
+        validate_owner_id=lambda _binding, candidate: candidate in owner_id,
+    )
+    attachment_scope = await attachments.bind_scope(
+        {}, RpcCallerContext.from_unix_peer(501)
+    )
+    upload_id = attachment_scope.new_operation_id()
+    staged = await attachment_scope.stage(upload_id, "image/png", PNG)
+    payload = json.dumps({"text": "inspect this"}, separators=(",", ":")).encode()
+    await queue.enqueue_batch_with_attachments(
+        queue.new_operation_id(),
+        queue.new_batch_id(),
+        [WebMessage(request_id, payload, (staged.ref,))],
+        attachment_scope=attachment_scope,
+    )
+    snapshot = await queue.snapshot()
+    return queue, attachments, attachment_scope, request_id, staged, snapshot
+
+
+@pytest.mark.asyncio
+async def test_worker_passes_exact_staged_refs_to_the_provider_adapter():
+    queue, _store, _scope, request_id, staged, snapshot = await _queue_with_image()
+    identity = ConversationIdentity("conversation-a", 4)
+    received = []
+
+    async def dispatch(request):
+        received.append(request)
+        return AdmissionAccepted(
+            conversation_uid=request.conversation_uid,
+            conversation_revision=request.conversation_revision,
+            request_id=request.request_id,
+            custody_id="native-queue:" + request.request_id,
+        )
+
+    worker = WebMessageQueueWorker(queue, identity, lambda: identity, dispatch)
+    result = await worker.dispatch_batch(snapshot.batches[0].batch_id)
+
+    assert result.status is WorkerStatus.ADMITTED
+    assert len(received) == 1
+    assert received[0].request_id == request_id
+    assert received[0].attachment_refs == (staged.ref,)
+
+
+@pytest.mark.asyncio
+async def test_authoritative_staging_rejects_bytes_that_disagree_with_declared_mime():
+    queue = WebMessageQueue(scope_id="conversation-scope")
+    attachments = WebMessageAttachmentRegistry(
+        resolve_scope=lambda _params, _caller: AttachmentScopeBinding(
+            queue.scope_id, queue.incarnation
+        ),
+        validate_owner_id=lambda _binding, _candidate: True,
+    )
+    attachment_scope = await attachments.bind_scope(
+        {}, RpcCallerContext.from_unix_peer(501)
+    )
+
+    with pytest.raises(InvalidAttachment, match="format|MIME|bytes"):
+        await attachment_scope.stage(
+            attachment_scope.new_operation_id(), "image/jpeg", PNG
+        )
+
+
+async def _real_local_state(tmp_path):
+    from kollabor.llm.llm_coordinator import LLMService
+    from kollabor.state import LocalStateService
+    from kollabor_ai.conversation_logger import KollaborConversationLogger
+    from kollabor_events import EventBus
+
+    config = MagicMock()
+    config.get.side_effect = lambda _key, default=None: default
+    event_bus = EventBus()
+    llm = LLMService(config, event_bus, MagicMock())
+    event_bus.register_service("llm_service", llm)
+    llm.api_service.supports_image_input = lambda: True
+    logger = KollaborConversationLogger(tmp_path / "conversations")
+    logger.reset_session(llm.conversation_logger.session_id)
+    llm.conversation_logger = logger
+    llm.config._conversations_dir = logger.conversations_dir
+    llm.conversation_manager.current_session_id = logger.session_id
+    uid = llm.conversation_manager.conversation_uid
+    llm.is_processing = True
+    await llm.register_hooks()
+    state = LocalStateService(
+        llm_service=llm,
+        profile_manager=MagicMock(),
+        event_bus=event_bus,
+    )
+    return state, llm, logger, uid
+
+
+@pytest.mark.asyncio
+async def test_real_dispatch_writes_history_and_binds_exact_image_before_releasing_owner(
+    tmp_path,
+):
+    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
+    from kollabor_engine import media_store
+    from kollabor_engine.history_store import _wire_message
+
+    queue, attachments, _scope, request_id, staged, snapshot = await _queue_with_image()
+    state, llm, logger, uid = await _real_local_state(tmp_path)
+    identity = ConversationIdentity(uid, state.get_conversation_revision())
+    dispatcher = WebMessageQueueDispatcher(state, attachments)
+    worker = WebMessageQueueWorker(queue, identity, state.get_conversation_identity, dispatcher)
+
+    result = await worker.dispatch_batch(snapshot.batches[0].batch_id)
+
+    assert result.status is WorkerStatus.ADMITTED
+    assert result.items[0].recording_status.value == "recorded"
+    assert llm.processing_queue.qsize() == 1
+    admitted = llm.processing_queue._queue[0]
+    assert admitted.request_ids == (request_id,)
+
+    raw = next(
+        json.loads(line)
+        for line in logger.session_file.read_text().splitlines()
+        if json.loads(line).get("type") == "user"
+    )
+    assert raw["message"]["metadata"]["queue_handoff"]["request_id"] == request_id
+    history_row = _wire_message(raw)
+    assert history_row is not None
+    assert history_row["uuid"] == raw["uuid"]
+    rows = [history_row]
+    media_store.attach_media_to_rows(
+        logger.conversations_dir, logger.session_id, rows
+    )
+    assert rows[0]["media"][0]["mime"] == "image/png"
+    data, mime = media_store.open_media(
+        logger.conversations_dir,
+        rows[0]["media"][0]["ref"],
+        session_id=logger.session_id,
+    )
+    assert mime == "image/png"
+    assert data == PNG
+    assert attachments.attachment_count == 0
+
+
+@pytest.mark.asyncio
+async def test_real_dispatch_rejects_stale_revision_before_history_or_provider_custody(
+    tmp_path,
+):
+    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
+
+    queue, attachments, _scope, request_id, _staged, _snapshot = await _queue_with_image()
+    state, llm, logger, uid = await _real_local_state(tmp_path)
+    current = state.get_conversation_identity()
+    dispatcher = WebMessageQueueDispatcher(state, attachments)
+    request = DispatchRequest(
+        conversation_uid=uid,
+        conversation_revision=current.revision + 1,
+        request_id=request_id,
+        queue_scope_id=queue.scope_id,
+        queue_incarnation=queue.incarnation,
+        queue_revision=0,
+        batch_id=queue.new_batch_id(),
+        claim_id=queue.new_operation_id(),
+        attempt_id=queue.new_operation_id(),
+        payload=json.dumps({"text": "inspect this"}).encode(),
+        attachment_refs=(),
+    )
+
+    result = await dispatcher(request)
+
+    assert isinstance(result, AdmissionRejectedBeforeCustody)
+    assert result.reason_code == "stale_conversation"
+    assert llm.processing_queue.empty()
+    assert not logger.session_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_real_acp_admission_records_and_binds_the_exact_queue_image(tmp_path):
+    from kollabor.llm.acp_bridge import ACPAdmission
+    from kollabor.llm.acp_orchestrator import ACPOrchestrator
+    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
+    from kollabor_engine import media_store
+    from kollabor_engine.history_store import read_history_from_disk
+
+    class PendingRunner:
+        generation = 3
+        session_id = "acp-session"
+        binding = None
+        supports_image_input = True
+
+        def __init__(self):
+            self.admissions = []
+
+        def admit(self, text, *, request_id, source, thread_id=None, origin=None, **kwargs):
+            future = asyncio.get_running_loop().create_future()
+            admission = ACPAdmission(
+                request_id, source, thread_id, self.generation,
+                len(self.admissions) + 1, text, future, origin or {},
+            )
+            self.admissions.append((admission, kwargs))
+            return admission
+
+    queue, attachments, _scope, request_id, _staged, snapshot = await _queue_with_image()
+    state, llm, logger, uid = await _real_local_state(tmp_path)
+    llm.profile_manager = SimpleNamespace(
+        get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "acp")
+    )
+    orchestrator = ACPOrchestrator(llm.event_bus)
+    runner = PendingRunner()
+    orchestrator._runner = runner
+    llm.event_bus.register_service("acp_orchestrator", orchestrator)
+    identity = ConversationIdentity(uid, state.get_conversation_revision())
+    dispatcher = WebMessageQueueDispatcher(state, attachments)
+    worker = WebMessageQueueWorker(queue, identity, state.get_conversation_identity, dispatcher)
+
+    result = await worker.dispatch_batch(snapshot.batches[0].batch_id)
+
+    assert result.status is WorkerStatus.ADMITTED
+    assert len(runner.admissions) == 1
+    assert result.items[0].custody_id.startswith("acp:3:")
+    rows = read_history_from_disk(logger.conversations_dir, logger.session_id)
+    media_store.attach_media_to_rows(logger.conversations_dir, logger.session_id, rows)
+    row = next(row for row in rows if row.get("metadata", {}).get("queue_handoff", {}).get("request_id") == request_id)
+    assert len(row["media"]) == 1
+    data, mime = media_store.open_media(
+        logger.conversations_dir, row["media"][0]["ref"], session_id=logger.session_id
+    )
+    assert (data, mime) == (PNG, "image/png")
+    assert attachments.attachment_count == 0
+
+    for task in tuple(orchestrator._completion_tasks):
+        task.cancel()
+    await asyncio.gather(*tuple(orchestrator._completion_tasks), return_exceptions=True)
+

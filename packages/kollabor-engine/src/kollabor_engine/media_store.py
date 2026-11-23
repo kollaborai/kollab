@@ -22,7 +22,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Tuple, TypeVar
+from typing import Callable, Dict, List, Sequence, Tuple, TypeVar
 
 from kollabor_config.file_lock import locked_file
 
@@ -171,6 +171,152 @@ def save(
     return record
 
 
+def _verified_mime(payload: bytes) -> str:
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if payload.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if len(payload) >= 12 and payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
+        return "image/webp"
+    if payload.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    raise MediaError("queue attachment bytes have no supported image signature")
+
+
+def save_queue_handoff_media(
+    conversations_dir: Path,
+    session_id: str,
+    *,
+    request_id: str,
+    attachments: Sequence[Tuple[str, str, bytes]],
+) -> Tuple[Tuple[str, str], ...]:
+    """Durably stage one exact ordered queue request image set idempotently.
+
+    Each index row is tied to the daemon-owned source ref and request ID before
+    the history row is written. A retry of the same request and bytes reuses
+    its refs; changing order, source refs, MIME, or bytes conflicts. The later
+    ``bind_queue_handoff`` call attaches the exact JSONL row UUID.
+    """
+    if not isinstance(request_id, str) or not request_id or len(request_id) > 256:
+        raise MediaError("queue handoff request id is invalid")
+    if not isinstance(attachments, (tuple, list)) or len(attachments) > 20:
+        raise MediaError("queue handoff attachments are invalid")
+
+    checked: List[Tuple[str, str, bytes]] = []
+    seen_sources = set()
+    for attachment in attachments:
+        if not isinstance(attachment, tuple) or len(attachment) != 3:
+            raise MediaError("queue handoff attachment is invalid")
+        source_ref, mime, payload = attachment
+        if (
+            not isinstance(source_ref, str)
+            or not source_ref
+            or len(source_ref) > 128
+            or source_ref in seen_sources
+        ):
+            raise MediaError("queue handoff attachment refs are invalid")
+        if mime not in MIME_BY_EXT.values():
+            raise MediaError("queue handoff attachment MIME is unsupported")
+        if type(payload) is not bytes or not payload or len(payload) > MAX_DECODED_BYTES:
+            raise MediaError("queue handoff attachment bytes are invalid")
+        if _verified_mime(payload) != mime:
+            raise MediaError("queue handoff attachment bytes do not match MIME")
+        seen_sources.add(source_ref)
+        checked.append((source_ref, mime, payload))
+
+    created_paths: List[Path] = []
+
+    def ensure(entries: List[Dict[str, object]]) -> Tuple[Tuple[str, str], ...]:
+        if any(not isinstance(entry, dict) for entry in entries):
+            raise MediaError("queue handoff media index is malformed")
+        existing = [
+            entry for entry in entries
+            if entry.get("queue_request_id") == request_id
+        ]
+        if existing:
+            try:
+                if any(type(entry.get("queue_attachment_index")) is not int for entry in existing):
+                    raise MediaError("queue handoff attachment index is malformed")
+                existing.sort(key=lambda entry: entry["queue_attachment_index"])
+                indices = [entry["queue_attachment_index"] for entry in existing]
+                if indices != list(range(len(existing))) or len(existing) != len(checked):
+                    raise MediaError("queue handoff attachment set conflicts")
+                result = []
+                for index, (entry, (source_ref, mime, payload)) in enumerate(
+                    zip(existing, checked, strict=True)
+                ):
+                    ref = entry.get("ref")
+                    digest = entry.get("sha256")
+                    if (
+                        entry.get("queue_source_ref") != source_ref
+                        or entry.get("mime") != mime
+                        or not isinstance(ref, str)
+                        or not isinstance(digest, str)
+                        or hashlib.sha256(payload).hexdigest() != digest
+                    ):
+                        raise MediaError("queue handoff attachment set conflicts")
+                    stored, actual_mime = open_media(
+                        conversations_dir, ref, session_id=session_id
+                    )
+                    if actual_mime != mime or stored != payload:
+                        raise MediaError("queue handoff attachment integrity failed")
+                    result.append((source_ref, ref))
+                return tuple(result)
+            except (KeyError, TypeError):
+                raise MediaError("queue handoff attachment set conflicts") from None
+
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        media_root = Path(conversations_dir) / "media"
+        result = []
+        new_entries = []
+        for index, (source_ref, mime, payload) in enumerate(checked):
+            ext = next(ext for ext, candidate in MIME_BY_EXT.items() if candidate == mime)
+            while True:
+                ref = timestamp + "-" + secrets.token_hex(2)
+                if not any(media_root.glob(f"*/{ref}.*")) and not any(
+                    ref == entry.get("ref") for entry in entries + new_entries
+                ):
+                    break
+            target = session_media_dir(conversations_dir, session_id) / f"{ref}.{ext}"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_suffix(".tmp")
+            try:
+                temporary.write_bytes(payload)
+                temporary.replace(target)
+            except OSError as exc:
+                try:
+                    temporary.unlink()
+                except OSError:
+                    pass
+                raise MediaError("queue attachment could not be stored") from exc
+            created_paths.append(target)
+            digest = hashlib.sha256(payload).hexdigest()
+            new_entries.append(
+                {
+                    "ref": ref,
+                    "mime": mime,
+                    "ts": time.time(),
+                    "sha256": digest,
+                    "queue_request_id": request_id,
+                    "queue_source_ref": source_ref,
+                    "queue_attachment_index": index,
+                }
+            )
+            result.append((source_ref, ref))
+        entries.extend(new_entries)
+        return tuple(result)
+
+    try:
+        return _modify_index(conversations_dir, session_id, ensure)
+    except BaseException:
+        for path in created_paths:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        raise
+
+
 def record_failed(
     conversations_dir: Path,
     session_id: str,
@@ -252,7 +398,7 @@ def bind_queue_handoff(
         ]
         if request_entries:
             if any(
-                entry.get("history_row_uuid") != history_row_uuid
+                entry.get("history_row_uuid") not in (None, history_row_uuid)
                 for entry in request_entries
             ):
                 raise MediaError("queue handoff request is bound to another row")
@@ -302,7 +448,7 @@ def bind_queue_handoff(
                 "queue_attachment_index": order,
             }
             for key, value in expected.items():
-                if key in entry and entry[key] != value:
+                if key in entry and entry[key] not in (None, value):
                     raise MediaError("queue handoff media binding conflicts")
             pending_updates.append((entry, expected))
             bound.append(
@@ -317,7 +463,7 @@ def bind_queue_handoff(
         for entry in entries:
             if (
                 entry.get("queue_request_id") == request_id
-                and entry.get("history_row_uuid") != history_row_uuid
+                and entry.get("history_row_uuid") not in (None, history_row_uuid)
             ):
                 raise MediaError("queue handoff request is bound to another row")
         for entry, expected in pending_updates:
