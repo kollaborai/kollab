@@ -1194,6 +1194,9 @@ class TerminalLLMChat:
 
         render_task = None
         input_task = None
+        deferred_startup_task = None
+        self._startup_exit_code = None
+        self._startup_exit_cleanup_error = None
         self._needs_terminal_cleanup = (
             False  # Track if we need terminal restore on exit
         )
@@ -1288,7 +1291,7 @@ class TerminalLLMChat:
                 await self.llm_service.register_hooks()
 
             # Launch deferred startup as background task
-            self.create_background_task(
+            deferred_startup_task = self.create_background_task(
                 self._deferred_startup(initial_message=initial_message),
                 "deferred_startup",
             )
@@ -1300,6 +1303,16 @@ class TerminalLLMChat:
             except asyncio.CancelledError:
                 if self.running:
                     raise
+
+            if self._startup_exit_code is not None and deferred_startup_task is not None:
+                exit_code = self._startup_exit_code
+                await deferred_startup_task
+                cleanup_error = self._startup_exit_cleanup_error
+                if cleanup_error is not None:
+                    if exit_code != 0:
+                        raise SystemExit(exit_code) from cleanup_error
+                    raise cleanup_error
+                raise SystemExit(exit_code)
 
         except KeyboardInterrupt:
             print("\r\n")
@@ -1767,7 +1780,12 @@ class TerminalLLMChat:
 
                 if not should_stay:
                     logger.info(f"CLI command complete, exiting with code {exit_code}")
-                    await self._cleanup_then_exit(exit_code)
+                    self._startup_exit_code = exit_code
+                    try:
+                        await self._cleanup_or_raise()
+                    except ApplicationCleanupIncompleteError as cleanup_error:
+                        self._startup_exit_cleanup_error = cleanup_error
+                    return
 
                 logger.info("CLI command complete, continuing to interactive mode")
 
@@ -4191,9 +4209,13 @@ class TerminalLLMChat:
             self._attach_writer = None  # type: ignore[assignment]
 
         # Cancel all tracked background tasks
-        if self._background_tasks:
-            logger.info(f"Cancelling {len(self._background_tasks)} background tasks")
-            for task in self._background_tasks[
+        current_task = asyncio.current_task()
+        background_tasks = [
+            task for task in self._background_tasks if task is not current_task
+        ]
+        if background_tasks:
+            logger.info(f"Cancelling {len(background_tasks)} background tasks")
+            for task in background_tasks[
                 :
             ]:  # Copy list to avoid modification during iteration
                 if not task.done():
@@ -4202,7 +4224,7 @@ class TerminalLLMChat:
             # Wait for cancelled tasks individually (asyncio.gather wrapping
             # cancelled tasks creates nested future chains that cause recursive
             # cancel() calls → RecursionError on deep task trees)
-            pending = [t for t in self._background_tasks if not t.done()]
+            pending = [t for t in background_tasks if not t.done()]
             if pending:
                 try:
                     done, still_pending = await asyncio.wait(pending, timeout=5.0)
