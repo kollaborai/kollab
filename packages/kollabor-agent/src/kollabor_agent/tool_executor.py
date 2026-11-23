@@ -1465,7 +1465,7 @@ class ToolExecutor:
                     _plugin_key = tool_type
                     if _plugin_key not in self._plugin_handlers:
                         _plugin_key = tool_type.replace("-", "_")
-                    if _plugin_key in self._plugin_handlers:
+                    if _plugin_key in self._plugin_handlers and not git_bundle_read_only:
                         logger.debug(
                             f"Routing to plugin handler for {_plugin_key}"
                         )
