@@ -208,3 +208,26 @@ async def test_native_send_now_waits_for_old_turn_then_admits_once_ahead_of_back
     ]
     assert handoff.provider_custody_id is not None
 
+
+@pytest.mark.asyncio
+async def test_forced_batch_priority_admissions_keep_fifo_ahead_of_older_queue_work():
+    processor = _processor_with_older_input()
+    token = await processor.begin_forced_send()
+    first = processor.reserve_admission_slot()
+    second = processor.reserve_admission_slot()
+    assert first is not None and second is not None
+
+    assert processor.commit_admission_slot(
+        first, TaggedInput("B", ("forced-b",)), priority=True
+    )
+    assert processor.commit_admission_slot(
+        second, TaggedInput("C", ("forced-c",)), priority=True
+    )
+
+    assert [item.request_ids for item in processor.processing_queue._queue] == [
+        ("forced-b",),
+        ("forced-c",),
+        ("older-d",),
+    ]
+    assert processor.end_forced_send(token)
+
