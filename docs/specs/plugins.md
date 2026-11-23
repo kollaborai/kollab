@@ -545,6 +545,43 @@ generated from `frontend/src/plugins/sdk.ts`. Under `kollab plugin dev`, a page 
 rebuilt `web/dist/`; a change under `python/` remounts the engine router and restarts the plugin's
 background processes; the `python` part reaches agents when they restart.
 
+#### Settled by the build (step 3, web runtime)
+
+- The import map is written into the built `index.html` by the app build
+  (`frontend/scripts/plugin-runtime-plugin.ts`), since the four runtime files carry content hashes; the
+  source `index.html` has none, and `vite dev` has no import map, so plugins load only from a build. The web
+  UI server hashes the served page's `<script type="importmap">` and sends
+  `script-src 'self' 'sha256-<hash>'` with that page only.
+- A plugin page's address is `/plugin?id=<plugin id>&page=<page id>`, so Back and a reload keep it; picking
+  a chat leaves it, as for What's New.
+- `k.settings` is both the contribution call and `{get, save}`. `k.notice({text, button})` takes a button
+  `{label, open}` or `{label, run}` and returns its dismissal; a notice from `ctx.notify` arrives on
+  `GET /plugins/events` as topic `notice` with a `{label, open}` button. `k.toast(text)` is a notice that
+  leaves after 5 s: the app has no separate toast.
+- A plugin view's key among the chat's views is `plugin:<plugin id>:<view id>`. The app keeps one view for
+  every chat (as for Code Editor), so "each chat remembers its own tab" is not built; a chat that cannot
+  show the plugin's tab shows Chat.
+- The menu count kollab sets, in order: `Failed to Load` (its web code failed on this page, or `/plugins`
+  reports `state: "error"`), `Stopped` (a background process is `crash-stopped`), `Stopping` (without the
+  minutes left); otherwise the plugin's own `{text, hint}`.
+- At load the page reads the entry file before importing it and refuses one that assigns React's internals
+  export, with the message above. Only the entry file is read, not the files it imports; `add` and `dev` do
+  not check yet.
+- A module that arrives after the 5 s limit is never set up, and once a plugin fails, is replaced or goes
+  off, its old `k` refuses `k.api` and `k.settings` (`<id> no longer runs on this page`) and adds nothing.
+- Page and modal tabs get kollab's own inset (as What's New); a view fills the main area like Code Editor.
+  On a touch screen the 44 px minimum covers buttons, tabs, links, selects and text fields inside
+  `[data-plugin]`; switches, checkboxes, radios and sliders keep their shape. `[data-plugin]` marks only
+  plugin UI mounts (the plugin's stylesheet link carries `data-plugin-style`).
+- Open: `k.ui` dialogs, sheets, select lists and tooltips render in portals outside `[data-plugin]`, so the
+  touch size and a plugin's scoped CSS do not reach them yet; the fix is a portal container inside each
+  plugin mount.
+- A manifest `icon` names one of a short list of lucide icons (`frontend/src/plugins/mount.tsx`); any
+  other name shows a puzzle piece. A modal uses the Settings dialog surface until `dialog.tsx` has its
+  full-screen phone variant.
+- PhoneLink's phone app loads no plugin code yet: it cannot `import()` from the computer, so Scenario 9 is
+  still open.
+
 ### Settings
 
 A plugin's settings are one section in the shape `get_config_widgets()` already returns:

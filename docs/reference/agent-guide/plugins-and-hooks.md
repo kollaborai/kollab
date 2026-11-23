@@ -110,3 +110,23 @@ def get_config_widgets() -> Dict[str, Any]:
 Supported widget types: `checkbox`, `slider`, `dropdown`, `text_input`, `spinbox`. Each widget requires `type`, `label`, `config_path`, and `help`. Additional keys depend on the widget type (e.g., `min_value`/`max_value`/`step` for slider, `options` for dropdown, plus an optional `option_labels` mapping each option to the text people read when the options are ids; the option is still what is saved).
 
 **Important:** every `config_path` in a widget must have a matching entry in `get_default_config()`. If the default is missing, the widget will display an empty or incorrect value regardless of what the user sets. This is the single most common bug in config widgets — always verify the `config_path` key appears in both `get_config_widgets()` and `get_default_config()`.
+
+## Web Plugins (package `web/`)
+
+A package plugin's `web/dist/index.js` default-exports `definePlugin((k) => ...)` from `@kollab/plugin`
+(`docs/specs/plugins.md`, "Web plugin API"). The runtime lives in `packages/kollabor-webui/frontend/src/plugins/`:
+
+- `sdk.ts`: `@kollab/plugin` and the `k` object. Every contribution binds to an id declared under
+  `contributes` in `kollab-plugin.json`; anything else is ignored with a warning.
+- `registry.ts`: the store every contribution point reads (`usePlugins()`); removing a plugin drops all it added.
+- `loader.ts`: `GET /plugins`, `import()` with a 5 s limit, Retry as `?v=<hash>&retry=<n>`, `plugins-changed`,
+  `?plugins=off`. A plugin's contributions show only after its function returns.
+- `mount.tsx`, `surfaces.tsx`: the `<div data-plugin>` mount and error boundary, and what kollab draws
+  (menu rows in `SessionPanel.tsx`, pages and notices in `App.tsx`, views, modals).
+
+Rules: plugin text renders as text, never as HTML; plugin UI mounts only through `PluginMount`; with no
+plugin installed every surface draws nothing. Plugins share the app's React through the import map the
+build writes into `index.html` (`frontend/scripts/plugin-runtime-plugin.ts`); the web UI server allows that
+one inline script by its hash (`kollabor_webui/server.py`, `page()`), so never add another inline script.
+Tests: `npx vitest run src/plugins tests/plugin-runtime.test.ts` in the frontend; the bundled
+`bundles/plugins/hello/` is a working web plugin to try by hand.

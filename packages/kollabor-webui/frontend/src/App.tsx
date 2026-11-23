@@ -96,6 +96,16 @@ import {
 } from "./api";
 import { applyModelChoice, pickLabel, runningKey, stateAfterPick } from "@/components/shell/model-choice";
 import { NoticeAction, NoticeBar } from "@/components/shell/NoticeBar";
+import { setPluginHost, startPluginRuntime } from "@/plugins/loader";
+import { usePlugins } from "@/plugins/registry";
+import {
+  PluginModalHost,
+  PluginNotices,
+  PluginPage,
+  PluginViewHost,
+  pluginViewAvailable,
+  pluginViewGone,
+} from "@/plugins/surfaces";
 import {
   EngineRuntimeProvider,
   buildInitialState,
@@ -248,8 +258,20 @@ function RuntimeShell({
   const [status, setStatus] = useState<string | null>(null);
   const [panelSheetOpen, setPanelSheetOpen] = useState(false);
   const workspace = session.workspace ?? "";
-  // Code Editor, Git and Terminal work in the chat's folder; a chat without one shows Chat.
-  const shown: SessionView = !workspace && (view === "code" || view === "git" || view === "terminal") ? "chat" : view;
+  const plugins = usePlugins();
+  // Code Editor, Git and Terminal work in the chat's folder; a chat without one shows Chat. So does a chat on
+  // a plugin tab that is gone (its plugin turned off) or needs a folder this chat lacks.
+  const shown: SessionView =
+    !workspace && (view === "code" || view === "git" || view === "terminal")
+      ? "chat"
+      : view.startsWith("plugin:") && !pluginViewAvailable(plugins, view, Boolean(workspace))
+        ? "chat"
+        : view;
+  // A plugin tab that is gone for good (plugin off or failed) moves the chat to Chat, so Chat is the tab marked.
+  const viewGone = pluginViewGone(plugins, view);
+  useEffect(() => {
+    if (viewGone) setView("chat");
+  }, [viewGone, setView]);
   const [visited, setVisited] = useState({ editor: false, terminal: false });
   useEffect(() => {
     // Code and Git are one editor (same tabs and panes) with a different sidebar
@@ -411,6 +433,8 @@ function RuntimeShell({
               <TrajectoryView api={api} sessionId={session.session_id} refreshSignal={refreshSignal} />
             ) : shown === "gallery" ? (
               <GalleryView api={api} sessionId={session.session_id} />
+            ) : shown.startsWith("plugin:") ? (
+              <PluginViewHost viewKey={shown} session={session} />
             ) : null}
             {/* Opened once, then kept mounted and hidden, so open files and shells survive a switch to Chat. */}
             {workspace && visited.editor ? (
@@ -467,6 +491,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const [pageRoute, setPageRoute] = useState(() => readMainPageRoute(window.location));
   const learnRoute = pageRoute.kind === "learn" ? pageRoute.learn : null;
   const whatsNewActive = pageRoute.kind === "whats-new";
+  const pluginPage = pageRoute.kind === "plugin" ? pageRoute : null;
   const pageOpen = pageRoute.kind !== "chat";
   const previousPageOpenRef = useRef(pageOpen);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -1856,6 +1881,22 @@ export default function App({ contained = false }: { contained?: boolean } = {})
 
   const aliveKey = agents.filter((agent) => agent.active).map((agent) => agent.name).join(",");
 
+  // Web plugins (docs/specs/plugins.md): loaded once per page; they reach the chat's views and chats through the host.
+  useEffect(() => startPluginRuntime(api), []);
+  useEffect(() =>
+    setPluginHost({
+      // A plugin tab shows in the chat, so a plugin page that opens one gives way to the chat.
+      openView: (key) => {
+        returnToChat();
+        setSessionView(key);
+      },
+      openSession: (sessionId) => {
+        returnToChat();
+        void selectSession(sessionId);
+      },
+    }),
+  );
+
   return (
     <GemAppearanceProvider api={api} refreshKey={aliveKey}>
       <AvatarImageProvider api={api}>
@@ -1966,6 +2007,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           onSeeAllChanges={navigateToWhatsNew}
         />
         <PrChainDialog api={api} open={prChainOpen} onOpenChange={setPrChainOpen} />
+        <PluginModalHost />
         {activeSession ? (
           <AppsDialog
             api={api}
@@ -2009,7 +2051,8 @@ export default function App({ contained = false }: { contained?: boolean } = {})
           className={`${contained ? "h-[calc(100%-1rem)] max-h-[calc(100%-1rem)]" : "h-[calc(100svh-1rem)] max-h-[calc(100svh-1rem)]"} min-h-0 overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`}
         >
           {whatsNewActive ? <WhatsNewPage onExit={returnToChat} /> : null}
-          <div className={whatsNewActive ? "hidden" : "contents"}>
+          {pluginPage ? <PluginPage pluginId={pluginPage.plugin} pageId={pluginPage.page} onExit={returnToChat} /> : null}
+          <div className={whatsNewActive || pluginPage ? "hidden" : "contents"}>
           {welcomeGuideNotice ? (
             <NoticeBar onDismiss={() => setWelcomeGuideNotice(false)}>
               {WELCOME_GUIDE_DISMISSED_NOTICE}
@@ -2097,6 +2140,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
               ) : null}
             </NoticeBar>
           ) : null}
+          <PluginNotices />
           {activeSession?.halted ? (
             <>
               <ShellHeader className="flex min-h-12 shrink-0 items-center gap-2 px-3 lg:hidden">
