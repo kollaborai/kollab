@@ -719,20 +719,112 @@ def _terminal_find_escapes_workspace(
     find_names = {"find", "gfind"}
 
     def contains_find_token(text: str, depth: int = 0) -> bool:
-        if re.search(r"\b(?:find|gfind)\b", text):
-            return True
         if depth > 8:
             return False
+        for nested in re.findall(r"(?:\$\(|[<>]\()(.*?)\)", text):
+            if contains_find_token(nested, depth + 1):
+                return True
         try:
-            parsed = shlex.split(text, posix=True)
+            lexer = shlex.shlex(
+                text.replace("\n", ";"), posix=True, punctuation_chars=";&|()"
+            )
+            lexer.whitespace_split = True
+            lexer.commenters = "#"
+            parsed = list(lexer)
         except ValueError:
             return False
+
+        commands: list[list[str]] = [[]]
         for token in parsed:
-            if Path(token).name.lower() in find_names:
-                return True
-            if token != text and contains_find_token(token, depth + 1):
-                return True
-        return False
+            if token and all(char in ";&|()" for char in token):
+                commands.append([])
+            else:
+                commands[-1].append(token)
+
+        shells = {"bash", "dash", "fish", "ksh", "sh", "zsh"}
+        interpreters = {"node", "perl", "php", "python", "python2", "python3", "ruby"}
+        prefixes = {
+            "busybox", "command", "doas", "env", "exec", "nice", "nohup",
+            "stdbuf", "sudo", "time", "timeout", "xargs",
+        }
+        for words in commands:
+            index = 0
+            while index < len(words):
+                word = words[index]
+                if word in {"if", "then", "else", "elif", "do", "!"} or re.fullmatch(
+                    r"[A-Za-z_][A-Za-z0-9_]*=.*", word
+                ):
+                    index += 1
+                    continue
+
+                executable = Path(word).name.lower()
+                if executable in find_names:
+                    return True
+                if executable == "eval":
+                    return contains_find_token(" ".join(words[index + 1 :]), depth + 1)
+                if executable in shells:
+                    script_index = next(
+                        (
+                            position
+                            for position in range(index + 1, len(words))
+                            if words[position] == "-c"
+                            or (
+                                words[position].startswith("-")
+                                and "c" in words[position][1:]
+                            )
+                        ),
+                        None,
+                    )
+                    return script_index is not None and script_index + 1 < len(words) and contains_find_token(
+                        words[script_index + 1], depth + 1
+                    )
+                if executable == "env":
+                    arguments = words[index + 1 :]
+                    split_index = next(
+                        (
+                            position
+                            for position, argument in enumerate(arguments)
+                            if argument in {"-S", "--split-string"}
+                            or argument.startswith("--split-string=")
+                            or (argument.startswith("-S") and argument != "-S")
+                        ),
+                        None,
+                    )
+                    if split_index is not None:
+                        option = arguments[split_index]
+                        if option in {"-S", "--split-string"}:
+                            script = arguments[split_index + 1] if split_index + 1 < len(arguments) else ""
+                        elif option.startswith("--split-string="):
+                            script = option.split("=", 1)[1]
+                        else:
+                            script = option[2:]
+                        if contains_find_token(script, depth + 1):
+                            return True
+                if executable in interpreters:
+                    script_option = "-e" if executable in {"perl", "php", "ruby"} else "-c"
+                    if script_option in words[index + 1 :]:
+                        script_at = words.index(script_option, index + 1)
+                        if script_at + 1 < len(words) and re.search(
+                            r"\b(?:find|gfind)\b", words[script_at + 1]
+                        ):
+                            return True
+                    break
+                if executable in prefixes:
+                    index += 1
+                    continue
+                break
+        wrapper_text = (
+            r"(?:bash|busybox|dash|doas|env|eval|fish|ksh|nice|nohup|"
+            r"node|perl|php|python2?|python3|ruby|sh|stdbuf|sudo|time|timeout|xargs|zsh)"
+        )
+        starts_with_wrapper = re.search(
+            rf"(?m)(?:^|[;&|]\s*)(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:\S*/)?{wrapper_text}\b",
+            text,
+        )
+        return bool(
+            re.search(r"\b(?:find|gfind)\b", text)
+            and starts_with_wrapper
+        )
 
     def contains_dynamic_command_name(text: str, depth: int = 0) -> bool:
         """Fail closed when shell expansion can choose the executable name."""
