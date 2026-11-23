@@ -14,10 +14,6 @@ import pytest
 from kollabor_config import proc_ctl
 from plugins.hub.messaging_bridge import TelegramBridge
 
-
-_REAL_PROCESS_CHILDREN = psutil.Process.children
-
-
 _REAL_PROCESS_CHILDREN = psutil.Process.children
 
 
