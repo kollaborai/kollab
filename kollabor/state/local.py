@@ -130,6 +130,14 @@ def _web_command_output(result: Any, command_name: str) -> str:
     the assistant message instead of returning only "opened".
     """
     message = str(getattr(result, "message", "") or "")
+
+    def escape_markdown_text(value: Any) -> str:
+        text = " ".join(str(value or "").split())
+        markdown_punctuation = frozenset("\\`*_{}[]()#+!<>|~")
+        return "".join(
+            f"\\{char}" if char in markdown_punctuation else char for char in text
+        )
+
     ui_config = getattr(result, "ui_config", None)
     modal_config = getattr(ui_config, "modal_config", None)
     if not isinstance(modal_config, dict):
@@ -146,6 +154,7 @@ def _web_command_output(result: Any, command_name: str) -> str:
     ).strip()
     lines = [f"### {title}"]
     rendered_section = False
+    rendered_session_list_rows = False
 
     sections = modal_config.get("sections")
     if isinstance(sections, list):
@@ -153,6 +162,65 @@ def _web_command_output(result: Any, command_name: str) -> str:
             if not isinstance(section, dict):
                 continue
             section_lines: list[str] = []
+
+            session_items = section.get("sessions")
+            if section.get("type") == "session_list" and isinstance(
+                session_items, list
+            ):
+                hidden_session_rows = 0
+                rendered_section_session_rows = 0
+                for session in session_items:
+                    if not isinstance(session, dict):
+                        hidden_session_rows += 1
+                        continue
+
+                    metadata = session.get("metadata")
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    action = str(session.get("action") or "").strip()
+                    session_id = metadata.get("session_id")
+                    if not session_id and action != "branch_execute":
+                        session_id = session.get("id")
+                    if not isinstance(session_id, str) or not re.fullmatch(
+                        r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", session_id
+                    ):
+                        hidden_session_rows += 1
+                        continue
+                    row_title = escape_markdown_text(session.get("title"))
+                    if not row_title:
+                        row_title = escape_markdown_text(session_id)
+                    subtitle = escape_markdown_text(session.get("subtitle"))
+                    follow_up = ""
+
+                    if action == "branch_select_session" and session_id:
+                        follow_up = f"/branch {session_id}"
+                    elif action == "branch_execute" and session_id:
+                        message_index = metadata.get("message_index")
+                        if (
+                            isinstance(message_index, int)
+                            and not isinstance(message_index, bool)
+                            and message_index >= 0
+                        ):
+                            follow_up = f"/branch {session_id} {message_index}"
+                    elif action == "resume_session" and session_id:
+                        follow_up = f"/resume {session_id}"
+
+                    if not follow_up:
+                        hidden_session_rows += 1
+                        continue
+
+                    row = f"- **{row_title}**"
+                    if subtitle:
+                        row += f" — {subtitle}"
+                    row += f" — run `{follow_up}`"
+                    section_lines.append(row)
+                    rendered_section_session_rows += 1
+                    rendered_session_list_rows = True
+
+                if hidden_session_rows and rendered_section_session_rows:
+                    section_lines.append(
+                        "Some session rows were hidden because they could not be run safely."
+                    )
 
             commands = section.get("commands")
             if isinstance(commands, list):
@@ -196,7 +264,7 @@ def _web_command_output(result: Any, command_name: str) -> str:
     footer = str(
         modal_config.get("footer") or getattr(ui_config, "footer", "") or ""
     ).strip()
-    if footer:
+    if footer and not rendered_session_list_rows:
         lines.extend(["", f"_{footer}_"])
     return "\n".join(lines)
 
