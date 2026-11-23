@@ -703,6 +703,23 @@ test("an asynchronously rejected acknowledgement lock preserves the admitted ret
   expect(enqueueWebMessageBatch).toHaveBeenCalledOnce();
 });
 
+test("acknowledging an admitted message after switching sessions preserves the new session plan", async () => {
+  const storage = new MemoryStorage();
+  const locks = new SerialQueueLocks();
+  const { api } = busyApiHarness();
+  const oldSession = await submitBusyWebMessage(api, busyInput({
+    sessionId: "session-old", draftKey: "shared-draft", conversationUid: "conversation-old",
+  }), storage, locks);
+  const newSession = await submitBusyWebMessage(api, busyInput({
+    sessionId: "session-new", draftKey: "shared-draft", conversationUid: "conversation-new", text: "new session draft",
+  }), storage, locks);
+
+  await expect(acknowledgeBusyWebMessage(oldSession, storage, locks)).resolves.toBe(true);
+
+  expect(storage.getItem(oldSession.planKey)).toBeNull();
+  expect(storage.getItem(newSession.planKey)).not.toBeNull();
+});
+
 test("Web Locks denial fails closed before allocating queue identities", async () => {
   const { api, allocateWebMessageQueueIds } = busyApiHarness();
   const denied: QueueSubmissionLocks = {
