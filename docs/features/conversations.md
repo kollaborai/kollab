@@ -61,6 +61,12 @@ conversation at a specific message.
 
 While reading a long conversation, loading older pages and reconciling compacted history preserves the visible messages and their scroll position.
 
+## Branching Conversations
+
+Use `/branch <session_id> <message_index>` to start a separate conversation from a saved session. The branch
+includes the selected message and the messages before it. Kollab attempts to save the active conversation first
+when it has messages, then makes the branch active while leaving the saved source available.
+
 ## Saving Conversations
 
 If saving a user message or assistant reply fails, Kollab keeps processing the
