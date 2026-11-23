@@ -645,6 +645,10 @@ async def test_real_sdk_interrupted_turn_survives_snapshot_and_reload_without_re
     try:
         await orchestrator.start(profile)
         runner = orchestrator.runner
+        # The private launcher anchor is not an adapter descendant, even though
+        # it was forked from a process whose initial environment had the marker.
+        runner._recover_session_processes()
+        assert set(runner._owned_processes) == {runner._adapter_pid}
         admission = orchestrator.admit(scenario, request_id="stopped-request", source="rpc", thread_id="stopped-thread")
         async with asyncio.timeout(5):
             while not any(event.get("type") == "acp_update" and event.get("update", {}).get("title") == "Waiting fixture"

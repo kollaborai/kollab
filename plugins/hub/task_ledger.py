@@ -718,7 +718,11 @@ class TaskLedger:
             self._write_json_atomic(path, card.to_dict())
 
     def _load(
-        self, task_id: str, *, for_mutation: bool = False
+        self,
+        task_id: str,
+        *,
+        for_mutation: bool = False,
+        read_errors: Optional[List[str]] = None,
     ) -> Optional[TaskCard]:
         path = self._task_path(task_id)
         if not path.exists():
@@ -737,6 +741,8 @@ class TaskLedger:
                 else "",
                 e,
             )
+            if read_errors is not None:
+                read_errors.append(task_id)
             return None
 
     def _load_mutable(self, task_id: str, operation: str) -> Optional[TaskCard]:
@@ -941,11 +947,13 @@ class TaskLedger:
                     return True
             return False
 
-    def get_active_for(self, identity: str) -> List[TaskCard]:
-        """Get all active tasks assigned to this agent."""
+    def get_active_for(
+        self, identity: str, *, read_errors: Optional[List[str]] = None
+    ) -> List[TaskCard]:
+        """Get active tasks; append unreadable card IDs to ``read_errors``."""
         result = []
         for f in self._task_files():
-            card = self._load(f.stem)
+            card = self._load(f.stem, read_errors=read_errors)
             if (
                 card
                 and card.assignee == identity
@@ -967,10 +975,13 @@ class TaskLedger:
                 result.append(card)
         return sorted(result, key=lambda c: c.priority)
 
-    def get_all(self, status: Optional[str] = None) -> List[TaskCard]:
+    def get_all(
+        self, status: Optional[str] = None, *, read_errors: Optional[List[str]] = None
+    ) -> List[TaskCard]:
+        """Get readable task cards; append unreadable card IDs when requested."""
         result = []
         for f in self._task_files():
-            card = self._load(f.stem)
+            card = self._load(f.stem, read_errors=read_errors)
             if card and (status is None or card.status == status):
                 result.append(card)
         return result

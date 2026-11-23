@@ -58,6 +58,9 @@ function harness(
     queueComposerDraftSubmission: vi.fn(),
     skipEmptyDraftPersist,
     sendTransportCommand,
+    // A plain send: the message waits for the turn to end (#1102).
+    submitSendsNow: { current: false },
+    sendWaitingNow: vi.fn(),
     imageAttachmentAdapter: attachmentAdapter,
     setBusySubmitError,
   });

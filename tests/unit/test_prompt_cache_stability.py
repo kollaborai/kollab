@@ -105,7 +105,7 @@ def test_keyed_injection_replaces_an_undrained_one():
 
 
 class _Ledger:
-    def get_active_for(self, _identity):
+    def get_active_for(self, _identity, *, read_errors=None):
         return [
             SimpleNamespace(
                 id="t1",
