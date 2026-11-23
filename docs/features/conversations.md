@@ -1,7 +1,7 @@
 ---
 title: "Conversations and Storage"
 created: 2026-02-24
-modified: 2026-11-16
+modified: 2026-11-17
 status: active
 ---
 # Conversations and Storage
@@ -56,6 +56,10 @@ Selecting a conversation in `/sessions` resumes it. The resume system restores t
 full message history so the LLM has context from the previous session. Use
 `/branch <session_id> <message_index>` to create a new session from a saved
 conversation at a specific message.
+
+### Reading History in the Web UI
+
+While reading a long conversation, loading older pages and reconciling compacted history preserves the visible messages and their scroll position.
 
 ## Saving Conversations
 
