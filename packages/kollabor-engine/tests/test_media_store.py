@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 
 import pytest
-from kollabor_engine.routes.messages import _save_sent_media
 from kollabor_engine.media_store import (
     MAX_DECODED_BYTES,
     REF_RE,
@@ -19,6 +18,7 @@ from kollabor_engine.media_store import (
     open_media,
     save,
 )
+from kollabor_engine.routes.messages import _save_sent_media
 
 PNG = "data:image/png;base64,AQID"
 JPEG = "data:image/jpeg;base64,BAUF"
@@ -171,6 +171,15 @@ def test_queue_handoff_is_idempotent_but_cannot_rebind_request_to_other_media(
             source_media_refs=(("stage-a", second.ref),),
         )
 
+    entries = json.loads(
+        (tmp_path / "media" / "s1" / "index.json").read_text()
+    )
+    request_entries = [
+        entry for entry in entries if entry.get("queue_request_id") == identity["request_id"]
+    ]
+    assert [entry["ref"] for entry in request_entries] == [first.ref]
+    assert not any(entry.get("queue_request_id") for entry in entries if entry["ref"] == second.ref)
+
 
 def test_non_ascii_digit_tokens_are_not_tokens_and_bind_nothing(tmp_path: Path) -> None:
     r"""#1140 R3: the image-token grammar is ASCII digits only.
@@ -317,15 +326,6 @@ def test_mixed_row_counts_once(tmp_path: Path) -> None:
 def test_page_after_mixed_row_skips_once(tmp_path: Path) -> None:
     """The older-page offset must count a mixed row once too."""
     refs = [save(tmp_path, "s1", url).ref for url in (PNG, JPEG)]
-    earlier = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "look [image1]"},
-                {"type": "image", "image": None},
-            ],
-        },
-    ]
     page = [{"role": "user", "content": "second [image1]"}]
     attach_media_to_rows(tmp_path, "s1", page, skip=1)
     assert [m["ref"] for m in page[0]["media"]] == [refs[1]]

@@ -244,7 +244,37 @@ def bind_queue_handoff(
                     raise MediaError("queue handoff media index has duplicate refs")
                 entry_positions[ref] = index
 
+        # A request owns one complete, ordered attachment set. A retry of the
+        # exact bind is safe, but extending or replacing that set would leave
+        # multiple media entries claiming the same single history token.
+        request_entries = [
+            entry for entry in entries if entry.get("queue_request_id") == request_id
+        ]
+        if request_entries:
+            if any(
+                entry.get("history_row_uuid") != history_row_uuid
+                for entry in request_entries
+            ):
+                raise MediaError("queue handoff request is bound to another row")
+            try:
+                indices = [entry["queue_attachment_index"] for entry in request_entries]
+                if any(type(index) is not int for index in indices):
+                    raise MediaError("queue handoff media binding is malformed")
+                request_entries.sort(key=lambda entry: entry["queue_attachment_index"])
+                indices = [entry["queue_attachment_index"] for entry in request_entries]
+                existing_pairs = tuple(
+                    (entry["queue_source_ref"], entry["ref"])
+                    for entry in request_entries
+                )
+            except (KeyError, TypeError):
+                raise MediaError("queue handoff media binding is malformed") from None
+            if existing_pairs != tuple(pairs):
+                raise MediaError("queue handoff request binding conflicts")
+            if indices != list(range(len(request_entries))):
+                raise MediaError("queue handoff media binding is malformed")
+
         bound: List[Dict[str, object]] = []
+        pending_updates: List[Tuple[Dict[str, object], Dict[str, object]]] = []
         for order, (source_ref, media_ref) in enumerate(pairs):
             position = entry_positions.get(media_ref)
             if position is None:
@@ -254,7 +284,7 @@ def bind_queue_handoff(
             if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
                 raise MediaError("queue handoff media digest is unavailable")
             try:
-                data, _mime = open_media(
+                data, actual_mime = open_media(
                     conversations_dir, media_ref, session_id=session_id
                 )
             except FileNotFoundError:
@@ -263,6 +293,8 @@ def bind_queue_handoff(
                 ) from None
             if hashlib.sha256(data).hexdigest() != digest:
                 raise MediaError("queue handoff media integrity check failed")
+            if entry.get("mime") != actual_mime:
+                raise MediaError("queue handoff media mime does not match stored file")
             expected = {
                 "queue_request_id": request_id,
                 "queue_source_ref": source_ref,
@@ -272,12 +304,12 @@ def bind_queue_handoff(
             for key, value in expected.items():
                 if key in entry and entry[key] != value:
                     raise MediaError("queue handoff media binding conflicts")
-            entry.update(expected)
+            pending_updates.append((entry, expected))
             bound.append(
                 {
                     "source_ref": source_ref,
                     "ref": media_ref,
-                    "mime": entry.get("mime"),
+                    "mime": actual_mime,
                     "sha256": digest,
                     "index": order,
                 }
@@ -288,6 +320,8 @@ def bind_queue_handoff(
                 and entry.get("history_row_uuid") != history_row_uuid
             ):
                 raise MediaError("queue handoff request is bound to another row")
+        for entry, expected in pending_updates:
+            entry.update(expected)
         return tuple(bound)
 
     return _modify_index(conversations_dir, session_id, bind)
