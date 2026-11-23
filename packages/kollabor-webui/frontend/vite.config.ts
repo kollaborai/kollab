@@ -243,6 +243,7 @@ const mainConfig = defineConfig({
       "tests/setup-guide-followups.test.tsx",
       "tests/plugin-runtime.test.ts",
       "tests/plugin-touch-size.test.ts",
+      "tests/settings-tabs-width.test.ts",
       "src/plugins/registry.test.ts",
       "src/plugins/sdk.test.ts",
       "src/plugins/loader.test.ts",
