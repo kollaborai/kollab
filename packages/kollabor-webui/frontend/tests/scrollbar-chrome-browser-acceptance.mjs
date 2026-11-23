@@ -1,8 +1,8 @@
 // #1174 browser acceptance: visible scrollbar chrome is hidden across every
 // scroll surface the app ships — native containers (both axes, nested),
 // the document scroller, the shared Radix ScrollArea/ScrollBar (vertical and
-// horizontal), a real Radix Dialog (portal), the real Monaco editor with the
-// production scrollbar options, and the real TerminalViewer (xterm) over a
+// horizontal), a real Radix Dialog (portal), the production EditorPane,
+// and the real TerminalViewer (xterm) over a
 // stub connection with synthetic output — while wheel, keyboard, and
 // programmatic scrolling keep working and layout gains no reserved gutter.
 //
@@ -31,7 +31,8 @@ async function launchBrowser() {
   // Chromium with the overlay feature disabled renders real classic
   // scrollbars, so chrome visibility is genuinely measurable on both sides.
   const args = ["--disable-features=OverlayScrollbar"];
-  if (process.platform === "linux") args.push("--no-sandbox");
+  if (process.platform === "linux") args.push("--no-sandbox", "--ozone-platform=x11");
+  args.push("--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding");
   const common = { headless: false, args };
   if (process.env.CHROME_PATH) {
     return chromium.launch({ ...common, executablePath: process.env.CHROME_PATH });
@@ -49,8 +50,11 @@ async function launchBrowser() {
 async function openFixture(browser, baseUrl) {
   const context = await browser.newContext({ viewport: { width: 1600, height: 900 } });
   const page = await context.newPage();
+  page.setDefaultTimeout(10_000);
+  page.setDefaultNavigationTimeout(60_000);
   page.on("pageerror", (e) => console.error(`pageerror: ${e.message}`));
   await page.goto(`${baseUrl}/tests/scrollbar-chrome-fixture.html`, { waitUntil: "domcontentloaded" });
+  await page.bringToFront();
   await until(() => page.evaluate(() => window.__ready === true), "fixture page never became ready");
   return { context, page };
 }
@@ -71,15 +75,17 @@ function assertChromeHidden(name, box) {
 }
 
 function assertThicknessZero(name, t) {
-  assert.equal(t.v, 0, `${name}: vertical scrollbar chrome still reserves ${t.v}px`);
-  assert.equal(t.h, 0, `${name}: horizontal scrollbar chrome still reserves ${t.h}px`);
+  // DOM client/offset dimensions are integers; computed borders can be
+  // fractional under desktop scaling. A classic scrollbar is many pixels.
+  assert.ok(Math.abs(t.v) < 1, `${name}: vertical scrollbar chrome still reserves ${t.v}px`);
+  assert.ok(Math.abs(t.h) < 1, `${name}: horizontal scrollbar chrome still reserves ${t.h}px`);
 }
 
 async function wheelDelta(page, locator, dx, dy, read) {
   await locator.hover();
   const before = await read();
   await page.mouse.wheel(dx, dy);
-  await page.waitForTimeout(150);
+  await until(async () => (await read()) !== before, "wheel input did not change the scroll position", 3000);
   const after = await read();
   return after - before;
 }
@@ -103,14 +109,15 @@ async function run() {
     const { context, page } = await openFixture(browser, baseUrl);
 
     await check("terminal feed renders scrollback", async () => {
+      await until(() => page.evaluate(() => typeof window.__termFeed === "function"), "terminal connection never mounted");
       await page.getByText("feed-terminal").click();
       await until(
         () =>
           page.evaluate(() => {
-            const vp = document.querySelector('[data-testid="terminal-box"] .xterm-viewport');
-            return vp ? vp.scrollHeight - vp.clientHeight > 100 : false;
+            const rows = document.querySelector('[data-testid="terminal-box"] .xterm-rows');
+            return rows?.textContent.includes("terminal line");
           }),
-        "xterm viewport never became scrollable",
+        "xterm never painted the synthetic scrollback feed",
       );
     });
 
@@ -136,7 +143,7 @@ async function run() {
       );
     });
 
-    await check("monaco editor mounted with shared options", async () => {
+    await check("production monaco editor mounted", async () => {
       await until(
         () => page.evaluate(() => Boolean(document.querySelector('[data-testid="editor-box"] .monaco-editor'))),
         "monaco editor never mounted",
@@ -213,8 +220,18 @@ async function run() {
       assert.ok(d > 0, `nested wheel scrolled by ${d}`);
     });
     await check("wheel scrolls radix viewport (scroll survives hidden scrollbar)", async () => {
+      await page.getByTestId("radix-v").hover();
+      await until(() => page.locator('[data-testid="radix-v"] [data-slot="scroll-area-viewport"]').evaluate(
+        (viewport) => getComputedStyle(viewport).overflowY === "scroll",
+      ), "Radix viewport never enabled scrolling");
       const d = await wheelDelta(page, page.getByTestId("radix-v"), 0, 240, r('[data-testid="radix-v"] [data-slot="scroll-area-viewport"]', "scrollTop"));
-      assert.ok(d > 0, `radix viewport wheel scrolled by ${d} — hiding the scrollbar must not disable scrolling`);
+      const state = await page.locator('[data-testid="radix-v"] [data-slot="scroll-area-viewport"]').evaluate((vp) => {
+        const box = vp.getBoundingClientRect();
+        return { top: vp.scrollTop, height: vp.scrollHeight, client: vp.clientHeight,
+          box: { x: box.x, y: box.y, width: box.width, height: box.height }, viewport: [innerWidth, innerHeight],
+          target: document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)?.outerHTML.slice(0, 180) };
+      });
+      assert.ok(d > 0, `radix viewport wheel scrolled by ${d}: ${JSON.stringify(state)}`);
     });
     await check("wheel scrolls radix horizontal", async () => {
       const d = await wheelDelta(page, page.getByTestId("radix-h"), 240, 0, () =>
@@ -241,18 +258,24 @@ async function run() {
 
     // Keyboard scrolling on focusable scrollers + editor.
     await check("keyboard scrolls native container", async () => {
-      await page.getByTestId("native-both").focus();
+      const container = page.getByTestId("native-both");
+      await page.bringToFront();
+      await container.focus();
       const before = await r('[data-testid="native-both"]', "scrollTop")();
-      await page.keyboard.press("PageDown");
-      await page.waitForTimeout(100);
+      await container.press("PageDown");
+      await until(async () => (await r('[data-testid="native-both"]', "scrollTop")()) > before,
+        "keyboard did not scroll the focused native container", 3000);
       const after = await r('[data-testid="native-both"]', "scrollTop")();
       assert.ok(after - before > 0, `keyboard scrolled by ${after - before}`);
     });
     await check("keyboard scrolls monaco", async () => {
-      await page.getByTestId("editor-box").click();
+      const input = page.locator('[data-testid="editor-box"] .monaco-editor :is(.inputarea, .native-edit-context)');
+      // Put the cursor in the visible text, rather than focusing an offscreen
+      // cursor left behind by the preceding wheel check.
+      await page.locator('[data-testid="editor-box"] .monaco-editor').click({ position: { x: 100, y: 80 } });
       const before = await editorVisibleLines();
-      await page.keyboard.press("PageDown");
-      await page.waitForTimeout(150);
+      await input.press("PageDown");
+      await until(async () => (await editorVisibleLines()) !== before, "monaco did not scroll after PageDown", 3000);
       const after = await editorVisibleLines();
       assert.notEqual(after, before, "monaco visible lines did not change after PageDown");
     });
@@ -338,6 +361,76 @@ async function run() {
       assert.ok(!diffProbes["monaco-diff-v-scrollbar"], `diff vertical slider visible: ${JSON.stringify(diffProbes["monaco-diff-v-scrollbar"])}`));
     await check("production diff horizontal slider hidden", () =>
       assert.ok(!diffProbes["monaco-diff-h-scrollbar"], `diff horizontal slider visible: ${JSON.stringify(diffProbes["monaco-diff-h-scrollbar"])}`));
+
+    // A single stylesheet owns the policy. Removing only its scrollbar rules
+    // must reveal real chrome on the same production components. This catches
+    // missing selectors, non-overflowing fixtures and a second policy hidden
+    // in editor options; none may silently count as successful coverage.
+    await check("removing the stylesheet policy reveals every scrollbar implementation", async () => {
+      // Reload to start in the normal editor; then visit the diff editor once.
+      // Disposing a diff model while remounting its normal sibling is unrelated
+      // to scrollbar rendering and is outside this fixture's contract.
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.bringToFront();
+      await until(() => page.evaluate(() => window.__ready === true), "fixture did not reload");
+      await until(() => page.evaluate(() => typeof window.__termFeed === "function"), "terminal connection never mounted");
+      await page.getByText("feed-terminal").click();
+      const removed = await page.evaluate(() => {
+        let count = 0;
+        const removePolicy = (sheet) => {
+          for (let i = sheet.cssRules.length - 1; i >= 0; i--) {
+            const rule = sheet.cssRules[i];
+            if (rule.selectorText && (
+              rule.selectorText.includes("scrollbar") ||
+              rule.selectorText.includes("minimap-slider") ||
+              rule.style.getPropertyValue("scrollbar-width") === "none"
+            )) {
+              sheet.deleteRule(i);
+              count++;
+            } else if (rule.cssRules) removePolicy(rule);
+          }
+        };
+        const style = document.querySelector('style[data-vite-dev-id$="/src/styles.css"]');
+        if (!style?.sheet) throw new Error("production stylesheet is missing");
+        removePolicy(style.sheet);
+        return count;
+      });
+      assert.ok(removed > 0, "no production scrollbar policy was removed");
+      const native = await probes(page);
+      assert.ok(native.document.v > 0, "classic document scrollbar must be measurable without the policy");
+      assert.ok(native["native-both"].v > 0 && native["native-both"].h > 0,
+        "both native scrollbar axes must be measurable without the policy");
+
+      const visible = async (selector) => {
+        const locator = page.locator(selector);
+        await until(() => locator.count(), `scrollbar implementation is missing: ${selector}`, 3000);
+        await until(() => locator.evaluateAll((elements) => elements.some((element) => {
+          const style = getComputedStyle(element);
+          const box = element.getBoundingClientRect();
+          return style.display !== "none" && style.visibility !== "hidden" &&
+            Number(style.opacity) > 0 && box.width > 0 && box.height > 0;
+        })), `scrollbar did not become visible without the policy: ${selector}`, 3000);
+      };
+      for (const id of ["radix-v", "radix-h"]) {
+        await page.getByTestId(id).hover();
+        await visible(`[data-testid="${id}"] [data-slot="scroll-area-scrollbar"]`);
+      }
+      await page.getByTestId("terminal-box").hover();
+      await page.mouse.wheel(0, -240);
+      await visible('[data-testid="terminal-box"] .xterm-scrollable-element > .scrollbar.vertical');
+      await visible('[data-testid="terminal-box"] .xterm-scrollable-element > .scrollbar.vertical > .slider');
+
+      for (const variant of ["normal", "diff"]) {
+        await page.evaluate((variant) => window.__setEditorVariant(variant), variant);
+        await until(() => page.locator('[data-testid="editor-box"] .monaco-editor').count(), "editor did not mount");
+        const box = await page.getByTestId("editor-box").boundingBox();
+        await page.mouse.move(box.x + box.width * 0.75, box.y + box.height / 2);
+        await page.mouse.wheel(240, 240);
+        await visible('[data-testid="editor-box"] .monaco-scrollable-element > .scrollbar.vertical');
+        await visible('[data-testid="editor-box"] .monaco-scrollable-element > .scrollbar.horizontal');
+        if (variant === "normal") await visible('[data-testid="editor-box"] .minimap-slider');
+      }
+    });
 
     await context.close();
   } finally {

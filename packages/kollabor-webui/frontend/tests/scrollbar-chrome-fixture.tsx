@@ -2,8 +2,7 @@
  * #1174 scrollbar-chrome fixture page. Mounts the REAL scroll surfaces the app
  * ships — the shared Radix ScrollArea/ScrollBar, a real Radix Dialog (portal),
  * the real TerminalViewer over a stub connection (synthetic output, never a
- * real shell), and the same Monaco editor component editor-pane mounts with
- * the same scrollbar options factory — plus plain native scroll containers,
+ * real shell), and the production EditorPane — plus plain native scroll containers,
  * including nested ones. Purely test scaffolding: it renders no app shell.
  */
 import { useState } from "react";
@@ -151,7 +150,7 @@ useEditorStore.getState().setActiveFile(paneId, normalEditorPath);
 function EditorSurface() {
   return (
     <div data-testid="editor-box" style={{ width: 400, height: 200 }}>
-      <EditorPane paneId={paneId} rootPath="/fixture" />
+      <EditorPane paneId={paneId} rootPath="/fixture" showFilePicker={false} onOpenFiles={() => {}} />
     </div>
   );
 }
@@ -304,7 +303,7 @@ window.__scrollbarProbes = () => {
     // Layout honesty: a hidden scrollbar must not leave a reserved gutter.
     "native-borderless-no-gutter": (() => {
       const el = byId("native-borderless");
-      return el ? el.clientWidth === el.getBoundingClientRect().width : false;
+      return el ? el.clientWidth === el.offsetWidth : false;
     })(),
   };
 };
