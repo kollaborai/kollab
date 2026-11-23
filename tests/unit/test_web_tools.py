@@ -415,6 +415,39 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertTrue(result.success, result.error)
         self.assertIn(article_body.rstrip(), result.output)
 
+    def test_web_fetch_json_ld_collapses_internal_whitespace_for_selection(self):
+        """Repeated internal whitespace cannot make a teaser beat article text."""
+        article_body = "Actual later article body. " * 12
+        teaser = "Short teaser" + (" " * 600) + " text"
+        html = (
+            '<script type="application/ld+json">'
+            + json.dumps(
+                [
+                    {"articleBody": teaser},
+                    {"articleBody": article_body},
+                ]
+            )
+            + "</script>"
+        )
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                self.executor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(article_body.rstrip(), result.output)
+
     def test_web_fetch_json_ld_description_does_not_shadow_semantic_article(self):
         """A metadata description cannot replace longer semantic article text."""
         from kollabor_agent.tool_executor import ToolExecutor
