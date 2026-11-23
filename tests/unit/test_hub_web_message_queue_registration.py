@@ -19,7 +19,9 @@ def test_hub_composes_queue_rpcs_on_its_authenticated_rpc_server():
     registered = plugin._register_web_message_queue_runtime(_ConversationState())
 
     assert registered is True
-    assert isinstance(plugin._web_message_queue_runtime.registry, WebMessageQueueRegistry)
+    assert isinstance(
+        plugin._web_message_queue_runtime.registry, WebMessageQueueRegistry
+    )
     assert plugin._web_message_queue_runtime.dispatch_available is False
     methods = set(plugin._rpc_server.list_methods())
     assert "state.web_queue.snapshot" in methods

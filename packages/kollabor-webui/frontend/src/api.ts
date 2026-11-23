@@ -150,6 +150,60 @@ export type HistoryPage = {
   stale?: boolean;
 };
 
+/** A daemon-minted ID set for one WebUI queue submission. */
+export type WebMessageQueueIds = {
+  scope_id: string;
+  incarnation: string;
+  operation_ids: string[];
+  batch_id: string;
+  request_ids: string[];
+  attachment_operation_ids: string[];
+};
+
+/** One daemon-owned image staged for a queued message. */
+export type WebMessageQueueAttachment = {
+  ref: string;
+  mime: string;
+  size: number;
+};
+
+export type WebMessageQueueItemSnapshot = {
+  request_id: string;
+  status: "queued" | "dispatching" | "in_doubt";
+  attempt_id: string | null;
+  payload_b64: string;
+  attachment_refs: string[];
+};
+
+export type WebMessageQueueBatchSnapshot = {
+  batch_id: string;
+  sequence: number;
+  status: "queued" | "dispatching" | "in_doubt";
+  request_ids: string[];
+  claim_id: string | null;
+  items: WebMessageQueueItemSnapshot[];
+};
+
+export type WebMessageQueueSnapshot = {
+  scope_id: string;
+  incarnation: string;
+  revision: number;
+  batches: WebMessageQueueBatchSnapshot[];
+  /** False until the daemon has a bounded supervisor and atomic provider adapter. */
+  dispatch_available: boolean;
+};
+
+export type WebMessageQueueEnqueueRequest = {
+  conversation_uid: string;
+  operation_id: string;
+  batch_id: string;
+  items: Array<{
+    request_id: string;
+    text: string;
+    attachment_refs: string[];
+  }>;
+};
+
 export type HistoryPageOptions = {
   limit?: number;
   before?: string;
@@ -1402,6 +1456,100 @@ export class EngineApi {
     return this.json<{ ok: boolean }>(
       `/sessions/${encodeURIComponent(sessionId)}/history`,
       { method: "DELETE" },
+    );
+  }
+
+  private webMessageQueuePath(sessionId: string) {
+    return `/sessions/${encodeURIComponent(sessionId)}/web-message-queue`;
+  }
+
+  getWebMessageQueue(sessionId: string, conversationUid: string) {
+    const query = new URLSearchParams({ conversation_uid: conversationUid });
+    return this.json<WebMessageQueueSnapshot>(
+      `${this.webMessageQueuePath(sessionId)}?${query.toString()}`,
+    );
+  }
+
+  allocateWebMessageQueueIds(
+    sessionId: string,
+    conversationUid: string,
+    itemCount: number,
+    operationCount: number,
+    attachmentOperationCount: number,
+  ) {
+    return this.json<WebMessageQueueIds>(`${this.webMessageQueuePath(sessionId)}/ids`, {
+      method: "POST",
+      body: JSON.stringify({
+        conversation_uid: conversationUid,
+        item_count: itemCount,
+        operation_count: operationCount,
+        attachment_operation_count: attachmentOperationCount,
+      }),
+    });
+  }
+
+  stageWebMessageQueueAttachment(
+    sessionId: string,
+    conversationUid: string,
+    operationId: string,
+    image: Blob,
+  ) {
+    const query = new URLSearchParams({ conversation_uid: conversationUid });
+    return this.json<WebMessageQueueAttachment>(
+      `${this.webMessageQueuePath(sessionId)}/attachments/${encodeURIComponent(operationId)}?${query.toString()}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": image.type || "application/octet-stream" },
+        body: image,
+      },
+    );
+  }
+
+  enqueueWebMessageBatch(sessionId: string, body: WebMessageQueueEnqueueRequest) {
+    return this.json<{ scope_id: string; incarnation: string; revision: number; status: string; batch_id: string; request_ids: string[] }>(
+      `${this.webMessageQueuePath(sessionId)}/batches`,
+      { method: "POST", body: JSON.stringify(body) },
+    );
+  }
+
+  removeWebMessageQueueItem(
+    sessionId: string,
+    conversationUid: string,
+    operationId: string,
+    requestId: string,
+  ) {
+    const query = new URLSearchParams({
+      conversation_uid: conversationUid,
+      operation_id: operationId,
+    });
+    return this.json<{ status: string; request_ids: string[] }>(
+      `${this.webMessageQueuePath(sessionId)}/items/${encodeURIComponent(requestId)}?${query.toString()}`,
+      { method: "DELETE" },
+    );
+  }
+
+  async getWebMessageQueueAttachment(
+    sessionId: string,
+    conversationUid: string,
+    requestId: string,
+    ref: string,
+  ) {
+    const query = new URLSearchParams({ conversation_uid: conversationUid });
+    const response = await this.request(
+      `${this.webMessageQueuePath(sessionId)}/items/${encodeURIComponent(requestId)}/attachments/${encodeURIComponent(ref)}?${query.toString()}`,
+    );
+    return response.blob();
+  }
+
+  sendWebMessageQueueBatchNow(
+    sessionId: string,
+    conversationUid: string,
+    batchId: string,
+  ) {
+    const query = new URLSearchParams({ conversation_uid: conversationUid });
+    return this.json<{ accepted: boolean }>(
+      `${this.webMessageQueuePath(sessionId)}/batches/${encodeURIComponent(batchId)}/send-now?${query.toString()}`,
+      { method: "POST" },
     );
   }
 

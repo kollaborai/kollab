@@ -659,6 +659,9 @@ class HubPlugin(BasePlugin):
         # The inbound remote request whose turn this agent is running.
         self._net_turn: Optional[_NetworkTurn] = None
         self._rpc_server: Optional[Any] = None  # kollabor_rpc.RpcServer; see _start_hub
+        # Daemon-owned WebUI queue intake and attachment custody. Provider
+        # dispatch remains disabled until its atomic adapter is composed.
+        self._web_message_queue_runtime: Optional[Any] = None
         self._work_queue: Optional[WorkQueue] = None
         self._designator = IdentityAssigner()
 
@@ -6287,6 +6290,7 @@ class HubPlugin(BasePlugin):
                             state_service.set_context_identity(self._identity.identity)
                     except Exception as e:
                         logger.debug(f"failed to push context identity: {e}")
+                    self._register_web_message_queue_runtime(state_service)
                 else:
                     logger.debug(
                         "state_service not yet on event bus, state rpc handlers deferred"
@@ -6735,6 +6739,32 @@ class HubPlugin(BasePlugin):
             logger.error(f"Hub startup failed: {e}", exc_info=True)
         finally:
             self._starting = False
+
+    def _register_web_message_queue_runtime(self, state_service: Any) -> bool:
+        """Register safe queue management RPCs on this daemon's RPC server.
+
+        Claim and settlement RPCs remain unregistered until the bounded worker
+        supervisor and atomic provider admission adapter are available.
+        """
+        self._web_message_queue_runtime = None
+        if self._rpc_server is None or state_service is None:
+            return False
+        try:
+            from kollabor.state.web_message_queue_runtime import (
+                register_web_message_queue_runtime,
+            )
+
+            self._web_message_queue_runtime = register_web_message_queue_runtime(
+                self._rpc_server,
+                state_service,
+            )
+        except Exception as exc:
+            logger.warning("WebUI queue RPC registration failed closed: %s", exc)
+            return False
+        logger.info(
+            "WebUI queue management RPC registered; provider dispatch unavailable"
+        )
+        return True
 
     def show_network_notice(self, text: str) -> None:
         """One system line in the main pane; attached windows get it from the renderer."""

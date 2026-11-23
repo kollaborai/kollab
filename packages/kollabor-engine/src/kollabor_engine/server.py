@@ -426,9 +426,11 @@ def create_app(port: Optional[int] = None) -> FastAPI:
     from .routes.permissions import router as permissions_router
     from .routes.profiles import router as profiles_router
     from .routes.sessions import router as sessions_router
+    from .routes.web_queue import router as web_queue_router
 
     opens = [Depends(open_named_session)]
     app.include_router(sessions_router, dependencies=opens)
+    app.include_router(web_queue_router, dependencies=opens)
     app.include_router(messages_router, dependencies=opens)
     app.include_router(permissions_router, dependencies=opens)
     app.include_router(profiles_router)

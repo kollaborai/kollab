@@ -22,6 +22,11 @@ from typing import Any
 
 from kollabor_rpc import RpcCallerContext, current_rpc_caller_context
 
+from .web_message_attachments import (
+    DEFAULT_MAX_ATTACHMENT_BYTES,
+    DEFAULT_MAX_ATTACHMENTS_PER_ITEM,
+    WebMessageAttachmentRegistry,
+)
 from .web_message_queue import (
     DEFAULT_MAX_BATCH_ITEMS,
     DEFAULT_MAX_PAYLOAD_BYTES,
@@ -35,6 +40,34 @@ from .web_message_queue import (
 
 DEFAULT_MAX_SCOPES = 16
 MAX_OPERATION_IDS_PER_ALLOCATION = 64
+
+_IMAGE_MIME_ALIASES = {
+    "image/png": "image/png",
+    "image/jpeg": "image/jpeg",
+    "image/jpg": "image/jpeg",
+    "image/webp": "image/webp",
+    "image/gif": "image/gif",
+}
+
+
+def _validated_image_mime(mime: str, payload: bytes) -> str:
+    """Verify an upload's declared MIME against its image format signature."""
+    normalized = _IMAGE_MIME_ALIASES.get(mime.strip().lower())
+    if normalized is None:
+        raise ValueError("unsupported image MIME type")
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        actual = "image/png"
+    elif payload.startswith(b"\xff\xd8\xff"):
+        actual = "image/jpeg"
+    elif len(payload) >= 12 and payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
+        actual = "image/webp"
+    elif payload.startswith((b"GIF87a", b"GIF89a")):
+        actual = "image/gif"
+    else:
+        raise ValueError("image bytes do not have a supported format signature")
+    if actual != normalized:
+        raise ValueError("image bytes do not match the declared MIME type")
+    return normalized
 
 
 class QueueRpcAuthorizationError(PermissionError):
@@ -185,6 +218,31 @@ class WebMessageQueueRegistry:
     def scope_count(self) -> int:
         """Current number of retained scoped queues."""
         return len(self._queues)
+
+    def validates_attachment_owner_id(
+        self,
+        scope_id: str,
+        incarnation: str,
+        request_id: str,
+    ) -> bool:
+        """Check an owner ID against the queue incarnation that retains it.
+
+        An item already in the queue remains a valid attachment owner after its
+        creation lease expires. A newly allocated request ID may be retained
+        only while that ID's creation lease is still valid. Callers that retain
+        staged refs must hold a registry lease for this exact scope.
+        """
+        queue = self._queues.get(scope_id)
+        if queue is None or queue.incarnation != incarnation:
+            return False
+        try:
+            queue._token_issue_time(request_id, "item")
+            if request_id in queue._item_owners:
+                return True
+            queue._validate_new_entity_id(request_id, "item")
+            return True
+        except Exception:
+            return False
 
     async def _make_room_unlocked(self) -> None:
         if len(self._queues) < self._max_scopes:
@@ -348,6 +406,7 @@ def _snapshot_to_wire(snapshot: QueueSnapshot) -> dict[str, Any]:
                         "status": item.status.value,
                         "attempt_id": item.attempt_id,
                         "payload_b64": base64.b64encode(item.payload).decode("ascii"),
+                        "attachment_refs": list(item.attachment_refs),
                     }
                     for item in batch.items
                 ],
@@ -368,6 +427,7 @@ def _claim_payload_to_wire(payload: Any) -> dict[str, Any]:
             {
                 "request_id": item.request_id,
                 "payload_b64": base64.b64encode(item.payload).decode("ascii"),
+                "attachment_refs": list(item.attachment_refs),
             }
             for item in payload.items
         ],
@@ -416,6 +476,14 @@ def _decode_items(
         encoded = raw_item.get("payload_b64")
         if not isinstance(request_id, str) or not isinstance(encoded, str):
             raise ValueError("invalid batch item")
+        raw_refs = raw_item.get("attachment_refs", [])
+        if (
+            not isinstance(raw_refs, list)
+            or len(raw_refs) > DEFAULT_MAX_ATTACHMENTS_PER_ITEM
+            or any(not isinstance(ref, str) for ref in raw_refs)
+            or len(set(raw_refs)) != len(raw_refs)
+        ):
+            raise ValueError("invalid attachment references")
         total_encoded += len(encoded)
         if len(encoded) > max_encoded_item or total_encoded > max_encoded_total:
             raise ValueError("payload byte bound exceeded")
@@ -429,7 +497,13 @@ def _decode_items(
             or total_decoded > registry.max_queue_bytes
         ):
             raise ValueError("payload byte bound exceeded")
-        items.append(WebMessage(request_id=request_id, payload=payload))
+        items.append(
+            WebMessage(
+                request_id=request_id,
+                payload=payload,
+                attachment_refs=tuple(raw_refs),
+            )
+        )
     return tuple(items)
 
 
@@ -439,6 +513,8 @@ def register_web_message_queue_handlers(
     *,
     resolve_scope: ScopeResolver,
     on_change: RpcChangeNotifier | None = None,
+    attachment_registry: WebMessageAttachmentRegistry | None = None,
+    include_worker_methods: bool = True,
 ) -> None:
     """Register JSON-safe queue RPC handlers on an existing ``RpcServer``.
 
@@ -452,6 +528,12 @@ def register_web_message_queue_handlers(
     """
 
     change_queue, change_queue_limit = _validate_change_notifier(on_change)
+    if not isinstance(include_worker_methods, bool):
+        raise TypeError("include_worker_methods must be a bool")
+    if attachment_registry is not None and not isinstance(
+        attachment_registry, WebMessageAttachmentRegistry
+    ):
+        raise TypeError("attachment_registry must be a WebMessageAttachmentRegistry")
 
     async def _scope(params: dict[str, Any]) -> _ResolvedQueueScope:
         caller_context = current_rpc_caller_context()
@@ -625,11 +707,19 @@ def register_web_message_queue_handlers(
             default=1,
             maximum=MAX_OPERATION_IDS_PER_ALLOCATION,
         )
+        attachment_operation_count = _bounded_integer(
+            params,
+            "attachment_operation_count",
+            default=0,
+            maximum=MAX_OPERATION_IDS_PER_ALLOCATION,
+        )
         if item_count < 1 or operation_count < 1:
             raise ValueError("item_count and operation_count must be positive")
+        if attachment_operation_count and attachment_registry is None:
+            raise ValueError("attachment staging is unavailable")
 
-        def mint(queue: WebMessageQueue) -> dict[str, Any]:
-            return {
+        async def mint(queue: WebMessageQueue) -> dict[str, Any]:
+            result = {
                 "scope_id": queue.scope_id,
                 "incarnation": queue.incarnation,
                 "operation_ids": [
@@ -638,8 +728,81 @@ def register_web_message_queue_handlers(
                 "batch_id": queue.new_batch_id(),
                 "request_ids": [queue.new_request_id() for _ in range(item_count)],
             }
+            if attachment_operation_count:
+                assert attachment_registry is not None
+                attachment_scope = await attachment_registry.bind_scope(
+                    params, current_rpc_caller_context()
+                )
+                if (
+                    attachment_scope.binding.scope_id != queue.scope_id
+                    or attachment_scope.binding.queue_incarnation != queue.incarnation
+                ):
+                    raise QueueRpcAuthorizationError("queue access denied")
+                result["attachment_operation_ids"] = [
+                    attachment_scope.new_operation_id()
+                    for _ in range(attachment_operation_count)
+                ]
+            else:
+                result["attachment_operation_ids"] = []
+            return result
 
         return await _with_queue(params, mint)
+
+    async def _stage_attachment(params: dict[str, Any]) -> dict[str, Any]:
+        if attachment_registry is None:
+            raise ValueError("attachment staging is unavailable")
+        operation_id = _required_text(params, "operation_id")
+        mime = _required_text(params, "mime")
+        encoded = params.get("payload_b64")
+        if not isinstance(encoded, str):
+            raise ValueError("invalid image payload")
+        max_encoded = ((DEFAULT_MAX_ATTACHMENT_BYTES + 2) // 3) * 4
+        if len(encoded) > max_encoded:
+            raise ValueError("image exceeds the attachment size limit")
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("invalid image payload") from None
+        if not payload:
+            raise ValueError("invalid image payload")
+        mime = _validated_image_mime(mime, payload)
+        attachment_scope = await attachment_registry.bind_scope(
+            params, current_rpc_caller_context()
+        )
+        receipt = await attachment_scope.stage(operation_id, mime, payload)
+        return {"ref": receipt.ref, "mime": receipt.mime, "size": receipt.size}
+
+    async def _open_attachment(params: dict[str, Any]) -> dict[str, Any]:
+        if attachment_registry is None:
+            raise ValueError("attachment staging is unavailable")
+        request_id = _required_text(params, "request_id")
+        ref = _required_text(params, "ref")
+
+        async def open_owned(queue: WebMessageQueue) -> dict[str, Any]:
+            snapshot = await queue.snapshot()
+            if not any(
+                item.request_id == request_id and ref in item.attachment_refs
+                for batch in snapshot.batches
+                for item in batch.items
+            ):
+                raise ValueError("attachment not found")
+            attachment_scope = await attachment_registry.bind_scope(
+                params, current_rpc_caller_context()
+            )
+            if (
+                attachment_scope.binding.scope_id != queue.scope_id
+                or attachment_scope.binding.queue_incarnation != queue.incarnation
+            ):
+                raise QueueRpcAuthorizationError("queue access denied")
+            staged = await attachment_scope.open_for_owner(request_id, ref)
+            return {
+                "ref": staged.ref,
+                "mime": staged.mime,
+                "size": len(staged.data),
+                "payload_b64": base64.b64encode(staged.data).decode("ascii"),
+            }
+
+        return await _with_queue(params, open_owned)
 
     async def _snapshot(params: dict[str, Any]) -> dict[str, Any]:
         async def read(queue: WebMessageQueue) -> dict[str, Any]:
@@ -653,7 +816,25 @@ def register_web_message_queue_handlers(
 
         async def enqueue(queue: WebMessageQueue) -> dict[str, Any]:
             items = _decode_items(params, registry)
-            receipt = await queue.enqueue_batch(operation_id, batch_id, items)
+            if any(item.attachment_refs for item in items):
+                if attachment_registry is None:
+                    raise ValueError("attachment staging is unavailable")
+                attachment_scope = await attachment_registry.bind_scope(
+                    params, current_rpc_caller_context()
+                )
+                if (
+                    attachment_scope.binding.scope_id != queue.scope_id
+                    or attachment_scope.binding.queue_incarnation != queue.incarnation
+                ):
+                    raise QueueRpcAuthorizationError("queue access denied")
+                receipt = await queue.enqueue_batch_with_attachments(
+                    operation_id,
+                    batch_id,
+                    items,
+                    attachment_scope=attachment_scope,
+                )
+            else:
+                receipt = await queue.enqueue_batch(operation_id, batch_id, items)
             await _notify(queue)
             return _receipt_to_wire(receipt)
 
@@ -737,7 +918,22 @@ def register_web_message_queue_handlers(
         request_id = _required_text(params, "request_id")
 
         async def remove(queue: WebMessageQueue) -> dict[str, Any]:
-            receipt = await queue.remove_item(operation_id, request_id)
+            if attachment_registry is None:
+                receipt = await queue.remove_item(operation_id, request_id)
+            else:
+                attachment_scope = await attachment_registry.bind_scope(
+                    params, current_rpc_caller_context()
+                )
+                if (
+                    attachment_scope.binding.scope_id != queue.scope_id
+                    or attachment_scope.binding.queue_incarnation != queue.incarnation
+                ):
+                    raise QueueRpcAuthorizationError("queue access denied")
+                receipt = await queue.remove_item_with_attachments(
+                    operation_id,
+                    request_id,
+                    attachment_scope=attachment_scope,
+                )
             await _notify(queue)
             return _receipt_to_wire(receipt)
 
@@ -773,5 +969,23 @@ def register_web_message_queue_handlers(
         "state.web_queue.remove_item": _remove_item,
         "state.web_queue.release_claim": _release_claim,
     }
+    if attachment_registry is not None:
+        handlers.update(
+            {
+                "state.web_queue.stage_attachment": _stage_attachment,
+                "state.web_queue.open_attachment": _open_attachment,
+            }
+        )
+    if not include_worker_methods:
+        allowed = {
+            "state.web_queue.allocate_ids",
+            "state.web_queue.snapshot",
+            "state.web_queue.enqueue_batch",
+            "state.web_queue.remove_item",
+        }
+        handlers = {method: handler for method, handler in handlers.items() if method in allowed or method in {
+            "state.web_queue.stage_attachment",
+            "state.web_queue.open_attachment",
+        }}
     for method, handler in handlers.items():
         rpc_server.register(method, handler)
