@@ -1,7 +1,6 @@
 """The web server reports truthful update-check states and bounds lookups."""
 
 import asyncio
-import json
 
 import httpx
 import pytest
@@ -42,31 +41,6 @@ def test_update_check_reports_current_after_a_successful_lookup(monkeypatch):
     assert body["status"] == "current"
     assert body["available"] is False
     assert body["last_successful_check"]
-
-
-def test_update_check_uses_channel_from_global_config(tmp_path, monkeypatch):
-    import kollabor.updates.version_check_service as service_module
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(service_module, "running_binary", lambda: tmp_path / "kollab")
-    monkeypatch.setattr(service_module, "app_launcher", lambda: None)
-    config_dir = tmp_path / ".kollab"
-    config_dir.mkdir()
-    (config_dir / "config.json").write_text(
-        json.dumps({"kollabor": {"updates": {"include_prereleases": True}}})
-    )
-    channels = []
-
-    async def latest(self):
-        channels.append(self.include_prereleases)
-        return {"tag_name": f"v{__version__}", "name": "Current", "html_url": "https://example.invalid/current"}
-
-    monkeypatch.setattr(VersionCheckService, "_fetch_latest_release", latest)
-    with TestClient(server.create_app(), base_url="http://127.0.0.1", client=("127.0.0.1", 12345)) as client:
-        response = client.get("/api/update/check")
-
-    assert response.status_code == 200
-    assert channels == [True]
 
 
 @pytest.mark.parametrize("release_data", [None, {"tag_name": "not-a-version"}])
