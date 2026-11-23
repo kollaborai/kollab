@@ -402,6 +402,31 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
                 "search paths must stay inside the active workspace", result.error
             )
 
+    async def test_terminal_find_refuses_awk_system_wrapper(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "project"
+            workspace.mkdir()
+            self.executor.workspace = workspace
+            self.executor.shell_executor.run = AsyncMock(
+                return_value=ShellResult(
+                    success=True,
+                    stdout="outside marker\n",
+                    stderr="",
+                    exit_code=0,
+                )
+            )
+            command = "awk 'BEGIN { system(\"find ../outside -name marker.txt -print\") }'"
+
+            result = await self.executor._execute_terminal_command(
+                {"type": "terminal", "id": "awk-find", "command": command}
+            )
+
+            self.assertFalse(result.success)
+            self.assertIn(
+                "search paths must stay inside the active workspace", result.error
+            )
+            self.executor.shell_executor.run.assert_not_awaited()
+
     async def test_terminal_find_refuses_eval_with_expanded_executable_name(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir) / "project"
