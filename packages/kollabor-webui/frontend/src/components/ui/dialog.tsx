@@ -4,6 +4,7 @@ import { Dialog as DialogPrimitive } from "radix-ui"
 
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
+import { usePluginPortalScope } from "@/components/ui/plugin-portal-scope"
 
 function Dialog({
   ...props
@@ -20,7 +21,9 @@ function DialogTrigger({
 function DialogPortal({
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Portal>) {
-  return <DialogPrimitive.Portal data-slot="dialog-portal" {...props} />
+  const { scoped, portalContainer } = usePluginPortalScope()
+  if (scoped && !portalContainer) return null
+  return <DialogPrimitive.Portal data-slot="dialog-portal" {...props} container={portalContainer} />
 }
 
 function DialogClose({
