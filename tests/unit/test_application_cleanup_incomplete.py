@@ -22,8 +22,74 @@ class _RenderLoop:
         return None
 
 
+class _FailingRenderLoop:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    async def run(self):
+        raise RuntimeError("original startup failure")
+
+
+class _CancelledRenderLoop:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    async def run(self):
+        raise asyncio.CancelledError("injected cancellation")
+
+
 async def _noop(*args, **kwargs):
     return None
+
+
+def _cli_args(*, pipe=False):
+    return SimpleNamespace(
+        mcp_hub=False,
+        acp_prompt=None,
+        acp_command=None,
+        reset_config=False,
+        cleanup_projects=False,
+        update=False,
+        font_dir=False,
+        login=False,
+        web_ui=False,
+        restart=False,
+        hub=None,
+        attach=None,
+        cli_command=None,
+        _unknown_args=[],
+        _help_pending=False,
+        pipe=pipe,
+        query="probe" if pipe else None,
+        detached=False,
+        system_prompt=None,
+        agent=None,
+        llm=None,
+        model=None,
+        effort=None,
+        save=False,
+        local=False,
+        make_default_profile=False,
+        skill=[],
+        context=None,
+        timeout="30s" if pipe else None,
+    )
+
+
+def _configure_cli(monkeypatch, args, app):
+    discovery = SimpleNamespace(plugins_dir="plugins")
+    monkeypatch.setattr(cli, "setup_bootstrap_logging", lambda: None)
+    monkeypatch.setattr(cli, "discover_plugin_args", lambda: ([], discovery))
+    monkeypatch.setattr(cli, "parse_arguments", lambda _: args)
+    monkeypatch.setattr(cli, "handle_early_plugin_args", lambda *args: False)
+    monkeypatch.setattr(cli.sys, "argv", ["kollab"])
+    monkeypatch.setattr(
+        cli.sys,
+        "stdin",
+        SimpleNamespace(isatty=lambda: True, read=lambda: ""),
+    )
+    monkeypatch.setattr("kollabor_plugins.PluginRegistry", lambda _: SimpleNamespace())
+    monkeypatch.setattr(cli, "TerminalLLMChat", lambda **_: app)
 
 
 def _build_start_app(args, cleanup_results, cleanup_calls):
@@ -75,53 +141,10 @@ async def test_start_surfaces_unconfirmed_cleanup(monkeypatch):
 @pytest.mark.parametrize("cleanup_result", [False, True])
 async def test_cli_retries_incomplete_start_cleanup(monkeypatch, cleanup_result):
     monkeypatch.setattr(application, "EventDrivenRenderLoop", _RenderLoop)
-    args = SimpleNamespace(
-        mcp_hub=False,
-        acp_prompt=None,
-        acp_command=None,
-        reset_config=False,
-        cleanup_projects=False,
-        update=False,
-        font_dir=False,
-        login=False,
-        web_ui=False,
-        restart=False,
-        hub=None,
-        attach=None,
-        cli_command=None,
-        _unknown_args=[],
-        _help_pending=False,
-        pipe=False,
-        query=None,
-        detached=False,
-        system_prompt=None,
-        agent=None,
-        llm=None,
-        model=None,
-        effort=None,
-        save=False,
-        local=False,
-        make_default_profile=False,
-        skill=[],
-        context=None,
-        timeout=None,
-    )
-    discovery = SimpleNamespace(plugins_dir="plugins")
+    args = _cli_args()
     cleanup_calls = []
     app = _build_start_app(args, [False, cleanup_result], cleanup_calls)
-
-    monkeypatch.setattr(cli, "setup_bootstrap_logging", lambda: None)
-    monkeypatch.setattr(cli, "discover_plugin_args", lambda: ([], discovery))
-    monkeypatch.setattr(cli, "parse_arguments", lambda _: args)
-    monkeypatch.setattr(cli, "handle_early_plugin_args", lambda *args: False)
-    monkeypatch.setattr(cli.sys, "argv", ["kollab"])
-    monkeypatch.setattr(
-        cli.sys,
-        "stdin",
-        SimpleNamespace(isatty=lambda: True, read=lambda: ""),
-    )
-    monkeypatch.setattr("kollabor_plugins.PluginRegistry", lambda _: SimpleNamespace())
-    monkeypatch.setattr(cli, "TerminalLLMChat", lambda **_: app)
+    _configure_cli(monkeypatch, args, app)
 
     if cleanup_result:
         await cli.async_main()
@@ -130,3 +153,59 @@ async def test_cli_retries_incomplete_start_cleanup(monkeypatch, cleanup_result)
             await cli.async_main()
 
     assert cleanup_calls == [False, cleanup_result]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_result", [False, True])
+async def test_cli_preserves_original_start_failure_after_cleanup_retry(
+    monkeypatch, retry_result
+):
+    monkeypatch.setattr(application, "EventDrivenRenderLoop", _FailingRenderLoop)
+    args = _cli_args()
+    cleanup_calls = []
+    app = _build_start_app(args, [False, retry_result], cleanup_calls)
+    _configure_cli(monkeypatch, args, app)
+
+    if retry_result:
+        with pytest.raises(RuntimeError, match="original startup failure"):
+            await cli.async_main()
+    else:
+        with pytest.raises(application.ApplicationCleanupIncompleteError) as exc:
+            await cli.async_main()
+        assert isinstance(exc.value.__cause__, RuntimeError)
+        assert "original startup failure" in str(exc.value.__cause__)
+
+    assert cleanup_calls == [False, retry_result]
+
+
+@pytest.mark.asyncio
+async def test_cli_preserves_original_pipe_failure_after_cleanup_retry(monkeypatch):
+    monkeypatch.setattr(application, "EventDrivenRenderLoop", _FailingRenderLoop)
+    args = _cli_args(pipe=True)
+    cleanup_calls = []
+    app = _build_start_app(args, [False, True], cleanup_calls)
+
+    async def fail_config_hooks(self):
+        raise RuntimeError("original pipe startup failure")
+
+    app._load_config_hooks = MethodType(fail_config_hooks, app)
+    _configure_cli(monkeypatch, args, app)
+
+    with pytest.raises(RuntimeError, match="original pipe startup failure"):
+        await cli.async_main()
+
+    assert cleanup_calls == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_cli_preserves_cancellation_after_cleanup_retry(monkeypatch):
+    monkeypatch.setattr(application, "EventDrivenRenderLoop", _CancelledRenderLoop)
+    args = _cli_args()
+    cleanup_calls = []
+    app = _build_start_app(args, [False, True], cleanup_calls)
+    _configure_cli(monkeypatch, args, app)
+
+    with pytest.raises(asyncio.CancelledError, match="injected cancellation"):
+        await cli.async_main()
+
+    assert cleanup_calls == [False, True]
