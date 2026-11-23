@@ -163,16 +163,38 @@ describe("QueuePanel", () => {
     expect(html.indexOf("First batch")).toBeLessThan(html.indexOf("Later batch"));
   });
 
+  it("renders batches as one compact flat message list", () => {
+    const html = render(snapshot([
+      batch("first", 1, ["r1", "r2"], [item("r1", "First message"), item("r2", "Second message")]),
+      batch("later", 2, ["r3"], [item("r3", "Later message")]),
+    ]));
+    expect(html).not.toContain('data-slot="web-queue-batch"');
+    expect(html.match(/data-slot="web-queue-item"/g) ?? []).toHaveLength(3);
+    expect(html).not.toMatch(/<span[^>]*>\d+ messages<\/span>/);
+    expect(html).toContain('aria-label="Send 2 queued messages now"');
+    expect(html.indexOf("First message")).toBeLessThan(html.indexOf("Second message"));
+    expect(html.indexOf("Second message")).toBeLessThan(html.indexOf("Later message"));
+  });
+
   it("does not bypass an ambiguous first batch to send a later batch", () => {
     const html = render(snapshot([
       batch("first", 1, ["r1"], [item("r1", "Uncertain first batch", "in_doubt")], "in_doubt"),
       batch("later", 2, ["r2"], [item("r2", "Held later batch")]),
     ]));
-    const sendLabels = html.match(/aria-label="Send 1 queued message now"/g) ?? [];
-    expect(sendLabels).toHaveLength(1);
-    expect(html).toMatch(/<button[^>]*aria-label="Send 1 queued message now"[^>]*disabled=""/);
+    expect(html).toContain('aria-label="Send Now unavailable: earlier message delivery status is unknown"');
+    expect(html).not.toContain('aria-label="Send 1 queued message now"');
+    expect(html).toMatch(/<button[^>]*aria-label="Send Now unavailable: earlier message delivery status is unknown"[^>]*disabled=""/);
     expect(html).toContain("held to avoid sending twice");
     expect(html.match(/data-slot="web-queue-status-dot"/g) ?? []).toHaveLength(2);
     expect(html).toContain('data-status="in_doubt"');
+  });
+
+  it("explains an earlier dispatching batch in the disabled Send Now name", () => {
+    const html = render(snapshot([
+      batch("first", 1, ["r1"], [item("r1", "Sending first batch", "dispatching")], "dispatching"),
+      batch("later", 2, ["r2"], [item("r2", "Later queued batch")]),
+    ]));
+    expect(html).toContain('aria-label="Send Now unavailable: earlier message is already being sent"');
+    expect(html).not.toContain('aria-label="Send 1 queued message now"');
   });
 });

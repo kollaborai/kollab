@@ -90,7 +90,10 @@ try {
     });
   });
   const batchSendNow = page.getByRole("button", { name: "Send 1 queued message now" });
-  await page.waitForFunction(() => document.querySelectorAll('[data-slot="web-queue-batch"]').length === 2);
+  await page.waitForFunction(() => document.querySelectorAll('[data-slot="web-queue-item"]').length === 2);
+  assert.equal(await page.locator('[data-slot="web-queue-batch"]').count(), 0,
+    "message rows should not be wrapped in repeated batch cards");
+  assert.equal(await page.locator('[data-slot="web-queue-item"]').count(), 2);
   assert.equal(await batchSendNow.count(), 1, "multiple batches must expose one FIFO Send Now control");
   await batchSendNow.click();
   await page.waitForFunction(() => window.__queuePanelTest?.calls().length === 4);
@@ -140,9 +143,12 @@ try {
     ],
   }));
   await page.waitForFunction(() => document.querySelector('[data-slot="web-queue-status-dot"][data-status="in_doubt"]') !== null);
-  const heldSendNow = page.getByRole("button", { name: "Send 1 queued message now" });
+  const heldSendNow = page.locator('[data-slot="web-queue-send-now"]');
   assert.equal(await heldSendNow.count(), 1, "ambiguous head must block all later batch Send Now actions");
   assert.equal(await heldSendNow.isDisabled(), true);
+  assert.equal(await heldSendNow.getAttribute("aria-label"),
+    "Send Now unavailable: earlier message delivery status is unknown",
+    "disabled control name must state why Send Now is blocked");
   assert.equal(await page.locator('[data-slot="web-queue-status-dot"][data-status="queued"]').count(), 1);
   assert.equal((await page.evaluate(() => window.__queuePanelTest?.calls())).length, 4,
     "an ambiguous head must not submit a later batch");
