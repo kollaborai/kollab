@@ -45,7 +45,11 @@ def test_update_check_reports_current_after_a_successful_lookup(monkeypatch):
 
 
 def test_update_check_uses_channel_from_global_config(tmp_path, monkeypatch):
+    import kollabor.updates.version_check_service as service_module
+
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(service_module, "running_binary", lambda: tmp_path / "kollab")
+    monkeypatch.setattr(service_module, "app_launcher", lambda: None)
     config_dir = tmp_path / ".kollab"
     config_dir.mkdir()
     (config_dir / "config.json").write_text(
