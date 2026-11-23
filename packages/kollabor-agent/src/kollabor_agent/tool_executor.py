@@ -773,7 +773,7 @@ class ToolExecutor:
             allowed_tools = None
         self._bundle_tools = allowed_tools
         logger.debug(
-            f"Bundle scope set: {len(allowed_tools) if allowed_tools else 'all'} tools"
+            f"Bundle scope set: {len(allowed_tools) if allowed_tools is not None else 'all'} tools"
         )
 
     def clear_bundle_scope(self) -> None:

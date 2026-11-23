@@ -99,25 +99,33 @@ class LaunchStrategy(Enum):
     API = "api"
 
 
+def _copy_tools(tools: Optional[List[str]]) -> Optional[List[str]]:
+    """Copy an agent's tools list, keeping None (no tools field) distinct from []."""
+    return None if tools is None else list(tools)
+
+
 def get_agent_tool_scope(agent: Any) -> Optional[List[str]]:
     """Return the active agent's bundle tool scope, if one is defined.
 
     Returns None (all tools allowed) when:
     - agent is None
-    - no tools field is defined
+    - no tools field is defined (missing from agent.json)
     - tools is ["*"] (wildcard = allow all)
+
+    Returns [] (no tools allowed) when agent.json sets "tools": [].
     """
     if agent is None:
         return None
 
     tools = getattr(agent, "tools", None)
-    if not tools:
+    if tools is None:
         config = getattr(agent, "config", None)
         config_get = getattr(config, "get", None)
         if callable(config_get):
             tools = config_get("tools")
 
-    if not tools:
+    # No tools field: every tool is allowed
+    if tools is None:
         return None
 
     # Wildcard: allow all tools (same as no scope)
@@ -251,9 +259,9 @@ class AgentRuntime:
     When False, no stream/working/crystallized files are written.
     Some throwaway agents (one-shot tasks) don't need memory."""
 
-    tools: List[str] = field(default_factory=list)
+    tools: Optional[List[str]] = None
     """Allowed registry tool names from agent.json.
-    Empty means no explicit bundle scope (legacy all-tools mode)."""
+    None means agent.json has no tools field (all tools). [] means no tools."""
 
     # ── runtime ─────────────────────────────────────────────────
     # Process-level state. Changes every session.
@@ -650,7 +658,7 @@ class AgentRuntime:
             active_skills=list(agent.active_skills),
             capabilities=list(agent.capabilities),
             vault_enabled=agent.vault_enabled,
-            tools=list(getattr(agent, "tools", [])),
+            tools=_copy_tools(getattr(agent, "tools", None)),
             # hub -- agent.identity carries over
             identity=agent.identity,
             # bridge -- keep original Agent for skill/prompt proxying
@@ -690,7 +698,7 @@ class AgentRuntime:
             rt.default_skills = list(agent.default_skills)
             rt.active_skills = list(agent.active_skills)
             rt.vault_enabled = agent.vault_enabled
-            rt.tools = list(getattr(agent, "tools", []))
+            rt.tools = _copy_tools(getattr(agent, "tools", None))
             # capabilities: prefer agent's if identity's is empty
             if not rt.capabilities and agent.capabilities:
                 rt.capabilities = list(agent.capabilities)

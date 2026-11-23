@@ -646,7 +646,7 @@ class SystemPromptBuilder:
 
             registry = get_registry()
 
-            if allowed_tools:
+            if allowed_tools is not None:
                 return render_for_bundle(allowed_tools, registry=registry)
             else:
                 # No bundle scoping — render all tools

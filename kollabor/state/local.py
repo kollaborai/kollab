@@ -2011,7 +2011,7 @@ class LocalStateService(StateService):
             return
 
         tools = get_agent_tool_scope(agent)
-        if tools:
+        if tools is not None:
             self._revoke_tools_outside_scope(tools)
             tool_executor.set_bundle_scope(tools)
         else:

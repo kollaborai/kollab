@@ -101,7 +101,10 @@ fields:
   - default_skills: subset of skills to load into context automatically (optional)
 
 `tools` controls the agent's tool registry view. `"*"` grants every registered
-tool; a list grants only the named tools. This is independent of the runtime
+tool; a list grants only the named tools; `[]` grants no tools. A missing `tools`
+field grants every tool. An `agent.json` that does not parse, or whose `tools` is
+not a list of names, fails to load: the agent is not available and the error is
+written to the log. This is independent of the runtime
 permission mode: an allowed tool can still require approval, and a tool absent
 from the bundle cannot be called by that agent.
 

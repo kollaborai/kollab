@@ -958,7 +958,7 @@ class TerminalLLMChat:
         def _sync_bundle_scope_to_executor(agent):
             te = self.llm_service.tool_executor
             tools = get_agent_tool_scope(agent)
-            if tools:
+            if tools is not None:
                 _revoke_removed_grants(tools)
                 te.set_bundle_scope(tools)
             else:

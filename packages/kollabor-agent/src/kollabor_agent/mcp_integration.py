@@ -1657,7 +1657,7 @@ class MCPIntegration:
         if agent_manager:
             active_agent = agent_manager.get_active_agent()
             tools = get_agent_tool_scope(active_agent)
-            if tools:
+            if tools is not None:
                 return tools
 
         # No bundle — all tools (legacy default)

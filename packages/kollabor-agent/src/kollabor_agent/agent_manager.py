@@ -60,7 +60,7 @@ from .runtime import AgentRuntime
 logger = logging.getLogger(__name__)
 
 # Cache settings
-CACHE_VERSION = 4  # Every agent gets the skills the user added; skills_fingerprint
+CACHE_VERSION = 5  # agent "tools" keeps None (no field) apart from [] (no tools); skills_fingerprint
 CACHE_TTL_SECONDS = 86400  # 24 hours
 AGENT_CACHE_NAME = "agent_metadata.cache"  # under get_config_directory(), read at use so HOME can change
 
@@ -514,7 +514,11 @@ def _save_cached_agents(
                 "capabilities": agent.capabilities,
                 "vault_enabled": agent.vault_enabled,
                 "tools": (
-                    list(agent._agent_ref.tools)
+                    (
+                        None
+                        if agent._agent_ref.tools is None
+                        else list(agent._agent_ref.tools)
+                    )
                     if agent._agent_ref and hasattr(agent._agent_ref, "tools")
                     else []
                 ),
@@ -578,8 +582,8 @@ class Agent:
     identity: str = ""  # Hub identity, defaults to agent name if empty
     capabilities: List[str] = field(default_factory=list)  # Capability tags
     vault_enabled: bool = True  # Enable persistent memory via hub vault
-    tools: List[str] = field(default_factory=list)
-    """Tool names from agent.json 'tools' field. Used for bundle scoping."""
+    tools: Optional[List[str]] = None
+    """Tool names from agent.json 'tools' field. None when the field is missing (all tools)."""
 
     @classmethod
     def from_directory(
@@ -628,11 +632,19 @@ class Agent:
         identity = ""
         capabilities: List[str] = []
         vault_enabled = True
-        tools: List[str] = []
+        tools: Optional[List[str]] = None
         config_file = agent_dir / "agent.json"
         if config_file.exists():
             try:
                 config = json.loads(config_file.read_text(encoding="utf-8"))
+                if not isinstance(config, dict):
+                    raise ValueError("agent.json must hold a JSON object")
+                tools = config.get("tools")
+                if tools is not None and (
+                    not isinstance(tools, list)
+                    or not all(isinstance(name, str) for name in tools)
+                ):
+                    raise ValueError("'tools' must be a list of tool names")
                 profile = config.get("profile")
                 description = config.get("description", "")
                 default_skills = config.get("default_skills", [])
@@ -640,9 +652,12 @@ class Agent:
                 identity = config.get("identity", "")
                 capabilities = config.get("capabilities", [])
                 vault_enabled = config.get("vault_enabled", True)
-                tools = config.get("tools", [])
             except Exception as e:
-                logger.warning(f"Failed to load agent config for {agent_dir.name}: {e}")
+                # Fail the load: an unreadable agent.json must not run unrestricted.
+                logger.error(
+                    f"Agent {agent_dir.name} not loaded, agent.json is unreadable: {e}"
+                )
+                return None
 
         # Resolve skills from the centralized library
         skills: Dict[str, Skill] = {}
@@ -1079,7 +1094,7 @@ class AgentManager:
                         identity=cached.get("identity", ""),
                         capabilities=cached.get("capabilities", []),
                         vault_enabled=cached.get("vault_enabled", True),
-                        tools=cached.get("tools", []),
+                        tools=cached.get("tools"),
                     )
 
                     # Reconstruct skills from cache (without full content)
