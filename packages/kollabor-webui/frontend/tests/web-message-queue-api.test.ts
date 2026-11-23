@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, test, vi } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { ApiError, EngineApi, type WebMessageQueueSnapshot } from "../src/api.ts";
 import { WebQueuePanelController } from "../src/components/web-queue/WebQueuePanelMount.tsx";
 
@@ -300,4 +300,63 @@ test("queue controller rechecks that Send Now still targets the FIFO head", asyn
   await assert.rejects(controller.sendNow("batch-1"), /no longer ready/);
   assert.equal(requests.filter((url) => url.includes("/send-now?")).length, 0,
     "a newly ambiguous FIFO head must block sending a later batch");
+});
+
+test("Send Now tolerates a concurrent background refresh of the same queue", async () => {
+  let reads = 0;
+  let resolvePreflight!: (snapshot: WebMessageQueueSnapshot) => void;
+  let sends = 0;
+  const api = {
+    getWebMessageQueue: vi.fn(() => {
+      reads += 1;
+      if (reads === 1) return Promise.resolve(queueSnapshot("scope-a", "inc-a", 1, [queuedBatch]));
+      if (reads === 2) return new Promise<WebMessageQueueSnapshot>((resolve) => {
+        resolvePreflight = resolve;
+      });
+      return Promise.resolve(queueSnapshot("scope-a", "inc-a", 2, [queuedBatch]));
+    }),
+    sendWebMessageQueueBatchNow: vi.fn(async () => {
+      sends += 1;
+      return { accepted: true };
+    }),
+  } as unknown as EngineApi;
+  const controller = new WebQueuePanelController(api, (() => 1) as unknown as typeof globalThis.setInterval);
+  controller.setIdentity("session-1", "conversation-a");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const sending = controller.sendNow("batch-1");
+  await Promise.resolve();
+  await controller.refresh(true);
+  resolvePreflight(queueSnapshot("scope-a", "inc-a", 2, [queuedBatch]));
+
+  await expect(sending).resolves.toBeUndefined();
+  expect(sends).toBe(1);
+});
+
+test("failed background refresh marks the visible queue stale until a fresh snapshot arrives", async () => {
+  let fail = false;
+  let revision = 1;
+  const api = {
+    getWebMessageQueue: vi.fn(async () => {
+      if (fail) throw new Error("offline");
+      return queueSnapshot("scope-a", "inc-a", revision, [queuedBatch]);
+    }),
+  } as unknown as EngineApi;
+  const controller = new WebQueuePanelController(api, (() => 1) as unknown as typeof globalThis.setInterval);
+  controller.setIdentity("session-1", "conversation-a");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(controller.getState().snapshot?.revision).toBe(1);
+
+  fail = true;
+  await controller.refresh(true);
+  expect(controller.getState().snapshot?.revision).toBe(1);
+  expect(controller.getState().stale).toBe(true);
+  expect(controller.getState().refreshError).toBe(true);
+
+  fail = false;
+  revision = 2;
+  await controller.refresh(true);
+  expect(controller.getState().snapshot?.revision).toBe(2);
+  expect(controller.getState().stale).toBe(false);
+  expect(controller.getState().refreshError).toBe(false);
 });
