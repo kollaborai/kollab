@@ -1,10 +1,8 @@
-"""A claimed WebUI item must not cross a daemon conversation switch."""
+"""A claimed queue item must be fenced again at real provider admission."""
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -12,22 +10,26 @@ import pytest
 
 from kollabor.llm.llm_coordinator import LLMService
 from kollabor.llm.message_handler import MessageHandler
-from kollabor.state.handlers import register_state_handlers
 from kollabor.state.local import LocalStateService
-from kollabor.state.web_message_queue_rpc import (
-    WebMessageQueueRegistry,
-    daemon_conversation_scope_resolver,
-    register_web_message_queue_handlers,
+from kollabor.state.web_message_attachments import (
+    AttachmentScopeBinding,
+    WebMessageAttachmentRegistry,
 )
-from kollabor_agent.queue_processor import QueueProcessor
+from kollabor.state.web_message_queue import ClaimOutcome, WebMessage, WebMessageQueue
+from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
+from kollabor.state.web_message_queue_worker import (
+    ConversationIdentity,
+    WebMessageQueueWorker,
+    WorkerStatus,
+)
 from kollabor_ai.conversation_manager import ConversationManager
+from kollabor_agent.queue_processor import QueueProcessor
 from kollabor_events import EventBus, EventType, Hook, HookPriority
-from kollabor_rpc import RpcCallerContext, RpcServer
 from kollabor_tui.display_tap import DisplayTap
 
 
 def _native_queue() -> QueueProcessor:
-    """A real native admission queue with enough room for the stale send."""
+    """A real native admission queue with enough room for a stale send."""
     processor = QueueProcessor.__new__(QueueProcessor)
     processor.renderer = DisplayTap()
     processor.mark_progress = lambda: None
@@ -85,116 +87,51 @@ async def _state_service(processor: QueueProcessor) -> LocalStateService:
     return LocalStateService(llm, profile_manager=object(), event_bus=None)
 
 
-async def _rpc_call(server: RpcServer, request_id: str, method: str, params: dict):
-    uid = os.getuid() if hasattr(os, "getuid") else 501
-    return await server.handle_wire(
-        {
-            "action": "rpc_request",
-            "request_id": request_id,
-            "method": method,
-            "params": params,
-        },
-        caller_context=RpcCallerContext.from_unix_peer(uid),
-    )
-
-
 @pytest.mark.asyncio
-async def test_claimed_old_conversation_item_is_rejected_before_native_admission():
+async def test_conversation_switch_between_worker_preflight_and_dispatch_is_not_sent():
     processor = _native_queue()
     state = await _state_service(processor)
-    old_uid = state.get_conversation_uid()
-    assert old_uid == "conversation-a"
+    old_identity = state.get_conversation_identity()
+    queue = WebMessageQueue(scope_id="conversation-owner-a")
+    request_id = queue.new_request_id()
+    batch_id = queue.new_batch_id()
+    await queue.enqueue_batch(
+        queue.new_operation_id(),
+        batch_id,
+        (WebMessage(request_id, b'{"text":"queued for old conversation"}'),),
+    )
+    binding = AttachmentScopeBinding(queue.scope_id, queue.incarnation)
+    attachments = WebMessageAttachmentRegistry(
+        resolve_scope=lambda _params, _caller: binding,
+        validate_owner_id=lambda _binding, _owner: True,
+    )
+    real_dispatch = WebMessageQueueDispatcher(state, attachments)
 
-    rpc_server = RpcServer()
-    registry = WebMessageQueueRegistry(max_scopes=2)
-    register_web_message_queue_handlers(
-        rpc_server,
-        registry,
-        resolve_scope=daemon_conversation_scope_resolver(state),
-    )
-    register_state_handlers(rpc_server, state)
+    async def switch_then_dispatch(request):
+        # The worker has already passed its preflight identity check. Change
+        # the real conversation identity immediately before the adapter's
+        # atomic admission recheck.
+        async with state._llm_service.conversation_transition():
+            state._llm_service.conversation_manager.reset_session("session-b")
+        return await real_dispatch(request)
 
-    allocation = await _rpc_call(
-        rpc_server,
-        "alloc",
-        "state.web_queue.allocate_ids",
-        {"expected_conversation_uid": old_uid, "item_count": 1, "operation_count": 4},
-    )
-    assert allocation["error"] is None
-    ids = allocation["result"]
-    payload = b"queued for the old conversation"
-    enqueued = await _rpc_call(
-        rpc_server,
-        "enqueue",
-        "state.web_queue.enqueue_batch",
-        {
-            "expected_conversation_uid": old_uid,
-            "operation_id": ids["operation_ids"][0],
-            "batch_id": ids["batch_id"],
-            "items": [
-                {
-                    "request_id": ids["request_ids"][0],
-                    "payload_b64": base64.b64encode(payload).decode("ascii"),
-                }
-            ],
-        },
-    )
-    assert enqueued["error"] is None
-    claim = await _rpc_call(
-        rpc_server,
-        "claim",
-        "state.web_queue.claim_batch",
-        {
-            "expected_conversation_uid": old_uid,
-            "operation_id": ids["operation_ids"][1],
-            "batch_id": ids["batch_id"],
-        },
-    )
-    item_claim = await _rpc_call(
-        rpc_server,
-        "claim-item",
-        "state.web_queue.claim_next_item",
-        {
-            "expected_conversation_uid": old_uid,
-            "operation_id": ids["operation_ids"][2],
-            "claim_id": claim["result"]["claim_id"],
-        },
-    )
-    assert item_claim["error"] is None
-    item_payload = await _rpc_call(
-        rpc_server,
-        "item-payload",
-        "state.web_queue.item_payload",
-        {
-            "expected_conversation_uid": old_uid,
-            "attempt_id": item_claim["result"]["attempt_id"],
-        },
-    )
-    assert item_payload["error"] is None
-    claimed_text = base64.b64decode(
-        item_payload["result"]["items"][0]["payload_b64"]
-    ).decode("utf-8")
-
-    # Exercise the real ConversationManager reset path, which replaces the
-    # conversation metadata and therefore its daemon-owned UID.
-    manager = state._llm_service.conversation_manager
-    async with state._llm_service.conversation_transition():
-        manager.reset_session("session-b")
-    new_uid = state.get_conversation_uid()
-    assert new_uid and new_uid != old_uid
-
-    admission = await _rpc_call(
-        rpc_server,
-        "stale-admission",
-        "state.send_message",
-        {
-            "message": claimed_text,
-            "request_id": ids["request_ids"][0],
-            "expected_conversation_uid": old_uid,
-        },
+    worker = WebMessageQueueWorker(
+        queue,
+        ConversationIdentity(old_identity.uid, old_identity.revision),
+        state.get_conversation_identity,
+        switch_then_dispatch,
     )
 
-    assert (
-        processor.processing_queue.empty()
-    ), "stale queued payload reached the native provider queue after a conversation switch"
-    assert admission["result"]["accepted"] is False
+    result = await worker.dispatch_batch(batch_id)
+
+    assert result.status is WorkerStatus.NOT_SENT
+    assert result.items[0].request_id == request_id
+    assert result.items[0].outcome is ClaimOutcome.NOT_SENT
+    assert state.get_conversation_uid() != old_identity.uid
+    assert processor.processing_queue.empty(), (
+        "stale item reached native provider custody"
+    )
+    assert state._llm_service.conversation_logger.log_user_message.await_count == 0
+    snapshot = await queue.snapshot()
+    assert snapshot.batches[0].items[0].request_id == request_id
+    assert snapshot.batches[0].items[0].status.value == "queued"
