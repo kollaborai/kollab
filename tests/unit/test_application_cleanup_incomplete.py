@@ -339,6 +339,26 @@ async def test_interactive_command_preserves_exit_status_if_cleanup_is_uncertain
     assert cleanup_calls == [False]
 
 
+@pytest.mark.asyncio
+async def test_cleanup_does_not_cancel_its_current_tracked_task(monkeypatch):
+    from kollabor import code_service
+
+    monkeypatch.setattr(code_service, "shutdown", _noop)
+    app = object.__new__(application.TerminalLLMChat)
+    app._background_tasks = []
+    app._startup_complete = True
+    app.running = True
+    app.event_bus = SimpleNamespace(get_service=lambda name: None)
+    app.shutdown = MethodType(_noop, app)
+
+    async def cleanup_from_tracked_task():
+        app._background_tasks.append(asyncio.current_task())
+        return await app.cleanup()
+
+    cleanup_task = asyncio.create_task(cleanup_from_tracked_task())
+    assert await asyncio.wait_for(cleanup_task, timeout=1.0) is True
+
+
 @pytest.mark.parametrize(
     ("scenario", "expected_exit_code"),
     [("transient-success", 0), ("transient-failure", 7), ("persistent-success", 1)],
