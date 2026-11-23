@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from kollabor.state import web_message_queue_runtime as queue_runtime_module
 from kollabor.state.web_message_queue_runtime import register_web_message_queue_runtime
 from kollabor_rpc import RpcCallerContext, RpcServer
 from kollabor_tui.display_tap import DisplayTap
@@ -178,6 +179,45 @@ async def test_acp_close_keeps_queue_wake_attached_to_registered_completion_task
     await asyncio.to_thread(tap.publish, {"type": "turn_complete"})
     try:
         await asyncio.wait_for(state.dispatched.wait(), timeout=3.0)
+    finally:
+        await runtime.close(timeout=0.1)
+
+    assert [item[1].request_id for item in state.dispatches] == minted["request_ids"]
+    assert tap._listeners == ()
+
+
+@pytest.mark.asyncio
+async def test_acp_completion_settlement_wakes_queue_after_retry_deadline(monkeypatch):
+    monkeypatch.setattr(queue_runtime_module, "_ACP_COMPLETION_SETTLE_SECONDS", 0.02)
+    tap = DisplayTap()
+    acp = SimpleNamespace(_closed=True, _completion_tasks=set())
+    llm = SimpleNamespace(
+        _active_acp=lambda: None,
+        _acp_service=lambda: acp,
+    )
+    state = _State(event_bus=_EventBus(display_tap=tap), llm_service=llm)
+    server = RpcServer()
+    runtime = register_web_message_queue_runtime(server, state)
+    minted = await _enqueue_one(server)
+    release_completion = asyncio.Event()
+
+    async def settle_completion():
+        await release_completion.wait()
+        state.is_processing = False
+
+    completion = asyncio.create_task(settle_completion())
+    acp._completion_tasks.add(completion)
+    completion.add_done_callback(acp._completion_tasks.discard)
+
+    await asyncio.to_thread(tap.publish, {"type": "turn_complete"})
+    try:
+        await asyncio.sleep(0.05)
+        assert runtime._turn_idle_retry_task is not None
+        assert runtime._turn_idle_retry_task.done()
+        assert state.dispatches == []
+
+        release_completion.set()
+        await asyncio.wait_for(state.dispatched.wait(), timeout=0.5)
     finally:
         await runtime.close(timeout=0.1)
 
