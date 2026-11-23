@@ -212,6 +212,65 @@ async def test_assistant_transport_submits_add_message(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_assistant_send_now_admits_complete_ordered_batch_at_one_boundary(monkeypatch):
+    session = _FakeSession([
+        {"type": "token", "text": "B", "request_id": "queued-b"},
+        {"type": "token", "text": "C", "request_id": "queued-c"},
+        {"type": "turn_complete", "request_ids": ["queued-b", "queued-c"]},
+    ])
+    session.send_message_batch = AsyncMock()
+    results = [
+        {"accepted": True, "request_id": "queued-b"},
+        {"accepted": True, "request_id": "queued-c"},
+    ]
+
+    async def admit_batch(items, *, expected_active_request_ids, on_admission):
+        assert expected_active_request_ids == ("active-a",)
+        for index, result in enumerate(results):
+            on_admission(index, result)
+        return {
+            "accepted": True,
+            "complete": True,
+            "accepted_count": 2,
+            "reason": None,
+            "results": results,
+        }
+
+    session.send_message_batch.side_effect = admit_batch
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[
+                {"type": "add-message", "message": {"id": "queued-b", "parts": [{"type": "text", "text": "B"}]}},
+                {"type": "add-message", "message": {"id": "queued-c", "parts": [{"type": "text", "text": "C"}]}},
+            ],
+            state={"messages": []},
+            force_next_turn=True,
+            force_after_request_ids=["active-a"],
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    session.send_message_batch.assert_awaited_once()
+    batch_call = session.send_message_batch.await_args
+    assert batch_call.args[0] == [
+        {"content": "B", "request_id": "queued-b"},
+        {"content": "C", "request_id": "queued-c"},
+    ]
+    assert batch_call.kwargs["expected_active_request_ids"] == ("active-a",)
+    assert not session.send_message.await_count
+    user_messages = [
+        message for message in captured["controller"].state["messages"]
+        if message.get("role") == "user"
+    ]
+    assert [message["content"] for message in user_messages] == ["B", "C"]
+
+
+@pytest.mark.asyncio
 async def test_assistant_transport_preserves_image_part_in_submitted_message(
     monkeypatch,
 ):
