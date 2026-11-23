@@ -293,6 +293,66 @@ class TestWebFetchExecution(unittest.TestCase):
                 self.assertNotIn("code marker", result.output)
                 self.assertNotIn("inline code marker", result.output)
 
+    def test_web_fetch_extracts_short_json_ld_article_body(self):
+        """A concise JSON-LD-only article is still useful fetched content."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        article_body = "A concise but complete article with useful facts and a clear conclusion."
+        html = (
+            '<script type="application/ld+json">'
+            + json.dumps({"articleBody": article_body})
+            + "</script>"
+        )
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(article_body, result.output)
+
+    def test_web_fetch_extracts_json_ld_article_inside_graph(self):
+        """JSON-LD graph nodes can carry article bodies."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        article_body = "Graph-wrapped article body. " * 5
+        html = (
+            '<script type="application/ld+json">'
+            + json.dumps(
+                {"@graph": [{"@type": "NewsArticle", "articleBody": article_body}]}
+            )
+            + "</script>"
+        )
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(article_body.rstrip(), result.output)
+
     def test_web_fetch_json_ld_does_not_require_lxml(self):
         """A BeautifulSoup install without lxml can still parse web-fetch HTML."""
         from kollabor_agent.tool_executor import ToolExecutor
