@@ -84,9 +84,18 @@ async def test_hub_shutdown_does_not_exit_or_stop_providers_when_queue_is_unsett
         assert not worker_task.done()
         snapshot = await queue.snapshot()
         assert snapshot.batches[0].items[0].status.value == "in_doubt"
-    finally:
+
         release.set()
         await asyncio.wait_for(worker_task, timeout=0.5)
+        plugin._self_stop_requested = False
+        result = await plugin.shutdown(exit_process=False)
+        assert result is True
+        assert plugin._shutdown_complete is True
+        assert plugin._acp_hub_tools.stopped is True
+    finally:
+        release.set()
+        if not worker_task.done():
+            await asyncio.wait_for(worker_task, timeout=0.5)
 
 
 class _EventBus:
@@ -105,6 +114,7 @@ async def test_hub_stop_hands_provider_teardown_to_application_cleanup(
     app = SimpleNamespace(running=True, _background_tasks=[])
     plugin = HubPlugin(event_bus=_EventBus(app))
     plugin._identity = SimpleNamespace(identity="hub-stop-agent", agent_id="test")
+    plugin._presence = SimpleNamespace()
     shutdown_calls = []
 
     async def plugin_shutdown(*, exit_process=True):
@@ -141,3 +151,29 @@ async def test_hub_stop_hands_provider_teardown_to_application_cleanup(
                 task.cancel()
         if scheduled:
             await asyncio.gather(*scheduled, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_hub_stop_watchdog_exits_nonzero(monkeypatch):
+    plugin = HubPlugin()
+    exit_codes = []
+    monkeypatch.setattr(hub_module.os, "_exit", exit_codes.append)
+
+    plugin._schedule_stop_watchdog(timeout=0, identity="hub-stop-agent")
+    await plugin._stop_watchdog_task
+
+    assert exit_codes == [1]
+
+
+@pytest.mark.asyncio
+async def test_confirmed_hub_shutdown_cancels_stop_watchdog(monkeypatch):
+    plugin = HubPlugin()
+    exit_codes = []
+    monkeypatch.setattr(hub_module.os, "_exit", exit_codes.append)
+
+    plugin._schedule_stop_watchdog(timeout=0.01, identity="hub-stop-agent")
+    assert await plugin.shutdown(exit_process=False) is True
+    await asyncio.sleep(0.02)
+
+    assert plugin._shutdown_complete is True
+    assert exit_codes == []
