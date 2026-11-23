@@ -1,0 +1,22 @@
+{
+ "unavailable-tablet-dark": false,
+ "recovered-tablet-dark": false,
+ "loading-tablet-dark": false,
+ "empty-tablet-dark": false,
+ "fallback-tablet-dark": false,
+ "unavailable-tablet-light": false,
+ "recovered-tablet-light": false,
+ "loading-tablet-light": false,
+ "empty-tablet-light": false,
+ "fallback-tablet-light": false,
+ "unavailable-phone-dark": false,
+ "recovered-phone-dark": false,
+ "loading-phone-dark": false,
+ "empty-phone-dark": false,
+ "fallback-phone-dark": false,
+ "unavailable-phone-light": false,
+ "recovered-phone-light": false,
+ "loading-phone-light": false,
+ "empty-phone-light": false,
+ "fallback-phone-light": false
+}
