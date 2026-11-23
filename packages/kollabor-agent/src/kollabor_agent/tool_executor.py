@@ -129,8 +129,90 @@ def _is_blocked_kollab_spawn(
         return bool(target and (is_background or dangerous))
 
     def substitution_end(text: str, opening_index: int) -> int | None:
-        frames = [{"depth": 1, "single": False, "double": False, "ansi": False}]
+        frames = [
+            {
+                "depth": 1,
+                "single": False,
+                "double": False,
+                "ansi": False,
+                "heredocs": [],
+            }
+        ]
         index = opening_index + 2
+
+        def comment_starts_word(comment_index: int) -> bool:
+            previous = comment_index - 1
+            if previous < 0 or text[previous] in ";|&(":
+                return True
+            if not text[previous].isspace():
+                return False
+            if text[previous] not in " \t":
+                return True
+            slash_count = 0
+            while (
+                previous > slash_count
+                and text[previous - slash_count - 1] == "\\"
+            ):
+                slash_count += 1
+            return slash_count % 2 == 0
+
+        def heredoc_delimiter(operator_end: int) -> tuple[str, bool] | None:
+            cursor = operator_end
+            strip_tabs = text.startswith("-", cursor)
+            if strip_tabs:
+                cursor += 1
+            while cursor < len(text) and text[cursor] in " \t":
+                cursor += 1
+            delimiter: list[str] = []
+            quote: str | None = None
+            while cursor < len(text):
+                char = text[cursor]
+                if quote is not None:
+                    if char == quote:
+                        quote = None
+                    else:
+                        delimiter.append(char)
+                    cursor += 1
+                    continue
+                if char in "'\"":
+                    quote = char
+                    cursor += 1
+                    continue
+                if char == "\\":
+                    if cursor + 1 >= len(text):
+                        return None
+                    if text[cursor + 1] == "\n":
+                        cursor += 2
+                        continue
+                    delimiter.append(text[cursor + 1])
+                    cursor += 2
+                    continue
+                if char.isspace() or char in ";|&()<>":
+                    break
+                delimiter.append(char)
+                cursor += 1
+            if quote is not None or not delimiter:
+                return None
+            return "".join(delimiter), strip_tabs
+
+        def skip_heredocs(cursor: int, heredocs: list[tuple[str, bool]]) -> int | None:
+            for delimiter, strip_tabs in heredocs:
+                while cursor < len(text):
+                    line_end = text.find("\n", cursor)
+                    if line_end < 0:
+                        line_end = len(text)
+                    line = text[cursor:line_end]
+                    candidate = line.lstrip("\t") if strip_tabs else line
+                    if candidate == delimiter:
+                        cursor = line_end + 1 if line_end < len(text) else line_end
+                        break
+                    if line_end == len(text):
+                        return None
+                    cursor = line_end + 1
+                else:
+                    return None
+            return cursor
+
         while index < len(text):
             frame = frames[-1]
             char = text[index]
@@ -156,7 +238,13 @@ def _is_blocked_kollab_spawn(
                     frame["double"] = False
                 elif text.startswith("$(", index):
                     frames.append(
-                        {"depth": 1, "single": False, "double": False, "ansi": False}
+                        {
+                            "depth": 1,
+                            "single": False,
+                            "double": False,
+                            "ansi": False,
+                            "heredocs": [],
+                        }
                     )
                     index += 2
                     continue
@@ -170,11 +258,37 @@ def _is_blocked_kollab_spawn(
                 frame["single"] = True
             elif char == '"':
                 frame["double"] = True
+            elif text.startswith("<<", index) and not text.startswith("<<<", index):
+                delimiter = heredoc_delimiter(index + 2)
+                if delimiter is None:
+                    return None
+                frame["heredocs"].append(delimiter)
+                index += 2
+                continue
+            elif char == "#" and comment_starts_word(index):
+                newline = text.find("\n", index)
+                if newline < 0:
+                    return None
+                index = newline
+                continue
             elif text.startswith(("$(", "<(", ">("), index):
                 frames.append(
-                    {"depth": 1, "single": False, "double": False, "ansi": False}
+                    {
+                        "depth": 1,
+                        "single": False,
+                        "double": False,
+                        "ansi": False,
+                        "heredocs": [],
+                    }
                 )
                 index += 2
+                continue
+            elif char == "\n" and frame["heredocs"]:
+                next_index = skip_heredocs(index + 1, frame["heredocs"])
+                if next_index is None:
+                    return None
+                frame["heredocs"].clear()
+                index = next_index
                 continue
             elif char == "(":
                 frame["depth"] += 1
@@ -1040,15 +1154,103 @@ def _is_blocked_kollab_spawn(
 
     token_scan_command = command
     for body_start, body_end in reversed(heredoc_body_ranges):
-        masked_body = "".join(
-            "\n" if char == "\n" else " "
-            for char in command[body_start:body_end]
-        )
+        masked_body = " " * (body_end - body_start)
         token_scan_command = (
             token_scan_command[:body_start]
             + masked_body
             + token_scan_command[body_end:]
         )
+
+    token_parts: list[str] = []
+    token_single = False
+    token_double = False
+    token_ansi = False
+    token_comment = False
+    token_index = 0
+
+    def token_comment_starts_word(comment_index: int) -> bool:
+        previous = comment_index - 1
+        while previous >= 0:
+            if (
+                token_scan_command[previous] == "\n"
+                and previous > 0
+                and token_scan_command[previous - 1] == "\\"
+            ):
+                previous -= 2
+                continue
+            if (
+                token_scan_command[previous] == "\n"
+                and previous > 1
+                and token_scan_command[previous - 1] == "\r"
+                and token_scan_command[previous - 2] == "\\"
+            ):
+                previous -= 3
+                continue
+            break
+        if previous < 0 or token_scan_command[previous] in ";|&(":
+            return True
+        if not token_scan_command[previous].isspace():
+            return False
+        if token_scan_command[previous] not in " \t":
+            return True
+        slash_count = 0
+        while (
+            previous > slash_count
+            and token_scan_command[previous - slash_count - 1] == "\\"
+        ):
+            slash_count += 1
+        return slash_count % 2 == 0
+
+    while token_index < len(token_scan_command):
+        char = token_scan_command[token_index]
+        if token_comment:
+            if char == "\n":
+                token_parts.append("\n;")
+                token_comment = False
+            else:
+                token_parts.append(char)
+            token_index += 1
+            continue
+        if token_ansi:
+            if char == "\\":
+                token_parts.append(token_scan_command[token_index : token_index + 2])
+                token_index += 2
+                continue
+            if char == "'":
+                token_ansi = False
+            token_parts.append(char)
+            token_index += 1
+            continue
+        if char == "\\" and not token_single:
+            token_parts.append(token_scan_command[token_index : token_index + 2])
+            token_index += 2
+            continue
+        if (
+            not token_single
+            and not token_double
+            and token_scan_command.startswith("$'", token_index)
+        ):
+            token_parts.append("$'")
+            token_ansi = True
+            token_index += 2
+            continue
+        if char == "'" and not token_double:
+            token_single = not token_single
+        elif char == '"' and not token_single:
+            token_double = not token_double
+        elif (
+            char == "#"
+            and not token_single
+            and not token_double
+            and token_comment_starts_word(token_index)
+        ):
+            token_comment = True
+        if char == "\n" and not token_single and not token_double:
+            token_parts.append(";\n")
+        else:
+            token_parts.append(char)
+        token_index += 1
+    token_scan_command = "".join(token_parts)
 
     try:
         lexer = shlex.shlex(token_scan_command, posix=True, punctuation_chars=";&|()")
