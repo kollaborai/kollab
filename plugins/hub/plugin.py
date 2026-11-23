@@ -6741,11 +6741,7 @@ class HubPlugin(BasePlugin):
             self._starting = False
 
     def _register_web_message_queue_runtime(self, state_service: Any) -> bool:
-        """Register safe queue management RPCs on this daemon's RPC server.
-
-        Claim and settlement RPCs remain unregistered until the bounded worker
-        supervisor and atomic provider admission adapter are available.
-        """
+        """Register the daemon-owned WebUI queue supervisor and public RPCs."""
         self._web_message_queue_runtime = None
         if self._rpc_server is None or state_service is None:
             return False
@@ -6758,12 +6754,17 @@ class HubPlugin(BasePlugin):
                 self._rpc_server,
                 state_service,
             )
+            if self.event_bus is not None:
+                register_service = getattr(self.event_bus, "register_service", None)
+                if callable(register_service):
+                    register_service(
+                        "web_message_queue_runtime",
+                        self._web_message_queue_runtime,
+                    )
         except Exception as exc:
             logger.warning("WebUI queue RPC registration failed closed: %s", exc)
             return False
-        logger.info(
-            "WebUI queue management RPC registered; provider dispatch unavailable"
-        )
+        logger.info("WebUI queue runtime registered")
         return True
 
     def show_network_notice(self, text: str) -> None:
@@ -18312,6 +18313,18 @@ class HubPlugin(BasePlugin):
             return
         self._shutdown_in_progress = True
         await self.stop_message_intake()
+        queue_runtime = getattr(self, "_web_message_queue_runtime", None)
+        if queue_runtime is not None:
+            try:
+                closed = await queue_runtime.close()
+                if not closed:
+                    logger.warning(
+                        "WebUI queue worker did not confirm clean shutdown"
+                    )
+            except Exception:
+                logger.warning(
+                    "WebUI queue worker shutdown failed", exc_info=True
+                )
         runtime = getattr(self, "_acp_hub_tools", None)
         if runtime is not None:
             runtime.stop()

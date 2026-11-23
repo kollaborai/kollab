@@ -4371,6 +4371,27 @@ class TerminalLLMChat:
         if callable(stop_message_intake):
             await stop_message_intake()
 
+        # Queue workers may still be admitting input through the active
+        # provider. Settle them before shutting down the LLM service that owns
+        # those admission calls; HubPlugin.shutdown repeats this idempotently.
+        queue_runtime = (
+            self.event_bus.get_service("web_message_queue_runtime")
+            if self.event_bus
+            else None
+        )
+        close_queue_runtime = getattr(queue_runtime, "close", None)
+        if callable(close_queue_runtime):
+            try:
+                if not await close_queue_runtime():
+                    logger.warning(
+                        "WebUI queue worker did not confirm clean shutdown before LLM shutdown"
+                    )
+            except Exception:
+                logger.warning(
+                    "WebUI queue worker shutdown failed before LLM shutdown",
+                    exc_info=True,
+                )
+
         # Shutdown LLM core service
         await self.llm_service.shutdown()
         await self.conversation_logger.shutdown()
