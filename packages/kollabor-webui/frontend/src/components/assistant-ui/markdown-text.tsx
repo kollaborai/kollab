@@ -9,12 +9,15 @@ import {
   useIsMarkdownCodeBlock,
 } from "@assistant-ui/react-markdown";
 import remarkGfm from "remark-gfm";
-import { type FC, memo, useState } from "react";
+import { type FC, createContext, memo, useContext, useState } from "react";
 import { CheckIcon, CopyIcon } from "lucide-react";
 
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
 import { terminalDialectToMarkdown } from "@/utils/terminal-dialect";
+
+/** Set inside the `pre` this file renders. Lets `code` see a fenced block where the library's pre context is absent, as in plugin prose. */
+const FencedBlockContext = createContext(false);
 
 const MarkdownTextImpl = () => {
   return (
@@ -261,16 +264,20 @@ export const defaultComponents = memoizeMarkdownComponents({
     />
   ),
   pre: ({ className, ...props }) => (
-    <pre
-      className={cn(
-        "aui-md-pre bg-muted/30 overflow-x-auto rounded-t-none rounded-b-xl p-3.5 text-[0.8125rem] leading-relaxed",
-        className,
-      )}
-      {...props}
-    />
+    <FencedBlockContext.Provider value={true}>
+      <pre
+        className={cn(
+          "aui-md-pre bg-muted/30 overflow-x-auto rounded-t-none rounded-b-xl p-3.5 text-[0.8125rem] leading-relaxed",
+          className,
+        )}
+        {...props}
+      />
+    </FencedBlockContext.Provider>
   ),
   code: function Code({ className, ...props }) {
-    const isCodeBlock = useIsMarkdownCodeBlock();
+    const inLibraryBlock = useIsMarkdownCodeBlock();
+    const inFencedBlock = useContext(FencedBlockContext);
+    const isCodeBlock = inLibraryBlock || inFencedBlock;
     return (
       <code
         className={cn(

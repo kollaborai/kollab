@@ -76,7 +76,7 @@ export function PluginTaggedText({ text }: { text: string }) {
   );
 }
 
-/** Text outside plugin tags gets the same markdown rules as the native text part. */
+/** Text outside plugin tags renders with the native markdown components. It has no copy header on fenced code: only MarkdownTextPrimitive draws that. */
 export function Prose({ text }: { text: string }) {
   return (
     <Markdown remarkPlugins={[remarkGfm]} components={defaultComponents}>
