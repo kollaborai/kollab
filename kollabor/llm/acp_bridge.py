@@ -753,7 +753,9 @@ class ACPRunner:
         self._cancelled_turn_id = 0
         self._cancel_target: tuple[str | None, int | None] | None = None
         self._cancel_active_task: asyncio.Task[Any] | None = None
-        self._permission_cancel_tasks: dict[tuple[str, int], asyncio.Task[None]] = {}
+        self._cancel_tasks: dict[
+            tuple[str | None, int | None], asyncio.Task[None]
+        ] = {}
         self.cancel_timeout = 30.0
         self.session_id: str | None = None
         self._connection: Any = None
@@ -1730,7 +1732,57 @@ class ACPRunner:
             len(batch.admissions),
             batch.expected_count,
         )
-        self.finish_send_now_batch(batch_id)
+        expired = self.finish_send_now_batch(batch_id)
+        if (
+            expired is not None
+            and expired.admissions
+            and expired.injected_count == 0
+            and self._active_context is expired.active_context
+            and self._active_turn_id == expired.active_turn_id
+            and self._active_generation == expired.generation
+            and self.session_id == expired.session_id
+        ):
+            # Keep the same owner fence as normal batch finalization. The queue
+            # has been ordered before this synchronous reservation; no newer
+            # turn can slip between the identity check and prepare_cancel.
+            queue = self._queue._queue
+            has_live_admission = any(
+                not admission.future.cancelled()
+                and any(item is admission for item in queue)
+                for admission in expired.admissions
+            )
+            if has_live_admission:
+                self._schedule_cancel(
+                    session_id=expired.session_id,
+                    generation=expired.generation,
+                )
+
+    def _schedule_cancel(
+        self, *, session_id: str | None, generation: int | None
+    ) -> bool:
+        """Reserve a fenced cancellation and own its asynchronous completion."""
+        key = (session_id, generation)
+        if self._closing or key in self._cancel_tasks:
+            return False
+        if not self.prepare_cancel(
+            expected_session_id=session_id,
+            expected_generation=generation,
+        ):
+            return False
+        task = asyncio.create_task(self.cancel(
+            expected_session_id=session_id,
+            expected_generation=generation,
+        ))
+        self._cancel_tasks[key] = task
+
+        def settled(completed: asyncio.Task[None]) -> None:
+            if self._cancel_tasks.get(key) is completed:
+                self._cancel_tasks.pop(key, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(settled)
+        return True
 
     def has_send_now_batch(self, batch_id: str) -> bool:
         """Whether an open batch still owns a queue reservation."""
@@ -2043,23 +2095,7 @@ class ACPRunner:
 
     def _schedule_permission_cancel(self, session_id: str, generation: int) -> None:
         """Reserve this owner synchronously; never await cancel inside an SDK callback."""
-        key = (session_id, generation)
-        if self._closing or key in self._permission_cancel_tasks:
-            return
-        if not self.prepare_cancel(expected_session_id=session_id, expected_generation=generation):
-            return
-        task = asyncio.create_task(self.cancel(
-            expected_session_id=session_id, expected_generation=generation,
-        ))
-        self._permission_cancel_tasks[key] = task
-
-        def settled(completed: asyncio.Task[None]) -> None:
-            if self._permission_cancel_tasks.get(key) is completed:
-                self._permission_cancel_tasks.pop(key, None)
-            if not completed.cancelled():
-                completed.exception()
-
-        task.add_done_callback(settled)
+        self._schedule_cancel(session_id=session_id, generation=generation)
 
 
     def _mark_cancelled(self) -> None:
@@ -2102,9 +2138,25 @@ class ACPRunner:
                     return
             elif target != (expected_session_id, expected_generation):
                 return
+            active = self._cancel_active_task or self._active_rpc_task
+            if target is not None and (
+                active is None
+                or active.done()
+                or self._active_rpc_task is not active
+                or self.session_id != expected_session_id
+                or self.generation != expected_generation
+            ):
+                # The prepared owner finished or changed before its task ran.
+                # Do not send session/cancel to whichever turn owns the
+                # harness now; release only this stale queue reservation.
+                self._cancel_hold = False
+                self._cancel_target = None
+                self._cancel_active_task = None
+                if not self._send_now_batches:
+                    self._queue_release.set()
+                return
             self.permission_bridge.cancel()
             self.state = "cancelling"
-            active = self._cancel_active_task or self._active_rpc_task
             if active is None and self._cancel_target is None:
                 return
             # Hold the worker at the queue boundary before sending cancel so a
@@ -2292,7 +2344,7 @@ class ACPRunner:
         self.permission_bridge.cancel()
         current_task = asyncio.current_task()
         cancel_tasks = [
-            task for task in self._permission_cancel_tasks.values()
+            task for task in self._cancel_tasks.values()
             if task is not current_task
         ]
         for task in cancel_tasks:
