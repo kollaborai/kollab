@@ -38,6 +38,23 @@ logger = logging.getLogger(__name__)
 TERMINAL_TASK_STATUSES = frozenset(
     {"done", "failed", "closed", "cancelled", "obsolete"}
 )
+_PENDING_REPLY_FIELDS = frozenset(
+    {
+        "task_id",
+        "assignee",
+        "requested_by",
+        "message_id",
+        "created_at",
+        "deadline_seconds",
+        "status",
+        "resolution",
+        "terminal_status",
+        "resolved_reason",
+        "resolved_by_message_id",
+        "resolved_at",
+        "expired_at",
+    }
+)
 
 
 @dataclass
@@ -355,7 +372,27 @@ class TaskLedger:
                         "pending reply envelope must contain an expected_replies list"
                     )
                 return []
-            return replies
+            normalized_replies = []
+            changed = False
+            for item in replies:
+                if not isinstance(item, dict):
+                    changed = True
+                    continue
+                normalized = {
+                    key: value
+                    for key, value in item.items()
+                    if key in _PENDING_REPLY_FIELDS
+                }
+                if len(normalized) != len(item):
+                    changed = True
+                normalized_replies.append(normalized)
+            if changed:
+                logger.warning(
+                    "Normalizing malformed pending reply entries in %s", path.name
+                )
+                if for_mutation:
+                    self._write_pending_replies_unlocked(normalized_replies)
+            return normalized_replies
         except Exception as e:
             if for_mutation:
                 logger.warning(
@@ -681,7 +718,11 @@ class TaskLedger:
             self._write_json_atomic(path, card.to_dict())
 
     def _load(
-        self, task_id: str, *, for_mutation: bool = False
+        self,
+        task_id: str,
+        *,
+        for_mutation: bool = False,
+        read_errors: Optional[List[str]] = None,
     ) -> Optional[TaskCard]:
         path = self._task_path(task_id)
         if not path.exists():
@@ -700,6 +741,8 @@ class TaskLedger:
                 else "",
                 e,
             )
+            if read_errors is not None:
+                read_errors.append(task_id)
             return None
 
     def _load_mutable(self, task_id: str, operation: str) -> Optional[TaskCard]:
@@ -815,8 +858,21 @@ class TaskLedger:
             kept = []
             for item in replies:
                 if item.get("status") == "pending":
-                    age = now - item.get("created_at", 0)
-                    if age > self.PENDING_REPLY_TTL:
+                    raw_created_at = item.get("created_at", 0)
+                    if isinstance(raw_created_at, bool) or not isinstance(
+                        raw_created_at, (int, float)
+                    ):
+                        expired = True
+                    else:
+                        try:
+                            created_at = float(raw_created_at)
+                        except OverflowError:
+                            expired = True
+                        else:
+                            expired = not math.isfinite(created_at) or (
+                                now - created_at > self.PENDING_REPLY_TTL
+                            )
+                    if expired:
                         item["status"] = "expired"
                         item["expired_at"] = now
                         changed = True
@@ -891,11 +947,13 @@ class TaskLedger:
                     return True
             return False
 
-    def get_active_for(self, identity: str) -> List[TaskCard]:
-        """Get all active tasks assigned to this agent."""
+    def get_active_for(
+        self, identity: str, *, read_errors: Optional[List[str]] = None
+    ) -> List[TaskCard]:
+        """Get active tasks; append unreadable card IDs to ``read_errors``."""
         result = []
         for f in self._task_files():
-            card = self._load(f.stem)
+            card = self._load(f.stem, read_errors=read_errors)
             if (
                 card
                 and card.assignee == identity
@@ -917,10 +975,13 @@ class TaskLedger:
                 result.append(card)
         return sorted(result, key=lambda c: c.priority)
 
-    def get_all(self, status: Optional[str] = None) -> List[TaskCard]:
+    def get_all(
+        self, status: Optional[str] = None, *, read_errors: Optional[List[str]] = None
+    ) -> List[TaskCard]:
+        """Get readable task cards; append unreadable card IDs when requested."""
         result = []
         for f in self._task_files():
-            card = self._load(f.stem)
+            card = self._load(f.stem, read_errors=read_errors)
             if card and (status is None or card.status == status):
                 result.append(card)
         return result

@@ -740,12 +740,7 @@ async def test_close_recovers_fast_detached_orphan_and_preserves_other_session_p
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork and setsid")
 @pytest.mark.asyncio
-async def test_setsid_orphan_lost_before_a_tree_sample_is_the_documented_limit(tmp_path):
-    """#608 trade-off: without reading environments no portable signal links a
-    descendant that called setsid() and lost its parent between two 100 ms tree
-    samples to the adapter. Teardown cannot find it and reports clean. If a
-    portable signal is ever added, this test should flip to asserting recovery.
-    """
+async def test_setsid_orphan_lost_before_a_tree_sample_is_recovered(tmp_path):
     child_file = tmp_path / "child.json"
     runner = ACPRunner(ACPProfile("owned-orphan", (sys.executable, "-c", FAST_ORPHAN_ADAPTER), cwd=str(tmp_path), env={
         "ACP_OWNED_CHILD_FILE": str(child_file), "ACP_OWNED_CHILD_MODE": "prompt",
@@ -764,7 +759,46 @@ async def test_setsid_orphan_lost_before_a_tree_sample_is_the_documented_limit(t
         assert child.create_time() == identity["birth"]
         assert os.getsid(child.pid) != runner._adapter_pid
         await runner.close()
-        assert child.is_running() and child.status() != psutil.STATUS_ZOMBIE
+        assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
+        assert not runner._owned_processes and runner._adapter_pid is None
+    finally:
+        with contextlib.suppress(Exception):
+            await runner.close()
+        if child is not None:
+            with contextlib.suppress(psutil.Error):
+                child.kill()
+                child.wait(timeout=2)
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "fork") or not hasattr(os, "getsid"),
+    reason="requires POSIX fork and sessions",
+)
+@pytest.mark.asyncio
+async def test_orphan_is_recovered_where_os_getsid_is_missing(tmp_path, monkeypatch):
+    child_file = tmp_path / "child.json"
+    runner = ACPRunner(ACPProfile("owned-orphan", (sys.executable, "-c", FAST_ORPHAN_ADAPTER), cwd=str(tmp_path), env={
+        "ACP_OWNED_CHILD_FILE": str(child_file), "ACP_OWNED_CHILD_MODE": "prompt",
+        "ACP_OWNED_CHILD_SETSID": "1",
+    }))
+    child = None
+    try:
+        await runner.start()
+        await runner.prompt("create an orphan")
+        for _ in range(200):
+            if child_file.exists() and child_file.read_text():
+                break
+            await asyncio.sleep(0.005)
+        identity = json.loads(child_file.read_text())
+        child = psutil.Process(identity["pid"])
+        assert child.create_time() == identity["birth"]
+        assert os.getsid(child.pid) != runner._adapter_pid
+        monkeypatch.delattr(bridge_mod.os, "getsid")
+        runner._recover_session_processes()
+        assert child.pid in runner._owned_processes
+        await runner.close()
+        monkeypatch.undo()
+        assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
         assert not runner._owned_processes and runner._adapter_pid is None
     finally:
         with contextlib.suppress(Exception):
@@ -777,8 +811,8 @@ async def test_setsid_orphan_lost_before_a_tree_sample_is_the_documented_limit(t
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
 @pytest.mark.asyncio
-async def test_private_process_group_cleans_orphan_without_session_lookup(tmp_path):
-    """A same-group orphan is cleaned without inspecting the host process table."""
+async def test_private_process_group_cleans_orphan_without_session_lookup(tmp_path, monkeypatch):
+    """The anchored group cleans its members without session or marker lookup."""
     child_file = tmp_path / "child.json"
     runner = ACPRunner(ACPProfile("owned-orphan", (sys.executable, "-c", FAST_ORPHAN_ADAPTER), cwd=str(tmp_path), env={
         "ACP_OWNED_CHILD_FILE": str(child_file), "ACP_OWNED_CHILD_MODE": "prompt",
@@ -795,6 +829,8 @@ async def test_private_process_group_cleans_orphan_without_session_lookup(tmp_pa
         child = psutil.Process(identity["pid"])
         assert child.create_time() == identity["birth"]
         assert os.getpgid(child.pid) == runner._process_group_id
+        runner._process_owner_token = None
+        monkeypatch.delattr(bridge_mod.os, "getsid")
         await runner.close()
         assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
         assert not runner._owned_processes and runner._adapter_pid is None
@@ -809,8 +845,74 @@ async def test_private_process_group_cleans_orphan_without_session_lookup(tmp_pa
 
 @pytest.mark.skipif(not hasattr(os, "getsid"), reason="requires POSIX sessions")
 @pytest.mark.asyncio
-async def test_start_and_close_never_read_any_process_environment(tmp_path, monkeypatch):
-    """#608: finding owned processes must not read other processes' environments."""
+async def test_session_lookup_ignores_session_whose_leader_pid_was_reused(tmp_path):
+    """A reused adapter pid that leads another session must not be adopted."""
+    stranger = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", "import time; time.sleep(60)", cwd=str(tmp_path),
+        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
+    )
+    try:
+        assert os.getsid(stranger.pid) == stranger.pid
+        runner = ACPRunner(ACPProfile("owned", (sys.executable,), cwd=str(tmp_path)))
+        # The recorded adapter had this pid; the number now names the stranger.
+        runner._adapter_pid = stranger.pid
+        runner._process_started_at = 0
+        runner._process_username = psutil.Process().username()
+        runner._recover_session_processes()
+        assert stranger.pid not in runner._owned_processes
+        assert stranger.returncode is None
+    finally:
+        stranger.kill()
+        await asyncio.wait_for(stranger.wait(), timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_close_checks_only_recent_same_user_process_markers(tmp_path, monkeypatch):
+    """#1044: marker lookup checks recent same-user candidates only."""
+    reads: list[tuple[int, str, float]] = []
+    original_environ = psutil.Process.environ
+
+    def recording_environ(self):
+        reads.append((self.pid, self.info["username"], self.info["create_time"]))
+        return original_environ(self)
+
+    monkeypatch.setattr(psutil.Process, "environ", recording_environ)
+    runner = ACPRunner(ACPProfile("owned", (sys.executable, "-c", FAKE_ADAPTER), cwd=str(tmp_path)))
+    outsider = None
+    try:
+        await runner.start()
+        # A same-user process born after the adapter, in its own session.
+        outsider = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", "import time; time.sleep(60)", cwd=str(tmp_path),
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
+        )
+        assert (await runner.prompt("one turn")).text == "hello "
+        process_started_at = runner._process_started_at
+        process_username = runner._process_username
+        assert process_started_at is not None and process_username is not None
+        await runner.close()
+        assert outsider.pid in [pid for pid, _, _ in reads]
+        assert sum(pid == outsider.pid for pid, _, _ in reads) == 1
+        assert all(
+            username == process_username and birth >= process_started_at
+            for _, username, birth in reads
+        )
+        assert outsider.returncode is None and psutil.Process(outsider.pid).is_running()
+        assert not runner._live_owned_processes()
+    finally:
+        with contextlib.suppress(Exception):
+            await runner.close()
+        if outsider is not None and outsider.returncode is None:
+            outsider.kill()
+            await asyncio.wait_for(outsider.wait(), timeout=2)
+
+
+@pytest.mark.skipif(not hasattr(os, "getsid"), reason="requires POSIX sessions")
+@pytest.mark.asyncio
+async def test_group_cleanup_without_owner_marker_never_reads_process_environments(tmp_path, monkeypatch):
+    """#608: the process-group path does not inspect process environments."""
     reads: list[int] = []
     original_environ = psutil.Process.environ
 
@@ -823,7 +925,7 @@ async def test_start_and_close_never_read_any_process_environment(tmp_path, monk
     outsider = None
     try:
         await runner.start()
-        # A same-user process born after the adapter, in its own session.
+        runner._process_owner_token = None
         outsider = await asyncio.create_subprocess_exec(
             sys.executable, "-c", "import time; time.sleep(60)", cwd=str(tmp_path),
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,

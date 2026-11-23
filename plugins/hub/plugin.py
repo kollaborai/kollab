@@ -10847,7 +10847,10 @@ class HubPlugin(BasePlugin):
         # Active tasks (compaction-proof: they live on disk and are injected
         # every user turn, so they survive any compaction)
         if self._identity and self._task_ledger:
-            my_tasks = self._task_ledger.get_active_for(self._identity.identity)
+            read_errors: List[str] = []
+            my_tasks = self._task_ledger.get_active_for(
+                self._identity.identity, read_errors=read_errors
+            )
             if my_tasks:
                 task_lines = ["", "--- active tasks (DO NOT FORGET) ---"]
                 for task in my_tasks:
@@ -10894,6 +10897,13 @@ class HubPlugin(BasePlugin):
                 )
                 task_lines.append("--- end tasks ---")
                 roster_block += "\n" + "\n".join(task_lines)
+            if read_errors:
+                unreadable_count = len(read_errors)
+                card_label = "card" if unreadable_count == 1 else "cards"
+                roster_block += (
+                    "\nWARNING: Task ledger is incomplete; "
+                    f"{unreadable_count} task {card_label} could not be read."
+                )
 
         # Scratchpad and session state are intentionally not injected here.
         # They are mutable operational notes that can outlive their task and
@@ -14077,7 +14087,10 @@ class HubPlugin(BasePlugin):
             or any(ord(char) < 32 or ord(char) == 127 for char in domain)
         ):
             return {"error": "invalid connect offer request"}
-        from .enrollment_client import EnrollmentProtocolError
+        from .enrollment_client import (
+            EnrollmentProtocolError,
+            connect_offer_unauthorized_refusal,
+        )
 
         try:
             if self._identity is None or self._rpc_server is None:
@@ -14088,13 +14101,17 @@ class HubPlugin(BasePlugin):
                 return {"error": "connect enrollment is unavailable"}
             result = await create(domain)
         except EnrollmentProtocolError as exc:
-            # The issuer refused before any relay request; say why (#693).
-            logger.warning("connect offer refused: %s", exc.refusal or exc.code)
-            return self._offer_failed(exc.refusal)
+            source = exc.source if exc.source in {"local", "relay"} else "local"
+            refusal = exc.refusal
+            if exc.code == "unauthorized" and not refusal:
+                refusal = connect_offer_unauthorized_refusal(source)
+            log_reason = f"{exc.code}: {refusal}" if refusal else exc.code
+            logger.warning("connect offer refused (%s): %s", source, log_reason)
+            return self._offer_failed(refusal)
         except Exception:
             return self._offer_failed()
         if not isinstance(result, dict) or result.get("error"):
-            return self._offer_failed()
+            return self._offer_failed(result.get("reason", "") if isinstance(result, dict) else "")
         offer_id = result.get("offer_id")
         expires_at = result.get("expires_at")
         code = result.get("code")
@@ -15979,11 +15996,12 @@ class HubPlugin(BasePlugin):
         """List all tasks."""
         if self._task_ledger is None:
             return "task system not available"
-        all_tasks = self._task_ledger.get_all()
-        if not all_tasks:
+        read_errors: List[str] = []
+        all_tasks = self._task_ledger.get_all(read_errors=read_errors)
+        if not all_tasks and not read_errors:
             return "no tasks"
 
-        lines = [f"tasks: {len(all_tasks)} total"]
+        lines = [f"tasks: {len(all_tasks)} total"] if all_tasks else []
         for card in sorted(all_tasks, key=lambda c: -c.priority):
             status_icon = {
                 "active": ">>",
@@ -16002,6 +16020,13 @@ class HubPlugin(BasePlugin):
                 f" {card.elapsed_str()}"
             )
             lines.append(f"       {card.directive[:70]}")
+        if read_errors:
+            unreadable_count = len(read_errors)
+            card_label = "card" if unreadable_count == 1 else "cards"
+            lines.append(
+                "WARNING: Task ledger is incomplete; "
+                f"{unreadable_count} task {card_label} could not be read."
+            )
         return "\n".join(lines)
 
     def _tasks_mine(self) -> str:
@@ -16010,11 +16035,14 @@ class HubPlugin(BasePlugin):
             return "not connected to hub"
         if not self._task_ledger:
             return "task ledger not available"
-        my_tasks = self._task_ledger.get_active_for(self._identity.identity)
-        if not my_tasks:
+        read_errors: List[str] = []
+        my_tasks = self._task_ledger.get_active_for(
+            self._identity.identity, read_errors=read_errors
+        )
+        if not my_tasks and not read_errors:
             return "no active tasks assigned to you"
 
-        lines = [f"your tasks: {len(my_tasks)}"]
+        lines = [f"your tasks: {len(my_tasks)}"] if my_tasks else []
         for card in my_tasks:
             lines.append(
                 f"  [{card.id}] p{card.priority}"
@@ -16030,6 +16058,13 @@ class HubPlugin(BasePlugin):
                 )
             if card.status == "qa_review":
                 lines.append("    status: awaiting QA review")
+        if read_errors:
+            unreadable_count = len(read_errors)
+            card_label = "card" if unreadable_count == 1 else "cards"
+            lines.append(
+                "WARNING: Task ledger is incomplete; "
+                f"{unreadable_count} task {card_label} could not be read."
+            )
         return "\n".join(lines)
 
     def _tasks_assign(self, args: str) -> str:
