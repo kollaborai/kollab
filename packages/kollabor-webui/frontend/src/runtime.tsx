@@ -157,6 +157,20 @@ const PermissionCancellationContext = createContext<{
 
 const SendWaitingNowContext = createContext<(() => void) | null>(null);
 
+function isStateUpdateWithOperations(event: Uint8Array): boolean {
+  const data = new TextDecoder().decode(event)
+    .split(/\r\n|\r|\n/)
+    .flatMap((line) => line.startsWith("data:") ? [line.slice(5).replace(/^ /, "")] : [])
+    .join("\n");
+  if (!data) return false;
+  try {
+    const payload = JSON.parse(data);
+    return payload?.type === "update-state" && Array.isArray(payload.operations) && payload.operations.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Sends the messages waiting behind the running turn at once: the agent takes
  * them in at its next step. Without it they go out when the turn ends (#1102).
@@ -998,6 +1012,14 @@ export function EngineRuntimeProvider({
   const handOverDue = useRef(false);
   // The user asked for the waiting messages to go now (Send Now, #1102).
   const sendNow = useRef(false);
+  // Pauses the old response after its first state-changing event until the
+  // thread has applied that state and the handover has ended the request.
+  const handoverEventWait = useRef<{ promise: Promise<void>; release: () => void } | null>(null);
+  const releaseHandoverEventWait = () => {
+    const wait = handoverEventWait.current;
+    handoverEventWait.current = null;
+    wait?.release();
+  };
   // Ends the stream of the request now streaming (see the hand-over below).
   const endRun = useRef<(() => void) | null>(null);
   const convert = useCallback((state: EngineState, metadata: AssistantTransportConnectionMetadata) => {
@@ -1019,7 +1041,10 @@ export function EngineRuntimeProvider({
 
   useEffect(() => {
     mounted.current = true;
-    return () => { mounted.current = false; };
+    return () => {
+      mounted.current = false;
+      releaseHandoverEventWait();
+    };
   }, []);
 
   const runtime = useAssistantTransportRuntime({
@@ -1090,7 +1115,16 @@ export function EngineRuntimeProvider({
       // the page can end (see the hand-over below). The request is let go
       // once the timing reader stops too.
       if (!response.body) return;
-      const run = endableStream(response.body);
+      const run = endableStream(response.body, {
+        beforeNextEvent: (event) => {
+          if (!sendNow.current || waitingSendIds.current.size === 0 || !isStateUpdateWithOperations(event)) return;
+          if (handoverEventWait.current) return handoverEventWait.current.promise;
+          let release!: () => void;
+          const promise = new Promise<void>((resolve) => { release = resolve; });
+          handoverEventWait.current = { promise, release };
+          return promise;
+        },
+      });
       Object.defineProperty(response, "body", { value: run.stream });
       endRun.current = () => {
         run.end();
@@ -1098,6 +1132,7 @@ export function EngineRuntimeProvider({
       };
     },
     onError: async (error, { updateState }) => {
+      releaseHandoverEventWait();
       streamingRun.current = null;
       endRun.current = null;
       inFlightSendIds.current = new Set();
@@ -1105,6 +1140,7 @@ export function EngineRuntimeProvider({
       updateState((state) => ({ ...state, error: error.message }));
     },
     onCancel: ({ commands, updateState, error }) => {
+      releaseHandoverEventWait();
       streamingRun.current = null;
       endRun.current = null;
       sendNow.current = false;
@@ -1125,6 +1161,7 @@ export function EngineRuntimeProvider({
       updateState((state) => ({ ...state, error: "Run cancelled" }));
     },
     onFinish: () => {
+      releaseHandoverEventWait();
       streamingRun.current = null;
       endRun.current = null;
       const last = runtime.thread.getState().messages.at(-1);
@@ -1160,6 +1197,7 @@ export function EngineRuntimeProvider({
       if (handoverLive.current) {
         liveTurn.current = { parts: [], requestId: handoverFromIds.current.values().next().value };
       }
+      releaseHandoverEventWait();
       const end = endRun.current;
       endRun.current = null;
       end?.();
