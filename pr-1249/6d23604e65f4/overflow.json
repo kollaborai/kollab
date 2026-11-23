@@ -1,0 +1,16 @@
+{
+ "config-notice-desktop-dark": false,
+ "config-notice-desktop-light": false,
+ "config-notice-tablet-dark": false,
+ "config-notice-tablet-light": false,
+ "config-notice-phone-dark": false,
+ "config-notice-phone-light": false,
+ "config-long-tablet-dark": false,
+ "config-long-tablet-light": false,
+ "config-long-phone-dark": false,
+ "config-long-phone-light": false,
+ "config-empty-desktop-dark": false,
+ "config-empty-desktop-light": false,
+ "config-empty-tablet-dark": false,
+ "config-empty-tablet-light": false
+}
