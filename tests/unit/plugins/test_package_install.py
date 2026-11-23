@@ -80,3 +80,32 @@ def test_update_disabled_and_remove_preserve_command_order_invariants(tmp_path, 
     assert registry["enable_order"]["hello"] == 2
     packages.remove_package("hello", expected_record=registry["plugins"]["hello"])
     assert "hello" not in json.loads(registry_path.read_text())["enable_order"]
+
+
+def test_update_of_enabled_plugin_without_order_assigns_one(tmp_path, monkeypatch):
+    """A registry written before enable_order existed still gets first-enabled-wins order."""
+    from kollabor_plugins import packages
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KOLLAB_NO_KEYRING", "1")
+
+    def install(name, plugin_id):
+        folder = tmp_path / name
+        folder.mkdir()
+        (folder / "kollab-plugin.json").write_text(json.dumps({"id": plugin_id}))
+        info = {"source": "https://example.invalid/repo", "ref": "main", "commit": "a" * 40,
+                "files_sha256": packages.files_sha256(folder), "manifest": {"id": plugin_id, "uses": []}}
+        packages.install_stage(folder, info, info["commit"], info["files_sha256"])
+
+    install("first", "legacy")
+    registry_path = tmp_path / ".kollab" / "plugins.json"
+    old = json.loads(registry_path.read_text())
+    old.pop("enable_order", None)
+    old.pop("enable_counter", None)
+    registry_path.write_text(json.dumps(old))
+
+    install("update", "legacy")
+    install("later", "later")
+    registry = json.loads(registry_path.read_text())
+    assert registry["plugins"]["legacy"]["enabled"] is True
+    assert registry["enable_order"]["legacy"] < registry["enable_order"]["later"]
