@@ -24,6 +24,12 @@ describe("settings Plugins tab", () => {
     expect(host).not.toMatch(/sessionId \? <PluginsSettings/);
   });
 
+  it("reads the plugin page as read-only over PhoneLink: a note, and the phone check", () => {
+    const settings = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/plugins/settings.tsx"), "utf8");
+    expect(settings).toContain("Manage plugins on this computer");
+    expect(settings).toMatch(/inPhoneApp\(window\.location\.pathname\)/);
+  });
+
   it("opens the Plugins tab in the responsive dialog surface", () => {
     expect(read("PanelHost.tsx")).toMatch(/responsive=\{tab === "plugins"\}/);
     expect(read("PanelDialogSurface.tsx")).toMatch(/responsive\?: boolean/);

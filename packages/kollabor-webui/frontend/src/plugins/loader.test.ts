@@ -4,6 +4,7 @@ import {
   bundlesOwnReact,
   createPluginLoader,
   isActive,
+  listedPluginEntries,
   LOAD_TIMEOUT_MS,
   pluginsOff,
   type LoaderDeps,
@@ -412,5 +413,18 @@ describe("own React detection", () => {
     expect(bundlesOwnReact('import{useState as e}from"react";export default function(){}')).toBe(false);
     expect(bundlesOwnReact("var s=r.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;s.H")).toBe(false);
     expect(bundlesOwnReact("if(r.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE===void 0)x()")).toBe(false);
+  });
+});
+
+describe("PhoneLink lists plugins and loads no code", () => {
+  it("fills the list, imports nothing and keeps the registry empty when loadCode is false", async () => {
+    const { registry, deps } = harness([[entry("hello"), entry("pr-chain")]], {});
+    const phone = { ...deps, loadCode: false };
+    const loader = createPluginLoader(registry, phone);
+    await loader.refresh();
+    await loader.idle();
+    expect(deps.importModule).not.toHaveBeenCalled();
+    expect(listedPluginEntries().map((item) => item.id)).toEqual(["hello", "pr-chain"]);
+    expect(registry.getSnapshot()).toMatchObject({ listed: true, plugins: [] });
   });
 });

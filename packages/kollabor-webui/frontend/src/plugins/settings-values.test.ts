@@ -48,4 +48,13 @@ describe("plugin row controls", () => {
     expect(pluginRowControls(row("installed", "stopping")).switchEnabled).toBe(false);
     expect(pluginRowControls(row("dev", "ok", true)).switchEnabled).toBe(false);
   });
+
+  it("makes every row read-only over PhoneLink: no switch, no service controls, no Update or Remove", () => {
+    for (const kind of ["built-in", "installed", "dev"] as const) {
+      const controls = pluginRowControls(row(kind), true);
+      expect(controls.switchEnabled).toBe(false);
+      expect(controls.services).toBe(false);
+      expect(controls.updateRemove).toBe(false);
+    }
+  });
 });
