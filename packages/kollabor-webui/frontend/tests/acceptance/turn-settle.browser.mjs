@@ -451,6 +451,57 @@ try {
         s.branches === 0 && s.errors === "0", "after the settle reload");
       await t.page.close();
     },
+    // Native Send Now has no live-steering path: stop the active turn, wait
+    // for its terminal event, then admit the full waiting batch exactly once
+    // as the next turn (#1102).
+    async "stops the native turn before admitting the complete Send Now batch"() {
+      const t = await open("?chat");
+      const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
+      await t.send();
+      const first = await t.sending();
+      await t.push(state([{ type: "set", path: ["messages"], value: [
+        { id: "user-s1-0", role: "user", content: "hello", metadata: { custom: { requestId: first.id } } },
+        { id: "assistant-s1-1", role: "assistant", content: text("Working") },
+      ] }]));
+      await t.waitFor((s) => s.assistant.includes("Working"), "the active native turn");
+      await t.page.locator("#send-what").click();
+      await t.page.locator("#send-later").click();
+      await t.waitFor((s) => s.users === "hello|what|later", "both waiting messages");
+      await t.page.getByRole("button", { name: "Send Now" }).first().click();
+
+      // A cancel acknowledgement is not proof that the provider turn settled.
+      await t.page.waitForFunction(() => window.cancels === 1, null, { timeout: 3000 })
+        .catch(() => assert.fail("native Send Now did not ask the engine to stop the active turn"));
+      assert.equal(await t.page.evaluate(() => window.transports.length), 1,
+        "the waiting batch is not posted after cancel acknowledgement alone");
+      await t.page.waitForTimeout(150);
+      assert.equal(await t.page.evaluate(() => window.transports.length), 1,
+        "the waiting batch remains owned until the active turn is terminal");
+
+      const terminal = `data: ${JSON.stringify({
+        type: "turn_complete", request_id: first.id, request_ids: [first.id], stop_reason: "cancelled",
+      })}\n\n`;
+      await t.page.evaluate(([frame, finish]) => {
+        window.transports[0].push(frame);
+        window.transports[0].push(finish);
+        window.transports[0].close();
+      }, [terminal, finishFrames]);
+      await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
+        .catch(() => assert.fail("the batch was not admitted after the active turn settled"));
+
+      const dispatched = await t.page.evaluate(() => ({
+        request: window.transports[1].request,
+        order: window.order,
+      }));
+      assert.deepEqual(dispatched.request.commands.map((command) => command.message.parts[0].text), ["what", "later"]);
+      assert.equal(dispatched.request.force_next_turn, true, "the server receives the next-turn intent");
+      assert.deepEqual(dispatched.order, [
+        "post:hello", "cancel-ack", `terminal:${first.id}`, "post:what|later",
+      ], "the whole FIFO batch follows the prior turn's terminal event");
+      assert.equal(await t.page.evaluate(() => window.transports.length), 2,
+        "each queued message is sent once in the single batch request");
+      await t.page.close();
+    },
     // A message sent while the page's turn runs waits: the turn goes on as it
     // was, the message shows as queued, and it is sent when the turn ends (#1102).
     async "keeps a message sent mid-turn waiting until the turn ends"() {

@@ -14,11 +14,14 @@ declare global {
     transports: Transport[];
     /** How many times the page asked the engine to stop the agent's turn. */
     cancels: number;
+    /** Wire-level request and turn ordering for Send Now acceptance. */
+    order: string[];
   }
 }
-type Transport = { request: { state?: EngineState }; push: (frame: string) => void; close: () => void; aborted: boolean };
+type Transport = { request: { state?: EngineState; commands?: Array<{ message?: unknown }> }; push: (frame: string) => void; close: () => void; aborted: boolean };
 window.transports = [];
 window.cancels = 0;
+window.order = [];
 
 // The page's send streams from here: the test reads what the request sent,
 // pushes the engine's frames one at a time and ends the stream (an engine
@@ -37,10 +40,34 @@ window.fetch = async (input, init) => {
   });
   const transport: Transport = {
     request: JSON.parse(String(init?.body ?? "{}")),
-    push: (frame) => stream.enqueue(encoder.encode(frame)),
+    push: (frame) => {
+      for (const line of frame.split(/\r?\n/)) {
+        if (!line.startsWith("data:")) continue;
+        try {
+          const event = JSON.parse(line.slice(5).trim());
+          if (event?.type === "turn_complete" || event?.type === "turn_cancelled") {
+            window.order.push(`terminal:${event.request_id ?? event.request_ids?.[0] ?? "unnamed"}`);
+          }
+        } catch { /* non-JSON assistant-transport frames are not turn terminals */ }
+      }
+      stream.enqueue(encoder.encode(frame));
+    },
     close: () => stream.close(),
     aborted: false,
   };
+  const commandText = (command: { message?: unknown }) => {
+    const message = command.message;
+    if (typeof message === "string") return message;
+    if (!message || typeof message !== "object") return "";
+    const parts = (message as { parts?: unknown }).parts;
+    return Array.isArray(parts)
+      ? parts.filter((part): part is { text: string } =>
+        !!part && typeof part === "object" && (part as { type?: unknown }).type === "text" &&
+        typeof (part as { text?: unknown }).text === "string")
+        .map((part) => part.text).join("")
+      : "";
+  };
+  window.order.push(`post:${(transport.request.commands ?? []).map(commandText).join("|")}`);
   // As a real fetch does: a request the page lets go ends its stream, and a
   // stream the page stops reading lets its request go.
   init?.signal?.addEventListener("abort", () => {
@@ -60,8 +87,8 @@ const api = {
   refreshToken: async () => false,
   getToken: () => null,
   getSessionState: async () => ({}),
-  cancel: async () => { window.cancels += 1; },
-  cancelOwned: async () => { window.cancels += 1; },
+  cancel: async () => { window.cancels += 1; window.order.push("cancel-ack"); },
+  cancelOwned: async () => { window.cancels += 1; window.order.push("cancel-ack"); },
 } as unknown as EngineApi;
 
 const initialState: EngineState = {
@@ -109,6 +136,7 @@ function Probe() {
     <div>
       <button id="send" onClick={() => aui.thread().append("hello")}>send</button>
       <button id="send-what" onClick={() => aui.thread().append("what")}>send what</button>
+      <button id="send-later" onClick={() => aui.thread().append("later")}>send later</button>
       <button id="stop" onClick={() => aui.thread().cancelRun()}>stop</button>
       <div id="running">{running ? "running" : "idle"}</div>
       <div id="assistant">{assistant}</div>
