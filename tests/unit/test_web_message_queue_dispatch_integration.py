@@ -173,6 +173,35 @@ async def test_real_dispatch_writes_history_and_binds_exact_image_before_releasi
 
 
 @pytest.mark.asyncio
+async def test_failed_native_queue_commit_does_not_leave_a_phantom_history_row(tmp_path):
+    """A failed provider-queue commit must not leave a durable user message."""
+    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
+
+    queue, attachments, _scope, request_id, _staged, snapshot = await _queue_with_image()
+    state, llm, logger, uid = await _real_local_state(tmp_path)
+    identity = ConversationIdentity(uid, state.get_conversation_revision())
+    dispatcher = WebMessageQueueDispatcher(state, attachments)
+    worker = WebMessageQueueWorker(queue, identity, state.get_conversation_identity, dispatcher)
+
+    # Model cancellation/revocation between durable recording and the
+    # reserved provider-queue commit. The worker must preserve the retryable
+    # queue item without publishing a user row that was never admitted.
+    llm._queue_processor.commit_admission_slot = lambda *_args, **_kwargs: False
+
+    result = await worker.dispatch_batch(snapshot.batches[0].batch_id)
+
+    assert result.status is WorkerStatus.NOT_SENT
+    assert result.items[0].request_id == request_id
+    assert logger.session_file.exists()
+    rows = [json.loads(line) for line in logger.session_file.read_text().splitlines()]
+    assert not any(row.get("type") == "user" for row in rows)
+    assert llm.processing_queue.empty()
+    queue_snapshot = await queue.snapshot()
+    assert queue_snapshot.batches[0].items[0].request_id == request_id
+    assert attachments.attachment_count == 1
+
+
+@pytest.mark.asyncio
 async def test_real_dispatch_rejects_stale_revision_before_history_or_provider_custody(
     tmp_path,
 ):
