@@ -226,6 +226,42 @@ async def test_acp_completion_settlement_wakes_queue_after_retry_deadline(monkey
 
 
 @pytest.mark.asyncio
+async def test_runtime_close_unsubscribes_pending_acp_completion_wake():
+    tap = DisplayTap()
+    acp = SimpleNamespace(_closed=True, _completion_tasks=set())
+    llm = SimpleNamespace(
+        _active_acp=lambda: None,
+        _acp_service=lambda: acp,
+    )
+    state = _State(event_bus=_EventBus(display_tap=tap), llm_service=llm)
+    server = RpcServer()
+    runtime = register_web_message_queue_runtime(server, state)
+    await _enqueue_one(server)
+    release_completion = asyncio.Event()
+
+    async def settle_completion():
+        await release_completion.wait()
+        state.is_processing = False
+
+    completion = asyncio.create_task(settle_completion())
+    acp._completion_tasks.add(completion)
+    completion.add_done_callback(acp._completion_tasks.discard)
+
+    await asyncio.to_thread(tap.publish, {"type": "turn_complete"})
+    await asyncio.sleep(0)
+    assert completion in runtime._acp_completion_wake_callbacks
+
+    assert await runtime.close(timeout=0.1) is True
+    assert runtime._acp_completion_wake_callbacks == {}
+    assert tap._listeners == ()
+
+    release_completion.set()
+    await completion
+    await asyncio.sleep(0)
+    assert state.dispatches == []
+
+
+@pytest.mark.asyncio
 async def test_repeated_turn_complete_extends_active_idle_retry_window():
     tap = DisplayTap()
     state = _State(event_bus=_EventBus(display_tap=tap))
