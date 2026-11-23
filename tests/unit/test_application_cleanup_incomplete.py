@@ -1,6 +1,10 @@
 """Top-level callers must not report success after incomplete cleanup."""
 
 import asyncio
+import os
+import subprocess
+import sys
+from pathlib import Path
 from types import MethodType, SimpleNamespace
 
 import pytest
@@ -333,3 +337,55 @@ async def test_interactive_command_preserves_exit_status_if_cleanup_is_uncertain
 
     assert exc.value.code == 2
     assert cleanup_calls == [False]
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_exit_code"),
+    [("transient-success", 0), ("transient-failure", 7), ("persistent-success", 1)],
+)
+def test_interactive_command_subprocess_preserves_exit_and_cleanup_status(
+    scenario, expected_exit_code, tmp_path
+):
+    repo_root = Path(__file__).resolve().parents[2]
+    source_roots = [
+        repo_root,
+        *(
+            repo_root / "packages" / package / "src"
+            for package in (
+                "kollabor-agent",
+                "kollabor-ai",
+                "kollabor-config",
+                "kollabor-engine",
+                "kollabor-events",
+                "kollabor-plugins",
+                "kollabor-rpc",
+                "kollabor-tui",
+                "kollabor-voice",
+                "kollabor-webui",
+            )
+        ),
+    ]
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path)
+    env["KOLLAB_NO_KEYRING"] = "1"
+    env["PYTHONPATH"] = os.pathsep.join(
+        [*(str(path) for path in source_roots), env.get("PYTHONPATH", "")]
+    )
+    probe = repo_root / "tests" / "unit" / "interactive_cli_exit_probe.py"
+
+    result = subprocess.run(
+        [sys.executable, str(probe), scenario],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == expected_exit_code, (
+        f"scenario={scenario} expected={expected_exit_code} "
+        f"actual={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    if scenario == "persistent-success":
+        assert "Emergency cleanup failed" in result.stderr
+        assert "ApplicationCleanupIncompleteError" in result.stderr
