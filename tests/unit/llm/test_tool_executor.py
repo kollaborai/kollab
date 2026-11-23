@@ -302,16 +302,25 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
                     exit_code=0,
                 )
             )
-            command = 'f=fi; n=nd; "$f$n" ../outside -name marker.txt -print'
+            commands = [
+                'f=fi; n=nd; "$f$n" ../outside -name marker.txt -print',
+                "bash -c 'f=fi; n=nd; \"$f$n\" ../outside -name marker.txt -print'",
+            ]
+            for command in commands:
+                with self.subTest(command=command):
+                    result = await self.executor._execute_terminal_command(
+                        {
+                            "type": "terminal",
+                            "id": "find-expanded-name",
+                            "command": command,
+                        }
+                    )
 
-            result = await self.executor._execute_terminal_command(
-                {"type": "terminal", "id": "find-expanded-name", "command": command}
-            )
-
-            self.assertFalse(result.success)
-            self.assertIn(
-                "search paths must stay inside the active workspace", result.error
-            )
+                    self.assertFalse(result.success)
+                    self.assertIn(
+                        "search paths must stay inside the active workspace",
+                        result.error,
+                    )
             self.executor.shell_executor.run.assert_not_awaited()
 
     async def test_terminal_find_mention_in_echo_is_not_executed_as_find(self):
