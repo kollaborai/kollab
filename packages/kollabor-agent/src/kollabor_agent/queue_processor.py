@@ -646,6 +646,13 @@ class QueueProcessor:
             maxsize=max_queue_size
         )
         self.max_queue_size = max_queue_size
+        self._chain_idle_event = asyncio.Event()
+        self._chain_idle_event.set()
+        self._forced_send_lock = asyncio.Lock()
+        self._forced_send_clear = asyncio.Event()
+        self._forced_send_clear.set()
+        self._forced_send_owner: object | None = None
+        self._forced_priority_count = 0
         # Trusted multi-step admissions reserve capacity while writing the
         # matching durable user row. Ordinary producers count reservations as
         # occupied, so they cannot steal a promised slot during an await.
@@ -708,6 +715,12 @@ class QueueProcessor:
         # request's turn can never be left open by a path that forgot to say so.
         was = self.is_processing
         self._is_processing = value
+        idle_event = getattr(self, "_chain_idle_event", None)
+        if idle_event is not None:
+            if value:
+                idle_event.clear()
+            else:
+                idle_event.set()
         if was and not value:
             approvals = getattr(getattr(self, "tool_executor", None), "yes_approvals", None)
             if isinstance(approvals, YesApprovals):
@@ -743,15 +756,91 @@ class QueueProcessor:
     def cancel_origin(self) -> CancellationOrigin | None:
         return self._cancel_origin
 
-    def request_cancellation(self, *, origin: CancellationOrigin) -> int:
-        """Set the cancellation latch and return its supersession generation."""
+    def request_cancellation(
+        self, *, origin: CancellationOrigin, preserve_queued: bool = False
+    ) -> int:
+        """Set the cancellation latch and return its supersession generation.
+
+        ``preserve_queued`` is reserved for a force-send handover. The active
+        turn still stops, but already-admitted chat stays queued so the forced
+        item can be inserted ahead of it after the old turn settles.
+        """
         if origin not in {"human", "remote_task", "external"}:
             raise ValueError("invalid cancellation origin")
+        if not isinstance(preserve_queued, bool):
+            raise ValueError("preserve_queued must be a bool")
         self._cancel_generation += 1
         self._cancel_processing = True
         self._cancel_origin = origin
-        self._end_queued_chat()
+        if not preserve_queued:
+            self._end_queued_chat()
         return self._cancel_generation
+
+    async def begin_forced_send(self) -> object:
+        """Block ordinary input while a forced stop/admission transaction runs."""
+        lock = getattr(self, "_forced_send_lock", None)
+        if not isinstance(lock, asyncio.Lock):
+            lock = self._forced_send_lock = asyncio.Lock()
+        await lock.acquire()
+        token = object()
+        self._forced_send_owner = token
+        self._forced_priority_count = 0
+        event = getattr(self, "_forced_send_clear", None)
+        if event is None:
+            event = self._forced_send_clear = asyncio.Event()
+            event.set()
+        event.clear()
+        return token
+
+    def end_forced_send(self, token: object) -> bool:
+        """Release only the transaction that owns the forced-send gate."""
+        if token is not getattr(self, "_forced_send_owner", None):
+            return False
+        self._forced_send_owner = None
+        self._forced_priority_count = 0
+        event = getattr(self, "_forced_send_clear", None)
+        if event is not None:
+            event.set()
+        lock = getattr(self, "_forced_send_lock", None)
+        if isinstance(lock, asyncio.Lock) and lock.locked():
+            lock.release()
+        return True
+
+    def owns_forced_send(self, token: object) -> bool:
+        return (
+            token is getattr(self, "_forced_send_owner", None)
+            and token is not None
+        )
+
+    async def wait_for_forced_send(self) -> None:
+        """Wait before ordinary admission can clear a forced-stop latch."""
+        event = getattr(self, "_forced_send_clear", None)
+        if event is not None:
+            await event.wait()
+
+    async def wait_until_idle(self) -> None:
+        """Wait until the current queue drain has completed its terminal path."""
+        if not self.is_processing:
+            return
+        event = getattr(self, "_chain_idle_event", None)
+        if event is None:
+            raise RuntimeError("queue drain settlement signal is unavailable")
+        await event.wait()
+
+    def clear_force_cancellation(self, generation: int) -> bool:
+        """Clear a force-send Stop only if it still owns the idle chain."""
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or self.is_processing
+            or not self._cancel_processing
+            or self._cancel_origin != "human"
+            or self._cancel_generation != generation
+        ):
+            return False
+        self._cancel_processing = False
+        self._cancel_origin = None
+        return True
 
     def reserve_admission_slot(self) -> object | None:
         """Reserve one bounded queue slot for a trusted admission path."""
@@ -775,7 +864,30 @@ class QueueProcessor:
             reservation, None
         ) is not None
 
-    def commit_admission_slot(self, reservation: object, message: Any) -> bool:
+    def refresh_admission_slot(self, reservation: object) -> bool:
+        """Carry a reservation across its own forced-stop generation change."""
+        reservations = getattr(self, "_admission_reservations", None)
+        if not isinstance(reservations, dict) or reservation not in reservations:
+            return False
+        queue = getattr(self, "processing_queue", None)
+        max_size = getattr(self, "max_queue_size", 0)
+        if (
+            queue is None
+            or isinstance(max_size, bool)
+            or not isinstance(max_size, int)
+            or queue.qsize() + len(reservations) > max_size
+        ):
+            return False
+        reservations[reservation] = getattr(self, "_cancel_generation", 0)
+        return True
+
+    def owns_admission_slot(self, reservation: object) -> bool:
+        reservations = getattr(self, "_admission_reservations", None)
+        return isinstance(reservations, dict) and reservation in reservations
+
+    def commit_admission_slot(
+        self, reservation: object, message: Any, *, priority: bool = False
+    ) -> bool:
         """Consume a reservation and enqueue without an intervening await.
 
         Stop advances the cancellation generation. A stale token is consumed
@@ -783,6 +895,8 @@ class QueueProcessor:
         """
         reservations = getattr(self, "_admission_reservations", None)
         if not isinstance(reservations, dict) or reservation not in reservations:
+            return False
+        if not isinstance(priority, bool):
             return False
         generation = reservations.pop(reservation)
         if generation != getattr(self, "_cancel_generation", 0):
@@ -794,12 +908,49 @@ class QueueProcessor:
             queue.put_nowait(message)
         except asyncio.QueueFull:
             return False
+        if priority:
+            # put_nowait accounts for unfinished work and wakes a waiting
+            # getter. Rotation/insertion is synchronous, so that getter cannot
+            # observe the item before it has moved ahead of older queued work.
+            if getattr(self, "_forced_send_owner", None) is not None:
+                # Every item in one held forced-send transaction belongs ahead
+                # of the pre-existing queue, in the order it was admitted.
+                # Repeated appendleft/rotate would reverse a multi-message
+                # batch, so put the new item after the prior forced prefix.
+                priority_count = max(
+                    0, int(getattr(self, "_forced_priority_count", 0))
+                )
+                queue._queue.pop()
+                queue._queue.insert(min(priority_count, len(queue._queue)), message)
+                self._forced_priority_count = priority_count + 1
+            else:
+                queue._queue.rotate(1)
         self.mark_progress()
         metrics = getattr(self, "_queue_metrics", None)
         if isinstance(metrics, dict):
             metrics["total_enqueue_attempts"] = metrics.get("total_enqueue_attempts", 0) + 1
             metrics["total_enqueue_successes"] = metrics.get("total_enqueue_successes", 0) + 1
         return True
+
+    def rollback_committed_admission(self, message: Any) -> bool:
+        """Remove one exact, not-yet-consumed admission during its sync commit.
+
+        Queue handoff calls this only before yielding back to the event loop,
+        while the just-enqueued object cannot yet have been consumed by the
+        drain task. Identity matching keeps a rollback from removing an equal
+        older message.
+        """
+        queue = getattr(self, "processing_queue", None)
+        entries = getattr(queue, "_queue", None)
+        if queue is None or entries is None:
+            return False
+        for index, current in enumerate(entries):
+            if current is message:
+                del entries[index]
+                queue.task_done()
+                queue._wakeup_next(queue._putters)
+                return True
+        return False
 
     def _has_unreserved_capacity(self) -> bool:
         queue = getattr(self, "processing_queue", None)
