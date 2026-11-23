@@ -216,6 +216,7 @@ const mainConfig = defineConfig({
       "tests/agent-type-glyph.test.tsx",
       "tests/kollab-logo.test.tsx",
       "tests/agent-version-notice.test.tsx",
+      "tests/web-queue-panel.test.tsx",
       "tests/mobile-invite.test.mjs",
       "tests/phonelink-app-shell.test.ts",
       "tests/trajectory-detail-title.test.ts",
