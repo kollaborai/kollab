@@ -1082,6 +1082,87 @@ async def test_missing_permission_id_fails_closed_but_drains_exact_turn_terminal
 
 
 @pytest.mark.asyncio
+async def test_missing_owner_error_does_not_inherit_prior_prompt_attempt(monkeypatch):
+    first_permission_id = "prompt-first"
+    session = _FakeSession([
+        {
+            "type": "permission_request",
+            "tool_id": "shell-first",
+            "tool_name": "terminal",
+            "request_id": "first",
+            "permission_id": first_permission_id,
+        },
+    ])
+
+    async def resolve_permission(tool_id, decision, scope, *, permission_id):
+        assert (tool_id, decision, scope, permission_id) == (
+            "shell-first", "approve", "once", first_permission_id,
+        )
+        session._events.put_nowait({
+            "type": "permission_granted",
+            "tool_id": "shell-first",
+            "request_id": "first",
+            "permission_id": first_permission_id,
+        })
+        session._events.put_nowait({"type": "turn_complete", "request_id": "first"})
+        session._events.put_nowait({
+            "type": "permission_request",
+            "tool_id": "shell-second",
+            "tool_name": "terminal",
+            "request_id": "second",
+        })
+        session._events.put_nowait({
+            "type": "token", "text": "second reply", "request_id": "second",
+        })
+        session._events.put_nowait({"type": "turn_complete", "request_id": "second"})
+        return True
+
+    async def accept(_content, *, request_id):
+        return {"accepted": True, "request_id": request_id}
+
+    session.send_message = AsyncMock(side_effect=accept)
+    session.resolve_permission = AsyncMock(side_effect=resolve_permission)
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    captured, _, drain = _install_fake_assistant_stream(monkeypatch)
+    first_response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(commands=[
+            {"type": "add-message", "message": {"id": "first", "parts": [{"type": "text", "text": "one"}]}},
+            {"type": "add-message", "message": {"id": "second", "parts": [{"type": "text", "text": "two"}]}},
+        ], state={"messages": []}),
+    )
+    await asyncio.wait_for(drain(first_response.stream), timeout=1)
+    first_state = copy.deepcopy(captured["controller"].state)
+
+    first_answer = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(commands=[{
+            "type": "add-tool-result",
+            "toolCallId": _permission_call_id(first_state, "shell-first", first_permission_id),
+            "result": {"decision": "approve", "scope": "once", "permission_id": first_permission_id},
+        }], state=first_state),
+    )
+    await asyncio.wait_for(drain(first_answer.stream), timeout=1)
+    second_state = copy.deepcopy(captured["controller"].state)
+
+    missing_owner_answer = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(commands=[{
+            "type": "add-tool-result",
+            "toolCallId": _permission_call_id(second_state, "shell-second"),
+            "result": {"decision": "deny", "scope": "once"},
+        }], state=second_state),
+    )
+    await asyncio.wait_for(drain(missing_owner_answer.stream), timeout=1)
+
+    assert session.resolve_permission.await_count == 1
+    error = "\n".join(captured["controller"].errors)
+    assert "No permission response was submitted." in error
+    assert "may or may not have taken effect" not in error
+    assert "second reply" in _text(captured["controller"].state["messages"][-1])
+
+
+@pytest.mark.asyncio
 async def test_handover_terminal_drop_reports_partial_loss_without_resubmitting(monkeypatch):
     monkeypatch.setattr(messages, "EVENT_IDLE_TIMEOUT_SECONDS", 0.01)
     permission_id = "prompt-first"

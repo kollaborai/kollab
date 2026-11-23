@@ -1817,6 +1817,7 @@ async def assistant_transport(
         resumed_permission_request_ids: Dict[str, set[str]] = {}
         request_ids: set[str] = set()
         admitted_turn_request_ids: set[str] = set()
+        possibly_accepted_request_ids: set[str] = set()
         untagged_request_ids: set[str] = set()
         completed_request_ids: set[str] = set()
         completed_assistant_turns: List[Dict[str, Any]] = []
@@ -1855,6 +1856,14 @@ async def assistant_transport(
             ]
             request_ids.update(resumed_request_order)
             admitted_turn_request_ids.update(resumed_request_order)
+            possibly_accepted_request_ids.update(
+                str(request_id)
+                for request_id in handover_record.get("possibly_accepted_request_ids") or ()
+                if request_id is not None and str(request_id)
+            )
+            admission_error = str(handover_record.get("admission_error") or "")
+            if admission_error:
+                completion["error"] = {"message": admission_error}
             submitted_turn_request_ids.extend(resumed_request_order)
             completed_request_ids.update(
                 str(request_id)
@@ -2392,6 +2401,8 @@ async def assistant_transport(
             return {
                 "request_ids": request_order,
                 "completed_request_ids": sorted(completed_request_ids),
+                "possibly_accepted_request_ids": sorted(possibly_accepted_request_ids),
+                "admission_error": admission_error,
                 "untagged_request_ids": sorted(untagged_request_ids),
                 "completed_turns": copy.deepcopy(completed_assistant_turns),
                 "rows": list(rows.values()),
@@ -2470,6 +2481,17 @@ async def assistant_transport(
 
         def correlation_failure_message(reason: str) -> str:
             """Name accepted messages whose untagged events cannot be assigned."""
+            possibly_pending = sorted(
+                possibly_accepted_request_ids - completed_request_ids
+            )
+            if possibly_pending:
+                labels = ", ".join(possibly_pending)
+                admission_context = f"{admission_error} " if admission_error else ""
+                return (
+                    f"{admission_context}Cannot safely correlate the completion for "
+                    f"possibly accepted message(s) {labels}: {reason}. These sends "
+                    "may still be running. No messages were resubmitted."
+                )
             missing = sorted(untagged_request_ids - completed_request_ids)
             candidates = ", ".join(missing) or ", ".join(sorted(untagged_request_ids))
             pending = sorted(admitted_turn_request_ids - completed_request_ids)
@@ -2509,12 +2531,17 @@ async def assistant_transport(
                 activity = (
                     f"Accepted message(s) {accepted or 'unknown'} may still be running."
                 )
+            active_prompt_keys = (
+                set(permission_resolution_pending) | set(permission_resolution_errors)
+            )
             attempted_decision = any(
                 pending.get("attempted", True)
-                for pending in permission_resolution_pending.values()
+                for key, pending in permission_resolution_pending.items()
+                if key in active_prompt_keys
             ) or any(
                 decision.get("status") in {"attempted", "resolved"}
-                for decision in permission_decisions.values()
+                for key, decision in permission_decisions.items()
+                if key in active_prompt_keys
             )
             decision_outcome = (
                 "The attempted decision may or may not have taken effect."
@@ -2613,6 +2640,12 @@ async def assistant_transport(
             current = command_message_label(body.commands[command_index], command_index)
             if attempted_request_id is not None:
                 current = attempted_request_id
+            if attempt_may_be_accepted and add_message_count == 1:
+                return (
+                    f"Admission response for message {current} was lost; it may have "
+                    f"been accepted. Admission error: {reason}. "
+                    "No messages were resubmitted."
+                )
             if attempt_may_be_accepted:
                 attempted = f"Possibly accepted despite the admission error: {current}."
                 future_start = command_index + 1
@@ -2637,6 +2670,27 @@ async def assistant_transport(
                 f"{attempted_clause}{unsent_clause}"
                 f"Admission error: {reason}. No messages were resubmitted."
             )
+
+        def record_possibly_accepted_submission(
+            request_id: str,
+            message_content: MessageContent,
+            command: Dict[str, Any],
+        ) -> None:
+            """Track a send whose admission response was lost by exact request ID."""
+            nonlocal correlation_deadline
+            possibly_accepted_request_ids.add(request_id)
+            request_ids.add(request_id)
+            admitted_turn_request_ids.add(request_id)
+            submitted_turn_request_ids.append(request_id)
+            submitted_contents.append(message_content)
+            submitted_media.append(_save_sent_media(message_content, session_id))
+            submitted_request_ids.append(request_id)
+            submitted_row_ids.append(stable_user_row_id(command.get("rowId")))
+            correlation_deadline = (
+                _assistant_correlation_monotonic()
+                + EVENT_IDLE_TIMEOUT_SECONDS
+            )
+            store_handover_snapshot()
 
         def add_streamed_text(part_type: str, text: str) -> None:
             """Grow the trailing text/reasoning part, or start one, and publish.
@@ -2764,13 +2818,15 @@ async def assistant_transport(
                         accepted = await session.send_message(message_content, **kwargs)
                     except Exception as exc:
                         admission_error = str(exc) or type(exc).__name__
-                        if submitted_contents:
-                            admission_error = partial_admission_error(
-                                command_index,
-                                admission_error,
-                                attempted_request_id=request_id,
-                                attempt_may_be_accepted=True,
-                            )
+                        admission_error = partial_admission_error(
+                            command_index,
+                            admission_error,
+                            attempted_request_id=request_id,
+                            attempt_may_be_accepted=True,
+                        )
+                        record_possibly_accepted_submission(
+                            request_id, message_content, command
+                        )
                         controller.add_error(admission_error)
                         completion["error"] = {"message": admission_error}
                         break
