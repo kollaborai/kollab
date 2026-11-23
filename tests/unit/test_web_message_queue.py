@@ -715,7 +715,11 @@ async def test_expired_active_attempt_id_remains_authenticatable_for_settlement(
 
 
 @pytest.mark.asyncio
-async def test_retry_lease_expires_to_explicit_stale_without_replaying_operation():
+async def test_retry_lease_expires_to_explicit_stale_without_replaying_operation(
+    monkeypatch,
+):
+    now = [1_000]
+    monkeypatch.setattr(queue_module.time, "monotonic_ns", lambda: now[0])
     queue = WebMessageQueue(
         scope_id="conversation-owner-a",
         operation_retry_lease_seconds=0.001,
@@ -726,7 +730,7 @@ async def test_retry_lease_expires_to_explicit_stale_without_replaying_operation
         _batch_id(queue, "batch-1"),
         (WebMessage(_request_id(queue, "request-1"), b"payload"),),
     )
-    await asyncio.sleep(0.01)
+    now[0] += 1_000_000
 
     with pytest.raises(StaleOperation):
         await queue.enqueue_batch(

@@ -572,7 +572,9 @@ async def test_bounded_close_marks_noncooperative_dispatch_in_doubt_and_ignores_
 
 
 @pytest.mark.asyncio
-async def test_worker_settlement_survives_expired_claim_operation_lease():
+async def test_worker_settlement_survives_expired_claim_operation_lease(monkeypatch):
+    now = [1_000]
+    monkeypatch.setattr(queue_module.time, "monotonic_ns", lambda: now[0])
     queue = WebMessageQueue(
         scope_id="conversation-owner-a", operation_retry_lease_seconds=0.001
     )
@@ -582,13 +584,15 @@ async def test_worker_settlement_survives_expired_claim_operation_lease():
 
     async def dispatch(request):
         entered.set()
+        now[0] += 1_000_000
         await finish.wait()
         return _accepted(request)
 
     worker = WebMessageQueueWorker(queue, _identity(), lambda: _identity(), dispatch)
     task = asyncio.create_task(worker.dispatch_batch(batch_id))
     await asyncio.wait_for(entered.wait(), 1)
-    await asyncio.sleep(0.01)
+    snapshot = await queue.snapshot()
+    assert snapshot.batches[0].items[0].status is ItemStatus.DISPATCHING
     finish.set()
 
     result = await asyncio.wait_for(task, 1)
