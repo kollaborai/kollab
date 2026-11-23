@@ -396,6 +396,26 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertTrue(result.success, result.error)
         self.assertIn("SECOND_MEMBER_SENTINEL", result.output)
 
+    def test_web_fetch_rejects_truncated_gzip_response(self):
+        """A missing gzip trailer must not produce successful partial text."""
+        body = gzip.compress(b"partial text " * 100)[:-8]
+        response = _make_mock_aiohttp_response(text=body, url="https://example.com")
+        response.headers = {"Content-Encoding": "gzip"}
+
+        with _patch_aiohttp_session(mock_get=response):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {
+                        "id": "web_fetch_truncated_gzip",
+                        "url": "https://example.com",
+                        "extract_main": False,
+                    }
+                )
+            )
+
+        self.assertFalse(result.success, result.output)
+        self.assertIn("incomplete gzip", result.error)
+
     def test_web_fetch_local_http_redirect_chunked_and_compressed_limits(self):
         """Exercise redirects, unknown lengths and gzip expansion over real HTTP."""
 
