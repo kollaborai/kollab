@@ -835,6 +835,30 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.success)
         plugin.send_to_session.assert_called_once_with("terminal", "y")
 
+    async def test_terminal_send_refuses_find_root_outside_workspace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "project"
+            outside = root / "outside"
+            workspace.mkdir()
+            outside.mkdir()
+            self.executor.workspace = workspace
+            plugin = MagicMock()
+            self.executor.tmux_plugin = plugin
+
+            result = await self.executor._execute_terminal_command(
+                {
+                    "type": "terminal_send",
+                    "id": "find-outside-session",
+                    "session_name": "terminal",
+                    "text": f'find "{outside}" -maxdepth 1 -type f -print',
+                }
+            )
+
+            self.assertFalse(result.success)
+            self.assertIn("search paths must stay inside the active workspace", result.error)
+            plugin.send_to_session.assert_not_called()
+
     async def test_terminal_send_rejects_native_calls_without_session_name(self):
         from kollabor_agent.tool_call_contract import normalize_native_tool_call
 
