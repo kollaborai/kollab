@@ -583,7 +583,7 @@ SUBSTITUTION_GUARD_CASES = [
         id="comment-parenthesis-inside-command-substitution",
     ),
     pytest.param(
-        'echo "$(cat <<EOF\n)\nkollab --agent coder\nEOF\n)"',
+        'echo "$(cat <<EOF\n)\nEOF\nkollab --agent coder\n)"',
         True,
         False,
         id="heredoc-parenthesis-inside-command-substitution",
