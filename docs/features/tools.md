@@ -337,6 +337,19 @@ capability. The `terminal-status`, `terminal-output`, and `terminal-kill` tools
 require that grant, so an agent without terminal access cannot inspect or stop
 a session started by the operator.
 
+### Web Fetch
+
+`web-fetch` streams a response instead of buffering the full page. It retains
+at most 500000 downloaded bytes, including redirect response bodies, and reads
+at most one additional byte to detect overflow. The final response is
+additionally limited to 2000000 decompressed bytes. The optional Playwright
+fallback renders the bounded response and fetches script resources within the
+remaining byte limits; other browser requests are blocked.
+
+`max_chars` limits the complete returned output, including the URL header and
+any truncation marker. It accepts integers from 1 through 50000 and defaults to
+5000. Invalid values return an error.
+
 File location: `packages/kollabor-agent/src/kollabor_agent/`
 
 - `tool_executor.py` - Main execution engine
