@@ -7545,7 +7545,10 @@ class HubPlugin(BasePlugin):
                 # INBOX_TTL_SECS and whose session has no living presence
                 # file. This reclaims disk from crashed/offline agents
                 # that will never reconnect to consume their inbox.
-                from .messenger import INBOX_TTL_SECS
+                from .messenger import (
+                    INBOX_TTL_SECS,
+                    _validated_mailbox_timestamp,
+                )
 
                 now = time.time()
                 inboxes_removed = 0
@@ -7570,12 +7573,20 @@ class HubPlugin(BasePlugin):
                                     try:
                                         with open(mf) as f:
                                             data = json.load(f)
-                                        ts = float(data.get("timestamp", 0) or 0)
+                                        ts = (
+                                            _validated_mailbox_timestamp(data)
+                                            if isinstance(data, dict)
+                                            else None
+                                        )
+                                        if ts is None or _is_durable_control(data):
+                                            all_stale = False
+                                            break
                                         if ts and (now - ts) < INBOX_TTL_SECS:
                                             all_stale = False
                                             break
                                     except Exception:
-                                        pass  # keep dirs with unreadable files
+                                        all_stale = False
+                                        break  # keep dirs with unreadable files
 
                                 if all_stale:
                                     shutil.rmtree(inbox_dir)
