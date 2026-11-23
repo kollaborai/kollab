@@ -565,6 +565,38 @@ def test_pip_prefix_install_verifies_its_custom_scripts_directory(
     assert "4.5.6" in result.stdout
 
 
+def test_pip_configured_prefix_install_verifies_its_scripts_directory(
+    tmp_path: Path,
+) -> None:
+    tools_dir = tmp_path / "tools"
+    prefix_bin = tmp_path / "configured prefix" / "bin"
+    _fake_executable(prefix_bin, "4.5.6")
+    python = _write_executable(
+        tools_dir / "python",
+        "#!/bin/sh\n"
+        "if [ \"$1\" = -c ]; then echo /default/scripts; exit 0; fi\n"
+        "script=\"$1\"; shift; exec /bin/sh \"$script\" \"$@\"\n",
+    )
+    _write_executable(
+        tools_dir / "pip3",
+        f"#!{python}\n"
+        f"if [ \"$1\" = config ] && [ \"$3\" = install.prefix ]; then echo '{prefix_bin.parent}'; exit 0; fi\n"
+        "if [ \"$1\" = config ]; then exit 1; fi\n"
+        "if [ \"$1\" = install ] && [ \"$2\" = --help ]; then echo --user; exit 0; fi\n"
+        "if [ \"$1\" = install ]; then exit 0; fi\n",
+    )
+
+    result = _run_installer_method(
+        tmp_path,
+        method="pip",
+        path_dirs=[tools_dir, prefix_bin, Path("/usr/bin"), Path("/bin")],
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert str(prefix_bin / "kollab") in result.stdout
+    assert "4.5.6" in result.stdout
+
+
 def test_windows_console_launcher_is_verified(tmp_path: Path) -> None:
     tools_dir = tmp_path / "tools"
     installed_dir = tmp_path / "Python Scripts"
