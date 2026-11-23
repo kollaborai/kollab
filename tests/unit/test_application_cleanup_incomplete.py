@@ -312,7 +312,7 @@ async def test_pipe_successful_command_exits_zero_only_after_cleanup(
 
 
 @pytest.mark.asyncio
-async def test_interactive_command_preserves_exit_status_if_cleanup_is_uncertain():
+async def test_interactive_deferred_startup_publishes_exit_to_foreground():
     args = SimpleNamespace(_help_pending=False, _unknown_args=[], stay=False)
     cleanup_calls = []
     app = _build_start_app(args, [False], cleanup_calls)
@@ -332,10 +332,13 @@ async def test_interactive_command_preserves_exit_status_if_cleanup_is_uncertain
     app._process_cli_command = process_cli_command
     app._execute_cli_command = execute_cli_command
 
-    with pytest.raises(SystemExit) as exc:
-        await app._deferred_startup()
+    await app._deferred_startup()
 
-    assert exc.value.code == 2
+    assert app._startup_exit_code == 2
+    assert isinstance(
+        app._startup_exit_cleanup_error,
+        application.ApplicationCleanupIncompleteError,
+    )
     assert cleanup_calls == [False]
 
 
