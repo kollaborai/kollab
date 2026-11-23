@@ -99,7 +99,13 @@ export type PageSpec = { id: string; title: string; tabs: PluginTab[] };
 export type ModalSpec = { id: string; title: string; tabs: PluginTab[] };
 export type SettingsSpec = { render: PluginComponent };
 export type CommandSpec = { name: string; description: string; run: (args: string) => unknown };
-export type RendererSpec = { tool?: string; tag?: string; render: ComponentType<{ k: PluginApi; data: unknown }> };
+/** What a chat renderer receives: `k` and its props, never a session. */
+export type PluginRendererProps = {
+  k: PluginApi;
+  toolCall?: { name: string; args: unknown; result: unknown; status: unknown };
+  tag?: { name: string; content: string };
+};
+export type RendererSpec = { tool?: string; tag?: string; render: ComponentType<PluginRendererProps> };
 export type NoticeButton = { label: string; open?: OpenTarget; run?: () => unknown };
 export type NoticeSpec = { text: string; button?: NoticeButton };
 export type ApiOptions = { refreshOn?: string; everyMs?: number };
