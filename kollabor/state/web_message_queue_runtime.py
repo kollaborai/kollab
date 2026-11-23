@@ -7,7 +7,7 @@ import inspect
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from kollabor_rpc import RpcCallerContext, current_rpc_caller_context
 
@@ -111,6 +111,9 @@ class WebMessageQueueRuntime:
     _supervisor_task: asyncio.Task[None] | None = field(default=None, repr=False)
     _turn_idle_retry_task: asyncio.Task[None] | None = field(default=None, repr=False)
     _turn_complete_generation: int = field(default=0, repr=False)
+    _acp_completion_wake_callbacks: dict[
+        asyncio.Future[Any], Callable[[asyncio.Future[Any]], None]
+    ] = field(default_factory=dict, repr=False)
     _close_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _event_loop: asyncio.AbstractEventLoop | None = field(default=None, repr=False)
     _display_tap: Any = field(default=None, repr=False)
@@ -207,6 +210,7 @@ class WebMessageQueueRuntime:
         if self._closing:
             return
         self._turn_complete_generation += 1
+        self._watch_acp_completion_tasks(self._active_acp_completion_tasks())
         self.wake_all()
         if not self._is_processing():
             return
@@ -221,10 +225,15 @@ class WebMessageQueueRuntime:
     def _active_acp_completion_tasks(self) -> tuple[asyncio.Future[Any], ...]:
         llm = getattr(self.state_service, "_llm_service", None)
         active = getattr(llm, "_active_acp", None)
-        if not callable(active):
-            return ()
         try:
-            orchestrator = active()
+            orchestrator = active() if callable(active) else None
+            if orchestrator is None:
+                # _active_acp() deliberately hides a closing/replacing
+                # orchestrator, but its completion tasks still own the busy
+                # state until shutdown settles. Observe the registered service
+                # so the queue wake follows that lifecycle boundary too.
+                resolve_service = getattr(llm, "_acp_service", None)
+                orchestrator = resolve_service() if callable(resolve_service) else None
             tasks = getattr(orchestrator, "_completion_tasks", ())
             return tuple(
                 task
@@ -235,16 +244,58 @@ class WebMessageQueueRuntime:
             logger.debug("WebUI queue could not inspect ACP completion tasks", exc_info=True)
             return ()
 
+    def _watch_acp_completion_tasks(
+        self, tasks: tuple[asyncio.Future[Any], ...]
+    ) -> bool:
+        loop = self._event_loop
+        if loop is None or not loop.is_running() or self._closing:
+            return False
+        added = False
+        for task in tasks:
+            if task in self._acp_completion_wake_callbacks:
+                continue
+
+            def settled(
+                completed: asyncio.Future[Any], *, target_loop: asyncio.AbstractEventLoop = loop
+            ) -> None:
+                try:
+                    target_loop.call_soon_threadsafe(
+                        self._on_acp_completion_settled, completed
+                    )
+                except RuntimeError:
+                    logger.debug("WebUI queue ACP completion settled after loop close")
+
+            self._acp_completion_wake_callbacks[task] = settled
+            task.add_done_callback(settled)
+            added = True
+        return added
+
+    def _on_acp_completion_settled(self, task: asyncio.Future[Any]) -> None:
+        self._acp_completion_wake_callbacks.pop(task, None)
+        if not self._closing:
+            self.wake_all()
+
+    def _unsubscribe_acp_completion_wakes(self) -> None:
+        callbacks = self._acp_completion_wake_callbacks
+        self._acp_completion_wake_callbacks = {}
+        for task, callback in callbacks.items():
+            task.remove_done_callback(callback)
+
     async def _retry_until_idle(self) -> None:
         loop = asyncio.get_running_loop()
         generation = self._turn_complete_generation
         pending = self._active_acp_completion_tasks()
+        self._watch_acp_completion_tasks(pending)
         deadline = loop.time() + (
             _ACP_COMPLETION_SETTLE_SECONDS if pending else _TURN_IDLE_RETRY_SECONDS
         )
         try:
             while not self._closing and self._is_processing():
                 pending = self._active_acp_completion_tasks()
+                if self._watch_acp_completion_tasks(pending):
+                    deadline = max(
+                        deadline, loop.time() + _ACP_COMPLETION_SETTLE_SECONDS
+                    )
                 if generation != self._turn_complete_generation:
                     generation = self._turn_complete_generation
                     deadline = max(
@@ -306,6 +357,7 @@ class WebMessageQueueRuntime:
 
         self._closing = True
         self._unsubscribe_turn_complete()
+        self._unsubscribe_acp_completion_wakes()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + float(timeout)
         remaining = max(0.0, deadline - loop.time())
