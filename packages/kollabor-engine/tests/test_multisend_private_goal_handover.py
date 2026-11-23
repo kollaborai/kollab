@@ -402,3 +402,71 @@ async def test_replayed_goal_in_resumed_run_keeps_the_retained_reply(monkeypatch
     wire = b"".join(chunks)
     assert b"private goal result" in wire
     assert b"data: [DONE]" in wire
+
+
+@pytest.mark.asyncio
+async def test_cancelled_stream_keeps_its_queue_and_a_reconnect_gets_the_late_reply(
+    monkeypatch,
+):
+    """Proves why a lost stream keeps its queue: the reply is not lost (#1368)."""
+    session = _FanoutSession([])
+    first_sent = asyncio.Event()
+
+    async def send_message(_content, *, request_id, **kwargs):
+        if request_id == "first":
+            first_sent.set()
+        if request_id == "next":
+            session.publish({"type": "token", "text": "next reply", "request_id": "next"})
+            session.publish({"type": "turn_complete", "request_id": "next"})
+        return {"accepted": True, "request_id": request_id}
+
+    session.send_message = AsyncMock(side_effect=send_message)
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+
+    def request(message_id, state):
+        return messages.AssistantRequest(
+            commands=[
+                {
+                    "type": "add-message",
+                    "message": {
+                        "id": message_id,
+                        "parts": [{"type": "text", "text": message_id}],
+                    },
+                }
+            ],
+            state=state,
+        )
+
+    first = await messages.assistant_transport(
+        session.session_id, request("first", {"messages": []})
+    )
+    first_task = asyncio.create_task(_drain_real_response(first, []))
+    await asyncio.wait_for(first_sent.wait(), timeout=1)
+    await asyncio.sleep(0.05)
+    first_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(first_task, timeout=1)
+
+    ledger = messages._assistant_handover_ledger(session)
+    assert len(ledger) == 1
+    token = next(iter(ledger))
+    assert len(session.subscriptions) == 1  # the queue survives the lost stream
+
+    # The reply finishes while nobody is connected.
+    session.publish({"type": "token", "text": "late reply", "request_id": "first"})
+    session.publish({"type": "turn_complete", "request_id": "first"})
+
+    resumed = await messages.assistant_transport(
+        session.session_id,
+        request("next", {"messages": [], messages._ASSISTANT_HANDOVER_STATE_KEY: token}),
+    )
+    chunks: list[bytes] = []
+    await asyncio.wait_for(_drain_real_response(resumed, chunks), timeout=2)
+    wire = b"".join(chunks)
+    assert b"late reply" in wire
+    assert b"next reply" in wire
+    assert b"data: [DONE]" in wire
+    assert token not in messages._assistant_handover_ledger(session)
+    assert session.subscriptions == []
