@@ -1799,6 +1799,7 @@ class ACPRunner:
         if batch is None:
             return False
         batch.injected_count += 1
+        self._renew_send_now_batch_expiry(batch)
         return True
 
     def finish_send_now_batch(self, batch_id: str) -> ACPSendNowBatch | None:
