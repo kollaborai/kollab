@@ -813,7 +813,7 @@ export function PanelHost({
               tab === "plugins" ? "flex" : "hidden",
             )}
           >
-            {sessionId ? <PluginsSettings api={api} /> : null}
+            <PluginsSettings api={api} />
           </div>
           {tab === "phonelink" && open ? (
             <div role="tabpanel" aria-label="PhoneLink" className="flex min-h-0 w-full flex-1 flex-col">

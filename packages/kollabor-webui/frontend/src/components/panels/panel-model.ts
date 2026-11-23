@@ -281,5 +281,5 @@ export function sessionlessPanelName(tab: PanelTab, haltFolder: string): string 
 
 /** The tabs a sessionless Settings mount offers. */
 export function sessionlessTabs(haltedFolder: boolean): readonly SettingsTab[] {
-  return haltedFolder ? ["network"] : ["setup", "network"];
+  return haltedFolder ? ["network", "plugins"] : ["setup", "network", "plugins"];
 }
