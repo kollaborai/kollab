@@ -9,6 +9,7 @@ import {
   type ComposerDraftStorage,
 } from "../src/composer-draft";
 import {
+  historyMessageIndex,
   mergeCompactionHistorySnapshot,
   mergeMissingHistoryMessages,
   shownMessagesChanged,
@@ -75,7 +76,10 @@ describe("compaction history reconciliation", () => {
       "Turn appended during compaction",
       "Streaming reply",
     ]);
-    expect(rebased?.messages[0].id).toMatch(/^compaction-archive-/);
+    expect(rebased!.messages[0].id).toBe(shown[0].id);
+    expect(historyMessageIndex(rebased!.messages[0])).toBeNull();
+    expect(historyMessageIndex(rebased!.messages[2])).toBe(0);
+    expect(new Set(rebased!.messages.map((row) => row.id)).size).toBe(rebased!.messages.length);
     expect(shownMessagesChanged(rebased!.messages, loaded)).toBe(false);
     expect(mergeCompactionHistorySnapshot(rebased!.messages, loaded)).toBeNull();
   });

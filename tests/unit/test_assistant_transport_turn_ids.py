@@ -1,11 +1,7 @@
 """A streamed turn keeps one id per row across the post-run history merge (#666).
-
-The reloaded history names every row ``history-<index>``. A streamed turn used
-to keep provisional ``user-<session>-<n>`` ids, so when the page merged the
-reloaded history after the turn, that merge (which dedupes by id) re-added the
-finished turn under its history ids and the window drew it twice until a full
-reload. The engine now renames the streamed rows to their history ids at turn
-completion, which makes the merge a no-op.
+The streamed display IDs stay mounted after completion. Once the engine
+proves a match, it publishes each row's canonical historySourceIndex so a
+page can reconcile the stored turn without showing it twice.
 """
 
 import asyncio
@@ -46,15 +42,27 @@ def _streamed(messages):
     ]
 
 
+def _assert_turn_mapping(rows, previous_ids, user, assistant):
+    """Previously shown rows retain their IDs. Each new row keeps its stream
+    ID. Only a proven match carries a stored index."""
+    assert [row["id"] for row in rows[:-2]] == previous_ids
+    assert all("historySourceIndex" not in row.get("metadata", {}).get("custom", {}) for row in rows[:-2])
+    assert [
+        (row["id"], row.get("metadata", {}).get("custom", {}).get("historySourceIndex"))
+        for row in rows[-2:]
+    ] == [user, assistant]
+
+
 class TestAlignStreamedIds:
-    def test_renames_the_turns_rows_to_their_history_ids(self):
+    def test_maps_stable_turn_ids_to_their_history_indexes(self):
         rows = _streamed(_state_messages())
 
         messages._assistant_align_streamed_ids(rows, _history())
 
-        assert [row["id"] for row in rows] == [
-            "history-0", "history-1", "history-2", "history-3",
-        ]
+        _assert_turn_mapping(
+            rows, ["history-0", "history-1"],
+            ("user-s1-2", 2), ("assistant-s1-3", 3),
+        )
 
     def test_pairing_skips_trailing_system_rows(self):
         rows = _streamed(_state_messages())
@@ -64,9 +72,10 @@ class TestAlignStreamedIds:
 
         messages._assistant_align_streamed_ids(rows, history)
 
-        assert [row["id"] for row in rows] == [
-            "history-0", "history-1", "history-2", "history-3",
-        ]
+        _assert_turn_mapping(
+            rows, ["history-0", "history-1"],
+            ("user-s1-2", 2), ("assistant-s1-3", 3),
+        )
 
     def test_indexes_are_absolute_not_relative_to_the_tail(self):
         """Two earlier rounds, distinct content; this turn pairs the tail by
@@ -93,9 +102,10 @@ class TestAlignStreamedIds:
 
         messages._assistant_align_streamed_ids(rows, history)
 
-        assert [row["id"] for row in rows] == [
-            "history-0", "history-1", "history-4", "history-5",
-        ]
+        _assert_turn_mapping(
+            rows, ["history-0", "history-1"],
+            ("user-s1-4", 4), ("assistant-s1-5", 5),
+        )
 
     def test_refuses_ambiguous_repeated_user_content(self):
         """Do not pick the newest matching user row by position alone."""
@@ -107,9 +117,10 @@ class TestAlignStreamedIds:
         ]
 
         assert messages._assistant_align_streamed_ids(rows, history) is False
-        assert [row["id"] for row in rows] == [
-            "history-0", "history-1", "user-s1-2", "assistant-s1-3",
-        ]
+        _assert_turn_mapping(
+            rows, ["history-0", "history-1"],
+            ("user-s1-2", None), ("assistant-s1-3", None),
+        )
 
     def test_refuses_ambiguous_duplicate_rounds(self):
         """Duplicate rounds where this turn's text matches the earlier one
@@ -127,11 +138,12 @@ class TestAlignStreamedIds:
         ]
 
         assert messages._assistant_align_streamed_ids(rows, history) is False
-        assert [row["id"] for row in rows] == [
-            "history-0", "history-1", "user-s1-2", "assistant-s1-3",
-        ]
+        _assert_turn_mapping(
+            rows, ["history-0", "history-1"],
+            ("user-s1-2", None), ("assistant-s1-3", None),
+        )
 
-    def test_rows_only_this_turn_appended_are_renamed(self):
+    def test_only_new_rows_receive_history_indexes(self):
         rows = [
             {"id": "history-0", "role": "user", "content": "old"},
             {"id": "user-s1-1", "role": "user", "content": "PROOF666 one"},
@@ -145,18 +157,20 @@ class TestAlignStreamedIds:
 
         messages._assistant_align_streamed_ids(rows, history)
 
-        assert [row["id"] for row in rows] == [
-            "history-0", "history-1", "history-2",
-        ]
+        _assert_turn_mapping(
+            rows, ["history-0"],
+            ("user-s1-1", 1), ("assistant-s1-2", 2),
+        )
 
     def test_keeps_provisional_ids_when_history_lacks_the_turn(self):
         rows = _streamed(_state_messages())
 
         messages._assistant_align_streamed_ids(rows, _history()[:2])
 
-        assert [row["id"] for row in rows] == [
-            "history-0", "history-1", "user-s1-2", "assistant-s1-3",
-        ]
+        _assert_turn_mapping(
+            rows, ["history-0", "history-1"],
+            ("user-s1-2", None), ("assistant-s1-3", None),
+        )
 
     def test_keeps_provisional_ids_on_a_role_mismatch(self):
         rows = _streamed(_state_messages())
@@ -168,9 +182,10 @@ class TestAlignStreamedIds:
 
         messages._assistant_align_streamed_ids(rows, history)
 
-        assert [row["id"] for row in rows] == [
-            "history-0", "history-1", "user-s1-2", "assistant-s1-3",
-        ]
+        _assert_turn_mapping(
+            rows, ["history-0", "history-1"],
+            ("user-s1-2", None), ("assistant-s1-3", None),
+        )
 
     def test_noop_when_every_row_already_has_a_history_id(self):
         rows = _state_messages()
@@ -211,10 +226,10 @@ class TestAlignStreamedIds:
 
         messages._assistant_align_streamed_ids(rows, history)
 
-        assert [row["id"] for row in rows] == [
-            "history-0", "history-1", "history-2", "history-3",
-            "history-4", "history-7",
-        ]
+        _assert_turn_mapping(
+            rows, ["history-0", "history-1", "history-2", "history-3"],
+            ("user-s1-4", 4), ("assistant-s1-5", 7),
+        )
 
     def test_native_tool_turn_ending_on_the_tool_batch(self):
         """A native turn that ends on its tool rows still aligns.
@@ -245,10 +260,10 @@ class TestAlignStreamedIds:
 
         messages._assistant_align_streamed_ids(rows, history)
 
-        assert [row["id"] for row in rows] == [
-            "history-0", "history-1", "history-2", "history-3",
-            "history-4", "history-5",
-        ]
+        _assert_turn_mapping(
+            rows, ["history-0", "history-1", "history-2", "history-3"],
+            ("user-s1-4", 4), ("assistant-s1-5", 5),
+        )
 
     def test_synthetic_error_rows_are_left_alone(self):
         rows = _streamed(_state_messages())
@@ -258,7 +273,10 @@ class TestAlignStreamedIds:
         messages._assistant_align_streamed_ids(rows, _history())
 
         assert rows[2]["id"] == "history-2-error"
-        assert [row["id"] for row in rows[3:]] == ["history-2", "history-3"]
+        _assert_turn_mapping(
+            rows[3:], [],
+            ("user-s1-2", 2), ("assistant-s1-3", 3),
+        )
 
 
 class _Controller:
@@ -392,12 +410,13 @@ async def _run_turn(
 
 
 @pytest.mark.asyncio
-async def test_turn_complete_publishes_history_ids(monkeypatch):
+async def test_turn_complete_publishes_history_indexes(monkeypatch):
     state = await _run_turn(monkeypatch, _history(), _state_messages())
 
-    assert [row["id"] for row in state["messages"]] == [
-        "history-0", "history-1", "history-2", "history-3",
-    ]
+    _assert_turn_mapping(
+        state["messages"], ["history-0", "history-1"],
+        ("user-s1-2", 2), ("assistant-s1-3", 3),
+    )
     assert state["synced"] == {"history": 4, "messages": 4}
 
 
@@ -458,11 +477,11 @@ def _tool_streamed():
 
 
 @pytest.mark.asyncio
-async def test_xml_tool_turn_publishes_history_ids(monkeypatch):
-    """Route-level: a tool turn's rows still get their stored history ids.
+async def test_xml_tool_turn_publishes_history_indexes(monkeypatch):
+    """A tool turn's rows retain their display IDs and receive stored indexes.
 
     The fake turn streams one assistant row (text, call card, final text)
-    matching the stored shape call-row, tool row(s), final row: the rename
+    matching the stored shape call-row, tool row(s), final row: the mapping
     straddles the tool row (history-7 after history-5) and the wiring passes
     the mirror through untouched.
     """
@@ -472,15 +491,15 @@ async def test_xml_tool_turn_publishes_history_ids(monkeypatch):
         tool_round=("Running it.", "terminal_0"),
     )
 
-    assert [row["id"] for row in state["messages"]] == [
-        "history-0", "history-1", "history-2", "history-3",
-        "history-4", "history-7",
-    ]
+    _assert_turn_mapping(
+        state["messages"], ["history-0", "history-1", "history-2", "history-3"],
+        ("user-s1-4", 4), ("assistant-s1-5", 7),
+    )
     assert state["synced"] == {"history": 8, "messages": 6}
 
 
 @pytest.mark.asyncio
-async def test_native_tool_turn_publishes_history_ids(monkeypatch):
+async def test_native_tool_turn_publishes_history_indexes(monkeypatch):
     """Route-level: native tool rows (no XML metadata) skip the same way."""
     state = await _run_turn(
         monkeypatch, _native_tool_history(), _tool_base_state(),
@@ -488,10 +507,10 @@ async def test_native_tool_turn_publishes_history_ids(monkeypatch):
         tool_round=("Running it.", "call_1"),
     )
 
-    assert [row["id"] for row in state["messages"]] == [
-        "history-0", "history-1", "history-2", "history-3",
-        "history-4", "history-7",
-    ]
+    _assert_turn_mapping(
+        state["messages"], ["history-0", "history-1", "history-2", "history-3"],
+        ("user-s1-4", 4), ("assistant-s1-5", 7),
+    )
     assert state["synced"] == {"history": 8, "messages": 6}
 
 
@@ -517,9 +536,10 @@ async def test_refresh_failure_claims_no_sync(monkeypatch):
     await asyncio.gather(*runners)
 
     final = controllers[0].state
-    assert [row["id"] for row in final["messages"]] == [
-        "history-0", "history-1", "user-s1-2", "assistant-s1-3",
-    ]
+    _assert_turn_mapping(
+        final["messages"], ["history-0", "history-1"],
+        ("user-s1-2", None), ("assistant-s1-3", None),
+    )
 
     assert final["synced"] is None
 
@@ -558,9 +578,10 @@ async def test_failed_refresh_then_stale_retry_never_claims_sync(monkeypatch):
     await asyncio.gather(*runners)
 
     final = controllers[0].state
-    assert [row["id"] for row in final["messages"]] == [
-        "history-0", "history-1", "user-s1-2", "assistant-s1-3",
-    ]
+    _assert_turn_mapping(
+        final["messages"], ["history-0", "history-1"],
+        ("user-s1-2", None), ("assistant-s1-3", None),
+    )
     assert final["synced"] is None
 
 
@@ -593,17 +614,18 @@ async def test_publish_precedes_refresh_history_round_trips(monkeypatch):
 
     # The FIRST publish still precedes the refresh round trips (#675), and
     # the aligned rows are re-published after alignment so the wire carries
-    # the canonical ids (#767 — the encode-time snapshot of the early chunk
-    # alone would leave the provisional ids on the client).
+    # the source indexes (#767 — the encode-time snapshot of the early chunk
+    # alone would leave the client without source indexes).
     first_refresh = order.index("refresh")
     assert order[0] == "publish" and first_refresh > 0, f"order wrong: {order}"
     assert "publish" in order[first_refresh + 1:], (
         f"aligned rows never re-published after refresh: {order}"
     )
-    # End state is unchanged: ids renamed against the snapshot, claim set.
-    assert [row["id"] for row in state["messages"]] == [
-        "history-0", "history-1", "history-2", "history-3",
-    ]
+    # The engine publishes both source indexes and the matching watermark.
+    _assert_turn_mapping(
+        state["messages"], ["history-0", "history-1"],
+        ("user-s1-2", 2), ("assistant-s1-3", 3),
+    )
     assert state["synced"] == {"history": 4, "messages": 4}
 
 
@@ -669,10 +691,10 @@ async def test_wire_does_not_guess_between_identical_turns(monkeypatch):
                 synced_sets.append(op["value"])
 
     assert messages_sets, "no messages update ever reached the wire"
-    last_ids = [row["id"] for row in messages_sets[-1]]
-    assert last_ids == [
-        "history-0", "history-1", "user-s1-2", "assistant-s1-3",
-    ], f"ambiguous rows were renamed on the wire: {last_ids}"
+    _assert_turn_mapping(
+        messages_sets[-1], ["history-0", "history-1"],
+        ("user-s1-2", None), ("assistant-s1-3", None),
+    )
     assert synced_sets and synced_sets[-1] is None, (
         "ambiguous alignment must clear the prior sync watermark; "
         f"wire carried {synced_sets}"
@@ -685,16 +707,9 @@ async def test_wire_does_not_guess_between_identical_turns(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_wire_republishes_aligned_rows_after_refresh(monkeypatch):
-    """The aligned ids must actually reach the client over the wire (#767).
-
-    Bismuth's encoder probe on the #767 head: the early publish chunk is
-    JSON-serialized at encode time and carries the provisional ids, and the
-    later ``synced`` chunk carries no messages update — so the in-place
-    alignment never re-published, and the client kept ``user-s1-2`` until a
-    full reload. This test drives the real ``assistant_stream`` encoder (no
-    fake harness) and asserts on the EMITTED CHUNKS: the last messages
-    chunk on the wire must carry the canonical ids.
-    """
+    """Drive the real assistant_stream encoder. It snapshots the early publish
+    before refresh. A later messages chunk must carry the proven indexes as
+    well as the original display IDs (#767)."""
     session = _Session(_history())
 
     async def _refresh(*, stale_raises=False):
@@ -745,14 +760,11 @@ async def test_wire_republishes_aligned_rows_after_refresh(monkeypatch):
                 messages_sets.append(op["value"])
 
     assert messages_sets, "no messages update ever reached the wire"
-    # The early publish may (by design) carry provisional ids, but the LAST
-    # messages chunk on the wire must be the aligned snapshot.
-    last_ids = [row["id"] for row in messages_sets[-1]]
-    assert last_ids == [
-        "history-0", "history-1", "history-2", "history-3",
-    ], (
-        "wire never re-published the aligned rows; last messages chunk "
-        f"carried ids {last_ids}"
+    # The same display IDs reach the client before and after refresh. The last
+    # update must also carry the canonical positions proven by the engine.
+    _assert_turn_mapping(
+        messages_sets[-1], ["history-0", "history-1"],
+        ("user-s1-2", 2), ("assistant-s1-3", 3),
     )
 
 
@@ -811,12 +823,13 @@ async def test_turn_complete_publishes_before_history_refresh_resolves(monkeypat
         gate.set()
         await asyncio.wait_for(runners[0], 2.0)
 
-    # The aligned republish lands the canonical ids, and only then is the
+    # The aligned republish lands the canonical indexes, and only then is the
     # synced watermark claimed.
     state = controllers[0].state
-    assert [row["id"] for row in state["messages"]] == [
-        "history-0", "history-1", "history-2", "history-3",
-    ]
+    _assert_turn_mapping(
+        state["messages"], ["history-0", "history-1"],
+        ("user-s1-2", 2), ("assistant-s1-3", 3),
+    )
     assert state["synced"] == {"history": 4, "messages": 4}
 
 
@@ -825,7 +838,7 @@ def test_align_refuses_stale_suffix_only_match():
 
     A refresh snapshot that missed this turn can still end on a stale
     answer whose text is the tail of the streamed answer ("42" vs
-    "Answer: 42"): pairing it would rename this turn onto the stale rows
+    "Answer: 42"): pairing it would map this turn onto the stale rows
     and claim a synced watermark over rows the page has not been shown.
     The aligner must refuse and keep the provisional ids; only a turn
     whose streamed row carries its own call cards proves a merged tool
@@ -845,6 +858,7 @@ def test_align_refuses_stale_suffix_only_match():
     ]
 
     assert messages._assistant_align_streamed_ids(rows, history) is False
-    assert [row["id"] for row in rows] == [
-        "history-0", "history-1", "user-s1-2", "assistant-s1-3",
-    ]
+    _assert_turn_mapping(
+        rows, ["history-0", "history-1"],
+        ("user-s1-2", None), ("assistant-s1-3", None),
+    )
