@@ -392,10 +392,13 @@ class TestLLMServiceIntegration(unittest.TestCase):
         permissions.cancel_confirmations.assert_not_called()
 
     def test_an_acp_stop_answers_an_open_approval_prompt_cancelled(self):
-        acp = SimpleNamespace(cancel=AsyncMock())
+        acp = SimpleNamespace(
+            cancel=AsyncMock(),
+            runner=SimpleNamespace(_active_context=SimpleNamespace(request_id="request-B")),
+        )
         with patch.object(self.service, "_selected_active_acp_orchestrator", return_value=acp):
             permissions = self._stop_with_permissions()
-        permissions.cancel_confirmations.assert_called_once_with()
+        permissions.cancel_confirmations.assert_called_once_with("request-B")
         permissions.park_confirmations.assert_not_called()
         acp.cancel.assert_awaited_once()
 
