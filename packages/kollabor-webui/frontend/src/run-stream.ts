@@ -28,7 +28,7 @@ function endsWithBlankLine(bytes: readonly number[]): boolean {
 }
 
 /** Find the end of the first SSE event, including a separator split by chunks. */
-function firstEventBoundary(chunks: readonly Uint8Array[], scanFrom = 0, final = false): Boundary | null {
+function firstEventBoundary(chunks: readonly Uint8Array[], scanFrom = 0): Boundary | null {
   const previous: number[] = [];
   let absoluteOffset = 0;
   for (let chunk = 0; chunk < chunks.length; chunk += 1) {
@@ -39,11 +39,11 @@ function firstEventBoundary(chunks: readonly Uint8Array[], scanFrom = 0, final =
         const n = previous.length;
         const last = previous[n - 1];
         if (endsWithBlankLine(previous)) {
-          // A trailing CR may become the CRLF half of one line ending. Wait
-          // for its next byte before splitting so the complete delimiter
-          // stays with the event it ends.
+          // Preserve an available LF after CR. If it has not arrived yet,
+          // dispatch CR as a valid standalone line ending instead of waiting
+          // for another source byte.
           const next = last === CR ? byteAfter(chunks, chunk, offset) : null;
-          if (last !== CR || next !== LF && (next !== null || final)) {
+          if (last !== CR || next !== LF) {
             return { chunk, offset };
           }
         }
@@ -174,7 +174,7 @@ export function endableStream(
       }
       while (!closed) {
         const scanFrom = Math.max(0, pendingScanned - 3);
-        const boundary = firstEventBoundary(pending, scanFrom, sourceDone);
+        const boundary = firstEventBoundary(pending, scanFrom);
         if (boundary) {
           const length = eventLength(pending, boundary);
           if (length > MAX_EVENT_BYTES) {
@@ -194,6 +194,10 @@ export function endableStream(
         }
         pendingScanned = pendingBytes;
         if (sourceDone) {
+          if (pendingBytes > MAX_EVENT_BYTES) {
+            await fail(new Error(`SSE event exceeds max buffered size (${pendingBytes} > ${MAX_EVENT_BYTES})`));
+            return;
+          }
           if (pending.length) {
             const partial = join(pending);
             pending = [];

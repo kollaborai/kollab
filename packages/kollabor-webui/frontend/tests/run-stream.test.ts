@@ -365,6 +365,8 @@ test("a live CR-terminated SSE event dispatches without another source byte", as
   ]);
 
   assert.deepEqual(result, { kind: "value", text: "data: first\r\r" });
+  const lockedDecoder = new SSEEventDecoder();
+  assert.deepEqual(lockedDecoder.push(result.text), [{ data: "first" }]);
   run.end();
   assert.equal(new TextDecoder().decode((await reader.read()).value), FINISH);
   assert.equal(from.state.let, true);
