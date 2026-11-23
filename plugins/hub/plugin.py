@@ -7078,14 +7078,19 @@ class HubPlugin(BasePlugin):
             exc.acknowledged_message_ids = acknowledged.copy()
             raise
 
-    def _acknowledge_inbox_delivery(self, message_ids: set[str]) -> None:
+    def _acknowledge_inbox_delivery(
+        self, message_ids: set[str], fallback_agent_keys: Optional[List[str]] = None
+    ) -> None:
         """Persist each accepted mailbox delivery before yielding control."""
         identity = getattr(self, "_identity", None)
-        if identity is None or not message_ids:
+        if not message_ids:
             return
-        AgentMessenger.acknowledge_mailboxes(
-            [identity.agent_id, identity.identity], message_ids
+        agent_keys = (
+            [identity.agent_id, identity.identity]
+            if identity is not None
+            else (fallback_agent_keys or [])
         )
+        AgentMessenger.acknowledge_mailboxes(agent_keys, message_ids)
 
     async def _deliver_inbox_message(self, msg: HubMessage) -> bool:
         """Deliver one mailbox message; refusal leaves its file unacknowledged."""
@@ -7098,7 +7103,7 @@ class HubPlugin(BasePlugin):
                 # without a cancellation request against this delivery task.
                 # Treat that callback outcome as completed so the durable
                 # mailbox does not replay the effect after a restart.
-                return True
+                self._acknowledge_inbox_delivery({msg.id}, [msg.to])
             raise
         except Exception as exc:
             logger.warning(
