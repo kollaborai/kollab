@@ -185,10 +185,10 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
         </> : null}
         {error ? <p role="alert" className="text-destructive break-words text-sm">{error}</p> : null}
       </div>
-      <DialogFooter><Button type="button" variant="outline" disabled={busy} onClick={close}>Cancel</Button>
-        {job?.status === "staging" && error ? <Button type="button" disabled={busy} onClick={() => { setError(null); setPollVersion(value => value + 1); }}>Retry</Button> : null}
-        {form.review ? <Button type="button" disabled={busy || !url.trim()} onClick={() => { void start(); }}>Review</Button> : null}
-        {ready ? <Button type="button" disabled={busy} onClick={() => { void confirm(); }}>{action === "install" ? "Install" : "Update"}</Button> : null}
+      <DialogFooter><Button type="button" variant="outline" className="pointer-coarse:min-h-11" disabled={busy} onClick={close}>Cancel</Button>
+        {job?.status === "staging" && error ? <Button type="button" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { setError(null); setPollVersion(value => value + 1); }}>Retry</Button> : null}
+        {form.review ? <Button type="button" className="pointer-coarse:min-h-11" disabled={busy || !url.trim()} onClick={() => { void start(); }}>Review</Button> : null}
+        {ready ? <Button type="button" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { void confirm(); }}>{action === "install" ? "Install" : "Update"}</Button> : null}
       </DialogFooter>
     </DialogContent>
   </Dialog>;

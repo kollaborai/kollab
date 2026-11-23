@@ -83,18 +83,18 @@ function ServiceRow({ service, api, id, canControl, enabled, onError }: {
       <span className="text-muted-foreground">{serviceStatus(service)}</span>
       {service.error ? <span className="text-destructive break-words">{service.error}</span> : null}
       <div className="ml-auto flex flex-wrap gap-1">
-        <Button type="button" variant="ghost" size="xs" disabled={busy} onClick={() => { void showLog(); }}>View Log</Button>
+        <Button type="button" variant="ghost" size="xs" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { void showLog(); }}>View Log</Button>
         {canControl && service.state === "running" ? (
           <>
-            {enabled ? <Button type="button" variant="outline" size="xs" disabled={busy} onClick={() => { void control("restart"); }}>Restart</Button> : null}
-            <Button type="button" variant="outline" size="xs" disabled={busy} onClick={() => { void control("stop"); }}>Stop</Button>
+            {enabled ? <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { void control("restart"); }}>Restart</Button> : null}
+            <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { void control("stop"); }}>Stop</Button>
           </>
         ) : null}
         {canControl && service.state === "stop-failed" ? (
-          <Button type="button" variant="outline" size="xs" disabled={busy} onClick={() => { void control("stop"); }}>Retry Stop</Button>
+          <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { void control("stop"); }}>Retry Stop</Button>
         ) : null}
         {canControl && enabled && service.state !== "running" && service.state !== "stopping" && service.state !== "stop-failed" ? (
-          <Button type="button" variant="outline" size="xs" disabled={busy} onClick={() => { void control("start"); }}>Start</Button>
+          <Button type="button" variant="outline" size="xs" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => { void control("start"); }}>Start</Button>
         ) : null}
       </div>
       <Dialog open={log !== null} onOpenChange={(open) => { if (!open) setLog(null); }}>
@@ -157,7 +157,7 @@ function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
         <h2 className="min-w-0 truncate font-semibold">{entry.name}</h2>
         <span className={`text-xs font-medium ${failure !== null || entry.state === "changed-on-disk" ? "text-destructive" : "text-muted-foreground"}`}>{status}</span>
         <Switch
-          className="relative max-sm:before:absolute max-sm:before:left-1/2 max-sm:before:top-1/2 max-sm:before:h-[44px] max-sm:before:w-[44px] max-sm:before:-translate-x-1/2 max-sm:before:-translate-y-1/2 max-sm:before:content-['']"
+          className="relative pointer-coarse:before:absolute pointer-coarse:before:left-1/2 pointer-coarse:before:top-1/2 pointer-coarse:before:h-[44px] pointer-coarse:before:w-[44px] pointer-coarse:before:-translate-x-1/2 pointer-coarse:before:-translate-y-1/2 pointer-coarse:before:content-['']"
           aria-label={`${entry.name} enabled`}
           checked={entry.enabled}
           disabled={!switchEnabled || busy}
@@ -165,8 +165,8 @@ function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
         />
         {updateRemove ? (
           <div className="ml-auto flex flex-wrap gap-2">
-            <Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => onUpdate(entry.id)}>Update</Button>
-            <Button type="button" size="xs" variant="ghost" disabled={busy} onClick={() => setConfirmation("remove")}>Remove</Button>
+            <Button type="button" size="xs" variant="outline" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => onUpdate(entry.id)}>Update</Button>
+            <Button type="button" size="xs" variant="ghost" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => setConfirmation("remove")}>Remove</Button>
           </div>
         ) : null}
       </div>
@@ -224,8 +224,8 @@ function PluginDetail({ entry, record, api, remote, onUpdate, detailRef }: {
           </DialogHeader>
           {error ? <p role="alert" className="text-destructive break-words text-sm">{error}</p> : null}
           <DialogFooter>
-            <Button type="button" variant="outline" disabled={busy} onClick={() => setConfirmation(null)}>Cancel</Button>
-            <Button type="button" disabled={busy || !confirmation} onClick={() => { if (confirmation) void perform(confirmation); }}>
+            <Button type="button" variant="outline" className="pointer-coarse:min-h-11" disabled={busy} onClick={() => setConfirmation(null)}>Cancel</Button>
+            <Button type="button" className="pointer-coarse:min-h-11" disabled={busy || !confirmation} onClick={() => { if (confirmation) void perform(confirmation); }}>
               {confirmation === "remove" ? "Remove" : "Turn Off"}
             </Button>
           </DialogFooter>
@@ -265,7 +265,7 @@ export function PluginsSettings({ api }: { api: EngineApi }) {
               <div className="mb-2 flex items-center justify-between gap-2">
                 <h2 className="text-muted-foreground text-xs font-semibold">{group.title}</h2>
                 {group.title === "Installed" && !snapshot.off && !remote ? (
-                  <Button type="button" size="xs" variant="outline" onClick={() => setOperation({ action: "install" })}>
+                  <Button type="button" size="xs" variant="outline" className="pointer-coarse:min-h-11" onClick={() => setOperation({ action: "install" })}>
                     <Plus className="size-3" /> Add Plugin
                   </Button>
                 ) : null}

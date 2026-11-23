@@ -770,7 +770,7 @@ export function PanelHost({
             <TabsTrigger
               key={item.id}
               value={item.id}
-              className="h-9 flex-none px-2.5 sm:px-3"
+              className="h-9 flex-none px-2.5 sm:px-3 pointer-coarse:min-h-11"
             >
               {item.label}
             </TabsTrigger>
