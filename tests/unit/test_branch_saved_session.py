@@ -263,3 +263,47 @@ async def test_remote_branch_calls_state_rpc_and_returns_metadata():
         {"session_id": "saved-source", "branch_index": 0},
         timeout=3.0,
     )
+
+
+@pytest.mark.asyncio
+async def test_branch_aborts_when_saving_current_conversation_fails():
+    branch_calls: list[str] = []
+
+    class ConversationManager:
+        current_session_id = "current-before"
+        messages = [{"role": "user", "content": "unsaved current turn"}]
+
+        def save_conversation(self) -> None:
+            raise OSError("conversation storage is read-only")
+
+        def branch_session(self, session_id: str, index: int) -> dict:
+            branch_calls.append(session_id)
+            self.current_session_id = "branch-created"
+            self.messages = [{"role": "user", "content": "saved branch"}]
+            return {
+                "success": True,
+                "session_id": self.current_session_id,
+                "branch_point": index,
+            }
+
+    manager = ConversationManager()
+    state = object.__new__(LocalStateService)
+    state._llm_service = SimpleNamespace(
+        conversation_manager=manager,
+        conversation_history=[],
+    )
+
+    @asynccontextmanager
+    async def ownership(_action: str):
+        yield object(), False, lambda: None
+
+    state._conversation_ownership = ownership
+
+    with pytest.raises(ValueError, match="save current conversation"):
+        await state.branch_conversation("saved-source", 0)
+
+    assert branch_calls == []
+    assert manager.current_session_id == "current-before"
+    assert manager.messages == [
+        {"role": "user", "content": "unsaved current turn"}
+    ]
