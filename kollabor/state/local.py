@@ -4445,7 +4445,9 @@ class LocalStateService(StateService):
                 conv_mgr.save_conversation()
                 logger.info("branch: auto-saved session %r", old_session_id)
         except Exception as e:
-            logger.debug("branch: auto-save error (non-fatal): %s", e)
+            raise ValueError(
+                f"failed to save current conversation before branching: {e}"
+            ) from e
 
         try:
             result = conv_mgr.branch_session(session_id, branch_index)
