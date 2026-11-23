@@ -8,8 +8,8 @@ import pytest
 from kollabor_engine import media_store
 from kollabor_engine.history_store import _wire_message
 from kollabor_engine.media_store import save
-from kollabor_ai.conversation_logger import KollaborConversationLogger
 
+from kollabor_ai.conversation_logger import KollaborConversationLogger
 
 PNG = "data:image/png;base64,AQID"
 JPEG = "data:image/jpeg;base64,BAUF"

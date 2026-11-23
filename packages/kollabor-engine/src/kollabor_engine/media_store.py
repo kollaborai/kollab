@@ -253,7 +253,14 @@ def bind_queue_handoff(
             digest = entry.get("sha256")
             if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
                 raise MediaError("queue handoff media digest is unavailable")
-            data, _mime = open_media(conversations_dir, media_ref)
+            try:
+                data, _mime = open_media(
+                    conversations_dir, media_ref, session_id=session_id
+                )
+            except FileNotFoundError:
+                raise MediaError(
+                    "queue handoff media ref is missing from its session"
+                ) from None
             if hashlib.sha256(data).hexdigest() != digest:
                 raise MediaError("queue handoff media integrity check failed")
             expected = {
@@ -286,14 +293,25 @@ def bind_queue_handoff(
     return _modify_index(conversations_dir, session_id, bind)
 
 
-def open_media(conversations_dir: Path, ref: str) -> Tuple[bytes, str]:
-    """Return (bytes, mime) for a ref, or raise FileNotFoundError."""
+def open_media(
+    conversations_dir: Path,
+    ref: str,
+    *,
+    session_id: str | None = None,
+) -> Tuple[bytes, str]:
+    """Return (bytes, mime) for a ref, optionally scoped to one session."""
     if not REF_RE.match(ref or ""):
         raise FileNotFoundError(ref)
-    directory = Path(conversations_dir) / "media"
-    matches = sorted(directory.glob(f"*/{ref}.*"))
+    if session_id is None:
+        directory = Path(conversations_dir) / "media"
+        matches = sorted(directory.glob(f"*/{ref}.*"))
+    else:
+        directory = session_media_dir(conversations_dir, session_id)
+        matches = sorted(directory.glob(f"{ref}.*"))
     if not matches:
         raise FileNotFoundError(ref)
+    if len(matches) > 1:
+        raise MediaError("media integrity check failed: duplicate media files")
     path = matches[0]
     ext = path.suffix.lstrip(".").lower()
     mime = MIME_BY_EXT.get(ext)
@@ -305,7 +323,9 @@ def open_media(conversations_dir: Path, ref: str) -> Tuple[bytes, str]:
     # durable attachment evidence.
     indexed = [
         entry
-        for entry in _read_index(Path(conversations_dir), path.parent.name)
+        for entry in _read_index(
+            Path(conversations_dir), session_id or path.parent.name
+        )
         if entry.get("ref") == ref
     ]
     if len(indexed) > 1:
