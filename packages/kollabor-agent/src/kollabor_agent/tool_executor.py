@@ -4117,8 +4117,6 @@ class ToolExecutor:
         if extract_main:
             # JSON-LD lives in script tags, so read it before removing scripts.
             article_body, description = ToolExecutor._extract_json_ld(soup)
-            if len(article_body) > 200:
-                return article_body
 
         # Remove non-content elements entirely
         for tag in soup.find_all(["script", "style", "nav", "footer",
@@ -4133,7 +4131,7 @@ class ToolExecutor:
                 if element:
                     text = ToolExecutor._soup_to_text(element)
                     if len(text) > 200:
-                        return text
+                        return article_body if len(article_body) > len(text) else text
 
             # Preformatted samples and inline code are not page prose. A
             # malformed inline code wrapper with block children must not hide
@@ -4201,7 +4199,7 @@ class ToolExecutor:
             # Priority 3: Readability heuristic — find densest content block
             text = ToolExecutor._readability_extract(soup)
             if text and len(text) > 200:
-                return text
+                return article_body if len(article_body) > len(text) else text
 
         # Prefer shorter structured candidates only when they add more than
         # the semantic, readability, and plain-text fallbacks already found.
