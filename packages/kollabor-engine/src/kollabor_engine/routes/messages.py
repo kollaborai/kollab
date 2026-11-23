@@ -1793,7 +1793,7 @@ async def assistant_transport(
             subscribed_here = True
         queue = shared_queue
         preserve_handover_queue = False
-        goal_pump = None
+        goal_pumps: List[asyncio.Task] = []
         revocation_watch = None
         tool_controllers: Dict[str, Any] = {}
         permission_controllers: Dict[tuple[str, str], Any] = {}
@@ -1823,6 +1823,7 @@ async def assistant_transport(
         resumed_permission_request_ids: Dict[str, set[str]] = {}
         request_ids: set[str] = set()
         admitted_turn_request_ids: set[str] = set()
+        private_goal_reply_ids: set[str] = set()
         possibly_accepted_request_ids: set[str] = set()
         untagged_request_ids: set[str] = set()
         completed_request_ids: set[str] = set()
@@ -1876,6 +1877,12 @@ async def assistant_transport(
                 for request_id in handover_record.get("completed_request_ids") or ()
                 if request_id is not None
             )
+            private_goal_reply_ids.update(
+                str(reply_id)
+                for reply_id in handover_record.get("private_goal_reply_ids") or ()
+                if reply_id is not None and str(reply_id)
+            )
+            private_goal_reply_ids.difference_update(completed_request_ids)
             untagged_request_ids.update(
                 str(request_id)
                 for request_id in handover_record.get("untagged_request_ids") or ()
@@ -2495,6 +2502,7 @@ async def assistant_transport(
             }
             return {
                 "request_ids": request_order,
+                "private_goal_reply_ids": sorted(private_goal_reply_ids),
                 "completed_request_ids": sorted(completed_request_ids),
                 "possibly_accepted_request_ids": sorted(possibly_accepted_request_ids),
                 "admission_error": admission_error,
@@ -2884,6 +2892,13 @@ async def assistant_transport(
                 shared_queue, "revoked", False
             ):
                 return
+            if queue_from_ledger and queue is not None:
+                for reply_id in sorted(private_goal_reply_ids):
+                    goal_pumps.append(
+                        asyncio.create_task(
+                            _pump_goal_reply(session, reply_id, queue)
+                        )
+                    )
             new_event_loss = record_event_loss()
             if event_loss_seen and not new_event_loss and event_loss_message:
                 completion["error"] = {
@@ -3076,10 +3091,18 @@ async def assistant_transport(
                             return
                         request_ids.add(str(reply_id))
                         turn_request_id = str(reply_id)
-                        queue = asyncio.Queue()
-                        goal_pump = asyncio.create_task(_pump_goal_reply(session, str(reply_id), queue))
-                        if read_context is not None:
-                            revocation_watch = asyncio.create_task(_forward_goal_revocation(shared_queue, queue))
+                        private_goal_reply_ids.add(str(reply_id))
+                        if not queue_from_ledger:
+                            queue = asyncio.Queue()
+                            if read_context is not None:
+                                revocation_watch = asyncio.create_task(
+                                    _forward_goal_revocation(shared_queue, queue)
+                                )
+                        goal_pumps.append(
+                            asyncio.create_task(
+                                _pump_goal_reply(session, str(reply_id), queue)
+                            )
+                        )
                     if accepted.get("goal_request_id") and isinstance(body.state, dict):
                         controller.state["goalSubmission"] = {
                             "requestId": str(accepted["goal_request_id"]),
@@ -3905,6 +3928,14 @@ async def assistant_transport(
                         if not completed_now:
                             continue
                         completed_request_ids.update(completed_now)
+                        completed_private_replies = (
+                            completed_now & private_goal_reply_ids
+                        )
+                        if completed_private_replies:
+                            private_goal_reply_ids.difference_update(
+                                completed_private_replies
+                            )
+                            store_handover_snapshot()
                         pending_correlation_ids = (
                             (untagged_request_ids | possibly_accepted_request_ids)
                             - completed_request_ids
@@ -4050,7 +4081,7 @@ async def assistant_transport(
                             submitted_row_ids,
                         )
                     if persist_message_state:
-                        if goal_pump is not None:
+                        if goal_pumps:
                             # Other goal commands may have reached history in
                             # between this page's request and its result. A
                             # total history count is not a prefix of the rows
@@ -4125,7 +4156,9 @@ async def assistant_transport(
             logger.exception("assistant transport failed for %s", session_id)
             controller.add_error(str(exc))
         finally:
-            tasks = [task for task in (goal_pump, revocation_watch) if task is not None]
+            tasks = [*goal_pumps]
+            if revocation_watch is not None:
+                tasks.append(revocation_watch)
             for task in tasks:
                 task.cancel()
             if tasks:
