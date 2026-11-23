@@ -60,6 +60,20 @@ class _FakeCorrelationClock:
 
 
 @pytest.mark.asyncio
+async def test_cancelled_event_wait_does_not_consume_buffered_event():
+    queue = asyncio.Queue()
+    event = {"type": "turn_complete", "request_id": "first"}
+    queue.put_nowait(event)
+    controller = type("Controller", (), {})()
+    controller.cancelled_event = asyncio.Event()
+    controller.cancelled_event.set()
+
+    assert await messages._assistant_next_event(queue, controller) is None
+    assert queue.qsize() == 1
+    assert queue.get_nowait() == event
+
+
+@pytest.mark.asyncio
 async def test_two_separate_turns_keep_stream_open_until_both_finish(monkeypatch):
     assistant_ids = {}
     original_turn_message = messages._assistant_turn_message
@@ -750,6 +764,96 @@ async def test_disconnected_permission_followup_retries_without_gap_or_replay(mo
         ("user", "two"),
         ("assistant", "second reply"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_racing_terminal_event_is_preserved_across_reconnect(monkeypatch):
+    session = _FakeSession([])
+    source = daemon_pool.DaemonHandle(session.session_id, "agent", launcher=None)
+    captured, _, drain = _install_fake_assistant_stream(monkeypatch)
+
+    def subscribe_with_cancel(*args, **kwargs):
+        queue = source.subscribe(*args, **kwargs)
+        original_get = queue.get
+
+        async def cancel_on_final_terminal():
+            event = await original_get()
+            if (
+                event.get("type") == "turn_complete"
+                and event.get("request_id") == "second"
+            ):
+                # Make queue.get() and cancellation complete in the same loop turn.
+                captured["controller"].cancelled_event.set()
+            return event
+
+        queue.get = cancel_on_final_terminal
+        return queue
+
+    session.subscribe = subscribe_with_cancel
+    session.unsubscribe = source.unsubscribe
+
+    async def accept(_content, *, request_id):
+        source._fan_out(
+            {"type": "token", "text": f"{request_id} reply", "request_id": request_id}
+        )
+        source._fan_out({"type": "turn_complete", "request_id": request_id})
+        return {"accepted": True, "request_id": request_id}
+
+    session.send_message = AsyncMock(side_effect=accept)
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    first_response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[
+                {
+                    "type": "add-message",
+                    "message": {
+                        "id": "first",
+                        "parts": [{"type": "text", "text": "first message"}],
+                    },
+                },
+                {
+                    "type": "add-message",
+                    "message": {
+                        "id": "second",
+                        "parts": [{"type": "text", "text": "second message"}],
+                    },
+                },
+            ],
+            state={"messages": []},
+        ),
+    )
+    await asyncio.wait_for(drain(first_response.stream), timeout=1)
+    first_state = copy.deepcopy(captured["controller"].state)
+
+    resumed = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[
+                {
+                    "type": "add-message",
+                    "message": {
+                        "id": "third",
+                        "parts": [{"type": "text", "text": "third message"}],
+                    },
+                }
+            ],
+            state=first_state,
+        ),
+    )
+    await asyncio.wait_for(drain(resumed.stream), timeout=1)
+
+    assert [
+        call.kwargs["request_id"] for call in session.send_message.await_args_list
+    ] == ["first", "second", "third"]
+    assert messages._assistant_handover_ledger(session) == {}
+    assert source._subscribers == set()
+    assert captured["controller"].errors == []
+    assert {"first reply", "second reply", "third reply"} <= {
+        _text(row) for row in _assistant_rows(captured)
+    }
 
 
 @pytest.mark.asyncio
