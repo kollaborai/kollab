@@ -527,7 +527,7 @@ async function submitBusyWebMessageLocked(
 }
 
 /** Call only after the exact unchanged composer draft has been cleared. */
-export function acknowledgeBusyWebMessage(
+export async function acknowledgeBusyWebMessage(
   result: BusyWebMessageResult,
   maybeStorage?: QueuePlanStorage,
   maybeLocks?: QueueSubmissionLocks,
@@ -550,9 +550,12 @@ export function acknowledgeBusyWebMessage(
     }
   };
   try {
-    return submissionLocks(maybeLocks).request(submissionLockName(result.planKey), acknowledge);
+    return await submissionLocks(maybeLocks).request(
+      submissionLockName(result.planKey),
+      acknowledge,
+    );
   } catch {
     // Keep the plan as an idempotency guard if cross-tab arbitration is unavailable.
-    return Promise.resolve(false);
+    return false;
   }
 }
