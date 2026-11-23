@@ -16,5 +16,9 @@
     }
   },
   "web": {"entry": "web/dist/index.js", "style": "web/dist/index.css"},
+  "contributes": {
+    "menu": [{"id": "hello", "label": "Hello", "icon": "hand", "open": {"page": "hello"}}],
+    "pages": [{"id": "hello", "title": "Hello"}]
+  },
   "uses": ["run:python3"]
 }

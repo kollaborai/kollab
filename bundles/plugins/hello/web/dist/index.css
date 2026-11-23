@@ -1,1 +1,7 @@
-/* Step-one static fixture; web UI support is delivered in step three. */
+/* Plugin styles scope under the plugin's mount, [data-plugin="<id>"]. Kollab already insets page and dialog tabs. */
+[data-plugin="hello"] .hello-plugin {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
