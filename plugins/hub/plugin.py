@@ -7075,6 +7075,9 @@ class HubPlugin(BasePlugin):
                     self._acknowledge_inbox_delivery({msg.id})
             return acknowledged
         except asyncio.CancelledError as exc:
+            acknowledged.update(
+                getattr(exc, "acknowledged_message_ids", set())
+            )
             exc.acknowledged_message_ids = acknowledged.copy()
             raise
 
@@ -7096,7 +7099,7 @@ class HubPlugin(BasePlugin):
         """Deliver one mailbox message; refusal leaves its file unacknowledged."""
         try:
             return await self._on_message_received(msg) is not False
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             task = asyncio.current_task()
             if task is not None and task.cancelling() == 0:
                 # A receiver may raise CancelledError after applying its effect
@@ -7104,6 +7107,7 @@ class HubPlugin(BasePlugin):
                 # Treat that callback outcome as completed so the durable
                 # mailbox does not replay the effect after a restart.
                 self._acknowledge_inbox_delivery({msg.id}, [msg.to])
+                exc.acknowledged_message_ids = {msg.id}
             raise
         except Exception as exc:
             logger.warning(
