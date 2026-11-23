@@ -1585,33 +1585,39 @@ class ProfileManager:
         else:
             path = global_path
 
-        data = self._read_profile_runtime_config(path)
-        if data is None:
-            return False
-        kollabor = data.setdefault("kollabor", {})
-        if not isinstance(kollabor, dict):
-            return False
-        llm = kollabor.setdefault("llm", {})
-        if not isinstance(llm, dict):
-            return False
-        profile_state = llm.setdefault("profile_state", {})
-        if not isinstance(profile_state, dict):
-            return False
-
-        state: Dict[str, Any] = {}
-        if profile.last_completed_turn:
-            state["last_completed_turn"] = dict(profile.last_completed_turn)
-        if profile.unsupported_models:
-            state["unsupported_models"] = dict(profile.unsupported_models)
-        if state:
-            profile_state[profile_name] = state
-        else:
-            profile_state.pop(profile_name, None)
-        if not profile_state:
-            llm.pop("profile_state", None)
-
         try:
-            write_text_atomic(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            lock_path = path.with_name(f"{path.name}.lock")
+            with locked_file(lock_path, private=True):
+                # Read the current bytes only after taking the shared config lock;
+                # profile state shares this file with settings and profile writers.
+                data = self._read_profile_runtime_config(path)
+                if data is None:
+                    return False
+                kollabor = data.setdefault("kollabor", {})
+                if not isinstance(kollabor, dict):
+                    return False
+                llm = kollabor.setdefault("llm", {})
+                if not isinstance(llm, dict):
+                    return False
+                profile_state = llm.setdefault("profile_state", {})
+                if not isinstance(profile_state, dict):
+                    return False
+
+                state: Dict[str, Any] = {}
+                if profile.last_completed_turn:
+                    state["last_completed_turn"] = dict(profile.last_completed_turn)
+                if profile.unsupported_models:
+                    state["unsupported_models"] = dict(profile.unsupported_models)
+                if state:
+                    profile_state[profile_name] = state
+                else:
+                    profile_state.pop(profile_name, None)
+                if not profile_state:
+                    llm.pop("profile_state", None)
+
+                write_text_atomic(
+                    path, json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+                )
         except Exception as exc:
             logger.warning(
                 "Unable to persist profile runtime state (%s)", type(exc).__name__
