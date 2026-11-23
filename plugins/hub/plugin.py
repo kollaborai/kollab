@@ -14087,7 +14087,10 @@ class HubPlugin(BasePlugin):
             or any(ord(char) < 32 or ord(char) == 127 for char in domain)
         ):
             return {"error": "invalid connect offer request"}
-        from .enrollment_client import EnrollmentProtocolError
+        from .enrollment_client import (
+            EnrollmentProtocolError,
+            connect_offer_unauthorized_refusal,
+        )
 
         try:
             if self._identity is None or self._rpc_server is None:
@@ -14098,13 +14101,17 @@ class HubPlugin(BasePlugin):
                 return {"error": "connect enrollment is unavailable"}
             result = await create(domain)
         except EnrollmentProtocolError as exc:
-            # The issuer refused before any relay request; say why (#693).
-            logger.warning("connect offer refused: %s", exc.refusal or exc.code)
-            return self._offer_failed(exc.refusal)
+            source = exc.source if exc.source in {"local", "relay"} else "local"
+            refusal = exc.refusal
+            if exc.code == "unauthorized" and not refusal:
+                refusal = connect_offer_unauthorized_refusal(source)
+            log_reason = f"{exc.code}: {refusal}" if refusal else exc.code
+            logger.warning("connect offer refused (%s): %s", source, log_reason)
+            return self._offer_failed(refusal)
         except Exception:
             return self._offer_failed()
         if not isinstance(result, dict) or result.get("error"):
-            return self._offer_failed()
+            return self._offer_failed(result.get("reason", "") if isinstance(result, dict) else "")
         offer_id = result.get("offer_id")
         expires_at = result.get("expires_at")
         code = result.get("code")
