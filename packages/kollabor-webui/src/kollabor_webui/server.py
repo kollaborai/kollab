@@ -192,9 +192,17 @@ def create_app(
 
 
     class _UpdateConfig:
-        """The web server keeps no update cache: every check asks GitHub."""
+        """The web server keeps no update cache: every check asks GitHub.
+
+        The update channel is still the user's: include_prereleases comes from
+        the global config, read the same way the binary upgrade reads it (#1349).
+        """
 
         def get(self, key: str, default=None):
+            if key == "kollabor.updates.include_prereleases":
+                from kollabor.updates.auto_update import _include_prereleases
+
+                return _include_prereleases()
             return default
 
         def save_key(self, key: str, value, **_kwargs) -> bool:
