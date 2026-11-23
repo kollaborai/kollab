@@ -1,3 +1,4 @@
+// @ts-expect-error Vitest runs in Node; the app tsconfig intentionally omits Node ambient types.
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -31,7 +32,9 @@ describe("PluginMount", () => {
         <p>plugin body</p>
       </PluginMount>,
     );
-    expect(html).toMatch(/^<div data-plugin="hello"[^>]*><p>plugin body<\/p><\/div>$/);
+    expect(html).toMatch(
+      /^<div data-plugin="hello"[^>]*><p>plugin body<\/p><div data-plugin-portal-root=""[^>]*><\/div><\/div>$/,
+    );
   });
 });
 
