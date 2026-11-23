@@ -109,16 +109,21 @@ function ServiceRow({ service, api, id, canControl, enabled, onError }: {
   );
 }
 
+/** The controls a plugin's Settings detail offers. Built-in services and removal 404 on the engine. */
+export function pluginRowControls(entry: Pick<PluginEntry, "kind" | "shadowed" | "state">) {
+  const managed = entry.kind !== "built-in";
+  const manageable = managed && !entry.shadowed && entry.state !== "stopping";
+  return { managed, switchEnabled: manageable, services: manageable, updateRemove: manageable && entry.kind === "installed" };
+}
+
 function PluginDetail({ entry, record, api, onUpdate, detailRef }: {
   entry: PluginEntry; record: PluginRecord | undefined; api: EngineApi; onUpdate: (id: string) => void; detailRef: RefObject<HTMLElement | null>;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<"disable" | "remove" | null>(null);
-  // Built-in plugins get no switch, service controls, Update or Remove here: a page choice; built-in services and removal 404 on the engine.
-  const managed = entry.kind !== "built-in";
+  const { managed, switchEnabled, services, updateRemove } = pluginRowControls(entry);
   const stopping = entry.state === "stopping";
-  const manageable = managed && !entry.shadowed && !stopping;
   const failure = failureOf(entry, record);
   const uses = describeUses(entry.uses);
   const usesCount = uses.throughKollab.length + uses.onItsOwn.length + uses.other.length;
@@ -152,11 +157,11 @@ function PluginDetail({ entry, record, api, onUpdate, detailRef }: {
             className="relative max-sm:before:absolute max-sm:before:left-1/2 max-sm:before:top-1/2 max-sm:before:h-[44px] max-sm:before:w-[44px] max-sm:before:-translate-x-1/2 max-sm:before:-translate-y-1/2 max-sm:before:content-['']"
             aria-label={`${entry.name} enabled`}
             checked={entry.enabled}
-            disabled={!manageable || busy}
+            disabled={!switchEnabled || busy}
             onCheckedChange={(checked) => { if (checked) void perform("enable"); else setConfirmation("disable"); }}
           />
         ) : null}
-        {manageable && entry.kind === "installed" ? (
+        {updateRemove ? (
           <div className="ml-auto flex flex-wrap gap-2">
             <Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => onUpdate(entry.id)}>Update</Button>
             <Button type="button" size="xs" variant="ghost" disabled={busy} onClick={() => setConfirmation("remove")}>Remove</Button>
@@ -181,7 +186,7 @@ function PluginDetail({ entry, record, api, onUpdate, detailRef }: {
           <div>
             <h3 className="text-sm font-semibold">Background Processes</h3>
             {entry.services.map((service) => (
-              <ServiceRow key={service.name} service={service} api={api} id={entry.id} canControl={manageable} enabled={entry.enabled} onError={setError} />
+              <ServiceRow key={service.name} service={service} api={api} id={entry.id} canControl={services} enabled={entry.enabled} onError={setError} />
             ))}
           </div>
         ) : null}
