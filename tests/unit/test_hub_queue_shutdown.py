@@ -87,3 +87,57 @@ async def test_hub_shutdown_does_not_exit_or_stop_providers_when_queue_is_unsett
     finally:
         release.set()
         await asyncio.wait_for(worker_task, timeout=0.5)
+
+
+class _EventBus:
+    def __init__(self, app):
+        self.app = app
+
+    def get_service(self, name):
+        return self.app if name == "app" else None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_kind", ["self", "remote"])
+async def test_hub_stop_hands_provider_teardown_to_application_cleanup(
+    monkeypatch, stop_kind
+):
+    app = SimpleNamespace(running=True, _background_tasks=[])
+    plugin = HubPlugin(event_bus=_EventBus(app))
+    plugin._identity = SimpleNamespace(identity="hub-stop-agent", agent_id="test")
+    shutdown_calls = []
+
+    async def plugin_shutdown(*, exit_process=True):
+        shutdown_calls.append(exit_process)
+        return False
+
+    plugin.shutdown = plugin_shutdown
+    # Stop-watchdog behavior is covered separately; don't leave delayed tasks
+    # alive after this routing-only check.
+    plugin._schedule_stop_watchdog = lambda timeout, identity: None
+    scheduled = []
+    original_ensure_future = asyncio.ensure_future
+
+    def capture_task(coro):
+        task = original_ensure_future(coro)
+        scheduled.append(task)
+        return task
+
+    monkeypatch.setattr(hub_module.asyncio, "ensure_future", capture_task)
+    try:
+        if stop_kind == "self":
+            result = await plugin._handle_stop_command("hub-stop-agent")
+        else:
+            result = await plugin._on_remote_shutdown("test remote stop")
+        await asyncio.sleep(0)
+
+        assert app.running is False
+        assert shutdown_calls == []
+        if stop_kind == "self":
+            assert result == "hub-stop-agent shutting down..."
+    finally:
+        for task in scheduled:
+            if not task.done():
+                task.cancel()
+        if scheduled:
+            await asyncio.gather(*scheduled, return_exceptions=True)
