@@ -202,6 +202,170 @@ async def test_failed_native_queue_commit_does_not_leave_a_phantom_history_row(t
 
 
 @pytest.mark.asyncio
+async def test_history_bind_failure_rolls_back_unconsumed_native_admission(
+    tmp_path, monkeypatch
+):
+    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
+
+    queue, attachments, _scope, request_id, _staged, snapshot = await _queue_with_image()
+    state, llm, logger, uid = await _real_local_state(tmp_path)
+    identity = ConversationIdentity(uid, state.get_conversation_revision())
+    worker = WebMessageQueueWorker(
+        queue,
+        identity,
+        state.get_conversation_identity,
+        WebMessageQueueDispatcher(state, attachments),
+    )
+
+    def fail_bind(*_args, **_kwargs):
+        raise OSError("injected media index bind failure")
+
+    monkeypatch.setattr("kollabor_engine.media_store.bind_queue_handoff", fail_bind)
+    result = await worker.dispatch_batch(snapshot.batches[0].batch_id)
+
+    assert result.status is WorkerStatus.NOT_SENT
+    assert result.items[0].request_id == request_id
+    assert llm.processing_queue.empty(), "failed history bind left provider custody"
+    rows = [json.loads(line) for line in logger.session_file.read_text().splitlines()]
+    assert not any(row.get("type") == "user" for row in rows)
+    assert attachments.attachment_count == 1
+    queued = await queue.snapshot()
+    assert queued.batches[0].items[0].request_id == request_id
+
+
+@pytest.mark.asyncio
+async def test_existing_queue_history_is_not_replayed_into_provider_custody(tmp_path):
+    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
+
+    queue = WebMessageQueue(scope_id="conversation-scope")
+    request_id = queue.new_request_id()
+    batch_id = queue.new_batch_id()
+    await queue.enqueue_batch(
+        queue.new_operation_id(),
+        batch_id,
+        (WebMessage(request_id, b'{"text":"inspect this"}'),),
+    )
+    attachments = WebMessageAttachmentRegistry(
+        resolve_scope=lambda _params, _caller: AttachmentScopeBinding(
+            queue.scope_id, queue.incarnation
+        ),
+        validate_owner_id=lambda _binding, _owner: True,
+    )
+    state, llm, logger, uid = await _real_local_state(tmp_path)
+    identity = ConversationIdentity(uid, state.get_conversation_revision())
+    handoff_metadata = {
+        "version": 1,
+        "conversation_uid": uid,
+        "conversation_revision": identity.revision,
+        "request_id": request_id,
+        "source_attachment_refs": [],
+        "media_refs": [],
+    }
+    await logger.log_user_message(
+        "inspect this", message_metadata={"queue_handoff": handoff_metadata}
+    )
+    worker = WebMessageQueueWorker(
+        queue,
+        identity,
+        state.get_conversation_identity,
+        WebMessageQueueDispatcher(state, attachments),
+    )
+
+    result = await worker.dispatch_batch(batch_id)
+
+    assert result.status is WorkerStatus.IN_DOUBT
+    assert llm.processing_queue.empty()
+    rows = [json.loads(line) for line in logger.session_file.read_text().splitlines()]
+    assert sum(row.get("type") == "user" for row in rows) == 1
+    queued = await queue.snapshot()
+    assert queued.batches[0].items[0].request_id == request_id
+
+
+@pytest.mark.asyncio
+async def test_stop_while_history_lock_waits_fails_before_row_or_custody(tmp_path):
+    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
+
+    queue, attachments, _scope, request_id, _staged, snapshot = await _queue_with_image()
+    state, llm, logger, uid = await _real_local_state(tmp_path)
+    identity = ConversationIdentity(uid, state.get_conversation_revision())
+    worker = WebMessageQueueWorker(
+        queue,
+        identity,
+        state.get_conversation_identity,
+        WebMessageQueueDispatcher(state, attachments),
+    )
+    entered_log = asyncio.Event()
+    original_log = logger.log_user_message
+
+    async def observe_log(*args, **kwargs):
+        entered_log.set()
+        return await original_log(*args, **kwargs)
+
+    logger.log_user_message = observe_log
+    await logger._write_lock.acquire()
+    task = asyncio.create_task(worker.dispatch_batch(snapshot.batches[0].batch_id))
+    try:
+        await asyncio.wait_for(entered_log.wait(), timeout=1)
+        llm._queue_processor.request_cancellation(origin="human")
+    finally:
+        logger._write_lock.release()
+    result = await asyncio.wait_for(task, timeout=2)
+
+    assert result.status is WorkerStatus.NOT_SENT
+    assert result.items[0].request_id == request_id
+    assert llm.processing_queue.empty()
+    rows = [json.loads(line) for line in logger.session_file.read_text().splitlines()]
+    assert not any(row.get("type") == "user" for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_jsonl_partial_write_rolls_back_exact_native_admission(tmp_path, monkeypatch):
+    import os
+
+    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
+
+    queue, attachments, _scope, request_id, _staged, snapshot = await _queue_with_image()
+    state, llm, logger, uid = await _real_local_state(tmp_path)
+    identity = ConversationIdentity(uid, state.get_conversation_revision())
+    original_commit = llm._queue_processor.commit_admission_slot
+    commits = 0
+
+    def count_commit(*args, **kwargs):
+        nonlocal commits
+        commits += 1
+        return original_commit(*args, **kwargs)
+
+    llm._queue_processor.commit_admission_slot = count_commit
+    real_write = os.write
+    write_calls = 0
+
+    def partial_then_fail(fd, data):
+        nonlocal write_calls
+        write_calls += 1
+        if write_calls == 1:
+            return real_write(fd, data[: max(1, len(data) // 3)])
+        raise OSError("injected JSONL append failure")
+
+    monkeypatch.setattr("kollabor_ai.conversation_logger.os.write", partial_then_fail)
+    worker = WebMessageQueueWorker(
+        queue,
+        identity,
+        state.get_conversation_identity,
+        WebMessageQueueDispatcher(state, attachments),
+    )
+
+    result = await worker.dispatch_batch(snapshot.batches[0].batch_id)
+
+    assert commits == 1, "the injected append fault must occur after provider commit"
+    assert result.status is WorkerStatus.NOT_SENT
+    assert llm.processing_queue.empty()
+    rows = [json.loads(line) for line in logger.session_file.read_text().splitlines()]
+    assert not any(row.get("type") == "user" for row in rows)
+    queued = await queue.snapshot()
+    assert queued.batches[0].items[0].request_id == request_id
+
+
+@pytest.mark.asyncio
 async def test_real_dispatch_rejects_stale_revision_before_history_or_provider_custody(
     tmp_path,
 ):
