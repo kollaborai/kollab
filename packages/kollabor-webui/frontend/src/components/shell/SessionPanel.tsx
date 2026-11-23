@@ -4,6 +4,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type ComponentType,
   type ReactNode,
 } from "react";
 import {
@@ -78,6 +79,8 @@ import {
 } from "@/utils/approval-mode";
 import { agentStatus, bundleName } from "@/components/panels/panel-model";
 import { agentName, formatSessionName, sessionHeading } from "@/utils/session-display";
+import { usePlugins, type PluginViewKey } from "@/plugins/registry";
+import { PluginMenuRows, pluginViews } from "@/plugins/surfaces";
 import {
   Select,
   SelectContent,
@@ -92,7 +95,9 @@ export type SessionView =
   | "code"
   | "git"
   | "terminal"
-  | "gallery";
+  | "gallery"
+  // A plugin's main-area tab (`k.view`, docs/specs/plugins.md): `plugin:<plugin id>:<view id>`.
+  | PluginViewKey;
 
 const VIEWS = [
   ["chat", "Chat", MessageSquare],
@@ -105,6 +110,8 @@ const VIEWS = [
 
 // Code Editor, Git and Terminal work in the chat's folder, so a chat with no folder has none of them.
 const FOLDER_VIEWS: readonly SessionView[] = ["code", "git", "terminal"];
+
+type ViewTab = readonly [SessionView, string, ComponentType<{ className?: string }>];
 
 // Whether the docked panel is open, per browser. Open unless closed here before.
 const PANEL_KEY = "kollab.session-panel";
@@ -175,7 +182,12 @@ export function SessionPanel({
 }) {
   const isMobile = useIsMobile(SIDEBAR_BREAKPOINT);
   const hasFolder = Boolean(session.workspace);
-  const views = VIEWS.filter(([id]) => hasFolder || !FOLDER_VIEWS.includes(id));
+  const plugins = usePlugins();
+  // Plugin tabs follow kollab's own; a plugin tab that needs a folder hides with Code Editor.
+  const views: readonly ViewTab[] = [
+    ...VIEWS.filter(([id]) => hasFolder || !FOLDER_VIEWS.includes(id)),
+    ...pluginViews(plugins, hasFolder),
+  ];
   const [open, setOpen] = useState(storedOpen);
   const [clearOpen, setClearOpen] = useState(false);
   const opener = useRef<HTMLElement | null>(null);
@@ -545,6 +557,7 @@ export function SessionPanel({
           <Users className="size-3.5" /><span>Who Is Online</span>
           <span className="text-muted-foreground ml-auto tabular-nums">{agents === null ? "…" : agents.length}</span>
         </Button>
+        <PluginMenuRows rowClassName={ROW} onOpen={openDialog} />
         <Button type="button" variant="ghost" size="sm" className={ROW} onClick={() => openDialog(onOpenSettings)}>
           <Settings2 className="size-3.5" /><span>Settings</span>
         </Button>
