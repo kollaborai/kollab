@@ -4392,6 +4392,231 @@ class LocalStateService(StateService):
         async with self._conversation_ownership("resume") as (acp, uses_acp, mark_changed):
             return await self._resume_conversation_owned(session_id, acp, uses_acp, mark_changed)
 
+    async def branch_conversation(
+        self, session_id: str, branch_index: int
+    ) -> dict[str, Any]:
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("session_id is required")
+        if isinstance(branch_index, bool) or not isinstance(branch_index, int):
+            raise ValueError("branch_index must be an integer")
+        if branch_index < 0:
+            raise ValueError("branch_index must be non-negative")
+
+        async with self._conversation_ownership("branch") as (
+            acp,
+            uses_acp,
+            mark_changed,
+        ):
+            return await self._branch_conversation_owned(
+                session_id.strip(), branch_index, acp, uses_acp, mark_changed
+            )
+
+    async def _branch_conversation_owned(
+        self,
+        session_id: str,
+        branch_index: int,
+        acp: Any,
+        uses_acp: bool,
+        mark_changed: Callable[[], None],
+    ) -> dict[str, Any]:
+        llm = self._llm_service
+        if llm is None:
+            raise ValueError("llm service not available")
+
+        conv_mgr = getattr(llm, "conversation_manager", None)
+        if conv_mgr is None:
+            raise ValueError("conversation manager not available")
+
+        old_session_id = getattr(conv_mgr, "current_session_id", "") or ""
+        previous_state = {
+            name: getattr(conv_mgr, name, None)
+            for name in (
+                "current_session_id",
+                "messages",
+                "message_index",
+                "context_window",
+                "current_parent_uuid",
+                "conversation_metadata",
+            )
+        }
+        conv_logger = getattr(conv_mgr, "conversation_logger", None) or getattr(
+            llm, "conversation_logger", None
+        )
+        api_service = getattr(llm, "api_service", None) or getattr(
+            llm, "api_communication_service", None
+        )
+        logger_state = getattr(conv_logger, "__dict__", None)
+        api_state = getattr(api_service, "__dict__", None)
+        logger_state = dict(logger_state) if isinstance(logger_state, dict) else None
+        api_state = dict(api_state) if isinstance(api_state, dict) else None
+        history = getattr(llm, "conversation_history", None)
+        history_state = list(history) if history is not None else None
+        session_stats = getattr(llm, "session_stats", None)
+        stats_state = dict(session_stats) if isinstance(session_stats, dict) else None
+
+        def restore_object_state(target: Any, snapshot: dict[str, Any] | None) -> None:
+            target_state = getattr(target, "__dict__", None)
+            if snapshot is None or not isinstance(target_state, dict):
+                return
+            target_state.clear()
+            target_state.update(snapshot)
+
+        try:
+            has_messages = bool(getattr(conv_mgr, "messages", None))
+            if has_messages and hasattr(conv_mgr, "save_conversation"):
+                conv_mgr.save_conversation()
+                logger.info("branch: auto-saved session %r", old_session_id)
+        except Exception as e:
+            raise ValueError(
+                f"failed to save current conversation before branching: {e}"
+            ) from e
+
+        try:
+            result = conv_mgr.branch_session(session_id, branch_index)
+        except Exception as e:
+            result = {"success": False, "error": str(e)}
+
+        if not isinstance(result, dict) or result.get("success") is not True:
+            changed = (
+                getattr(conv_mgr, "current_session_id", "") != old_session_id
+                or getattr(conv_mgr, "messages", None) is not previous_state["messages"]
+            )
+            if changed:
+                restored = False
+                if old_session_id and hasattr(conv_mgr, "load_session"):
+                    try:
+                        restored = bool(conv_mgr.load_session(old_session_id))
+                    except Exception:
+                        restored = False
+                if not restored:
+                    for name, value in previous_state.items():
+                        if hasattr(conv_mgr, name):
+                            setattr(conv_mgr, name, value)
+            error = result.get("error", "unknown error") if isinstance(result, dict) else "invalid response"
+            raise ValueError(f"failed to branch session {session_id!r}: {error}")
+
+        try:
+            mark_changed()
+            new_session_id = result.get("session_id")
+            if not isinstance(new_session_id, str) or not new_session_id:
+                raise ValueError("branch did not return a session id")
+
+            conv_mgr.current_session_id = new_session_id
+            raw_messages = getattr(conv_mgr, "messages", None) or []
+
+            if conv_logger is not None and hasattr(conv_logger, "reset_session"):
+                conv_logger.reset_session(new_session_id)
+
+            if api_service is not None and hasattr(api_service, "set_session_id"):
+                api_service.set_session_id(new_session_id)
+        except Exception as e:
+            for name, value in previous_state.items():
+                if hasattr(conv_mgr, name):
+                    setattr(conv_mgr, name, value)
+            if history is not None and history_state is not None:
+                if hasattr(history, "clear") and hasattr(history, "extend"):
+                    history.clear()
+                    history.extend(history_state)
+                else:
+                    llm.conversation_history = history_state
+            if isinstance(session_stats, dict) and stats_state is not None:
+                session_stats.clear()
+                session_stats.update(stats_state)
+            restore_object_state(conv_logger, logger_state)
+            restore_object_state(api_service, api_state)
+            if isinstance(e, ValueError) and str(e) == "branch did not return a session id":
+                raise
+            raise ValueError(f"failed to name branch session: {e}") from e
+
+        from kollabor_ai.response_channels import turn_display_texts
+        from kollabor_events.data_models import ConversationMessage
+
+        loaded_messages: list[Any] = []
+        display_messages: list[dict[str, Any]] = []
+        raw_messages = [msg for msg in raw_messages if isinstance(msg, dict)]
+        for msg, shown in zip(raw_messages, turn_display_texts(raw_messages)):
+            role = str(msg.get("role", "user"))
+            content = deepcopy(msg.get("content") or "")
+            metadata = deepcopy(msg.get("metadata") or {})
+            if msg.get("tool_uses") and not metadata.get("tool_calls") and not metadata.get("xml_tool_calls"):
+                metadata["xml_tool_calls"] = [
+                    {
+                        "id": tool.get("id"),
+                        "name": tool.get("name"),
+                        "input": deepcopy(tool.get("input", {})),
+                    }
+                    for tool in msg["tool_uses"]
+                    if isinstance(tool, dict)
+                ]
+            timestamp = msg.get("timestamp")
+            if isinstance(timestamp, str):
+                try:
+                    timestamp = datetime.fromisoformat(timestamp)
+                except ValueError:
+                    timestamp = None
+            timestamp_args = {"timestamp": timestamp} if isinstance(timestamp, datetime) else {}
+            loaded_messages.append(
+                ConversationMessage(
+                    role=role,
+                    content=content,
+                    metadata=metadata,
+                    thinking=msg.get("thinking"),
+                    **timestamp_args,
+                )
+            )
+            if role in ("user", "assistant") and shown != "" and not metadata.get("tool_output_batch"):
+                visible = content if shown is None else shown
+                display_messages.append({"role": role, "content": visible})
+
+        history = getattr(llm, "conversation_history", None)
+        if history is None:
+            raise ValueError("llm.conversation_history missing")
+        if hasattr(history, "clear") and hasattr(history, "extend"):
+            history.clear()
+            history.extend(loaded_messages)
+        else:
+            logger.warning(
+                "branch: conversation_history is not mutable; direct assignment loses list identity"
+            )
+            llm.conversation_history = loaded_messages
+
+        if hasattr(llm, "session_stats"):
+            try:
+                llm.session_stats["messages"] = len(loaded_messages)
+            except Exception as e:
+                logger.debug("branch: session_stats update error: %s", e)
+
+        if uses_acp:
+            try:
+                await self._restore_conversation_acp(acp, session_id)
+            except Exception as e:
+                for name, value in previous_state.items():
+                    if hasattr(conv_mgr, name):
+                        setattr(conv_mgr, name, value)
+                if hasattr(history, "clear") and hasattr(history, "extend"):
+                    history.clear()
+                    history.extend(history_state or [])
+                elif history_state is not None:
+                    llm.conversation_history = history_state
+                if isinstance(session_stats, dict) and stats_state is not None:
+                    session_stats.clear()
+                    session_stats.update(stats_state)
+                restore_object_state(conv_logger, logger_state)
+                restore_object_state(api_service, api_state)
+                raise ValueError(f"failed to restore ACP conversation: {e}") from e
+
+        header = f"--- Branched from {session_id} at message {branch_index} ---"
+        success_message = f"[ok] Created branch: {new_session_id}. Continue below."
+        return {
+            "old_session_id": old_session_id,
+            "new_session_id": new_session_id,
+            "branch_point": result.get("branch_point", branch_index),
+            "message_count": len(loaded_messages),
+            "header": header,
+            "success_message": success_message,
+            "messages": display_messages,
+        }
+
     async def _resume_conversation_owned(
         self, session_id: str, acp: Any, uses_acp: bool, mark_changed: Callable[[], None]
     ) -> dict[str, Any]:
