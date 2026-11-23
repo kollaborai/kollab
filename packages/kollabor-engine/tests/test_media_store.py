@@ -11,7 +11,9 @@ from kollabor_engine.routes.messages import _save_sent_media
 from kollabor_engine.media_store import (
     MAX_DECODED_BYTES,
     REF_RE,
+    MediaError,
     attach_media_to_rows,
+    bind_queue_handoff,
     count_image_tokens,
     list_for,
     open_media,
@@ -117,6 +119,57 @@ def test_open_media_keeps_legacy_index_entries_readable(tmp_path: Path) -> None:
 
     assert data == bytes([1, 2, 3])
     assert mime == "image/png"
+
+
+def test_queue_handoff_rejects_index_mime_that_disagrees_with_media_file(
+    tmp_path: Path,
+) -> None:
+    record = save(tmp_path, "s1", PNG)
+    index_path = tmp_path / "media" / "s1" / "index.json"
+    entries = json.loads(index_path.read_text())
+    entries[-1]["mime"] = "image/svg+xml"
+    index_path.write_text(json.dumps(entries))
+
+    with pytest.raises(MediaError, match="mime|type"):
+        bind_queue_handoff(
+            tmp_path,
+            "s1",
+            request_id="queue-request-a",
+            history_row_uuid="row-a",
+            source_media_refs=(("stage-a", record.ref),),
+        )
+
+
+def test_queue_handoff_is_idempotent_but_cannot_rebind_request_to_other_media(
+    tmp_path: Path,
+) -> None:
+    first = save(tmp_path, "s1", PNG)
+    second = save(tmp_path, "s1", JPEG)
+    identity = {
+        "request_id": "queue-request-a",
+        "history_row_uuid": "row-a",
+    }
+
+    initial = bind_queue_handoff(
+        tmp_path,
+        "s1",
+        **identity,
+        source_media_refs=(("stage-a", first.ref),),
+    )
+    assert bind_queue_handoff(
+        tmp_path,
+        "s1",
+        **identity,
+        source_media_refs=(("stage-a", first.ref),),
+    ) == initial
+
+    with pytest.raises(MediaError, match="binding|request"):
+        bind_queue_handoff(
+            tmp_path,
+            "s1",
+            **identity,
+            source_media_refs=(("stage-a", second.ref),),
+        )
 
 
 def test_non_ascii_digit_tokens_are_not_tokens_and_bind_nothing(tmp_path: Path) -> None:
