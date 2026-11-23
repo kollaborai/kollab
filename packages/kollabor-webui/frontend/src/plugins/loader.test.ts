@@ -250,6 +250,40 @@ describe("loading", () => {
     expect(deps.importModule).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [
+      "nested minified static imports",
+      'import{jsx as e}from"./chunks/shared.js";',
+      {
+        "/plugins/hello/web/chunks/shared.js?v=abc": 'export{jsx as e}from"../vendor-react.js";',
+        "/plugins/hello/web/vendor-react.js?v=abc":
+          "var e={};e.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE=t;",
+      },
+    ],
+    [
+      "literal dynamic imports",
+      'import("./chunks/lazy.js");',
+      {
+        "/plugins/hello/web/chunks/lazy.js?v=abc":
+          "var e={};e.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE=t;",
+      },
+    ],
+  ])("refuses React in %s", async (_case, entrySource, chunks) => {
+    const { loader, deps, plugin } = harness([[entry("hello")]], {
+      "/plugins/hello/web/index.js?v=abc": module(page),
+    });
+    deps.fetchText.mockImplementation(async (url) =>
+      url === "/plugins/hello/web/index.js?v=abc" ? entrySource : chunks[url as keyof typeof chunks] ?? "",
+    );
+    await loader.refresh();
+    await loader.idle();
+    expect(plugin("hello")).toMatchObject({
+      status: "failed",
+      error: "web/dist/index.js bundles its own React: mark react as external",
+    });
+    expect(deps.importModule).not.toHaveBeenCalled();
+  });
+
   it("Retry imports index.js?v=<hash>&retry=<n> so the browser does not hand back the failed module", async () => {
     let fail = true;
     const retried = vi.fn(page);
