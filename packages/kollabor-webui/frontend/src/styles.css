@@ -197,14 +197,16 @@
   }
 }
 
-/* Unlayered on purpose: Tailwind utilities (e.g. .flex on the Radix
-   scrollbar) live in the utilities layer and would beat a base-layer rule.
-   Radix ScrollArea must keep its scrollbar MOUNTED: Radix only gives the
-   viewport scrolling overflow while a scrollbar exists, so deleting the
-   component would silently disable scrolling. Hiding the chrome via CSS
-   keeps the mount, the context, and the scrolling. */
-[data-slot="scroll-area-scrollbar"] {
-  display: none;
+/* #1174: this stylesheet owns native and custom scrollbar chrome. Keep
+   Radix ScrollBar components in the tree: they enable viewport scrolling.
+   Hide only the known drawing elements, including Monaco's separate minimap
+   slider and xterm 6's custom scrollback bar. Unlayered and important to beat
+   utility classes and inline display styles without changing scroll logic. */
+[data-slot="scroll-area-scrollbar"],
+.monaco-editor .monaco-scrollable-element > .scrollbar,
+.monaco-editor .minimap-slider,
+.xterm .xterm-scrollable-element > .scrollbar {
+  display: none !important;
 }
 /* xterm renders its scrollback in a native-scrolled viewport element. */
 .xterm .xterm-viewport {
@@ -213,14 +215,6 @@
 .xterm .xterm-viewport::-webkit-scrollbar {
   width: 0;
   height: 0;
-}
-/* xterm 6 draws its scrollback thumb as a separate custom scrollbar. */
-.xterm .xterm-scrollable-element > .scrollbar {
-  display: none !important;
-}
-/* Monaco sets the minimap slider's display inline, outside its editor scrollbars. */
-.monaco-editor .minimap-slider {
-  display: none !important;
 }
 /* Web plugins (#1028): on a touch screen every control a plugin draws is at least 44 px tall. Unlayered, so
    it holds over the utility classes of the app components a plugin uses (k.ui). Switches, checkboxes, radios

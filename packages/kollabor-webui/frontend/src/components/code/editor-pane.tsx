@@ -147,21 +147,6 @@ function errorMessageOf(payload: unknown, fallback: string): string {
   return fallback;
 }
 
-/**
- * Scrollbar options shared by every editor-pane editor instance and the
- * #1174 browser fixture: one definition of how the editor draws (or does
- * not draw) scrollbar chrome. "hidden" keeps wheel/trackpad and
- * programmatic scrolling alive while the sliders themselves stay invisible.
- */
-export function editorScrollbars(): { scrollbar: editor.IEditorScrollbarOptions } {
-  return {
-    scrollbar: {
-      vertical: "hidden",
-      horizontal: "hidden",
-    },
-  };
-}
-
 interface EditorPaneProps {
   paneId: string;
   rootPath: string;
@@ -364,7 +349,6 @@ export function EditorPane({ paneId, rootPath, showFilePicker, onOpenFiles }: Ed
                 beforeMount={handleBeforeMount}
                 theme="kollab-void"
                 options={{
-                  ...editorScrollbars(),
                   fontSize: editorConfig.fontSize,
                   fontFamily:
                     "ui-monospace, SFMono-Regular, Menlo, Monaco, monospace",
@@ -392,7 +376,6 @@ export function EditorPane({ paneId, rootPath, showFilePicker, onOpenFiles }: Ed
                 beforeMount={handleBeforeMount}
                 theme="kollab-void"
                 options={{
-                  ...editorScrollbars(),
                   fontSize: editorConfig.fontSize,
                   readOnly: file.virtual === true,
                   fontFamily:

@@ -134,7 +134,7 @@ const diffEditorPath = "/fixture/.diffs/scrollbar-long.diff";
 setCodeSession("scrollbar-fixture");
 setCodeRoot("/fixture");
 const initialEditorConfig = useEditorStore.getState().editorConfig;
-useEditorStore.setState({ editorConfig: { ...initialEditorConfig, minimap: true } });
+useEditorStore.setState({ editorConfig: { ...initialEditorConfig, minimap: true, wordWrap: "off" } });
 useEditorStore.getState().openFile(paneId, normalEditorPath, "scrollbar-long.ts", ".ts", LONG_CODE);
 useEditorStore.getState().pinFile(normalEditorPath);
 useEditorStore.getState().openFile(paneId, diffEditorPath, "scrollbar-long.diff", ".diff", LONG_CODE);
