@@ -773,18 +773,24 @@ async def test_exact_lease_boundary_is_stale_and_cannot_reuse_entity_ids(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_expired_replay_and_entity_ledgers_are_pruned_without_reusing_old_ids():
+async def test_expired_replay_and_entity_ledgers_are_pruned_without_reusing_old_ids(
+    monkeypatch,
+):
+    now = [1_000]
+    monkeypatch.setattr(queue_module.time, "monotonic_ns", lambda: now[0])
     queue = WebMessageQueue(
         scope_id="conversation-owner-a",
         max_operations=12,
         max_batch_items=1,
-        operation_retry_lease_seconds=0.003,
+        operation_retry_lease_seconds=3 / 1e9,
     )
     first_operation_id = ""
     first_batch_id = ""
     first_request_id = ""
 
     for index in range(8):
+        if index:
+            now[0] += 4
         operation_id = queue.new_operation_id()
         batch_id = queue.new_batch_id()
         request_id = queue.new_request_id()
@@ -802,8 +808,8 @@ async def test_expired_replay_and_entity_ledgers_are_pruned_without_reusing_old_
         await queue.settle_item(
             queue.new_operation_id(), item.attempt_id, ClaimOutcome.ACCEPTED
         )
-        await asyncio.sleep(0.005)
 
+    now[0] += 4
     await queue.enqueue_batch(
         queue.new_operation_id(),
         queue.new_batch_id(),
