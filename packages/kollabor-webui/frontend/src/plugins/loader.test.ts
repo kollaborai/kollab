@@ -232,6 +232,24 @@ describe("loading", () => {
     expect(deps.importModule).not.toHaveBeenCalled();
   });
 
+  it("refuses React carried by an imported chunk before running the plugin", async () => {
+    const { loader, deps, plugin } = harness([[entry("hello")]], {
+      "/plugins/hello/web/index.js?v=abc": module(page),
+    });
+    deps.fetchText.mockImplementation(async (url) =>
+      url === "/plugins/hello/web/index.js?v=abc"
+        ? 'import "./vendor-react.js"; export default function setup() {}'
+        : "var e={};e.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE=t;",
+    );
+    await loader.refresh();
+    await loader.idle();
+    expect(plugin("hello")).toMatchObject({
+      status: "failed",
+      error: "web/dist/index.js bundles its own React: mark react as external",
+    });
+    expect(deps.importModule).not.toHaveBeenCalled();
+  });
+
   it("Retry imports index.js?v=<hash>&retry=<n> so the browser does not hand back the failed module", async () => {
     let fail = true;
     const retried = vi.fn(page);
