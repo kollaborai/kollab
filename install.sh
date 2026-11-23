@@ -306,13 +306,17 @@ pip_windows_interpreter() {
 # Resolve the scripts directory used by the interpreter behind pip. This keeps
 # system installs and --user installs tied to the executable pip just wrote.
 pip_scripts_dir() {
-    local pip_cmd="$1" scheme="$2" pip_path shebang python_cmd env_args scripts_subdir scripts_dir
-    if [[ -n "${PIP_PREFIX:-}" ]]; then
+    local pip_cmd="$1" scheme="$2" pip_path shebang python_cmd env_args scripts_subdir scripts_dir configured_prefix
+    configured_prefix="${PIP_PREFIX:-}"
+    if [[ -z "$configured_prefix" ]]; then
+        configured_prefix=$("$pip_cmd" config get install.prefix 2>/dev/null || true)
+    fi
+    if [[ -n "$configured_prefix" ]]; then
         scripts_subdir=bin
         if is_windows_shell; then
             scripts_subdir=Scripts
         fi
-        normalize_install_dir "${PIP_PREFIX%/}/$scripts_subdir" || return 1
+        normalize_install_dir "${configured_prefix%/}/$scripts_subdir" || return 1
         return 0
     fi
     pip_path=$(command -v "$pip_cmd") || return 1
