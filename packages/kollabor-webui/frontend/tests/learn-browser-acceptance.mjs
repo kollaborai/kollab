@@ -377,9 +377,15 @@ export async function openPage(browser, baseUrl, fixtures, options = {}) {
 export async function until(check, message, timeoutMs = 60_000) {
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) {
-    const value = await check();
+    let timeoutId;
+    const value = await Promise.race([
+      Promise.resolve().then(check),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(message)), end - Date.now());
+      }),
+    ]).finally(() => clearTimeout(timeoutId));
     if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, Math.min(50, end - Date.now())));
   }
   throw new Error(message);
 }
