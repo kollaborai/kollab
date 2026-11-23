@@ -76,9 +76,9 @@ function DetailsList({ label, values }: { label: string; values: unknown }) {
   return <div className="grid min-w-0 gap-1 sm:grid-cols-[8rem_minmax(0,1fr)] sm:gap-3"><h3 className="text-muted-foreground text-sm">{label}</h3><ul className="min-w-0 space-y-1 text-sm">{lines.map((item, index) => <li className="break-words" key={index}>{typeof item === "string" ? item : JSON.stringify(item)}</li>)}</ul></div>;
 }
 
-/** Which source and Review controls the dialog shows for a job state. */
+/** Which source and Review controls the dialog shows. A failed review keeps both open so the URL can be edited and reviewed again. */
 export function reviewFormState(action: "install" | "update", job: Pick<Job, "status"> | null): { source: boolean; review: boolean } {
-  const open = action === "install" && !job;
+  const open = action === "install" && (!job || job.status === "error");
   return { source: open, review: open };
 }
 
@@ -94,7 +94,7 @@ export function PluginInstallDialog({ api, action, pluginId, onClose, onApplied 
   const [pollVersion, setPollVersion] = useState(0);
   const started = useRef(false);
   const start = async () => {
-    setBusy(true); setError(null);
+    setBusy(true); setError(null); setJob(null);
     try {
       if (action === "install" && gitRef.trim() && url.includes("#")) throw new Error("Put the branch or tag in one field, not both.");
       const endpoint = action === "install" ? "/plugins/install" : `/plugins/${encodeURIComponent(pluginId ?? "")}/update`;
