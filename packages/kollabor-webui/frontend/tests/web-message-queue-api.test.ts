@@ -698,6 +698,9 @@ test("an asynchronously rejected acknowledgement lock preserves the admitted ret
 
   await expect(acknowledgement).resolves.toBe(false);
   expect(storage.getItem(result.planKey)).not.toBeNull();
+  vi.stubGlobal("navigator", {});
+  await expect(acknowledgeBusyWebMessage(result, storage)).resolves.toBe(false);
+  expect(storage.getItem(result.planKey)).not.toBeNull();
   const retry = await submitBusyWebMessage(api, busyInput(), storage, submissionLocks);
   expect(retry.operationId).toBe(result.operationId);
   expect(enqueueWebMessageBatch).toHaveBeenCalledOnce();
