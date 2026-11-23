@@ -1214,7 +1214,7 @@ async def test_handover_capacity_full_rejects_before_any_admission(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_single_send_permission_handover_does_not_consume_multisend_capacity(monkeypatch):
+async def test_single_send_permission_handover_uses_capacity_until_terminal(monkeypatch):
     monkeypatch.setattr(messages, "_ASSISTANT_HANDOVER_MAX_ENTRIES", 1)
     permission_id = "prompt-single"
     session = _FakeSession([
@@ -1228,11 +1228,6 @@ async def test_single_send_permission_handover_does_not_consume_multisend_capaci
         {"type": "permission_granted", "tool_id": "shell-single", "request_id": "single", "permission_id": permission_id},
         {"type": "turn_complete", "request_id": "single"},
     ])
-    existing_queue = session.subscribe()
-    existing_token, existing_claim = messages._assistant_reserve_handover(
-        session, existing_queue, None
-    )
-    assert existing_token is not None
     session.send_message = AsyncMock(return_value={"accepted": True, "request_id": "single"})
     monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
     captured, _, drain = _install_fake_assistant_stream(monkeypatch)
@@ -1246,11 +1241,14 @@ async def test_single_send_permission_handover_does_not_consume_multisend_capaci
     await asyncio.wait_for(drain(first_response.stream), timeout=1)
 
     handover_state = copy.deepcopy(captured["controller"].state)
+    token = handover_state[messages._ASSISTANT_HANDOVER_STATE_KEY]
+    entry = messages._assistant_handover_ledger(session)[token]
+    assert entry["status"] == "available"
+    assert entry["record"]["request_ids"] == ["single"]
+    assert entry["queue"] in session.subscriptions
     permission_call_id = _permission_call_id(
         handover_state, "shell-single", permission_id
     )
-    assert messages._ASSISTANT_HANDOVER_STATE_KEY not in handover_state
-    assert existing_token in messages._assistant_handover_ledger(session)
     assert len(_assistant_rows(captured)) == 1
     assert _assistant_rows(captured)[0]["status"]["reason"] == "tool-calls"
 
@@ -1268,9 +1266,9 @@ async def test_single_send_permission_handover_does_not_consume_multisend_capaci
 
     assert session.send_message.await_count == 1
     assert session.resolve_permission.await_count == 1
-    assert existing_token in messages._assistant_handover_ledger(session)
+    assert token not in messages._assistant_handover_ledger(session)
+    assert session.subscriptions == []
     assert captured["controller"].errors == []
-    messages._assistant_finish_handover(session, existing_token, existing_claim)
 
 
 @pytest.mark.asyncio
