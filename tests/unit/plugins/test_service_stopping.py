@@ -342,3 +342,71 @@ def test_disable_exposes_live_stopping_service_and_rejects_restart(tmp_path, mon
             except subprocess.TimeoutExpired:
                 wrapper.kill()
                 wrapper.wait(timeout=3)
+
+
+def test_stop_services_treats_a_dead_wrapper_as_stopped(tmp_path, monkeypatch):
+    # The plugin is not installed, so control_service fails before any signal is sent.
+    from kollabor_plugins import services
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = tmp_path / ".kollab"
+    home.mkdir()
+    (home / "plugins.json").write_text(json.dumps({"plugins": {}, "dev": {}}))
+    run = home / "plugin-data" / "hello" / "run"
+    run.mkdir(parents=True)
+    exited = subprocess.Popen([sys.executable, "-c", "pass"])
+    exited.wait()
+    identity = {"pid": exited.pid, "start_time": 1.0, "nonce": "abcd"}
+    (run / "worker.pid").write_text(json.dumps({"wrapper": identity, "child": None}))
+    assert services.stop_services("hello") == []
+    state = json.loads((run / "worker.state").read_text())
+    assert state["status"] == "stopped"
+    assert state["desired"] == "stopped"
+
+
+def test_stop_services_reports_success_after_signalling_a_live_wrapper(tmp_path, monkeypatch):
+    import signal
+
+    from kollabor_plugins import services
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = tmp_path / ".kollab"
+    home.mkdir()
+    (home / "plugins.json").write_text(json.dumps({"plugins": {}, "dev": {}}))
+    run = home / "plugin-data" / "hello" / "run"
+    run.mkdir(parents=True)
+    live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        (run / "worker.pid").write_text(json.dumps({"wrapper": {"pid": live.pid}, "child": None}))
+        monkeypatch.setattr(services, "_verified_wrapper", lambda identity: identity.get("pid") == live.pid)
+        assert services.stop_services("hello") == []
+        assert live.wait(timeout=5) == -signal.SIGTERM
+        state = json.loads((run / "worker.state").read_text())
+        assert state["status"] == "stopping"
+        assert state["stop_deadline"] > time.time()
+    finally:
+        if live.poll() is None:
+            live.kill()
+            live.wait(timeout=5)
+
+
+def test_stop_services_still_reports_a_real_signal_error(tmp_path, monkeypatch):
+    from kollabor_plugins import services
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = tmp_path / ".kollab"
+    home.mkdir()
+    (home / "plugins.json").write_text(json.dumps({"plugins": {}, "dev": {}}))
+    run = home / "plugin-data" / "hello" / "run"
+    run.mkdir(parents=True)
+    (run / "worker.pid").write_text(json.dumps({"wrapper": {"pid": 4321}, "child": None}))
+    monkeypatch.setattr(services, "_verified_wrapper", lambda _: True)
+
+    def denied(*_):
+        raise PermissionError("not permitted")
+
+    monkeypatch.setattr(services.os, "kill", denied)
+    assert services.stop_services("hello") == ["worker"]
+    state = json.loads((run / "worker.state").read_text())
+    assert state["status"] == "stop-failed"
+    assert state["desired"] == "stopped"
