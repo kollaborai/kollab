@@ -495,9 +495,9 @@ def test_a_stream_gets_none_of_another_requests_output():
     assert not _foreign_output({"type": "token"}, mine)  # session-wide, or a daemon that tags nothing
     assert not _foreign_output({"type": "token", "request_ids": ["A"]}, set())  # a stream with no id
     prompt = _normalize_event(
-        {"type": "permission_request", "request_ids": ["A"], "details": {"tool_name": "terminal"}}
+        {"type": "permission_request", "request_ids": ["A"], "details": {"tool_name": "terminal", "permission_id": "owner-A"}}
     )
-    assert prompt["request_ids"] == ["A"] and _foreign_output(prompt, mine)
+    assert prompt["request_ids"] == ["A"] and prompt["permission_id"] == "owner-A" and _foreign_output(prompt, mine)
     # Chalcedony on #554 round 5: a turn typed in the terminal names no request
     # and a voice turn only its own id, so both reached a tagged request.
     assert _foreign_output({"type": "token"}, mine, tagged=True)
