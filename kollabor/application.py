@@ -1767,8 +1767,7 @@ class TerminalLLMChat:
 
                 if not should_stay:
                     logger.info(f"CLI command complete, exiting with code {exit_code}")
-                    await self._cleanup_or_raise()
-                    sys.exit(exit_code)
+                    await self._cleanup_then_exit(exit_code)
 
                 logger.info("CLI command complete, continuing to interactive mode")
 
@@ -1971,8 +1970,7 @@ class TerminalLLMChat:
                 if command is None:
                     logger.warning("Pipe command failed to parse: %s", piped_input)
                     print(f"Unknown command: {piped_input.strip()}")
-                    await self._cleanup_or_raise()
-                    sys.exit(2)
+                    await self._cleanup_then_exit(2)
                 result = await self.input_handler.command_executor.execute_command(
                     command, self.event_bus
                 )
@@ -1984,8 +1982,7 @@ class TerminalLLMChat:
                 ):
                     self._print_command_result(result)
                 exit_code = 0 if result and result.success else 1
-                await self._cleanup_or_raise()
-                sys.exit(exit_code)
+                await self._cleanup_then_exit(exit_code)
 
             # Send input to LLM and wait for response
             # The LLM service will handle the response display
@@ -4047,6 +4044,14 @@ class TerminalLLMChat:
             raise ApplicationCleanupIncompleteError(
                 "Application cleanup did not complete; queue workers may still be active"
             )
+
+    async def _cleanup_then_exit(self, exit_code: int) -> None:
+        """Keep the caller's intended CLI status pending through cleanup retries."""
+        try:
+            await self._cleanup_or_raise()
+        except ApplicationCleanupIncompleteError as cleanup_error:
+            raise SystemExit(exit_code) from cleanup_error
+        raise SystemExit(exit_code)
 
     async def _stop_hub_message_intake(self) -> None:
         """Stop accepting Hub messages once application teardown begins."""

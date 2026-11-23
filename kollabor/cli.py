@@ -1486,10 +1486,19 @@ async def async_main() -> None:
                 cleanup_error = error
             if cleanup_error is not None:
                 logger.error(f"Emergency cleanup failed: {cleanup_error}")
-                cause = pending_error or first_cleanup_failure
-                if cause is not None and cause is not cleanup_error:
-                    raise cleanup_error from cause
-                raise cleanup_error
+                if (
+                    isinstance(pending_error, SystemExit)
+                    and pending_error.code not in (None, 0)
+                ):
+                    pending_error.add_note(
+                        "Emergency cleanup also failed: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    )
+                else:
+                    cause = pending_error or first_cleanup_failure
+                    if cause is not None and cause is not cleanup_error:
+                        raise cleanup_error from cause
+                    raise cleanup_error
 
 
 def _hub_config_flag(key: str) -> bool:
