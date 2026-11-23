@@ -1687,6 +1687,93 @@ async def test_assistant_transport_rejects_request_id_owned_by_another_active_st
 
 
 @pytest.mark.asyncio
+async def test_lost_batch_finish_rpc_is_recovered_by_runner_lease(monkeypatch):
+    """A lost finalizer RPC reports uncertainty, then releases B/C before D."""
+    from kollabor.llm.acp_bridge import ACPProfile, ACPRunner
+    from kollabor.llm.llm_coordinator import LLMService
+
+    session = _FakeSession([])
+    runner = ACPRunner(ACPProfile("lost-batch-finish", ("unused",)))
+    runner.session_id = session.session_id
+    runner.generation = 7
+    runner._connection = object()
+    runner.send_now_batch_timeout_seconds = 0.05
+    runner._queue.put_nowait(types.SimpleNamespace(request_id="older-D", future=None))
+    llm = object.__new__(LLMService)
+
+    async def steer(*_args, **_kwargs):
+        return False
+
+    acp = types.SimpleNamespace(
+        active=True,
+        runner=runner,
+        supports_image_input=False,
+        voice_rules_epochs=set(),
+        steer=steer,
+        begin_send_now_batch=runner.begin_send_now_batch,
+        has_send_now_batch=runner.has_send_now_batch,
+        send_now_batch_has_admissions=runner.send_now_batch_has_admissions,
+        record_send_now_batch_injected=runner.record_send_now_batch_injected,
+        finish_send_now_batch=runner.finish_send_now_batch,
+        admit=runner.admit,
+        prepare_cancel=lambda **_kwargs: False,
+        schedule_prepared_cancel=lambda **_kwargs: True,
+    )
+
+    async def submit(content, **kwargs):
+        result = await llm._admit_acp(
+            acp, {"message": content, **kwargs}, "state_rpc"
+        )
+        return {
+            "accepted": result.get("status") in {"queued", "injected"},
+            "request_id": result.get("request_id"),
+            "reason": result.get("reason", ""),
+        }
+
+    session.send_message = AsyncMock(side_effect=submit)
+    session.finish_send_now_batch = AsyncMock(
+        side_effect=RuntimeError("simulated lost finalizer RPC")
+    )
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, drain_stream = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[
+                {
+                    "type": "add-message",
+                    "message": {"id": "client-B", "parts": [{"type": "text", "text": "B"}]},
+                },
+                {
+                    "type": "add-message",
+                    "message": {"id": "client-C", "parts": [{"type": "text", "text": "C"}]},
+                },
+            ],
+            state={"messages": []},
+            send_now=True,
+        ),
+    )
+    await asyncio.wait_for(drain_stream(response.stream), timeout=1)
+
+    assert session.send_message.await_count == 2
+    assert session.finish_send_now_batch.await_count == 2
+    assert any("could not be finalized" in error.lower() for error in captured["controller"].errors)
+    batch_id = session.send_message.await_args_list[0].kwargs["send_now_batch_id"]
+    assert runner.has_send_now_batch(batch_id)
+    assert not runner._queue_release.is_set()
+
+    await asyncio.wait_for(runner._queue_release.wait(), timeout=1)
+    assert not runner.has_send_now_batch(batch_id)
+    assert runner._send_now_reserved == 0
+    assert [item.request_id for item in runner._queue._queue] == [
+        "client-B", "client-C", "older-D",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_assistant_transport_shows_none_of_a_running_turn_typed_in_the_terminal(monkeypatch):
     """Chalcedony on #554 round 5: a turn typed in the terminal names no
     request, and its text and permission prompt became this message's."""
