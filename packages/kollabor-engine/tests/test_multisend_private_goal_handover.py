@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock
 
 import pytest
@@ -163,5 +164,146 @@ async def test_reconnect_resumes_private_goal_reply_before_followup_terminal(
     assert b"private goal result" in resumed_wire
     assert b"next reply" in resumed_wire
     assert b"data: [DONE]" in resumed_wire
+    assert token not in messages._assistant_handover_ledger(session)
+    assert session.subscriptions == []
+
+
+@pytest.mark.asyncio
+async def test_reconnect_does_not_render_a_queued_private_reply_twice(monkeypatch):
+    session = _FanoutSession([])
+    first_poll_started = asyncio.Event()
+    second_poll_returned = asyncio.Event()
+    third_poll_returned = asyncio.Event()
+    next_admission_started = asyncio.Event()
+    release_later_admission = asyncio.Event()
+    never = asyncio.Event()
+    poll_count = 0
+
+    async def poll_goal_reply(reply_id):
+        nonlocal poll_count
+        assert reply_id == "private-reply"
+        poll_count += 1
+        if poll_count == 1:
+            first_poll_started.set()
+            return {"status": "pending"}
+        if poll_count == 2:
+            second_poll_returned.set()
+        else:
+            third_poll_returned.set()
+        return {
+            "status": "complete",
+            "success": True,
+            "conversation_uid": "conversation-1",
+            "message": "private goal result",
+        }
+
+    async def send_message(_content, *, request_id, **kwargs):
+        if request_id == "goal-command":
+            return {
+                "accepted": True,
+                "request_id": "goal-request",
+                "goal_request_id": "goal-request",
+                "goal_reply_id": "private-reply",
+            }
+        if request_id == "next":
+            session.publish({"type": "token", "text": "next reply", "request_id": "next"})
+            session.publish({"type": "turn_complete", "request_id": "next"})
+            next_admission_started.set()
+            await never.wait()
+        if request_id == "later":
+            await release_later_admission.wait()
+            session.publish({"type": "token", "text": "later reply", "request_id": "later"})
+            session.publish({"type": "turn_complete", "request_id": "later"})
+            return {"accepted": True, "request_id": request_id}
+        raise AssertionError(f"unexpected submission {request_id}")
+
+    session.poll_goal_reply = AsyncMock(side_effect=poll_goal_reply)
+    session.send_message = AsyncMock(side_effect=send_message)
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+
+    first_response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[
+                {
+                    "type": "add-message",
+                    "message": {
+                        "id": "goal-command",
+                        "parts": [{"type": "text", "text": "/goal show"}],
+                    },
+                }
+            ],
+            state={"messages": [], "conversationUid": "conversation-1"},
+        ),
+    )
+    first_task = asyncio.create_task(_drain_real_response(first_response, []))
+    await asyncio.wait_for(first_poll_started.wait(), timeout=1)
+    first_task.cancel()
+    await asyncio.gather(first_task, return_exceptions=True)
+
+    token = next(iter(messages._assistant_handover_ledger(session)))
+    second_response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[
+                {
+                    "type": "add-message",
+                    "message": {
+                        "id": "next",
+                        "parts": [{"type": "text", "text": "next"}],
+                    },
+                }
+            ],
+            state={messages._ASSISTANT_HANDOVER_STATE_KEY: token},
+        ),
+    )
+    second_task = asyncio.create_task(_drain_real_response(second_response, []))
+    await asyncio.wait_for(next_admission_started.wait(), timeout=1)
+    await asyncio.wait_for(second_poll_returned.wait(), timeout=1)
+    await asyncio.sleep(0)
+    second_task.cancel()
+    await asyncio.gather(second_task, return_exceptions=True)
+
+    token = next(iter(messages._assistant_handover_ledger(session)))
+    third_response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[
+                {
+                    "type": "add-message",
+                    "message": {
+                        "id": "later",
+                        "parts": [{"type": "text", "text": "later"}],
+                    },
+                }
+            ],
+            state={messages._ASSISTANT_HANDOVER_STATE_KEY: token},
+        ),
+    )
+    third_chunks: list[bytes] = []
+    third_task = asyncio.create_task(_drain_real_response(third_response, third_chunks))
+    await asyncio.wait_for(third_poll_returned.wait(), timeout=1)
+    await asyncio.sleep(0)
+    release_later_admission.set()
+    await asyncio.wait_for(third_task, timeout=1)
+
+    wire = b"".join(third_chunks).decode()
+    frames = [
+        json.loads(line.removeprefix("data: "))
+        for line in wire.splitlines()
+        if line.startswith("data: {")
+    ]
+    private_deltas = [
+        frame["textDelta"]
+        for frame in frames
+        if frame.get("type") == "text-delta"
+        and frame.get("textDelta") == "private goal result"
+    ]
+    assert private_deltas == ["private goal result"]
+    assert [
+        call.kwargs["request_id"] for call in session.send_message.await_args_list
+    ] == ["goal-command", "next", "later"]
     assert token not in messages._assistant_handover_ledger(session)
     assert session.subscriptions == []
