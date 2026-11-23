@@ -377,7 +377,7 @@ export async function openPage(browser, baseUrl, fixtures, options = {}) {
 export async function until(check, message, timeoutMs = 60_000) {
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) {
-    const value = check();
+    const value = await check();
     if (value) return value;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
