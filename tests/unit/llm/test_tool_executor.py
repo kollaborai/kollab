@@ -859,6 +859,51 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
             self.assertIn("search paths must stay inside the active workspace", result.error)
             plugin.send_to_session.assert_not_called()
 
+    async def test_terminal_send_allows_absolute_find_root_inside_workspace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "project"
+            workspace.mkdir()
+            self.executor.workspace = workspace
+            plugin = MagicMock()
+            plugin.send_to_session.return_value = {
+                "success": True,
+                "message": "Input sent to session 'terminal'",
+            }
+            self.executor.tmux_plugin = plugin
+            text = f'find "{workspace}" -maxdepth 1 -type f -print'
+
+            result = await self.executor._execute_terminal_command(
+                {
+                    "type": "terminal_send",
+                    "id": "find-inside-session",
+                    "session_name": "terminal",
+                    "text": text,
+                }
+            )
+
+            self.assertTrue(result.success)
+            plugin.send_to_session.assert_called_once_with("terminal", text)
+
+    async def test_terminal_send_refuses_relative_find_root_with_unknown_session_cwd(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self.executor.workspace = Path(temp_dir) / "project"
+            self.executor.workspace.mkdir()
+            plugin = MagicMock()
+            self.executor.tmux_plugin = plugin
+
+            result = await self.executor._execute_terminal_command(
+                {
+                    "type": "terminal_send",
+                    "id": "find-relative-session",
+                    "session_name": "terminal",
+                    "text": "find . -maxdepth 1 -type f -print",
+                }
+            )
+
+            self.assertFalse(result.success)
+            self.assertIn("search paths must stay inside the active workspace", result.error)
+            plugin.send_to_session.assert_not_called()
+
     async def test_terminal_send_rejects_native_calls_without_session_name(self):
         from kollabor_agent.tool_call_contract import normalize_native_tool_call
 
