@@ -66,6 +66,7 @@ type SubmissionPlan = {
   request_id: string;
   attachment_operation_ids: string[];
   attachment_refs: string[];
+  stage_attempted: boolean;
   enqueue_attempted: boolean;
   admitted: boolean;
 };
@@ -87,12 +88,20 @@ function storageOrThrow(storage?: QueuePlanStorage): QueuePlanStorage {
   throw new Error("Could not safely retain this queue submission. The message was not sent.");
 }
 
+function planBaseKey(sessionId: string, draftKey: string | null | undefined): string {
+  return `${PLAN_PREFIX}:${encodeURIComponent(sessionId)}:${encodeURIComponent(draftKey ?? "")}`;
+}
+
 function planKey(input: BusyWebMessageInput): string {
-  return `${PLAN_PREFIX}:${encodeURIComponent(input.sessionId)}:${encodeURIComponent(input.draftKey ?? "")}`;
+  return `${planBaseKey(input.sessionId, input.draftKey)}:${encodeURIComponent(input.conversationUid)}`;
 }
 
 function submissionLockName(key: string): string {
-  return `${PLAN_PREFIX}:lock:${key}`;
+  // Conversation-specific plans share one draft lock so an acknowledgement
+  // from one tab cannot race another conversation's plan migration/write.
+  const draftKeyEnd = key.lastIndexOf(":");
+  const draftKey = draftKeyEnd >= 0 ? key.slice(0, draftKeyEnd) : key;
+  return `${PLAN_PREFIX}:lock:${draftKey}`;
 }
 
 function submissionLocks(explicit?: QueueSubmissionLocks): QueueSubmissionLocks {
@@ -125,6 +134,13 @@ function isDefinitePayloadRejection(error: unknown): boolean {
     (detail as { code?: unknown }).code === "queue_capacity";
 }
 
+function isDefiniteStageRejection(error: unknown): boolean {
+  if (!(error instanceof ApiError) || typeof error.body !== "object" || error.body === null) return false;
+  const detail = (error.body as { detail?: unknown }).detail;
+  return typeof detail === "object" && detail !== null &&
+    (detail as { code?: unknown }).code === "attachment_rejected";
+}
+
 function definiteRejectionMessage(error: unknown, phase: "attachment" | "message"): string {
   if (error instanceof ApiError && error.status === 409 &&
       typeof error.body === "object" && error.body !== null) {
@@ -152,6 +168,7 @@ function readPlan(storage: QueuePlanStorage, key: string): SubmissionPlan | null
         value.attachment_operation_ids.some((id) => typeof id !== "string") ||
         (value.attachment_refs !== undefined && (!Array.isArray(value.attachment_refs) ||
           value.attachment_refs.some((ref) => typeof ref !== "string"))) ||
+        (value.stage_attempted !== undefined && typeof value.stage_attempted !== "boolean") ||
         (value.enqueue_attempted !== undefined && typeof value.enqueue_attempted !== "boolean") ||
         typeof value.admitted !== "boolean") {
       throw new Error("invalid stored plan");
@@ -159,6 +176,7 @@ function readPlan(storage: QueuePlanStorage, key: string): SubmissionPlan | null
     return {
       ...value,
       attachment_refs: value.attachment_refs ?? [],
+      stage_attempted: value.stage_attempted ?? false,
       enqueue_attempted: value.enqueue_attempted ?? false,
     } as SubmissionPlan;
   } catch {
@@ -171,19 +189,25 @@ export function hasUnresolvedBusyWebMessage(
   sessionId: string | null | undefined,
   draftKey: string | null | undefined,
   maybeStorage?: QueuePlanStorage,
+  conversationUid?: string | null,
 ): boolean {
   if (!sessionId) return false;
   if (maybeStorage === undefined && typeof window === "undefined") return false;
-  const key = `${PLAN_PREFIX}:${encodeURIComponent(sessionId)}:${encodeURIComponent(draftKey ?? "")}`;
+  const baseKey = planBaseKey(sessionId, draftKey);
+  const key = conversationUid ? `${baseKey}:${encodeURIComponent(conversationUid)}` : baseKey;
   try {
     const storage = storageOrThrow(maybeStorage);
-    if (storage.getItem(key) === null) return false;
-    const plan = readPlan(storage, key);
-    return plan !== null && !plan.admitted && plan.enqueue_attempted;
+    let plan = storage.getItem(key) === null ? null : readPlan(storage, key);
+    if (!plan && conversationUid && key !== baseKey && storage.getItem(baseKey) !== null) {
+      const legacyPlan = readPlan(storage, baseKey);
+      if (legacyPlan?.conversation_uid === conversationUid) plan = legacyPlan;
+    }
+    return plan !== null && !plan.admitted && (plan.stage_attempted || plan.enqueue_attempted);
   } catch {
     // A corrupt saved operation cannot be discarded or edited around safely.
     try {
-      return storageOrThrow(maybeStorage).getItem(key) !== null;
+      const storage = storageOrThrow(maybeStorage);
+      return storage.getItem(key) !== null || storage.getItem(baseKey) !== null;
     } catch {
       return true;
     }
@@ -273,6 +297,7 @@ function validateIds(ids: WebMessageQueueIds, attachmentCount: number, conversat
     request_id: requestId,
     attachment_operation_ids: [...ids.attachment_operation_ids],
     attachment_refs: [],
+    stage_attempted: false,
     enqueue_attempted: false,
     admitted: false,
   };
@@ -314,12 +339,13 @@ export async function submitBusyWebMessage(
   const fingerprint = await messageFingerprint(input.text, files);
   const storage = storageOrThrow(maybeStorage);
   const key = planKey(input);
+  const baseKey = planBaseKey(input.sessionId, input.draftKey);
   const locks = submissionLocks(maybeLocks);
   let entered = false;
   try {
     return await locks.request(submissionLockName(key), async () => {
       entered = true;
-      return submitBusyWebMessageLocked(api, input, storage, key, files, fingerprint);
+      return submitBusyWebMessageLocked(api, input, storage, key, baseKey, files, fingerprint);
     });
   } catch (error) {
     if (!entered) {
@@ -334,13 +360,24 @@ async function submitBusyWebMessageLocked(
   input: BusyWebMessageInput,
   storage: QueuePlanStorage,
   key: string,
+  legacyKey: string,
   files: readonly File[],
   fingerprint: string,
 ): Promise<BusyWebMessageResult> {
   let plan = readPlan(storage, key);
+  if (!plan && legacyKey !== key) {
+    const legacyPlan = readPlan(storage, legacyKey);
+    if (legacyPlan?.conversation_uid === input.conversationUid) {
+      // Move a pre-UID-keyed plan only when its stored identity proves the
+      // conversation. Keep the old record if persisting the new key fails.
+      storage.setItem(key, JSON.stringify(legacyPlan));
+      discardPlan(storage, legacyKey, legacyPlan);
+      plan = legacyPlan;
+    }
+  }
   if (plan && !plan.admitted &&
       (plan.fingerprint !== fingerprint || plan.conversation_uid !== input.conversationUid)) {
-    if (plan.enqueue_attempted) {
+    if (plan.enqueue_attempted || plan.stage_attempted) {
       throw new QueueSubmissionReconciliationError("A previous queue submission is unresolved. Keep its message unchanged and check the queue before retrying.");
     }
     // Only staged blobs exist, so no queue item can have been admitted.
@@ -364,7 +401,7 @@ async function submitBusyWebMessageLocked(
 
   if (plan.fingerprint !== fingerprint || plan.conversation_uid !== input.conversationUid ||
       plan.attachment_operation_ids.length !== files.length) {
-    if (plan.enqueue_attempted) {
+    if (plan.enqueue_attempted || plan.stage_attempted) {
       throw new QueueSubmissionReconciliationError("A previous queue submission is unresolved. Keep its message unchanged and check the queue before retrying.");
     }
     discardPlan(storage, key, plan);
@@ -386,10 +423,16 @@ async function submitBusyWebMessageLocked(
       }
     } else {
       const staged: WebMessageQueueAttachment[] = [];
-      try {
-        for (let index = 0; index < files.length; index += 1) {
-          const operationId = plan.attachment_operation_ids[index];
-          if (!operationId) throw new Error("The image staging plan is incomplete.");
+      for (let index = 0; index < files.length; index += 1) {
+        const operationId = plan.attachment_operation_ids[index];
+        if (!operationId) throw new Error("The image staging plan is incomplete.");
+        plan = { ...plan, stage_attempted: true };
+        try {
+          storage.setItem(key, JSON.stringify(plan));
+        } catch {
+          throw new QueueSubmissionReconciliationError("Could not safely record the image staging attempt. Keep the exact message unchanged and retry to reconcile it.");
+        }
+        try {
           const attachment = await api.stageWebMessageQueueAttachment(
             input.sessionId,
             input.conversationUid,
@@ -403,14 +446,17 @@ async function submitBusyWebMessageLocked(
           staged.push(attachment);
           plan = { ...plan, attachment_refs: staged.map((entry) => entry.ref) };
           storage.setItem(key, JSON.stringify(plan));
+        } catch (error) {
+          if (isDefiniteStageRejection(error)) {
+            // The route or daemon supplied a typed precommit rejection. Any
+            // earlier staged refs remain unowned and expire under their TTL.
+            discardPlan(storage, key, plan);
+            throw new QueueSubmissionRejectedError(definiteRejectionMessage(error, "attachment"));
+          }
+          // A lost response may follow a successful daemon stage. Preserve
+          // this operation ID so its idempotent replay returns the same ref.
+          throw new QueueSubmissionReconciliationError("Could not confirm image staging. Keep the exact composer message unchanged and retry to reconcile the same upload.");
         }
-      } catch (error) {
-        // No enqueue call has happened. Any staged refs are unowned and expire
-        // under the daemon's staging TTL, so this draft can be corrected safely.
-        discardPlan(storage, key, plan);
-        throw new QueueSubmissionRejectedError(isDefinitePayloadRejection(error)
-          ? definiteRejectionMessage(error, "attachment")
-          : "Could not stage the attachment, so it was not queued. Keep it in the composer and retry.");
       }
     }
 

@@ -158,6 +158,8 @@ export type ThreadProps = {
   draftKey?: string | null | undefined;
   /** Engine session owning this daemon queue submission plan. */
   queueSessionId?: string | null | undefined;
+  /** Current canonical conversation for local queue retry ownership. */
+  queueConversationUid?: string | null | undefined;
   /** Daemon-backed queue shown in the sticky composer footer. */
   queuePanel?: ReactNode | undefined;
   /** Queue a busy-composer message through the authenticated daemon route. */
@@ -201,6 +203,7 @@ export const Thread: FC<ThreadProps> = ({
   historyStartIndex = 0,
   draftKey,
   queueSessionId,
+  queueConversationUid,
   queuePanel,
   onQueueBusyMessage,
 }) => {
@@ -221,6 +224,7 @@ export const Thread: FC<ThreadProps> = ({
         historyStartIndex={historyStartIndex}
         draftKey={draftKey}
         queueSessionId={queueSessionId}
+        queueConversationUid={queueConversationUid}
         queuePanel={queuePanel}
         onQueueBusyMessage={onQueueBusyMessage}
       />
@@ -241,6 +245,7 @@ const ThreadRoot: FC<{
   historyStartIndex: number;
   draftKey: ThreadProps["draftKey"];
   queueSessionId: ThreadProps["queueSessionId"];
+  queueConversationUid: ThreadProps["queueConversationUid"];
   queuePanel: ThreadProps["queuePanel"];
   onQueueBusyMessage: ThreadProps["onQueueBusyMessage"];
 }> = ({
@@ -256,6 +261,7 @@ const ThreadRoot: FC<{
   historyStartIndex,
   draftKey,
   queueSessionId,
+  queueConversationUid,
   queuePanel,
   onQueueBusyMessage,
 }) => {
@@ -447,6 +453,7 @@ const ThreadRoot: FC<{
                 attachmentsEnabled={attachmentsEnabled}
                 draftKey={draftKey}
                 queueSessionId={queueSessionId}
+                queueConversationUid={queueConversationUid}
                 onQueueBusyMessage={onQueueBusyMessage}
               />
             </div>
@@ -542,8 +549,9 @@ const Composer: FC<{
   attachmentsEnabled: boolean;
   draftKey: ThreadProps["draftKey"];
   queueSessionId: ThreadProps["queueSessionId"];
+  queueConversationUid: ThreadProps["queueConversationUid"];
   onQueueBusyMessage: ThreadProps["onQueueBusyMessage"];
-}> = ({ agents, commands, onOpenPanel, onOpenWelcome, attachmentsEnabled, draftKey, queueSessionId, onQueueBusyMessage }) => {
+}> = ({ agents, commands, onOpenPanel, onOpenWelcome, attachmentsEnabled, draftKey, queueSessionId, queueConversationUid, onQueueBusyMessage }) => {
   const aui = useAui();
   // The mic starts the LiveKit room in this browser; /voice (the computer
   // running the agent listens) stays a typed command, and its status line shows.
@@ -580,7 +588,7 @@ const Composer: FC<{
     draftKey: string | null;
     locked: boolean;
   } | null>(null);
-  const queueAdmissionLocked = hasUnresolvedBusyWebMessage(queueSessionId, draftKey) ||
+  const queueAdmissionLocked = hasUnresolvedBusyWebMessage(queueSessionId, draftKey, undefined, queueConversationUid) ||
     (queueAdmissionLock?.locked === true && queueAdmissionLock.draftKey === (draftKey ?? null));
 
   useLayoutEffect(() => {

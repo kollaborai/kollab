@@ -17,6 +17,7 @@ from kollabor.state.web_message_queue_rpc import (
     daemon_conversation_scope_resolver,
     register_web_message_queue_handlers,
 )
+from kollabor.state.web_message_queue_runtime import register_web_message_queue_runtime
 from kollabor_rpc import RpcCallerContext, RpcServer
 
 
@@ -1162,3 +1163,39 @@ async def test_enqueue_capacity_rejection_is_a_typed_precommit_rpc_outcome():
     assert allocated[1]["batch_id"] not in {
         batch["batch_id"] for batch in snapshot["result"]["batches"]
     }
+
+
+@pytest.mark.asyncio
+async def test_invalid_stage_payload_returns_typed_precommit_rejection_after_authentication():
+    registry = WebMessageQueueRegistry(max_scopes=1)
+    server = RpcServer()
+    state = _ConversationState("conversation-a")
+    runtime = register_web_message_queue_runtime(server, state, queue_registry=registry)
+
+    ids = await _rpc_call(
+        server,
+        "state.web_queue.allocate_ids",
+        {
+            "expected_conversation_uid": "conversation-a",
+            "item_count": 1,
+            "operation_count": 1,
+            "attachment_operation_count": 1,
+        },
+    )
+    assert ids["error"] is None
+    staged = await _rpc_call(
+        server,
+        "state.web_queue.stage_attachment",
+        {
+            "expected_conversation_uid": "conversation-a",
+            "operation_id": ids["result"]["attachment_operation_ids"][0],
+            "mime": "image/png",
+            "filename": "invalid.png",
+            "payload_b64": base64.b64encode(b"not a PNG").decode("ascii"),
+        },
+    )
+
+    assert staged["error_kind"] == "handler"
+    assert staged["error"] == "kollab.web_queue.attachment_rejected.v1"
+    assert runtime.attachments.attachment_count == 0
+    assert runtime.attachments.used_bytes == 0

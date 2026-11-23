@@ -486,16 +486,16 @@ test("busy composer admission stages images before enqueue and retains accepted 
   expect(persistedPlan).not.toContain("diagram.png");
 });
 
-test("busy composer retries an ambiguous enqueue with the same daemon IDs and blocks changed content", async () => {
+test("busy composer retries an ambiguous enqueue with the same daemon IDs and scopes plans by conversation", async () => {
   const storage = new MemoryStorage();
   const locks = new SerialQueueLocks();
   const { api, allocateWebMessageQueueIds, enqueueWebMessageBatch } = busyApiHarness();
   enqueueWebMessageBatch.mockRejectedValueOnce(new Error("connection closed after admission"));
 
   await expect(submitBusyWebMessage(api, busyInput(), storage, locks)).rejects.toThrow(/confirm queue admission/);
-  expect(hasUnresolvedBusyWebMessage("session-a", "draft-a", storage)).toBe(true);
+  expect(hasUnresolvedBusyWebMessage("session-a", "draft-a", storage, "conversation-a")).toBe(true);
   const result = await submitBusyWebMessage(api, busyInput(), storage, locks);
-  expect(hasUnresolvedBusyWebMessage("session-a", "draft-a", storage)).toBe(false);
+  expect(hasUnresolvedBusyWebMessage("session-a", "draft-a", storage, "conversation-a")).toBe(false);
   expect(result.admitted).toBe(true);
   expect(allocateWebMessageQueueIds).toHaveBeenCalledOnce();
   expect(enqueueWebMessageBatch.mock.calls.map((call) => call[1].operation_id)).toEqual([
@@ -506,11 +506,14 @@ test("busy composer retries an ambiguous enqueue with the same daemon IDs and bl
   const otherStorage = new MemoryStorage();
   enqueueWebMessageBatch.mockRejectedValueOnce(new Error("response lost"));
   await expect(submitBusyWebMessage(api, busyInput({ draftKey: "draft-b" }), otherStorage, locks)).rejects.toThrow(/confirm queue admission/);
-  await expect(submitBusyWebMessage(api, busyInput({ draftKey: "draft-b", conversationUid: "conversation-b" }), otherStorage, locks))
-    .rejects.toThrow(/previous queue submission/);
   await expect(submitBusyWebMessage(api, busyInput({ draftKey: "draft-b", text: "changed" }), otherStorage, locks))
     .rejects.toThrow(/previous queue submission/);
-  expect(allocateWebMessageQueueIds).toHaveBeenCalledTimes(2);
+  const conversationB = await submitBusyWebMessage(api, busyInput({
+    draftKey: "draft-b", conversationUid: "conversation-b", text: "message for B",
+  }), otherStorage, locks);
+  expect(conversationB.admitted).toBe(true);
+  expect(enqueueWebMessageBatch.mock.calls.at(-1)?.[1].conversation_uid).toBe("conversation-b");
+  expect(allocateWebMessageQueueIds).toHaveBeenCalledTimes(3);
 });
 
 test("lost stage response retries the same staging operation instead of orphaning a second blob", async () => {
@@ -564,7 +567,7 @@ test("lost stage response retries the same staging operation instead of orphanin
 
   await expect(submitBusyWebMessage(api, input, storage, locks))
     .rejects.toBeInstanceOf(QueueSubmissionReconciliationError);
-  expect(hasUnresolvedBusyWebMessage("session-a", "draft-a", storage)).toBe(true);
+  expect(hasUnresolvedBusyWebMessage("session-a", "draft-a", storage, "conversation-a")).toBe(true);
   const retry = await submitBusyWebMessage(api, input, storage, locks);
 
   expect(retry.admitted).toBe(true);
@@ -612,6 +615,8 @@ test("an ambiguous plan for a prior conversation stays scoped there while a new 
   const conversationB = await submitBusyWebMessage(api, busyInput({
     conversationUid: "conversation-b", text: "message for B",
   }), storage, locks);
+  expect(hasUnresolvedBusyWebMessage("session-a", "draft-a", storage, "conversation-a")).toBe(true);
+  expect(hasUnresolvedBusyWebMessage("session-a", "draft-a", storage, "conversation-b")).toBe(false);
   const conversationARetry = await submitBusyWebMessage(api, busyInput(), storage, locks);
 
   expect(conversationB.requestId).toBe("request-2");
@@ -722,7 +727,11 @@ test("a definite image-stage rejection releases its plan so corrected content ca
       attachment_operation_ids: Array.from({ length: count }, (_, index) => `attachment-${allocation}-${index}`),
     };
   });
-  const stage = vi.fn(async () => { throw new ApiError("unsupported image", 415, {}); });
+  const stage = vi.fn(async () => {
+    throw new ApiError("unsupported image", 415, {
+      detail: { code: "attachment_rejected", message: "Unsupported image type." },
+    });
+  });
   const enqueue = vi.fn(async (_s: string, body: { operation_id: string; batch_id: string; items: Array<{ request_id: string }> }) => ({
     scope_id: "scope-a", incarnation: "inc-a", operation_id: body.operation_id,
     revision: 1, status: "queued", batch_id: body.batch_id,
@@ -736,11 +745,38 @@ test("a definite image-stage rejection releases its plan so corrected content ca
 
   await expect(submitBusyWebMessage(api, rejectedInput, storage, locks))
     .rejects.toThrow(/rejected this attachment before queue admission/);
-  expect(hasUnresolvedBusyWebMessage("session-a", "draft-a", storage)).toBe(false);
+  expect(hasUnresolvedBusyWebMessage("session-a", "draft-a", storage, "conversation-a")).toBe(false);
   const accepted = await submitBusyWebMessage(api, busyInput({ text: "corrected text" }), storage, locks);
   expect(accepted.requestId).toBe("request-2");
   expect(allocate).toHaveBeenCalledTimes(2);
   expect(enqueue).toHaveBeenCalledOnce();
+});
+
+test("an untyped stage conflict retains the exact upload plan for idempotent retry", async () => {
+  const storage = new MemoryStorage();
+  const locks = new SerialQueueLocks();
+  const { api, allocateWebMessageQueueIds, stageWebMessageQueueAttachment } = busyApiHarness();
+  stageWebMessageQueueAttachment.mockRejectedValueOnce(
+    new ApiError("The daemon rejected this queue operation.", 409, { detail: "conflict" }),
+  );
+  const image = new File(
+    [new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])],
+    "retry.png",
+    { type: "image/png" },
+  );
+  const input = busyInput({ attachments: [{
+    id: "retry-image", type: "image", name: image.name, contentType: image.type, file: image,
+  }] });
+
+  await expect(submitBusyWebMessage(api, input, storage, locks))
+    .rejects.toBeInstanceOf(QueueSubmissionReconciliationError);
+  expect(hasUnresolvedBusyWebMessage("session-a", "draft-a", storage, "conversation-a")).toBe(true);
+  const retry = await submitBusyWebMessage(api, input, storage, locks);
+
+  expect(retry.admitted).toBe(true);
+  expect(allocateWebMessageQueueIds).toHaveBeenCalledOnce();
+  expect(stageWebMessageQueueAttachment.mock.calls.map((call) => call[2]))
+    .toEqual(["attachment-op-0", "attachment-op-0"]);
 });
 
 test("a definite enqueue rejection releases its exact plan for a corrected retry", async () => {
@@ -798,7 +834,7 @@ test("typed daemon queue-capacity rejection releases the draft plan; unrelated 4
   const api = { allocateWebMessageQueueIds: allocate, enqueueWebMessageBatch: enqueue } as unknown as EngineApi;
   await expect(submitBusyWebMessage(api, busyInput(), storage, locks))
     .rejects.toThrow(/queue is full/);
-  expect(hasUnresolvedBusyWebMessage("session-a", "draft-a", storage)).toBe(false);
+  expect(hasUnresolvedBusyWebMessage("session-a", "draft-a", storage, "conversation-a")).toBe(false);
   const corrected = await submitBusyWebMessage(api, busyInput({ text: "after capacity clears" }), storage, locks);
   expect(corrected.requestId).toBe("request-2");
   expect(allocate).toHaveBeenCalledTimes(2);

@@ -8,8 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from kollabor_rpc import RpcHandlerError
 from kollabor_engine.routes import web_queue
+
+from kollabor_rpc import RpcHandlerError
 
 
 class _Rpc:
@@ -276,3 +277,50 @@ async def test_only_the_typed_precommit_capacity_error_gets_a_queue_capacity_cod
         await web_queue._call_queue_rpc("s1", "state.web_queue.enqueue_batch", {})
     assert conflict.value.status_code == 409
     assert conflict.value.detail == "The daemon rejected this queue operation."
+
+
+@pytest.mark.asyncio
+async def test_only_typed_precommit_stage_refusal_gets_attachment_rejected_code(monkeypatch):
+    rpc = _install_session(monkeypatch)
+
+    async def attachment_refused(_method, _params, *, timeout=None):
+        raise RpcHandlerError(
+            "handler rejected",
+            "kollab.web_queue.attachment_rejected.v1",
+        )
+
+    rpc.call = attachment_refused
+    with pytest.raises(HTTPException) as refused:
+        await web_queue._call_queue_rpc("s1", "state.web_queue.stage_attachment", {})
+    assert refused.value.status_code == 422
+    assert refused.value.detail == {
+        "code": "attachment_rejected",
+        "message": "The image was not staged. Correct it or retry after storage becomes available.",
+    }
+
+    async def untyped_conflict(_method, _params, *, timeout=None):
+        raise RpcHandlerError("handler rejected", "generic conflict")
+
+    rpc.call = untyped_conflict
+    with pytest.raises(HTTPException) as conflict:
+        await web_queue._call_queue_rpc("s1", "state.web_queue.stage_attachment", {})
+    assert conflict.value.status_code == 409
+    assert conflict.value.detail == "The daemon rejected this queue operation."
+
+
+@pytest.mark.asyncio
+async def test_local_stage_payload_validation_is_typed_and_stops_before_daemon_rpc(monkeypatch):
+    rpc = _install_session(monkeypatch)
+    request = SimpleNamespace(
+        headers={"content-type": "text/plain"},
+        stream=lambda: None,
+    )
+    with pytest.raises(HTTPException) as refused:
+        await web_queue.stage_queue_attachment("s1", "op-1", "conversation-a", request)
+
+    assert refused.value.status_code == 415
+    assert refused.value.detail == {
+        "code": "attachment_rejected",
+        "message": "Unsupported image type.",
+    }
+    assert rpc.calls == []

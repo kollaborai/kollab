@@ -3,6 +3,7 @@
 from .client import RpcClient
 from .context import RpcCallerContext, current_rpc_caller_context
 from .errors import (
+    WEB_QUEUE_ATTACHMENT_REJECTED,
     WEB_QUEUE_CAPACITY_REJECTED,
     RpcError,
     RpcHandlerError,
@@ -24,6 +25,7 @@ __all__ = [
     "RpcTimeoutError",
     "RpcMethodNotFound",
     "RpcHandlerError",
+    "WEB_QUEUE_ATTACHMENT_REJECTED",
     "WEB_QUEUE_CAPACITY_REJECTED",
     "RpcServer",
     "RpcCallerContext",

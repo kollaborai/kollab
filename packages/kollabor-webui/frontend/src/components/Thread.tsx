@@ -349,8 +349,10 @@ export const Thread: FC<{
   historyStartIndex?: number;
   /** Daemon-backed queue mounted above the composer. */
   queuePanel?: ReactNode;
+  /** Current canonical conversation for local queue retry ownership. */
+  queueConversationUid?: string | null;
   onQueueBusyMessage?: (input: BusyWebMessageComposerRequest) => Promise<BusyWebMessageResult>;
-}> = ({ agents = [], commands = [], onOpenPanel, onOpenWelcome, attachmentsEnabled = true, identity, sessionId, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", historyStatus, onLoadOlder, onRetryHistory, historyStartIndex = 0, queuePanel, onQueueBusyMessage }) => (
+}> = ({ agents = [], commands = [], onOpenPanel, onOpenWelcome, attachmentsEnabled = true, identity, sessionId, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", historyStatus, onLoadOlder, onRetryHistory, historyStartIndex = 0, queuePanel, queueConversationUid, onQueueBusyMessage }) => (
   <PoolContext.Provider value={agents}>
   <WhereContext.Provider value={device || workspace}>
   <ComposerHubContext.Provider value={{ workspace, remote: remoteAgents }}>
@@ -377,6 +379,7 @@ export const Thread: FC<{
             attachmentsEnabled={attachmentsEnabled}
             draftKey={composerDraftStorageKey(identity, sessionId)}
             queueSessionId={sessionId}
+            queueConversationUid={queueConversationUid}
 
             historyStatus={historyStatus}
             onLoadOlder={onLoadOlder}

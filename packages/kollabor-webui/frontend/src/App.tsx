@@ -416,6 +416,7 @@ function RuntimeShell({
                     busy={running}
                   />
                 }
+                queueConversationUid={runtimeState?.state?.conversationUid}
                 onQueueBusyMessage={(input) => {
                   const conversationUid = runtimeState?.state?.conversationUid;
                   if (!conversationUid) {

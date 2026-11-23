@@ -21,22 +21,23 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from kollabor_rpc import (
+    WEB_QUEUE_ATTACHMENT_REJECTED,
     WEB_QUEUE_CAPACITY_REJECTED,
     RpcCallerContext,
     current_rpc_caller_context,
 )
 
 from .web_message_attachments import (
-    AttachmentCapacityExceeded,
     DEFAULT_MAX_ATTACHMENT_BYTES,
     DEFAULT_MAX_ATTACHMENTS_PER_ITEM,
+    AttachmentCapacityExceeded,
     WebMessageAttachmentRegistry,
 )
 from .web_message_queue import (
-    CapacityExceeded,
     DEFAULT_MAX_BATCH_ITEMS,
     DEFAULT_MAX_PAYLOAD_BYTES,
     DEFAULT_MAX_QUEUE_BYTES,
+    CapacityExceeded,
     InvalidIdentifier,
     QueueReceipt,
     QueueSnapshot,
@@ -57,6 +58,16 @@ class _QueueCapacityRejected(Exception):
     def __repr__(self) -> str:
         # RpcServer carries handler errors as repr; keep this stable code-only.
         return WEB_QUEUE_CAPACITY_REJECTED
+
+
+class _QueueAttachmentRejected(Exception):
+    """Safe RPC marker for an authenticated, definite precommit image refusal."""
+
+    def __init__(self) -> None:
+        super().__init__(WEB_QUEUE_ATTACHMENT_REJECTED)
+
+    def __repr__(self) -> str:
+        return WEB_QUEUE_ATTACHMENT_REJECTED
 
 _IMAGE_MIME_ALIASES = {
     "image/png": "image/png",
@@ -822,6 +833,11 @@ def register_web_message_queue_handlers(
     async def _stage_attachment(params: dict[str, Any]) -> dict[str, Any]:
         if attachment_registry is None:
             raise ValueError("attachment staging is unavailable")
+        # Resolve the local principal and active conversation before returning
+        # any typed payload rejection to the RPC caller.
+        attachment_scope = await attachment_registry.bind_scope(
+            params, current_rpc_caller_context()
+        )
         operation_id = _required_text(params, "operation_id")
         mime = _required_text(params, "mime")
         filename = params.get("filename", "Image")
@@ -839,13 +855,18 @@ def register_web_message_queue_handlers(
             raise ValueError("invalid image payload") from None
         if not payload:
             raise ValueError("invalid image payload")
-        mime = _validated_image_mime(mime, payload)
-        attachment_scope = await attachment_registry.bind_scope(
-            params, current_rpc_caller_context()
-        )
-        receipt = await attachment_scope.stage(
-            operation_id, mime, payload, filename=filename
-        )
+        try:
+            mime = _validated_image_mime(mime, payload)
+        except ValueError:
+            raise _QueueAttachmentRejected() from None
+        try:
+            receipt = await attachment_scope.stage(
+                operation_id, mime, payload, filename=filename
+            )
+        except AttachmentCapacityExceeded:
+            # _stage checks idempotency, retry lease and all storage bounds
+            # before mutating its byte or operation ledgers.
+            raise _QueueAttachmentRejected() from None
         return {
             "ref": receipt.ref,
             "mime": receipt.mime,

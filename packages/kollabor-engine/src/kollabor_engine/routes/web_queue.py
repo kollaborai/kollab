@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from kollabor_ai.message_content import DEFAULT_MAX_IMAGE_BYTES
 from kollabor_rpc import (
+    WEB_QUEUE_ATTACHMENT_REJECTED,
     WEB_QUEUE_CAPACITY_REJECTED,
     RpcError,
     RpcHandlerError,
@@ -92,6 +93,14 @@ async def _call_queue_rpc(session_id: str, method: str, params: dict[str, Any]) 
                     "message": "The queue is full. No message was admitted.",
                 },
             ) from None
+        if exc.remote_message == WEB_QUEUE_ATTACHMENT_REJECTED:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "attachment_rejected",
+                    "message": "The image was not staged. Correct it or retry after storage becomes available.",
+                },
+            ) from None
         raise HTTPException(
             status_code=409,
             detail="The daemon rejected this queue operation.",
@@ -158,16 +167,23 @@ async def stage_queue_attachment(
 ):
     mime = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if mime not in _IMAGE_MIMES:
-        raise HTTPException(status_code=415, detail="Unsupported image type.")
+        raise HTTPException(
+            status_code=415,
+            detail={"code": "attachment_rejected", "message": "Unsupported image type."},
+        )
     data = bytearray()
     async for chunk in request.stream():
         if len(data) + len(chunk) > DEFAULT_MAX_IMAGE_BYTES:
             raise HTTPException(
-                status_code=413, detail="Image exceeds the 10 MiB limit."
+                status_code=413,
+                detail={"code": "attachment_rejected", "message": "Image exceeds the 10 MiB limit."},
             )
         data.extend(chunk)
     if not data:
-        raise HTTPException(status_code=400, detail="Image data is empty.")
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "attachment_rejected", "message": "Image data is empty."},
+        )
     return await _call_queue_rpc(
         session_id,
         "state.web_queue.stage_attachment",

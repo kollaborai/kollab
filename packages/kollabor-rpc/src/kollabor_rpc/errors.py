@@ -8,11 +8,15 @@ __all__ = [
     "RpcMethodNotFound",
     "RpcHandlerError",
     "WEB_QUEUE_CAPACITY_REJECTED",
+    "WEB_QUEUE_ATTACHMENT_REJECTED",
 ]
 
 # Cross-process marker emitted only when the daemon's atomic web-queue enqueue
 # rejects for capacity before making any queue or attachment-owner mutation.
 WEB_QUEUE_CAPACITY_REJECTED = "kollab.web_queue.capacity_rejected.v1"
+
+# The daemon refused an image before retaining bytes under its staging op ID.
+WEB_QUEUE_ATTACHMENT_REJECTED = "kollab.web_queue.attachment_rejected.v1"
 
 
 class RpcError(Exception):
