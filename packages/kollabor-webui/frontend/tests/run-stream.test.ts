@@ -91,6 +91,34 @@ test("a run's stream ended inside an event passes on nothing the engine sent aft
   assert.equal(letGo, true, "the engine's stream is let go");
 });
 
+test("a run's stream ended after one event holds back the next queued event", async () => {
+  const encoder = new TextEncoder();
+  const source = new ReadableStream<Uint8Array>({
+    start: (controller) => {
+      controller.enqueue(encoder.encode("data: one\n\n"));
+      controller.enqueue(encoder.encode("data: two\n\n"));
+      controller.close();
+    },
+  });
+  const run = endableStream(source);
+  // The assistant-transport reader pipes the response through transforms,
+  // which can have the next read pending while the page handles this event.
+  const consumed = run.stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform: (chunk, controller) => controller.enqueue(chunk),
+  }));
+  const reader = consumed.getReader();
+  const decoder = new TextDecoder();
+  let text = decoder.decode((await reader.read()).value);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  run.end();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    text += decoder.decode(value, { stream: true });
+  }
+  assert.equal(text, `data: one\n\n${FINISH}`);
+});
+
 test("a run's stream ended before its first event holds only the end", async () => {
   const from = engine();
   const run = endableStream(from.source);
