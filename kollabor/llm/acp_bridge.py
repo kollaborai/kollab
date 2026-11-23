@@ -1516,7 +1516,8 @@ class ACPRunner:
         finally:
             if self.update_callback is not None:
                 self.update_callback({"kind": "turn_finished", "request_id": admission.request_id,
-                                      "turn_id": turn_id, "source": admission.source})
+                                      "turn_id": turn_id, "generation": generation,
+                                      "source": admission.source})
             self.permission_bridge.cancel()
             self._active_generation = 0
             self._active_turn_id = 0
@@ -1550,7 +1551,10 @@ class ACPRunner:
         images: tuple[dict[str, str], ...] = (),
     ) -> bool:
         active = getattr(self, "_active_context", None)
-        if not self._active_turn_id or not active or not self.supports_steering:
+        turn_id = self._active_turn_id
+        generation = self._active_generation
+        session_id = self.session_id
+        if not turn_id or not active or not self.supports_steering:
             return False
         human = bool(origin.get("operator"))
         same_requester = (
@@ -1568,14 +1572,13 @@ class ACPRunner:
             return False
         try:
             await asyncio.wait_for(connection.ext_method("session/steering", {
-                "sessionId": self.session_id,
+                "sessionId": session_id,
                 "prompt": [
                     {"type": "text", "text": text},
                     *({"type": "image", "data": image["data"], "mimeType": image["mime_type"]}
                       for image in images),
                 ],
             }), timeout=10)
-            return True
         except acp.RequestError:
             return False
         except Exception as exc:
@@ -1584,6 +1587,12 @@ class ACPRunner:
             raise ACPSteeringUnconfirmed(
                 f"{self.profile.name}: steering receipt not confirmed ({type(exc).__name__})"
             ) from exc
+        if (self._active_context is not active or self._active_turn_id != turn_id
+                or self._active_generation != generation or self.session_id != session_id):
+            raise ACPSteeringUnconfirmed(
+                f"{self.profile.name}: turn changed before steering was confirmed"
+            )
+        return True
 
     def cancel_queued(self, request_id: str, admission: ACPAdmission | None = None) -> bool:
         """Cancel one queued admission: that exact admission if given, else the first with this id."""
@@ -1684,6 +1693,7 @@ class ACPRunner:
         update_data.update({
             "request_id": getattr(getattr(self, "_active_context", None), "request_id", ""),
             "turn_id": self._active_turn_id,
+            "generation": self._active_generation,
             "source": getattr(getattr(self, "_active_context", None), "source", ""),
             "thread_id": getattr(getattr(self, "_active_context", None), "thread_id", None),
         })
@@ -1780,6 +1790,7 @@ class ACPRunner:
         active = getattr(self, "_active_context", None)
         source = getattr(active, "source", "acp")
         thread_id = getattr(active, "thread_id", None)
+        owner_request_id = getattr(active, "request_id", "")
         option_data = []
         for option in options:
             raw = option.model_dump() if hasattr(option, "model_dump") else {}
@@ -1816,7 +1827,9 @@ class ACPRunner:
             self.update_callback({
                 "kind": "permission_request",
                 "request_id": request.request_id,
+                "owner_request_id": owner_request_id,
                 "turn_id": turn_id,
+                "generation": generation,
                 "source": source,
                 "thread_id": thread_id,
                 "payload": {
@@ -1841,7 +1854,9 @@ class ACPRunner:
             self.state = "prompting"
         if self.update_callback is not None:
             self.update_callback({"kind": "permission_resolved", "request_id": request.request_id,
-                                  "turn_id": turn_id, "source": source, "thread_id": thread_id,
+                                  "owner_request_id": owner_request_id,
+                                  "turn_id": turn_id, "generation": generation,
+                                  "source": source, "thread_id": thread_id,
                                   "payload": {"waiting": False, "tool_id": request.request_id}})
         if selected is None:
             return acp.RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
