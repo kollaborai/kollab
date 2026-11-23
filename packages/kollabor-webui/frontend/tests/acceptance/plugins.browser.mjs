@@ -180,7 +180,8 @@ function serve(req, res) {
     // Every other path is the app's page; the app reads its own routes such as /plugin?id=...
     send(res, 200, mime[".html"], indexBytes, { "content-security-policy": pageCsp });
   } catch (error) {
-    send(res, 400, "text/plain; charset=utf-8", String(error));
+    problems.push(`request ${req.url ?? "/"} failed: ${String(error)}`);
+    send(res, 400, "text/plain; charset=utf-8", "bad request");
   }
 }
 
