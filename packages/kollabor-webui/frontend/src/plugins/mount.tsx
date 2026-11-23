@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { PluginPortalScopeContext } from "@/components/ui/plugin-portal-scope";
 import { cn } from "@/lib/utils";
 import type { PluginRecord } from "./registry";
 import type { PluginSession, PluginTab } from "./sdk";
@@ -113,9 +114,13 @@ export class PluginBoundary extends Component<{ name: string; children: ReactNod
 
 /** Every plugin view, page tab and modal tab mounts through this. */
 export function PluginMount({ record, children }: { record: Pick<PluginRecord, "id" | "name">; children: ReactNode }) {
+  const [portalContainer, setPortalContainer] = useState<HTMLDivElement | null>(null);
   return (
     <div data-plugin={record.id} className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <PluginBoundary name={record.name}>{children}</PluginBoundary>
+      <PluginPortalScopeContext.Provider value={{ scoped: true, container: portalContainer }}>
+        <PluginBoundary name={record.name}>{children}</PluginBoundary>
+        <div ref={setPortalContainer} data-plugin-portal-root="" className="contents" />
+      </PluginPortalScopeContext.Provider>
     </div>
   );
 }
