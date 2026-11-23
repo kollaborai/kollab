@@ -82,7 +82,7 @@ try {
     assert.equal(await page.getByRole("alert").count(), 1, "error disappeared before retry succeeded");
     await page.getByTestId("prompts-sidebar").waitFor({ state: "attached" });
     assert.equal(await page.getByRole("alert").count(), 0);
-    assert.equal(await page.getByTestId("target-title").textContent(), "Coder");
+    assert.equal(await page.getByTestId("target-title").textContent(), "Default");
     await page.getByRole("tablist", { name: "Model variant" }).waitFor({ state: "visible" });
     assert.equal(await page.evaluate(() => window.promptsLoadLibrariesCalls), 2);
     const loadedScreenshot = path.join(screenshotDir, `prompts-loaded-${width}.png`);
