@@ -288,7 +288,7 @@ test("end finishes after a complete event followed by an empty source chunk", as
 });
 
 test("an oversized unterminated SSE line fails within the decoder's bound", async () => {
-  const limit = 16 * 1024 * 1024;
+  const limit = 16 * 1024 * 1024 + 4;
   const bytes = new Uint8Array(limit + 1);
   bytes.set(new TextEncoder().encode("data: "));
   const lockedDecoder = new SSEEventDecoder();
@@ -319,7 +319,7 @@ test("an oversized unterminated SSE line fails within the decoder's bound", asyn
 });
 
 test("an oversized trailing partial event still fails after an earlier complete event", async () => {
-  const limit = 16 * 1024 * 1024;
+  const limit = 16 * 1024 * 1024 + 4;
   const first = new TextEncoder().encode("data: first\n\n");
   const partial = new Uint8Array(limit + 1);
   partial.set(new TextEncoder().encode("data: "));
@@ -373,7 +373,7 @@ test("a live CR-terminated SSE event dispatches without another source byte", as
 });
 
 test("an oversized live suffix after a complete event errors before another source read", async () => {
-  const limit = 16 * 1024 * 1024;
+  const limit = 16 * 1024 * 1024 + 4;
   const first = new TextEncoder().encode("data: first\n\n");
   const partial = new Uint8Array(limit + 1);
   partial.set(new TextEncoder().encode("data: "));
@@ -402,6 +402,24 @@ test("an oversized live suffix after a complete event errors before another sour
   assert.match("message" in result ? result.message : "", /SSE event exceeds/);
   assert.equal(cancelled, true, "the still-open upstream source is cancelled");
   await reader.cancel().catch(() => undefined);
+});
+
+test("a decoder-valid max-length line fits with the largest SSE separator", async () => {
+  const lineLimit = 16 * 1024 * 1024;
+  const line = `data: ${"x".repeat(lineLimit - 6)}`;
+  const bytes = new TextEncoder().encode(`${line}\r\n\r\n`);
+  assert.equal(bytes.length, lineLimit + 4);
+  const source = new ReadableStream<Uint8Array>({
+    start: (controller) => {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+  const reader = endableStream(source).stream.getReader();
+  const event = new SSEEventDecoder().push(new TextDecoder().decode((await reader.read()).value));
+  assert.equal(event.length, 1);
+  assert.equal(event[0].data.length, lineLimit - 6);
+  await reader.cancel();
 });
 
 test("a CRLF split after a valid CR-only boundary keeps both locked-decoder events", async () => {

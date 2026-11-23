@@ -4,7 +4,9 @@ const FINISH = new TextEncoder().encode(
 );
 const LF = 10;
 const CR = 13;
-const MAX_EVENT_BYTES = 16 * 1024 * 1024;
+// The locked assistant-transport producer emits one ASCII JSON data line.
+// Its decoder allows 16 MiB line lengths plus at most a CRLF blank separator.
+const MAX_EVENT_BYTES = 16 * 1024 * 1024 + 4;
 
 type Boundary = { chunk: number; offset: number };
 
