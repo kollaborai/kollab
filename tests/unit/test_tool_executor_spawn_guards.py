@@ -414,3 +414,282 @@ def test_unknown_wrapper_double_dash_encoded_command_stays_blocked(option):
 @pytest.mark.parametrize("option", ["-ec", "-enc"])
 def test_unknown_wrapper_multichar_encoded_flags_stay_conservative(option):
     assert _is_blocked_kollab_spawn(f"mytool {option} not-base64")
+
+
+deeply_nested_short_launch = "kollab -a coder"
+for _ in range(9):
+    deeply_nested_short_launch = f'echo "$({deeply_nested_short_launch})"'
+
+long_literal_substitution = "echo '" + ("x" * 5000) + " $(kollab --agent coder)'"
+
+SUBSTITUTION_GUARD_CASES = [
+    pytest.param(
+        "echo '$(kollab --agent coder)'", False, False, id="single-quoted-command-text"
+    ),
+    pytest.param(
+        "echo safe # $(kollab --agent coder)",
+        False,
+        False,
+        id="command-substitution-in-shell-comment",
+    ),
+    pytest.param(
+        "echo safe # <(kollab --agent coder)",
+        False,
+        False,
+        id="process-substitution-in-shell-comment",
+    ),
+    pytest.param(
+        "echo safe # `kollab --agent coder`",
+        False,
+        False,
+        id="backtick-substitution-in-shell-comment",
+    ),
+    pytest.param(
+        "echo foo\\ # $(kollab --agent coder)",
+        True,
+        False,
+        id="escaped-space-before-comment-marker",
+    ),
+    pytest.param(
+        "cat <<EOF\n'$(kollab --agent coder)'\nEOF",
+        True,
+        False,
+        id="single-quoted-substitution-in-unquoted-heredoc",
+    ),
+    pytest.param(
+        "cat <<'EOF'\n`kollab --agent coder`\nEOF",
+        False,
+        False,
+        id="backtick-text-in-quoted-heredoc",
+    ),
+    pytest.param(
+        "cat <<EOF\n`kollab --agent coder`\nEOF",
+        True,
+        False,
+        id="backtick-substitution-in-unquoted-heredoc",
+    ),
+    pytest.param(
+        "cat <<EOF\nplain\nEOF\necho safe # $(kollab --agent coder)",
+        False,
+        False,
+        id="comment-after-heredoc-body",
+    ),
+    pytest.param(
+        "echo '<(kollab --agent coder)'",
+        False,
+        False,
+        id="single-quoted-input-process-text",
+    ),
+    pytest.param(
+        'echo "<(kollab --agent coder)"',
+        False,
+        False,
+        id="double-quoted-input-process-text",
+    ),
+    pytest.param(
+        'echo ">(kollab --agent coder)"',
+        False,
+        False,
+        id="double-quoted-output-process-text",
+    ),
+    pytest.param(
+        "echo '\"$(kollab --agent coder)\"'",
+        False,
+        False,
+        id="nested-single-quoted-text",
+    ),
+    pytest.param(
+        r'echo "\$(kollab --agent coder)"',
+        False,
+        False,
+        id="escaped-command-substitution",
+    ),
+    pytest.param(
+        "echo '>(kollab --agent coder)' &", False, False, id="backgrounded-literal-text"
+    ),
+    pytest.param(
+        long_literal_substitution, False, False, id="long-literal-substitution"
+    ),
+    pytest.param(
+        "echo 'é ü $(kollab --agent coder)'",
+        False,
+        False,
+        id="non-ascii-literal-substitution",
+    ),
+    pytest.param(
+        "echo $(kollab --agent coder)", True, False, id="unquoted-command-substitution"
+    ),
+    pytest.param(
+        'echo "$(kollab --agent coder)"',
+        True,
+        False,
+        id="double-quoted-command-substitution",
+    ),
+    pytest.param(
+        "echo \"'$(kollab --agent coder)'\"",
+        True,
+        False,
+        id="single-quotes-inside-double-quotes",
+    ),
+    pytest.param(
+        'echo "\'" $(kollab --agent coder)',
+        True,
+        False,
+        id="single-quote-inside-double-then-launch",
+    ),
+    pytest.param(
+        "echo '\"' $(kollab --agent coder)",
+        True,
+        False,
+        id="double-quote-inside-single-then-launch",
+    ),
+    pytest.param(
+        "cat <(kollab --agent coder)", True, False, id="input-process-substitution"
+    ),
+    pytest.param(
+        "echo >(kollab --agent coder)", True, False, id="output-process-substitution"
+    ),
+    pytest.param(
+        'echo "$(true; (kollab --agent coder))"', True, False, id="nested-parentheses"
+    ),
+    pytest.param(
+        "echo \"$(printf ')'; kollab --agent coder)\"",
+        True,
+        False,
+        id="quoted-closing-parenthesis",
+    ),
+    pytest.param(
+        'echo "$(echo "$(kollab --agent coder)")"',
+        True,
+        False,
+        id="nested-command-substitution",
+    ),
+    pytest.param(
+        'echo "$(printf safe)"',
+        False,
+        False,
+        id="safe-double-quoted-command-substitution",
+    ),
+    pytest.param(
+        'echo "$(kollab --agent coder"',
+        True,
+        False,
+        id="unmatched-command-substitution",
+    ),
+    pytest.param(
+        'echo "$(printf safe # )\nkollab --agent coder\n)"',
+        True,
+        False,
+        id="comment-parenthesis-inside-command-substitution",
+    ),
+    pytest.param(
+        'echo "$(cat <<EOF\n)\nEOF\nkollab --agent coder\n)"',
+        True,
+        False,
+        id="heredoc-parenthesis-inside-command-substitution",
+    ),
+    pytest.param('echo "$(kollab -a coder"', True, False, id="unmatched-short-launch"),
+    pytest.param(
+        r"echo $'\'' $(kollab -a coder) 'x'",
+        True,
+        False,
+        id="ansi-c-quote-tokenizer-error",
+    ),
+    pytest.param(
+        r"echo $'it\'s'; kollab -a coder", True, False, id="ansi-c-quote-short-launch"
+    ),
+    pytest.param(
+        deeply_nested_short_launch, True, False, id="deeply-nested-short-launch"
+    ),
+    pytest.param(
+        'bash -c "echo \\$(kollab --agent coder)"', True, False, id="shell-wrapper"
+    ),
+    pytest.param(
+        'python -c \'import subprocess; subprocess.run(["echo", "$(kollab --agent coder)"])\'',
+        False,
+        False,
+        id="python-argv-literal-substitution",
+    ),
+    pytest.param(
+        "python -c 'import subprocess; subprocess.run([\"echo $(kollab --agent coder)\"], shell=True)'",
+        True,
+        False,
+        id="python-shell-true-substitution",
+    ),
+    pytest.param("kollab --agent coder &", True, False, id="background-command"),
+    pytest.param(
+        "kollab --agent coder 2>&1", True, False, id="file-descriptor-redirection"
+    ),
+    pytest.param(
+        "echo '$(kollab --agent coder)'", False, True, id="background-flag-literal-text"
+    ),
+    pytest.param("kollab --agent coder", True, True, id="background-flag-command"),
+]
+
+
+@pytest.mark.parametrize(("command", "blocked", "background"), SUBSTITUTION_GUARD_CASES)
+def test_spawn_guard_respects_shell_substitution_context(command, blocked, background):
+    assert _is_blocked_kollab_spawn(command, background=background) is blocked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("command", "blocked", "background"), SUBSTITUTION_GUARD_CASES)
+@pytest.mark.parametrize("use_tmux", [False, True], ids=["shell-executor", "tmux"])
+async def test_terminal_dispatch_preserves_shell_substitution_guard(
+    command, blocked, background, use_tmux
+):
+    config = MagicMock()
+    config.get.side_effect = lambda key, default=None: (
+        key == "tools.block_kollab_terminal_spawn"
+    )
+    executor = ToolExecutor(MagicMock(), MagicMock(), config=config)
+    tmux = MagicMock()
+    tmux.execute_foreground = AsyncMock(
+        return_value={"success": True, "output": "ok\n", "error": ""}
+    )
+    tmux.execute_background = AsyncMock(
+        return_value={
+            "success": True,
+            "message": "started",
+            "session_name": "substitution-guard",
+        }
+    )
+    executor.tmux_plugin = tmux if use_tmux else None
+    executor.shell_executor.run = AsyncMock(
+        return_value=SimpleNamespace(
+            error="", success=True, stdout="ok\n", stderr="", exit_code=0
+        )
+    )
+
+    result = await executor._execute_terminal_command(
+        {
+            "type": "terminal",
+            "id": "substitution-guard",
+            "command": command,
+            "background": background,
+        }
+    )
+
+    if blocked:
+        assert not result.success
+        assert "tools.block_kollab_terminal_spawn" in result.error
+        executor.shell_executor.run.assert_not_awaited()
+        tmux.execute_foreground.assert_not_awaited()
+        tmux.execute_background.assert_not_awaited()
+    else:
+        assert result.success
+        if use_tmux and background:
+            assert result.output == "started"
+            tmux.execute_background.assert_awaited_once()
+            tmux.execute_foreground.assert_not_awaited()
+            executor.shell_executor.run.assert_not_awaited()
+        elif use_tmux:
+            assert result.output == "ok\n"
+            tmux.execute_foreground.assert_awaited_once()
+            tmux.execute_background.assert_not_awaited()
+            executor.shell_executor.run.assert_not_awaited()
+        else:
+            assert result.output == "ok\n"
+            executor.shell_executor.run.assert_awaited_once()
+            tmux.execute_foreground.assert_not_awaited()
+            tmux.execute_background.assert_not_awaited()
