@@ -352,6 +352,7 @@ async def test_assistant_transport_sets_usage_when_client_omits_state(monkeypatc
         pass
 
     assert captured["controller"].state == {
+        messages._ASSISTANT_HANDOVER_STATE_KEY: None,
         "usage": {
             "inputTokens": 0,
             "outputTokens": 3,
@@ -438,8 +439,16 @@ async def test_assistant_transport_preserves_state_through_real_state_proxy(
     ]
     # The admitted send shows at once, before the daemon says anything (#1359).
     admitted = [(op["path"], op["value"]) for op in frames[0]["operations"]]
-    assert [path for path, _ in admitted] == [["messages", "1"]]
-    assert admitted[0][1]["content"] == "hello"
+    capability = [
+        value for path, value in admitted
+        if path == [messages._ASSISTANT_HANDOVER_STATE_KEY]
+    ]
+    assert len(capability) == 1 and isinstance(capability[0], str)
+    user_rows = [
+        value for path, value in admitted if path == ["messages", "1"]
+    ]
+    assert len(user_rows) == 1
+    assert user_rows[0]["content"] == "hello"
     assert frames[2]["path"] == [0]
     assert frames[2]["textDelta"] == "thinking"
     # The first streamed event publishes at once; "hello" lands inside the
@@ -449,7 +458,20 @@ async def test_assistant_transport_preserves_state_through_real_state_proxy(
     assert mid_turn[0][1]["content"] == [{"type": "reasoning", "text": "thinking"}]
     assert frames[6]["path"] == [1]
     assert frames[6]["textDelta"] == "hello"
-    assert frames[7]["operations"] == [
+    final_operations = frames[7]["operations"]
+    assert [operation for operation in final_operations if operation["path"] == [
+        messages._ASSISTANT_HANDOVER_STATE_KEY
+    ]] == [
+        {
+            "type": "set",
+            "path": [messages._ASSISTANT_HANDOVER_STATE_KEY],
+            "value": None,
+        }
+    ]
+    assert [
+        operation for operation in final_operations
+        if operation["path"] != [messages._ASSISTANT_HANDOVER_STATE_KEY]
+    ] == [
         {"type": "set", "path": ["messages"], "value": state["messages"]},
         {"type": "set", "path": ["synced"], "value": None},
         {"type": "set", "path": ["usage"], "value": state["usage"]},
@@ -551,7 +573,13 @@ async def test_assistant_transport_exposes_and_resolves_permission_prompt(monkey
     first = await messages.assistant_transport(
         session.session_id,
         messages.AssistantRequest(
-            commands=[{"type": "add-message", "content": "run command"}],
+            commands=[{
+                "type": "add-message",
+                "message": {
+                    "id": "parent-turn-shell-2",
+                    "content": "run command",
+                },
+            }],
             state={"messages": []},
         ),
     )
@@ -802,6 +830,7 @@ async def _state_ops(monkeypatch, session, commands, state):
         if frame["type"] == "update-state"
         for op in frame["operations"]
         if op["type"] == "set"
+        and op["path"] != [messages._ASSISTANT_HANDOVER_STATE_KEY]
     ]
 
 

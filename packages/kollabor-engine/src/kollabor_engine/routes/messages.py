@@ -13,6 +13,7 @@ import logging
 import re
 import time
 import uuid
+import weakref
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -66,6 +67,270 @@ EVENT_IDLE_TIMEOUT_SECONDS = 600.0
 # (it renders only state.messages); at most one per interval. Text held back by
 # the interval goes out with the next publish, or once the stream goes quiet.
 STREAM_PUBLISH_INTERVAL = 0.15
+_ASSISTANT_HANDOVER_STATE_KEY = "_kollabAssistantHandover"
+_ASSISTANT_HANDOVER_LEDGER_ATTR = "_assistant_transport_handover_ledger"
+_ASSISTANT_HANDOVER_TTL_SECONDS = 24 * 60 * 60
+_ASSISTANT_HANDOVER_TOMBSTONE_TTL_SECONDS = 24 * 60 * 60
+_ASSISTANT_HANDOVER_MAX_ENTRIES = 64
+
+
+def _assistant_correlation_monotonic() -> float:
+    """Clock for the bounded idle wait when admitted turns lack IDs."""
+    return time.monotonic()
+
+
+def _assistant_handover_ledger(session: Any) -> Dict[str, Dict[str, Any]]:
+    """Keep handover authority on the server-side session object."""
+    ledger = getattr(session, _ASSISTANT_HANDOVER_LEDGER_ATTR, None)
+    if not isinstance(ledger, dict):
+        ledger = {}
+        setattr(session, _ASSISTANT_HANDOVER_LEDGER_ATTR, ledger)
+    return ledger
+
+
+def _assistant_cancel_handover_expiry(entry: Dict[str, Any]) -> None:
+    handle = entry.pop("expiry_handle", None)
+    if handle is not None:
+        handle.cancel()
+
+
+def _assistant_expire_handover_entry(
+    session: Any,
+    ledger: Dict[str, Dict[str, Any]],
+    token: str,
+    entry: Dict[str, Any],
+    now: float,
+) -> None:
+    """Release queue resources but retain a bounded tombstone for accepted IDs."""
+    _assistant_cancel_handover_expiry(entry)
+    if entry.get("status") == "expired":
+        ledger.pop(token, None)
+        return
+    record = entry.get("record") or {}
+    accepted_ids = list(record.get("request_ids") or ())
+    queue = entry.get("queue")
+    if queue is not None:
+        session.unsubscribe(queue)
+    if not accepted_ids:
+        ledger.pop(token, None)
+        return
+    entry["status"] = "expired"
+    entry["claim_id"] = None
+    entry["queue"] = None
+    entry["context"] = None
+    entry["record"] = {
+        "request_ids": accepted_ids,
+        "completed_request_ids": list(record.get("completed_request_ids") or ()),
+        "expired": True,
+    }
+    entry["expires_at"] = now + _ASSISTANT_HANDOVER_TOMBSTONE_TTL_SECONDS
+    _assistant_schedule_handover_expiry(session, token, entry)
+
+
+def _assistant_schedule_handover_expiry(
+    session: Any, token: str, entry: Dict[str, Any]
+) -> None:
+    """Bound parked handover resources and retain accepted-ID expiry evidence."""
+    _assistant_cancel_handover_expiry(entry)
+    if entry.get("status") == "claimed":
+        # A live route owns the lease; parked handovers get the idle TTL.
+        entry["expires_at"] = None
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        session_ref = weakref.ref(session)
+    except (RuntimeError, TypeError):
+        return
+    expires_at = float(entry.get("expires_at") or 0)
+
+    def expire() -> None:
+        current_session = session_ref()
+        if current_session is None:
+            return
+        ledger = getattr(current_session, _ASSISTANT_HANDOVER_LEDGER_ATTR, {})
+        current_entry = ledger.get(token) if isinstance(ledger, dict) else None
+        if current_entry is None:
+            return
+        remaining = expires_at - _assistant_correlation_monotonic()
+        if remaining > 0:
+            _assistant_schedule_handover_expiry(
+                current_session, token, current_entry
+            )
+            return
+        if current_entry is not None:
+            _assistant_expire_handover_entry(
+                current_session, ledger, token, current_entry,
+                _assistant_correlation_monotonic(),
+            )
+
+    entry["expiry_handle"] = loop.call_later(
+        max(0.0, expires_at - _assistant_correlation_monotonic()), expire
+    )
+
+
+def _assistant_prune_handover_ledger(
+    session: Any, ledger: Dict[str, Dict[str, Any]], now: float
+) -> None:
+    """Expire old capabilities and bound abandoned handovers per session."""
+    for token, entry in list(ledger.items()):
+        expires_at = entry.get("expires_at")
+        if expires_at is not None and float(expires_at) <= now:
+            _assistant_expire_handover_entry(session, ledger, token, entry, now)
+
+
+def _assistant_reserve_handover(
+    session: Any,
+    queue: asyncio.Queue,
+    context: SessionReadContext | None,
+) -> tuple[Optional[str], Optional[str]]:
+    """Reserve capacity before accepting a send that may need handover."""
+    ledger = _assistant_handover_ledger(session)
+    now = _assistant_correlation_monotonic()
+    _assistant_prune_handover_ledger(session, ledger, now)
+    if len(ledger) >= _ASSISTANT_HANDOVER_MAX_ENTRIES:
+        return None, None
+    token = uuid.uuid4().hex
+    claim_id = uuid.uuid4().hex
+    entry = {
+        "expires_at": now + _ASSISTANT_HANDOVER_TTL_SECONDS,
+        "status": "claimed",
+        "claim_id": claim_id,
+        "record": {},
+        "queue": queue,
+        "context": context,
+    }
+    ledger[token] = entry
+    _assistant_schedule_handover_expiry(session, token, entry)
+    return token, claim_id
+
+
+def _assistant_claim_handover(
+    session: Any, token: Any
+) -> tuple[
+    Optional[Dict[str, Any]], Optional[str], Optional[str],
+    Optional[asyncio.Queue], Optional[SessionReadContext],
+]:
+    """Lease one session-bound token; reject replay while another run owns it."""
+    if not isinstance(token, str) or re.fullmatch(r"[0-9a-f]{32}", token) is None:
+        return None, None, "Permission handover capability is invalid or expired.", None, None
+    ledger = _assistant_handover_ledger(session)
+    now = _assistant_correlation_monotonic()
+    _assistant_prune_handover_ledger(session, ledger, now)
+    entry = ledger.get(token)
+    if entry is None:
+        return None, None, "Permission handover capability is invalid or expired.", None, None
+    if entry.get("status") == "expired":
+        request_ids = ", ".join(
+            str(request_id)
+            for request_id in (entry.get("record") or {}).get("request_ids") or ()
+        ) or "unknown"
+        return (
+            None,
+            None,
+            "Permission handover expired. Accepted message(s) "
+            f"{request_ids} may still be running; their event stream is no longer "
+            "available. No messages were resubmitted.",
+            None,
+            None,
+        )
+    if entry.get("status") == "claimed":
+        return None, None, "Permission handover is already in progress; replay was rejected.", None, None
+    claim_id = uuid.uuid4().hex
+    entry["status"] = "claimed"
+    entry["claim_id"] = claim_id
+    entry["expires_at"] = now + _ASSISTANT_HANDOVER_TTL_SECONDS
+    _assistant_schedule_handover_expiry(session, token, entry)
+    return (
+        copy.deepcopy(entry.get("record") or {}),
+        claim_id,
+        None,
+        entry.get("queue"),
+        entry.get("context"),
+    )
+
+
+def _assistant_update_handover(
+    session: Any,
+    token: Optional[str],
+    claim_id: Optional[str],
+    record: Dict[str, Any],
+    queue: Optional[asyncio.Queue] = None,
+    context: SessionReadContext | None = None,
+) -> None:
+    """Refresh the record only while this run holds its matching lease."""
+    if not token or not claim_id:
+        return
+    ledger = _assistant_handover_ledger(session)
+    entry = ledger.get(token)
+    if entry is None or entry.get("claim_id") != claim_id:
+        return
+    entry["record"] = copy.deepcopy(record)
+    if queue is not None:
+        entry["queue"] = queue
+        entry["context"] = context
+    entry["expires_at"] = (
+        _assistant_correlation_monotonic() + _ASSISTANT_HANDOVER_TTL_SECONDS
+    )
+    _assistant_schedule_handover_expiry(session, token, entry)
+
+
+def _assistant_release_handover(
+    session: Any,
+    token: Optional[str],
+    claim_id: Optional[str],
+    record: Optional[Dict[str, Any]],
+) -> None:
+    """Return an unfinished lease to the same capability for a safe retry."""
+    if not token or not claim_id:
+        return
+    ledger = _assistant_handover_ledger(session)
+    entry = ledger.get(token)
+    if entry is None or entry.get("claim_id") != claim_id:
+        return
+    if record is not None:
+        entry["record"] = copy.deepcopy(record)
+    entry["status"] = "available"
+    entry["claim_id"] = None
+    entry["expires_at"] = (
+        _assistant_correlation_monotonic() + _ASSISTANT_HANDOVER_TTL_SECONDS
+    )
+    _assistant_schedule_handover_expiry(session, token, entry)
+
+
+def _assistant_finish_handover(
+    session: Any,
+    token: Optional[str],
+    claim_id: Optional[str],
+) -> Any:
+    """Delete a fully completed or invalidated handover capability.
+
+    Returns the queue it unsubscribed, or None, so the caller does not
+    unsubscribe the same queue twice.
+    """
+    if not token or not claim_id:
+        return None
+    ledger = _assistant_handover_ledger(session)
+    entry = ledger.get(token)
+    if entry is not None and entry.get("claim_id") == claim_id:
+        finished = ledger.pop(token, None)
+        if finished is not None:
+            _assistant_cancel_handover_expiry(finished)
+            if finished.get("queue") is not None:
+                session.unsubscribe(finished["queue"])
+                return finished["queue"]
+    return None
+
+
+def _event_request_ids(event: Dict[str, Any]) -> set[str]:
+    """Return every request id carried by an event, including its primary id."""
+    values = event.get("request_ids") or ()
+    if isinstance(values, (str, bytes)):
+        values = (values,)
+    return (
+        {str(event["request_id"])}
+        if event.get("request_id") is not None and str(event["request_id"])
+        else set()
+    ) | {str(value) for value in values if value is not None and str(value)}
 
 
 def _foreign_completion(event: Dict[str, Any], request_ids: set[str], tagged: bool = False) -> bool:
@@ -79,10 +344,9 @@ def _foreign_completion(event: Dict[str, Any], request_ids: set[str], tagged: bo
     """
     if event.get("type") != "turn_complete":
         return False
-    request_id = str(event.get("request_id") or "")
     if event.get("input_source") == "acp_client" and event.get("queued") is True:
-        return request_id not in request_ids
-    named = {request_id} - {""} | {str(i) for i in event.get("request_ids") or ()}
+        return not _event_request_ids(event) & request_ids
+    named = _event_request_ids(event)
     if not named:
         return tagged
     return bool(request_ids) and not named & request_ids
@@ -539,28 +803,34 @@ def _assistant_permission_identity(messages: List[Dict[str, Any]], call_id: str)
 async def _assistant_next_event(queue, controller, timeout=None):
     """Wait for either a daemon event or assistant-stream cancellation.
 
-    Returns None once the stream is cancelled, and ``{}`` when ``timeout``
-    seconds pass with neither (a cancelled ``queue.get()`` loses no event).
+    Returns None once the stream is cancelled, without starting another queue
+    read. If cancellation and a queue read finish together, preserve the event;
+    the next call observes cancellation. Returns ``{}`` when ``timeout``
+    seconds pass with neither. A revoked stream marker remains terminal.
+
     A closed stream (another chat opened, the tab closed, a phone dropped)
     leaves the daemon's turn running; Stop cancels it through
     ``POST /{session_id}/cancel``.
     """
+    if controller.cancelled_event.is_set():
+        return None
+
     event_task = asyncio.create_task(queue.get())
     cancel_task = asyncio.create_task(controller.cancelled_event.wait())
     try:
-        done, _ = await asyncio.wait(
+        await asyncio.wait(
             {event_task, cancel_task},
             timeout=timeout,
             return_when=asyncio.FIRST_COMPLETED,
         )
-        if cancel_task in done:
+        if event_task.done():
+            cancel_task.cancel()
+            event = event_task.result()
+            return None if event is PHONE_STREAM_REVOKED else event
+        if cancel_task.done():
             event_task.cancel()
             return None
-        if event_task not in done:
-            return {}
-        cancel_task.cancel()
-        event = event_task.result()
-        return None if event is PHONE_STREAM_REVOKED else event
+        return {}
     finally:
         for task in (event_task, cancel_task):
             if not task.done():
@@ -590,6 +860,14 @@ def _permission_result_from_event(event: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _assistant_permission_id(event: Dict[str, Any]) -> Optional[str]:
+    """Read the unique permission prompt identity when the daemon provides it."""
+    value = event.get("permission_id")
+    if value is None and isinstance(event.get("details"), dict):
+        value = event["details"].get("permission_id")
+    return str(value) if value is not None and str(value) else None
+
+
 def _assistant_set_usage(controller: Any, usage: Dict[str, Any]) -> None:
     """Publish usage without assuming a plain dict state.
 
@@ -607,6 +885,18 @@ def _assistant_set_usage(controller: Any, usage: Dict[str, Any]) -> None:
         state["usage"] = usage
     except (KeyError, TypeError, AttributeError):
         controller.state = {"usage": usage}
+
+
+def _assistant_set_state_value(controller: Any, key: str, value: Any) -> None:
+    """Set one root state field across assistant-stream state versions."""
+    state = controller.state
+    if state is None:
+        controller.state = {key: value}
+        return
+    try:
+        state[key] = value
+    except (KeyError, TypeError, AttributeError):
+        controller.state = {key: value}
 
 
 def _assistant_copy_messages(state: Any) -> List[Dict[str, Any]]:
@@ -736,6 +1026,27 @@ def _assistant_update_message_state(
         assistant_message["status"] = status
     messages.append(assistant_message)
     return messages
+
+
+def _assistant_turn_message(
+    session_id: str,
+    messages: List[Dict[str, Any]],
+    turn: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Make one assistant-ui row for one completed or in-flight daemon turn."""
+    message: Dict[str, Any] = {
+        "id": str(
+            turn.get("message_id")
+            or f"assistant-{session_id}-{len(messages)}"
+        ),
+        "role": "assistant",
+        "content": copy.deepcopy(turn.get("parts") or []),
+    }
+    if not message["content"]:
+        message["content"] = ""
+    if turn.get("status") is not None:
+        message["status"] = copy.deepcopy(turn["status"])
+    return message
 
 
 def _assistant_align_streamed_ids(
@@ -1212,6 +1523,8 @@ def _assistant_finish_reason(value: Any) -> str:
         "length": "length",
         "content_filter": "content-filter",
         "error": "error",
+        "cancelled": "stop",
+        "canceled": "stop",
     }.get(normalized, "other")
 
 
@@ -1424,15 +1737,78 @@ async def assistant_transport(
         ) from exc
 
     completion: Dict[str, Any] = {"completed": False}
+    handover_delivery: Dict[str, Any] = {
+        "enabled": False,
+        "token": None,
+        "sent": asyncio.Event(),
+    }
 
     async def run_callback(controller: RunController):
-        shared_queue = _subscribe(session, read_context)
+        state_blob = body.state if isinstance(body.state, dict) else {}
+        handover_token = state_blob.get(_ASSISTANT_HANDOVER_STATE_KEY)
+        handover_token_from_request = handover_token is not None
+        handover_record: Optional[Dict[str, Any]] = None
+        handover_claim_id: Optional[str] = None
+        handover_error = ""
+        clear_handover_state_on_reject = False
+        shared_queue: Optional[asyncio.Queue] = None
+        queue_from_ledger = False
+        if handover_token is not None:
+            (
+                handover_record,
+                handover_claim_id,
+                claim_error,
+                retained_queue,
+                retained_context,
+            ) = _assistant_claim_handover(session, handover_token)
+            if claim_error:
+                handover_error = claim_error
+                clear_handover_state_on_reject = (
+                    "capability is invalid or expired" in claim_error.lower()
+                    or claim_error.lower().startswith("permission handover expired")
+                )
+                handover_record = None
+                handover_claim_id = None
+            elif retained_context is not read_context:
+                _assistant_release_handover(
+                    session, handover_token, handover_claim_id, handover_record
+                )
+                handover_error = (
+                    "Permission handover authorization context changed; "
+                    "accepted turns were not resumed."
+                )
+                clear_handover_state_on_reject = True
+                handover_record = None
+                handover_claim_id = None
+            elif retained_queue is None:
+                _assistant_release_handover(
+                    session, handover_token, handover_claim_id, handover_record
+                )
+                handover_error = (
+                    "Permission handover event subscription is unavailable; "
+                    "accepted turns were not resumed."
+                )
+                clear_handover_state_on_reject = True
+                handover_record = None
+                handover_claim_id = None
+            else:
+                shared_queue = retained_queue
+                queue_from_ledger = True
+        subscribed_here = False
+        if shared_queue is None and not handover_error:
+            shared_queue = _subscribe(session, read_context)
+            subscribed_here = True
         queue = shared_queue
-        goal_pump = None
+        preserve_handover_queue = False
+        goal_pumps: List[asyncio.Task] = []
         revocation_watch = None
         tool_controllers: Dict[str, Any] = {}
         permission_controllers: Dict[tuple[str, str], Any] = {}
         permission_tool_ids: Dict[str, str] = {}
+        permission_decisions: Dict[str, Dict[str, Any]] = {}
+        permission_resolution_pending: Dict[str, Dict[str, Any]] = {}
+        permission_resolution_errors: Dict[str, str] = {}
+        permission_resolution_deadline: Optional[float] = None
         state_messages = _assistant_copy_messages(body.state)
         persist_message_state = isinstance(body.state, dict) and isinstance(
             body.state.get("messages"), list
@@ -1443,10 +1819,24 @@ async def assistant_transport(
         submitted_media: List[List[Dict[str, str]]] = []
         # The request id of each submission, parallel to submitted_contents (#1359).
         submitted_request_ids: List[str] = []
+        # The request ID the daemon says owns each submitted user row.
+        submitted_turn_request_ids: List[str] = []
         submitted_row_ids: List[Optional[str]] = []  # the row each send names, if any (#1102)
+        resumed_request_order: List[str] = []
+        resumed_rows: Dict[str, Dict[str, Any]] = {}
+        resumed_prompt_request_ids: set[str] = set()
+        resumed_prompt_tools: Dict[str, set[str]] = {}
+        resumed_prompt_permission_ids: Dict[str, set[str]] = {}
+        resumed_permission_request_ids: Dict[str, set[str]] = {}
         request_ids: set[str] = set()
-        untagged = False  # an admission that echoed no id: its turn carries none (#551)
-        answered_prompts: set[tuple[str, str]] = set()  # exact permission owners this request answered
+        admitted_turn_request_ids: set[str] = set()
+        private_goal_reply_ids: set[str] = set()
+        possibly_accepted_request_ids: set[str] = set()
+        untagged_request_ids: set[str] = set()
+        completed_request_ids: set[str] = set()
+        completed_assistant_turns: List[Dict[str, Any]] = []
+        current_turn_request_ids: set[str] = set()
+        answered_prompts: set[tuple[str, str]] = set()
         assistant_tool_parts: Dict[str, Dict[str, Any]] = {}
         # Text, reasoning and tool-call parts in arrival order.
         assistant_parts: List[Dict[str, Any]] = []
@@ -1460,6 +1850,257 @@ async def assistant_transport(
         turn_error = ""
         # Structured fields from the error event (error_class/code/...).
         turn_error_fields: dict = {}
+        run_error: Optional[Dict[str, Any]] = None
+        admission_error = ""
+        correlation_deadline: Optional[float] = None
+        usage_totals = {"inputTokens": 0, "outputTokens": 0, "toolCalls": 0}
+        final_stop_reason = "end_turn"
+        handover_drop_baseline = int(getattr(queue, "dropped_count", 0) or 0)
+        event_loss_seen = False
+        event_loss_count = 0
+        event_loss_message = ""
+        event_loss_terminal = False
+        event_loss_permission = False
+
+        if handover_record is not None:
+            resumed_request_order = [
+                str(request_id)
+                for request_id in handover_record.get("request_ids") or ()
+                if request_id is not None and str(request_id)
+            ]
+            request_ids.update(resumed_request_order)
+            admitted_turn_request_ids.update(resumed_request_order)
+            possibly_accepted_request_ids.update(
+                str(request_id)
+                for request_id in handover_record.get("possibly_accepted_request_ids") or ()
+                if request_id is not None and str(request_id)
+            )
+            admission_error = str(handover_record.get("admission_error") or "")
+            if admission_error:
+                completion["error"] = {"message": admission_error}
+            submitted_turn_request_ids.extend(resumed_request_order)
+            completed_request_ids.update(
+                str(request_id)
+                for request_id in handover_record.get("completed_request_ids") or ()
+                if request_id is not None
+            )
+            private_goal_reply_ids.update(
+                str(reply_id)
+                for reply_id in handover_record.get("private_goal_reply_ids") or ()
+                if reply_id is not None and str(reply_id)
+            )
+            private_goal_reply_ids.difference_update(completed_request_ids)
+            untagged_request_ids.update(
+                str(request_id)
+                for request_id in handover_record.get("untagged_request_ids") or ()
+                if request_id is not None
+            )
+            completed_assistant_turns.extend(
+                copy.deepcopy(handover_record.get("completed_turns") or [])
+            )
+            resumed_rows = {
+                str(row["request_id"]): copy.deepcopy(row)
+                for row in handover_record.get("rows") or []
+                if isinstance(row, dict)
+                and row.get("request_id") is not None
+                and row.get("row_id") is not None
+            }
+            resumed_prompt_tools = {
+                str(request_id): {
+                    str(tool_id)
+                    for tool_id in tool_ids or ()
+                    if tool_id is not None and str(tool_id)
+                }
+                for request_id, tool_ids in (
+                    handover_record.get("prompt_tools") or {}
+                ).items()
+            }
+            resumed_prompt_request_ids = set(resumed_prompt_tools)
+            resumed_prompt_permission_ids = {
+                str(tool_id): {
+                    str(permission_id)
+                    for permission_id in permission_ids or ()
+                    if permission_id is not None and str(permission_id)
+                }
+                for tool_id, permission_ids in (
+                    handover_record.get("prompt_permission_ids") or {}
+                ).items()
+            }
+            resumed_permission_request_ids = {
+                str(permission_id): {
+                    str(request_id)
+                    for request_id in request_ids or ()
+                    if request_id is not None and str(request_id)
+                }
+                for permission_id, request_ids in (
+                    handover_record.get("permission_request_ids") or {}
+                ).items()
+            }
+            permission_resolution_errors = {
+                str(tool_id): str(message)
+                for tool_id, message in (
+                    handover_record.get("permission_resolution_errors") or {}
+                ).items()
+            }
+            for tool_ids in resumed_prompt_tools.values():
+                for tool_id in tool_ids:
+                    permission_ids = resumed_prompt_permission_ids.get(tool_id) or {""}
+                    for permission_id in permission_ids:
+                        call_id = (
+                            f"permission_{tool_id}_{permission_id}"
+                            if permission_id
+                            else f"permission_{tool_id}"
+                        )
+                        permission_tool_ids[call_id] = tool_id
+            permission_decisions = copy.deepcopy(
+                handover_record.get("permission_decisions") or {}
+            )
+            assistant_parts = copy.deepcopy(
+                handover_record.get("assistant_parts") or []
+            )
+            assistant_tool_parts = {
+                str(part.get("toolCallId")): part
+                for part in assistant_parts
+                if isinstance(part, dict)
+                and part.get("type") == "tool-call"
+                and part.get("toolCallId")
+            }
+            answered_prompts.update(
+                (str(answer[0]), str(answer[1]))
+                for answer in handover_record.get("answered_prompts") or ()
+                if isinstance(answer, (list, tuple))
+                and len(answer) == 2
+                and answer[0] is not None
+                and answer[1] is not None
+            )
+            current_turn_request_ids.update(
+                str(request_id)
+                for request_id in handover_record.get("current_turn_request_ids") or ()
+                if request_id is not None
+            )
+            turn_error = str(handover_record.get("turn_error") or "")
+            turn_error_fields = copy.deepcopy(
+                handover_record.get("turn_error_fields") or {}
+            )
+            saved_messages = handover_record.get("messages")
+            if isinstance(saved_messages, list):
+                state_messages = copy.deepcopy(saved_messages)
+                sent_messages = list(state_messages)
+                if persist_message_state:
+                    _assistant_set_messages(controller, state_messages)
+            saved_usage = handover_record.get("usage_totals") or {}
+            for key in usage_totals:
+                usage_totals[key] = int(saved_usage.get(key, 0) or 0)
+            handover_drop_baseline = int(
+                handover_record.get(
+                    "queue_dropped_count", handover_drop_baseline
+                )
+                or 0
+            )
+            event_loss_seen = bool(handover_record.get("event_loss_seen"))
+            event_loss_count = int(handover_record.get("event_loss_count", 0) or 0)
+            event_loss_message = str(
+                handover_record.get("event_loss_message") or ""
+            )
+            event_loss_terminal = bool(handover_record.get("event_loss_terminal"))
+            event_loss_permission = bool(
+                handover_record.get("event_loss_permission")
+            )
+            if event_loss_seen and admitted_turn_request_ids - completed_request_ids:
+                correlation_deadline = (
+                    _assistant_correlation_monotonic()
+                    + EVENT_IDLE_TIMEOUT_SECONDS
+                )
+            if (
+                len(resumed_request_order) > 1
+                and untagged_request_ids - completed_request_ids
+            ):
+                correlation_deadline = (
+                    _assistant_correlation_monotonic()
+                    + EVENT_IDLE_TIMEOUT_SECONDS
+                )
+            if possibly_accepted_request_ids - completed_request_ids:
+                # An earlier admission response may have been lost. Keep the
+                # resumed receive loop bounded even when a later accepted turn
+                # completes and the uncertain request never emits anything.
+                correlation_deadline = (
+                    _assistant_correlation_monotonic()
+                    + EVENT_IDLE_TIMEOUT_SECONDS
+                )
+
+        def reject_handover(message: str) -> None:
+            nonlocal handover_record, handover_claim_id
+            controller.add_error(message)
+            completion["error"] = {"message": message}
+            completion["usage"] = {
+                **usage_totals,
+                "stopReason": "error",
+            }
+            completion["completed"] = True
+            _assistant_set_usage(controller, completion["usage"])
+            if handover_token and handover_claim_id:
+                _assistant_release_handover(
+                    session, handover_token, handover_claim_id, handover_record
+                )
+                handover_claim_id = None
+            if clear_handover_state_on_reject:
+                # Invalid, expired, or otherwise non-resumable capabilities
+                # must not poison every later request copied from this state.
+                _assistant_set_state_value(
+                    controller, _ASSISTANT_HANDOVER_STATE_KEY, None
+                )
+            handover_record = None
+
+        async def wait_for_handover_capability_delivery() -> bool:
+            """Wait boundedly for the ASGI send callback before admitting work."""
+            if (
+                handover_token_from_request
+                or not handover_token
+                or not handover_delivery["enabled"]
+            ):
+                return True
+            handover_delivery["token"] = handover_token
+            state_manager = getattr(controller, "_state_manager", None)
+            flush = getattr(state_manager, "flush", None)
+            if callable(flush):
+                flush()
+
+            deadline = time.monotonic() + EVENT_IDLE_TIMEOUT_SECONDS
+            while True:
+                if (read_context and read_context.revoked) or getattr(
+                    shared_queue, "revoked", False
+                ):
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    message = (
+                        "Cannot submit assistant messages because the handover "
+                        "capability ASGI send timed out. No messages were submitted. "
+                        "Retry the request."
+                    )
+                    controller.add_error(message)
+                    completion["error"] = {"message": message}
+                    completion["usage"] = {
+                        **usage_totals,
+                        "stopReason": "error",
+                    }
+                    completion["completed"] = True
+                    _assistant_set_state_value(
+                        controller, _ASSISTANT_HANDOVER_STATE_KEY, None
+                    )
+                    _assistant_set_usage(controller, completion["usage"])
+                    return False
+                try:
+                    await asyncio.wait_for(
+                        handover_delivery["sent"].wait(),
+                        timeout=min(remaining, 0.05),
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                return not (
+                    (read_context and read_context.revoked)
+                    or getattr(shared_queue, "revoked", False)
+                )
 
         def publish_progress() -> None:
             """Publish the in-flight turn so its parts reach the browser.
@@ -1474,16 +2115,7 @@ async def assistant_transport(
             stream_held = False
             if not persist_message_state:
                 return
-            progress = _assistant_update_message_state(
-                [dict(message) for message in state_messages],
-                session_id,
-                submitted_contents,
-                copy.deepcopy(assistant_parts),
-                None,
-                copy.deepcopy(submitted_media),
-                list(submitted_request_ids),
-                list(submitted_row_ids),
-            )
+            progress = build_messages_for_turn()
             published = controller.state["messages"]
             for index, message in enumerate(progress):
                 if index >= len(sent_messages):
@@ -1491,6 +2123,727 @@ async def assistant_transport(
                 elif message != sent_messages[index]:
                     published[index] = message
             sent_messages = progress
+
+        def stable_user_row_id(proposed: Any) -> str:
+            """Reserve each user row ID in admission order before rows move."""
+            taken = {
+                message.get("id") for message in state_messages
+            } | set(submitted_row_ids)
+            row_pattern = re.compile(rf"user-{re.escape(session_id)}-\d+")
+            if (
+                isinstance(proposed, str)
+                and row_pattern.fullmatch(proposed)
+                and proposed not in taken
+            ):
+                return proposed
+            ordinal = len(submitted_row_ids)
+            suffix = len(state_messages) + ordinal
+            candidate = f"user-{session_id}-{suffix}"
+            while candidate in taken:
+                suffix += 1
+                candidate = f"user-{session_id}-{suffix}"
+            return candidate
+
+        def assistant_row_id(request_ids_for_turn: set[str]) -> str:
+            if queue_from_ledger:
+                indexes = [
+                    resumed_request_order.index(request_id)
+                    for request_id in request_ids_for_turn
+                    if request_id in resumed_request_order
+                ]
+                ordinal = min(indexes) if indexes else len(resumed_request_order)
+                return f"assistant-{session_id}-resume-{ordinal}"
+            if len(submitted_contents) == 1:
+                # Keep the established row id for ordinary one-message runs.
+                # Multi-send runs need ids independent of progress-list length
+                # so each streamed turn keeps its row through reordering.
+                return f"assistant-{session_id}-{len(state_messages) + 1}"
+            indexes = [
+                index
+                for index, request_id in enumerate(submitted_turn_request_ids)
+                if request_id in request_ids_for_turn
+            ]
+            if not indexes:
+                indexes = [
+                    index
+                    for index, request_id in enumerate(submitted_turn_request_ids)
+                    if request_id not in completed_request_ids
+                ]
+            ordinal = min(indexes) if indexes else len(submitted_contents)
+            return f"assistant-{session_id}-turn-{len(state_messages) + ordinal}"
+
+        def build_resumed_messages_for_turn(
+            status: Optional[Dict[str, str]] = None,
+            request_ids_for_turn: Optional[set[str]] = None,
+            parts_override: Optional[List[Dict[str, Any]]] = None,
+            message_id_override: Optional[str] = None,
+        ) -> List[Dict[str, Any]]:
+            """Render completed and active turns beside their original user rows."""
+            current = [dict(message) for message in state_messages]
+            if submitted_contents:
+                present_row_ids = {
+                    row.get("id") for row in current if row.get("role") == "user"
+                }
+                present_request_ids = {
+                    (row.get("metadata") or {}).get("custom", {}).get("requestId")
+                    for row in current
+                    if row.get("role") == "user"
+                }
+                missing_indexes = [
+                    index
+                    for index, row_id in enumerate(submitted_row_ids)
+                    if row_id not in present_row_ids
+                    and submitted_request_ids[index] not in present_request_ids
+                ]
+                if missing_indexes:
+                    _assistant_update_message_state(
+                        current,
+                        session_id,
+                        [submitted_contents[index] for index in missing_indexes],
+                        [],
+                        None,
+                        [submitted_media[index] for index in missing_indexes],
+                        [submitted_request_ids[index] for index in missing_indexes],
+                        [submitted_row_ids[index] for index in missing_indexes],
+                    )
+                    current.pop()  # discard the helper's single reply placeholder
+
+            def render_turn(
+                turn_ids: set[str],
+                parts: List[Dict[str, Any]],
+                turn_status: Optional[Dict[str, str]],
+                message_id: Optional[str],
+            ) -> None:
+                nonlocal current
+                if not turn_ids or (not parts and turn_status is None):
+                    return
+                prompt_ids = turn_ids & resumed_prompt_request_ids
+                prompt_identities: set[tuple[str, str]] = set()
+                for request_id in prompt_ids:
+                    for tool_id in resumed_prompt_tools.get(request_id, set()):
+                        permission_ids = {
+                            permission_id
+                            for permission_id, owner_request_ids
+                            in resumed_permission_request_ids.items()
+                            if request_id in owner_request_ids
+                            and permission_id
+                            in resumed_prompt_permission_ids.get(tool_id, set())
+                        }
+                        if permission_ids:
+                            prompt_identities.update(
+                                (tool_id, permission_id)
+                                for permission_id in permission_ids
+                            )
+                        else:
+                            prompt_identities.add((tool_id, ""))
+                prompt_call_ids = {
+                    f"permission_{tool_id}_{permission_id}"
+                    if permission_id
+                    else f"permission_{tool_id}"
+                    for tool_id, permission_id in prompt_identities
+                }
+                prompt_index = next(
+                    (
+                        index
+                        for index in range(len(current) - 1, -1, -1)
+                        if current[index].get("role") == "assistant"
+                        and any(
+                            isinstance(part, dict)
+                            and part.get("toolCallId") in prompt_call_ids
+                            for part in (
+                                current[index].get("content")
+                                if isinstance(current[index].get("content"), list)
+                                else []
+                            )
+                        )
+                    ),
+                    None,
+                )
+                if prompt_ids and prompt_index is not None:
+                    message = current.pop(prompt_index)
+                    content = message.get("content")
+                    merged = (
+                        list(content)
+                        if isinstance(content, list)
+                        else ([{"type": "text", "text": content}] if content else [])
+                    )
+                    stored_tools = {
+                        part.get("toolCallId"): index
+                        for index, part in enumerate(merged)
+                        if isinstance(part, dict)
+                        and part.get("type") == "tool-call"
+                    }
+                    for part in parts:
+                        index = (
+                            stored_tools.get(part.get("toolCallId"))
+                            if isinstance(part, dict) and part.get("type") == "tool-call"
+                            else None
+                        )
+                        if index is None:
+                            merged.append(copy.deepcopy(part))
+                        else:
+                            merged[index] = copy.deepcopy(part)
+                    message["content"] = merged or ""
+                    if turn_status is None:
+                        message.pop("status", None)
+                    else:
+                        message["status"] = copy.deepcopy(turn_status)
+                    target = len(current)
+                    for index, row in enumerate(current):
+                        if row.get("role") == "user" and any(
+                            (resumed_rows.get(request_id) or {}).get("row_id")
+                            == row.get("id")
+                            for request_id in turn_ids
+                        ):
+                            target = max(target if target != len(current) else 0, index + 1)
+                    if target:
+                        current.insert(target, message)
+                    else:
+                        current.insert(min(prompt_index, len(current)), message)
+                    return
+
+                indexes = [
+                    resumed_request_order.index(request_id)
+                    for request_id in turn_ids
+                    if request_id in resumed_request_order
+                ]
+                ordinal = min(indexes) if indexes else len(resumed_request_order)
+                resolved_message_id = message_id or (
+                    message_id_override
+                    if request_ids_for_turn is not None
+                    else None
+                ) or f"assistant-{session_id}-resume-{ordinal}"
+                assistant_message = _assistant_turn_message(
+                    session_id,
+                    current,
+                    {
+                        "parts": parts,
+                        "status": turn_status,
+                        "message_id": resolved_message_id,
+                    },
+                )
+                user_indexes = []
+                for request_id in turn_ids:
+                    row_info = resumed_rows.get(request_id) or {}
+                    row_id = row_info.get("row_id")
+                    index = next(
+                        (
+                            i for i, row in enumerate(current)
+                            if row.get("role") == "user" and row.get("id") == row_id
+                        ),
+                        None,
+                    )
+                    if index is None:
+                        client_request_id = row_info.get("client_request_id")
+                        index = next(
+                            (
+                                i for i, row in enumerate(current)
+                                if row.get("role") == "user"
+                                and (row.get("metadata") or {}).get("custom", {}).get(
+                                    "requestId"
+                                ) == client_request_id
+                            ),
+                            None,
+                        )
+                    if index is not None:
+                        user_indexes.append(index)
+                target = max(user_indexes) + 1 if user_indexes else len(current)
+                existing_index = next(
+                    (
+                        index for index, row in enumerate(current)
+                        if row.get("id") == resolved_message_id
+                    ),
+                    None,
+                )
+                if existing_index is not None:
+                    current.pop(existing_index)
+                    if existing_index < target:
+                        target -= 1
+                current.insert(target, assistant_message)
+
+            ordered_turns = sorted(
+                completed_assistant_turns,
+                key=lambda turn: min(
+                    (
+                        resumed_request_order.index(request_id)
+                        for request_id in turn.get("request_ids") or ()
+                        if request_id in resumed_request_order
+                    ),
+                    default=len(resumed_request_order),
+                ),
+            )
+            for turn in ordered_turns:
+                render_turn(
+                    set(turn.get("request_ids") or ()),
+                    copy.deepcopy(turn.get("parts") or []),
+                    copy.deepcopy(turn.get("status")),
+                    turn.get("message_id"),
+                )
+
+            active_ids = set(
+                request_ids_for_turn
+                if request_ids_for_turn is not None
+                else current_turn_request_ids - completed_request_ids
+            )
+            active_parts = copy.deepcopy(
+                assistant_parts if parts_override is None else parts_override
+            )
+            render_turn(active_ids, active_parts, status, message_id_override)
+            return current
+
+        def build_messages_for_turn(
+            status: Optional[Dict[str, str]] = None,
+        ) -> List[Dict[str, Any]]:
+            """Build the current stream state with one assistant row per turn."""
+            if queue_from_ledger:
+                return build_resumed_messages_for_turn(status)
+            if not submitted_contents:
+                if resumed_request_order:
+                    return build_resumed_messages_for_turn(status)
+                return _assistant_update_message_state(
+                    [dict(message) for message in state_messages],
+                    session_id,
+                    submitted_contents,
+                    copy.deepcopy(assistant_parts),
+                    status,
+                    copy.deepcopy(submitted_media),
+                    list(submitted_request_ids),
+                    list(submitted_row_ids),
+                )
+            current = [dict(message) for message in state_messages]
+            grouped_submissions: set[int] = set()
+
+            def append_user_rows(indexes: List[int]) -> None:
+                if not indexes:
+                    return
+                _assistant_update_message_state(
+                    current,
+                    session_id,
+                    [submitted_contents[index] for index in indexes],
+                    [],
+                    None,
+                    [submitted_media[index] for index in indexes],
+                    [submitted_request_ids[index] for index in indexes],
+                    [submitted_row_ids[index] for index in indexes],
+                )
+                current.pop()  # discard the helper's single reply placeholder
+
+            ordered_turns = sorted(
+                completed_assistant_turns,
+                key=lambda turn: min(
+                    (
+                        index
+                        for index, request_id in enumerate(submitted_turn_request_ids)
+                        if request_id in set(turn.get("request_ids") or ())
+                    ),
+                    default=len(submitted_contents),
+                ),
+            )
+            for turn in ordered_turns:
+                turn_ids = set(turn.get("request_ids") or ())
+                indexes = [
+                    index
+                    for index, request_id in enumerate(submitted_turn_request_ids)
+                    if request_id in turn_ids and index not in grouped_submissions
+                ]
+                append_user_rows(indexes)
+                grouped_submissions.update(indexes)
+                current.append(_assistant_turn_message(session_id, current, turn))
+
+            active_ids = current_turn_request_ids - completed_request_ids
+            active_indexes = [
+                index
+                for index, request_id in enumerate(submitted_turn_request_ids)
+                if request_id in active_ids and index not in grouped_submissions
+            ]
+            if (assistant_parts or status is not None) and not active_indexes:
+                pending_indexes = [
+                    index
+                    for index in range(len(submitted_contents))
+                    if index not in grouped_submissions
+                ]
+                if len(pending_indexes) == 1:
+                    active_indexes = pending_indexes
+            append_user_rows(active_indexes)
+            grouped_submissions.update(active_indexes)
+            if assistant_parts or status is not None:
+                current.append(
+                    _assistant_turn_message(
+                        session_id,
+                        current,
+                        {
+                            "parts": assistant_parts,
+                            "status": status,
+                            "message_id": assistant_row_id(active_ids),
+                        },
+                    )
+                )
+
+            append_user_rows(
+                [
+                    index
+                    for index in range(len(submitted_contents))
+                    if index not in grouped_submissions
+                ]
+            )
+            return current
+
+        def handover_snapshot() -> Dict[str, Any]:
+            request_order = list(
+                dict.fromkeys(resumed_request_order + submitted_turn_request_ids)
+            )
+            rows = copy.deepcopy(resumed_rows)
+            if not queue_from_ledger:
+                for index, turn_request_id in enumerate(submitted_turn_request_ids):
+                    if index >= len(submitted_request_ids) or index >= len(submitted_row_ids):
+                        continue
+                    rows[turn_request_id] = {
+                        "request_id": turn_request_id,
+                        "client_request_id": submitted_request_ids[index],
+                        "row_id": submitted_row_ids[index],
+                    }
+            prompt_tools = {
+                request_id: sorted(tool_ids)
+                for request_id, tool_ids in resumed_prompt_tools.items()
+                if tool_ids
+            }
+            return {
+                "request_ids": request_order,
+                "private_goal_reply_ids": sorted(private_goal_reply_ids),
+                "completed_request_ids": sorted(completed_request_ids),
+                "possibly_accepted_request_ids": sorted(possibly_accepted_request_ids),
+                "admission_error": admission_error,
+                "untagged_request_ids": sorted(untagged_request_ids),
+                "completed_turns": copy.deepcopy(completed_assistant_turns),
+                "rows": list(rows.values()),
+                "prompt_tools": prompt_tools,
+                "prompt_permission_ids": {
+                    tool_id: sorted(permission_ids)
+                    for tool_id, permission_ids in resumed_prompt_permission_ids.items()
+                },
+                "permission_request_ids": {
+                    permission_id: sorted(request_ids)
+                    for permission_id, request_ids in resumed_permission_request_ids.items()
+                },
+                "permission_decisions": copy.deepcopy(permission_decisions),
+                "permission_resolution_errors": dict(permission_resolution_errors),
+                "answered_prompts": sorted(answered_prompts),
+                "assistant_parts": copy.deepcopy(assistant_parts),
+                "current_turn_request_ids": sorted(current_turn_request_ids),
+                "turn_error": turn_error,
+                "turn_error_fields": copy.deepcopy(turn_error_fields),
+                "usage_totals": dict(usage_totals),
+                "queue_dropped_count": handover_drop_baseline,
+                "event_loss_seen": event_loss_seen,
+                "event_loss_count": event_loss_count,
+                "event_loss_message": event_loss_message,
+                "event_loss_terminal": event_loss_terminal,
+                "event_loss_permission": event_loss_permission,
+                "messages": build_messages_for_turn(),
+            }
+
+        def store_handover_snapshot() -> None:
+            nonlocal handover_record
+            if not handover_token or not handover_claim_id or shared_queue is None:
+                return
+            handover_record = handover_snapshot()
+            _assistant_update_handover(
+                session,
+                handover_token,
+                handover_claim_id,
+                handover_record,
+                shared_queue,
+                read_context,
+            )
+
+        def fail_correlation(message: str) -> None:
+            """Close a partially accepted run without guessing turn ownership."""
+            nonlocal preserve_handover_queue
+            previous_error = completion.get("error") or {}
+            already_reported_gap = (
+                event_loss_seen
+                and previous_error.get("code") == "assistant_event_stream_gap"
+            )
+            completion["error"] = {
+                "message": message,
+                **({"code": "assistant_event_stream_gap"} if event_loss_seen else {}),
+            }
+            completion["usage"] = {
+                **usage_totals,
+                "stopReason": "error",
+            }
+            completion["completed"] = True
+            if not already_reported_gap:
+                controller.add_error(message)
+            if persist_message_state:
+                status = (
+                    {"type": "incomplete", "reason": "error", "error": message}
+                    if assistant_parts
+                    else None
+                )
+                _assistant_set_messages(
+                    controller, build_messages_for_turn(status)
+                )
+                controller.state["synced"] = None
+            _assistant_set_usage(controller, completion["usage"])
+            preserve_handover_queue = bool(handover_token and handover_claim_id)
+            store_handover_snapshot()
+
+        def correlation_failure_message(reason: str) -> str:
+            """Name accepted messages whose untagged events cannot be assigned."""
+            possibly_pending = sorted(
+                possibly_accepted_request_ids - completed_request_ids
+            )
+            if possibly_pending:
+                labels = ", ".join(possibly_pending)
+                admission_context = f"{admission_error} " if admission_error else ""
+                return (
+                    f"{admission_context}Cannot safely correlate the completion for "
+                    f"possibly accepted message(s) {labels}: {reason}. These sends "
+                    "may still be running. No messages were resubmitted."
+                )
+            missing = sorted(untagged_request_ids - completed_request_ids)
+            candidates = ", ".join(missing) or ", ".join(sorted(untagged_request_ids))
+            pending = sorted(admitted_turn_request_ids - completed_request_ids)
+            pending_names = ", ".join(pending) or candidates
+            admission_context = f"{admission_error} " if admission_error else ""
+            return (
+                f"{admission_context}Cannot safely correlate the completion for accepted message(s) "
+                f"{candidates}: the daemon did not echo their request IDs and "
+                f"{reason}. These sends were admitted; accepted message(s) "
+                f"{pending_names} may still be running. No messages were "
+                "resubmitted."
+            )
+
+        def permission_resolution_error_message(*, all_terminal: bool) -> str:
+            prompt_labels = {
+                str(pending.get("permission_id") or pending.get("tool_id") or key)
+                for key, pending in permission_resolution_pending.items()
+            }
+            prompt_labels.update(
+                str(key).removeprefix("unidentified:")
+                for key in permission_resolution_errors
+            )
+            labels = ", ".join(sorted(prompt_labels)) or "the pending prompt"
+            details = "; ".join(permission_resolution_errors.values())
+            if not details:
+                details = "no matching permission outcome event was observed"
+            if all_terminal:
+                accepted = ", ".join(sorted(admitted_turn_request_ids)) or "unknown"
+                activity = (
+                    f"Accepted message(s) {accepted} reached their terminal events."
+                )
+            else:
+                pending = sorted(
+                    admitted_turn_request_ids - completed_request_ids
+                )
+                accepted = ", ".join(pending or sorted(admitted_turn_request_ids))
+                activity = (
+                    f"Accepted message(s) {accepted or 'unknown'} may still be running."
+                )
+            active_prompt_keys = (
+                set(permission_resolution_pending) | set(permission_resolution_errors)
+            )
+            attempted_decision = any(
+                pending.get("attempted", True)
+                for key, pending in permission_resolution_pending.items()
+                if key in active_prompt_keys
+            ) or any(
+                decision.get("status") in {"attempted", "resolved"}
+                for key, decision in permission_decisions.items()
+                if key in active_prompt_keys
+            )
+            decision_outcome = (
+                "The attempted decision may or may not have taken effect."
+                if attempted_decision
+                else "No permission response was submitted."
+            )
+            return (
+                f"Permission resolution could not be confirmed for prompt(s) {labels}: "
+                f"{details}. {decision_outcome} "
+                f"{activity} No messages were resubmitted."
+            )
+
+        def record_event_loss() -> bool:
+            """Mark one or more per-subscriber drops as an incomplete run."""
+            nonlocal handover_drop_baseline, event_loss_seen, event_loss_count
+            nonlocal event_loss_message, event_loss_terminal, event_loss_permission
+            nonlocal correlation_deadline, preserve_handover_queue
+            if (
+                queue is None
+                or not admitted_turn_request_ids
+                or getattr(queue, "revoked", False)
+            ):
+                return False
+            current_count = int(getattr(queue, "dropped_count", 0) or 0)
+            delta = current_count - handover_drop_baseline
+            if delta <= 0:
+                return False
+            event_loss_count += delta
+            handover_drop_baseline = current_count
+            event_loss_seen = True
+            event_loss_terminal = event_loss_terminal or bool(
+                getattr(queue, "dropped_terminal", False)
+            )
+            event_loss_permission = event_loss_permission or bool(
+                getattr(queue, "dropped_permission", False)
+            )
+            accepted = sorted(admitted_turn_request_ids)
+            pending = sorted(admitted_turn_request_ids - completed_request_ids)
+            accepted_text = ", ".join(accepted) or "unknown"
+            pending_text = ", ".join(pending) or accepted_text
+            first_seq = getattr(queue, "first_dropped_seq", None)
+            last_seq = getattr(queue, "last_dropped_seq", None)
+            sequence_detail = (
+                f" Daemon sequence range {first_seq}–{last_seq} was dropped."
+                if first_seq is not None and last_seq is not None
+                else ""
+            )
+            kinds = []
+            if event_loss_terminal:
+                kinds.append("including a terminal frame")
+            if event_loss_permission:
+                kinds.append("including a permission frame")
+            kind_detail = f" ({', '.join(kinds)})" if kinds else ""
+            event_loss_message = (
+                f"Assistant event stream lost {event_loss_count} frame(s)"
+                f"{kind_detail} for accepted message(s) {accepted_text}."
+                f"{sequence_detail} Accepted message(s) {pending_text} may still be running. "
+                "No messages were resubmitted."
+            )
+            completion["error"] = {
+                "message": event_loss_message,
+                "code": "assistant_event_stream_gap",
+            }
+            completion["usage"] = {**usage_totals, "stopReason": "error"}
+            controller.add_error(event_loss_message)
+            if isinstance(controller.state, dict):
+                controller.state["error"] = event_loss_message
+            else:
+                try:
+                    controller.state["error"] = event_loss_message
+                except (KeyError, TypeError, AttributeError):
+                    pass
+            _assistant_set_usage(controller, completion["usage"])
+            correlation_deadline = (
+                _assistant_correlation_monotonic() + EVENT_IDLE_TIMEOUT_SECONDS
+            )
+            preserve_handover_queue = bool(handover_token and handover_claim_id)
+            store_handover_snapshot()
+            return True
+
+        def command_message_label(command: Dict[str, Any], index: int) -> str:
+            message = command.get("message")
+            client_id = message.get("id") if isinstance(message, dict) else None
+            if isinstance(client_id, str) and _CLIENT_REQUEST_ID.fullmatch(client_id):
+                return client_id
+            return f"command {index + 1}"
+
+        def partial_admission_error(
+            command_index: int,
+            reason: str,
+            *,
+            attempted_request_id: Optional[str] = None,
+            attempt_may_be_accepted: bool = False,
+        ) -> str:
+            accepted = ", ".join(submitted_request_ids) or "none"
+            current = command_message_label(body.commands[command_index], command_index)
+            if attempted_request_id is not None:
+                current = attempted_request_id
+            if attempt_may_be_accepted and add_message_count == 1:
+                return (
+                    f"Admission response for message {current} was lost; it may have "
+                    f"been accepted. Admission error: {reason}. "
+                    "No messages were resubmitted."
+                )
+            if attempt_may_be_accepted:
+                attempted = f"Possibly accepted despite the admission error: {current}."
+                future_start = command_index + 1
+            elif attempted_request_id is not None:
+                attempted = f"Rejected and not accepted: {current}."
+                future_start = command_index + 1
+            else:
+                attempted = ""
+                future_start = command_index
+            unsent = [
+                command_message_label(future, index)
+                for index, future in enumerate(body.commands[future_start:], future_start)
+                if _assistant_command_type(future) == "add-message"
+            ]
+            unsent_clause = (
+                f"Not submitted: {', '.join(unsent)}. " if unsent else ""
+            )
+            attempted_clause = f"{attempted} " if attempted else ""
+            return (
+                "Partial assistant batch admission. "
+                f"Acknowledged as accepted: {accepted}. "
+                f"{attempted_clause}{unsent_clause}"
+                f"Admission error: {reason}. No messages were resubmitted."
+            )
+
+        def record_possibly_accepted_submission(
+            request_id: str,
+            message_content: MessageContent,
+            command: Dict[str, Any],
+        ) -> None:
+            """Track a send whose admission response was lost by exact request ID."""
+            nonlocal admission_error, correlation_deadline
+            nonlocal handover_record, handover_token, handover_claim_id
+            if handover_token is None:
+                retention_reason = ""
+                if shared_queue is None:
+                    retention_reason = "the event subscription is unavailable"
+                else:
+                    reserved_token, reserved_claim = _assistant_reserve_handover(
+                        session, shared_queue, read_context
+                    )
+                    if reserved_token is None:
+                        retention_reason = (
+                            "all "
+                            f"{_ASSISTANT_HANDOVER_MAX_ENTRIES} handover capacity "
+                            "slots are occupied"
+                        )
+                    else:
+                        handover_token = reserved_token
+                        handover_claim_id = reserved_claim
+                        handover_record = {}
+                        _assistant_set_state_value(
+                            controller,
+                            _ASSISTANT_HANDOVER_STATE_KEY,
+                            handover_token,
+                        )
+                if retention_reason:
+                    retention_error = (
+                        "Could not retain this event subscription because "
+                        f"{retention_reason}. If this response ends before the "
+                        f"terminal event for message {request_id} is observed, the "
+                        "message may still be running and late events cannot be "
+                        "guaranteed to be available on reconnect. No messages were "
+                        "resubmitted."
+                    )
+                    admission_error = f"{admission_error} {retention_error}".strip()
+            possibly_accepted_request_ids.add(request_id)
+            request_ids.add(request_id)
+            admitted_turn_request_ids.add(request_id)
+            submitted_turn_request_ids.append(request_id)
+            submitted_contents.append(message_content)
+            submitted_media.append(_save_sent_media(message_content, session_id))
+            submitted_request_ids.append(request_id)
+            row_id = stable_user_row_id(command.get("rowId"))
+            submitted_row_ids.append(row_id)
+            if queue_from_ledger:
+                if request_id not in resumed_request_order:
+                    resumed_request_order.append(request_id)
+                resumed_rows[request_id] = {
+                    "request_id": request_id,
+                    "client_request_id": request_id,
+                    "row_id": row_id,
+                }
+            correlation_deadline = (
+                _assistant_correlation_monotonic()
+                + EVENT_IDLE_TIMEOUT_SECONDS
+            )
+            store_handover_snapshot()
 
         def add_streamed_text(part_type: str, text: str) -> None:
             """Grow the trailing text/reasoning part, or start one, and publish.
@@ -1516,7 +2869,127 @@ async def assistant_transport(
                 return None
             return max(0.0, last_publish + STREAM_PUBLISH_INTERVAL - time.monotonic())
 
+        def has_unresolved_handover_permission() -> bool:
+            """Block new input while an accepted permission prompt still owns the turn."""
+            pending_request_ids = admitted_turn_request_ids - completed_request_ids
+            for request_id in resumed_prompt_request_ids & pending_request_ids:
+                for tool_id in resumed_prompt_tools.get(request_id, set()):
+                    permission_ids = {
+                        permission_id
+                        for permission_id, owner_request_ids
+                        in resumed_permission_request_ids.items()
+                        if request_id in owner_request_ids
+                        and permission_id
+                        in resumed_prompt_permission_ids.get(tool_id, set())
+                    }
+                    identities = (
+                        {(tool_id, permission_id) for permission_id in permission_ids}
+                        if permission_ids
+                        else {(tool_id, "")}
+                    )
+                    if any(identity not in answered_prompts for identity in identities):
+                        return True
+            return bool(permission_resolution_pending or permission_resolution_errors)
+
         try:
+            if handover_error:
+                reject_handover(handover_error)
+                return
+            if (read_context and read_context.revoked) or getattr(
+                shared_queue, "revoked", False
+            ):
+                return
+            if queue_from_ledger and queue is not None:
+                for reply_id in sorted(private_goal_reply_ids):
+                    goal_pumps.append(
+                        asyncio.create_task(
+                            _pump_goal_reply(session, reply_id, queue)
+                        )
+                    )
+            new_event_loss = record_event_loss()
+            if event_loss_seen and not new_event_loss and event_loss_message:
+                completion["error"] = {
+                    "message": event_loss_message,
+                    "code": "assistant_event_stream_gap",
+                }
+                completion["usage"] = {**usage_totals, "stopReason": "error"}
+                controller.add_error(event_loss_message)
+                _assistant_set_usage(controller, completion["usage"])
+            has_add_message = any(
+                _assistant_command_type(command) == "add-message"
+                for command in body.commands
+            )
+            add_message_count = sum(
+                _assistant_command_type(command) == "add-message"
+                for command in body.commands
+            )
+            if handover_record is not None and has_add_message:
+                if event_loss_seen:
+                    pending_ids = sorted(
+                        admitted_turn_request_ids - completed_request_ids
+                    )
+                    pending_label = ", ".join(pending_ids) or "accepted messages"
+                    reject_handover(
+                        "Cannot admit new messages after an assistant event-stream "
+                        f"gap. Accepted message(s) {pending_label} may still be "
+                        "running; no resubmission or completion attribution is safe. "
+                        "Their retained event stream remains owned by this capability."
+                    )
+                    return
+                if has_unresolved_handover_permission():
+                    reject_handover(
+                        "Permission handover cannot admit new messages while an "
+                        "accepted permission prompt remains unresolved; the accepted "
+                        "sends were left owned by this capability."
+                    )
+                    return
+            if handover_token is None and add_message_count > 0:
+                if shared_queue is None:
+                    message = (
+                        "Cannot submit assistant messages because the event "
+                        "subscription is unavailable. No messages were submitted."
+                    )
+                    controller.add_error(message)
+                    completion["error"] = {"message": message}
+                    completion["usage"] = {**usage_totals, "stopReason": "error"}
+                    completion["completed"] = True
+                    _assistant_set_usage(controller, completion["usage"])
+                    return
+                handover_token, handover_claim_id = _assistant_reserve_handover(
+                    session, shared_queue, read_context
+                )
+                if handover_token is None:
+                    unsent = [
+                        command_message_label(command, index)
+                        for index, command in enumerate(body.commands)
+                        if _assistant_command_type(command) == "add-message"
+                    ]
+                    unsent_clause = (
+                        f"Not submitted: {', '.join(unsent)}. " if unsent else ""
+                    )
+                    message = (
+                        "Cannot submit assistant messages: the session already "
+                        f"has {_ASSISTANT_HANDOVER_MAX_ENTRIES} active or expired "
+                        "assistant handover records; handover capacity is full. "
+                        f"{unsent_clause}No messages were submitted. Retry after an active handover "
+                        "completes or an expired record is released."
+                    )
+                    controller.add_error(message)
+                    completion["error"] = {"message": message}
+                    completion["usage"] = {**usage_totals, "stopReason": "error"}
+                    completion["completed"] = True
+                    _assistant_set_usage(controller, completion["usage"])
+                    return
+                handover_record = {}
+                _assistant_set_state_value(
+                    controller, _ASSISTANT_HANDOVER_STATE_KEY, handover_token
+                )
+                if not await wait_for_handover_capability_delivery():
+                    return
+                if (read_context and read_context.revoked) or getattr(
+                    shared_queue, "revoked", False
+                ):
+                    return
             if len(body.commands) > 1 and any(
                 _assistant_command_type(command) == "add-message"
                 and _is_goal_message(_assistant_message_content(command))
@@ -1524,13 +2997,19 @@ async def assistant_transport(
             ):
                 controller.add_error("Send a goal command on its own.")
                 return
-            for command in body.commands:
+            for command_index, command in enumerate(body.commands):
                 command_type = _assistant_command_type(command)
                 if command_type == "add-message":
                     message_content = _assistant_message_content(command)
                     if not content_to_text(message_content).strip():
-                        controller.add_error("add-message command has no text")
-                        return
+                        admission_error = "add-message command has no text"
+                        if submitted_contents:
+                            admission_error = partial_admission_error(
+                                command_index, admission_error
+                            )
+                        controller.add_error(admission_error)
+                        completion["error"] = {"message": admission_error}
+                        break
                     message = command.get("message")
                     client_id = message.get("id") if isinstance(message, dict) else None
                     # The page knows its send by the id it made, so that id
@@ -1545,34 +3024,93 @@ async def assistant_transport(
                         kwargs.update(private_goal_reply=True, goal_conversation_uid=uid)
                         if body.goal_reply_id is not None:
                             kwargs["private_goal_reply_id"] = body.goal_reply_id
-                    accepted = await session.send_message(message_content, **kwargs)
-                    if read_context and read_context.revoked:
+                    if (read_context and read_context.revoked) or getattr(
+                        shared_queue, "revoked", False
+                    ):
                         return
-                    saw_action = True
-                    if not accepted.get("accepted"):
-                        controller.add_error(
-                            str(accepted.get("message") or accepted.get("reason", "message rejected"))
+                    try:
+                        accepted = await session.send_message(message_content, **kwargs)
+                    except asyncio.CancelledError:
+                        if read_context and read_context.revoked:
+                            raise
+                        admission_error = partial_admission_error(
+                            command_index,
+                            "admission wait was cancelled",
+                            attempted_request_id=request_id,
+                            attempt_may_be_accepted=True,
                         )
+                        record_possibly_accepted_submission(
+                            request_id, message_content, command
+                        )
+                        completion["error"] = {"message": admission_error}
+                        raise
+                    except Exception as exc:
+                        if read_context and read_context.revoked:
+                            # Revocation wins over uncertain admission too: do
+                            # not copy private content into a handover snapshot,
+                            # media store, or response after access was removed.
+                            return
+                        admission_error = str(exc) or type(exc).__name__
+                        admission_error = partial_admission_error(
+                            command_index,
+                            admission_error,
+                            attempted_request_id=request_id,
+                            attempt_may_be_accepted=True,
+                        )
+                        record_possibly_accepted_submission(
+                            request_id, message_content, command
+                        )
+                        controller.add_error(admission_error)
+                        completion["error"] = {"message": admission_error}
+                        break
+                    if read_context and read_context.revoked:
+                        # Revocation wins before any admission receipt or
+                        # private goal receipt is copied into client state.
                         return
+                    if not accepted.get("accepted"):
+                        admission_error = str(
+                            accepted.get("message") or accepted.get("reason", "message rejected")
+                        )
+                        if submitted_contents:
+                            admission_error = partial_admission_error(
+                                command_index,
+                                admission_error,
+                                attempted_request_id=request_id,
+                            )
+                        controller.add_error(admission_error)
+                        completion["error"] = {"message": admission_error}
+                        break
+                    saw_action = True
                     replayed = private_goal and accepted.get("completed") is True and accepted.get("replayed") is True
                     if replayed:
                         replay_id = str(accepted.get("request_id") or request_id)
-                        queue = asyncio.Queue()
+                        if not queue_from_ledger:
+                            queue = asyncio.Queue()
                         queue.put_nowait({
                             "type": "token", "text": str(accepted.get("message") or "Goal request already processed."),
                             "request_id": replay_id,
                         })
                         queue.put_nowait({"type": "turn_complete", "stop_reason": "end_turn", "request_id": replay_id})
+                        turn_request_id = replay_id
                     elif private_goal:
                         reply_id = accepted.get("goal_reply_id")
                         if not reply_id:
                             controller.add_error("daemon did not provide a private goal reply")
                             return
                         request_ids.add(str(reply_id))
-                        queue = asyncio.Queue()
-                        goal_pump = asyncio.create_task(_pump_goal_reply(session, str(reply_id), queue))
-                        if read_context is not None:
-                            revocation_watch = asyncio.create_task(_forward_goal_revocation(shared_queue, queue))
+                        turn_request_id = str(reply_id)
+                        private_goal_reply_ids.add(str(reply_id))
+                        if not queue_from_ledger:
+                            queue = asyncio.Queue()
+                            if read_context is not None:
+                                revocation_watch = asyncio.create_task(
+                                    _forward_goal_revocation(shared_queue, queue)
+                                )
+                        goal_pumps.append(
+                            asyncio.create_task(
+                                _pump_goal_reply(session, str(reply_id), queue)
+                            )
+                        )
                     if accepted.get("goal_request_id") and isinstance(body.state, dict):
                         controller.state["goalSubmission"] = {
                             "requestId": str(accepted["goal_request_id"]),
@@ -1583,13 +3121,44 @@ async def assistant_transport(
                         # admitted input must not keep that error as its status.
                         controller.state["error"] = ""
                     if accepted.get("request_id"):
-                        request_ids.add(str(accepted["request_id"]))
+                        accepted_request_id = str(accepted["request_id"])
+                        request_ids.add(accepted_request_id)
+                        if not private_goal and not replayed:
+                            turn_request_id = accepted_request_id
                     else:
-                        untagged = True
+                        accepted_request_id = request_id
+                        request_ids.add(accepted_request_id)
+                        if not private_goal and not replayed:
+                            turn_request_id = accepted_request_id
+                            untagged_request_ids.add(accepted_request_id)
+                    admitted_turn_request_ids.add(turn_request_id)
+                    submitted_turn_request_ids.append(turn_request_id)
                     submitted_contents.append(message_content)
                     submitted_media.append(_save_sent_media(message_content, session_id))
                     submitted_request_ids.append(request_id)
-                    submitted_row_ids.append(command.get("rowId"))
+                    row_id = stable_user_row_id(command.get("rowId"))
+                    submitted_row_ids.append(row_id)
+                    if queue_from_ledger:
+                        if turn_request_id not in resumed_request_order:
+                            resumed_request_order.append(turn_request_id)
+                        resumed_rows[turn_request_id] = {
+                            "request_id": turn_request_id,
+                            "client_request_id": request_id,
+                            "row_id": row_id,
+                        }
+                    store_handover_snapshot()
+                    if read_context and read_context.revoked:
+                        return
+                    if len(submitted_contents) > 1 and untagged_request_ids:
+                        # Keep admitting the whole command batch. Request IDs
+                        # were still sent with each message, so exact IDs on
+                        # later events can recover ownership; if they cannot,
+                        # the bounded correlation failure below reports the
+                        # accepted messages without guessing or retrying.
+                        correlation_deadline = (
+                            _assistant_correlation_monotonic()
+                            + EVENT_IDLE_TIMEOUT_SECONDS
+                        )
                 elif command_type == "add-tool-result":
                     call_id, result, decision, scope = _assistant_tool_result(command)
                     if not call_id:
@@ -1597,12 +3166,27 @@ async def assistant_transport(
                             "add-tool-result command has no toolCallId"
                         )
                         return
-                    state_tool_id, state_permission_id = _assistant_permission_identity(state_messages, call_id)
-                    result_tool_id = result.get("tool_id") if isinstance(result, dict) else None
-                    result_permission_id = result.get("permission_id") if isinstance(result, dict) else None
-                    if (state_permission_id and result_permission_id and
-                            state_permission_id != result_permission_id):
-                        controller.add_error("permission response owner does not match the displayed prompt")
+                    state_tool_id, state_permission_id = _assistant_permission_identity(
+                        state_messages, call_id
+                    )
+                    result_tool_id = (
+                        result.get("tool_id") if isinstance(result, dict) else None
+                    )
+                    result_permission_id = (
+                        result.get("permission_id") if isinstance(result, dict) else None
+                    )
+                    if (
+                        state_permission_id
+                        and result_permission_id
+                        and state_permission_id != result_permission_id
+                    ):
+                        message = (
+                            "Permission response owner does not match the displayed prompt."
+                        )
+                        if handover_record is not None:
+                            reject_handover(message)
+                        else:
+                            controller.add_error(message)
                         return
                     source_tool_id = (
                         state_tool_id
@@ -1610,9 +3194,14 @@ async def assistant_transport(
                         or permission_tool_ids.get(call_id)
                     )
                     if not source_tool_id:
-                        controller.add_error(
-                            "permission response is missing its tool owner; refresh the chat before answering"
+                        message = (
+                            "Permission response is missing its tool owner; refresh the chat "
+                            "before answering."
                         )
+                        if handover_record is not None:
+                            reject_handover(message)
+                        else:
+                            controller.add_error(message)
                         return
                     if not decision:
                         decision = "approve" if result is True else "deny"
@@ -1622,42 +3211,209 @@ async def assistant_transport(
                         )
                         return
                     option_id = result.get("option_id") if isinstance(result, dict) else None
-                    permission_id = result_permission_id or state_permission_id
+                    supplied_permission_id = (
+                        str(result.get("permission_id"))
+                        if isinstance(result, dict)
+                        and result.get("permission_id") is not None
+                        and str(result.get("permission_id"))
+                        else None
+                    )
+                    permission_id = supplied_permission_id or state_permission_id or None
+                    known_permission_ids = resumed_prompt_permission_ids.get(source_tool_id, set())
+                    if handover_record is not None:
+                        known_prompt_tools = {
+                            tool_id
+                            for tool_ids in resumed_prompt_tools.values()
+                            for tool_id in tool_ids
+                        }
+                        if source_tool_id not in known_prompt_tools:
+                            reject_handover(
+                                "Permission result does not match an accepted pending "
+                                "prompt; no permission was resolved."
+                            )
+                            return
+                        if permission_id is not None:
+                            if permission_id not in known_permission_ids:
+                                reject_handover(
+                                    "Permission result did not match a server-recorded "
+                                    "permission prompt; no permission was resolved."
+                                )
+                                return
+                        elif len(known_permission_ids) == 1:
+                            permission_id = next(iter(known_permission_ids))
+                        elif len(known_permission_ids) > 1:
+                            reject_handover(
+                                "Permission result is ambiguous because the tool ID has "
+                                "multiple pending prompts; include the matching permission_id."
+                            )
+                            return
+                    decision_record = {
+                        "decision": decision,
+                        "scope": scope,
+                        "option_id": str(option_id) if option_id is not None else None,
+                        "permission_id": permission_id,
+                    }
+                    decision_key = permission_id or f"unidentified:{source_tool_id}"
+                    previous_decision = permission_decisions.get(decision_key)
+                    if handover_record is not None:
+                        if previous_decision is not None and any(
+                            previous_decision.get(key) != value
+                            for key, value in decision_record.items()
+                        ):
+                            reject_handover(
+                                "Permission handover was already attempted with a "
+                                "different decision; the conflicting replay was rejected."
+                            )
+                            return
+                        if previous_decision is None:
+                            permission_decisions[decision_key] = {
+                                **decision_record,
+                                "status": "attempted",
+                            }
+                            store_handover_snapshot()
                     if not isinstance(permission_id, str) or not permission_id:
-                        controller.add_error(
-                            "permission response is missing its owner; refresh the chat before answering"
+                        message = (
+                            "Permission response was not submitted because the accepted "
+                            f"prompt for tool_id '{source_tool_id}' has no unique "
+                            "server-recorded permission_id."
                         )
-                        return
-                    if option_id is None:
-                        resolved = await session.resolve_permission(
-                            source_tool_id,
-                            decision,
-                            scope,
-                            permission_id=permission_id,
+                        if handover_record is None:
+                            controller.add_error(message)
+                            completion["error"] = {"message": message}
+                            completion["usage"] = {
+                                **usage_totals,
+                                "stopReason": "error",
+                            }
+                            completion["completed"] = True
+                            _assistant_set_usage(controller, completion["usage"])
+                            _assistant_set_state_value(controller, "error", message)
+                            return
+                        if previous_decision is None:
+                            permission_decisions[decision_key] = {
+                                **decision_record,
+                                "status": "not_submitted",
+                            }
+                        permission_resolution_errors[decision_key] = message
+                        pending_request_ids = sorted(
+                            request_id
+                            for request_id, tool_ids in resumed_prompt_tools.items()
+                            if source_tool_id in tool_ids
                         )
+                        permission_resolution_pending[decision_key] = {
+                            "tool_id": source_tool_id,
+                            "permission_id": None,
+                            "decision": decision,
+                            "request_ids": pending_request_ids,
+                            "attempted": False,
+                        }
+                        permission_resolution_deadline = (
+                            _assistant_correlation_monotonic()
+                            + EVENT_IDLE_TIMEOUT_SECONDS
+                        )
+                        store_handover_snapshot()
+                        saw_action = True
+                        continue
+                    if previous_decision is not None and previous_decision.get("status") == "resolved":
+                        resolved = True
                     else:
-                        resolved = await session.resolve_permission(
-                            source_tool_id,
-                            decision,
-                            scope,
-                            option_id=str(option_id),
-                            permission_id=permission_id,
-                        )
+                        try:
+                            permission_kwargs = {"permission_id": permission_id}
+                            if option_id is not None:
+                                permission_kwargs["option_id"] = str(option_id)
+                            resolved = await session.resolve_permission(
+                                source_tool_id,
+                                decision,
+                                scope,
+                                **permission_kwargs,
+                            )
+                        except Exception:
+                            # The daemon may have consumed the decision before
+                            # this route lost its connection. The capability
+                            # retains the attempted value for an idempotent retry.
+                            store_handover_snapshot()
+                            raise
+                        if resolved and handover_record is not None:
+                            permission_decisions[decision_key] = {
+                                **decision_record,
+                                "status": "resolved",
+                            }
+                            permission_resolution_errors.pop(decision_key, None)
+                            store_handover_snapshot()
                     saw_action = True
                     if not resolved:
-                        controller.add_error(
-                            f"Permission owner is stale or no longer pending for tool_id '{source_tool_id}'"
+                        if handover_record is not None:
+                            pending_request_ids = sorted(
+                                resumed_permission_request_ids.get(
+                                    permission_id, set()
+                                )
+                            )
+                            permission_resolution_pending[decision_key] = {
+                                "tool_id": source_tool_id,
+                                "permission_id": permission_id,
+                                "decision": decision,
+                                "request_ids": pending_request_ids,
+                                "attempted": True,
+                            }
+                            permission_resolution_deadline = (
+                                _assistant_correlation_monotonic()
+                                + EVENT_IDLE_TIMEOUT_SECONDS
+                            )
+                            if (
+                                permission_id is None
+                                and decision_key not in permission_resolution_errors
+                            ):
+                                permission_resolution_errors[decision_key] = (
+                                    "Permission resolution could not be confirmed because "
+                                    "the accepted prompt has no unique permission_id."
+                                )
+                            store_handover_snapshot()
+                            continue
+                        pending_permission_ids = sorted(
+                            admitted_turn_request_ids - completed_request_ids
                         )
+                        pending_detail = (
+                            f"Accepted message(s) {', '.join(pending_permission_ids)} "
+                            "may still be running."
+                            if pending_permission_ids
+                            else "The accepted turn may still be running."
+                        )
+                        message = (
+                            "Permission resolution could not be confirmed for "
+                            f"tool_id '{source_tool_id}'; the decision may or may "
+                            f"not have taken effect. {pending_detail} "
+                            "No messages were resubmitted."
+                        )
+                        controller.add_error(message)
+                        completion["error"] = {"message": message}
+                        completion["usage"] = {
+                            **usage_totals,
+                            "stopReason": "error",
+                        }
+                        completion["completed"] = True
+                        _assistant_set_usage(controller, completion["usage"])
+                        _assistant_set_state_value(controller, "error", message)
                         return
                     answered_prompts.add((source_tool_id, permission_id))
+                    store_handover_snapshot()
                 else:
                     controller.add_error(
                         f"Unsupported assistant command: {command_type or 'unknown'}"
                     )
                     return
 
-            if not saw_action:
-                controller.add_error("assistant request has no commands")
+            if not saw_action and not submitted_contents:
+                if not admission_error:
+                    admission_error = "assistant request has no commands"
+                    controller.add_error(admission_error)
+                if completion.get("error") is None:
+                    completion["error"] = {"message": admission_error}
+                if completion.get("error") is not None:
+                    completion["usage"] = {
+                        **usage_totals,
+                        "stopReason": "error",
+                    }
+                    completion["completed"] = True
+                    _assistant_set_usage(controller, completion["usage"])
                 return
 
             if not submitted_contents:
@@ -1690,18 +3446,141 @@ async def assistant_transport(
                 sent_messages = admitted
 
             while True:
+                if (read_context and read_context.revoked) or getattr(
+                    queue, "revoked", False
+                ):
+                    return
+                record_event_loss()
+                event_timeout = held_text_due()
+                if correlation_deadline is not None:
+                    deadline_remaining = max(
+                        0.0,
+                        correlation_deadline - _assistant_correlation_monotonic(),
+                    )
+                    event_timeout = (
+                        deadline_remaining
+                        if event_timeout is None
+                        else min(event_timeout, deadline_remaining)
+                    )
+                if permission_resolution_deadline is not None:
+                    permission_remaining = max(
+                        0.0,
+                        permission_resolution_deadline
+                        - _assistant_correlation_monotonic(),
+                    )
+                    event_timeout = (
+                        permission_remaining
+                        if event_timeout is None
+                        else min(event_timeout, permission_remaining)
+                    )
                 event = await _assistant_next_event(
-                    queue, controller, timeout=held_text_due()
+                    queue, controller, timeout=event_timeout
                 )
                 if event is None or (read_context and read_context.revoked):
                     return
+                if getattr(queue, "revoked", False):
+                    return
+                record_event_loss()
                 if not event:
+                    if (
+                        permission_resolution_deadline is not None
+                        and _assistant_correlation_monotonic()
+                        >= permission_resolution_deadline
+                        and permission_resolution_pending
+                    ):
+                        fail_correlation(
+                            permission_resolution_error_message(all_terminal=False)
+                        )
+                        return
+                    if (
+                        correlation_deadline is not None
+                        and _assistant_correlation_monotonic()
+                        >= correlation_deadline
+                    ):
+                        fail_correlation(
+                            (
+                                f"{event_loss_message} No safely identified terminal "
+                                "event arrived after the stream gap; accepted messages "
+                                "may still be running. No messages were resubmitted."
+                                if event_loss_seen
+                                else correlation_failure_message(
+                                    "no safely identified terminal event arrived before "
+                                    f"the {EVENT_IDLE_TIMEOUT_SECONDS:g}s correlation deadline"
+                                )
+                            )
+                        )
+                        return
                     # The daemon went quiet after streaming (e.g. before
                     # turn_complete): publish the text the throttle held.
                     publish_progress()
                     continue
                 event_type = str(event.get("type") or "")
-                tagged = bool(request_ids) and not untagged
+                named_event_ids = _event_request_ids(event)
+                correlated_pending_ids = named_event_ids & (
+                    admitted_turn_request_ids - completed_request_ids
+                )
+                correlated_activity = event_type in (
+                    _TURN_OUTPUT | _PERMISSION_ANSWERS
+                    | {"error", "turn_start", "turn_complete"}
+                )
+                if (
+                    correlation_deadline is not None
+                    and correlated_pending_ids
+                    and correlated_activity
+                ):
+                    # Reset only for safely correlated activity. A busy but
+                    # unrelated daemon turn must not hold this run open.
+                    correlation_deadline = (
+                        _assistant_correlation_monotonic()
+                        + EVENT_IDLE_TIMEOUT_SECONDS
+                    )
+                if permission_resolution_pending and correlated_pending_ids and correlated_activity:
+                    permission_resolution_deadline = (
+                        _assistant_correlation_monotonic()
+                        + EVENT_IDLE_TIMEOUT_SECONDS
+                    )
+                multiple_untracked = (
+                    len(submitted_contents) > 1
+                    and bool(untagged_request_ids - completed_request_ids)
+                )
+                if multiple_untracked and not named_event_ids:
+                    if event_type in {"turn_complete", "error"}:
+                        fail_correlation(
+                            correlation_failure_message(
+                                f"the daemon emitted an unnamed {event_type} event"
+                            )
+                        )
+                        return
+                    if event_type in _TURN_OUTPUT:
+                        # Never put unowned shared-stream output into one of
+                        # this request's assistant rows.
+                        continue
+                if (
+                    event_type in _TURN_OUTPUT | {"error"}
+                    and named_event_ids
+                    and named_event_ids.issubset(completed_request_ids)
+                ):
+                    # A retained private-goal poll can be repeated after a
+                    # reconnect while its earlier result is still queued.
+                    # Ignore its late duplicate output after the exact turn
+                    # has already completed.
+                    continue
+                event_turn_ids = named_event_ids & admitted_turn_request_ids
+                if event_turn_ids and event_type in _TURN_OUTPUT | {"error"}:
+                    current_turn_request_ids.clear()
+                    current_turn_request_ids.update(event_turn_ids)
+                elif (
+                    event_type in _TURN_OUTPUT | {"error"}
+                    and not named_event_ids
+                    and len(admitted_turn_request_ids - completed_request_ids) == 1
+                    and not multiple_untracked
+                ):
+                    current_turn_request_ids = (
+                        admitted_turn_request_ids - completed_request_ids
+                    )
+                tagged = bool(request_ids) and not (
+                    untagged_request_ids - completed_request_ids
+                )
                 if _foreign_completion(event, request_ids, tagged):
                     continue
                 if _foreign_error(event, request_ids) or _foreign_output(event, request_ids, tagged):
@@ -1779,8 +3658,43 @@ async def assistant_transport(
                     source_tool_id = str(event.get("tool_id") or "")
                     if not source_tool_id:
                         continue
+                    permission_id = _assistant_permission_id(event)
                     details = event.get("details") if isinstance(event.get("details"), dict) else {}
-                    permission_id = event.get("permission_id") or details.get("permission_id")
+                    prompt_permission_ids = resumed_prompt_permission_ids.setdefault(
+                        source_tool_id, set()
+                    )
+                    if permission_id is not None:
+                        prompt_permission_ids.add(permission_id)
+                    prompt_request_ids = (
+                        event_turn_ids
+                        or current_turn_request_ids
+                        & (admitted_turn_request_ids - completed_request_ids)
+                    )
+                    if not prompt_request_ids:
+                        pending_turn_ids = (
+                            admitted_turn_request_ids - completed_request_ids
+                        )
+                        if len(pending_turn_ids) == 1:
+                            prompt_request_ids = pending_turn_ids
+                    if not prompt_request_ids and len(
+                        admitted_turn_request_ids - completed_request_ids
+                    ) > 1:
+                        fail_correlation(
+                            correlation_failure_message(
+                                "the daemon emitted a permission request without a "
+                                "safe turn identity"
+                            )
+                        )
+                        return
+                    if permission_id is not None:
+                        resumed_permission_request_ids.setdefault(
+                            permission_id, set()
+                        ).update(prompt_request_ids)
+                    for request_id in prompt_request_ids:
+                        resumed_prompt_tools.setdefault(request_id, set()).add(
+                            source_tool_id
+                        )
+                        resumed_prompt_request_ids.add(request_id)
                     permission_call_id = (
                         f"permission_{source_tool_id}_{permission_id}"
                         if permission_id
@@ -1791,26 +3705,27 @@ async def assistant_transport(
                         "request_permission", permission_call_id
                     )
                     permission_controllers[(source_tool_id, str(permission_id or ""))] = permission_controller
+                    permission_args = {
+                        "tool_id": source_tool_id,
+                        **(
+                            {"request_id": event["request_id"]}
+                            if isinstance(event.get("request_id"), str)
+                            and event["request_id"]
+                            else {}
+                        ),
+                        **({"permission_id": permission_id} if permission_id else {}),
+                        "tool_name": event.get("tool_name"),
+                        "risk_level": event.get("risk_level"),
+                        "risk_reason": event.get("risk_reason"),
+                        "input": event.get("input") or {},
+                        "details": details,
+                        "acp_options": details.get("acp_options", []),
+                    }
                     permission_part = {
                         "type": "tool-call",
                         "toolCallId": permission_call_id,
                         "toolName": "request_permission",
-                        "args": {
-                            "tool_id": source_tool_id,
-                            **(
-                                {"request_id": event["request_id"]}
-                                if isinstance(event.get("request_id"), str) and event["request_id"]
-                                else {}
-                            ),
-                            "permission_id": event.get("permission_id")
-                            or (event.get("details") or {}).get("permission_id"),
-                            "tool_name": event.get("tool_name"),
-                            "risk_level": event.get("risk_level"),
-                            "risk_reason": event.get("risk_reason"),
-                            "input": event.get("input") or {},
-                            "details": details,
-                            "acp_options": details.get("acp_options", []),
-                        },
+                        "args": permission_args,
                     }
                     permission_part["argsText"] = json.dumps(
                         permission_part["args"], ensure_ascii=False
@@ -1818,18 +3733,16 @@ async def assistant_transport(
                     assistant_tool_parts[permission_call_id] = permission_part
                     assistant_parts.append(permission_part)
                     permission_controller.append_args_text(permission_part["argsText"])
-                    _assistant_update_message_state(
-                        state_messages,
-                        session_id,
-                        submitted_contents,
-                        assistant_parts,
-                        {"type": "requires-action", "reason": "tool-calls"},
-                        submitted_media,
-                        submitted_request_ids,
-                        submitted_row_ids,
-                    )
                     if persist_message_state:
-                        _assistant_set_messages(controller, state_messages)
+                        _assistant_set_messages(
+                            controller,
+                            build_messages_for_turn(
+                                {"type": "requires-action", "reason": "tool-calls"}
+                            ),
+                        )
+                    if handover_token and handover_claim_id:
+                        preserve_handover_queue = True
+                        store_handover_snapshot()
                     # Return this run after exposing the prompt.  The daemon is
                     # blocked until a later add-tool-result request answers it;
                     # keeping this stream open would deadlock that follow-up.
@@ -1868,7 +3781,80 @@ async def assistant_transport(
                     publish_progress()
                 elif event_type in ("permission_granted", "permission_denied", "permission_cancelled"):
                     source_tool_id = str(event.get("tool_id") or "")
-                    permission_id = event.get("permission_id")
+                    event_permission_id = _assistant_permission_id(event)
+                    pending_resolution = None
+                    pending_resolution_key = None
+                    if event_permission_id is not None:
+                        pending_resolution = permission_resolution_pending.get(
+                            event_permission_id
+                        )
+                        if pending_resolution is not None:
+                            pending_resolution_key = event_permission_id
+                    if pending_resolution is None:
+                        for key, candidate in permission_resolution_pending.items():
+                            if candidate.get("tool_id") == source_tool_id:
+                                pending_resolution = candidate
+                                pending_resolution_key = key
+                                break
+                    if pending_resolution is not None:
+                        expected_permission_id = pending_resolution.get("permission_id")
+                        owner_request_ids = set(
+                            pending_resolution.get("request_ids") or ()
+                        )
+                        event_request_ids = _event_request_ids(event)
+                        if (
+                            source_tool_id != pending_resolution.get("tool_id")
+                            or expected_permission_id is None
+                            or event_permission_id != expected_permission_id
+                            or (
+                                owner_request_ids
+                                and event_request_ids
+                                and not owner_request_ids.intersection(event_request_ids)
+                            )
+                        ):
+                            # Tool IDs can be reused. An outcome without the
+                            # exact server-issued prompt ID cannot settle this
+                            # attempted permission response.
+                            continue
+                        expected_decision = str(
+                            pending_resolution.get("decision") or ""
+                        )
+                        observed_decision = (
+                            "approve"
+                            if event_type == "permission_granted"
+                            else "deny"
+                            if event_type == "permission_denied"
+                            else "cancelled"
+                        )
+                        if observed_decision == expected_decision:
+                            previous = permission_decisions.get(
+                                pending_resolution_key or ""
+                            )
+                            if previous is not None:
+                                permission_decisions[pending_resolution_key] = {
+                                    **previous,
+                                    "status": "resolved",
+                                }
+                            permission_resolution_errors.pop(
+                                pending_resolution_key or "", None
+                            )
+                            answered_prompts.add(
+                                (source_tool_id, event_permission_id)
+                            )
+                            _assistant_set_state_value(controller, "error", "")
+                        else:
+                            permission_resolution_errors[pending_resolution_key or ""] = (
+                                "Observed permission outcome "
+                                f"'{observed_decision}' for tool_id '{source_tool_id}' "
+                                f"did not confirm attempted '{expected_decision}'."
+                            )
+                        permission_resolution_pending.pop(
+                            pending_resolution_key, None
+                        )
+                        if not permission_resolution_pending:
+                            permission_resolution_deadline = None
+                        store_handover_snapshot()
+                    permission_id = event_permission_id
                     permission_result = _permission_result_from_event(event)
                     permission_call_id = (
                         f"permission_{source_tool_id}_{permission_id}"
@@ -1944,36 +3930,176 @@ async def assistant_transport(
                         # No message state to carry it: fail the run instead.
                         controller.add_error(turn_error)
                 elif event_type == "turn_complete":
-                    completion["usage"] = {
-                        "inputTokens": int(event.get("input_tokens", 0) or 0),
-                        "outputTokens": int(event.get("output_tokens", 0) or 0),
-                        "toolCalls": int(event.get("tool_calls", 0) or 0),
-                        "stopReason": "error"
-                        if turn_error
-                        else event.get("stop_reason", "end_turn"),
-                    }
-                    completion["completed"] = True
-                    # The page shows a message's error status in its error box,
-                    # so a failed turn says why instead of ending blank.
-                    _assistant_update_message_state(
-                        state_messages,
-                        session_id,
-                        submitted_contents,
-                        assistant_parts,
-                        (
+                    if admitted_turn_request_ids:
+                        # A turn may answer one queued send or several sends
+                        # that the daemon batched together. Retire only the
+                        # ids this completion actually names.
+                        named = _event_request_ids(event)
+                        completed_now = named & admitted_turn_request_ids
+                        if not named:
+                            pending_untagged = (
+                                untagged_request_ids - completed_request_ids
+                            )
+                            if len(pending_untagged) == 1:
+                                completed_now = pending_untagged
+                        completed_now -= completed_request_ids
+                        if not completed_now:
+                            continue
+                        completed_request_ids.update(completed_now)
+                        completed_private_replies = (
+                            completed_now & private_goal_reply_ids
+                        )
+                        if completed_private_replies:
+                            private_goal_reply_ids.difference_update(
+                                completed_private_replies
+                            )
+                            store_handover_snapshot()
+                        pending_correlation_ids = (
+                            (untagged_request_ids | possibly_accepted_request_ids)
+                            - completed_request_ids
+                        )
+                        pending_gap_ids = (
+                            admitted_turn_request_ids - completed_request_ids
+                            if event_loss_seen
+                            else set()
+                        )
+                        if not pending_correlation_ids and not pending_gap_ids:
+                            correlation_deadline = None
+                        turn_status = (
                             {
                                 "type": "incomplete", "reason": "error",
                                 "error": turn_error, **turn_error_fields,
                             }
                             if turn_error
                             else {"type": "complete", "reason": "stop"}
-                        ),
-                        submitted_media,
-                        submitted_request_ids,
-                        submitted_row_ids,
-                    )
+                        )
+                        completed_assistant_turns.append(
+                            {
+                                "parts": copy.deepcopy(assistant_parts),
+                                "status": turn_status,
+                                "request_ids": sorted(completed_now),
+                                "message_id": assistant_row_id(completed_now),
+                            }
+                        )
+                        usage_totals["inputTokens"] += int(
+                            event.get("input_tokens", 0) or 0
+                        )
+                        usage_totals["outputTokens"] += int(
+                            event.get("output_tokens", 0) or 0
+                        )
+                        usage_totals["toolCalls"] += int(
+                            event.get("tool_calls", 0) or 0
+                        )
+                        if turn_error and run_error is None:
+                            run_error = {
+                                "message": turn_error, **turn_error_fields,
+                            }
+                            completion["error"] = run_error
+                        final_stop_reason = (
+                            "error" if run_error or completion.get("error")
+                            else str(event.get("stop_reason") or "end_turn")
+                        )
+                        assistant_parts.clear()
+                        current_turn_request_ids.clear()
+                        assistant_tool_parts.clear()
+                        tool_controllers.clear()
+                        permission_controllers.clear()
+                        permission_tool_ids.clear()
+                        answered_prompts.clear()
+                        turn_error = ""
+                        turn_error_fields = {}
+
+                        if not admitted_turn_request_ids.issubset(
+                            completed_request_ids
+                        ):
+                            publish_progress()
+                            continue
+
+                        # The last completion closes the response. Keep the
+                        # usage total and all turn rows in admission order.
+                        permission_error = ""
+                        if permission_resolution_pending or permission_resolution_errors:
+                            permission_error = permission_resolution_error_message(
+                                all_terminal=True
+                            )
+                            completion["error"] = {"message": permission_error}
+                            final_stop_reason = "error"
+                            controller.add_error(permission_error)
+                            _assistant_set_state_value(
+                                controller, "error", permission_error
+                            )
+                        completion["usage"] = {
+                            **usage_totals,
+                            "stopReason": final_stop_reason,
+                        }
+                        completion["completed"] = True
+                        preserve_handover_queue = False
+                        mark_turn_incomplete = bool(
+                            event_loss_seen
+                            or permission_error
+                            or (
+                                admission_error
+                                and (
+                                    not queue_from_ledger
+                                    or possibly_accepted_request_ids
+                                    - completed_request_ids
+                                )
+                            )
+                        )
+                        if mark_turn_incomplete and completed_assistant_turns:
+                            order = resumed_request_order + submitted_turn_request_ids
+                            latest_turn = max(
+                                completed_assistant_turns,
+                                key=lambda turn: min(
+                                    (
+                                        index
+                                        for index, request_id in enumerate(order)
+                                        if request_id in set(turn.get("request_ids") or ())
+                                    ),
+                                    default=len(order),
+                                ),
+                            )
+                            latest_turn["status"] = {
+                                "type": "incomplete",
+                                "reason": "error",
+                                "error": (
+                                    admission_error
+                                    or event_loss_message
+                                    or permission_error
+                                ),
+                            }
+                        final_messages = build_messages_for_turn()
+                    else:
+                        # Permission answers can continue a turn without a new
+                        # user send; preserve their existing single-row update.
+                        completion["usage"] = {
+                            "inputTokens": int(event.get("input_tokens", 0) or 0),
+                            "outputTokens": int(event.get("output_tokens", 0) or 0),
+                            "toolCalls": int(event.get("tool_calls", 0) or 0),
+                            "stopReason": "error"
+                            if turn_error
+                            else event.get("stop_reason", "end_turn"),
+                        }
+                        completion["completed"] = True
+                        final_messages = _assistant_update_message_state(
+                            state_messages,
+                            session_id,
+                            submitted_contents,
+                            assistant_parts,
+                            (
+                                {
+                                    "type": "incomplete", "reason": "error",
+                                    "error": turn_error, **turn_error_fields,
+                                }
+                                if turn_error
+                                else {"type": "complete", "reason": "stop"}
+                            ),
+                            submitted_media,
+                            submitted_request_ids,
+                            submitted_row_ids,
+                        )
                     if persist_message_state:
-                        if goal_pump is not None:
+                        if goal_pumps:
                             # Other goal commands may have reached history in
                             # between this page's request and its result. A
                             # total history count is not a prefix of the rows
@@ -1981,7 +4107,7 @@ async def assistant_transport(
                             # canonical history once it is idle instead. The
                             # daemon is not asked for history: the full reload
                             # supersedes any count this stream could set.
-                            _assistant_set_messages(controller, state_messages)
+                            _assistant_set_messages(controller, final_messages)
                             controller.state["synced"] = None
                             if event.get("history_recorded"):
                                 controller.state["goalHistoryReloadRequired"] = True
@@ -1997,7 +4123,7 @@ async def assistant_transport(
                             # has not been shown). The snapshot only decides
                             # the sync claim; alignment mutates these published
                             # rows in place (#675).
-                            _assistant_set_messages(controller, state_messages)
+                            _assistant_set_messages(controller, final_messages)
                             refreshed = None
                             for _attempt in (0, 1):
                                 try:
@@ -2015,7 +4141,7 @@ async def assistant_transport(
                             aligned = False
                             if refreshed:
                                 aligned = _assistant_align_streamed_ids(
-                                    state_messages, refreshed
+                                    final_messages, refreshed
                                 )
                             if aligned:
                                 # Each streamed row carries its source index
@@ -2024,11 +4150,11 @@ async def assistant_transport(
                                 # their ids. Republish the metadata before the
                                 # watermark is claimed (#767/#666).
                                 _assistant_set_messages(
-                                    controller, state_messages
+                                    controller, final_messages
                                 )
                                 controller.state["synced"] = {
                                     "history": len(refreshed),
-                                    "messages": len(state_messages),
+                                    "messages": len(final_messages),
                                 }
                             else:
                                 # No snapshot this stream reconciled against
@@ -2048,20 +4174,73 @@ async def assistant_transport(
             logger.exception("assistant transport failed for %s", session_id)
             controller.add_error(str(exc))
         finally:
-            tasks = [task for task in (goal_pump, revocation_watch) if task is not None]
+            tasks = [*goal_pumps]
+            if revocation_watch is not None:
+                tasks.append(revocation_watch)
             for task in tasks:
                 task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
-            session.unsubscribe(shared_queue)
+            pending_handover_ids = (
+                admitted_turn_request_ids - completed_request_ids
+            )
+            handover_revoked = bool(
+                (read_context and read_context.revoked)
+                or getattr(shared_queue, "revoked", False)
+            )
+            keep_handover = bool(
+                handover_token
+                and handover_claim_id
+                and not handover_revoked
+                and (preserve_handover_queue or pending_handover_ids)
+            )
+            if handover_token and handover_claim_id:
+                if keep_handover:
+                    store_handover_snapshot()
+                    _assistant_release_handover(
+                        session,
+                        handover_token,
+                        handover_claim_id,
+                        handover_record,
+                    )
+                    preserve_handover_queue = True
+                else:
+                    if (
+                        _assistant_finish_handover(
+                            session, handover_token, handover_claim_id
+                        )
+                        is shared_queue
+                    ):
+                        subscribed_here = False
+                    handover_claim_id = None
+                    _assistant_set_state_value(
+                        controller, _ASSISTANT_HANDOVER_STATE_KEY, None
+                    )
+            if subscribed_here and shared_queue is not None and not preserve_handover_queue:
+                session.unsubscribe(shared_queue)
 
     stream = create_run(run_callback, state=body.state)
     protocol_stream = _assistant_protocol_stream(stream, completion)
 
     class _OwnedAssistantTransportResponse(AssistantTransportResponse):
         async def stream_response(self, send):
+            handover_delivery["enabled"] = True
+
+            async def send_with_handover_tracking(message):
+                await send(message)
+                token = handover_delivery.get("token")
+                if token and message.get("type") == "http.response.body":
+                    payload = message.get("body", b"")
+                    wire = (
+                        payload
+                        if isinstance(payload, bytes)
+                        else str(payload).encode("utf-8")
+                    )
+                    if str(token).encode("ascii") in wire:
+                        handover_delivery["sent"].set()
+
             try:
-                await super().stream_response(send)
+                await super().stream_response(send_with_handover_tracking)
             finally:
                 # Cancellation can arrive during downstream send, outside the
                 # generators. Close every owned layer explicitly so create_run
@@ -2072,7 +4251,8 @@ async def assistant_transport(
                         closing.push_async_callback(protocol_stream.aclose)
                         closing.push_async_callback(self.body_iterator.aclose)
 
-    return _OwnedAssistantTransportResponse(protocol_stream)
+    response = _OwnedAssistantTransportResponse(protocol_stream)
+    return response
 
 
 class CancelRequest(BaseModel):

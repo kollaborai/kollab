@@ -18,7 +18,7 @@ npm run inventory:controls -- /tmp/kollab-control-candidates.json
 npm run test:e2e:parallel
 ```
 
-The runner executes ten independent browser suites; locally it defaults to
+The runner executes all registered independent browser suites; locally it defaults to
 two workers, and CI fans the suites out across four parallel webui lane jobs
 (core, learn, topics, notices) selected with `KOLLAB_BROWSER_SUITES` (#1022). Each has its own scratch home, temporary directory, browser context,
 and dynamically allocated local listener. It does not inherit unrelated
@@ -39,6 +39,17 @@ limitation rather than an orphan-free guarantee. On Windows, the runner cannot
 gracefully signal and verify a whole process tree with its current Node-only
 mechanism. It reports cleanup as unverified and does not count that suite as
 passed.
+
+The sidebar footer proof opens the mocked shell at 390px and 820px, checks all
+eight controls are at least 44x44 CSS pixels, and checks that the footer and
+page fit without horizontal overflow. At 1280px it checks that all eight
+controls stay inside the desktop row without horizontal overflow at the default
+sidebar width and at the minimum saved sidebar width. It saves
+`sidebar-footer-touch-targets-390.png` and
+`sidebar-footer-touch-targets-820.png` and
+`sidebar-footer-touch-targets-1280.png` and
+`sidebar-footer-touch-targets-1280-sidebar-220.png`. Run it from the frontend directory with
+`node tests/sidebar-footer-touch-target-browser-acceptance.mjs <artifact-dir>`.
 
 CI prepares the artifact directory before build and test commands and uploads
 it with `if: always()`. A parallel run must not connect to a real user's
@@ -108,8 +119,9 @@ command exits 1 when any flow shows a defect.
 - Profile rows: `acceptance/profile-rows.browser.mjs`. Still needed: full profile lifecycle and real authentication/error paths.
 - Profile copy: `acceptance/profile-copy.browser.mjs`. Still needed: real keyring, provider and provisioned-profile negative cases.
 - Agent sidebar glyphs and responsive layout: `agent-sidebar-glyph-browser-acceptance.mjs`. Still needed: agent launch, stop, deletion and remote failures.
+- Sidebar footer touch targets and desktop fit: `sidebar-footer-touch-target-browser-acceptance.mjs`; checks 44x44px controls at 390px and 820px, and all eight controls fit the desktop row at 1280px.
 - Team launch: `team-launch-browser-acceptance.mjs`. Still needed: live launch, permissions and failure/recovery.
-- Chat: the remote lifecycle suite sends and receives through the UI, switches sessions, reloads and recreates a browser profile, and checks cached messages during synthetic history errors. A real remote persistence failure is tracked in #927. Still needed: live reconnection, busy state, attachments and additional errors.
+- Chat: the remote lifecycle suite sends and receives through the UI, switches sessions, reloads and recreates a browser profile, and checks cached messages during synthetic history errors. A real remote persistence failure is tracked in #927. The composer control layout proof covers a six-line draft at 390, 820 and 1440px in light and dark themes, while idle and running (`issue-1109-composer-controls-browser-acceptance.mjs`, #1109). Still needed: live reconnection, other busy-turn behavior, attachments and additional errors.
 - Settings and panels: partial profile flows above. Still needed: config, models, loadouts, MCP, permissions, session properties, versions and destructive confirmations.
 - Hub and network: mocked remote selection only. Still needed: membership, invitations, trust, permissions, remote errors and recovery.
 - Apps, prompts and Gem Studio: no end-to-end browser flow in this suite. Still needed: navigation, create/edit/remove actions, persistence and errors.
