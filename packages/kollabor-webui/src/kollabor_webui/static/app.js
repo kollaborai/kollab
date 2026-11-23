@@ -198,9 +198,10 @@ class EngineAPI {
     return this.post(`/sessions/${sessionId}/permissions/mode`, { mode });
   }
 
-  async respondPermission(sessionId, toolId, decision, scope = 'once') {
+  async respondPermission(sessionId, toolId, permissionId, decision, scope = 'once') {
     return this.post(`/sessions/${sessionId}/permission`, {
       tool_id: toolId,
+      permission_id: permissionId,
       decision,
       scope,
     });
@@ -627,11 +628,11 @@ class TerminalSession {
         break;
 
       case 'permission_granted':
-        this.printPermissionGranted(event.tool_id, event.scope);
+        this.printPermissionGranted(event.tool_id, event.scope, event.permission_id);
         break;
 
       case 'permission_denied':
-        this.printPermissionDenied(event.tool_id);
+        this.printPermissionDenied(event.tool_id, event.permission_id);
         break;
 
       case 'turn_complete':
@@ -836,55 +837,89 @@ class TerminalSession {
   }
 
   printPermissionRequest(event) {
+    const toolId = typeof event.tool_id === 'string' ? event.tool_id : '';
+    const details = event.details && typeof event.details === 'object' ? event.details : {};
+    const permissionId = typeof event.permission_id === 'string' && event.permission_id
+      ? event.permission_id
+      : typeof details.permission_id === 'string' ? details.permission_id : '';
+    if (toolId && permissionId && Array.from(this.container.querySelectorAll('.output-line.permission'))
+      .some(existing => existing.dataset.toolId === toolId && existing.dataset.permissionId === permissionId)) {
+      return;
+    }
+
     const line = document.createElement('div');
     line.className = 'output-line permission';
-    line.id = `perm-${this.id}-${event.tool_id}`;
+    line.dataset.toolId = toolId;
+    if (permissionId) line.dataset.permissionId = permissionId;
 
     const riskColor = event.risk_level === 'high' ? 'var(--error)' : 'var(--warning)';
 
+    const answerControls = toolId && permissionId ? `
+      <div class="permission-buttons">
+        <button class="btn btn-approve">approve</button>
+        <button class="btn btn-deny">deny</button>
+      </div>
+    ` : '<div class="permission-error">Cannot safely answer this permission request because its owner identity is missing.</div>';
     line.innerHTML = `
       <div class="tool-info">[perm] <span class="tool-name">${this.escapeHtml(event.tool_name)}</span> <span style="color: ${riskColor}">[${event.risk_level}]</span></div>
       <div style="font-size: 11px; color: var(--text-dim); margin-top: 4px;">${this.escapeHtml(event.risk_reason)}</div>
-      <div class="permission-buttons">
-        <button class="btn btn-approve" data-tool-id="${event.tool_id}">approve</button>
-        <button class="btn btn-deny" data-tool-id="${event.tool_id}">deny</button>
-      </div>
+      ${answerControls}
     `;
 
-    // Add event listeners
-    line.querySelectorAll('button').forEach(btn => {
-      btn.addEventListener('click', () => this.respondPermission(event.tool_id, btn.classList.contains('btn-approve') ? 'approve' : 'deny'));
+    line.querySelector('.btn-approve')?.addEventListener('click', () => {
+      this.respondPermission(toolId, permissionId, 'approve', line);
+    });
+    line.querySelector('.btn-deny')?.addEventListener('click', () => {
+      this.respondPermission(toolId, permissionId, 'deny', line);
     });
 
     this.container.appendChild(line);
     this.scrollToBottom();
   }
 
-  async respondPermission(toolId, decision) {
-    const permLine = document.getElementById(`perm-${this.id}-${toolId}`);
-    if (!permLine) return;
+  async respondPermission(toolId, permissionId, decision, permLine) {
+    if (!toolId || !permissionId || !permLine ||
+        permLine.dataset.toolId !== toolId || permLine.dataset.permissionId !== permissionId) {
+      this.printError('permission response refused: prompt owner identity is missing or stale');
+      return;
+    }
 
     // Disable buttons
     permLine.querySelectorAll('button').forEach(btn => btn.disabled = true);
 
     try {
-      await this.api.respondPermission(this.id, toolId, decision);
+      await this.api.respondPermission(this.id, toolId, permissionId, decision);
 
-      const statusText = decision === 'approve' ? 'approved' : 'denied';
-      const color = decision === 'approve' ? 'var(--accent)' : 'var(--error)';
-      permLine.innerHTML += `<span style="color: ${color}; margin-left: 8px;">[${statusText}]</span>`;
+      this.markPermissionRow(toolId, permissionId, decision);
     } catch (e) {
       this.printError(`permission response failed: ${e.message}`);
       permLine.querySelectorAll('button').forEach(btn => btn.disabled = false);
     }
   }
 
-  printPermissionGranted(toolId, scope) {
-    this.printSystem(`permission granted for ${toolId} [${scope}]`);
+  markPermissionRow(toolId, permissionId, decision) {
+    const permLine = Array.from(this.container.querySelectorAll('.output-line.permission'))
+      .find(line => line.dataset.toolId === toolId && line.dataset.permissionId === permissionId);
+    if (!permLine) return;
+    permLine.querySelectorAll('button').forEach(btn => btn.disabled = true);
+    if (permLine.querySelector('[data-permission-result]')) return;
+
+    const status = document.createElement('span');
+    status.dataset.permissionResult = decision;
+    status.style.color = decision === 'approve' ? 'var(--accent)' : 'var(--error)';
+    status.style.marginLeft = '8px';
+    status.textContent = `[${decision === 'approve' ? 'approved' : 'denied'}]`;
+    permLine.append(status);
   }
 
-  printPermissionDenied(toolId) {
+  printPermissionGranted(toolId, scope, permissionId) {
+    this.printSystem(`permission granted for ${toolId} [${scope}]`);
+    if (permissionId) this.markPermissionRow(toolId, permissionId, 'approve');
+  }
+
+  printPermissionDenied(toolId, permissionId) {
     this.printWarning(`permission denied for ${toolId}`);
+    if (permissionId) this.markPermissionRow(toolId, permissionId, 'deny');
   }
 
   scrollToBottom() {
