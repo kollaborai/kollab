@@ -61,6 +61,55 @@ export function bundlesOwnReact(source: string): boolean {
   return OWN_REACT.test(source);
 }
 
+const IMPORT_SPECIFIERS = [
+  /\b(?:import|export)\s*(?:[^;'\"]*?\s*from\s*)?["']([^"']+)["']/g,
+  /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
+];
+
+/** Check the entry and its local module graph; bundled React is often emitted as a shared chunk. */
+async function bundleImportsOwnReact(
+  pluginId: string,
+  entryUrl: string,
+  entrySource: string,
+  fetchText: (url: string) => Promise<string>,
+): Promise<boolean> {
+  const origin = "https://kollab-plugin.invalid";
+  const rootPath = `/plugins/${pluginId}/web/`;
+  const visited = new Set<string>();
+
+  async function inspect(url: string, source: string): Promise<boolean> {
+    const resolved = new URL(url, origin);
+    if (resolved.origin !== origin || !resolved.pathname.startsWith(rootPath)) return false;
+    const key = `${resolved.pathname}${resolved.search}`;
+    if (visited.has(key)) return false;
+    visited.add(key);
+    if (bundlesOwnReact(source)) return true;
+
+    const specifiers = new Set<string>();
+    for (const pattern of IMPORT_SPECIFIERS) {
+      pattern.lastIndex = 0;
+      for (let match = pattern.exec(source); match; match = pattern.exec(source)) specifiers.add(match[1]);
+    }
+    for (const specifier of specifiers) {
+      if (!specifier.startsWith(".") && !specifier.startsWith("/")) continue;
+      const dependency = new URL(specifier, resolved);
+      if (dependency.origin !== origin || !dependency.pathname.startsWith(rootPath)) continue;
+      // Keep the entry's cache key on fetched chunks so a retry checks the same version the browser imports.
+      if (!dependency.search) {
+        for (const keyName of ["v", "retry"]) {
+          const value = resolved.searchParams.get(keyName);
+          if (value !== null) dependency.searchParams.set(keyName, value);
+        }
+      }
+      if (await inspect(`${dependency.pathname}${dependency.search}`, await fetchText(`${dependency.pathname}${dependency.search}`)))
+        return true;
+    }
+    return false;
+  }
+
+  return inspect(entryUrl, entrySource);
+}
+
 export type LoaderDeps = {
   list(): Promise<{ plugins?: unknown }>;
   importModule(url: string): Promise<unknown>;
@@ -156,7 +205,8 @@ export function createPluginLoader(registry: PluginRegistry, deps: LoaderDeps) {
       if (!url) throw new Error(`${web.entry} is not a file inside web/dist`);
       const source = await deps.fetchText(url);
       if (abandoned) return;
-      if (bundlesOwnReact(source)) throw new Error(`${web.entry} bundles its own React: mark react as external`);
+      if (await bundleImportsOwnReact(entry.id, url, source, deps.fetchText))
+        throw new Error(`${web.entry} bundles its own React: mark react as external`);
       const module = await deps.importModule(url);
       // A module that arrives after the limit is never set up.
       if (abandoned) return;
