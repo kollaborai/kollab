@@ -4587,7 +4587,23 @@ class LocalStateService(StateService):
                 logger.debug("branch: session_stats update error: %s", e)
 
         if uses_acp:
-            await self._restore_conversation_acp(acp, session_id)
+            try:
+                await self._restore_conversation_acp(acp, session_id)
+            except Exception as e:
+                for name, value in previous_state.items():
+                    if hasattr(conv_mgr, name):
+                        setattr(conv_mgr, name, value)
+                if hasattr(history, "clear") and hasattr(history, "extend"):
+                    history.clear()
+                    history.extend(history_state or [])
+                elif history_state is not None:
+                    llm.conversation_history = history_state
+                if isinstance(session_stats, dict) and stats_state is not None:
+                    session_stats.clear()
+                    session_stats.update(stats_state)
+                restore_object_state(conv_logger, logger_state)
+                restore_object_state(api_service, api_state)
+                raise ValueError(f"failed to restore ACP conversation: {e}") from e
 
         header = f"--- Branched from {session_id} at message {branch_index} ---"
         success_message = f"[ok] Created branch: {new_session_id}. Continue below."
