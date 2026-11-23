@@ -9,6 +9,7 @@ network or a running daemon.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import re
 import sys
@@ -257,6 +258,7 @@ async def test_assistant_transport_preserves_image_part_in_submitted_message(
 
 @pytest.mark.asyncio
 async def test_assistant_transport_maps_permission_result(monkeypatch):
+    permission_id = "owner-shell-1"
     session = _FakeSession([{"type": "turn_complete"}])
     monkeypatch.setattr(
         messages, "get_session_registry", lambda: _FakeRegistry(session)
@@ -269,16 +271,20 @@ async def test_assistant_transport_maps_permission_result(monkeypatch):
             commands=[
                 {
                     "type": "add-tool-result",
-                    "toolCallId": "permission_shell-1",
-                    "result": {"decision": "approve", "scope": "session"},
+                    "toolCallId": f"permission_shell-1_{permission_id}",
+                    "result": {"decision": "approve", "scope": "session", "permission_id": permission_id},
                 }
-            ]
+            ],
+            state={"messages": [{"role": "assistant", "content": [{
+                "type": "tool-call", "toolCallId": f"permission_shell-1_{permission_id}",
+                "toolName": "request_permission", "args": {"tool_id": "shell-1", "permission_id": permission_id},
+            }]}]},
         ),
     )
     async for _chunk in response.stream:
         pass
 
-    session.resolve_permission.assert_awaited_once_with("shell-1", "approve", "session")
+    session.resolve_permission.assert_awaited_once_with("shell-1", "approve", "session", permission_id=permission_id)
 
 
 @pytest.mark.asyncio
@@ -372,6 +378,7 @@ async def test_assistant_transport_preserves_state_through_real_state_proxy(
         if line.startswith("data: {")
     ]
     assert [frame["type"] for frame in frames] == [
+        "update-state",
         "part-start",
         "text-delta",
         "update-state",
@@ -382,25 +389,31 @@ async def test_assistant_transport_preserves_state_through_real_state_proxy(
         "part-finish",
         "message-finish",
     ]
-    assert frames[1]["path"] == [0]
-    assert frames[1]["textDelta"] == "thinking"
+    # The admitted send shows at once, before the daemon says anything (#1359).
+    admitted = [(op["path"], op["value"]) for op in frames[0]["operations"]]
+    assert [path for path, _ in admitted] == [["messages", "1"]]
+    assert admitted[0][1]["content"] == "hello"
+    assert frames[2]["path"] == [0]
+    assert frames[2]["textDelta"] == "thinking"
     # The first streamed event publishes at once; "hello" lands inside the
     # throttle window and rides the final publish.
-    mid_turn = [(op["path"], op["value"]) for op in frames[2]["operations"]]
-    assert [path for path, _ in mid_turn] == [["messages", "1"], ["messages", "2"]]
-    assert mid_turn[1][1]["content"] == [{"type": "reasoning", "text": "thinking"}]
-    assert frames[5]["path"] == [1]
-    assert frames[5]["textDelta"] == "hello"
-    assert frames[6]["operations"] == [
+    mid_turn = [(op["path"], op["value"]) for op in frames[3]["operations"]]
+    assert [path for path, _ in mid_turn] == [["messages", "2"]]
+    assert mid_turn[0][1]["content"] == [{"type": "reasoning", "text": "thinking"}]
+    assert frames[6]["path"] == [1]
+    assert frames[6]["textDelta"] == "hello"
+    assert frames[7]["operations"] == [
         {"type": "set", "path": ["messages"], "value": state["messages"]},
         {"type": "set", "path": ["synced"], "value": None},
         {"type": "set", "path": ["usage"], "value": state["usage"]},
     ]
-    assert frames[8]["finishReason"] == "stop"
+    assert frames[9]["finishReason"] == "stop"
     assert state["sessionId"] == initial_state["sessionId"]
     assert state["messages"] == [
         *prior_messages,
-        {"id": "user-session-test-1", "role": "user", "content": "hello"},
+        # The send's request id rides on its row (#1359).
+        {"id": "user-session-test-1", "role": "user", "content": "hello",
+         "metadata": {"custom": {"requestId": ANY}}},
         {
             "id": "assistant-session-test-2",
             "role": "assistant",
@@ -451,11 +464,14 @@ async def test_assistant_stream_close_leaves_daemon_turn_running(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_assistant_transport_exposes_and_resolves_permission_prompt(monkeypatch):
+    permission_id = "owner-shell-2"
     session = _FakeSession(
         [
             {
                 "type": "permission_request",
+                "request_id": "parent-turn-shell-2",
                 "tool_id": "shell-2",
+                "permission_id": permission_id,
                 "tool_name": "terminal",
                 "tool_type": "terminal",
                 "risk_level": "high",
@@ -465,11 +481,12 @@ async def test_assistant_transport_exposes_and_resolves_permission_prompt(monkey
         ]
     )
 
-    async def resolve_permission(tool_id: str, decision: str, scope: str) -> bool:
+    async def resolve_permission(tool_id: str, decision: str, scope: str, *, permission_id: str) -> bool:
         session._events.put_nowait(
             {
                 "type": "permission_denied",
                 "tool_id": tool_id,
+                "permission_id": permission_id,
                 "option_id": "vendor-denied",
                 "vendor_saved": True,
                 "warning": "Saved by the ACP provider; Kollab cannot undo it.",
@@ -487,16 +504,18 @@ async def test_assistant_transport_exposes_and_resolves_permission_prompt(monkey
     first = await messages.assistant_transport(
         session.session_id,
         messages.AssistantRequest(
-            commands=[{"type": "add-message", "content": "run command"}]
+            commands=[{"type": "add-message", "content": "run command"}],
+            state={"messages": []},
         ),
     )
     async for _chunk in first.stream:
         pass
     first_controller = captured["controller"]
     assert [(tool.name, tool.tool_call_id) for tool in first_controller.tool_calls] == [
-        ("request_permission", "permission_shell-2")
+        ("request_permission", f"permission_shell-2_{permission_id}")
     ]
     assert '"tool_id": "shell-2"' in first_controller.tool_calls[0].args
+    assert '"request_id": "parent-turn-shell-2"' in first_controller.tool_calls[0].args
 
     second = await messages.assistant_transport(
         session.session_id,
@@ -504,25 +523,27 @@ async def test_assistant_transport_exposes_and_resolves_permission_prompt(monkey
             commands=[
                 {
                     "type": "add-tool-result",
-                    "toolCallId": "permission_shell-2",
-                    "result": {"decision": "deny", "scope": "once"},
+                    "toolCallId": f"permission_shell-2_{permission_id}",
+                    "result": {"decision": "deny", "scope": "once", "permission_id": permission_id},
                 }
-            ]
+            ],
+            state=first_controller.state,
         ),
     )
     async for _chunk in second.stream:
         pass
-    session.resolve_permission.assert_awaited_once_with("shell-2", "deny", "once")
+    session.resolve_permission.assert_awaited_once_with("shell-2", "deny", "once", permission_id=permission_id)
     assert captured["controller"].errors == []
 
 
 async def _answer_parked_prompt(monkeypatch, decision, events):
     """Answer a prompt a Stop left open; the daemon answers with ``events``."""
+    permission_id = "owner-shell-3"
     session = _FakeSession([])
 
-    async def resolve_permission(tool_id: str, decision: str, scope: str) -> bool:
+    async def resolve_permission(tool_id: str, decision: str, scope: str, *, permission_id: str) -> bool:
         for event in events:
-            session._events.put_nowait(event)
+            session._events.put_nowait({**event, "permission_id": permission_id})
         return True
 
     session.resolve_permission = AsyncMock(side_effect=resolve_permission)
@@ -536,10 +557,14 @@ async def _answer_parked_prompt(monkeypatch, decision, events):
             commands=[
                 {
                     "type": "add-tool-result",
-                    "toolCallId": "permission_shell-3",
-                    "result": {"decision": decision, "scope": "once"},
+                    "toolCallId": f"permission_shell-3_{permission_id}",
+                    "result": {"decision": decision, "scope": "once", "permission_id": permission_id},
                 }
-            ]
+            ],
+            state={"messages": [{"role": "assistant", "content": [{
+                "type": "tool-call", "toolCallId": f"permission_shell-3_{permission_id}",
+                "toolName": "request_permission", "args": {"tool_id": "shell-3", "permission_id": permission_id},
+            }], "status": {"type": "requires-action", "reason": "tool-calls"}}]},
         ),
     )
 
@@ -579,8 +604,8 @@ async def test_a_parked_prompts_allow_streams_the_turn_it_goes_on_with(monkeypat
 @pytest.mark.parametrize(
     ("event", "decision"),
     [
-        ({"type": "permission_granted", "scope": "once"}, "approve"),
-        ({"type": "permission_denied"}, "deny"),
+        ({"type": "permission_granted", "scope": "once", "permission_id": "owner-shell-3"}, "approve"),
+        ({"type": "permission_denied", "permission_id": "owner-shell-3"}, "deny"),
     ],
 )
 @pytest.mark.asyncio
@@ -595,9 +620,9 @@ async def test_a_message_that_answers_a_shown_card_closes_it(monkeypatch, event,
     )
     card = {
         "type": "tool-call",
-        "toolCallId": "permission_shell-3",
+        "toolCallId": "permission_shell-3_owner-shell-3",
         "toolName": "request_permission",
-        "args": {"tool_id": "shell-3", "details": {"parked": True}},
+        "args": {"tool_id": "shell-3", "permission_id": "owner-shell-3", "details": {"parked": True}},
         "argsText": "{}",
     }
     state = {
@@ -618,10 +643,14 @@ async def test_a_message_that_answers_a_shown_card_closes_it(monkeypatch, event,
         state,
     )
 
-    # The card closes as soon as its answer lands, before the turn goes on.
-    path, message = sets[0]
+    # The answering message shows at once (#1359); the card closes as soon as
+    # its answer lands, before the turn goes on.
+    assert sets[0][0] == ["messages", "2"] and sets[0][1]["content"] == "yes"
+    path, message = sets[1]
     assert path == ["messages", "1"]
-    assert message["content"][0]["result"] == {"decision": decision, "scope": "once"}
+    assert message["content"][0]["result"] == {
+        "decision": decision, "scope": "once", "permission_id": "owner-shell-3",
+    }
     assert message["content"][0]["isError"] is (decision == "deny")
     # Turn end: the card stays answered above the message that answered it.
     final = sets[-3][1]
@@ -773,8 +802,9 @@ async def test_assistant_transport_publishes_running_tool_with_timing(monkeypatc
         ["synced"],
         ["usage"],
     ]
-    # tool_start: the user message and an in-flight assistant message, no result
-    # and no explicit status (the client shows it running while the run is open).
+    # Admission: the user message, before the daemon says anything (#1359).
+    # tool_start: an in-flight assistant message, no result and no explicit
+    # status (the client shows it running while the run is open).
     assert sets[0][1]["role"] == "user"
     running = sets[1][1]
     part = running["content"][0]
@@ -809,13 +839,18 @@ async def test_assistant_transport_progress_extends_continued_assistant_message(
         ]
     )
     earlier = {"type": "tool-call", "toolCallId": "call-1", "toolName": "terminal"}
+    permission_part = {
+        "type": "tool-call", "toolCallId": "permission_call-1_owner-call-1",
+        "toolName": "request_permission",
+        "args": {"tool_id": "call-1", "permission_id": "owner-call-1"},
+    }
     state = {
         "messages": [
             {"id": "u", "role": "user", "content": "go"},
             {
                 "id": "a",
                 "role": "assistant",
-                "content": [earlier],
+                "content": [earlier, permission_part],
                 "status": {"type": "requires-action", "reason": "tool-calls"},
             },
         ]
@@ -826,8 +861,8 @@ async def test_assistant_transport_progress_extends_continued_assistant_message(
         [
             {
                 "type": "add-tool-result",
-                "toolCallId": "permission_call-1",
-                "result": True,
+                "toolCallId": "permission_call-1_owner-call-1",
+                "result": {"decision": "approve", "permission_id": "owner-call-1"},
             }
         ],
         state,
@@ -835,7 +870,9 @@ async def test_assistant_transport_progress_extends_continued_assistant_message(
 
     path, message = sets[0]
     assert path == ["messages", "1"]
-    assert [part["toolCallId"] for part in message["content"]] == ["call-1", "call-2"]
+    assert [part["toolCallId"] for part in message["content"]] == [
+        "call-1", "permission_call-1_owner-call-1", "call-2",
+    ]
     assert "status" not in message
     # The final publish keeps one assistant message with an explicit status.
     assert [m["role"] for m in sets[-3][1]] == ["user", "assistant"]
@@ -845,9 +882,10 @@ async def test_assistant_transport_progress_extends_continued_assistant_message(
 @pytest.mark.asyncio
 async def test_assistant_transport_finishes_gated_tool_in_place(monkeypatch):
     """A tool gated by a prompt gets its result and duration in the answering run."""
+    permission_id = "owner-call-1"
     session = _FakeSession(
         [
-            {"type": "permission_granted", "tool_id": "call-1", "scope": "once"},
+            {"type": "permission_granted", "tool_id": "call-1", "permission_id": permission_id, "scope": "once"},
             {
                 "type": "tool_result",
                 "tool_id": "call-1",
@@ -876,10 +914,10 @@ async def test_assistant_transport_finishes_gated_tool_in_place(monkeypatch):
                     },
                     {
                         "type": "tool-call",
-                        "toolCallId": "permission_call-1",
+                        "toolCallId": f"permission_call-1_{permission_id}",
                         "toolName": "request_permission",
-                        "args": {"tool_id": "call-1"},
-                        "argsText": '{"tool_id": "call-1"}',
+                        "args": {"tool_id": "call-1", "permission_id": permission_id},
+                        "argsText": json.dumps({"tool_id": "call-1", "permission_id": permission_id}),
                     },
                 ],
                 "status": {"type": "requires-action", "reason": "tool-calls"},
@@ -892,8 +930,8 @@ async def test_assistant_transport_finishes_gated_tool_in_place(monkeypatch):
         [
             {
                 "type": "add-tool-result",
-                "toolCallId": "permission_call-1",
-                "result": {"decision": "approve", "scope": "once"},
+                "toolCallId": f"permission_call-1_{permission_id}",
+                "result": {"decision": "approve", "scope": "once", "permission_id": permission_id},
             }
         ],
         state,
@@ -902,7 +940,7 @@ async def test_assistant_transport_finishes_gated_tool_in_place(monkeypatch):
     # permission_granted: the prompt card is answered and the message runs again.
     path, message = sets[0]
     assert path == ["messages", "1"] and "status" not in message
-    assert message["content"][1]["result"] == {"decision": "approve", "scope": "once"}
+    assert message["content"][1]["result"] == {"decision": "approve", "scope": "once", "permission_id": permission_id}
     # tool_result: the same row finishes with its output and a measured duration.
     path, message = sets[1]
     row = message["content"][0]
@@ -913,7 +951,7 @@ async def test_assistant_transport_finishes_gated_tool_in_place(monkeypatch):
     final = sets[-3][1]
     assert [m["role"] for m in final] == ["user", "assistant"]
     tools = [p for p in final[1]["content"] if p["type"] == "tool-call"]
-    assert [p["toolCallId"] for p in tools] == ["call-1", "permission_call-1"]
+    assert [p["toolCallId"] for p in tools] == ["call-1", "permission_call-1_owner-call-1"]
     assert tools[0]["timing"] == {"startedAt": 1000, "completedAt": 3000}
     # The continued run's text lands after the finished rows, not above them.
     assert final[1]["content"][-1] == {"type": "text", "text": "done"}
@@ -970,6 +1008,8 @@ async def test_assistant_transport_throttles_streamed_text_publishes(monkeypatch
         ["synced"],
         ["usage"],
     ]
+    # The admitted send's publish does not start the throttle: "a" still
+    # publishes at once.
     assert sets[1][1]["content"] == [{"type": "text", "text": "a"}]
     assert sets[2][1][1]["content"] == [{"type": "text", "text": "abc"}]
 
@@ -1051,9 +1091,10 @@ async def test_assistant_transport_orders_text_and_tools_chronologically(monkeyp
 @pytest.mark.asyncio
 async def test_assistant_transport_continued_run_keeps_text_order(monkeypatch):
     """Answering a prompt finishes its row in place; later text and tools follow it."""
+    permission_id = "owner-call-1"
     session = _FakeSession(
         [
-            {"type": "permission_granted", "tool_id": "call-1", "scope": "once"},
+            {"type": "permission_granted", "tool_id": "call-1", "permission_id": permission_id, "scope": "once"},
             {
                 "type": "tool_result",
                 "tool_id": "call-1",
@@ -1092,8 +1133,9 @@ async def test_assistant_transport_continued_run_keeps_text_order(monkeypatch):
                     },
                     {
                         "type": "tool-call",
-                        "toolCallId": "permission_call-1",
+                        "toolCallId": f"permission_call-1_{permission_id}",
                         "toolName": "request_permission",
+                        "args": {"tool_id": "call-1", "permission_id": permission_id},
                     },
                 ],
                 "status": {"type": "requires-action", "reason": "tool-calls"},
@@ -1106,8 +1148,8 @@ async def test_assistant_transport_continued_run_keeps_text_order(monkeypatch):
         [
             {
                 "type": "add-tool-result",
-                "toolCallId": "permission_call-1",
-                "result": True,
+                "toolCallId": f"permission_call-1_{permission_id}",
+                "result": {"decision": "approve", "permission_id": permission_id},
             }
         ],
         state,
@@ -1118,7 +1160,7 @@ async def test_assistant_transport_continued_run_keeps_text_order(monkeypatch):
     assert [part.get("text") or part["toolCallId"] for part in final[1]["content"]] == [
         "before",
         "call-1",
-        "permission_call-1",
+        f"permission_call-1_{permission_id}",
         "x",
         "call-2",
         "y",
@@ -1207,7 +1249,7 @@ async def test_assistant_transport_shows_none_of_a_running_turn_typed_in_the_ter
     def admit(content, request_id=None):
         for event in (
             {"type": "token", "text": "THEIRS"},
-            {"type": "permission_request", "tool_id": "their-tool", "tool_name": "terminal",
+            {"type": "permission_request", "tool_id": "their-tool", "permission_id": "owner-their-tool", "tool_name": "terminal",
              "input": {"command": "echo hi"}},
             {"type": "turn_complete", "stop_reason": "end_turn"},
             {"type": "token", "text": "B-OK", "request_ids": [request_id]},
@@ -1454,6 +1496,69 @@ def test_align_helper_preserves_streamed_ids_for_matching_content():
     assert [m["id"] for m in other] == ["user-y", "assistant-y"]
 
 
+def test_a_sent_message_takes_the_row_id_the_page_names():
+    """A message the page already shows keeps its row when it is sent (#1102).
+
+    A queued message is drawn before it is sent, and rows can join the chat
+    while it waits. Numbered by the rows at hand it would get a new id, and
+    the chat takes a row whose id changed down and builds it again.
+    """
+    state = [{"id": "history-0", "role": "user", "content": "q"}, {"id": "user-s1-9", "role": "user", "content": "x"}]
+
+    def rows(row_ids):
+        built = messages._assistant_update_message_state(
+            [dict(row) for row in state], "s1", ["first", "second"], [], None, None, ["r1", "r2"], row_ids
+        )
+        return [row["id"] for row in built[2:4]]
+
+    assert rows(["user-s1-1", "user-s1-7"]) == ["user-s1-1", "user-s1-7"]
+    # No name, a row the chat already has, another session's row, another kind
+    # of row and a name used twice: the message is numbered by the rows at hand.
+    assert rows(None) == ["user-s1-2", "user-s1-3"]
+    assert rows(["user-s1-9", "user-s2-4"]) == ["user-s1-2", "user-s1-3"]
+    assert rows(["history-0", "assistant-s1-4"]) == ["user-s1-2", "user-s1-3"]
+    assert rows(["user-s1-5", "user-s1-5"]) == ["user-s1-5", "user-s1-3"]
+    assert rows(["user-s1-5"]) == ["user-s1-5", "user-s1-3"]
+
+
+def test_align_helper_keeps_a_row_shown_for_a_saved_row_of_tool_calls_alone():
+    """A reply that starts with a tool call keeps its row in the chat (#1359).
+
+    The page shows the reply's first saved row, tool calls with no words, under
+    the id it drew the reply with. That row has no words to compare, so its
+    call ids are its identity: the next turn still lines up with history.
+    """
+    def shown() -> list[dict]:
+        return [
+            {"id": "user-s-0", "role": "user", "content": "q1",
+             "metadata": {"custom": {"historySourceId": "history-0", "historySourceIndex": 0}}},
+            {"id": "assistant-s-1", "role": "assistant",
+             "content": [{"type": "tool-call", "toolCallId": "c1", "toolName": "terminal", "result": "ok"}],
+             "metadata": {"custom": {"historySourceId": "history-1", "historySourceIndex": 1}}},
+            {"id": "history-3", "role": "assistant", "content": [{"type": "text", "text": "first answer"}]},
+            {"id": "user-s-4", "role": "user", "content": "q2"},
+            {"id": "assistant-s-5", "role": "assistant", "content": [{"type": "text", "text": "second answer"}]},
+        ]
+
+    stored = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "", "metadata": {"tool_calls": [{"id": "c1"}]}},
+        {"role": "tool", "content": "ok"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "q2"},
+        {"role": "assistant", "content": "second answer"},
+    ]
+    rows = shown()
+    assert messages._assistant_align_streamed_ids(rows, stored) is True
+    assert [m["id"] for m in rows] == ["user-s-0", "assistant-s-1", "history-3", "user-s-4", "assistant-s-5"]
+    assert [m["metadata"]["custom"]["historySourceIndex"] for m in rows[3:]] == [4, 5]
+
+    # The position now holds other calls: the row names an obsolete place.
+    moved = [dict(row) for row in stored]
+    moved[1] = {"role": "assistant", "content": "", "metadata": {"tool_calls": [{"id": "c9"}]}}
+    assert messages._assistant_align_streamed_ids(shown(), moved) is False
+
+
 def test_archive_and_synthetic_alias_cannot_claim_the_new_turns_history_row():
     previous = [
         {
@@ -1581,6 +1686,52 @@ async def test_new_admitted_turn_clears_previous_cancel_error(monkeypatch):
     assert state["messages"][0] == cancelled
     assert state["messages"][-1]["status"] == {"type": "complete", "reason": "stop"}
     assert captured["controller"].errors == []
+
+
+@pytest.mark.asyncio
+async def test_admitted_send_reaches_the_page_before_the_daemon_speaks(monkeypatch):
+    """The page drops its pending copy of a send at the first state it receives.
+
+    A daemon busy with another turn stays quiet long after it admits the send,
+    and clearing the last turn's error is already a state: without the send's
+    row in it, the message is gone from the chat until the daemon speaks (#1359).
+    """
+    session = _FakeSession([])
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    captured, _, drain_stream = _install_fake_assistant_stream(monkeypatch)
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{
+                "type": "add-message",
+                "message": {"id": "send-1", "parts": [{"type": "text", "text": "hello"}]},
+            }],
+            state={
+                "messages": [{"id": "history-0", "role": "user", "content": "earlier"}],
+                "error": "Run cancelled",
+            },
+        ),
+    )
+    run = asyncio.create_task(drain_stream(response.stream))
+    try:
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if session.send_message.await_count:
+                break
+        await asyncio.sleep(0.01)
+        state = captured["controller"].state
+        assert state["error"] == ""
+        # The reply's row comes with its first output: until then the page
+        # keeps the placeholder it already shows.
+        assert [row["id"] for row in state["messages"]] == ["history-0", "user-session-test-1"]
+        assert state["messages"][1]["content"] == "hello"
+        assert state["messages"][1]["metadata"] == {"custom": {"requestId": "send-1"}}
+    finally:
+        session._events.put_nowait({"type": "turn_complete"})
+        await run
+    final = captured["controller"].state["messages"]
+    assert [row["id"] for row in final] == ["history-0", "user-session-test-1", "assistant-session-test-2"]
+    assert final[-1]["status"] == {"type": "complete", "reason": "stop"}
 
 
 @pytest.mark.parametrize("status", ["completed", "failed"])
@@ -1774,21 +1925,23 @@ async def test_an_answer_to_a_parked_card_reaches_the_message_that_gives_it(monk
             bridge.request_confirmation(
                 display_tap=tap,
                 rpc_server=rpc,
-                details={"tool_id": "shell-3", "tool_type": "shell"},
+                details={"tool_id": "shell-3", "permission_id": "owner-shell-3", "tool_type": "shell"},
                 timeout=None,
             )
         )
     finally:
         turn._stamp_turn(None)  # turn A ends; its parked prompt keeps A's context
     await asyncio.sleep(0)
-    assert events.get_nowait()["request_ids"] == ["request-A"]
-    bridge.park("shell-3")
+    permission_event = events.get_nowait()
+    assert permission_event["request_ids"] == ["request-A"]
+    permission_id = permission_event["details"]["permission_id"]
+    bridge.park("shell-3", permission_id)
     assert events.get_nowait()["type"] == "permission_parked"
     answers = []
 
     async def submit(content, *, request_id=None, **kwargs):
         # This message's "no" answers the card.
-        assert (await rpc.handler({"tool_id": "shell-3", "response": "DENY"}))["ok"]
+        assert (await rpc.handler({"tool_id": "shell-3", "permission_id": permission_id, "response": "DENY"}))["ok"]
         await asyncio.wait_for(prompt, 1)
         answers.append(events.get_nowait())
         session._events.put_nowait(_normalize_event(answers[-1]))
@@ -1802,9 +1955,9 @@ async def test_an_answer_to_a_parked_card_reaches_the_message_that_gives_it(monk
     session.send_message = AsyncMock(side_effect=submit)
     card = {
         "type": "tool-call",
-        "toolCallId": "permission_shell-3",
+        "toolCallId": f"permission_shell-3_{permission_id}",
         "toolName": "request_permission",
-        "args": {"tool_id": "shell-3"},
+        "args": {"tool_id": "shell-3", "permission_id": permission_id},
     }
     state = {"messages": [{"id": "old-assistant", "role": "assistant", "content": [card]}]}
     response = await messages.assistant_transport(
@@ -1814,6 +1967,7 @@ async def test_an_answer_to_a_parked_card_reaches_the_message_that_gives_it(monk
     try:
         await asyncio.wait_for(drain(response.stream), 1)
         assert answers[0]["type"] == "permission_denied" and answers[0]["request_ids"] == ["request-A"]
+        assert answers[0]["permission_id"] == permission_id
         shown = captured["controller"].state["messages"][0]["content"][0]
         assert shown.get("result", {}).get("decision") == "deny", shown
     finally:
@@ -1942,3 +2096,149 @@ async def test_completed_non_goal_still_reads_its_own_shared_events(monkeypatch)
     events = [item async for item in response.body_iterator]
     assert "actual response" in repr(events) and "Goal request" not in repr(events)
     assert not session.subscriptions
+
+
+def test_batched_sends_get_consecutive_provisional_ids():
+    """Two messages in one request are rows L and L+1 after an L-row state (#1356).
+
+    The web client names its pending copies user-<session>-<L + i> and tracks
+    its in-flight sends by those ids, so the engine's rows must use the same
+    numbers.
+    """
+    state = [
+        {"id": "history-0", "role": "user", "content": "earlier"},
+        {"id": "history-1", "role": "assistant", "content": "ok"},
+    ]
+    rows = messages._assistant_update_message_state(state, "s1", ["first", "second"], [], None)
+    assert [row["id"] for row in rows[2:]] == ["user-s1-2", "user-s1-3", "assistant-s1-4"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("client_id", "expected"),
+    [("Wfw7Jka", "Wfw7Jka"), ("has spaces", None), ("x" * 129, None), (7, None)],
+)
+async def test_a_send_is_followed_by_its_client_message_id(monkeypatch, client_id, expected):
+    """The page knows its send by the message id it made (#1359).
+
+    The daemon saves the request id on the user row, so a safe client id is the
+    request id: the page can tell its own saved send from another sender's
+    before the engine answers. Anything else gets a fresh id.
+    """
+    session = _FakeSession([{"type": "turn_complete"}])
+    monkeypatch.setattr(messages, "get_session_registry", lambda: _FakeRegistry(session))
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{
+                "type": "add-message",
+                "message": {"id": client_id, "parts": [{"type": "text", "text": "hello"}]},
+            }],
+            state={"messages": []},
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    request_id = session.send_message.await_args.kwargs["request_id"]
+    if expected is None:
+        assert re.fullmatch(r"[0-9a-f]{32}", request_id)
+    else:
+        assert request_id == expected
+    user_row = captured["controller"].state["messages"][0]
+    assert user_row["role"] == "user"
+    assert user_row["metadata"]["custom"]["requestId"] == request_id
+
+
+def _saved_user(content, *request_ids):
+    return {"role": "user", "content": content, "metadata": {"operator_inputs": [
+        {"source": "state_rpc", "timestamp": "t", "text": "x", "request_id": request_id}
+        for request_id in request_ids
+    ]}}
+
+
+def test_align_helper_pairs_a_user_row_with_its_saved_copy_by_request_id():
+    """The daemon saves sends that arrive together as one row, behind any agent
+    HUD, so its words differ from the streamed row; the request id it names
+    still pairs them (#1359)."""
+    streamed = [
+        {"id": "user-s1-2", "role": "user", "content": "twin words",
+         "metadata": {"custom": {"requestId": "mine"}}},
+        {"id": "assistant-s1-3", "role": "assistant", "content": [{"type": "text", "text": "done"}]},
+    ]
+    stored = [
+        _saved_user("<agent_hud>budget</agent_hud>\ntwin words\ntwin words", "mine", "theirs"),
+        {"role": "assistant", "content": "done"},
+    ]
+    assert messages._assistant_align_streamed_ids(streamed, stored) is True
+    assert [m["metadata"]["custom"]["historySourceIndex"] for m in streamed] == [0, 1]
+
+
+def test_align_helper_does_not_pair_another_senders_identical_words():
+    """Same words, another send's id: not this turn's row (#1359)."""
+    streamed = [
+        {"id": "user-s1-2", "role": "user", "content": "twin words",
+         "metadata": {"custom": {"requestId": "mine"}}},
+        {"id": "assistant-s1-3", "role": "assistant", "content": [{"type": "text", "text": "done"}]},
+    ]
+    stored = [_saved_user("twin words", "theirs"), {"role": "assistant", "content": "done"}]
+    assert messages._assistant_align_streamed_ids(streamed, stored) is False
+    assert "historySourceIndex" not in streamed[0]["metadata"]["custom"]
+
+
+def test_align_helper_skips_the_live_row_of_a_watched_turn():
+    """A page that sent while watching another turn's reply carries that live
+    row (live-turn) in its state. It is a display row, not one of this turn's,
+    so it must not stop the turn's rows from pairing (#1359)."""
+    streamed = [
+        {"id": "history-0", "role": "user", "content": "busy"},
+        {"id": "live-turn", "role": "assistant",
+         "content": [{"type": "tool-call", "toolCallId": "call-1", "toolName": "terminal"}]},
+        {"id": "user-s1-2", "role": "user", "content": "twin words",
+         "metadata": {"custom": {"requestId": "mine"}}},
+        {"id": "assistant-s1-3", "role": "assistant", "content": [{"type": "text", "text": "done"}]},
+    ]
+    stored = [
+        {"role": "user", "content": "busy"},
+        {"role": "assistant", "content": "", "metadata": {"tool_calls": [{"id": "call-1"}]}},
+        {"role": "tool", "content": "", "metadata": {"tool_call_id": "call-1"}},
+        _saved_user("<agent_hud>budget</agent_hud>\ntwin words\ntwin words", "mine", "theirs"),
+        {"role": "assistant", "content": "done"},
+    ]
+    assert messages._assistant_align_streamed_ids(streamed, stored) is True
+    assert [streamed[i]["metadata"]["custom"]["historySourceIndex"] for i in (2, 3)] == [3, 4]
+    assert "metadata" not in streamed[1]
+
+
+def test_align_helper_skips_another_senders_message_steered_into_the_turn():
+    """Another client's message that arrives mid-turn is saved between this
+    turn's rows (the daemon steers it into the running turn). It names only its
+    own send, so it is not one of this page's rows and must not stop the
+    pairing; the page adds it from history (#1359)."""
+    streamed = [
+        {"id": "user-s1-0", "role": "user", "content": "twin words",
+         "metadata": {"custom": {"requestId": "mine"}}},
+        {"id": "assistant-s1-1", "role": "assistant", "content": [
+            {"type": "tool-call", "toolCallId": "c1"}, {"type": "tool-call", "toolCallId": "c2"},
+            {"type": "text", "text": "done"},
+        ]},
+    ]
+    stored = [
+        _saved_user("twin words\ntwin words", "mine", "theirs"),
+        {"role": "assistant", "content": "", "metadata": {"tool_calls": [{"id": "c1"}]}},
+        {"role": "tool", "content": "", "metadata": {"tool_call_id": "c1"}},
+        _saved_user("ping", "theirs-ping"),
+        {"role": "assistant", "content": "", "metadata": {"tool_calls": [{"id": "c2"}]}},
+        {"role": "tool", "content": "", "metadata": {"tool_call_id": "c2"}},
+        {"role": "assistant", "content": "done"},
+    ]
+    assert messages._assistant_align_streamed_ids(streamed, stored) is True
+    assert [m["metadata"]["custom"]["historySourceIndex"] for m in streamed] == [0, 6]
+
+    # A streamed user row that names no send proves nothing: no skipping.
+    unnamed = copy.deepcopy(streamed)
+    del unnamed[0]["metadata"]
+    unnamed[1].pop("metadata", None)
+    assert messages._assistant_align_streamed_ids(unnamed, stored) is False

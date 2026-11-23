@@ -116,6 +116,7 @@ import {
   storeHistoryPageIfCurrent,
   clearHistoryPagesIfCurrent,
 } from "./history-cache";
+import { olderLoadFailed, olderLoadRunning, type HistoryStatus } from "./history-status";
 import { agentName, sessionHeading } from "@/utils/session-display";
 import { reuseIfEqual } from "@/utils/state-snapshot";
 import { createSessionRefreshGate } from "@/utils/session-refresh";
@@ -612,11 +613,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
   const initialStateRef = useRef(initialState);
   initialStateRef.current = initialState;
 
-  const [historyStatus, setHistoryStatus] = useState<{
-    sessionId: string;
-    kind: "loading" | "loading-older" | "error" | "empty";
-    message: string;
-  } | null>(null);
+  const [historyStatus, setHistoryStatus] = useState<HistoryStatus>(null);
   const historyPagesRef = useRef(new Map<string, HistoryPage>());
   const historyRefreshVersion = useRef(0);
   const retryHistoryReconciliationRef = useRef<((sessionId: string) => boolean) | null>(null);
@@ -895,7 +892,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
     };
     olderLoadRef.current.add(sessionId);
     if (!prefetch && activeIdRef.current === sessionId) {
-      setHistoryStatus({ sessionId, kind: "loading-older", message: "Loading older messages…" });
+      setHistoryStatus((status) => olderLoadRunning(status, sessionId));
     }
     try {
       const older = await loadOlderHistoryPage(
@@ -1022,11 +1019,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
       }
       console.warn("Failed to load older history", error);
       if (!prefetch && activeIdRef.current === sessionId && stillCurrent()) {
-        setHistoryStatus({
-          sessionId,
-          kind: "error",
-          message: "Couldn't load older messages. Scroll up or retry to try again.",
-        });
+        setHistoryStatus((status) => olderLoadFailed(status, sessionId));
       }
       return false;
     } finally {
@@ -2065,6 +2058,7 @@ export default function App({ contained = false }: { contained?: boolean } = {})
                 api={api}
                 sessionId={activeSession.session_id}
                 agentIdentity={activeSession.identity}
+                harness={Boolean(activeSession.harness)}
                 initialState={initialState}
                 onStale={(stillCurrent) => resetThread(activeSession.session_id, stillCurrent)}
                 liveEvents={liveEventsRef}

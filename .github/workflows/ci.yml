@@ -314,7 +314,7 @@ jobs:
           - lane: learn
             suites: learn,learn-loadouts
           - lane: topics
-            suites: learn-topics,gallery
+            suites: learn-topics,gallery,live-pending-input,turn-settle
           - lane: notices
             suites: learn-notices,learn-retries
 
