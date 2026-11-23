@@ -77,7 +77,7 @@ Native goal turns send their attached images to image-capable models.
 /goal                           show the active goal and next action
 /goal show                     show the active goal in full
 /goal pause                    stop continuation at the next safe boundary
-/goal resume [--budget N] [--turns N]  resume after a stop
+/goal resume [--budget N] [--turns N] [--time N]  resume after a stop
 /goal clear                    clear the goal, keep history
 /goal history [N]              list recent finished goals (default 10)
 /goal pending                  list this conversation's pending image requests
@@ -92,6 +92,9 @@ record a durable stop intent immediately, applied at the next safe boundary.
 If a driver stops while a storage error prevents saving its paused state, the
 goal may still be marked active; `/goal resume` schedules that stopped driver
 again once storage is available.
+Time ceilings are total active seconds. If a goal has used its current time
+ceiling, `/goal resume` requires `--time N` with a value greater than the time
+already used; the new value replaces the total ceiling.
 Attach clients execute `/goal` daemon-side through the `state.goal_command`
 RPC — the daemon owns the conversation identity, store, and driver, and
 `goal.state_changed` events stream back over the attach socket.
