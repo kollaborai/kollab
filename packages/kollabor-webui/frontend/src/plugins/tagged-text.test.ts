@@ -61,4 +61,23 @@ describe("plugin tagged text", () => {
     const text = "`a ```<todo_write>x</todo_write>`";
     expect(splitPluginTags(text, ["todo_write"])).toEqual([{ type: "text", text }]);
   });
+  it("does not interpret tags inside fences that sit in a blockquote or a list item", () => {
+    const quoted = "> ~~~\n> <todo_write>quoted</todo_write>\n> ~~~";
+    expect(splitPluginTags(quoted, ["todo_write"])).toEqual([{ type: "text", text: quoted }]);
+    const listed = "- ~~~\n  <todo_write>listed</todo_write>\n  ~~~";
+    expect(splitPluginTags(listed, ["todo_write"])).toEqual([{ type: "text", text: listed }]);
+  });
+  it("reads a backtick run with text after it on the same line as an inline code span, not a fence", () => {
+    expect(splitPluginTags("```literal``` then <todo_write>real</todo_write>", ["todo_write"])).toEqual([
+      { type: "text", text: "```literal``` then " },
+      { type: "tag", name: "todo_write", content: "real" },
+    ]);
+  });
+  it("does not let a code span cross a blank line", () => {
+    expect(splitPluginTags("a `\n\n<todo_write>real</todo_write>\n\nb `", ["todo_write"])).toEqual([
+      { type: "text", text: "a `\n\n" },
+      { type: "tag", name: "todo_write", content: "real" },
+      { type: "text", text: "\n\nb `" },
+    ]);
+  });
 });
