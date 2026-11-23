@@ -8,6 +8,23 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import { existsSync } from "node:fs";
 import { browserSuites, DEFAULT_SUITE_TIMEOUT_MS, runBrowserSuites, suiteTimeoutMs } from "../scripts/browser-acceptance-runner.mjs";
+import { until } from "./learn-browser-acceptance.mjs";
+
+test("browser polling waits for an asynchronous condition to become true", async () => {
+  let attempts = 0;
+  const result = await until(async () => ++attempts >= 2, "condition stayed false", 1000);
+  assert.equal(result, true);
+  assert.equal(attempts, 2, "an unresolved promise must not count as readiness");
+});
+
+test("browser polling rejects when an asynchronous condition stays false", async () => {
+  await assert.rejects(until(async () => false, "condition stayed false", 100), /condition stayed false/);
+});
+
+test("browser polling preserves synchronous values and asynchronous errors", async () => {
+  assert.equal(await until(() => "ready", "missing", 100), "ready");
+  await assert.rejects(until(async () => { throw new Error("probe failed"); }, "missing", 100), /probe failed/);
+});
 
 async function fixture(name, source) {
   const root = await mkdtemp(path.join(os.tmpdir(), `kollab-runner-${name}-`));
