@@ -2669,9 +2669,29 @@ class LLMService:
         )
         runner = getattr(acp, "runner", None) if send_now or batch_member else None
         target_context = getattr(runner, "_active_context", None)
-        target_turn_id = getattr(runner, "_active_turn_id", 0)
+        active_turn_id = getattr(runner, "_active_turn_id", 0)
+        target_turn_id = active_turn_id
         target_generation = getattr(runner, "_active_generation", None)
         target_session_id = getattr(runner, "session_id", None)
+        target_task = getattr(runner, "_active_rpc_task", None)
+        task_done = getattr(target_task, "done", None)
+        context_turn_id = getattr(target_context, "turn_id", 0)
+        startup_owner = bool(
+            target_context is not None
+            and not active_turn_id
+            and isinstance(context_turn_id, int)
+            and context_turn_id > 0
+            and target_task is not None
+            and callable(task_done)
+            and not task_done()
+        )
+        if startup_owner:
+            # _drain_queue claims the admission and task before _run_prompt
+            # publishes its active turn markers. Use that exact task and its
+            # generation as the startup owner; never steer it before the prompt
+            # has started or cancel whichever owner replaces it.
+            target_turn_id = context_turn_id
+            target_generation = getattr(runner, "generation", target_generation)
         if not self._manual_relay_origin_authorized(origin):
             return {
                 "status": "rejected",
@@ -2811,14 +2831,35 @@ class LLMService:
             if target_turn_id:
                 # Steering may yield while the turn ends or the runner is
                 # replaced. A Send Now request must never cancel that next
-                # owner by mistake.
-                if send_now and (
+                # owner by mistake. During startup, the admission context and
+                # task are the owner even before _run_prompt publishes markers.
+                owner_changed = (
                     getattr(acp, "runner", None) is not runner
                     or getattr(runner, "_active_context", None) is not target_context
-                    or getattr(runner, "_active_turn_id", None) != target_turn_id
-                    or getattr(runner, "_active_generation", None) != target_generation
                     or getattr(runner, "session_id", None) != target_session_id
-                ):
+                )
+                if startup_owner:
+                    owner_changed = owner_changed or (
+                        getattr(runner, "_active_rpc_task", None) is not target_task
+                        or target_task.done()
+                        or getattr(runner, "generation", None) != target_generation
+                        or getattr(runner, "_active_turn_id", 0)
+                        not in (0, target_turn_id)
+                        or getattr(runner, "_active_generation", 0)
+                        not in (0, target_generation)
+                    )
+                else:
+                    owner_changed = owner_changed or (
+                        getattr(runner, "_active_turn_id", None) != target_turn_id
+                        or getattr(runner, "_active_generation", None)
+                        != target_generation
+                        or (
+                            target_task is not None
+                            and getattr(runner, "_active_rpc_task", None)
+                            is not target_task
+                        )
+                    )
+                if send_now and owner_changed:
                     return {"status": "rejected", "reason": "turn_changed"}
         # `steer` above can await while a relay is revoked; re-check at the
         # actual queue-admission boundary before sending anything to ACP.
@@ -2862,28 +2903,28 @@ class LLMService:
             # caller request ID (#597), and the orchestrator pops by the
             # same (request_id, turn_id) key when the turn finishes.
             acp.voice_turns[(admission.request_id, admission.turn_id)] = voice
-        if send_now and target_turn_id and not batch_member:
-            # Admission, queue placement, cancellation fencing, and task
-            # ownership all happen without yielding. The admitted message is
-            # therefore in front of older waiting turns before this exact
-            # active owner can be stopped.
+        if send_now and not batch_member:
+            # Admission and queue placement happen without yielding, so this
+            # message is next even when the prior owner has just completed.
             prioritize = getattr(acp, "prioritize_queued", None)
-            prepare_cancel = getattr(acp, "prepare_cancel", None)
-            schedule_cancel = getattr(acp, "schedule_prepared_cancel", None)
-            if (
-                callable(prioritize)
-                and prioritize(admission)
-                and callable(prepare_cancel)
-                and callable(schedule_cancel)
-                and prepare_cancel(
-                    session_id=target_session_id,
-                    generation=target_generation,
-                )
-            ):
-                schedule_cancel(
-                    session_id=target_session_id,
-                    generation=target_generation,
-                )
+            if callable(prioritize) and prioritize(admission):
+                # Cancel only the exact owner captured before steering. If no
+                # active turn existed, priority alone makes this the next turn.
+                prepare_cancel = getattr(acp, "prepare_cancel", None)
+                schedule_cancel = getattr(acp, "schedule_prepared_cancel", None)
+                if (
+                    (target_turn_id or startup_owner)
+                    and callable(prepare_cancel)
+                    and callable(schedule_cancel)
+                    and prepare_cancel(
+                        session_id=target_session_id,
+                        generation=target_generation,
+                    )
+                ):
+                    schedule_cancel(
+                        session_id=target_session_id,
+                        generation=target_generation,
+                    )
         return {
             "status": "queued",
             "request_id": admission.request_id,
