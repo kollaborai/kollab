@@ -24,6 +24,14 @@ from kollabor.state.web_message_attachments import (
 )
 
 
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def _png(body: bytes = b"") -> bytes:
+    """Use the supported PNG signature in attachment staging fixtures."""
+    return _PNG_SIGNATURE + body
+
+
 @dataclass(frozen=True)
 class _Caller:
     is_local_operator: bool
@@ -87,20 +95,22 @@ async def test_stage_replay_is_idempotent_and_conflicting_bytes_are_rejected():
     scope = await bind()
     operation_id = scope.new_operation_id()
 
-    first = await scope.stage(operation_id, "image/png", b"first-image")
-    replay = await scope.stage(operation_id, "image/png", b"first-image")
+    image = _png(b"first-image")
+    first = await scope.stage(operation_id, "image/png", image)
+    replay = await scope.stage(operation_id, "image/png", image)
 
     assert replay == first
-    assert registry.used_bytes == len(b"first-image")
+    assert registry.used_bytes == len(image)
     with pytest.raises(AttachmentIdempotencyConflict):
-        await scope.stage(operation_id, "image/png", b"different-image")
-    assert registry.used_bytes == len(b"first-image")
+        await scope.stage(operation_id, "image/png", _png(b"different-image"))
+    assert registry.used_bytes == len(image)
     assert registry.attachment_count == 1
 
 
 @pytest.mark.asyncio
 async def test_rejects_bad_media_and_single_image_over_limit_without_mutation():
-    registry, _, _, bind = _harness(max_attachment_bytes=8)
+    over_limit = _png(b"x")
+    registry, _, _, bind = _harness(max_attachment_bytes=len(_PNG_SIGNATURE))
     scope = await bind()
 
     with pytest.raises(InvalidAttachment):
@@ -108,7 +118,7 @@ async def test_rejects_bad_media_and_single_image_over_limit_without_mutation():
     with pytest.raises(InvalidAttachment):
         await scope.stage(scope.new_operation_id(), "image/png", b"")
     with pytest.raises(AttachmentCapacityExceeded):
-        await scope.stage(scope.new_operation_id(), "image/png", b"123456789")
+        await scope.stage(scope.new_operation_id(), "image/png", over_limit)
 
     assert registry.used_bytes == 0
     assert registry.attachment_count == 0
@@ -118,7 +128,7 @@ async def test_rejects_bad_media_and_single_image_over_limit_without_mutation():
 async def test_accepts_ten_mib_image_and_rejects_one_byte_over_default_limit():
     registry, _, _, bind = _harness()
     scope = await bind()
-    image = b"x" * DEFAULT_MAX_ATTACHMENT_BYTES
+    image = _png(b"x" * (DEFAULT_MAX_ATTACHMENT_BYTES - len(_PNG_SIGNATURE)))
 
     receipt = await scope.stage(scope.new_operation_id(), "image/png", image)
     with pytest.raises(AttachmentCapacityExceeded):
@@ -131,37 +141,40 @@ async def test_accepts_ten_mib_image_and_rejects_one_byte_over_default_limit():
 
 @pytest.mark.asyncio
 async def test_scope_and_global_caps_reject_before_partial_admission():
+    first_image = _png()
+    rejected_image = _png(b"123456")
+    accepted_image = _png(b"12345")
     registry, _, _, bind = _harness(
-        max_attachment_bytes=10,
-        max_item_bytes=10,
-        max_scope_bytes=10,
-        max_total_bytes=12,
+        max_attachment_bytes=len(rejected_image),
+        max_item_bytes=len(rejected_image),
+        max_scope_bytes=len(rejected_image),
+        max_total_bytes=len(first_image) + len(accepted_image),
         max_attachments_per_item=3,
         max_attachments=4,
         max_attachments_per_scope=3,
     )
     first_scope = await bind("conversation-a")
     second_scope = await bind("conversation-b", incarnation="queue-b")
-    await first_scope.stage(first_scope.new_operation_id(), "image/png", b"12345678")
+    await first_scope.stage(first_scope.new_operation_id(), "image/png", first_image)
     second_op = second_scope.new_operation_id()
 
     with pytest.raises(AttachmentCapacityExceeded):
-        await second_scope.stage(second_op, "image/png", b"12345")
-    assert registry.used_bytes == 8
+        await second_scope.stage(second_op, "image/png", rejected_image)
+    assert registry.used_bytes == len(first_image)
     assert registry.attachment_count == 1
 
     # A capacity rejection did not consume the operation ID.
-    await second_scope.stage(second_op, "image/png", b"1234")
-    assert registry.used_bytes == 12
+    await second_scope.stage(second_op, "image/png", accepted_image)
+    assert registry.used_bytes == len(first_image) + len(accepted_image)
     assert registry.attachment_count == 2
 
 
 @pytest.mark.asyncio
 async def test_scope_count_capacity_releases_only_after_orphan_expiry():
     registry, clock, _, bind = _harness(
-        max_attachment_bytes=8,
-        max_item_bytes=16,
-        max_scope_bytes=16,
+        max_attachment_bytes=len(_png(b"a")),
+        max_item_bytes=len(_png(b"a")) * 2,
+        max_scope_bytes=len(_png(b"a")) * 2,
         max_total_bytes=32,
         max_attachments_per_item=2,
         max_attachments_per_scope=2,
@@ -172,18 +185,18 @@ async def test_scope_count_capacity_releases_only_after_orphan_expiry():
     )
     first_scope = await bind("conversation-a")
     second_scope = await bind("conversation-b", incarnation="queue-b")
-    await first_scope.stage(first_scope.new_operation_id(), "image/png", b"a")
+    await first_scope.stage(first_scope.new_operation_id(), "image/png", _png(b"a"))
     second_operation_id = second_scope.new_operation_id()
 
     with pytest.raises(AttachmentCapacityExceeded):
-        await second_scope.stage(second_operation_id, "image/png", b"b")
+        await second_scope.stage(second_operation_id, "image/png", _png(b"b"))
     assert registry.scope_count == 1
 
     clock.advance(2)
     assert await registry.prune_expired() == 1
-    await second_scope.stage(second_operation_id, "image/png", b"b")
+    await second_scope.stage(second_operation_id, "image/png", _png(b"b"))
     assert registry.scope_count == 1
-    assert registry.used_bytes == 1
+    assert registry.used_bytes == len(_png(b"b"))
 
 
 @pytest.mark.asyncio
@@ -192,29 +205,31 @@ async def test_concurrent_same_operation_writes_one_attachment():
     scope = await bind()
     operation_id = scope.new_operation_id()
 
+    image = _png(b"one-image")
     receipts = await asyncio.gather(
-        *(scope.stage(operation_id, "image/png", b"one-image") for _ in range(12))
+        *(scope.stage(operation_id, "image/png", image) for _ in range(12))
     )
 
     assert all(receipt == receipts[0] for receipt in receipts)
     assert registry.attachment_count == 1
-    assert registry.used_bytes == len(b"one-image")
+    assert registry.used_bytes == len(image)
 
 
 @pytest.mark.asyncio
 async def test_concurrent_capacity_race_admits_no_overflow():
+    image = _png(b"1234567")
     registry, _, _, bind = _harness(
-        max_attachment_bytes=10,
-        max_item_bytes=10,
-        max_scope_bytes=10,
-        max_total_bytes=10,
+        max_attachment_bytes=len(image),
+        max_item_bytes=len(image),
+        max_scope_bytes=len(image),
+        max_total_bytes=len(image),
     )
     scope = await bind()
     operation_ids = [scope.new_operation_id(), scope.new_operation_id()]
 
     outcomes = await asyncio.gather(
         *(
-            scope.stage(operation_id, "image/png", b"1234567")
+            scope.stage(operation_id, "image/png", image)
             for operation_id in operation_ids
         ),
         return_exceptions=True,
@@ -225,7 +240,7 @@ async def test_concurrent_capacity_race_admits_no_overflow():
         sum(isinstance(outcome, AttachmentCapacityExceeded) for outcome in outcomes)
         == 1
     )
-    assert registry.used_bytes == 7
+    assert registry.used_bytes == len(image)
     assert registry.attachment_count == 1
 
 
@@ -240,17 +255,18 @@ async def test_retained_attachment_survives_long_wait_and_retry_lease_expiry():
     owner = "item-a"
     owners[scope.binding].add(owner)
     operation_id = scope.new_operation_id()
-    receipt = await scope.stage(operation_id, "image/jpg", b"queued-image")
+    image = _png(b"queued-image")
+    receipt = await scope.stage(operation_id, "image/png", image)
     await scope.retain(owner, [receipt.ref])
 
     clock.advance(24 * 60 * 60)
     await registry.prune_expired()
 
     stored = await scope.open_for_owner(owner, receipt.ref)
-    assert stored.data == b"queued-image"
-    assert stored.mime == "image/jpeg"
-    assert await scope.stage(operation_id, "image/jpeg", b"queued-image") == receipt
-    assert registry.used_bytes == len(b"queued-image")
+    assert stored.data == image
+    assert stored.mime == "image/png"
+    assert await scope.stage(operation_id, "image/png", image) == receipt
+    assert registry.used_bytes == len(image)
 
 
 @pytest.mark.asyncio
@@ -263,12 +279,13 @@ async def test_unreferenced_upload_expires_and_old_id_cannot_recreate_it():
     scope = await bind()
     owners[scope.binding].add("item-a")
     operation_id = scope.new_operation_id()
-    receipt = await scope.stage(operation_id, "image/png", b"temporary")
+    image = _png(b"temporary")
+    receipt = await scope.stage(operation_id, "image/png", image)
 
     clock.advance(11)
     assert await registry.prune_expired() == 1
     with pytest.raises(StaleAttachmentOperation):
-        await scope.stage(operation_id, "image/png", b"temporary")
+        await scope.stage(operation_id, "image/png", image)
     with pytest.raises(AttachmentNotFound):
         await scope.open_for_owner("item-a", receipt.ref)
     assert registry.used_bytes == 0
@@ -281,8 +298,10 @@ async def test_release_owner_removes_only_its_attachments_and_is_idempotent():
     scope = await bind()
     owners[scope.binding].update({"item-a", "item-b"})
     operation_a = scope.new_operation_id()
-    a = await scope.stage(operation_a, "image/png", b"a")
-    b = await scope.stage(scope.new_operation_id(), "image/png", b"bb")
+    image_a = _png(b"a")
+    image_b = _png(b"bb")
+    a = await scope.stage(operation_a, "image/png", image_a)
+    b = await scope.stage(scope.new_operation_id(), "image/png", image_b)
     await scope.retain("item-a", [a.ref])
     await scope.retain("item-b", [b.ref])
     with pytest.raises(AttachmentOwnerConflict):
@@ -293,33 +312,35 @@ async def test_release_owner_removes_only_its_attachments_and_is_idempotent():
     with pytest.raises(AttachmentNotFound):
         await scope.open_for_owner("item-a", a.ref)
     with pytest.raises(StaleAttachmentOperation):
-        await scope.stage(operation_a, "image/png", b"a")
-    assert (await scope.open_for_owner("item-b", b.ref)).data == b"bb"
-    assert registry.used_bytes == 2
+        await scope.stage(operation_a, "image/png", image_a)
+    assert (await scope.open_for_owner("item-b", b.ref)).data == image_b
+    assert registry.used_bytes == len(image_b)
     assert registry.attachment_count == 1
 
 
 @pytest.mark.asyncio
 async def test_item_byte_cap_rejects_all_refs_without_partial_retention():
+    first_image = _png(b"1234567")
+    second_image = _png(b"1234")
     registry, _, owners, bind = _harness(
-        max_attachment_bytes=8,
-        max_item_bytes=10,
-        max_scope_bytes=20,
+        max_attachment_bytes=max(len(first_image), len(second_image)),
+        max_item_bytes=len(first_image) + len(second_image) - 1,
+        max_scope_bytes=len(first_image) + len(second_image),
         max_total_bytes=40,
         max_attachments_per_item=3,
         max_attachments_per_scope=4,
     )
     scope = await bind()
     owners[scope.binding].update({"item-a", "item-b"})
-    first = await scope.stage(scope.new_operation_id(), "image/png", b"1234567")
-    second = await scope.stage(scope.new_operation_id(), "image/png", b"1234")
+    first = await scope.stage(scope.new_operation_id(), "image/png", first_image)
+    second = await scope.stage(scope.new_operation_id(), "image/png", second_image)
 
     with pytest.raises(AttachmentCapacityExceeded):
         await scope.retain("item-a", [first.ref, second.ref])
     with pytest.raises(AttachmentNotFound):
         await scope.open_for_owner("item-a", first.ref)
     assert await scope.retain("item-b", [first.ref]) is True
-    assert registry.used_bytes == 11
+    assert registry.used_bytes == len(first_image) + len(second_image)
 
 
 @pytest.mark.asyncio
@@ -335,7 +356,8 @@ async def test_refs_and_owner_ids_cannot_cross_scope_or_be_spoofed():
     owners[scope_b.binding].add("item-b")
     owners[other_principal.binding].add("item-other-principal")
     owners[restarted_scope_a.binding].add("item-a-new")
-    receipt = await scope_a.stage(scope_a.new_operation_id(), "image/png", b"private")
+    private_image = _png(b"private")
+    receipt = await scope_a.stage(scope_a.new_operation_id(), "image/png", private_image)
 
     with pytest.raises(AttachmentNotFound):
         await scope_b.open_for_owner("item-b", receipt.ref)
@@ -348,9 +370,11 @@ async def test_refs_and_owner_ids_cannot_cross_scope_or_be_spoofed():
     with pytest.raises(AttachmentAuthorizationError):
         await scope_a.retain("caller-invented-id", [receipt.ref])
     with pytest.raises(InvalidAttachmentOperation):
-        await scope_b.stage(scope_a.new_operation_id(), "image/png", b"private")
+        await scope_b.stage(
+            scope_a.new_operation_id(), "image/png", _png(b"private")
+        )
 
-    assert registry.used_bytes == len(b"private")
+    assert registry.used_bytes == len(private_image)
     assert registry.attachment_count == 1
 
 
@@ -362,10 +386,10 @@ async def test_retain_validates_every_ref_before_pinning_any():
     owners[scope_a.binding].update({"item-a", "item-a2"})
     owners[scope_b.binding].add("item-b")
     local_receipt = await scope_a.stage(
-        scope_a.new_operation_id(), "image/png", b"local"
+        scope_a.new_operation_id(), "image/png", _png(b"local")
     )
     foreign_receipt = await scope_b.stage(
-        scope_b.new_operation_id(), "image/png", b"foreign"
+        scope_b.new_operation_id(), "image/png", _png(b"foreign")
     )
 
     with pytest.raises(AttachmentNotFound):
@@ -373,8 +397,8 @@ async def test_retain_validates_every_ref_before_pinning_any():
     with pytest.raises(AttachmentNotFound):
         await scope_a.open_for_owner("item-a", local_receipt.ref)
     assert await scope_a.retain("item-a2", [local_receipt.ref]) is True
-    assert (await scope_a.open_for_owner("item-a2", local_receipt.ref)).data == b"local"
-    assert registry.used_bytes == len(b"local") + len(b"foreign")
+    assert (await scope_a.open_for_owner("item-a2", local_receipt.ref)).data == _png(b"local")
+    assert registry.used_bytes == len(_png(b"local")) + len(_png(b"foreign"))
 
 
 @pytest.mark.asyncio

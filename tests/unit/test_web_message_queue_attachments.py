@@ -32,6 +32,14 @@ from kollabor.state.web_message_queue_rpc import (
 from kollabor_rpc import RpcCallerContext, RpcServer
 
 
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def _png(body: bytes = b"") -> bytes:
+    """Use the supported PNG signature in attachment staging fixtures."""
+    return _PNG_SIGNATURE + body
+
+
 class _Clock:
     def __init__(self) -> None:
         self.now = 100.0
@@ -101,8 +109,10 @@ async def _rpc_call(server: RpcServer, method: str, params: dict[str, object]):
 async def test_enqueue_with_attachments_is_atomic_ordered_and_idempotent():
     queue = WebMessageQueue(scope_id="conversation-owner-a")
     registry, scope = await _attachment_scope(queue)
-    first_ref = await _stage(scope, b"first-image")
-    second_ref = await _stage(scope, b"second-image")
+    first_image = _png(b"first-image")
+    second_image = _png(b"second-image")
+    first_ref = await _stage(scope, first_image)
+    second_ref = await _stage(scope, second_image)
     first_id = queue.new_request_id()
     second_id = queue.new_request_id()
     items = (
@@ -133,9 +143,9 @@ async def test_enqueue_with_attachments_is_atomic_ordered_and_idempotent():
         (first_ref,),
         (second_ref,),
     )
-    assert (await scope.open_for_owner(first_id, first_ref)).data == b"first-image"
-    assert (await scope.open_for_owner(second_id, second_ref)).data == b"second-image"
-    assert registry.used_bytes == len(b"first-imagesecond-image")
+    assert (await scope.open_for_owner(first_id, first_ref)).data == first_image
+    assert (await scope.open_for_owner(second_id, second_ref)).data == second_image
+    assert registry.used_bytes == len(first_image + second_image)
 
     claim = await queue.claim_next(queue.new_operation_id())
     attempt = await queue.claim_next_item(
@@ -156,14 +166,15 @@ async def test_enqueue_with_attachments_is_atomic_ordered_and_idempotent():
             ),
             attachment_scope=scope,
         )
-    assert (await scope.open_for_owner(first_id, first_ref)).data == b"first-image"
+    assert (await scope.open_for_owner(first_id, first_ref)).data == first_image
 
 
 @pytest.mark.asyncio
 async def test_bad_reference_rejects_entire_batch_without_retaining_valid_prefix():
     queue = WebMessageQueue(scope_id="conversation-owner-a")
     _registry, scope = await _attachment_scope(queue)
-    valid_ref = await _stage(scope, b"valid-image")
+    valid_image = _png(b"valid-image")
+    valid_ref = await _stage(scope, valid_image)
     first_id = queue.new_request_id()
     second_id = queue.new_request_id()
 
@@ -191,7 +202,8 @@ async def test_bad_reference_rejects_entire_batch_without_retaining_valid_prefix
 async def test_plain_enqueue_rejects_attachment_metadata_without_atomic_store():
     queue = WebMessageQueue(scope_id="conversation-owner-a")
     _registry, scope = await _attachment_scope(queue)
-    staged_ref = await _stage(scope, b"private-image")
+    private_image = _png(b"private-image")
+    staged_ref = await _stage(scope, private_image)
     request_id = queue.new_request_id()
 
     with pytest.raises(InvalidAttachment):
@@ -210,7 +222,8 @@ async def test_plain_enqueue_rejects_attachment_metadata_without_atomic_store():
 async def test_repeated_reference_cannot_be_retained_by_two_batch_items():
     queue = WebMessageQueue(scope_id="conversation-owner-a")
     _registry, scope = await _attachment_scope(queue)
-    shared_ref = await _stage(scope, b"shared-image")
+    shared_image = _png(b"shared-image")
+    shared_ref = await _stage(scope, shared_image)
     first_id = queue.new_request_id()
     second_id = queue.new_request_id()
 
@@ -235,15 +248,17 @@ async def test_repeated_reference_cannot_be_retained_by_two_batch_items():
 @pytest.mark.asyncio
 async def test_per_item_byte_limit_rejects_all_refs_without_partial_retention():
     queue = WebMessageQueue(scope_id="conversation-owner-a")
+    first_image = _png(b"123456")
+    second_image = _png(b"12345")
     _registry, scope = await _attachment_scope(
         queue,
-        max_attachment_bytes=8,
-        max_item_bytes=10,
-        max_scope_bytes=16,
-        max_total_bytes=16,
+        max_attachment_bytes=max(len(first_image), len(second_image)),
+        max_item_bytes=len(first_image) + len(second_image) - 1,
+        max_scope_bytes=len(first_image) + len(second_image),
+        max_total_bytes=len(first_image) + len(second_image),
     )
-    first_ref = await _stage(scope, b"123456")
-    second_ref = await _stage(scope, b"12345")
+    first_ref = await _stage(scope, first_image)
+    second_ref = await _stage(scope, second_image)
     request_id = queue.new_request_id()
 
     with pytest.raises(AttachmentCapacityExceeded):
@@ -271,7 +286,8 @@ async def test_queue_capacity_rejection_keeps_upload_unowned_for_retry_or_expiry
         queue.new_batch_id(),
         (WebMessage(existing_id, b"existing-message"),),
     )
-    staged_ref = await _stage(scope, b"staged-image")
+    staged_image = _png(b"staged-image")
+    staged_ref = await _stage(scope, staged_image)
     request_id = queue.new_request_id()
     operation_id = queue.new_operation_id()
     batch_id = queue.new_batch_id()
@@ -285,7 +301,7 @@ async def test_queue_capacity_rejection_keeps_upload_unowned_for_retry_or_expiry
         )
 
     assert (await queue.snapshot()).batches[0].request_ids == (existing_id,)
-    assert registry.used_bytes == len(b"staged-image")
+    assert registry.used_bytes == len(staged_image)
     with pytest.raises(AttachmentNotFound):
         await scope.open_for_owner(request_id, staged_ref)
 
@@ -296,7 +312,7 @@ async def test_queue_capacity_rejection_keeps_upload_unowned_for_retry_or_expiry
         (WebMessage(request_id, b"new-message", (staged_ref,)),),
         attachment_scope=scope,
     )
-    assert (await scope.open_for_owner(request_id, staged_ref)).data == b"staged-image"
+    assert (await scope.open_for_owner(request_id, staged_ref)).data == staged_image
 
 
 @pytest.mark.asyncio
@@ -309,7 +325,7 @@ async def test_expired_orphan_is_rejected_but_retained_reference_survives_prunin
         operation_retry_lease_seconds=20,
         orphan_ttl_seconds=5,
     )
-    expired_ref = await _stage(scope, b"expired-image")
+    expired_ref = await _stage(scope, _png(b"expired-image"))
     expired_id = queue.new_request_id()
     clock.advance(5)
 
@@ -323,7 +339,8 @@ async def test_expired_orphan_is_rejected_but_retained_reference_survives_prunin
     assert (await queue.snapshot()).batches == ()
     assert registry.used_bytes == 0
 
-    retained_ref = await _stage(scope, b"retained-image")
+    retained_image = _png(b"retained-image")
+    retained_ref = await _stage(scope, retained_image)
     retained_id = queue.new_request_id()
     await queue.enqueue_batch_with_attachments(
         queue.new_operation_id(),
@@ -334,17 +351,18 @@ async def test_expired_orphan_is_rejected_but_retained_reference_survives_prunin
     clock.advance(6)
     await registry.prune_expired()
 
-    assert registry.used_bytes == len(b"retained-image")
+    assert registry.used_bytes == len(retained_image)
     assert (
         await scope.open_for_owner(retained_id, retained_ref)
-    ).data == b"retained-image"
+    ).data == retained_image
 
 
 @pytest.mark.asyncio
 async def test_cancellation_waiting_for_attachment_lock_leaves_both_ledgers_unchanged():
     queue = WebMessageQueue(scope_id="conversation-owner-a")
     registry, scope = await _attachment_scope(queue)
-    staged_ref = await _stage(scope, b"cancel-image")
+    cancel_image = _png(b"cancel-image")
+    staged_ref = await _stage(scope, cancel_image)
     request_id = queue.new_request_id()
     operation_id = queue.new_operation_id()
     batch_id = queue.new_batch_id()
@@ -377,7 +395,7 @@ async def test_cancellation_waiting_for_attachment_lock_leaves_both_ledgers_unch
         (WebMessage(request_id, b"cancel-message", (staged_ref,)),),
         attachment_scope=scope,
     )
-    assert (await scope.open_for_owner(request_id, staged_ref)).data == b"cancel-image"
+    assert (await scope.open_for_owner(request_id, staged_ref)).data == cancel_image
 
 
 @pytest.mark.asyncio
@@ -411,7 +429,7 @@ async def test_attachment_scope_from_another_queue_incarnation_is_denied():
     foreign_scope = await shared_registry.bind_scope(
         {"scope": "b"}, _Caller("conversation-b")
     )
-    staged_ref = await _stage(scope, b"private-image")
+    staged_ref = await _stage(scope, _png(b"private-image"))
     request_id = queue.new_request_id()
 
     await queue.enqueue_batch_with_attachments(
@@ -452,7 +470,7 @@ async def test_attachment_claims_keep_refs_private_from_change_notifications():
 
     async with queue_registry.acquire("conversation-owner-a") as queue:
         _attachment_registry, scope = await _attachment_scope(queue)
-        staged_ref = await _stage(scope, b"private-notification-image")
+        staged_ref = await _stage(scope, _png(b"private-notification-image"))
         request_id = queue.new_request_id()
         await queue.enqueue_batch_with_attachments(
             queue.new_operation_id(),
@@ -481,7 +499,8 @@ async def test_attachment_claims_keep_refs_private_from_change_notifications():
 async def test_terminal_outcomes_keep_refs_until_handoff_and_remove_releases_exact_item():
     queue = WebMessageQueue(scope_id="conversation-owner-a")
     registry, scope = await _attachment_scope(queue)
-    staged_ref = await _stage(scope, b"permission-image")
+    permission_image = _png(b"permission-image")
+    staged_ref = await _stage(scope, permission_image)
     request_id = queue.new_request_id()
     await queue.enqueue_batch_with_attachments(
         queue.new_operation_id(),
@@ -494,7 +513,7 @@ async def test_terminal_outcomes_keep_refs_until_handoff_and_remove_releases_exa
     await queue.release_claim(queue.new_operation_id(), claim.claim_id or "")
     assert (
         await scope.open_for_owner(request_id, staged_ref)
-    ).data == b"permission-image"
+    ).data == permission_image
 
     claim = await queue.claim_next(queue.new_operation_id())
     attempt = await queue.claim_next_item(
@@ -505,7 +524,7 @@ async def test_terminal_outcomes_keep_refs_until_handoff_and_remove_releases_exa
     )
     assert (
         await scope.open_for_owner(request_id, staged_ref)
-    ).data == b"permission-image"
+    ).data == permission_image
 
     claim = await queue.claim_next(queue.new_operation_id())
     attempt = await queue.claim_next_item(
@@ -516,7 +535,7 @@ async def test_terminal_outcomes_keep_refs_until_handoff_and_remove_releases_exa
     )
     assert (
         await scope.open_for_owner(request_id, staged_ref)
-    ).data == b"permission-image"
+    ).data == permission_image
 
     await queue.settle_item(
         queue.new_operation_id(), attempt.attempt_id or "", ClaimOutcome.ACCEPTED
@@ -525,12 +544,14 @@ async def test_terminal_outcomes_keep_refs_until_handoff_and_remove_releases_exa
     # releases them; this lane does not implement that handoff.
     assert (
         await scope.open_for_owner(request_id, staged_ref)
-    ).data == b"permission-image"
+    ).data == permission_image
     await scope.release_owner(request_id)
     assert registry.used_bytes == 0
 
-    removable_ref = await _stage(scope, b"removed-image")
-    survivor_ref = await _stage(scope, b"survivor-image")
+    removable_image = _png(b"removed-image")
+    survivor_image = _png(b"survivor-image")
+    removable_ref = await _stage(scope, removable_image)
+    survivor_ref = await _stage(scope, survivor_image)
     removable_id = queue.new_request_id()
     survivor_id = queue.new_request_id()
     await queue.enqueue_batch_with_attachments(
@@ -546,10 +567,10 @@ async def test_terminal_outcomes_keep_refs_until_handoff_and_remove_releases_exa
         await queue.remove_item(queue.new_operation_id(), removable_id)
     assert (
         await scope.open_for_owner(removable_id, removable_ref)
-    ).data == b"removed-image"
+    ).data == removable_image
     assert (
         await scope.open_for_owner(survivor_id, survivor_ref)
-    ).data == b"survivor-image"
+    ).data == survivor_image
 
     removed = await queue.remove_item_with_attachments(
         queue.new_operation_id(), removable_id, attachment_scope=scope
@@ -559,9 +580,9 @@ async def test_terminal_outcomes_keep_refs_until_handoff_and_remove_releases_exa
     )
 
     assert replay == removed
-    assert registry.used_bytes == len(b"survivor-image")
+    assert registry.used_bytes == len(survivor_image)
     with pytest.raises(AttachmentNotFound):
         await scope.open_for_owner(removable_id, removable_ref)
     assert (
         await scope.open_for_owner(survivor_id, survivor_ref)
-    ).data == b"survivor-image"
+    ).data == survivor_image
