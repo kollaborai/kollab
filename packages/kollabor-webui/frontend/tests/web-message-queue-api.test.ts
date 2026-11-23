@@ -513,6 +513,119 @@ test("busy composer retries an ambiguous enqueue with the same daemon IDs and bl
   expect(allocateWebMessageQueueIds).toHaveBeenCalledTimes(2);
 });
 
+test("lost stage response retries the same staging operation instead of orphaning a second blob", async () => {
+  const storage = new MemoryStorage();
+  const locks = new SerialQueueLocks();
+  let allocation = 0;
+  const allocateWebMessageQueueIds = vi.fn(async (_s: string, _uid: string, _items: number, _ops: number, count: number) => {
+    allocation += 1;
+    return {
+      scope_id: "scope-a", incarnation: "inc-a", operation_ids: [`enqueue-${allocation}`],
+      batch_id: `batch-${allocation}`, request_ids: [`request-${allocation}`],
+      attachment_operation_ids: Array.from({ length: count }, (_, index) => `stage-${allocation}-${index}`),
+    };
+  });
+  const stageOperationIds: string[] = [];
+  const stagedByOperation = new Map<string, { ref: string; mime: string; size: number; filename: string }>();
+  let loseFirstStageResponse = true;
+  const stageWebMessageQueueAttachment = vi.fn(async (_s: string, _uid: string, operationId: string, file: Blob) => {
+    stageOperationIds.push(operationId);
+    let staged = stagedByOperation.get(operationId);
+    if (!staged) {
+      staged = {
+        ref: `ref-${stagedByOperation.size + 1}`,
+        mime: file.type,
+        size: file.size,
+        filename: file instanceof File ? file.name : "Image",
+      };
+      stagedByOperation.set(operationId, staged);
+    }
+    if (loseFirstStageResponse) {
+      loseFirstStageResponse = false;
+      throw new TypeError("network response lost after daemon stored attachment");
+    }
+    return staged;
+  });
+  const enqueueWebMessageBatch = vi.fn(async (_s: string, body: {
+    operation_id: string;
+    batch_id: string;
+    items: Array<{ request_id: string; attachment_refs: string[] }>;
+  }) => ({
+    scope_id: "scope-a", incarnation: "inc-a", operation_id: body.operation_id,
+    revision: 1, status: "queued", batch_id: body.batch_id,
+    request_ids: body.items.map((item) => item.request_id),
+  }));
+  const api = { allocateWebMessageQueueIds, stageWebMessageQueueAttachment, enqueueWebMessageBatch } as unknown as EngineApi;
+  const bytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0]);
+  const input = busyInput({ attachments: [{
+    id: "image-a", type: "image", name: "image.png", contentType: "image/png",
+    file: new File([bytes], "image.png", { type: "image/png" }),
+  }] });
+
+  await expect(submitBusyWebMessage(api, input, storage, locks))
+    .rejects.toBeInstanceOf(QueueSubmissionReconciliationError);
+  expect(hasUnresolvedBusyWebMessage("session-a", "draft-a", storage)).toBe(true);
+  const retry = await submitBusyWebMessage(api, input, storage, locks);
+
+  expect(retry.admitted).toBe(true);
+  expect(allocateWebMessageQueueIds).toHaveBeenCalledOnce();
+  expect(stageOperationIds).toEqual(["stage-1-0", "stage-1-0"]);
+  expect(stagedByOperation.size).toBe(1);
+  expect(enqueueWebMessageBatch.mock.calls[0]?.[1].items[0]?.attachment_refs).toEqual(["ref-1"]);
+});
+
+test("an ambiguous plan for a prior conversation stays scoped there while a new conversation queues independently", async () => {
+  const storage = new MemoryStorage();
+  const locks = new SerialQueueLocks();
+  let allocation = 0;
+  const allocateWebMessageQueueIds = vi.fn(async (_s: string, uid: string) => {
+    allocation += 1;
+    return {
+      scope_id: `scope-${uid}`, incarnation: `inc-${uid}`, operation_ids: [`operation-${allocation}`],
+      batch_id: `batch-${allocation}`, request_ids: [`request-${allocation}`],
+      attachment_operation_ids: [],
+    };
+  });
+  const admissions: Array<{ uid: string; operationId: string; requestId: string }> = [];
+  let loseConversationAResponse = true;
+  const enqueueWebMessageBatch = vi.fn(async (_s: string, body: {
+    conversation_uid: string;
+    operation_id: string;
+    batch_id: string;
+    items: Array<{ request_id: string }>;
+  }) => {
+    admissions.push({ uid: body.conversation_uid, operationId: body.operation_id, requestId: body.items[0]!.request_id });
+    if (body.conversation_uid === "conversation-a" && loseConversationAResponse) {
+      loseConversationAResponse = false;
+      throw new TypeError("response lost after admission");
+    }
+    return {
+      scope_id: `scope-${body.conversation_uid}`, incarnation: `inc-${body.conversation_uid}`,
+      operation_id: body.operation_id, revision: 1, status: "queued", batch_id: body.batch_id,
+      request_ids: body.items.map((item) => item.request_id),
+    };
+  });
+  const api = { allocateWebMessageQueueIds, enqueueWebMessageBatch } as unknown as EngineApi;
+
+  await expect(submitBusyWebMessage(api, busyInput(), storage, locks))
+    .rejects.toBeInstanceOf(QueueSubmissionReconciliationError);
+  const conversationB = await submitBusyWebMessage(api, busyInput({
+    conversationUid: "conversation-b", text: "message for B",
+  }), storage, locks);
+  const conversationARetry = await submitBusyWebMessage(api, busyInput(), storage, locks);
+
+  expect(conversationB.requestId).toBe("request-2");
+  expect(conversationARetry.requestId).toBe("request-1");
+  expect(allocateWebMessageQueueIds).toHaveBeenCalledTimes(2);
+  expect(admissions).toEqual([
+    { uid: "conversation-a", operationId: "operation-1", requestId: "request-1" },
+    { uid: "conversation-b", operationId: "operation-2", requestId: "request-2" },
+    { uid: "conversation-a", operationId: "operation-1", requestId: "request-1" },
+  ]);
+  expect([...storage.values.values()].map((raw) => JSON.parse(raw).conversation_uid).sort())
+    .toEqual(["conversation-a", "conversation-b"]);
+});
+
 test("a late acknowledgement cannot erase a newer ambiguous submission in another tab", async () => {
   const storage = new MemoryStorage();
   const locks = new SerialQueueLocks();
