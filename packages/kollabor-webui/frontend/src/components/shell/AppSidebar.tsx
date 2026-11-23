@@ -122,7 +122,7 @@ function FoldGroup({
 }
 
 const FOOTER_BUTTON =
-  "size-8 p-2 text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground md:size-7 md:p-1.5";
+  "size-[44px] min-w-[44px] p-2 text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground lg:size-7 lg:min-w-7 lg:p-1.5";
 
 const ROW_CLASS = "h-auto gap-2.5 overflow-visible rounded-lg px-2.5 py-2.5 transition-colors";
 const AVATAR_SIZE = 40;
@@ -911,10 +911,10 @@ export function AppSidebar({
             Could not save sidebar order: {sidebarOrder.error}
           </p>
         ) : null}
-        {/* Use one row when it fits, otherwise two rows of four. */}
+        {/* Use two rows of four on touch layouts and narrow sidebars; one compact desktop row when it fits. */}
         <div
           data-sidebar="footer-actions"
-          className="grid grid-cols-8 items-center justify-items-center gap-y-1 [&>button]:col-span-2 @min-[17rem]:flex @min-[17rem]:justify-between md:@min-[14rem]:flex md:@min-[14rem]:justify-between"
+          className="grid grid-cols-4 items-center justify-items-center max-lg:gap-x-1 gap-y-1 [&>button]:col-span-1 lg:@min-[14rem]:flex lg:@min-[14rem]:justify-between"
         >
           <Popover>
             <PopoverTrigger asChild>
