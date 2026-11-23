@@ -324,6 +324,124 @@ async def test_send_now_batch_renews_timeout_when_later_member_is_admitted():
 
 
 @pytest.mark.asyncio
+async def test_expired_send_now_lease_stops_captured_owner_before_running_batch():
+    runner = ACPRunner(ACPProfile("send-now-expiry-cancel", ("unused",)))
+    runner.session_id = "session-A"
+    runner.generation = 7
+    runner.send_now_batch_timeout_seconds = 0.02
+    started: asyncio.Queue[str] = asyncio.Queue()
+    release = {name: asyncio.Event() for name in ("active-A", "client-B", "older-D")}
+    cancelled: list[str] = []
+
+    class Connection:
+        async def cancel(self, *, session_id: str) -> None:
+            cancelled.append(session_id)
+            release["active-A"].set()
+
+    runner._connection = Connection()
+
+    async def fake_run_prompt(admission, generation):
+        runner._active_turn_id = admission.turn_id
+        runner._active_generation = generation
+        started.put_nowait(admission.request_id)
+        await release[admission.request_id].wait()
+        stop_reason = (
+            "cancelled"
+            if admission.request_id == "active-A" and cancelled
+            else "end_turn"
+        )
+        return ACPResult(
+            generation=generation,
+            session_id="session-A",
+            text="",
+            stop_reason=stop_reason,
+            updates=(),
+            end_frame={},
+            turn_id=admission.turn_id,
+            request_id=admission.request_id,
+            source=admission.source,
+        )
+
+    runner._run_prompt = fake_run_prompt
+    runner.admit("active", request_id="active-A", source="rpc")
+    runner.admit("older", request_id="older-D", source="rpc")
+    worker = asyncio.create_task(runner._drain_queue())
+    try:
+        assert await asyncio.wait_for(started.get(), timeout=1) == "active-A"
+        owner = runner._active_context
+        assert runner.begin_send_now_batch(
+            "batch-BC",
+            2,
+            session_id="session-A",
+            generation=runner._active_generation,
+            active_context=owner,
+            active_turn_id=runner._active_turn_id,
+        )
+        runner.admit(
+            "message B",
+            request_id="client-B",
+            source="rpc",
+            send_now_batch_id="batch-BC",
+        )
+
+        assert await asyncio.wait_for(started.get(), timeout=1) == "client-B"
+        assert cancelled == ["session-A"]
+        assert [item.request_id for item in runner._queue._queue] == ["older-D"]
+
+        release["client-B"].set()
+        assert await asyncio.wait_for(started.get(), timeout=1) == "older-D"
+        assert cancelled == ["session-A"], "expiry must not stop a later queued turn"
+    finally:
+        for event in release.values():
+            event.set()
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_expired_send_now_lease_does_not_stop_replacement_owner():
+    runner, active_task, release_active = _active_runner()
+    runner.send_now_batch_timeout_seconds = 0.02
+    cancelled: list[str] = []
+
+    class Connection:
+        async def cancel(self, *, session_id: str) -> None:
+            cancelled.append(session_id)
+
+    runner._connection = Connection()
+    replacement = asyncio.create_task(asyncio.Event().wait())
+    try:
+        assert runner.begin_send_now_batch(
+            "batch-BC",
+            2,
+            session_id=runner.session_id,
+            generation=runner.generation,
+            active_context=runner._active_context,
+            active_turn_id=runner._active_turn_id,
+        )
+        runner.admit(
+            "message B",
+            request_id="client-B",
+            source="rpc",
+            send_now_batch_id="batch-BC",
+        )
+        runner._active_context = SimpleNamespace(request_id="replacement-E")
+        runner._active_turn_id = 13
+        runner._active_rpc_task = replacement
+
+        await asyncio.wait_for(runner._queue_release.wait(), timeout=1)
+        assert cancelled == []
+        assert [item.request_id for item in runner._queue._queue] == [
+            "client-B", "older-D",
+        ]
+    finally:
+        replacement.cancel()
+        release_active.set()
+        _cleanup_runner(runner, active_task)
+        await asyncio.gather(replacement, active_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_send_now_batch_does_not_cancel_owner_after_one_member_was_injected():
     runner, active_task, release_active = _active_runner()
     service = object.__new__(LLMService)
