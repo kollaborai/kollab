@@ -73,7 +73,7 @@ async def test_runtime_registers_safe_queue_and_attachment_operations_only():
     assert allocated["error"] is None
     ids = allocated["result"]
 
-    image = b"bounded image bytes"
+    image = b"\x89PNG\r\n\x1a\nbounded image bytes"
     staged = await _call(
         server,
         "state.web_queue.stage_attachment",
@@ -145,6 +145,72 @@ async def test_runtime_registers_safe_queue_and_attachment_operations_only():
         {**binding, "request_id": ids["request_ids"][0], "ref": ref},
     )
     assert after_remove["error_kind"] == "handler"
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejects_declared_image_mime_that_disagrees_with_bytes():
+    server = RpcServer()
+    state = _ConversationState("conversation-a")
+    runtime = register_web_message_queue_runtime(server, state)
+    binding = {"expected_conversation_uid": "conversation-a"}
+
+    allocated = await _call(
+        server,
+        "state.web_queue.allocate_ids",
+        {**binding, "item_count": 1, "operation_count": 1, "attachment_operation_count": 1},
+    )
+    operation_id = allocated["result"]["attachment_operation_ids"][0]
+    png_bytes = b"\x89PNG\r\n\x1a\nnot-a-jpeg"
+    staged = await _call(
+        server,
+        "state.web_queue.stage_attachment",
+        {
+            **binding,
+            "operation_id": operation_id,
+            "mime": "image/jpeg",
+            "payload_b64": base64.b64encode(png_bytes).decode("ascii"),
+        },
+    )
+
+    assert staged["error_kind"] == "handler"
+    assert runtime.attachments.attachment_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mime", "image"),
+    [
+        ("image/png", b"\x89PNG\r\n\x1a\nimage"),
+        ("image/jpeg", b"\xff\xd8\xff\xe0image"),
+        ("image/webp", b"RIFF\x04\x00\x00\x00WEBPimage"),
+        ("image/gif", b"GIF89aimage"),
+    ],
+)
+async def test_runtime_accepts_each_supported_image_signature(mime, image):
+    server = RpcServer()
+    state = _ConversationState("conversation-a")
+    runtime = register_web_message_queue_runtime(server, state)
+    binding = {"expected_conversation_uid": "conversation-a"}
+    allocated = await _call(
+        server,
+        "state.web_queue.allocate_ids",
+        {**binding, "item_count": 1, "operation_count": 1, "attachment_operation_count": 1},
+    )
+
+    staged = await _call(
+        server,
+        "state.web_queue.stage_attachment",
+        {
+            **binding,
+            "operation_id": allocated["result"]["attachment_operation_ids"][0],
+            "mime": mime,
+            "payload_b64": base64.b64encode(image).decode("ascii"),
+        },
+    )
+
+    assert staged["error"] is None
+    assert staged["result"]["mime"] == mime
+    assert runtime.attachments.attachment_count == 1
 
 
 @pytest.mark.asyncio
