@@ -7192,6 +7192,14 @@ class HubPlugin(BasePlugin):
                     summary.metadata.get("total", "?"),
                 )
                 return acknowledged
+            except asyncio.CancelledError as exc:
+                # LLMService queues the HUD entry before its first await, so
+                # cancellation from the injection call follows acceptance.
+                replayed_ids = {msg.id for msg in ordinary_msgs}
+                acknowledged.update(replayed_ids)
+                self._acknowledge_inbox_delivery(replayed_ids)
+                exc.acknowledged_message_ids = acknowledged.copy()
+                raise
             except Exception as exc:
                 logger.debug("inbox replay injection failed: %s", exc)
 
