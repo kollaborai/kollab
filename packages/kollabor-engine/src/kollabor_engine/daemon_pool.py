@@ -104,6 +104,50 @@ _TYPE_HEAD = re.compile(rb'\{"type":\s*"([^"\\]+)"')
 _SEQ_FIELD = re.compile(rb'"seq":\s*(\d+)')
 
 
+class DaemonEventQueue(asyncio.Queue):
+    """One subscriber's bounded event queue and constant-size loss metadata.
+
+    Existing consumers still receive the original event dictionaries in FIFO
+    order. A consumer that owns a long-lived handover can inspect the counters
+    to avoid mistaking a dropped terminal event for a successful turn.
+    """
+
+    def __init__(self, maxsize: int = 1000) -> None:
+        super().__init__(maxsize=maxsize)
+        self.dropped_count = 0
+        self.first_dropped_seq: Optional[int] = None
+        self.last_dropped_seq: Optional[int] = None
+        self.dropped_terminal = False
+        self.dropped_permission = False
+        self.revoked = False
+
+    def note_drop(self, event: Any) -> None:
+        """Record a lost frame without retaining payloads or changing the queue."""
+        self.dropped_count += 1
+        if not isinstance(event, dict):
+            return
+        seq = event.get("seq")
+        if isinstance(seq, int):
+            if self.first_dropped_seq is None:
+                self.first_dropped_seq = seq
+            self.last_dropped_seq = seq
+        event_type = event.get("type")
+        self.dropped_terminal = self.dropped_terminal or event_type in {
+            "turn_complete", "daemon_closed"
+        }
+        self.dropped_permission = self.dropped_permission or event_type in {
+            "permission_request", "permission_granted", "permission_denied",
+            "permission_cancelled",
+        }
+
+    def mark_revoked(self) -> None:
+        """Apply the existing privacy purge and make revocation authoritative."""
+        self.revoked = True
+        while not self.empty():
+            self.get_nowait()
+        self.put_nowait(PHONE_STREAM_REVOKED)
+
+
 def _open_brackets(text: str) -> int:
     """Brackets opened minus closed in JSON text, outside its strings."""
     level, i = 0, 0
@@ -513,6 +557,8 @@ class DaemonHandle:
             try:
                 queue.put_nowait(event)
             except asyncio.QueueFull:
+                if isinstance(queue, DaemonEventQueue):
+                    queue.note_drop(event)
                 logger.warning(
                     "dropping event for slow subscriber on session %s", self.session_id
                 )
@@ -527,9 +573,9 @@ class DaemonHandle:
         self._fan_out(event)
 
     def subscribe(self, context: SessionReadContext | None = None) -> asyncio.Queue:
-        queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        queue: DaemonEventQueue = DaemonEventQueue(maxsize=1000)
         if context is not None and context.revoked:
-            queue.put_nowait(PHONE_STREAM_REVOKED)
+            queue.mark_revoked()
             return queue
         self._subscribers.add(queue)
         if context is not None:
@@ -548,9 +594,12 @@ class DaemonHandle:
                 continue
             self._subscriber_contexts.pop(queue, None)
             self._subscribers.discard(queue)
-            while not queue.empty():
-                queue.get_nowait()
-            queue.put_nowait(PHONE_STREAM_REVOKED)
+            if isinstance(queue, DaemonEventQueue):
+                queue.mark_revoked()
+            else:
+                while not queue.empty():
+                    queue.get_nowait()
+                queue.put_nowait(PHONE_STREAM_REVOKED)
             closed += 1
         return closed
 
