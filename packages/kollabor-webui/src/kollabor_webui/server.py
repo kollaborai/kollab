@@ -154,6 +154,16 @@ def create_app(
     bind_hosts: Sequence[str] | None = None,
     update_settings: Mapping[str, object] | None = None,
 ) -> FastAPI:
+    if update_settings is None:
+        from kollabor_config import ConfigService
+        from kollabor_config.config_utils import get_config_directory
+
+        config = ConfigService(get_config_directory() / "config.json", None, fast_mode=True)
+        update_settings = {
+            key: config.get(key, _UpdateConfig.SETTING_DEFAULTS[key])
+            for key in _UpdateConfig.SETTING_KEYS
+        }
+
     # Refuse an invalid explicit selection before allocating clients or serving
     # any page; it must never become permission to use an older bundle.
     _explicit_frontend_dir()

@@ -118,7 +118,7 @@ def main() -> None:
 
     import uvicorn  # type: ignore[import-not-found]
 
-    from .server import _UpdateConfig, create_app
+    from .server import create_app
 
     port = int(os.getenv("KOLLAB_WEBUI_PORT", "8080"))
     engine_url = os.getenv("KOLLAB_ENGINE_URL", "http://127.0.0.1:7433")
@@ -152,17 +152,7 @@ def main() -> None:
     if not os.getenv("KOLLAB_WEBUI_NO_BROWSER"):
         threading.Thread(target=open_browser_delayed, daemon=True).start()
 
-    from kollabor_config import ConfigService
-    from kollabor_config.config_utils import get_config_directory
-
-    config = ConfigService(get_config_directory() / "config.json", None, fast_mode=True)
-    update_settings = {
-        key: config.get(key, _UpdateConfig.SETTING_DEFAULTS[key])
-        for key in _UpdateConfig.SETTING_KEYS
-    }
-    app = create_app(
-        engine_url, bind_hosts=active_hosts, update_settings=update_settings
-    )
+    app = create_app(engine_url, bind_hosts=active_hosts)
     uvicorn.Server(build_uvicorn_config(app)).run(sockets=sockets)
 
 
