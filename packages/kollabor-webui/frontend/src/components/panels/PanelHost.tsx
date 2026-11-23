@@ -762,13 +762,13 @@ export function PanelHost({
       >
         <TabsList
           aria-label="Settings sections"
-          className="mx-4 h-auto w-auto shrink-0 flex-wrap justify-start [scrollbar-width:none] sm:mx-6 md:h-9 md:flex-nowrap md:overflow-x-auto [&::-webkit-scrollbar]:hidden"
+          className="mx-4 h-auto w-auto shrink-0 flex-wrap justify-start [scrollbar-width:none] sm:mx-6 [&::-webkit-scrollbar]:hidden"
         >
           {SETTINGS_TABS.filter((item) => sessionId || sessionlessTabs(!!session.workspace).includes(item.id)).map((item) => (
             <TabsTrigger
               key={item.id}
               value={item.id}
-              className="h-9 flex-none px-2.5 sm:px-3 md:h-full"
+              className="h-9 flex-none px-2.5 sm:px-3"
             >
               {item.label}
             </TabsTrigger>
