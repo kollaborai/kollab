@@ -249,6 +249,7 @@ const mainConfig = defineConfig({
       "src/plugins/loader.test.ts",
       "src/plugins/mount.test.tsx",
       "src/plugins/settings-values.test.ts",
+      "src/plugins/install-summary.test.ts",
       "src/plugins/surfaces.test.tsx",
       "src/plugins/wiring.test.tsx",
     ],
