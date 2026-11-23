@@ -44,4 +44,21 @@ describe("plugin tagged text", () => {
       { type: "tag", name: "x", content: "" },
     ]);
   });
+  it("does not let a close inside a code span, escape or fence end a real tag", () => {
+    expect(splitPluginTags("<todo_write>a `</todo_write>` b</todo_write>", ["todo_write"])).toEqual([
+      { type: "tag", name: "todo_write", content: "a `</todo_write>` b" },
+    ]);
+    expect(splitPluginTags("<todo_write>a \\</todo_write> b</todo_write>", ["todo_write"])).toEqual([
+      { type: "tag", name: "todo_write", content: "a \\</todo_write> b" },
+    ]);
+    expect(splitPluginTags("<todo_write>a \\<todo_write>b</todo_write>", ["todo_write"])).toEqual([
+      { type: "tag", name: "todo_write", content: "a \\<todo_write>b" },
+    ]);
+    const fenced = "<todo_write>a\n```\n</todo_write>\n```";
+    expect(splitPluginTags(fenced, ["todo_write"])).toEqual([{ type: "text", text: fenced }]);
+  });
+  it("closes a code span only on a backtick run of the same length", () => {
+    const text = "`a ```<todo_write>x</todo_write>`";
+    expect(splitPluginTags(text, ["todo_write"])).toEqual([{ type: "text", text }]);
+  });
 });
