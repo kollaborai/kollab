@@ -68,7 +68,7 @@ export function pluginCommandItems(
 ): ComposerPaletteItem[] {
   return entries.map(
     (entry): ComposerPaletteItem => ({
-      id: `plugin:${entry.pluginId}:${entry.name}`,
+      id: entry.name,
       label: label(entry.name),
       description: entry.description,
       type: "command",
@@ -76,4 +76,11 @@ export function pluginCommandItems(
       insertText: entry.name,
     }),
   );
+}
+
+/** One-line toast text for a plugin command that threw or rejected. */
+export function pluginCommandFailure(name: string, error: unknown): string {
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const detail = raw.replace(/\s+/g, " ").trim();
+  return detail ? `Could not run /${name}: ${detail}` : `Could not run /${name}.`;
 }

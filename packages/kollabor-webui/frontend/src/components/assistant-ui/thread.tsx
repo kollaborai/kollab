@@ -62,6 +62,7 @@ import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/a
 import {
   matchPluginCommand,
   pluginCommandEntries,
+  pluginCommandFailure,
   pluginCommandItems,
   reservedCommandKeys,
 } from "@/plugins/composer-commands";
@@ -712,8 +713,7 @@ const Composer: FC<{
     event.preventDefault();
     aui.composer.setText("");
     const fail = (error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
-      match.entry.k.toast(`/${match.entry.name} failed: ${message}`);
+      match.entry.k.toast(pluginCommandFailure(match.entry.name, error));
     };
     try {
       const result = match.entry.run(match.args);
