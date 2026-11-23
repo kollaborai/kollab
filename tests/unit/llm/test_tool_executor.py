@@ -249,6 +249,46 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
 
             self.executor.shell_executor.run.assert_not_awaited()
 
+    async def test_terminal_find_refuses_shell_escaped_executable_names(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "project"
+            outside = root / "outside"
+            workspace.mkdir()
+            outside.mkdir()
+            (outside / "marker.txt").write_text("outside fixture\n")
+            self.executor.workspace = workspace
+            self.executor.shell_executor.run = AsyncMock(
+                return_value=ShellResult(
+                    success=True,
+                    stdout="outside fixture\n",
+                    stderr="",
+                    exit_code=0,
+                )
+            )
+
+            commands = [
+                f'f\\ind "{outside}" -name marker.txt -print',
+                f"fi''nd '{outside}' -name marker.txt -print",
+            ]
+            for command in commands:
+                with self.subTest(command=command):
+                    result = await self.executor._execute_terminal_command(
+                        {
+                            "type": "terminal",
+                            "id": "find-escaped-name",
+                            "command": command,
+                            "cwd": str(workspace),
+                        }
+                    )
+
+                    self.assertFalse(result.success)
+                    self.assertIn(
+                        "search paths must stay inside the active workspace",
+                        result.error,
+                    )
+                    self.executor.shell_executor.run.assert_not_awaited()
+
     async def test_terminal_find_mention_in_echo_is_not_executed_as_find(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir) / "project"
