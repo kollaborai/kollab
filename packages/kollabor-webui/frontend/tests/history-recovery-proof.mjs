@@ -29,8 +29,12 @@ const types = {
   ".svg": "image/svg+xml",
   ".png": "image/png",
 };
+const streams = new Map();
 const server = http
   .createServer((req, res) => {
+    // A scenario's held response stream (the engine's assistant transport).
+    const stream = streams.get(new URL(req.url, "http://x").pathname);
+    if (stream) return stream(req, res);
     const file = path.join(root, new URL(req.url, "http://x").pathname);
     const target =
       file.startsWith(root) && fs.existsSync(file) && fs.statSync(file).isFile()
@@ -1582,6 +1586,168 @@ try {
     viewport: { width: 390, height: 844 },
     isMobile: true,
   });
+
+  // #1364: the reader is on a message while this page's own send runs. A
+  // history sync lands mid-turn (another agent's message), then the turn ends
+  // and history saves it. Whatever the reader is looking at stays put: the
+  // message they scrolled up to, or the sent message the view anchored.
+  const runMidTurnScroll = async (name, readerScrolls, midTurnSync = true, watching = false, peerAfterSend = false) => {
+    const st = { events: [], assistant: [], phase: 0, refreshes: 0, sendId: null };
+    // The page's send as the daemon saves it: its request id names the send.
+    const sentRow = () => ({ role: "user", content: "CLIENT-TURN", metadata: { operator_inputs: [
+      { source: "state_rpc", timestamp: "t", text: "CLIENT-TURN", request_id: st.sendId },
+    ] } });
+    const rows = () => peerAfterSend ? [
+      // Another agent's message saved right after the page's send, in its turn.
+      ...Array.from({ length: 50 }, (_, i) => ({ role: "user", content: `message-${i + 10}` })),
+      ...(st.phase >= 1 ? [sentRow(), { role: "user", content: "PEER-ARRIVAL" }] : []),
+      ...(st.phase >= 2 ? [{ role: "assistant", content: "CLIENT-REPLY" }] : []),
+    ] : [
+      ...Array.from({ length: 50 }, (_, i) => ({ role: "user", content: `message-${i + 10}` })),
+      ...(st.phase >= 1 ? [{ role: "user", content: "PEER-ARRIVAL" }, { role: "assistant", content: "PEER-REPLY" }] : []),
+      ...(st.phase >= 2 ? [sentRow(), { role: "assistant", content: "CLIENT-REPLY" }] : []),
+    ];
+    const saved = peerAfterSend ? { send: 60, reply: 62 } : { send: 62, reply: 63 };
+    const page60 = () => mkPage(10, 10 + rows().length, { history: rows() });
+    await scenario(
+      name,
+      () => ({
+        resolve(options) {
+          if (options.before) return { status: 200, body: mkPage(0, 10) };
+          if (options.after) st.refreshes += 1;
+          return { status: 200, body: page60() };
+        },
+        events(route) {
+          return new Promise((resolve) => st.events.push((body) =>
+            resolve(route.fulfill({ status: 200, contentType: "text/event-stream", body }).catch(() => {}))));
+        },
+        assistant(route) {
+          // A real stream, as the engine sends it for a send made during a busy
+          // turn: nothing until the daemon admits it at the agent's next step
+          // (released), then the send's row and the reply as it streams, then
+          // the final state with the turn's rows matched to their saved positions.
+          const key = `/__stream/${name}`;
+          streams.set(key, (req, res) => {
+            let raw = "";
+            req.on("data", (chunk) => { raw += chunk; });
+            req.on("end", async () => {
+              const request = JSON.parse(raw);
+              const state = request.state;
+              st.sendId = request.commands?.[0]?.message?.id ?? null;
+              const at = state.messages.length;
+              const user = { id: `user-demo-session-${at}`, role: "user", content: "CLIENT-TURN" };
+              const reply = { id: `assistant-demo-session-${at + 1}`, role: "assistant", content: "" };
+              const send = (operations) => res.write(`data: ${JSON.stringify({ type: "update-state", operations })}\n\n`);
+              res.writeHead(200, {
+                "content-type": "text/event-stream",
+                // Only the app this harness serves reads it.
+                "access-control-allow-origin": base,
+              });
+              await new Promise((release) => st.assistant.push(release));
+              send([{ type: "set", path: ["messages"], value: [...state.messages, user, reply] }]);
+              await new Promise((wait) => setTimeout(wait, 400));
+              send([{ type: "set", path: ["messages"], value: [...state.messages, user, { ...reply, content: "CLIENT-REPLY" }] }]);
+              await new Promise((wait) => setTimeout(wait, 800));
+              const messages = [...state.messages,
+                { ...user, metadata: { custom: { historySourceIndex: saved.send, requestId: st.sendId } } },
+                { ...reply, content: "CLIENT-REPLY", status: { type: "complete", reason: "stop" },
+                  metadata: { custom: { historySourceIndex: saved.reply } } },
+              ];
+              send([
+                { type: "set", path: ["messages"], value: messages },
+                { type: "set", path: ["synced"], value: { history: saved.reply + 1, messages: messages.length } },
+              ]);
+              res.end(`data: ${JSON.stringify({ type: "message-finish", finishReason: "stop" })}\n\ndata: [DONE]\n\n`);
+            });
+          });
+          if (route.request().method() === "OPTIONS") {
+            return route.fulfill({ status: 204, headers: {
+              "access-control-allow-origin": base,
+              "access-control-allow-methods": "POST, OPTIONS",
+              "access-control-allow-headers": "authorization, content-type",
+            } });
+          }
+          return route.continue({ url: `${base}${key}` });
+        },
+      }),
+      async (page) => {
+        const drift = [];
+        try {
+          await openThread(page, "message-59");
+          if (watching) {
+            // Another client's turn is streaming: the page shows its live row.
+            for (let n = 0; n < 50 && !st.events.length; n++) await page.waitForTimeout(100);
+            st.events.splice(0).forEach((release) => release('data: {"type":"token","text":"BUSY-LIVE","request_id":"r-busy"}\n\n'));
+            await page.getByText("BUSY-LIVE").first().waitFor({ timeout: 10000 });
+          }
+          const composer = page.locator(".aui-composer-input");
+          await composer.fill("CLIENT-TURN");
+          await composer.press("Enter");
+          for (let n = 0; n < 100 && (!st.assistant.length || !st.events.length); n++) await page.waitForTimeout(100);
+          if (!st.assistant.length || !st.events.length) throw new Error("local send or event stream was not held");
+          await page.waitForTimeout(1200);
+          const viewport = page.locator('[data-slot="aui_thread-viewport"]');
+          let watched = "CLIENT-TURN";
+          if (readerScrolls) {
+            // A real wheel over the thread: the reader scrolls up to read.
+            const box = await viewport.boundingBox();
+            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+            await page.mouse.wheel(0, -400);
+            await page.waitForTimeout(600);
+            watched = await viewport.evaluate((view) => {
+              const top = view.getBoundingClientRect().top;
+              const row = [...view.querySelectorAll('[data-role="user"]')]
+                .find((el) => el.getBoundingClientRect().top >= top + 10);
+              return row?.textContent?.trim() ?? "";
+            });
+            if (!/^message-\d+$/.test(watched)) throw new Error(`no history message at the top of the view: ${watched}`);
+          }
+          const before = await messagePosition(page, watched, true);
+          const sample = async (label) => {
+            const now = await messagePosition(page, watched);
+            drift.push(`${label}: ${Math.round(now.offset - before.offset)}px${now.sameNode ? "" : " (remounted)"}`);
+            return Math.abs(now.offset - before.offset) <= 2 && now.sameNode;
+          };
+          // Mid-turn: another agent's message reaches history.
+          let midTurn = true;
+          if (midTurnSync) {
+            st.phase = 1;
+            st.events.splice(0).forEach((release) => release('data: {"type":"hub_message"}\n\n'));
+            await page.getByText("PEER-ARRIVAL", { exact: true }).first().waitFor({ state: "attached", timeout: 10000 });
+            await page.waitForTimeout(1200);
+            midTurn = await sample("after the mid-turn sync");
+          }
+          // The turn ends and history saves it.
+          st.phase = 2;
+          st.assistant.splice(0).forEach((release) => release());
+          await page.getByText("CLIENT-REPLY", { exact: true }).first().waitFor({ state: "attached", timeout: 10000 });
+          const scrollsBefore = await page.evaluate(() => window.__issue1142ProgrammaticScrolls.length);
+          await page.waitForTimeout(1200);
+          const ended = await sample("after the run's final state");
+          const endScrolls = await page.evaluate((from) => window.__issue1142ProgrammaticScrolls.slice(from), scrollsBefore);
+          if (endScrolls.length) console.log(`    ${name} scrolls at the run's end: ${JSON.stringify(endScrolls).slice(0, 400)}`);
+          for (let n = 0; n < 50 && !st.events.length; n++) await page.waitForTimeout(100);
+          const refreshesBefore = st.refreshes;
+          st.events.splice(0).forEach((release) => release('data: {"type":"turn_complete"}\n\n'));
+          for (let n = 0; n < 50 && st.refreshes === refreshesBefore; n++) await page.waitForTimeout(100);
+          await page.waitForTimeout(1500);
+          const settled = await sample("after the turn ended");
+          if (midTurn && ended && settled) ok(name, `${watched} stays put (${drift.join(", ")})`);
+          else fail(name, `${watched} moved: ${drift.join(", ")}`);
+        } finally {
+          st.events.splice(0).forEach((release) => release(""));
+          st.assistant.splice(0).forEach((release) => release());
+        }
+      },
+    );
+  };
+  await runMidTurnScroll("S-1364-reader-scrolled-up", true);
+  await runMidTurnScroll("S-1364-reader-on-the-sent-message", false);
+  await runMidTurnScroll("S-1364-reader-scrolled-up-while-watching", true, true, true);
+  await runMidTurnScroll("S-1364-reader-scrolled-up-peer-after-send", true, true, false, true);
+  await runMidTurnScroll("S-1364-reader-on-the-sent-message-peer-after-send", false, true, false, true);
+  await runMidTurnScroll("S-1364-reader-scrolled-up-no-sync", true, false);
+  await runMidTurnScroll("S-1364-reader-on-the-sent-message-no-sync", false, false);
 
   // K: another agent's message and reply land while this page owns a local
   // turn. They must be appended after that turn settles, even when the
