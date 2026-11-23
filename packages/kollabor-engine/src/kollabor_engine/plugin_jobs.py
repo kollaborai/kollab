@@ -174,6 +174,7 @@ class PluginJobs:
         if self.reaper is None:
             self.reaper = asyncio.create_task(self._reap(), name="plugin-job-reaper")
         task = self._track(self._stage(job))
+        job["stage_task"] = task
         self.staging_tasks.add(task)
         task.add_done_callback(self.staging_tasks.discard)
         return self._public(job)
@@ -311,6 +312,48 @@ class PluginJobs:
         finally:
             job["updated"] = time.monotonic()
             self.hub.publish_change()
+
+    async def cancel(self, job_id: str) -> dict:
+        self._expire()
+        job = self.jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Plugin job not found")
+        if job["status"] == "cancelled":
+            pending = job.get("cancel_task")
+            if pending is not None:
+                return await asyncio.shield(pending)
+            if "base" not in job:
+                return self._public(job)
+        elif job["status"] not in {"staging", "ready"}:
+            raise HTTPException(status_code=409, detail="Plugin job cannot be cancelled")
+        job["status"] = "cancelled"
+        job["updated"] = time.monotonic()
+        stage_task = job.get("stage_task")
+        if stage_task is not None and not stage_task.done():
+            stage_task.cancel()
+
+        async def finish() -> dict:
+            try:
+                if stage_task is not None:
+                    await asyncio.gather(stage_task, return_exceptions=True)
+                cleaned, interrupted = await self._run_cleanup(job)
+                if interrupted:
+                    raise asyncio.CancelledError
+                if not cleaned:
+                    job["warning"] = "Plugin staging files could not be removed"
+                    job["updated"] = time.monotonic()
+                    self.hub.publish_change()
+                    raise HTTPException(status_code=503, detail="Cannot remove staged plugin files; try again")
+                job.pop("warning", None)
+                job["updated"] = time.monotonic()
+                self.hub.publish_change()
+                return self._public(job)
+            finally:
+                job.pop("cancel_task", None)
+
+        task = self._track(finish())
+        job["cancel_task"] = task
+        return await asyncio.shield(task)
 
     async def confirm(self, job_id: str, commit: str, digest: str) -> dict:
         if self.closing:
