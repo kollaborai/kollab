@@ -45,6 +45,6 @@ export function NoticeBar({
 }
 
 /** A notice's button: the way out of what the line says. */
-export function NoticeAction(props: Omit<ComponentProps<typeof Button>, "variant" | "size">) {
-  return <Button type="button" variant="outline" size="xs" className="text-foreground pointer-coarse:min-h-11" {...props} />;
+export function NoticeAction({ className, ...props }: Omit<ComponentProps<typeof Button>, "variant" | "size">) {
+  return <Button type="button" variant="outline" size="xs" className={cn("text-foreground pointer-coarse:min-h-11", className)} {...props} />;
 }
