@@ -4439,6 +4439,28 @@ class LocalStateService(StateService):
                 "conversation_metadata",
             )
         }
+        conv_logger = getattr(conv_mgr, "conversation_logger", None) or getattr(
+            llm, "conversation_logger", None
+        )
+        api_service = getattr(llm, "api_service", None) or getattr(
+            llm, "api_communication_service", None
+        )
+        logger_state = getattr(conv_logger, "__dict__", None)
+        api_state = getattr(api_service, "__dict__", None)
+        logger_state = dict(logger_state) if isinstance(logger_state, dict) else None
+        api_state = dict(api_state) if isinstance(api_state, dict) else None
+        history = getattr(llm, "conversation_history", None)
+        history_state = list(history) if history is not None else None
+        session_stats = getattr(llm, "session_stats", None)
+        stats_state = dict(session_stats) if isinstance(session_stats, dict) else None
+
+        def restore_object_state(target: Any, snapshot: dict[str, Any] | None) -> None:
+            target_state = getattr(target, "__dict__", None)
+            if snapshot is None or not isinstance(target_state, dict):
+                return
+            target_state.clear()
+            target_state.update(snapshot)
+
         try:
             has_messages = bool(getattr(conv_mgr, "messages", None))
             if has_messages and hasattr(conv_mgr, "save_conversation"):
@@ -4473,27 +4495,37 @@ class LocalStateService(StateService):
             error = result.get("error", "unknown error") if isinstance(result, dict) else "invalid response"
             raise ValueError(f"failed to branch session {session_id!r}: {error}")
 
-        mark_changed()
-        new_session_id = result.get("session_id")
-        if not isinstance(new_session_id, str) or not new_session_id:
-            raise ValueError("branch did not return a session id")
-
-        conv_mgr.current_session_id = new_session_id
-        raw_messages = getattr(conv_mgr, "messages", None) or []
-
         try:
-            conv_logger = getattr(conv_mgr, "conversation_logger", None) or getattr(
-                llm, "conversation_logger", None
-            )
+            mark_changed()
+            new_session_id = result.get("session_id")
+            if not isinstance(new_session_id, str) or not new_session_id:
+                raise ValueError("branch did not return a session id")
+
+            conv_mgr.current_session_id = new_session_id
+            raw_messages = getattr(conv_mgr, "messages", None) or []
+
             if conv_logger is not None and hasattr(conv_logger, "reset_session"):
                 conv_logger.reset_session(new_session_id)
 
-            api_service = getattr(llm, "api_service", None) or getattr(
-                llm, "api_communication_service", None
-            )
             if api_service is not None and hasattr(api_service, "set_session_id"):
                 api_service.set_session_id(new_session_id)
         except Exception as e:
+            for name, value in previous_state.items():
+                if hasattr(conv_mgr, name):
+                    setattr(conv_mgr, name, value)
+            if history is not None and history_state is not None:
+                if hasattr(history, "clear") and hasattr(history, "extend"):
+                    history.clear()
+                    history.extend(history_state)
+                else:
+                    llm.conversation_history = history_state
+            if isinstance(session_stats, dict) and stats_state is not None:
+                session_stats.clear()
+                session_stats.update(stats_state)
+            restore_object_state(conv_logger, logger_state)
+            restore_object_state(api_service, api_state)
+            if isinstance(e, ValueError) and str(e) == "branch did not return a session id":
+                raise
             raise ValueError(f"failed to name branch session: {e}") from e
 
         from kollabor_ai.response_channels import turn_display_texts
