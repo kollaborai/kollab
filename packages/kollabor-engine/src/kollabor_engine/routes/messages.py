@@ -2483,7 +2483,8 @@ async def assistant_transport(
                 for key, pending in permission_resolution_pending.items()
             }
             prompt_labels.update(
-                str(key) for key in permission_resolution_errors
+                str(key).removeprefix("unidentified:")
+                for key in permission_resolution_errors
             )
             labels = ", ".join(sorted(prompt_labels)) or "the pending prompt"
             details = "; ".join(permission_resolution_errors.values())
@@ -2502,9 +2503,21 @@ async def assistant_transport(
                 activity = (
                     f"Accepted message(s) {accepted or 'unknown'} may still be running."
                 )
+            attempted_decision = any(
+                pending.get("attempted", True)
+                for pending in permission_resolution_pending.values()
+            ) or any(
+                decision.get("status") in {"attempted", "resolved"}
+                for decision in permission_decisions.values()
+            )
+            decision_outcome = (
+                "The attempted decision may or may not have taken effect."
+                if attempted_decision
+                else "No permission response was submitted."
+            )
             return (
                 f"Permission resolution could not be confirmed for prompt(s) {labels}: "
-                f"{details}. The attempted decision may or may not have taken effect. "
+                f"{details}. {decision_outcome} "
                 f"{activity} No messages were resubmitted."
             )
 
@@ -2892,7 +2905,7 @@ async def assistant_transport(
                         and str(result.get("permission_id"))
                         else None
                     )
-                    permission_id = supplied_permission_id or state_permission_id
+                    permission_id = supplied_permission_id or state_permission_id or None
                     known_permission_ids = resumed_prompt_permission_ids.get(source_tool_id, set())
                     if handover_record is not None:
                         known_prompt_tools = {
@@ -2921,16 +2934,6 @@ async def assistant_transport(
                                 "multiple pending prompts; include the matching permission_id."
                             )
                             return
-                    if not isinstance(permission_id, str) or not permission_id:
-                        message = (
-                            "Permission response is missing its owner; refresh the chat "
-                            "before answering."
-                        )
-                        if handover_record is not None:
-                            reject_handover(message)
-                        else:
-                            controller.add_error(message)
-                        return
                     decision_record = {
                         "decision": decision,
                         "scope": scope,
@@ -2955,6 +2958,48 @@ async def assistant_transport(
                                 "status": "attempted",
                             }
                             store_handover_snapshot()
+                    if not isinstance(permission_id, str) or not permission_id:
+                        message = (
+                            "Permission response was not submitted because the accepted "
+                            f"prompt for tool_id '{source_tool_id}' has no unique "
+                            "server-recorded permission_id."
+                        )
+                        if handover_record is None:
+                            controller.add_error(message)
+                            completion["error"] = {"message": message}
+                            completion["usage"] = {
+                                **usage_totals,
+                                "stopReason": "error",
+                            }
+                            completion["completed"] = True
+                            _assistant_set_usage(controller, completion["usage"])
+                            _assistant_set_state_value(controller, "error", message)
+                            return
+                        if previous_decision is None:
+                            permission_decisions[decision_key] = {
+                                **decision_record,
+                                "status": "not_submitted",
+                            }
+                        permission_resolution_errors[decision_key] = message
+                        pending_request_ids = sorted(
+                            request_id
+                            for request_id, tool_ids in resumed_prompt_tools.items()
+                            if source_tool_id in tool_ids
+                        )
+                        permission_resolution_pending[decision_key] = {
+                            "tool_id": source_tool_id,
+                            "permission_id": None,
+                            "decision": decision,
+                            "request_ids": pending_request_ids,
+                            "attempted": False,
+                        }
+                        permission_resolution_deadline = (
+                            _assistant_correlation_monotonic()
+                            + EVENT_IDLE_TIMEOUT_SECONDS
+                        )
+                        store_handover_snapshot()
+                        saw_action = True
+                        continue
                     if previous_decision is not None and previous_decision.get("status") == "resolved":
                         resolved = True
                     else:
@@ -2994,6 +3039,7 @@ async def assistant_transport(
                                 "permission_id": permission_id,
                                 "decision": decision,
                                 "request_ids": pending_request_ids,
+                                "attempted": True,
                             }
                             permission_resolution_deadline = (
                                 _assistant_correlation_monotonic()

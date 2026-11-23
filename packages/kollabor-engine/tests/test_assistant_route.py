@@ -504,7 +504,13 @@ async def test_assistant_transport_exposes_and_resolves_permission_prompt(monkey
     first = await messages.assistant_transport(
         session.session_id,
         messages.AssistantRequest(
-            commands=[{"type": "add-message", "content": "run command"}],
+            commands=[{
+                "type": "add-message",
+                "message": {
+                    "id": "parent-turn-shell-2",
+                    "content": "run command",
+                },
+            }],
             state={"messages": []},
         ),
     )
