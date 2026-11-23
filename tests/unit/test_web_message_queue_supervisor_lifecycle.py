@@ -113,10 +113,12 @@ async def test_acp_turn_complete_wakes_queue_if_idle_flag_clears_after_event():
     loop = asyncio.get_running_loop()
     loop.call_later(0.02, setattr, state, "is_processing", False)
     await asyncio.to_thread(tap.publish, {"type": "turn_complete"})
-    await asyncio.wait_for(state.dispatched.wait(), timeout=0.5)
+    try:
+        await asyncio.wait_for(state.dispatched.wait(), timeout=0.5)
+    finally:
+        await runtime.close(timeout=0.1)
 
     assert [item[1].request_id for item in state.dispatches] == minted["request_ids"]
-    assert await runtime.close() is True
     assert tap._listeners == ()
 
 
@@ -210,6 +212,7 @@ async def test_close_is_bounded_and_retries_a_worker_that_did_not_settle():
     first_finished_in_time = bool(done)
     worker.release_first.set()
     first = await first_task
+    await asyncio.sleep(0)
     second = await runtime.close(timeout=0.1)
 
     assert first_finished_in_time is True
@@ -243,6 +246,35 @@ async def test_close_does_not_wait_forever_for_a_cancellation_resistant_supervis
     assert closed_in_time is True
     assert first is False
     assert second is True
+
+
+@pytest.mark.asyncio
+async def test_concurrent_close_call_respects_its_own_timeout_waiting_for_lock():
+    class _HeldWorker:
+        def __init__(self):
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def close(self, *, timeout):
+            self.entered.set()
+            await self.release.wait()
+            return False
+
+    runtime = register_web_message_queue_runtime(RpcServer(), _State())
+    worker = _HeldWorker()
+    runtime._active_workers.add(worker)
+
+    first = asyncio.create_task(runtime.close(timeout=0.5))
+    await asyncio.wait_for(worker.entered.wait(), timeout=0.1)
+    second = asyncio.create_task(runtime.close(timeout=0.01))
+    done, _ = await asyncio.wait({second}, timeout=0.05)
+    second_finished_in_time = bool(done)
+    worker.release.set()
+    await first
+    second_result = await second
+
+    assert second_finished_in_time is True
+    assert second_result is False
 
 
 @pytest.mark.asyncio
