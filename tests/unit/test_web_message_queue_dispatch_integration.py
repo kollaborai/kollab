@@ -481,3 +481,92 @@ async def test_real_acp_admission_records_and_binds_the_exact_queue_image(tmp_pa
         task.cancel()
     await asyncio.gather(*tuple(orchestrator._completion_tasks), return_exceptions=True)
 
+
+@pytest.mark.asyncio
+async def test_acp_bind_failure_cancels_exact_deferred_admission_before_completion(
+    tmp_path, monkeypatch
+):
+    from kollabor_engine import media_store
+
+    from kollabor.llm.acp_bridge import ACPAdmission
+    from kollabor.llm.acp_orchestrator import ACPOrchestrator
+    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
+
+    class PendingRunner:
+        generation = 3
+        session_id = "acp-session"
+        binding = None
+        supports_image_input = True
+
+        def __init__(self):
+            self.admissions = []
+            self.cancelled = []
+
+        def admit(self, text, *, request_id, source, thread_id=None, origin=None, **kwargs):
+            future = asyncio.get_running_loop().create_future()
+            admission = ACPAdmission(
+                request_id,
+                source,
+                thread_id,
+                self.generation,
+                len(self.admissions) + 1,
+                text,
+                future,
+                origin or {},
+            )
+            self.admissions.append(admission)
+            return admission
+
+        def cancel_queued(self, request_id, admission=None):
+            for candidate in tuple(self.admissions):
+                if candidate is admission and candidate.request_id == request_id:
+                    self.admissions.remove(candidate)
+                    self.cancelled.append(candidate)
+                    candidate.future.cancel()
+                    return True
+            return False
+
+    queue, attachments, _scope, request_id, _staged, snapshot = await _queue_with_image()
+    state, llm, logger, uid = await _real_local_state(tmp_path)
+    llm.profile_manager = SimpleNamespace(
+        get_active_profile=lambda: SimpleNamespace(get_provider=lambda: "acp")
+    )
+    orchestrator = ACPOrchestrator(llm.event_bus)
+    runner = PendingRunner()
+    orchestrator._runner = runner
+    llm.event_bus.register_service("acp_orchestrator", orchestrator)
+    identity = ConversationIdentity(uid, state.get_conversation_revision())
+    worker = WebMessageQueueWorker(
+        queue,
+        identity,
+        state.get_conversation_identity,
+        WebMessageQueueDispatcher(state, attachments),
+    )
+
+    def fail_bind(*_args, **_kwargs):
+        raise OSError("injected ACP media bind failure")
+
+    monkeypatch.setattr(media_store, "bind_queue_handoff", fail_bind)
+    result = await worker.dispatch_batch(snapshot.batches[0].batch_id)
+
+    assert result.status is WorkerStatus.NOT_SENT
+    assert len(runner.cancelled) == 1
+    assert runner.cancelled[0].request_id == request_id
+    assert runner.cancelled[0].future.cancelled()
+    assert not orchestrator._completion_tasks
+    assert not orchestrator._deferred_queue_admissions
+    assert llm.processing_queue.empty()
+    rows = (
+        [json.loads(line) for line in logger.session_file.read_text().splitlines()]
+        if logger.session_file.exists()
+        else []
+    )
+    assert not any(row.get("type") == "user" for row in rows)
+    assert not any(
+        entry.get("queue_request_id") == request_id
+        for entry in media_store.list_for(logger.conversations_dir, logger.session_id)
+    )
+    assert attachments.attachment_count == 1
+    queued = await queue.snapshot()
+    assert queued.batches[0].items[0].request_id == request_id
+
