@@ -29,6 +29,25 @@ def _text(message):
     )
 
 
+def _permission_call_id(state, tool_id, permission_id=None):
+    for message in state.get("messages", []):
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("toolName") != "request_permission":
+                continue
+            args = part.get("args") or {}
+            if not isinstance(args, dict) or args.get("tool_id") != tool_id:
+                continue
+            if permission_id is None or args.get("permission_id") == permission_id:
+                return part["toolCallId"]
+    raise AssertionError(
+        f"no displayed permission call for tool_id={tool_id!r}, "
+        f"permission_id={permission_id!r}"
+    )
+
+
 class _FakeCorrelationClock:
     def __init__(self):
         self.now = 0.0
@@ -510,13 +529,16 @@ async def test_permission_handover_keeps_later_admitted_turn_owned(monkeypatch):
     handover_state = copy.deepcopy(first_run.state)
     assert len(_assistant_rows(captured)) == 1
     assert first_run.state["messages"][-1]["role"] == "user"
+    permission_call_id = _permission_call_id(
+        handover_state, "shell-first", permission_id
+    )
 
     second_response = await messages.assistant_transport(
         session.session_id,
         messages.AssistantRequest(commands=[
             {
                 "type": "add-tool-result",
-                "toolCallId": "permission_shell-first",
+                "toolCallId": permission_call_id,
                 "result": {"decision": "approve", "scope": "once", "permission_id": permission_id},
             },
         ], state=handover_state),
@@ -671,12 +693,15 @@ async def test_disconnected_permission_followup_retries_without_gap_or_replay(mo
     await asyncio.wait_for(drain(first_response.stream), timeout=1)
     first_state = copy.deepcopy(captured["controller"].state)
     token = first_state[messages._ASSISTANT_HANDOVER_STATE_KEY]
+    permission_call_id = _permission_call_id(
+        first_state, "shell-first", permission_id
+    )
     assert len(source._subscribers) == 1
     retained_queue = next(iter(source._subscribers))
 
     permission_command = {
         "type": "add-tool-result",
-        "toolCallId": "permission_shell-first",
+        "toolCallId": permission_call_id,
         "result": {"decision": "approve", "scope": "once", "permission_id": permission_id},
     }
     disconnected_response = await messages.assistant_transport(
@@ -758,10 +783,11 @@ async def test_reused_tool_id_outcome_with_wrong_permission_id_does_not_reconcil
     token = state[messages._ASSISTANT_HANDOVER_STATE_KEY]
     queue = session.subscriptions[-1]
     assert queue.qsize() == 0
+    permission_call_id = _permission_call_id(state, "shell-first", permission_id)
 
     decision = {
         "type": "add-tool-result",
-        "toolCallId": "permission_shell-first",
+        "toolCallId": permission_call_id,
         "result": {
             "decision": "approve",
             "scope": "once",
@@ -806,7 +832,7 @@ async def test_reused_tool_id_outcome_with_wrong_permission_id_does_not_reconcil
     state_messages = captured["controller"].state["messages"]
     assert _text(state_messages[-1]) == "second reply"
     permission_part = state_messages[1]["content"][0]
-    assert permission_part["toolCallId"] == "permission_shell-first"
+    assert permission_part["toolCallId"] == permission_call_id
     assert "result" not in permission_part
 
 
@@ -843,10 +869,13 @@ async def test_false_permission_rpc_recovers_from_matching_permission_id_and_ter
     token = first_state[messages._ASSISTANT_HANDOVER_STATE_KEY]
     queue = session.subscriptions[-1]
     assert queue.qsize() == 0
+    permission_call_id = _permission_call_id(
+        first_state, "shell-first", permission_id
+    )
 
     decision = {
         "type": "add-tool-result",
-        "toolCallId": "permission_shell-first",
+        "toolCallId": permission_call_id,
         "result": {
             "decision": "approve",
             "scope": "once",
@@ -926,12 +955,13 @@ async def test_missing_permission_id_fails_closed_but_drains_exact_turn_terminal
     await asyncio.wait_for(drain(first_response.stream), timeout=1)
     state = copy.deepcopy(captured["controller"].state)
     token = state[messages._ASSISTANT_HANDOVER_STATE_KEY]
+    permission_call_id = _permission_call_id(state, "shell-first")
 
     response = await messages.assistant_transport(
         session.session_id,
         messages.AssistantRequest(commands=[{
             "type": "add-tool-result",
-            "toolCallId": "permission_shell-first",
+            "toolCallId": permission_call_id,
             "result": {"decision": "approve", "scope": "once"},
         }], state=state),
     )
@@ -983,13 +1013,16 @@ async def test_handover_terminal_drop_reports_partial_loss_without_resubmitting(
     queue._maxsize = 1
     source._fan_out({"type": "token", "text": "buffered", "request_id": "first", "seq": 40})
     source._fan_out({"type": "turn_complete", "request_id": "first", "seq": 41})
+    permission_call_id = _permission_call_id(
+        handover_state, "shell-first", permission_id
+    )
 
     second_response = await messages.assistant_transport(
         session.session_id,
         messages.AssistantRequest(commands=[
             {
                 "type": "add-tool-result",
-                "toolCallId": "permission_shell-first",
+                "toolCallId": permission_call_id,
                 "result": {"decision": "approve", "scope": "once", "permission_id": permission_id},
             },
         ], state=handover_state),
@@ -1039,6 +1072,7 @@ async def test_revocation_takes_priority_over_handover_queue_gap(monkeypatch):
     )
     await asyncio.wait_for(drain(first_response.stream), timeout=1)
     handover_state = copy.deepcopy(captured["controller"].state)
+    permission_call_id = _permission_call_id(handover_state, "shell-first")
     token = handover_state[messages._ASSISTANT_HANDOVER_STATE_KEY]
     queue = session.subscriptions[-1]
     queue.revoked = True
@@ -1050,7 +1084,7 @@ async def test_revocation_takes_priority_over_handover_queue_gap(monkeypatch):
         messages.AssistantRequest(commands=[
             {
                 "type": "add-tool-result",
-                "toolCallId": "permission_shell-first",
+                "toolCallId": permission_call_id,
                 "result": {"decision": "approve", "scope": "once"},
             },
         ], state=handover_state),
@@ -1131,6 +1165,9 @@ async def test_single_send_permission_handover_does_not_consume_multisend_capaci
     await asyncio.wait_for(drain(first_response.stream), timeout=1)
 
     handover_state = copy.deepcopy(captured["controller"].state)
+    permission_call_id = _permission_call_id(
+        handover_state, "shell-single", permission_id
+    )
     assert messages._ASSISTANT_HANDOVER_STATE_KEY not in handover_state
     assert existing_token in messages._assistant_handover_ledger(session)
     assert len(_assistant_rows(captured)) == 1
@@ -1141,7 +1178,7 @@ async def test_single_send_permission_handover_does_not_consume_multisend_capaci
         messages.AssistantRequest(commands=[
             {
                 "type": "add-tool-result",
-                "toolCallId": "permission_shell-single",
+                "toolCallId": permission_call_id,
                 "result": {"decision": "approve", "scope": "once", "permission_id": permission_id},
             },
         ], state=handover_state),

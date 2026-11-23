@@ -391,7 +391,7 @@ export function liveMessage(turn: LiveTurn): ThreadMessageLike | null {
     role: "assistant",
     content: parts,
     status: SETTLED_STATUS[turn.settled ?? ""] ?? (standaloneNotice ? SETTLED_STATUS.complete : { type: "running" }),
-    metadata: { isOptimistic: true },
+    metadata: { isOptimistic: true, ...(turn.requestId ? { custom: { requestId: turn.requestId } } : {}) },
   };
 }
 

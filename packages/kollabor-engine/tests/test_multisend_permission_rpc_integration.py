@@ -100,6 +100,17 @@ async def test_multisend_false_permission_rpc_reconciles_through_engine_session(
     )
     await asyncio.wait_for(drain(first.stream), timeout=1)
     state = captured["controller"].state
+    permission_call_id = next(
+        part["toolCallId"]
+        for message in state["messages"]
+        for part in (
+            message.get("content")
+            if isinstance(message.get("content"), list)
+            else []
+        )
+        if isinstance(part, dict)
+        if part.get("toolName") == "request_permission"
+    )
 
     followup = await messages.assistant_transport(
         session_id,
@@ -107,7 +118,7 @@ async def test_multisend_false_permission_rpc_reconciles_through_engine_session(
             commands=[
                 {
                     "type": "add-tool-result",
-                    "toolCallId": "permission_shell-first",
+                    "toolCallId": permission_call_id,
                     "result": {
                         "decision": "approve",
                         "scope": "once",
@@ -125,12 +136,13 @@ async def test_multisend_false_permission_rpc_reconciles_through_engine_session(
     assert engine_state.send_message.await_count == 2
     assert captured["controller"].errors == []
     assert captured["controller"].state["usage"]["stopReason"] == "end_turn"
-    assert [
+    actual_rows = [
         (row["role"], messages.content_to_text(row.get("content")))
         for row in captured["controller"].state["messages"]
-    ] == [
+    ]
+    assert actual_rows == [
         ("user", "one"),
         ("assistant", ""),
         ("user", "two"),
         ("assistant", "second reply"),
-    ]
+    ], actual_rows

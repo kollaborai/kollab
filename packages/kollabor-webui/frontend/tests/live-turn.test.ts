@@ -27,6 +27,15 @@ test("tokens accumulate into one streaming text part", () => {
   assert.deepEqual(message.content, [{ type: "text", text: "hello world" }]);
 });
 
+test("a live message keeps the request id that history will replace", () => {
+  const message = liveMessage(applyLiveEvent(emptyLiveTurn(), { type: "token", text: "late output", request_id: "request-A" }));
+  assert.equal(message?.id, `${LIVE_MESSAGE_ID}:request-A`);
+  assert.equal(
+    (message?.metadata as { custom?: { requestId?: string } } | undefined)?.custom?.requestId,
+    "request-A",
+  );
+});
+
 test("a tool call between tokens keeps the arrival order", () => {
   let turn = emptyLiveTurn();
   turn = applyLiveEvent(turn, token("running "));
