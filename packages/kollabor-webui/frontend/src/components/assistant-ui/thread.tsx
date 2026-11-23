@@ -10,7 +10,6 @@ import {
   type ComposerPaletteItem,
 } from "@/components/assistant-ui/composer-palette";
 import { ThreadFollowupSuggestions } from "@/components/assistant-ui/follow-up-suggestions";
-import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { MessageTimingBadge } from "@/components/assistant-ui/message-timing";
 import {
   Reasoning,
@@ -60,6 +59,14 @@ import {
   useSendWaitingNow,
 } from "@/runtime";
 import type { AgentPoolEntry, MediaEntry, NetworkAgent, SlashCommand } from "@/api";
+import {
+  matchPluginCommand,
+  pluginCommandEntries,
+  pluginCommandItems,
+  reservedCommandKeys,
+} from "@/plugins/composer-commands";
+import { PluginTaggedText, PluginToolPart } from "@/plugins/renderers";
+import { usePlugins } from "@/plugins/registry";
 import {
   panelCommandRequest,
   type PanelOpenRequest,
@@ -690,6 +697,33 @@ const Composer: FC<{
     onOpenPanel(request);
   };
 
+  const { plugins } = usePlugins();
+  const pluginEntries = useMemo(
+    () => pluginCommandEntries(plugins, reservedCommandKeys(commands)),
+    [plugins, commands],
+  );
+
+  // A loaded plugin's /command typed in the composer runs here instead of
+  // going to the agent. Returns true when it handled the submit.
+  const runPluginCommand = (event: { preventDefault: () => void }) => {
+    if (aui.composer.getState().attachments.length > 0) return false;
+    const match = matchPluginCommand(aui.composer.getState().text, pluginEntries);
+    if (!match) return false;
+    event.preventDefault();
+    aui.composer.setText("");
+    const fail = (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      match.entry.k.toast(`/${match.entry.name} failed: ${message}`);
+    };
+    try {
+      const result = match.entry.run(match.args);
+      if (result instanceof Promise) result.catch(fail);
+    } catch (error) {
+      fail(error);
+    }
+    return true;
+  };
+
   // Picking a panel command in the slash menu (Enter or click) opens its tab
   // instead of leaving "/config" in the box for a second Enter.
   const sendBusyMessage = async (event: {
@@ -782,6 +816,7 @@ const Composer: FC<{
     preventDefault: () => void;
     defaultPrevented?: boolean;
   }) => {
+    if (runPluginCommand(event)) return;
     openPanelFromComposer(event);
     sendBusyMessage(event);
   };
@@ -790,6 +825,7 @@ const Composer: FC<{
     preventDefault: () => void;
     defaultPrevented?: boolean;
   }) => {
+    if (runPluginCommand(event)) return;
     // Keep panel commands on their existing path, then bypass assistant-ui's
     // disabled-send predicate while a turn is running. The transport already
     // queues this append message behind the active run.
@@ -810,6 +846,8 @@ const Composer: FC<{
     id: string;
     metadata?: Record<string, unknown> | undefined;
   }) => {
+    // Plugin commands are inserted as text and run on submit, not from here.
+    if (item.metadata?.category === "plugins") return;
     const insert = item.metadata?.insertText;
     const commandText = `/${typeof insert === "string" ? insert : item.id}`;
     if (
@@ -934,6 +972,15 @@ const Composer: FC<{
       });
     },
     [commands],
+  );
+
+  const pluginItems = useMemo(
+    () => pluginCommandItems(pluginEntries, prettyCommandName),
+    [pluginEntries],
+  );
+  const paletteItems = useMemo<readonly ComposerPaletteItem[]>(
+    () => [...commandItems, ...pluginItems],
+    [commandItems, pluginItems],
   );
 
   const nestedCommandNames = useMemo(() => {
@@ -1090,7 +1137,7 @@ const Composer: FC<{
       >
         <ComposerPalette
           char="/"
-          items={commandItems}
+          items={paletteItems}
           title="Commands"
           emptyMessage="No matching commands"
           emptyHint="Keep typing to refine the command search."
@@ -1423,11 +1470,16 @@ const AssistantMessage: FC = () => {
                 );
               }
               case "text":
-                return <MarkdownText />;
+                return <PluginTaggedText text={part.text} />;
               case "reasoning":
                 return <Reasoning {...part} />;
               case "tool-call":
-                return part.toolUI ?? <ToolFallbackComponent {...part} />;
+                return (
+                  <PluginToolPart
+                    part={part}
+                    fallback={part.toolUI ?? <ToolFallbackComponent {...part} />}
+                  />
+                );
               case "data":
                 return part.dataRendererUI;
               case "indicator":
