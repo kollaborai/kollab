@@ -105,6 +105,20 @@ def test_open_media_rejects_changed_bytes_for_a_persisted_ref(tmp_path: Path) ->
         open_media(tmp_path, record.ref)
 
 
+def test_open_media_keeps_legacy_index_entries_readable(tmp_path: Path) -> None:
+    """Older private media indexes remain readable but cannot prove handoff."""
+    record = save(tmp_path, "s1", PNG)
+    index_path = tmp_path / "media" / "s1" / "index.json"
+    entries = json.loads(index_path.read_text())
+    entries[-1].pop("sha256")
+    index_path.write_text(json.dumps(entries))
+
+    data, mime = open_media(tmp_path, record.ref)
+
+    assert data == bytes([1, 2, 3])
+    assert mime == "image/png"
+
+
 def test_non_ascii_digit_tokens_are_not_tokens_and_bind_nothing(tmp_path: Path) -> None:
     r"""#1140 R3: the image-token grammar is ASCII digits only.
 
