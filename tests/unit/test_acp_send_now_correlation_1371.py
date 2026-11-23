@@ -6,10 +6,10 @@ import pytest
 
 from kollabor.llm import acp_orchestrator as orchestrator_module
 from kollabor.llm.acp_bridge import (
-    ACPSteeringUnconfirmed,
     ACPAdmission,
     ACPProfile,
     ACPRunner,
+    ACPSteeringUnconfirmed,
 )
 from kollabor.llm.acp_orchestrator import ACPOrchestrator
 
@@ -50,22 +50,26 @@ async def test_session_update_has_the_active_request_turn_and_generation():
 
     await runner._session_update("session-A", _SessionUpdate())
 
-    assert updates == [{
-        "kind": "text",
-        "text": "partial reply",
-        "request_id": "active-request-A",
-        "turn_id": 12,
-        "generation": 7,
-        "source": "state_rpc",
-        "thread_id": "thread-A",
-    }]
+    assert updates == [
+        {
+            "kind": "text",
+            "text": "partial reply",
+            "request_id": "active-request-A",
+            "turn_id": 12,
+            "generation": 7,
+            "source": "state_rpc",
+            "thread_id": "thread-A",
+        }
+    ]
 
 
 @pytest.mark.asyncio
 async def test_finished_turn_update_keeps_its_generation():
     runner, updates = _active_runner()
     runner._connection = SimpleNamespace(
-        prompt=AsyncMock(return_value=SimpleNamespace(stopReason="end_turn", usage=None)),
+        prompt=AsyncMock(
+            return_value=SimpleNamespace(stopReason="end_turn", usage=None)
+        ),
     )
     admission = ACPAdmission(
         "active-request-A",
@@ -90,7 +94,9 @@ async def test_finished_turn_update_keeps_its_generation():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("owner_change", ["request", "turn", "generation", "session"])
-async def test_steering_rejects_receipt_if_the_active_owner_changes_in_flight(owner_change):
+async def test_steering_rejects_receipt_if_the_active_owner_changes_in_flight(
+    owner_change,
+):
     runner, _ = _active_runner()
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -198,7 +204,12 @@ async def test_orchestrator_does_not_record_steering_after_runner_replacement():
         ),
         (
             "tool_call_update",
-            {"toolCallId": "tool-A", "title": "Run A", "status": "completed", "rawOutput": "done"},
+            {
+                "toolCallId": "tool-A",
+                "title": "Run A",
+                "status": "completed",
+                "rawOutput": "done",
+            },
             {"acp_update", "tool_result"},
         ),
         ("permission_request", {"title": "Approval"}, {"acp_waiting"}),
@@ -206,7 +217,10 @@ async def test_orchestrator_does_not_record_steering_after_runner_replacement():
     ],
 )
 def test_orchestrator_forwards_generation_to_projected_acp_events(
-    monkeypatch, kind, payload, projected_events,
+    monkeypatch,
+    kind,
+    payload,
+    projected_events,
 ):
     published: list[tuple[str, dict]] = []
 
@@ -227,17 +241,23 @@ def test_orchestrator_forwards_generation_to_projected_acp_events(
     orchestrator.hub_plugin = None
     orchestrator._profile_name = "send-now-test"
 
-    orchestrator._on_runner_update({
-        "kind": kind,
-        "payload": payload,
-        "request_id": "active-request-A",
-        "turn_id": 12,
-        "generation": 7,
-        "source": "state_rpc",
-        "thread_id": "thread-A",
-    })
+    orchestrator._on_runner_update(
+        {
+            "kind": kind,
+            "payload": payload,
+            "request_id": "active-request-A",
+            "turn_id": 12,
+            "generation": 7,
+            "source": "state_rpc",
+            "thread_id": "thread-A",
+        }
+    )
 
     for event_type in projected_events:
-        event_payloads = [payload for published_type, payload in published if published_type == event_type]
+        event_payloads = [
+            payload
+            for published_type, payload in published
+            if published_type == event_type
+        ]
         assert event_payloads, f"missing {event_type} projection for {kind}"
         assert all(payload.get("generation") == 7 for payload in event_payloads)
