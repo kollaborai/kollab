@@ -3573,8 +3573,9 @@ class ToolExecutor:
                     if not isinstance(body, str) or not body.strip():
                         body = item.get("text", "")
                     if isinstance(body, str):
-                        # Collapse whitespace
-                        lines = [ln.strip() for ln in body.split("\n") if ln.strip()]
+                        # Normalize each line so padded text cannot win by length.
+                        lines = [" ".join(ln.split()) for ln in body.splitlines()]
+                        lines = [line for line in lines if line]
                         normalized_body = "\n".join(lines)
                         if len(normalized_body) > len(article_body) and len(normalized_body) > 100:
                             article_body = normalized_body
