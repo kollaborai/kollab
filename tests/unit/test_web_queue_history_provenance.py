@@ -101,3 +101,30 @@ def test_queue_handoff_refuses_legacy_media_without_a_digest(tmp_path):
             history_row_uuid="row-a",
             source_media_refs=(("stage-a", record.ref),),
         )
+
+
+def test_queue_handoff_refuses_media_index_alias_from_another_session(tmp_path):
+    foreign = save(tmp_path, "conversation-b", PNG)
+    local_index = tmp_path / "media" / "conversation-a" / "index.json"
+    local_index.parent.mkdir(parents=True)
+    local_index.write_text(
+        json.dumps(
+            [
+                {
+                    "ref": foreign.ref,
+                    "mime": foreign.mime,
+                    "ts": foreign.ts,
+                    "sha256": foreign.sha256,
+                }
+            ]
+        )
+    )
+
+    with pytest.raises(ValueError, match="session|missing|integrity"):
+        media_store.bind_queue_handoff(
+            tmp_path,
+            "conversation-a",
+            request_id="queue-request-a",
+            history_row_uuid="row-a",
+            source_media_refs=(("stage-a", foreign.ref),),
+        )
