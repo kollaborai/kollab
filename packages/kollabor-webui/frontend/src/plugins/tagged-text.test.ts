@@ -25,4 +25,23 @@ describe("plugin tagged text", () => {
       { type: "tag", name: "x", content: "a<x>b</x>c" }, { type: "text", text: " + " }, { type: "tag", name: "x", content: "d" },
     ]);
   });
+  it("keeps a backtick run with no closer as text, so later tags still split", () => {
+    expect(splitPluginTags("a ` then <todo_write>demo</todo_write>", ["todo_write"])).toEqual([
+      { type: "text", text: "a ` then " },
+      { type: "tag", name: "todo_write", content: "demo" },
+    ]);
+  });
+  it("closes a code fence only on a bare marker line", () => {
+    const text = "~~~\n~~~text\n<todo_write>demo</todo_write>\n~~~";
+    expect(splitPluginTags(text, ["todo_write"])).toEqual([{ type: "text", text }]);
+  });
+  it("pairs many unclosed opens with one close in linear time", () => {
+    const started = performance.now();
+    const parts = splitPluginTags("<x>".repeat(2000) + "</x>", ["x"]);
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(parts).toEqual([
+      { type: "text", text: "<x>".repeat(1999) },
+      { type: "tag", name: "x", content: "" },
+    ]);
+  });
 });

@@ -4,6 +4,7 @@ import type { CommandSpec, PluginApi } from "./sdk";
 import {
   matchPluginCommand,
   pluginCommandEntries,
+  pluginCommandFailure,
   pluginCommandItems,
   reservedCommandKeys,
 } from "./composer-commands";
@@ -89,12 +90,24 @@ describe("pluginCommandItems", () => {
     const entries = pluginCommandEntries([record("hello", [command("hello", "Say hello")])], new Set());
     const [item] = pluginCommandItems(entries, (name) => `Label ${name}`);
     expect(item).toMatchObject({
-      id: "plugin:hello:hello",
+      id: "hello",
       label: "Label hello",
       description: "Say hello",
       type: "command",
       category: "plugins",
       insertText: "hello",
     });
+  });
+});
+
+describe("pluginCommandFailure", () => {
+  it("names the command and keeps the error on one line", () => {
+    expect(pluginCommandFailure("hello", new Error("first line\nsecond line"))).toBe(
+      "Could not run /hello: first line second line",
+    );
+  });
+
+  it("names the command alone when the error has no text", () => {
+    expect(pluginCommandFailure("hello", new Error("  "))).toBe("Could not run /hello.");
   });
 });
