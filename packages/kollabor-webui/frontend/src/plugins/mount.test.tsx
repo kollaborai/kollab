@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Puzzle } from "lucide-react";
@@ -31,6 +32,19 @@ describe("PluginMount", () => {
       </PluginMount>,
     );
     expect(html).toMatch(/^<div data-plugin="hello"[^>]*><p>plugin body<\/p><\/div>$/);
+  });
+});
+
+describe("plugin portal scope", () => {
+  it.each([
+    ["dialog.tsx", "dialogs"],
+    ["sheet.tsx", "sheets"],
+    ["select.tsx", "selects"],
+    ["tooltip.tsx", "tooltips"],
+  ])("mounts %s inside the plugin portal container", (file, label) => {
+    const source = readFileSync(new URL("../components/ui/" + file, import.meta.url), "utf8");
+    expect(source, label + " must target the active plugin mount's portal container").toMatch(/usePluginPortalScope/);
+    expect(source, label + " must pass the scoped container to Radix").toContain("container={portalContainer}");
   });
 });
 
