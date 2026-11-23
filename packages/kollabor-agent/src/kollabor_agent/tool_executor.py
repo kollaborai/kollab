@@ -1416,7 +1416,10 @@ def _terminal_find_escapes_workspace(
                 if executable in find_names:
                     return True
                 if executable == "eval":
-                    return contains_find_token(" ".join(words[index + 1 :]), depth + 1)
+                    script = " ".join(words[index + 1 :])
+                    return contains_find_token(script, depth + 1) or contains_dynamic_command_name(
+                        script, depth + 1
+                    )
                 if executable in shells:
                     script_index = next(
                         (
