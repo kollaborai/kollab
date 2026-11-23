@@ -376,6 +376,30 @@ class TestWebFetchExecution(unittest.TestCase):
                 self.assertTrue(result.success, result.error)
                 self.assertIn("Deflate decoding works", result.output)
 
+    def test_web_fetch_rejects_incomplete_deflate_response(self):
+        """Invalid or truncated deflate streams must not return partial text."""
+        complete = zlib.compress(b"partial deflate text")
+        for body in (b"x", complete[:-1]):
+            with self.subTest(body_length=len(body)):
+                response = _make_mock_aiohttp_response(
+                    text=body, url="https://example.com"
+                )
+                response.headers = {"Content-Encoding": "deflate"}
+
+                with _patch_aiohttp_session(mock_get=response):
+                    result = _run(
+                        self.executor._execute_web_fetch(
+                            {
+                                "id": "web_fetch_incomplete_deflate",
+                                "url": "https://example.com",
+                                "extract_main": False,
+                            }
+                        )
+                    )
+
+                self.assertFalse(result.success, result.output)
+                self.assertIn("incomplete deflate", result.error)
+
     def test_web_fetch_decodes_concatenated_gzip_members(self):
         """Valid gzip members concatenated in one response must all be decoded."""
         body = gzip.compress(b"A" * 600) + gzip.compress(b"SECOND_MEMBER_SENTINEL")
