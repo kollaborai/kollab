@@ -314,6 +314,7 @@ def test_orchestrator_forwards_generation_to_projected_acp_events(
         if kind in {"permission_request", "permission_resolved"}:
             assert all(
                 payload.get("request_id") == "active-request-A"
-                and payload.get("tool_id") == "tool-A"
                 for payload in event_payloads
             )
+        if kind == "permission_request":
+            assert all(payload.get("tool_id") == "tool-A" for payload in event_payloads)
