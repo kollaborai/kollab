@@ -74,6 +74,17 @@ function statusLabel(status: WebQueueItemStatus): string {
   }
 }
 
+function statusDotClass(status: WebQueueItemStatus): string {
+  switch (status) {
+    case "dispatching":
+      return "animate-pulse bg-highlight";
+    case "in_doubt":
+      return "bg-destructive";
+    default:
+      return "bg-highlight";
+  }
+}
+
 function orderedBatches(snapshot: WebQueueSnapshot | null): OrderedBatch[] {
   if (!snapshot) return [];
   return snapshot.batches
@@ -108,15 +119,15 @@ export function QueuePanel({
     (sum, { items }) => sum + items.filter((item) => item.status === "dispatching").length,
     0,
   );
-  const [pendingActions, setPendingActions] = useState<ReadonlySet<string>>(() => new Set());
-  const pendingRef = useRef<Set<string>>(new Set());
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const pendingRef = useRef<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const scopeKey = `${snapshot?.scope_id ?? ""}:${snapshot?.incarnation ?? ""}`;
 
   const perform = useCallback(async (key: string, action: () => void | Promise<void>) => {
-    if (pendingRef.current.has(key)) return;
-    pendingRef.current.add(key);
-    setPendingActions(new Set(pendingRef.current));
+    if (pendingRef.current !== null) return;
+    pendingRef.current = key;
+    setPendingAction(key);
     setActionError(null);
     try {
       await action();
@@ -124,8 +135,10 @@ export function QueuePanel({
       // Do not echo backend detail that could contain filenames or stored refs.
       setActionError("Could not update the queue. Try again.");
     } finally {
-      pendingRef.current.delete(key);
-      setPendingActions(new Set(pendingRef.current));
+      if (pendingRef.current === key) {
+        pendingRef.current = null;
+        setPendingAction(null);
+      }
     }
   }, []);
 
@@ -143,6 +156,23 @@ export function QueuePanel({
             ? "Waiting for this turn to finish."
             : "Queued for the next turn.";
 
+  const earliest = batches[0];
+  const earliestCount = earliest?.batch.request_ids.length ?? 0;
+  const earliestSendKey = earliest ? `send:${scopeKey}:${earliest.batch.batch_id}` : "send:none";
+  const earliestBatchActionable = !!earliest && earliest.batch.status === "queued" &&
+    earliest.items.length === earliestCount && earliest.items.every((item) => item.status === "queued");
+  const sendNowDisabled = !busy || !dispatchAvailable || !earliestBatchActionable ||
+    missingItems > 0 || pendingAction !== null;
+  const sendNowTitle = !dispatchAvailable
+    ? "Sending is unavailable right now"
+    : earliest?.items.some((item) => item.status === "in_doubt") || earliest?.batch.status === "in_doubt"
+      ? "Resolve the earlier message delivery status before sending later messages"
+      : earliest?.items.some((item) => item.status === "dispatching") || earliest?.batch.status === "dispatching"
+        ? "An earlier message is already being sent"
+        : missingItems > 0
+          ? "Refresh the queue before sending"
+          : "Adds the earliest queued batch at the next agent step";
+
   let messageOrdinal = 0;
   return (
     <section
@@ -150,7 +180,7 @@ export function QueuePanel({
       aria-live="polite"
       aria-relevant="all"
       aria-atomic="false"
-      aria-busy={pendingActions.size > 0}
+      aria-busy={pendingAction !== null}
       className="rounded-2xl bg-card/80 px-3 py-3 sm:px-3.5"
       data-slot="web-queue-panel"
       data-revision={snapshot?.revision}
@@ -164,18 +194,24 @@ export function QueuePanel({
             {queueSummary}
           </p>
         </div>
+        {busy ? (
+          <Button
+            type="button"
+            size="sm"
+            className="h-8 shrink-0 rounded-lg bg-highlight px-3 text-highlight-foreground hover:bg-highlight/90"
+            aria-label={`Send ${earliestCount} queued ${earliestCount === 1 ? "message" : "messages"} now`}
+            title={sendNowTitle}
+            disabled={sendNowDisabled}
+            onClick={() => earliest && void perform(earliestSendKey, () => onSendNow(earliest.batch.batch_id))}
+          >
+            {pendingAction === earliestSendKey ? "Sending…" : "Send Now"}
+          </Button>
+        ) : null}
       </div>
 
       <ol aria-label="Queued message groups" className="mt-2.5 grid gap-2">
         {batches.map(({ batch, items, missingCount }) => {
           const batchCount = batch.request_ids.length;
-          const sendKey = `send:${scopeKey}:${batch.batch_id}`;
-          const batchBusy = pendingActions.has(sendKey);
-          const batchActionPending = batchBusy || items.some((item) =>
-            pendingActions.has(`remove:${scopeKey}:${item.request_id}`));
-          const batchActionable = batch.status === "queued" && items.length === batchCount &&
-            items.every((item) => item.status === "queued");
-          const batchSendDisabled = !busy || !dispatchAvailable || !batchActionable || batchActionPending || missingItems > 0;
           const firstOrdinal = messageOrdinal + 1;
           messageOrdinal += batchCount;
 
@@ -189,19 +225,6 @@ export function QueuePanel({
                 <span className="min-w-0 flex-1 text-muted-foreground text-xs font-medium">
                   {batchCount} {batchCount === 1 ? "message" : "messages"}
                 </span>
-                {busy ? (
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="h-8 rounded-lg bg-highlight px-3 text-highlight-foreground hover:bg-highlight/90"
-                    aria-label={`Send ${batchCount} queued ${batchCount === 1 ? "message" : "messages"} now`}
-                    title={!dispatchAvailable ? "Sending is unavailable right now" : "Adds these messages at the next agent step"}
-                    disabled={batchSendDisabled}
-                    onClick={() => void perform(sendKey, () => onSendNow(batch.batch_id))}
-                  >
-                    {batchBusy ? "Sending…" : "Send Now"}
-                  </Button>
-                ) : null}
               </div>
 
               <ol aria-label={`${batchCount} queued ${batchCount === 1 ? "message" : "messages"}`} className="mt-1.5 grid gap-1">
@@ -209,9 +232,9 @@ export function QueuePanel({
                   const localOrdinal = batch.request_ids.indexOf(item.request_id);
                   const ordinal = firstOrdinal + localOrdinal;
                   const removeKey = `remove:${scopeKey}:${item.request_id}`;
-                  const removing = pendingActions.has(removeKey);
+                  const removing = pendingAction === removeKey;
                   const canRemove = batch.status === "queued" && item.status === "queued" &&
-                    !batchActionPending && missingItems === 0;
+                    pendingAction === null && missingItems === 0;
                   const attachments = (item.attachment_labels ?? [])
                     .map(sanitizeAttachmentLabel)
                     .filter(Boolean);
@@ -226,7 +249,13 @@ export function QueuePanel({
                         {ordinal}
                       </span>
                       <div className="min-w-0">
-                        <p className="text-muted-foreground text-[0.6875rem] font-medium leading-4">
+                        <p className="flex items-center gap-1.5 text-muted-foreground text-[0.6875rem] font-medium leading-4">
+                          <span
+                            aria-hidden="true"
+                            className={`inline-block size-1.5 shrink-0 rounded-full ${statusDotClass(item.status)}`}
+                            data-slot="web-queue-status-dot"
+                            data-status={item.status}
+                          />
                           {statusLabel(item.status)}
                         </p>
                         {preview ? (
