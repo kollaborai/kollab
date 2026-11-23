@@ -34,3 +34,14 @@ test("unknown Learn topics retain recovery instead of opening release updates", 
   });
   assert.deepEqual(readMainPageRoute({ pathname: "/whats-new", search: "?topic=agents" }), { kind: "whats-new" });
 });
+
+test("a plugin page has its own route; a bad plugin id or a missing page is the chat", () => {
+  assert.deepEqual(readMainPageRoute({ pathname: "/plugin", search: "?id=pr-chain&page=board" }), {
+    kind: "plugin", plugin: "pr-chain", page: "board",
+  });
+  assert.deepEqual(readMainPageRoute({ pathname: "/plugin", search: "?id=hello%40dev&page=main" }), {
+    kind: "plugin", plugin: "hello@dev", page: "main",
+  });
+  assert.deepEqual(readMainPageRoute({ pathname: "/plugin", search: "?id=../x&page=main" }), { kind: "chat" });
+  assert.deepEqual(readMainPageRoute({ pathname: "/plugin", search: "?id=pr-chain" }), { kind: "chat" });
+});

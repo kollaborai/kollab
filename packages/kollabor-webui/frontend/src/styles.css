@@ -222,3 +222,11 @@
 .monaco-editor .minimap-slider {
   display: none !important;
 }
+/* Web plugins (#1028): on a touch screen every control a plugin draws is at least 44 px tall. Unlayered, so
+   it holds over the utility classes of the app components a plugin uses (k.ui). Switches, checkboxes, radios
+   and sliders keep their own shape. */
+@media (pointer: coarse) {
+  [data-plugin] :is(button, [role="button"], [role="tab"], a[href], select, summary, input, textarea):not([role="switch"], [role="checkbox"], [role="radio"], [type="checkbox"], [type="radio"], [type="range"], [type="hidden"]) {
+    min-height: 44px;
+  }
+}
