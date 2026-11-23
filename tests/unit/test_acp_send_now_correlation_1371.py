@@ -268,6 +268,7 @@ def test_orchestrator_forwards_generation_to_projected_acp_events(
     projected_events,
 ):
     published: list[tuple[str, dict]] = []
+    waiting_callbacks: list[tuple] = []
 
     class EventBus:
         def get_service(self, _name: str):
@@ -283,7 +284,9 @@ def test_orchestrator_forwards_generation_to_projected_acp_events(
     orchestrator._runner = SimpleNamespace(session_id="session-A")
     orchestrator._display_turn = None
     orchestrator.voice_turns = {}
-    orchestrator.hub_plugin = None
+    orchestrator.hub_plugin = SimpleNamespace(
+        on_acp_waiting=lambda *args: waiting_callbacks.append(args)
+    )
     orchestrator._profile_name = "send-now-test"
 
     update = {
@@ -318,3 +321,6 @@ def test_orchestrator_forwards_generation_to_projected_acp_events(
             )
         if kind == "permission_request":
             assert all(payload.get("tool_id") == "tool-A" for payload in event_payloads)
+            assert waiting_callbacks == [("active-request-A", True, payload)]
+        if kind == "permission_resolved":
+            assert waiting_callbacks == [("active-request-A", False, {})]
