@@ -18,6 +18,12 @@ describe("settings Plugins tab", () => {
     expect(host).toMatch(/<PluginsSettings\b/);
   });
 
+  it("mounts the plugin page whether or not a session is open", () => {
+    const host = read("PanelHost.tsx");
+    expect(host).toMatch(/^\s*<PluginsSettings api=\{api\} \/>\s*$/m);
+    expect(host).not.toMatch(/sessionId \? <PluginsSettings/);
+  });
+
   it("opens the Plugins tab in the responsive dialog surface", () => {
     expect(read("PanelHost.tsx")).toMatch(/responsive=\{tab === "plugins"\}/);
     expect(read("PanelDialogSurface.tsx")).toMatch(/responsive\?: boolean/);
