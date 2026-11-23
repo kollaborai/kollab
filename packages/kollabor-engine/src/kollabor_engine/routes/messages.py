@@ -3071,7 +3071,8 @@ async def assistant_transport(
                     replayed = private_goal and accepted.get("completed") is True and accepted.get("replayed") is True
                     if replayed:
                         replay_id = str(accepted.get("request_id") or request_id)
-                        queue = asyncio.Queue()
+                        if not queue_from_ledger:
+                            queue = asyncio.Queue()
                         queue.put_nowait({
                             "type": "token", "text": str(accepted.get("message") or "Goal request already processed."),
                             "request_id": replay_id,
