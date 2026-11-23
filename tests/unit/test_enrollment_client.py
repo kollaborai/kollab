@@ -1232,6 +1232,14 @@ async def test_issuer_offer_binds_one_human_action_and_revokes_it_on_close(tmp_p
     )
     issuer = EnrollmentIssuer(bridge)
 
+    identity.is_coordinator = False
+    with pytest.raises(EnrollmentProtocolError, match="unauthorized") as local_refusal:
+        await issuer.create_offer("kollabor.ai")
+    assert local_refusal.value.refusal == "Not the network coordinator. Create the code there."
+    assert local_refusal.value.source == "local"
+    assert transport.request is None
+    identity.is_coordinator = True
+
     result = await issuer.create_offer("kollabor.ai")
 
     assert result["status"] == "offered"
@@ -1334,10 +1342,69 @@ async def test_issuer_offer_binds_one_human_action_and_revokes_it_on_close(tmp_p
     state = json.loads((tmp_path / "enrollment-delegations.json").read_text())
     assert len(state["delegations"]) == 1
 
+    relay.state.origin = origin
+    relay._store.save()
+    commands._discover.return_value = (discovery, "", (), False)
+
+    async def refuse_unauthorized(*_args, **_kwargs):
+        error = EnrollmentProtocolError("unauthorized")
+        error.source = "relay"
+        raise error
+
+    transport.post_signed_retry = refuse_unauthorized
+    with pytest.raises(EnrollmentProtocolError, match="unauthorized") as relay_refusal:
+        await issuer.create_offer("kollabor.ai")
+    assert relay_refusal.value.refusal == "Relay denied authorization. Reconnect the network owner."
+    assert relay_refusal.value.source == "relay"
+
     await issuer.close()
 
     state = json.loads((tmp_path / "enrollment-delegations.json").read_text())
     assert next(iter(state["delegations"].values()))["revoked"] is True
+
+
+@pytest.mark.asyncio
+async def test_enrollment_http_unauthorized_response_is_marked_as_relay():
+    from types import SimpleNamespace
+
+    from plugins.hub.enrollment_client import EnrollmentHTTPClient
+
+    origin = "https://kollabor.ai"
+    path = "/relay/v1/enrollment/offers"
+
+    class Content:
+        async def read(self, _limit):
+            return b'{"error":"unauthorized"}'
+
+    response = SimpleNamespace(
+        status=403,
+        url=origin + path,
+        content_type="application/json",
+        headers={},
+        content=Content(),
+    )
+
+    class ResponseContext:
+        async def __aenter__(self):
+            return response
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Session:
+        def post(self, url, **_kwargs):
+            assert url == response.url
+            return ResponseContext()
+
+    client = EnrollmentHTTPClient.__new__(EnrollmentHTTPClient)
+    client.origin = origin
+    client._session = Session()
+
+    with pytest.raises(EnrollmentProtocolError, match="unauthorized") as refused:
+        await client.post(path, {})
+
+    assert refused.value.code == "unauthorized"
+    assert getattr(refused.value, "source", "unclassified") == "relay"
 
 
 @pytest.mark.parametrize(
