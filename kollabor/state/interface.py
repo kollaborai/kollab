@@ -823,6 +823,30 @@ class StateService(Protocol):
         """
         ...
 
+    async def branch_conversation(
+        self, session_id: str, branch_index: int
+    ) -> dict[str, Any]:
+        """Create and activate a branch from a saved conversation.
+
+        The state owner saves the current conversation, creates the branch,
+        synchronizes the active session IDs, and returns display metadata in
+        the same shape as ``resume_conversation``.
+
+        Args:
+            session_id: ID of the saved conversation to branch from.
+            branch_index: Zero-based message index to include in the branch.
+
+        Returns:
+            Metadata containing the old and new session IDs, branch point,
+            message count, display header, success message, and visible
+            messages.
+
+        Raises:
+            ValueError: if the active conversation or saved source cannot be
+                loaded or the branch point is invalid.
+        """
+        ...
+
     # === Input ===
 
     async def send_message(
