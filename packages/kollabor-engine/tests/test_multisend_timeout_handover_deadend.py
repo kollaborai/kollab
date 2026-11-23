@@ -138,3 +138,8 @@ async def test_late_ambiguous_turn_is_reconciled_before_followup_message(monkeyp
         ("user", "new input"),
         ("assistant", "new reply"),
     ]
+    assert [
+        message["status"]["type"]
+        for message in captured["controller"].state["messages"]
+        if message["role"] == "assistant"
+    ] == ["complete", "complete"]
