@@ -3541,6 +3541,16 @@ async def assistant_transport(
                         # Never put unowned shared-stream output into one of
                         # this request's assistant rows.
                         continue
+                if (
+                    event_type in _TURN_OUTPUT | {"error"}
+                    and named_event_ids
+                    and named_event_ids.issubset(completed_request_ids)
+                ):
+                    # A retained private-goal poll can be repeated after a
+                    # reconnect while its earlier result is still queued.
+                    # Ignore its late duplicate output after the exact turn
+                    # has already completed.
+                    continue
                 event_turn_ids = named_event_ids & admitted_turn_request_ids
                 if event_turn_ids and event_type in _TURN_OUTPUT | {"error"}:
                     current_turn_request_ids.clear()
