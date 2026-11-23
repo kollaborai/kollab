@@ -18,6 +18,7 @@ import math
 import re
 import secrets
 import time
+import unicodedata
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -116,6 +117,25 @@ def verified_image_mime(mime: object, payload: object) -> str:
     return normalized
 
 
+def safe_attachment_basename(filename: object) -> str:
+    """Return a short display label with paths and control characters removed."""
+    if not isinstance(filename, str):
+        return "Image"
+    normalized = unicodedata.normalize("NFC", filename).replace("\\", "/")
+    basename = normalized.rsplit("/", 1)[-1]
+    basename = "".join(
+        char
+        if char.isprintable()
+        and unicodedata.category(char) not in {"Cf", "Cs"}
+        else " "
+        for char in basename
+    )
+    basename = " ".join(basename.split()).strip(".")
+    if not basename or basename in {".", ".."}:
+        return "Image"
+    return basename[:120]
+
+
 @dataclass(frozen=True, slots=True)
 class AttachmentScopeBinding:
     """Trusted identity for one principal, conversation, and queue instance.
@@ -135,6 +155,7 @@ class AttachmentReceipt:
     ref: str
     mime: str
     size: int
+    filename: str = "Image"
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +165,7 @@ class StagedAttachment:
     ref: str
     mime: str
     data: bytes = field(repr=False)
+    filename: str = "Image"
 
 
 @dataclass(slots=True)
@@ -151,6 +173,7 @@ class _StoredAttachment:
     binding: AttachmentScopeBinding = field(repr=False)
     ref: str
     mime: str
+    filename: str
     data: bytes = field(repr=False)
     expires_at_ns: int | None
     owner_id: str | None = field(default=None, repr=False)
@@ -496,14 +519,20 @@ class WebMessageAttachmentRegistry:
         operation_id: str,
         mime: object,
         payload: object,
+        filename: object = None,
     ) -> AttachmentReceipt:
         normalized_mime = verified_image_mime(mime, payload)
+        display_name = safe_attachment_basename(filename)
         size = len(payload)
         if size > self._max_attachment_bytes:
             raise AttachmentCapacityExceeded("image exceeds the attachment size limit")
         issued_at_ns = self._operation_issue_time(binding, operation_id)
         fingerprint = hashlib.sha256(
-            normalized_mime.encode("ascii") + b"\0" + payload
+            normalized_mime.encode("ascii")
+            + b"\0"
+            + display_name.encode("utf-8")
+            + b"\0"
+            + payload
         ).hexdigest()
         operation_key = (binding, operation_id)
 
@@ -529,7 +558,9 @@ class WebMessageAttachmentRegistry:
                     raise StaleAttachmentOperation(
                         "attachment operation retry lease has expired"
                     )
-                return AttachmentReceipt(stored.ref, stored.mime, len(stored.data))
+                return AttachmentReceipt(
+                    stored.ref, stored.mime, len(stored.data), stored.filename
+                )
 
             if now_ns - issued_at_ns >= self._retry_lease_ns:
                 raise StaleAttachmentOperation(
@@ -552,6 +583,7 @@ class WebMessageAttachmentRegistry:
                 binding=binding,
                 ref=ref,
                 mime=normalized_mime,
+                filename=display_name,
                 data=payload,
                 expires_at_ns=expires_at_ns,
             )
@@ -567,7 +599,7 @@ class WebMessageAttachmentRegistry:
             self._used_bytes += size
             self._bytes_by_scope[binding] = self._bytes_by_scope.get(binding, 0) + size
             self._count_by_scope[binding] = self._count_by_scope.get(binding, 0) + 1
-            return AttachmentReceipt(ref, normalized_mime, size)
+            return AttachmentReceipt(ref, normalized_mime, size, display_name)
 
     async def _retain(
         self,
@@ -713,7 +745,9 @@ class WebMessageAttachmentRegistry:
                 or stored.owner_id != owner_id
             ):
                 raise AttachmentNotFound("attachment not found")
-            return StagedAttachment(stored.ref, stored.mime, stored.data)
+            return StagedAttachment(
+                stored.ref, stored.mime, stored.data, stored.filename
+            )
 
     async def _release_owner(
         self,
@@ -777,10 +811,16 @@ class _BoundAttachmentScope:
         return self._registry._new_operation_id(self._binding)
 
     async def stage(
-        self, operation_id: str, mime: str, payload: bytes
+        self,
+        operation_id: str,
+        mime: str,
+        payload: bytes,
+        filename: str | None = None,
     ) -> AttachmentReceipt:
         """Store one image or return the identical prior upload receipt."""
-        return await self._registry._stage(self._binding, operation_id, mime, payload)
+        return await self._registry._stage(
+            self._binding, operation_id, mime, payload, filename
+        )
 
     async def retain(self, owner_id: str, refs: Sequence[str]) -> bool:
         """Atomically pin staged refs to one queue-minted item ID."""
@@ -813,6 +853,16 @@ class _BoundAttachmentScope:
         plan: tuple[tuple[str, tuple[str, ...], tuple[_StoredAttachment, ...]], ...],
     ) -> None:
         self._registry._commit_owner_retention_unlocked(self._binding, plan)
+
+    @staticmethod
+    def _labels_from_owner_retention_plan(
+        plan: tuple[tuple[str, tuple[str, ...], tuple[_StoredAttachment, ...]], ...],
+    ) -> dict[str, tuple[str, ...]]:
+        """Read sanitized labels from an already validated ownership plan."""
+        return {
+            owner_id: tuple(stored.filename for stored in stored_records)
+            for owner_id, _refs, stored_records in plan
+        }
 
     def _release_owner_unlocked(self, owner_id: str) -> int:
         return self._registry._release_owner_unlocked(

@@ -95,6 +95,96 @@ async def test_worker_dispatches_only_item_payload_in_order_and_settles_custody(
 
 
 @pytest.mark.asyncio
+async def test_send_now_batch_uses_one_gate_for_the_entire_ordered_batch():
+    queue = WebMessageQueue(scope_id="conversation-owner-a")
+    batch_id, request_ids = await _enqueue(queue, b"first", b"second", b"third")
+    identity = _identity()
+    events = []
+    lease = object()
+
+    class BatchDispatcher:
+        async def begin_batch(self, request):
+            events.append(("begin", request.request_ids))
+            return lease
+
+        async def __call__(self, request):
+            events.append(
+                (
+                    "dispatch",
+                    request.request_id,
+                    request.send_now,
+                    getattr(request, "batch_lease", None),
+                )
+            )
+            return _accepted(request)
+
+        def finish_batch(self, batch_lease, *, accepted_count, uncertain):
+            events.append(("finish", batch_lease, accepted_count, uncertain))
+            return True
+
+    worker = WebMessageQueueWorker(
+        queue, identity, lambda: identity, BatchDispatcher()
+    )
+
+    result = await worker.dispatch_batch(batch_id, send_now=True)
+
+    assert result.status is WorkerStatus.ADMITTED
+    assert events == [
+        ("begin", request_ids),
+        ("dispatch", request_ids[0], True, lease),
+        ("dispatch", request_ids[1], True, lease),
+        ("dispatch", request_ids[2], True, lease),
+        ("finish", lease, 3, False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_failed_send_now_finalizer_retains_the_lease_and_blocks_another_run():
+    queue = WebMessageQueue(scope_id="conversation-owner-a")
+    batch_id, request_ids = await _enqueue(queue, b"first")
+    identity = _identity()
+    lease = object()
+    calls = []
+    finish_results = iter((False, True))
+    finish_calls = 0
+
+    class FinalizerFailureDispatcher:
+        async def begin_batch(self, request):
+            return lease
+
+        async def __call__(self, request):
+            calls.append(request.request_id)
+            return _accepted(request)
+
+        def finish_batch(self, batch_lease, *, accepted_count, uncertain):
+            nonlocal finish_calls
+            finish_calls += 1
+            assert batch_lease is lease
+            assert accepted_count == 1
+            assert uncertain is False
+            return next(finish_results)
+
+    worker = WebMessageQueueWorker(
+        queue, identity, lambda: identity, FinalizerFailureDispatcher()
+    )
+
+    result = await worker.dispatch_batch(batch_id, send_now=True)
+    blocked = await worker.dispatch_batch(batch_id, send_now=True)
+    retained_lease = worker._dispatch_batch_lease
+    closed = await worker.close()
+
+    assert result.status is WorkerStatus.IN_DOUBT
+    assert blocked.status is WorkerStatus.IN_DOUBT
+    assert retained_lease is lease
+    assert worker._dispatch_batch_lease is None
+    assert worker._forced_in_doubt is True
+    assert closed is True
+    assert finish_calls == 2
+    assert calls == [request_ids[0]]
+    assert (await queue.snapshot()).batches == ()
+
+
+@pytest.mark.asyncio
 async def test_payload_metadata_mismatch_is_proven_not_sent():
     queue = WebMessageQueue(scope_id="conversation-owner-a")
     batch_id, request_ids = await _enqueue(queue, b"first", b"second")

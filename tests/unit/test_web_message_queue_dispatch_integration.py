@@ -173,6 +173,284 @@ async def test_real_dispatch_writes_history_and_binds_exact_image_before_releasi
 
 
 @pytest.mark.asyncio
+async def test_real_send_now_dispatch_uses_one_native_gate_and_keeps_batch_fifo(tmp_path):
+    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
+    from kollabor_agent.queue_processor import TaggedInput
+
+    queue = WebMessageQueue(scope_id="conversation-scope")
+    batch_id = queue.new_batch_id()
+    request_ids = (queue.new_request_id(), queue.new_request_id())
+    payloads = (
+        json.dumps({"text": "forced B"}, separators=(",", ":")).encode(),
+        json.dumps({"text": "forced C"}, separators=(",", ":")).encode(),
+    )
+    await queue.enqueue_batch(
+        queue.new_operation_id(),
+        batch_id,
+        tuple(WebMessage(request_id, payload) for request_id, payload in zip(request_ids, payloads)),
+    )
+    attachments = WebMessageAttachmentRegistry(
+        resolve_scope=lambda _params, _caller: AttachmentScopeBinding(
+            queue.scope_id, queue.incarnation
+        ),
+        validate_owner_id=lambda _binding, _request_id: True,
+    )
+    state, llm, _logger, uid = await _real_local_state(tmp_path)
+    llm.is_processing = False
+    llm.create_background_task = MagicMock()
+    llm.processing_queue.put_nowait(TaggedInput("older D", ("older-d",)))
+    cancellations = []
+    generation = [0]
+
+    def cancel_active(*, origin="human", preserve_queued=False):
+        cancellations.append((origin, preserve_queued))
+        generation[0] = llm._queue_processor.request_cancellation(
+            origin=origin, preserve_queued=preserve_queued
+        )
+        llm.is_processing = False
+        return generation[0]
+
+    async def stop_is_settled(cancel_generation):
+        return cancel_generation == generation[0]
+
+    llm.is_processing = True
+    llm.cancel_current_request = cancel_active
+    llm._await_forced_native_stop = stop_is_settled
+    dispatcher = WebMessageQueueDispatcher(state, attachments)
+    identity = state.get_conversation_identity()
+    worker = WebMessageQueueWorker(
+        queue, identity, state.get_conversation_identity, dispatcher
+    )
+
+    result = await worker.dispatch_batch(batch_id, send_now=True)
+
+    assert result.status is WorkerStatus.ADMITTED
+    assert [item.request_ids for item in llm.processing_queue._queue] == [
+        (request_ids[0],),
+        (request_ids[1],),
+        ("older-d",),
+    ]
+    admitted = list(llm.processing_queue._queue)[:2]
+    assert [item.queue_request_id for item in admitted] == list(request_ids)
+    assert [item.attempt_id for item in admitted] == [
+        entry.attempt_id for entry in result.items
+    ]
+    assert cancellations == [("human", True)]
+    assert llm.create_background_task.call_count == 1
+    snapshot = await queue.snapshot()
+    assert snapshot.batches == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("later_stop_origin", ("remote_task", "external"))
+async def test_later_nonhuman_stop_between_batch_items_preserves_prefix_without_drain(
+    tmp_path, later_stop_origin
+):
+    """An old forced lease cannot erase a newer non-human Stop generation."""
+    from kollabor_agent.queue_processor import QueueHandoffInput
+
+    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
+
+    queue = WebMessageQueue(scope_id="conversation-scope")
+    batch_id = queue.new_batch_id()
+    request_ids = (queue.new_request_id(), queue.new_request_id())
+    await queue.enqueue_batch(
+        queue.new_operation_id(),
+        batch_id,
+        tuple(
+            WebMessage(request_id, json.dumps({"text": text}).encode())
+            for request_id, text in zip(request_ids, ("forced B", "forced C"))
+        ),
+    )
+    attachments = WebMessageAttachmentRegistry(
+        resolve_scope=lambda _params, _caller: AttachmentScopeBinding(
+            queue.scope_id, queue.incarnation
+        ),
+        validate_owner_id=lambda _binding, _request_id: True,
+    )
+    state, llm, logger, _uid = await _real_local_state(tmp_path)
+    llm.is_processing = False
+    llm.create_background_task = MagicMock()
+    generation = [0]
+
+    def begin_stop(*, origin="human", preserve_queued=False):
+        generation[0] = llm._queue_processor.request_cancellation(
+            origin=origin, preserve_queued=preserve_queued
+        )
+        llm.is_processing = False
+        return generation[0]
+
+    async def settled(stop_generation):
+        return stop_generation == generation[0]
+
+    llm.is_processing = True
+    llm.cancel_current_request = begin_stop
+    llm._await_forced_native_stop = settled
+    original_submit = state.submit_queue_message
+    submissions = []
+
+    async def submit(message, *, queue_handoff, batch_lease=None):
+        result = await original_submit(
+            message,
+            queue_handoff=queue_handoff,
+            batch_lease=batch_lease,
+        )
+        submissions.append(queue_handoff.request_id)
+        if queue_handoff.request_id == request_ids[0]:
+            generation[0] = llm._queue_processor.request_cancellation(
+                origin=later_stop_origin
+            )
+        return result
+
+    state.submit_queue_message = submit
+    worker = WebMessageQueueWorker(
+        queue,
+        state.get_conversation_identity(),
+        state.get_conversation_identity,
+        WebMessageQueueDispatcher(state, attachments),
+    )
+
+    result = await worker.dispatch_batch(batch_id, send_now=True)
+
+    assert result.status is WorkerStatus.NOT_SENT
+    assert [item.request_id for item in result.items] == list(request_ids)
+    assert [item.outcome.value for item in result.items] == ["accepted", "not_sent"]
+    assert submissions == list(request_ids)
+    assert llm._queue_processor.cancel_processing is True
+    assert llm._queue_processor.cancel_origin == later_stop_origin
+    assert llm.create_background_task.call_count == 0
+    assert llm.processing_queue.qsize() == 1
+    admitted = llm.processing_queue.get_nowait()
+    assert isinstance(admitted, QueueHandoffInput)
+    assert admitted.queue_request_id == request_ids[0]
+    rows = [json.loads(line) for line in logger.session_file.read_text().splitlines()]
+    assert [
+        row["message"]["metadata"]["queue_handoff"]["request_id"]
+        for row in rows
+        if row.get("type") == "user"
+    ] == [request_ids[0]]
+    queue_snapshot = await queue.snapshot()
+    assert queue_snapshot.batches[0].request_ids == (request_ids[1],)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("later_stop_origin", ("remote_task", "external"))
+async def test_new_stop_after_force_settlement_cannot_be_adopted_by_refresh(
+    tmp_path, later_stop_origin
+):
+    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
+
+    queue = WebMessageQueue(scope_id="conversation-scope")
+    batch_id = queue.new_batch_id()
+    request_id = queue.new_request_id()
+    await queue.enqueue_batch(
+        queue.new_operation_id(),
+        batch_id,
+        [WebMessage(request_id, json.dumps({"text": "forced B"}).encode())],
+    )
+    attachments = WebMessageAttachmentRegistry(
+        resolve_scope=lambda _params, _caller: AttachmentScopeBinding(
+            queue.scope_id, queue.incarnation
+        ),
+        validate_owner_id=lambda _binding, _request_id: True,
+    )
+    state, llm, logger, _uid = await _real_local_state(tmp_path)
+    llm.is_processing = False
+    generation = [0]
+
+    def begin_stop(*, origin="human", preserve_queued=False):
+        generation[0] = llm._queue_processor.request_cancellation(
+            origin=origin, preserve_queued=preserve_queued
+        )
+        llm.is_processing = False
+        return generation[0]
+
+    async def settled(stop_generation):
+        assert stop_generation == generation[0]
+        generation[0] = llm._queue_processor.request_cancellation(
+            origin=later_stop_origin
+        )
+        return True
+
+    llm.is_processing = True
+    llm.cancel_current_request = begin_stop
+    llm._await_forced_native_stop = settled
+    worker = WebMessageQueueWorker(
+        queue,
+        state.get_conversation_identity(),
+        state.get_conversation_identity,
+        WebMessageQueueDispatcher(state, attachments),
+    )
+
+    result = await worker.dispatch_batch(batch_id, send_now=True)
+
+    assert result.status is WorkerStatus.NOT_SENT
+    assert llm._queue_processor.cancel_origin == later_stop_origin
+    assert llm._queue_processor.cancel_processing is True
+    assert llm.processing_queue.empty()
+    rows = (
+        [json.loads(line) for line in logger.session_file.read_text().splitlines()]
+        if logger.session_file.exists()
+        else []
+    )
+    assert not any(row.get("type") == "user" for row in rows)
+    assert (await queue.snapshot()).batches[0].request_ids == (request_id,)
+
+
+@pytest.mark.asyncio
+async def test_real_batch_finalizer_can_retry_partial_gate_release(tmp_path):
+    from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
+
+    queue = WebMessageQueue(scope_id="conversation-scope")
+    batch_id = queue.new_batch_id()
+    request_id = queue.new_request_id()
+    await queue.enqueue_batch(
+        queue.new_operation_id(),
+        batch_id,
+        [WebMessage(request_id, json.dumps({"text": "forced B"}).encode())],
+    )
+    attachments = WebMessageAttachmentRegistry(
+        resolve_scope=lambda _params, _caller: AttachmentScopeBinding(
+            queue.scope_id, queue.incarnation
+        ),
+        validate_owner_id=lambda _binding, _request_id: True,
+    )
+    state, llm, _logger, _uid = await _real_local_state(tmp_path)
+    llm.is_processing = False
+    llm.create_background_task = MagicMock()
+    processor = llm._queue_processor
+    original_end = processor.end_forced_send
+    end_calls = 0
+
+    def fail_once(token):
+        nonlocal end_calls
+        end_calls += 1
+        if end_calls == 1:
+            return False
+        return original_end(token)
+
+    processor.end_forced_send = fail_once
+    worker = WebMessageQueueWorker(
+        queue,
+        state.get_conversation_identity(),
+        state.get_conversation_identity,
+        WebMessageQueueDispatcher(state, attachments),
+    )
+
+    result = await worker.dispatch_batch(batch_id, send_now=True)
+    retained_lease = worker._dispatch_batch_lease
+    closed = await worker.close()
+
+    assert result.status is WorkerStatus.IN_DOUBT
+    assert retained_lease is not None
+    assert closed is True
+    assert end_calls == 2
+    assert processor.owns_forced_send(retained_lease.gate_token) is False
+    assert llm._queue_handoff_batch_lease is None
+    assert (await queue.snapshot()).batches == ()
+
+
+@pytest.mark.asyncio
 async def test_failed_native_queue_commit_does_not_leave_a_phantom_history_row(tmp_path):
     """A failed provider-queue commit must not leave a durable user message."""
     from kollabor_engine import media_store

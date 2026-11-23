@@ -35,11 +35,41 @@ class WebMessageQueueDispatcher:
         self._state_service = state_service
         self._attachments = attachments
 
+    async def begin_batch(self, request: Any) -> object | None:
+        """Reserve and stop once before any item in a Send Now batch."""
+        begin = getattr(self._state_service, "begin_queue_handoff_batch", None)
+        if not callable(begin):
+            return None
+        return await begin(request)
+
+    def finish_batch(
+        self,
+        batch_lease: object,
+        *,
+        accepted_count: int,
+        uncertain: bool,
+    ) -> bool:
+        """Release the shared native gate after the worker settles its prefix."""
+        finish = getattr(self._state_service, "finish_queue_handoff_batch", None)
+        if not callable(finish):
+            return False
+        return bool(
+            finish(
+                batch_lease,
+                accepted_count=accepted_count,
+                uncertain=uncertain,
+            )
+        )
+
     async def __call__(
         self, request: DispatchRequest
     ) -> AdmissionAccepted | AdmissionRejectedBeforeCustody:
         if not isinstance(request, DispatchRequest):
             raise TypeError("trusted queue dispatch request is required")
+        if request.send_now and request.batch_lease is None:
+            return self._rejected(request, "queue_batch_unavailable")
+        if not request.send_now and request.batch_lease is not None:
+            return self._rejected(request, "invalid_queue_batch")
 
         identity_reader = getattr(self._state_service, "get_conversation_identity", None)
         if not callable(identity_reader):
@@ -109,23 +139,50 @@ class WebMessageQueueDispatcher:
             conversation_uid=request.conversation_uid,
             conversation_revision=request.conversation_revision,
             images=tuple(images),
+            attempt_id=request.attempt_id,
+            force_send=request.send_now,
+            queue_scope_id=request.queue_scope_id,
+            queue_incarnation=request.queue_incarnation,
+            batch_id=request.batch_id,
+            claim_id=request.claim_id,
         )
         submit = getattr(self._state_service, "submit_queue_message", None)
         if not callable(submit):
             return self._rejected(request, "queue_admission_unavailable")
         try:
-            outcome = await submit(message, queue_handoff=context)
+            if request.send_now:
+                outcome = await submit(
+                    message,
+                    queue_handoff=context,
+                    batch_lease=request.batch_lease,
+                )
+            else:
+                outcome = await submit(message, queue_handoff=context)
         except Exception:
-            if context.provider_admission_started or context.provider_custody_id:
+            if (
+                context.provider_admission_started
+                or context.provider_custody_id
+                or context.history_row_preexisting
+                or context.recording_status == "uncertain"
+            ):
                 raise RuntimeError("queue admission outcome is uncertain") from None
             return self._rejected(request, "queue_admission_failed")
 
         if not isinstance(outcome, dict):
-            if context.provider_admission_started or context.provider_custody_id:
+            if (
+                context.provider_admission_started
+                or context.provider_custody_id
+                or context.history_row_preexisting
+                or context.recording_status == "uncertain"
+            ):
                 raise RuntimeError("queue admission outcome is uncertain")
             return self._rejected(request, "invalid_admission_result")
         if not context.provider_custody_id:
-            if context.provider_admission_started:
+            if (
+                context.provider_admission_started
+                or context.history_row_preexisting
+                or context.recording_status == "uncertain"
+            ):
                 raise RuntimeError("queue admission outcome is uncertain")
             reason = outcome.get("reason")
             if not isinstance(reason, str) or not _REASON_CODE.fullmatch(reason):

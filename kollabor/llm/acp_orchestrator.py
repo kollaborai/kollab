@@ -127,6 +127,8 @@ class ACPOrchestrator:
         self._parents: dict[str, str] = {}
         self._history_tasks: set[asyncio.Task] = set()
         self._user_history_tasks: dict[str, asyncio.Task] = {}
+        self._deferred_queue_admissions: dict[tuple[int, int], ACPAdmission] = {}
+        self._completion_keys: set[tuple[int, int]] = set()
         # An admission owns its history parent and user-row write under its own
         # (generation, turn_id), so a caller-supplied request id reused by a
         # later admission cannot overwrite them (#597). `_parents` and
@@ -134,6 +136,16 @@ class ACPOrchestrator:
         # steering rows, which are uuid-unique.
         self._turn_parents: dict[tuple[int, int], str | None] = {}
         self._turn_user_tasks: dict[tuple[int, int], asyncio.Task] = {}
+        self._pending_turn_user_tasks: dict[tuple[int, int], asyncio.Task] = {}
+        self._turn_history_row_uuids: dict[tuple[int, int], str] = {}
+        self._dispatch_history_tasks: dict[tuple[str, int, str], asyncio.Task] = {}
+        self._dispatch_history_row_uuids: dict[tuple[str, int, str], str] = {}
+        # Admission turn IDs describe enqueue order. Display order is assigned
+        # separately when _run_prompt actually starts, and scoped to this ACP
+        # orchestrator lifetime so an old session cannot collide with a new one.
+        self._dispatch_epoch = uuid.uuid4().hex
+        self._dispatch_order = 0
+        self._dispatch_orders: dict[tuple[str, int, str], tuple[str, int]] = {}
         # The conversation an admission was made under (#596): resume swaps the
         # live manager's session id in place, and the reply must not follow it.
         self._turn_conversations: dict[tuple[int, int], str] = {}
@@ -702,9 +714,12 @@ class ACPOrchestrator:
         self, text: str, *, request_id: str, source: str, thread_id: str | None = None,
         origin: dict[str, Any] | None = None,
         record: bool = True,
+        defer_completion: bool = False,
+        defer_turn_history: bool = False,
         images: tuple[dict[str, str], ...] = (),
         operator_inputs: tuple[dict[str, str], ...] = (),
         queue_handoff: Any = None,
+        queue_handoff_batch: object | None = None,
     ) -> ACPAdmission:
         if self.closing_reason:
             raise ACPError(self.closing_reason)
@@ -722,18 +737,42 @@ class ACPOrchestrator:
             llm = self.event_bus.get_service("llm_service") if self.event_bus else None
             if getattr(llm, "conversation_logger", None) is None:
                 raise ACPError("queue history logger is unavailable")
+        if queue_handoff_batch is not None:
+            validate_batch = getattr(self._runner, "validate_queue_handoff_batch", None)
+            if (
+                queue_handoff is None
+                or not getattr(queue_handoff, "force_send", False)
+                or not callable(validate_batch)
+                or validate_batch(queue_handoff_batch, request_id) is not True
+            ):
+                raise ACPError("invalid forced queue batch", error_class="queue_batch")
+        if (
+            not isinstance(defer_completion, bool)
+            or not isinstance(defer_turn_history, bool)
+            or (defer_completion and queue_handoff is None)
+            or (defer_turn_history and not defer_completion)
+            or (defer_completion and record)
+            or (
+                queue_handoff_batch is not None
+                and (not defer_completion or not defer_turn_history)
+            )
+        ):
+            raise ValueError("invalid deferred queue admission")
         if source == "agent" and (origin or {}).get("sender"):
             text = f"Message from {origin['sender']} [thread:{thread_id or ''}]\n{text}"
         kwargs = {"images": images} if images else {}
+        if queue_handoff_batch is not None:
+            kwargs["queue_handoff_batch"] = queue_handoff_batch
         admission = self._runner.admit(
             text, request_id=request_id, source=source, thread_id=thread_id, origin=origin,
             **kwargs,
         )
-        task = asyncio.create_task(self._complete(admission), name=f"acp-turn-{request_id}")
-        self._completion_tasks.add(task)
-        task.add_done_callback(self._completion_tasks.discard)
         turn_key = (admission.generation, admission.turn_id)
         self._turn_conversations[turn_key] = self._conversation_id()
+        if defer_completion:
+            self._deferred_queue_admissions[turn_key] = admission
+        else:
+            self._start_completion(admission)
         if record:
             try:
                 record_text = text
@@ -752,6 +791,9 @@ class ACPOrchestrator:
                     track_completion=True,
                     operator_inputs=operator_inputs,
                     queue_handoff=queue_handoff,
+                    turn_id=admission.turn_id,
+                    history_key=admission.history_key,
+                    generation=admission.generation,
                 )
             except Exception as exc:
                 # Admission is already owned. Remove this admission (by identity,
@@ -763,8 +805,106 @@ class ACPOrchestrator:
                     admission.future.set_exception(exc)
                 self._runner.cancel_queued(request_id, admission)
                 return admission
-        self._take_turn_history(turn_key, request_id)
+        if not defer_turn_history:
+            self._take_turn_history(turn_key, request_id)
         return admission
+
+    def _start_completion(self, admission: ACPAdmission) -> bool:
+        """Start one completion observer for this exact generation/turn."""
+        turn_key = (admission.generation, admission.turn_id)
+        if turn_key in self._completion_keys:
+            return False
+        self._completion_keys.add(turn_key)
+        try:
+            task = asyncio.create_task(
+                self._complete(admission), name=f"acp-turn-{admission.request_id}"
+            )
+        except BaseException:
+            self._completion_keys.discard(turn_key)
+            raise
+        self._completion_tasks.add(task)
+        task.add_done_callback(self._completion_tasks.discard)
+        task.add_done_callback(
+            lambda _task, key=turn_key: self._completion_keys.discard(key)
+        )
+        return True
+
+    def activate_queue_handoff_admission(
+        self,
+        admission: ACPAdmission,
+        *,
+        text: str,
+        source: str,
+        thread_id: str | None,
+        queue_handoff: Any,
+        operator_inputs: tuple[dict[str, str], ...] = (),
+    ) -> bool:
+        """Attach history and start events after queue custody is durable."""
+        from .queue_handoff import QueueHandoffContext
+
+        if (
+            not isinstance(queue_handoff, QueueHandoffContext)
+            or admission.request_id != queue_handoff.request_id
+        ):
+            return False
+        turn_key = (admission.generation, admission.turn_id)
+        if self._deferred_queue_admissions.get(turn_key) is not admission:
+            return False
+        self._deferred_queue_admissions.pop(turn_key, None)
+        try:
+            self._record_user(
+                admission.request_id,
+                text,
+                source,
+                thread_id,
+                operator_inputs=operator_inputs,
+                queue_handoff=queue_handoff,
+                durable_logged=True,
+                turn_id=admission.turn_id,
+                history_key=admission.history_key,
+                generation=admission.generation,
+            )
+        except Exception as exc:
+            logger.error("ACP queue history mirror failed (%s)", type(exc).__name__)
+        finally:
+            self._take_turn_history(turn_key, admission.request_id)
+            self._start_completion(admission)
+        return True
+
+    def rollback_queue_handoff_admission(
+        self,
+        admission: ACPAdmission,
+        *,
+        queue_handoff_batch: object | None = None,
+    ) -> bool:
+        """Remove one deferred ACP admission before its worker can start."""
+        turn_key = (admission.generation, admission.turn_id)
+        if self._deferred_queue_admissions.get(turn_key) is not admission:
+            return False
+        runner = self._runner
+        if queue_handoff_batch is not None:
+            rollback = getattr(runner, "rollback_queue_handoff_admission", None)
+            removed = callable(rollback) and rollback(
+                queue_handoff_batch, admission
+            ) is True
+        else:
+            cancel = getattr(runner, "cancel_queued", None)
+            removed = callable(cancel) and cancel(admission.request_id, admission) is True
+        if not removed:
+            return False
+        self._deferred_queue_admissions.pop(turn_key, None)
+        self._turn_conversations.pop(turn_key, None)
+        self._turn_parents.pop(turn_key, None)
+        self._turn_user_tasks.pop(turn_key, None)
+        self._mark_usage_settled(admission.turn_id)
+        return True
+
+    def owns_queue_handoff_admission(
+        self, queue_handoff_batch: object, admission: ACPAdmission
+    ) -> bool:
+        runner = self._runner
+        owns = getattr(runner, "owns_queue_handoff_admission", None)
+        return callable(owns) and owns(queue_handoff_batch, admission) is True
 
     async def wait_for_queue_handoff_history(
         self, admission: ACPAdmission, queue_handoff: Any
@@ -794,7 +934,9 @@ class ACPOrchestrator:
     def _take_turn_history(self, turn_key: tuple[int, int], request_id: str) -> None:
         """Move this row's parent and user-row write under the admission's own key."""
         self._turn_parents[turn_key] = self._parents.pop(request_id, None)
-        task = self._user_history_tasks.pop(request_id, None)
+        task = self._pending_turn_user_tasks.pop(turn_key, None)
+        if task is None:
+            task = self._user_history_tasks.pop(request_id, None)
         if task is not None:
             self._turn_user_tasks[turn_key] = task
 
@@ -1076,6 +1218,10 @@ class ACPOrchestrator:
         retry: bool = False,
         operator_inputs: tuple[dict[str, str], ...] = (),
         queue_handoff: Any = None,
+        durable_logged: bool = False,
+        turn_id: int | None = None,
+        history_key: str | None = None,
+        generation: int | None = None,
     ) -> None:
         llm = self.event_bus.get_service("llm_service")
         manager = getattr(llm, "conversation_manager", None)
@@ -1085,6 +1231,10 @@ class ACPOrchestrator:
             "source": source,
             "thread_id": thread_id,
         }
+        if isinstance(turn_id, int) and not isinstance(turn_id, bool) and turn_id > 0:
+            metadata["turn_id"] = turn_id
+        if isinstance(history_key, str) and history_key:
+            metadata["acp_turn_key"] = history_key
         if source in HUMAN_USER_INPUT_SOURCES:
             trusted_operator_inputs = [
                 {
@@ -1112,6 +1262,17 @@ class ACPOrchestrator:
             ):
                 raise ValueError("queue history capability does not match its request")
             metadata["queue_handoff"] = queue_handoff._history_metadata()
+        turn_key = (
+            (generation, turn_id)
+            if isinstance(generation, int) and generation >= 0
+            and isinstance(turn_id, int) and turn_id > 0
+            else None
+        )
+        dispatch_identity = (
+            (request_id, turn_id, history_key)
+            if turn_key is not None and isinstance(history_key, str) and history_key
+            else None
+        )
         landed = None
         if manager is not None:
             # A retry whose first save raised after the append reuses that row,
@@ -1121,7 +1282,8 @@ class ACPOrchestrator:
                 landed = manager.add_message("user", text, metadata=metadata)
             self._parents[request_id] = landed
         logger_service = getattr(llm, "conversation_logger", None)
-        if logger_service is not None:
+        task: asyncio.Task | None = None
+        if logger_service is not None and not durable_logged:
             if queue_handoff is not None:
                 task = asyncio.create_task(
                     queue_handoff.record_user_history(
@@ -1132,13 +1294,29 @@ class ACPOrchestrator:
                     )
                 )
             else:
-                task = asyncio.create_task(logger_service.log_user_message(text))
+                task = asyncio.create_task(
+                    logger_service.log_user_message(
+                        text,
+                        parent_uuid=landed,
+                        message_metadata=metadata,
+                    )
+                )
             self._history_tasks.add(task)
+            if turn_key is not None:
+                self._pending_turn_user_tasks[turn_key] = task
+            if dispatch_identity is not None:
+                self._dispatch_history_tasks[dispatch_identity] = task
             if track_completion:
                 self._user_history_tasks[request_id] = task
             task.add_done_callback(
                 self._observation_task_done if source == "observation" else self._history_task_done
             )
+        elif turn_key is not None and queue_handoff is not None:
+            row_uuid = getattr(queue_handoff, "history_row_uuid", None)
+            if isinstance(row_uuid, str) and row_uuid:
+                self._turn_history_row_uuids[turn_key] = row_uuid
+                if dispatch_identity is not None:
+                    self._dispatch_history_row_uuids[dispatch_identity] = row_uuid
         history = getattr(llm, "conversation_history", None)
         if isinstance(history, list) and history is not getattr(manager, "messages", None):
             history.append(ConversationMessage(role="user", content=text, metadata=metadata))
@@ -1348,6 +1526,11 @@ class ACPOrchestrator:
 
     async def _complete(self, admission: ACPAdmission) -> dict[str, Any]:
         turn_key = (admission.generation, admission.turn_id)
+        dispatch_identity = (
+            admission.request_id,
+            admission.turn_id,
+            admission.history_key,
+        )
         result: ACPResult | None = None
         settled_usage: dict[str, Any] | None = None
         try:
@@ -1394,6 +1577,7 @@ class ACPOrchestrator:
             session_id = session_id or ""
             generation = (result.generation if result is not None else
                           observed.generation if observed is not None else admission.generation)
+            dispatch = self._dispatch_orders.get(dispatch_identity)
             stop_reason = (
                 "cancelled"
                 if isinstance(exc, asyncio.CancelledError)
@@ -1406,6 +1590,11 @@ class ACPOrchestrator:
                 "stopReason": stop_reason, "error": str(exc) or type(exc).__name__,
                 "outcome": "failed",
             }
+            if dispatch is not None:
+                end_frame.update(
+                    dispatchEpoch=dispatch[0],
+                    dispatchOrder=dispatch[1],
+                )
             event_usage = ((settled_usage or {}).get("usage") if result is not None else None)
             if (event_usage is None and result is not None and self._display_usage_payload is not None
                     and self._display_usage_payload[0] == (result.request_id, result.turn_id)):
@@ -1433,6 +1622,13 @@ class ACPOrchestrator:
                     tuple(deepcopy(observed.updates)), dict(end_frame),
                     admission.turn_id, admission.request_id, admission.source, admission.thread_id,
                 )
+                partial = replace(partial, history_key=admission.history_key)
+                if dispatch is not None:
+                    partial = replace(
+                        partial,
+                        dispatch_epoch=dispatch[0],
+                        dispatch_order=dispatch[1],
+                    )
                 try:
                     await self._await_user_history(turn_key)
                     await self._record_result(partial, turn_key)
@@ -1462,6 +1658,11 @@ class ACPOrchestrator:
                 input_source=admission.source, thread_id=admission.thread_id,
                 error=str(exc) or type(exc).__name__,
                 code=error_code,
+                **(
+                    {"dispatch_epoch": dispatch[0], "dispatch_order": dispatch[1]}
+                    if dispatch is not None
+                    else {}
+                ),
                 **usage_fields,
             )
             publish_semantic(
@@ -1483,6 +1684,11 @@ class ACPOrchestrator:
         finally:
             self._turn_parents.pop(turn_key, None)
             self._turn_user_tasks.pop(turn_key, None)
+            self._pending_turn_user_tasks.pop(turn_key, None)
+            self._turn_history_row_uuids.pop(turn_key, None)
+            self._dispatch_orders.pop(dispatch_identity, None)
+            self._dispatch_history_tasks.pop(dispatch_identity, None)
+            self._dispatch_history_row_uuids.pop(dispatch_identity, None)
             self._turn_conversations.pop(turn_key, None)
             self._observed_turns.pop((admission.request_id, admission.turn_id), None)
             self._sent_observations.pop(admission.request_id, None)
@@ -1495,6 +1701,11 @@ class ACPOrchestrator:
             session_id=result.session_id, generation=result.generation,
             turn_id=result.turn_id, stop_reason=result.stop_reason,
             input_source=result.source, thread_id=result.thread_id,
+            **(
+                {"dispatch_epoch": result.dispatch_epoch, "dispatch_order": result.dispatch_order}
+                if result.dispatch_epoch and result.dispatch_order > 0
+                else {}
+            ),
             input_tokens=(settled_usage or {}).get("input_total", 0),
             output_tokens=(settled_usage or {}).get("output_total", 0),
             turn_usage=dict(event_usage) if event_usage is not None else None,
@@ -1533,9 +1744,14 @@ class ACPOrchestrator:
                     for update in result.updates if update.get("kind") == "agent_thought_chunk"]
         metadata = {"provider": "acp", "profile": self._profile_name, "request_id": result.request_id,
                     "acp_session_id": result.session_id,
+                    "turn_id": result.turn_id,
+                    "acp_turn_key": result.history_key,
                     "acp_updates": [update for update in result.updates
                                     if update.get("kind") not in {"plan", "usage_update"}],
                     "stop_reason": result.stop_reason, "thinking": thoughts}
+        if result.dispatch_epoch and result.dispatch_order > 0:
+            metadata["dispatch_epoch"] = result.dispatch_epoch
+            metadata["dispatch_order"] = result.dispatch_order
         tools: dict[str, dict[str, Any]] = {}
         for update in result.updates:
             if update.get("kind") not in {"tool_call", "tool_call_update"}:
@@ -1620,11 +1836,48 @@ class ACPOrchestrator:
         self._delivery_tasks.add(task)
         task.add_done_callback(self._delivery_tasks.discard)
 
-    def _on_runner_update(self, update: dict[str, Any]) -> None:
+    def _on_runner_update(self, update: dict[str, Any]) -> Any:
         kind = "token" if update.get("kind") == "text" else str(update.get("kind", "update"))
         key = (str(update.get("request_id") or ""), int(update.get("turn_id") or 0))
         observed = self._observed_turns.get(key)
+        persist_dispatch: Any = None
         if kind == "turn_start":
+            generation = update.get("generation")
+            turn_id = update.get("turn_id")
+            turn_key = (
+                (generation, turn_id)
+                if isinstance(generation, int) and not isinstance(generation, bool)
+                and isinstance(turn_id, int) and not isinstance(turn_id, bool)
+                and generation >= 0 and turn_id > 0
+                else None
+            )
+            if turn_key is not None:
+                request_id = str(update.get("request_id") or "")
+                history_key = str(update.get("acp_turn_key") or "")
+                dispatch_identity = (request_id, turn_id, history_key)
+                dispatch_orders = getattr(self, "_dispatch_orders", None)
+                if isinstance(dispatch_orders, dict):
+                    dispatch = dispatch_orders.get(dispatch_identity)
+                    if dispatch is None:
+                        self._dispatch_order += 1
+                        dispatch = (self._dispatch_epoch, self._dispatch_order)
+                        dispatch_orders[dispatch_identity] = dispatch
+                    history_tasks = getattr(self, "_dispatch_history_tasks", {})
+                    history_rows = getattr(self, "_dispatch_history_row_uuids", {})
+                    task = history_tasks.get(dispatch_identity)
+                    row_uuid = history_rows.get(dispatch_identity)
+                    if task is not None or row_uuid:
+                        update["dispatch_epoch"], update["dispatch_order"] = dispatch
+                        persist_dispatch = self._persist_dispatch_identity(
+                            dispatch_identity,
+                            dispatch=dispatch,
+                        )
+                    else:
+                        # No durable opening row means reload must retain source
+                        # order; do not advertise an order that cannot be replayed.
+                        dispatch_orders.pop(dispatch_identity, None)
+                        update.pop("dispatch_epoch", None)
+                        update.pop("dispatch_order", None)
             self._usage_display_turn = key
             self._display_usage_payload = None
             observed = self._observed_turns[key] = _ObservedTurn(
@@ -1738,16 +1991,120 @@ class ACPOrchestrator:
                     callback(str(owner_request_id or ""), False, {})
         if kind in {"permission_request", "permission_resolved", "turn_finished"}:
             return
-        publish_semantic(
-            self.event_bus,
-            kind,
-            **{k: v for k, v in update.items() if k not in {"kind", "request_id", "turn_id", "source", "thread_id"}},
-            request_id=update.get("request_id"),
-            turn_id=update.get("turn_id"),
-            input_source=update.get("source", "acp"),
-            thread_id=update.get("thread_id"),
-            acp_passthrough=kind in {"tool_call", "tool_call_update", "agent_thought_chunk", "plan", "usage_update"},
-        )
+        def publish_update() -> None:
+            publish_semantic(
+                self.event_bus,
+                kind,
+                **{k: v for k, v in update.items() if k not in {"kind", "request_id", "turn_id", "source", "thread_id"}},
+                request_id=update.get("request_id"),
+                turn_id=update.get("turn_id"),
+                input_source=update.get("source", "acp"),
+                thread_id=update.get("thread_id"),
+                acp_passthrough=kind in {"tool_call", "tool_call_update", "agent_thought_chunk", "plan", "usage_update"},
+            )
+
+        if kind == "turn_start" and persist_dispatch is not None:
+            async def persist_then_publish() -> bool:
+                persisted = await persist_dispatch
+                if persisted is not True:
+                    update.pop("dispatch_epoch", None)
+                    update.pop("dispatch_order", None)
+                publish_update()
+                return persisted is True
+
+            return persist_then_publish()
+
+        publish_update()
+        return persist_dispatch
+
+    async def _persist_dispatch_identity(
+        self,
+        dispatch_identity: tuple[str, int, str],
+        *,
+        dispatch: tuple[str, int],
+    ) -> bool:
+        """Persist execution order on the exact user row before provider prompt."""
+        request_id, turn_id, history_key = dispatch_identity
+        task = self._dispatch_history_tasks.get(dispatch_identity)
+        row_uuid = self._dispatch_history_row_uuids.get(dispatch_identity)
+        if task is not None:
+            try:
+                task_row_uuid = await task
+            except Exception as exc:
+                logger.warning(
+                    "ACP dispatch identity could not await its user row (%s)",
+                    type(exc).__name__,
+                )
+                self._dispatch_orders.pop(dispatch_identity, None)
+                return False
+            if isinstance(task_row_uuid, str) and task_row_uuid:
+                row_uuid = task_row_uuid
+                self._dispatch_history_row_uuids[dispatch_identity] = row_uuid
+        if not row_uuid:
+            # Test and embedded contexts can deliberately omit durable logging.
+            # Their live turn still runs, but history projection will keep
+            # source order because no persistent dispatch identity exists.
+            self._dispatch_orders.pop(dispatch_identity, None)
+            return False
+
+        llm = self.event_bus.get_service("llm_service") if self.event_bus else None
+        logger_service = getattr(llm, "conversation_logger", None)
+        update_metadata = getattr(logger_service, "update_user_message_metadata", None)
+        if not callable(update_metadata):
+            self._dispatch_orders.pop(dispatch_identity, None)
+            return False
+        dispatch_epoch, dispatch_order = dispatch
+        expected = {
+            "provider": "acp",
+            "request_id": request_id,
+            "turn_id": turn_id,
+            "acp_turn_key": history_key,
+        }
+        updates = {
+            "dispatch_epoch": dispatch_epoch,
+            "dispatch_order": dispatch_order,
+        }
+        try:
+            persisted = await update_metadata(
+                row_uuid,
+                expected_metadata=expected,
+                updates=updates,
+            )
+        except Exception as exc:
+            logger.warning("ACP dispatch identity persistence failed (%s)", type(exc).__name__)
+            self._dispatch_orders.pop(dispatch_identity, None)
+            return False
+        if persisted is not True:
+            logger.warning("ACP dispatch identity did not match its exact user history row")
+            self._dispatch_orders.pop(dispatch_identity, None)
+            return False
+
+        # Keep the in-memory transcript aligned with the durable JSONL row. The
+        # turn identity is composite; request IDs can be reused by callers.
+        manager = getattr(llm, "conversation_manager", None)
+        for message in getattr(manager, "messages", None) or []:
+            metadata = message.get("metadata") if isinstance(message, dict) else None
+            if (
+                isinstance(metadata, dict)
+                and metadata.get("provider") == "acp"
+                and metadata.get("request_id") == request_id
+                and metadata.get("turn_id") == turn_id
+                and metadata.get("acp_turn_key") == history_key
+            ):
+                metadata.update(updates)
+        history = getattr(llm, "conversation_history", None)
+        if isinstance(history, list) and history is not getattr(manager, "messages", None):
+            for message in history:
+                metadata = getattr(message, "metadata", None)
+                if (
+                    isinstance(metadata, dict)
+                    and metadata.get("provider") == "acp"
+                    and metadata.get("request_id") == request_id
+                    and metadata.get("turn_id") == turn_id
+                    and metadata.get("acp_turn_key") == history_key
+                ):
+                    metadata.update(updates)
+        return True
 
 
     def advertised_command(self, name: str) -> str | None:

@@ -36,23 +36,36 @@ async def test_worker_carries_send_now_to_the_native_admission_boundary():
     )
     seen = []
     identity = _identity()
+    lease = object()
 
-    async def dispatch(request):
-        seen.append(request)
-        return AdmissionAccepted(
-            conversation_uid=request.conversation_uid,
-            conversation_revision=request.conversation_revision,
-            request_id=request.request_id,
-            custody_id="custody-b",
-            recording_status=RecordingStatus.RECORDED,
-        )
+    class Dispatcher:
+        async def begin_batch(self, request):
+            assert request.request_ids == (request_id,)
+            return lease
 
-    worker = WebMessageQueueWorker(queue, identity, lambda: identity, dispatch)
+        async def __call__(self, request):
+            seen.append(request)
+            return AdmissionAccepted(
+                conversation_uid=request.conversation_uid,
+                conversation_revision=request.conversation_revision,
+                request_id=request.request_id,
+                custody_id="custody-b",
+                recording_status=RecordingStatus.RECORDED,
+            )
+
+        def finish_batch(self, batch_lease, *, accepted_count, uncertain):
+            assert batch_lease is lease
+            assert accepted_count == 1
+            assert uncertain is False
+            return True
+
+    worker = WebMessageQueueWorker(queue, identity, lambda: identity, Dispatcher())
     result = await worker.dispatch_batch(batch_id, send_now=True)
 
     assert result.status is WorkerStatus.ADMITTED
     assert len(seen) == 1
     assert seen[0].send_now is True
+    assert seen[0].batch_lease is lease
 
 
 def _processor_with_older_input() -> QueueProcessor:
@@ -169,7 +182,12 @@ async def test_native_send_now_waits_for_old_turn_then_admits_once_ahead_of_back
         conversation_uid="conversation-a",
         conversation_revision=4,
         images=(),
+        attempt_id="attempt-force-b",
         force_send=True,
+        queue_scope_id="queue-scope",
+        queue_incarnation="queue-incarnation",
+        batch_id="batch-force-b",
+        claim_id="claim-force-b",
     )
 
     admission = asyncio.create_task(
@@ -293,6 +311,9 @@ async def test_forced_batch_stops_matching_owner_before_admitting_all_members_on
 
     assert result == {
         "accepted": True,
+        "complete": True,
+        "accepted_count": 2,
+        "reason": None,
         "results": [
             {"accepted": True, "request_id": "forced-b"},
             {"accepted": True, "request_id": "forced-c"},

@@ -224,9 +224,10 @@ async def test_assistant_send_now_admits_complete_ordered_batch_at_one_boundary(
         {"accepted": True, "request_id": "queued-c"},
     ]
 
-    async def admit_batch(items, *, expected_active_request_ids, on_admission):
+    async def admit_batch(items, *, expected_active_request_ids, on_attempt, on_admission):
         assert expected_active_request_ids == ("active-a",)
         for index, result in enumerate(results):
+            on_attempt(index)
             on_admission(index, result)
         return {
             "accepted": True,

@@ -6,6 +6,7 @@ import base64
 import binascii
 import json
 from typing import Any
+from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
@@ -161,6 +162,7 @@ async def stage_queue_attachment(
             "expected_conversation_uid": conversation_uid,
             "operation_id": operation_id,
             "mime": mime,
+            "filename": unquote(request.headers.get("x-file-name", "Image")),
             "payload_b64": base64.b64encode(data).decode("ascii"),
         },
     )
@@ -257,11 +259,25 @@ async def get_queue_attachment(
 
 @router.post("/{session_id}/web-message-queue/batches/{batch_id}/send-now")
 async def send_queue_batch_now(session_id: str, conversation_uid: str, batch_id: str):
-    """Fail closed until a bounded worker and real admission adapter exist."""
+    """Ask the authenticated daemon worker to dispatch one exact queued batch."""
     _session_rpc(session_id)
     if not conversation_uid or not batch_id:
         raise HTTPException(status_code=400, detail="Queue identity is required.")
-    raise HTTPException(
-        status_code=503,
-        detail="Queue dispatch is unavailable; the message remains queued.",
+    capability = await _call_queue_rpc(
+        session_id,
+        "state.web_queue.capabilities",
+        {"expected_conversation_uid": conversation_uid},
+    )
+    if capability.get("dispatch_available") is not True:
+        raise HTTPException(
+            status_code=503,
+            detail="Queue dispatch is unavailable; the message remains queued.",
+        )
+    return await _call_queue_rpc(
+        session_id,
+        "state.web_queue.send_now",
+        {
+            "expected_conversation_uid": conversation_uid,
+            "batch_id": batch_id,
+        },
     )

@@ -417,10 +417,9 @@ async def test_rpc_round_trips_ordered_batch_and_only_dispatch_payload():
     snapshot = await _rpc_call(server, "state.web_queue.snapshot", {})
     batch = snapshot["result"]["batches"][0]
     assert batch["request_ids"] == ids["request_ids"]
-    assert [item["payload_b64"] for item in batch["items"]] == [
-        base64.b64encode(b"first").decode("ascii"),
-        base64.b64encode(b"second").decode("ascii"),
-    ]
+    assert [item["text_preview"] for item in batch["items"]] == ["", ""]
+    assert all("payload_b64" not in item for item in batch["items"])
+    assert all("attachment_refs" not in item for item in batch["items"])
 
     claimed = await _rpc_call(
         server,

@@ -384,12 +384,9 @@ try {
     },
     // A shown row reads differently in the reloaded history: it changes where
     // it is, without the whole reload that blanked the chat (#1358).
-    // A message sent while the page's turn runs waits for the turn to end
-    // (the next scenario). Send Now on the waiting message sends it at once:
-    // the page lets its request go, without stopping the turn, and sends the
-    // message in a request of its own. The agent takes it in at its next
-    // step, and the reply goes on under the message (#1102, #1365).
-    async "hands a waiting message to the agent at once on Send Now"() {
+    // Send Now posts one next-turn request immediately. The engine must settle
+    // the active owner before accepting that message (#1102).
+    async "sends one waiting message as the next turn on Send Now"() {
       const t = await open("?chat");
       const done = { type: "complete", reason: "stop" };
       const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
@@ -412,19 +409,22 @@ try {
       await t.waitFor((s) => s.users === "hello|what", "the waiting message");
       await t.page.getByRole("button", { name: "Send Now" }).click();
       await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
-        .catch(() => assert.fail("Send Now left the message waiting behind the running turn"));
+        .catch(() => assert.fail("Send Now did not post its forced next-turn request"));
       const second = await t.page.evaluate(() => ({
         commands: window.transport.request.commands, sent: window.transport.request.state?.messages ?? [],
-        let: window.transports[0].aborted, cancels: window.cancels,
+        request: window.transport.request, let: window.transports[0].aborted,
+        cancels: window.cancels, order: window.order,
         running: document.getElementById("running")?.textContent,
       }));
       assert.equal(second.commands.length, 1);
       assert.equal(second.commands[0].message.parts[0].text, "what");
+      assert.equal(second.request.force_next_turn, true);
+      assert.deepEqual(second.request.force_after_request_ids, [first.id]);
       assert.equal(second.let, true, "the page let its first request go");
       assert.equal(await t.page.getByRole("button", { name: "Send Now" }).count(), 0, "a message on its way is not waiting");
-      assert.equal(second.cancels, 0, "the agent's turn was not stopped");
-      assert.equal(second.running, "running");
-      await t.holds((s) => s.errors === "0" && s.users === "hello|what" && said(s) === "Wor", "while the message is on its way", 200);
+      assert.equal(second.cancels, 0, "the engine fences the active owner in the batch request");
+      assert.deepEqual(second.order, ["post:hello", "post:what"]);
+      await t.holds((s) => s.errors === "0" && s.users === "hello|what" && said(s) === "Wor", "until the active turn settles", 200);
       // The message and the typing dots under it stay drawn through the
       // hand-over: a row taken down and drawn again blinks, and the chat
       // jumps for a frame.
@@ -432,12 +432,19 @@ try {
       assert.equal(drawn.at(-1)?.length, 4, `the turn, the message and the dots under it: ${JSON.stringify(drawn)}`);
       drawn.forEach((rows, n) => assert.ok(n === 0 || drawn[n - 1].every((id) => rows.includes(id)),
         `a row was taken down during the hand-over: ${JSON.stringify(drawn)}`));
-      // The engine admits it; the turn's reply goes on under it.
+      // The resumed engine reports the old terminal before the new reply.
       const at = second.sent.length;
-      await t.push(state([{ type: "set", path: ["messages"], value: [...second.sent,
+      const terminal = `data: ${JSON.stringify({
+        type: "turn_complete", request_id: first.id,
+        request_ids: [first.id], stop_reason: "cancelled",
+      })}\n\n`;
+      await t.page.evaluate(([endOldTurn, nextState]) => {
+        window.transport.push(endOldTurn);
+        window.transport.push(nextState);
+      }, [terminal, state([{ type: "set", path: ["messages"], value: [...second.sent,
         { id: `user-s1-${at}`, role: "user", content: "what", metadata: { custom: { requestId: second.commands[0].message.id } } },
         { id: `assistant-s1-${at + 1}`, role: "assistant", content: text("Sure") },
-      ] }]));
+      ] }])]);
       await t.waitFor((s) => s.users === "hello|what" && said(s) === "Wor|Sure", "the reply under the message");
       await t.end();
       await t.setHistory([
@@ -469,35 +476,47 @@ try {
       await t.waitFor((s) => s.users === "hello|what|later", "both waiting messages");
       await t.page.getByRole("button", { name: "Send Now" }).first().click();
 
-      // A cancel acknowledgement is not proof that the provider turn settled.
-      await t.page.waitForFunction(() => window.cancels === 1, null, { timeout: 3000 })
-        .catch(() => assert.fail("native Send Now did not ask the engine to stop the active turn"));
-      assert.equal(await t.page.evaluate(() => window.transports.length), 1,
-        "the waiting batch is not posted after cancel acknowledgement alone");
-      await t.page.waitForTimeout(150);
-      assert.equal(await t.page.evaluate(() => window.transports.length), 1,
-        "the waiting batch remains owned until the active turn is terminal");
+      // The request reaches the daemon now; its owner-fenced batch operation
+      // must hold provider admission until the active stream's terminal.
+      await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
+        .catch(() => assert.fail("native Send Now did not post the forced batch"));
+      const dispatched = await t.page.evaluate(() => ({
+        request: window.transports[1].request,
+        firstAborted: window.transports[0].aborted,
+        cancels: window.cancels,
+        order: window.order,
+      }));
+      assert.deepEqual(dispatched.request.commands.map((command) => command.message.parts[0].text), ["what", "later"]);
+      assert.equal(dispatched.request.force_next_turn, true);
+      assert.deepEqual(dispatched.request.force_after_request_ids, [first.id]);
+      assert.equal(dispatched.firstAborted, true, "the page hands its stream to the forced request");
+      assert.equal(dispatched.cancels, 0, "the server batch request owns the stop fence");
+      assert.deepEqual(dispatched.order, ["post:hello", "post:what|later"]);
+      await t.holds((s) => s.assistant.includes("Working") && s.users === "hello|what|later",
+        "without provider output before the old terminal", 150);
 
       const terminal = `data: ${JSON.stringify({
         type: "turn_complete", request_id: first.id, request_ids: [first.id], stop_reason: "cancelled",
       })}\n\n`;
-      await t.page.evaluate(([frame, finish]) => {
-        window.transports[0].push(frame);
-        window.transports[0].push(finish);
-        window.transports[0].close();
-      }, [terminal, finishFrames]);
-      await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
-        .catch(() => assert.fail("the batch was not admitted after the active turn settled"));
-
-      const dispatched = await t.page.evaluate(() => ({
-        request: window.transports[1].request,
-        order: window.order,
-      }));
-      assert.deepEqual(dispatched.request.commands.map((command) => command.message.parts[0].text), ["what", "later"]);
-      assert.equal(dispatched.request.force_next_turn, true, "the server receives the next-turn intent");
-      assert.deepEqual(dispatched.order, [
-        "post:hello", "cancel-ack", `terminal:${first.id}`, "post:what|later",
-      ], "the whole FIFO batch follows the prior turn's terminal event");
+      const at = dispatched.request.state.messages.length;
+      await t.page.evaluate(([endOldTurn, nextState, finish]) => {
+        const transport = window.transports[1];
+        transport.push(endOldTurn);
+        transport.push(nextState);
+        transport.push(finish);
+        transport.close();
+      }, [terminal, state([{ type: "set", path: ["messages"], value: [
+        ...dispatched.request.state.messages,
+        { id: `user-s1-${at}`, role: "user", content: "what", metadata: { custom: { requestId: dispatched.request.commands[0].message.id } } },
+        { id: `user-s1-${at + 1}`, role: "user", content: "later", metadata: { custom: { requestId: dispatched.request.commands[1].message.id } } },
+        { id: `assistant-s1-${at + 2}`, role: "assistant", content: text("Batch reply") },
+      ] }]), finishFrames]);
+      await t.waitFor((s) => s.assistant.includes("Batch reply") && s.users === "hello|what|later",
+        "the batch response after the prior terminal");
+      const orderAfterSettle = await t.page.evaluate(() => window.order);
+      assert.deepEqual(orderAfterSettle, [
+        "post:hello", "post:what|later", `terminal:${first.id}`,
+      ], "the batch request receives the prior terminal before any response state");
       assert.equal(await t.page.evaluate(() => window.transports.length), 2,
         "each queued message is sent once in the single batch request");
       await t.page.close();

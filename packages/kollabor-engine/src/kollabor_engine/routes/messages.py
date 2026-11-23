@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 import anyio
 from fastapi import APIRouter, HTTPException, Request  # type: ignore[import-not-found]
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool, StrictStr
 from sse_starlette.sse import EventSourceResponse  # type: ignore[import-not-found]
 
 from kollabor.state.remote import ReloadNeededError
@@ -675,6 +675,8 @@ class AssistantRequest(BaseModel):
     tools: Optional[Dict[str, Any]] = None
     system: Optional[Any] = None
     goal_reply_id: Optional[str] = None
+    force_next_turn: StrictBool = False
+    force_after_request_ids: List[StrictStr] = Field(default_factory=list)
 
 
 def _assistant_command_type(command: Dict[str, Any]) -> str:
@@ -1840,6 +1842,12 @@ async def assistant_transport(
         # Text, reasoning and tool-call parts in arrival order.
         assistant_parts: List[Dict[str, Any]] = []
         saw_action = False
+        turn_request_id: str | None = None
+        force_batch_results: list[dict[str, Any]] | None = None
+        force_batch_items: list[dict[str, Any]] = []
+        force_recorded_indexes: set[int] = set()
+        force_started_indexes: set[int] = set()
+        force_attempted_indexes: set[int] = set()
         # What the client holds; progress publishes only send what differs.
         sent_messages = list(state_messages)
         last_publish = float("-inf")
@@ -2745,7 +2753,11 @@ async def assistant_transport(
             attempted_request_id: Optional[str] = None,
             attempt_may_be_accepted: bool = False,
         ) -> str:
-            accepted = ", ".join(submitted_request_ids) or "none"
+            accepted = ", ".join(
+                request_id
+                for request_id in submitted_request_ids
+                if request_id not in possibly_accepted_request_ids
+            ) or "none"
             current = command_message_label(body.commands[command_index], command_index)
             if attempted_request_id is not None:
                 current = attempted_request_id
@@ -2779,6 +2791,55 @@ async def assistant_transport(
                 f"{attempted_clause}{unsent_clause}"
                 f"Admission error: {reason}. No messages were resubmitted."
             )
+
+        def record_forced_admission(index: int, accepted: dict[str, Any]) -> None:
+            """Persist each batch receipt before the next member can await."""
+            nonlocal saw_action, turn_request_id
+            if (
+                accepted.get("accepted") is not True
+                or not (0 <= index < len(force_batch_items))
+                or index in force_recorded_indexes
+            ):
+                return
+            force_attempted_indexes.discard(index)
+            force_recorded_indexes.add(index)
+            item = force_batch_items[index]
+            request_id = str(item["request_id"])
+            message_content = item["content"]
+            command = item["command"]
+            accepted_request_id = str(accepted.get("request_id") or request_id)
+            saw_action = True
+            request_ids.add(request_id)
+            request_ids.add(accepted_request_id)
+            admitted_turn_request_ids.add(accepted_request_id)
+            submitted_turn_request_ids.append(accepted_request_id)
+            submitted_contents.append(message_content)
+            submitted_media.append(_save_sent_media(message_content, session_id))
+            submitted_request_ids.append(request_id)
+            submitted_row_ids.append(stable_user_row_id(command.get("rowId")))
+            turn_request_id = accepted_request_id
+            force_recorded_indexes.add(index)
+            if queue_from_ledger:
+                if accepted_request_id not in resumed_request_order:
+                    resumed_request_order.append(accepted_request_id)
+                resumed_rows[accepted_request_id] = {
+                    "request_id": accepted_request_id,
+                    "client_request_id": request_id,
+                    "row_id": submitted_row_ids[-1],
+                }
+            if isinstance(body.state, dict) and body.state.get("error"):
+                controller.state["error"] = ""
+            store_handover_snapshot()
+
+        def record_forced_attempt(index: int) -> None:
+            """Remember which member was in-flight if its RPC is canceled."""
+            if (read_context and read_context.revoked) or getattr(
+                shared_queue, "revoked", False
+            ):
+                raise asyncio.CancelledError
+            if 0 <= index < len(force_batch_items):
+                force_started_indexes.add(index)
+                force_attempted_indexes.add(index)
 
         def record_possibly_accepted_submission(
             request_id: str,
@@ -2922,6 +2983,62 @@ async def assistant_transport(
                 _assistant_command_type(command) == "add-message"
                 for command in body.commands
             )
+            if body.force_next_turn:
+                force_error = ""
+                if not body.commands or add_message_count != len(body.commands):
+                    force_error = "Send Now accepts only an ordered batch of messages."
+                elif len(set(body.force_after_request_ids)) != len(
+                    body.force_after_request_ids
+                ):
+                    force_error = "Send Now received duplicate active request IDs."
+                else:
+                    seen_force_request_ids: set[str] = set()
+                    for index, command in enumerate(body.commands):
+                        message_content = _assistant_message_content(command)
+                        if not content_to_text(message_content).strip():
+                            force_error = (
+                                f"Send Now message {command_message_label(command, index)} "
+                                "has no text. No messages were submitted."
+                            )
+                            break
+                        if _is_goal_message(message_content):
+                            force_error = (
+                                "Send Now cannot combine goal commands with a forced "
+                                "provider batch. No messages were submitted."
+                            )
+                            break
+                        message = command.get("message")
+                        client_id = message.get("id") if isinstance(message, dict) else None
+                        request_id = (
+                            client_id
+                            if isinstance(client_id, str)
+                            and _CLIENT_REQUEST_ID.fullmatch(client_id)
+                            else uuid.uuid4().hex
+                        )
+                        if request_id in seen_force_request_ids:
+                            force_error = (
+                                "Send Now received duplicate message IDs. "
+                                "No messages were submitted."
+                            )
+                            break
+                        seen_force_request_ids.add(request_id)
+                        force_batch_items.append(
+                            {
+                                "content": message_content,
+                                "request_id": request_id,
+                                "command": command,
+                            }
+                        )
+                if force_error:
+                    controller.add_error(force_error)
+                    completion["error"] = {"message": force_error}
+                    completion["usage"] = {
+                        **usage_totals,
+                        "stopReason": "error",
+                    }
+                    completion["completed"] = True
+                    _assistant_set_usage(controller, completion["usage"])
+                    return
             if handover_record is not None and has_add_message:
                 if event_loss_seen:
                     pending_ids = sorted(
@@ -2996,10 +3113,101 @@ async def assistant_transport(
             ):
                 controller.add_error("Send a goal command on its own.")
                 return
+            if body.force_next_turn:
+                try:
+                    batch_result = await session.send_message_batch(
+                        [
+                            {
+                                "content": item["content"],
+                                "request_id": item["request_id"],
+                            }
+                            for item in force_batch_items
+                        ],
+                        expected_active_request_ids=tuple(
+                            body.force_after_request_ids
+                        ),
+                        on_attempt=record_forced_attempt,
+                        on_admission=record_forced_admission,
+                    )
+                except asyncio.CancelledError:
+                    if (read_context and read_context.revoked) or getattr(
+                        shared_queue, "revoked", False
+                    ):
+                        raise
+                    for index in sorted(force_attempted_indexes):
+                        item = force_batch_items[index]
+                        record_possibly_accepted_submission(
+                            item["request_id"], item["content"], item["command"]
+                        )
+                        force_attempted_indexes.discard(index)
+                    raise
+                except Exception as exc:
+                    if (read_context and read_context.revoked) or getattr(
+                        shared_queue, "revoked", False
+                    ):
+                        return
+                    batch_result = {
+                        "accepted": bool(force_recorded_indexes),
+                        "complete": False,
+                        "accepted_count": len(force_recorded_indexes),
+                        "reason": type(exc).__name__,
+                        "results": [],
+                    }
+                if (read_context and read_context.revoked) or getattr(
+                    shared_queue, "revoked", False
+                ):
+                    return
+                raw_results = (
+                    batch_result.get("results")
+                    if isinstance(batch_result, dict)
+                    else None
+                )
+                force_batch_results = []
+                if isinstance(raw_results, list):
+                    force_batch_results.extend(
+                        result if isinstance(result, dict) else {}
+                        for result in raw_results[: len(force_batch_items)]
+                    )
+                while len(force_batch_results) < len(force_batch_items):
+                    force_batch_results.append(
+                        {
+                            "accepted": False,
+                            "reason": (
+                                str(batch_result.get("reason") or "batch_incomplete")
+                                if isinstance(batch_result, dict)
+                                else "batch_incomplete"
+                            ),
+                        }
+                    )
+                for index, result in enumerate(force_batch_results):
+                    if result.get("accepted") is True:
+                        result.setdefault("request_id", force_batch_items[index]["request_id"])
+                        if index not in force_recorded_indexes:
+                            record_forced_admission(index, result)
+                    elif index in force_attempted_indexes and result.get(
+                        "possibly_accepted"
+                    ) is True:
+                        item = force_batch_items[index]
+                        record_possibly_accepted_submission(
+                            item["request_id"], item["content"], item["command"]
+                        )
+                        force_recorded_indexes.add(index)
+                        force_attempted_indexes.discard(index)
+                    else:
+                        force_attempted_indexes.discard(index)
             for command_index, command in enumerate(body.commands):
                 command_type = _assistant_command_type(command)
                 if command_type == "add-message":
-                    message_content = _assistant_message_content(command)
+                    forced_item = (
+                        force_batch_items[command_index]
+                        if body.force_next_turn
+                        else None
+                    )
+                    message_content = (
+                        forced_item["content"]
+                        if forced_item is not None
+                        else _assistant_message_content(command)
+                    )
                     if not content_to_text(message_content).strip():
                         admission_error = "add-message command has no text"
                         if submitted_contents:
@@ -3014,8 +3222,12 @@ async def assistant_transport(
                     # The page knows its send by the id it made, so that id
                     # follows the send into saved history (#1359); an image goal
                     # also replays by it. Anything unsafe gets a fresh id.
-                    request_id = (client_id if isinstance(client_id, str)
-                                  and _CLIENT_REQUEST_ID.fullmatch(client_id) else uuid.uuid4().hex)
+                    request_id = (
+                        forced_item["request_id"]
+                        if forced_item is not None
+                        else (client_id if isinstance(client_id, str)
+                              and _CLIENT_REQUEST_ID.fullmatch(client_id) else uuid.uuid4().hex)
+                    )
                     private_goal = _is_goal_message(message_content)
                     kwargs = {"request_id": request_id}
                     if private_goal:
@@ -3027,41 +3239,44 @@ async def assistant_transport(
                         shared_queue, "revoked", False
                     ):
                         return
-                    try:
-                        accepted = await session.send_message(message_content, **kwargs)
-                    except asyncio.CancelledError:
-                        if read_context and read_context.revoked:
+                    if body.force_next_turn:
+                        accepted = force_batch_results[command_index]
+                    else:
+                        try:
+                            accepted = await session.send_message(message_content, **kwargs)
+                        except asyncio.CancelledError:
+                            if read_context and read_context.revoked:
+                                raise
+                            admission_error = partial_admission_error(
+                                command_index,
+                                "admission wait was cancelled",
+                                attempted_request_id=request_id,
+                                attempt_may_be_accepted=True,
+                            )
+                            record_possibly_accepted_submission(
+                                request_id, message_content, command
+                            )
+                            completion["error"] = {"message": admission_error}
                             raise
-                        admission_error = partial_admission_error(
-                            command_index,
-                            "admission wait was cancelled",
-                            attempted_request_id=request_id,
-                            attempt_may_be_accepted=True,
-                        )
-                        record_possibly_accepted_submission(
-                            request_id, message_content, command
-                        )
-                        completion["error"] = {"message": admission_error}
-                        raise
-                    except Exception as exc:
-                        if read_context and read_context.revoked:
-                            # Revocation wins over uncertain admission too: do
-                            # not copy private content into a handover snapshot,
-                            # media store, or response after access was removed.
-                            return
-                        admission_error = str(exc) or type(exc).__name__
-                        admission_error = partial_admission_error(
-                            command_index,
-                            admission_error,
-                            attempted_request_id=request_id,
-                            attempt_may_be_accepted=True,
-                        )
-                        record_possibly_accepted_submission(
-                            request_id, message_content, command
-                        )
-                        controller.add_error(admission_error)
-                        completion["error"] = {"message": admission_error}
-                        break
+                        except Exception as exc:
+                            if read_context and read_context.revoked:
+                                # Revocation wins over uncertain admission too: do
+                                # not copy private content into a handover snapshot,
+                                # media store, or response after access was removed.
+                                return
+                            admission_error = str(exc) or type(exc).__name__
+                            admission_error = partial_admission_error(
+                                command_index,
+                                admission_error,
+                                attempted_request_id=request_id,
+                                attempt_may_be_accepted=True,
+                            )
+                            record_possibly_accepted_submission(
+                                request_id, message_content, command
+                            )
+                            controller.add_error(admission_error)
+                            completion["error"] = {"message": admission_error}
+                            break
                     if read_context and read_context.revoked:
                         # Revocation wins before any admission receipt or
                         # private goal receipt is copied into client state.
@@ -3074,7 +3289,28 @@ async def assistant_transport(
                             admission_error = partial_admission_error(
                                 command_index,
                                 admission_error,
-                                attempted_request_id=request_id,
+                                attempted_request_id=(
+                                    request_id
+                                    if not body.force_next_turn
+                                    or command_index in force_started_indexes
+                                    else None
+                                ),
+                                attempt_may_be_accepted=(
+                                    accepted.get("possibly_accepted") is True
+                                ),
+                            )
+                        elif body.force_next_turn:
+                            admission_error = partial_admission_error(
+                                command_index,
+                                admission_error,
+                                attempted_request_id=(
+                                    request_id
+                                    if command_index in force_started_indexes
+                                    else None
+                                ),
+                                attempt_may_be_accepted=(
+                                    accepted.get("possibly_accepted") is True
+                                ),
                             )
                         controller.add_error(admission_error)
                         completion["error"] = {"message": admission_error}
@@ -3130,22 +3366,30 @@ async def assistant_transport(
                         if not private_goal and not replayed:
                             turn_request_id = accepted_request_id
                             untagged_request_ids.add(accepted_request_id)
-                    admitted_turn_request_ids.add(turn_request_id)
-                    submitted_turn_request_ids.append(turn_request_id)
-                    submitted_contents.append(message_content)
-                    submitted_media.append(_save_sent_media(message_content, session_id))
-                    submitted_request_ids.append(request_id)
-                    row_id = stable_user_row_id(command.get("rowId"))
-                    submitted_row_ids.append(row_id)
-                    if queue_from_ledger:
-                        if turn_request_id not in resumed_request_order:
-                            resumed_request_order.append(turn_request_id)
-                        resumed_rows[turn_request_id] = {
-                            "request_id": turn_request_id,
-                            "client_request_id": request_id,
-                            "row_id": row_id,
-                        }
-                    store_handover_snapshot()
+                    if body.force_next_turn:
+                        accepted_request_id = str(
+                            accepted.get("request_id") or request_id
+                        )
+                        request_ids.add(accepted_request_id)
+                        admitted_turn_request_ids.add(accepted_request_id)
+                        turn_request_id = accepted_request_id
+                    else:
+                        admitted_turn_request_ids.add(turn_request_id)
+                        submitted_turn_request_ids.append(turn_request_id)
+                        submitted_contents.append(message_content)
+                        submitted_media.append(_save_sent_media(message_content, session_id))
+                        submitted_request_ids.append(request_id)
+                        row_id = stable_user_row_id(command.get("rowId"))
+                        submitted_row_ids.append(row_id)
+                        if queue_from_ledger:
+                            if turn_request_id not in resumed_request_order:
+                                resumed_request_order.append(turn_request_id)
+                            resumed_rows[turn_request_id] = {
+                                "request_id": turn_request_id,
+                                "client_request_id": request_id,
+                                "row_id": row_id,
+                            }
+                        store_handover_snapshot()
                     if read_context and read_context.revoked:
                         return
                     if len(submitted_contents) > 1 and untagged_request_ids:

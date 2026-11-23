@@ -473,6 +473,127 @@ def bind_queue_handoff(
     return _modify_index(conversations_dir, session_id, bind)
 
 
+def discard_queue_handoff_media(
+    conversations_dir: Path,
+    session_id: str,
+    *,
+    request_id: str,
+    source_media_refs: Tuple[Tuple[str, str], ...],
+    history_row_uuid: str | None = None,
+) -> None:
+    """Remove only one exact, unshared staged set after failed admission.
+
+    The index mutation is serialized with all other media writers. Files are
+    unlinked only after their exact index entries have been removed, so an
+    interrupted cleanup can leave an orphan file but cannot leave a live ref
+    to a missing file. An entry bound to another history row is never removed.
+    """
+    if not isinstance(request_id, str) or not request_id or len(request_id) > 256:
+        raise MediaError("queue handoff request id is invalid")
+    if (
+        history_row_uuid is not None
+        and (
+            not isinstance(history_row_uuid, str)
+            or not history_row_uuid
+            or len(history_row_uuid) > 256
+        )
+    ):
+        raise MediaError("queue handoff history row id is invalid")
+    if not isinstance(source_media_refs, tuple) or len(source_media_refs) > 20:
+        raise MediaError("queue handoff media references are invalid")
+    expected: List[Tuple[str, str]] = []
+    for pair in source_media_refs:
+        if (
+            not isinstance(pair, tuple)
+            or len(pair) != 2
+            or any(not isinstance(value, str) or not value for value in pair)
+        ):
+            raise MediaError("queue handoff media references are invalid")
+        expected.append((pair[0], pair[1]))
+    if (
+        len({source for source, _ref in expected}) != len(expected)
+        or len({ref for _source, ref in expected}) != len(expected)
+    ):
+        raise MediaError("queue handoff media references are duplicated")
+
+    removed: List[Dict[str, object]] = []
+
+    def remove(entries: List[Dict[str, object]]) -> None:
+        if any(not isinstance(entry, dict) for entry in entries):
+            raise MediaError("queue handoff media index is malformed")
+        owned = [
+            entry for entry in entries if entry.get("queue_request_id") == request_id
+        ]
+        if not owned:
+            return
+        try:
+            owned.sort(key=lambda entry: entry["queue_attachment_index"])
+            indices = [entry["queue_attachment_index"] for entry in owned]
+            actual = tuple(
+                (entry["queue_source_ref"], entry["ref"]) for entry in owned
+            )
+        except (KeyError, TypeError):
+            raise MediaError("queue handoff media binding is malformed") from None
+        if (
+            any(type(index) is not int for index in indices)
+            or indices != list(range(len(owned)))
+            or actual != tuple(expected)
+        ):
+            raise MediaError("queue handoff media set changed before rollback")
+
+        for entry in owned:
+            if entry.get("history_row_uuid") not in (None, history_row_uuid):
+                raise MediaError("queue handoff media belongs to another history row")
+            ref = entry.get("ref")
+            mime = entry.get("mime")
+            digest = entry.get("sha256")
+            if (
+                not isinstance(ref, str)
+                or REF_RE.fullmatch(ref) is None
+                or not isinstance(mime, str)
+                or mime not in MIME_BY_EXT.values()
+                or not isinstance(digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            ):
+                raise MediaError("queue handoff media integrity metadata is invalid")
+            data, actual_mime = open_media(
+                conversations_dir, ref, session_id=session_id
+            )
+            if (
+                actual_mime != mime
+                or hashlib.sha256(data).hexdigest() != digest
+            ):
+                raise MediaError("queue handoff media integrity check failed")
+
+        removed.extend(owned)
+        owned_ids = {id(entry) for entry in owned}
+        entries[:] = [entry for entry in entries if id(entry) not in owned_ids]
+
+    _modify_index(conversations_dir, session_id, remove)
+
+    for entry in removed:
+        ref = entry.get("ref")
+        if not isinstance(ref, str) or REF_RE.fullmatch(ref) is None:
+            raise MediaError("queue handoff media ref is invalid")
+        extension = next(
+            (
+                ext
+                for ext, mime in MIME_BY_EXT.items()
+                if mime == entry.get("mime")
+            ),
+            None,
+        )
+        if extension is None:
+            raise MediaError("queue handoff media MIME is unsupported")
+        path = session_media_dir(conversations_dir, session_id) / f"{ref}.{extension}"
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise MediaError("queue handoff media cleanup failed") from exc
+
+
 def open_media(
     conversations_dir: Path,
     ref: str,

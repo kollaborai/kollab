@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -452,6 +453,25 @@ class ACPAdmission:
     future: asyncio.Future["ACPResult"]
     origin: dict[str, Any] = field(default_factory=dict)
     images: tuple[dict[str, str], ...] = field(default_factory=tuple, repr=False)
+    history_key: str = field(
+        default_factory=lambda: secrets.token_urlsafe(18), repr=False
+    )
+
+
+@dataclass(slots=True, eq=False)
+class _ACPQueueHandoffBatch:
+    """Opaque queue reservation and dequeue gate for one forced ACP batch."""
+
+    owner: object
+    request_ids: tuple[str, ...]
+    session_id: str
+    generation: int
+    active_admission: ACPAdmission | None
+    active_task: asyncio.Task[ACPResult] | None
+    reserved_slots: int
+    inserted: list[ACPAdmission] = field(default_factory=list)
+    in_doubt: bool = False
+    closed: bool = False
 
 
 def _turn_usage_payload(usage: Any) -> dict[str, int] | None:
@@ -609,6 +629,9 @@ class ACPResult:
     source: str = ""
     thread_id: str | None = None
     usage: dict[str, int] | None = None
+    history_key: str = ""
+    dispatch_epoch: str = ""
+    dispatch_order: int = 0
 
 
 class _Client(acp.Client):
@@ -718,12 +741,19 @@ class ACPRunner:
         self._next_turn_id = 0
         self._active_turn_id = 0
         self._active_future: asyncio.Future[ACPResult] | None = None
+        self._active_context: ACPAdmission | None = None
         self._restart_before_next = False
         self._restarting = False
         self._active_done = asyncio.Event()
         self._active_done.set()
         self._queue_release = asyncio.Event()
         self._queue_release.set()
+        # The consumer never blocks inside Queue.get(): gate creation and
+        # dequeuing are serialized by this lock, while this event only wakes
+        # an idle consumer after a synchronous admission.
+        self._queue_gate_lock = asyncio.Lock()
+        self._queue_changed = asyncio.Event()
+        self._dequeue_waiting_for_input = asyncio.Event()
         self._active_rpc_task: asyncio.Task[ACPResult] | None = None
         self._force_cancel = False
         self._closing = False
@@ -751,6 +781,7 @@ class ACPRunner:
         self._process_group_id: int | None = None
         self._teardown_lock = asyncio.Lock()
         self._queue: asyncio.Queue[ACPAdmission | None] = asyncio.Queue(maxsize=10)
+        self._queue_handoff_batch: _ACPQueueHandoffBatch | None = None
         self._worker: asyncio.Task[None] | None = None
         self._updates: list[dict[str, Any]] = []
         self._active_generation = 0
@@ -779,6 +810,7 @@ class ACPRunner:
             self._active_rpc_task is not None
             or self._active_future is not None
             or not self._queue.empty()
+            or self._queue_handoff_batch is not None
             or self._cancel_hold
             or not self._active_done.is_set()
         )
@@ -1326,6 +1358,7 @@ class ACPRunner:
         thread_id: str | None = None,
         origin: dict[str, Any] | None = None,
         images: tuple[dict[str, str], ...] = (),
+        queue_handoff_batch: object | None = None,
     ) -> ACPAdmission:
         # While the harness restarts (after a failed or cancelled prompt) its
         # connection is briefly gone; a request then waits in the queue like one
@@ -1338,6 +1371,26 @@ class ACPRunner:
         if images and not self.supports_image_input:
             raise ACPError(
                 "This harness can't take images.", error_class="images_unsupported"
+            )
+        batch = self._queue_handoff_batch
+        if queue_handoff_batch is not None:
+            if (
+                batch is None
+                or queue_handoff_batch is not batch
+                or batch.closed
+                or batch.in_doubt
+                or batch.session_id != self.session_id
+                or batch.generation != self.generation
+                or len(batch.inserted) >= len(batch.request_ids)
+                or request_id != batch.request_ids[len(batch.inserted)]
+                or batch.reserved_slots <= 0
+            ):
+                raise ACPError("invalid forced queue batch", error_class="queue_batch")
+        elif batch is not None:
+            error_class = "queue_batch_in_doubt" if batch.in_doubt else "queue_batch_active"
+            raise ACPError(
+                "ACP queue is held for a forced batch",
+                error_class=error_class,
             )
         generation = self.generation
         # A rejected queue admission is not a turn and must not create a hole
@@ -1354,8 +1407,262 @@ class ACPRunner:
                 "ACP prompt queue is full", error_class="queue_full",
                 cause=type(exc).__name__,
             ) from exc
+        self._queue_changed.set()
+        if batch is not None and queue_handoff_batch is batch:
+            # Put the whole accepted prefix ahead of every older queued ACP
+            # admission while the runner's dequeue gate is still held.
+            tail = self._queue._queue.pop()
+            self._queue._queue.insert(len(batch.inserted), tail)
+            batch.inserted.append(admission)
+            batch.reserved_slots -= 1
         self._next_turn_id = turn_id
         return admission
+
+    async def begin_queue_handoff_batch(
+        self, request_ids: tuple[str, ...]
+    ) -> object | None:
+        """Reserve queue capacity, stop its active owner, and hold dequeue."""
+        async with self._queue_gate_lock:
+            if (
+                not isinstance(request_ids, tuple)
+                or not request_ids
+                or any(not isinstance(value, str) or not value for value in request_ids)
+                or len(set(request_ids)) != len(request_ids)
+                or self._queue_handoff_batch is not None
+                or self._closing
+                or not self.session_id
+                or self._connection is None
+                or self._restarting
+                or self._restart_before_next
+                or self._queue.qsize() + len(request_ids) > self._queue.maxsize
+                or any(
+                    item is not None and item.request_id in request_ids
+                    for item in self._queue._queue
+                )
+                or (
+                    self._active_context is not None
+                    and self._active_context.request_id in request_ids
+                )
+            ):
+                return None
+
+            active_task = self._active_rpc_task
+            if active_task is not None and active_task.done():
+                active_task = None
+            active_admission = self._active_context if active_task is not None else None
+            token = _ACPQueueHandoffBatch(
+                owner=self,
+                request_ids=request_ids,
+                session_id=self.session_id,
+                generation=self.generation,
+                active_admission=active_admission,
+                active_task=active_task,
+                reserved_slots=len(request_ids),
+            )
+            self._queue_handoff_batch = token
+            self._queue_release.clear()
+            self._dequeue_waiting_for_input.clear()
+        cancellation_attempted = False
+        try:
+            if active_task is not None and not active_task.done():
+                if not self.prepare_cancel(
+                    expected_session_id=token.session_id,
+                    expected_generation=token.generation,
+                ):
+                    # The active task may have completed between the snapshot
+                    # and this call. It is safe to proceed only if that exact
+                    # owner has settled and no successor could have dequeued.
+                    await self._active_done.wait()
+                    if self._active_context is not None:
+                        self._abort_queue_handoff_batch(token)
+                        return None
+                else:
+                    cancellation_attempted = True
+                    await self.cancel(
+                        expected_session_id=token.session_id,
+                        expected_generation=token.generation,
+                    )
+                    await self._active_done.wait()
+                if (
+                    not active_task.done()
+                    or not self._active_done.is_set()
+                    or self._active_context is not None
+                    or active_task is not token.active_task
+                ):
+                    token.in_doubt = cancellation_attempted
+                    if token.in_doubt:
+                        raise ACPError(
+                            "ACP queue handoff cancellation did not settle its owner",
+                            error_class="queue_batch_in_doubt",
+                        )
+                    self._abort_queue_handoff_batch(token)
+                    return None
+                try:
+                    active_task.result()
+                except BaseException as exc:
+                    if cancellation_attempted:
+                        token.in_doubt = True
+                        raise ACPError(
+                            "ACP queue handoff cancellation outcome is uncertain",
+                            error_class="queue_batch_in_doubt",
+                            cause=type(exc).__name__,
+                        ) from exc
+                    self._abort_queue_handoff_batch(token)
+                    return None
+                if (
+                    self.session_id != token.session_id
+                    or self._active_rpc_task is not None
+                    or self._active_context is not None
+                    or self._restarting
+                    or self._restart_before_next
+                    or self._closing
+                ):
+                    token.in_doubt = cancellation_attempted
+                    if token.in_doubt:
+                        raise ACPError(
+                            "ACP queue handoff owner changed before admission",
+                            error_class="queue_batch_in_doubt",
+                        )
+                    self._abort_queue_handoff_batch(token)
+                    return None
+                token.generation = self.generation
+
+            if (
+                self._queue_handoff_batch is not token
+                or token.closed
+                or self.session_id != token.session_id
+                or self._active_rpc_task is not None
+            ):
+                self._abort_queue_handoff_batch(token)
+                return None
+            return token
+        except asyncio.CancelledError:
+            if cancellation_attempted:
+                token.in_doubt = True
+            else:
+                self._abort_queue_handoff_batch(token)
+            raise
+        except Exception as exc:
+            if cancellation_attempted:
+                token.in_doubt = True
+                raise ACPError(
+                    "ACP queue handoff cancellation outcome is uncertain",
+                    error_class="queue_batch_in_doubt",
+                    cause=type(exc).__name__,
+                ) from exc
+            self._abort_queue_handoff_batch(token)
+            return None
+
+    def finish_queue_handoff_batch(
+        self,
+        token: object,
+        *,
+        accepted_count: int,
+        uncertain: bool,
+    ) -> bool:
+        """Release an accepted prefix, or keep the queue held if ambiguous."""
+        batch = self._queue_handoff_batch
+        if (
+            batch is None
+            or token is not batch
+            or batch.owner is not self
+            or batch.closed
+            or batch.session_id != self.session_id
+            or batch.generation != self.generation
+            or type(accepted_count) is not int
+            or accepted_count < 0
+            or not isinstance(uncertain, bool)
+        ):
+            return False
+        if uncertain:
+            batch.in_doubt = True
+            return False
+        if batch.in_doubt or accepted_count != len(batch.inserted):
+            return False
+        batch.reserved_slots = 0
+        batch.closed = True
+        self._queue_handoff_batch = None
+        self._queue_release.set()
+        self._queue_changed.set()
+        return True
+
+    def validate_queue_handoff_batch(
+        self, token: object, request_id: str | None = None
+    ) -> bool:
+        """Prove this runner still owns the next slot of the exact batch."""
+        batch = self._queue_handoff_batch
+        return bool(
+            batch is not None
+            and token is batch
+            and batch.owner is self
+            and not batch.closed
+            and not batch.in_doubt
+            and batch.session_id == self.session_id
+            and batch.generation == self.generation
+            and batch.reserved_slots > 0
+            and len(batch.inserted) < len(batch.request_ids)
+            and (
+                request_id is None
+                or request_id == batch.request_ids[len(batch.inserted)]
+            )
+        )
+
+    def mark_queue_handoff_in_doubt(self, token: object) -> bool:
+        batch = self._queue_handoff_batch
+        if batch is None or token is not batch or batch.owner is not self:
+            return False
+        batch.in_doubt = True
+        self._queue_release.clear()
+        return True
+
+    def rollback_queue_handoff_admission(
+        self, token: object, admission: ACPAdmission
+    ) -> bool:
+        """Remove only the newest, not-yet-consumed member of this batch."""
+        batch = self._queue_handoff_batch
+        if (
+            batch is None
+            or token is not batch
+            or batch.owner is not self
+            or batch.closed
+            or batch.in_doubt
+            or not batch.inserted
+            or batch.inserted[-1] is not admission
+            or self._active_context is admission
+        ):
+            return False
+        if not self.cancel_queued(admission.request_id, admission):
+            batch.in_doubt = True
+            return False
+        batch.inserted.pop()
+        batch.reserved_slots += 1
+        self._queue_changed.set()
+        return True
+
+    def owns_queue_handoff_admission(
+        self, token: object, admission: ACPAdmission
+    ) -> bool:
+        batch = self._queue_handoff_batch
+        return bool(
+            batch is not None
+            and token is batch
+            and batch.owner is self
+            and not batch.closed
+            and not batch.in_doubt
+            and batch.session_id == self.session_id
+            and batch.generation == self.generation
+            and admission in batch.inserted
+        )
+
+    def _abort_queue_handoff_batch(self, token: _ACPQueueHandoffBatch) -> bool:
+        if self._queue_handoff_batch is not token or token.inserted:
+            return False
+        token.reserved_slots = 0
+        token.closed = True
+        self._queue_handoff_batch = None
+        self._queue_release.set()
+        self._queue_changed.set()
+        return True
 
     async def prompt(self, text: str) -> ACPResult:
         admission = self.admit(text, request_id=f"turn-{self._next_turn_id + 1}", source="rpc")
@@ -1364,27 +1671,42 @@ class ACPRunner:
     async def _drain_queue(self) -> None:
         while True:
             await self._queue_release.wait()
-            item = await self._queue.get()
-            if item is None:
-                if self._closing:
-                    return
+            waiting_for_input = False
+            async with self._queue_gate_lock:
+                if not self._queue_release.is_set():
+                    continue
+                try:
+                    item = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    self._queue_changed.clear()
+                    self._dequeue_waiting_for_input.set()
+                    waiting_for_input = True
+                else:
+                    self._dequeue_waiting_for_input.clear()
+                    if item is None:
+                        if self._closing:
+                            return
+                        continue
+                    admission = item
+                    generation = admission.generation
+                    future = admission.future
+                    if future.cancelled():
+                        continue
+                    if generation != self.generation:
+                        generation = self.generation
+                    self._active_future = future
+                    self._active_context = admission
+                    self._active_done.clear()
+                    self._queue_release.clear()
+                    active_rpc_task = asyncio.create_task(
+                        self._run_prompt(admission, generation)
+                    )
+                    self._active_rpc_task = active_rpc_task
+            if waiting_for_input:
+                await self._queue_changed.wait()
                 continue
-            admission = item
-            generation = admission.generation
-            future = admission.future
-            if future.cancelled():
-                continue
-            if generation != self.generation:
-                generation = self.generation
-            self._active_future = future
-            self._active_context = admission
-            self._active_done.clear()
-            self._queue_release.clear()
-            self._active_rpc_task = asyncio.create_task(
-                self._run_prompt(admission, generation)
-            )
             try:
-                result = await self._active_rpc_task
+                result = await active_rpc_task
                 if not future.done():
                     future.set_result(result)
             except asyncio.CancelledError:
@@ -1400,6 +1722,7 @@ class ACPRunner:
             finally:
                 self._active_rpc_task = None
                 self._active_future = None
+                self._active_context = None
                 self._active_done.set()
                 # Advance the turn fence only after the RPC response and all
                 # reader-delivered updates have drained.
@@ -1420,8 +1743,9 @@ class ACPRunner:
                     if not item.future.done():
                         item.future.set_exception(exc)
             finally:
-                if not self._cancel_hold:
+                if not self._cancel_hold and self._queue_handoff_batch is None:
                     self._queue_release.set()
+                    self._queue_changed.set()
 
     async def _restart_process(self) -> None:
         """Replace the owned ACP process, even if SDK close is stuck."""
@@ -1456,10 +1780,30 @@ class ACPRunner:
         if self._preface_pending and self._preface:
             text = self._preface + "\n\n" + text
             self._preface_pending = False
+        dispatch_update = {
+            "kind": "turn_start",
+            "request_id": admission.request_id,
+            "turn_id": turn_id,
+            "source": admission.source,
+            "thread_id": admission.thread_id,
+            "generation": generation,
+            "acp_turn_key": admission.history_key,
+        }
         if self.update_callback is not None:
-            self.update_callback({"kind": "turn_start", "request_id": admission.request_id,
-                                  "turn_id": turn_id, "source": admission.source,
-                                  "thread_id": admission.thread_id, "generation": generation})
+            callback_result = self.update_callback(dispatch_update)
+            if inspect.isawaitable(callback_result):
+                callback_result = await callback_result
+            if callback_result is False:
+                dispatch_update.pop("dispatch_epoch", None)
+                dispatch_update.pop("dispatch_order", None)
+        dispatch_epoch = str(dispatch_update.get("dispatch_epoch") or "")
+        dispatch_order = dispatch_update.get("dispatch_order")
+        if (
+            isinstance(dispatch_order, bool)
+            or not isinstance(dispatch_order, int)
+            or dispatch_order < 1
+        ):
+            dispatch_order = 0
         try:
             if admission.images and not self.supports_image_input:
                 raise ACPError(
@@ -1492,12 +1836,20 @@ class ACPRunner:
                     "stopReason": stop_reason,
                     "outcome": "success" if stop_reason == "end_turn" else "failed",
                     "acp_turn_usage": turn_usage,
+                    **(
+                        {"dispatchEpoch": dispatch_epoch, "dispatchOrder": dispatch_order}
+                        if dispatch_epoch and dispatch_order
+                        else {}
+                    ),
                 },
                 turn_id=turn_id,
                 request_id=admission.request_id,
                 source=admission.source,
                 thread_id=admission.thread_id,
                 usage=turn_usage,
+                history_key=admission.history_key,
+                dispatch_epoch=dispatch_epoch,
+                dispatch_order=dispatch_order,
             )
         except Exception as exc:
             if isinstance(exc, ACPError):
@@ -1515,9 +1867,19 @@ class ACPRunner:
             raise ACPError(line, cause=type(exc).__name__) from exc
         finally:
             if self.update_callback is not None:
-                self.update_callback({"kind": "turn_finished", "request_id": admission.request_id,
-                                      "turn_id": turn_id, "generation": generation,
-                                      "source": admission.source})
+                self.update_callback({
+                    "kind": "turn_finished",
+                    "request_id": admission.request_id,
+                    "turn_id": turn_id,
+                    "generation": generation,
+                    "source": admission.source,
+                    "acp_turn_key": admission.history_key,
+                    **(
+                        {"dispatch_epoch": dispatch_epoch, "dispatch_order": dispatch_order}
+                        if dispatch_epoch and dispatch_order
+                        else {}
+                    ),
+                })
             self.permission_bridge.cancel()
             self._active_generation = 0
             self._active_turn_id = 0
@@ -1977,7 +2339,9 @@ class ACPRunner:
                 self._cancel_hold = False
                 self._cancel_target = None
                 self._cancel_active_task = None
-                self._queue_release.set()
+                if self._queue_handoff_batch is None:
+                    self._queue_release.set()
+                    self._queue_changed.set()
 
     async def _terminate_process(self) -> None:
         async with self._teardown_lock:
@@ -2118,6 +2482,7 @@ class ACPRunner:
         for task in cancel_tasks:
             task.cancel()
         self._queue_release.set()
+        self._queue_changed.set()
 
         def settle_queued() -> None:
             while True:
@@ -2134,6 +2499,7 @@ class ACPRunner:
         # waiter, which can remain pending under SDK callbacks.
         if worker is not None and not worker.done():
             self._queue.put_nowait(None)
+            self._queue_changed.set()
         if self._active_future is not None and not self._active_future.done():
             self._active_future.set_exception(ACPError("ACP runner closed"))
         try:

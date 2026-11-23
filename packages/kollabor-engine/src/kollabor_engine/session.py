@@ -1125,6 +1125,42 @@ class EngineSession:
             await self.refresh_history(notify=True)  # open windows hear the new row
         return result
 
+    async def send_message_batch(
+        self,
+        messages: list[Dict[str, Any]],
+        *,
+        expected_active_request_ids: tuple[str, ...],
+        on_attempt: Any = None,
+        on_admission: Any = None,
+    ) -> Dict[str, Any]:
+        """Admit a trusted Send Now batch after its captured native turn settles."""
+        if not self.alive:
+            return {
+                "accepted": False,
+                "complete": False,
+                "accepted_count": 0,
+                "reason": "session_unavailable",
+                "results": [],
+            }
+        submit = getattr(self.state, "send_message_batch", None)
+        if not callable(submit):
+            return {
+                "accepted": False,
+                "complete": False,
+                "accepted_count": 0,
+                "reason": "force_send_unavailable",
+                "results": [],
+            }
+        result = await submit(
+            messages,
+            expected_active_request_ids=expected_active_request_ids,
+            on_attempt=on_attempt,
+            on_admission=on_admission,
+        )
+        if not isinstance(result, dict):
+            raise TypeError("state.send_message_batch expected a result dict")
+        return result
+
     def cancel_turn(self, voice_turn_id: str | None = None) -> None:
         """Ask the daemon to cancel the in-flight turn (fire and forget).
 

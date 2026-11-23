@@ -11,6 +11,7 @@ import pytest
 from kollabor.state.web_message_attachments import (
     AttachmentAuthorizationError,
     AttachmentCapacityExceeded,
+    AttachmentIdempotencyConflict,
     AttachmentNotFound,
     AttachmentOwnerConflict,
     AttachmentScopeBinding,
@@ -106,6 +107,36 @@ async def _rpc_call(server: RpcServer, method: str, params: dict[str, object]):
 
 
 @pytest.mark.asyncio
+async def test_attachment_display_name_is_basename_only_and_part_of_retry_identity():
+    queue = WebMessageQueue(scope_id="conversation-owner-a")
+    _registry, scope = await _attachment_scope(queue)
+    operation_id = scope.new_operation_id()
+
+    receipt = await scope.stage(
+        operation_id,
+        "image/png",
+        _png(b"name-test"),
+        filename="../private\\image\nlabel.png",
+    )
+    replay = await scope.stage(
+        operation_id,
+        "image/png",
+        _png(b"name-test"),
+        filename="../private\\image\nlabel.png",
+    )
+
+    assert receipt.filename == replay.filename == "image label.png"
+    assert "/" not in receipt.filename and "\\" not in receipt.filename
+    with pytest.raises(AttachmentIdempotencyConflict):
+        await scope.stage(
+            operation_id,
+            "image/png",
+            _png(b"name-test"),
+            filename="another.png",
+        )
+
+
+@pytest.mark.asyncio
 async def test_enqueue_with_attachments_is_atomic_ordered_and_idempotent():
     queue = WebMessageQueue(scope_id="conversation-owner-a")
     registry, scope = await _attachment_scope(queue)
@@ -142,6 +173,10 @@ async def test_enqueue_with_attachments_is_atomic_ordered_and_idempotent():
     assert tuple(item.attachment_refs for item in snapshot.batches[0].items) == (
         (first_ref,),
         (second_ref,),
+    )
+    assert tuple(item.attachment_labels for item in snapshot.batches[0].items) == (
+        ("Image",),
+        ("Image",),
     )
     assert (await scope.open_for_owner(first_id, first_ref)).data == first_image
     assert (await scope.open_for_owner(second_id, second_ref)).data == second_image

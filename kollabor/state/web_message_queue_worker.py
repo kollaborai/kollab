@@ -14,7 +14,7 @@ import inspect
 import math
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import TypeAlias
 
@@ -82,6 +82,19 @@ class AdmissionRejectedBeforeCustody:
 
 
 @dataclass(frozen=True, slots=True)
+class DispatchBatchStart:
+    """Trusted metadata needed to prepare a whole Send Now batch once."""
+
+    conversation_uid: str
+    conversation_revision: int
+    queue_scope_id: str
+    queue_incarnation: str
+    batch_id: str
+    claim_id: str
+    request_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class DispatchRequest:
     """One exact queue item passed to trusted in-process admission code."""
 
@@ -96,6 +109,8 @@ class DispatchRequest:
     attempt_id: str
     payload: bytes = field(repr=False)
     attachment_refs: tuple[str, ...] = field(default=(), repr=False)
+    send_now: bool = False
+    batch_lease: object | None = field(default=None, repr=False)
 
 
 AdmissionResult: TypeAlias = AdmissionAccepted | AdmissionRejectedBeforeCustody
@@ -194,6 +209,9 @@ class WebMessageQueueWorker:
         self._active_attempt: _ActiveAttempt | None = None
         self._revision = 0
         self._results: list[WorkerItemResult] = []
+        self._dispatch_send_now = False
+        self._dispatch_batch_lease: object | None = None
+        self._dispatch_batch_finisher: Callable[..., Any] | None = None
 
     def request_stop(self) -> None:
         """Stop before the next item; an in-flight dispatch is not cancelled.
@@ -217,7 +235,18 @@ class WebMessageQueueWorker:
         self._run_requested = True
         try:
             async with self._run_lock:
-                return await self._dispatch_batch_locked(batch_id, send_now=send_now)
+                result = await self._dispatch_batch_locked(
+                    batch_id, send_now=send_now
+                )
+                if (
+                    self._dispatch_batch_lease is not None
+                    and result.status is not WorkerStatus.IN_DOUBT
+                ):
+                    # A provider custody prefix may already be accepted, but
+                    # the batch finalizer did not prove release of its gate.
+                    # Report that cleanup uncertainty instead of success.
+                    result = replace(result, status=WorkerStatus.IN_DOUBT)
+                return result
         finally:
             self._run_requested = False
 
@@ -229,6 +258,12 @@ class WebMessageQueueWorker:
     ) -> WorkerBatchResult:
         if self._closing or self._closed:
             return self._unstarted_result(batch_id, WorkerStatus.CLOSED)
+        if self._dispatch_batch_lease is not None:
+            return self._result(
+                self._batch_id or batch_id,
+                self._claim_id,
+                WorkerStatus.IN_DOUBT,
+            )
         if self._active_attempt is not None:
             # A previous run may have crossed admission but failed while
             # recording its terminal receipt. Keep that exact attempt pinned
@@ -247,6 +282,7 @@ class WebMessageQueueWorker:
         self._active_attempt = None
         self._revision = 0
         self._results = []
+        self._dispatch_send_now = send_now
         claim: QueueReceipt | None = None
         try:
             if self._forced_in_doubt:
@@ -292,6 +328,41 @@ class WebMessageQueueWorker:
             if not expected_ids or len(set(expected_ids)) != len(expected_ids):
                 await self._release_claim(claim.claim_id or "")
                 return self._result(batch_id, claim.claim_id, WorkerStatus.IN_DOUBT)
+
+            if send_now:
+                begin_batch = getattr(self._dispatcher, "begin_batch", None)
+                finish_batch = getattr(self._dispatcher, "finish_batch", None)
+                if not callable(begin_batch) or not callable(finish_batch):
+                    await self._release_claim(claim.claim_id or "")
+                    return self._result(batch_id, claim.claim_id, WorkerStatus.NOT_SENT)
+                batch_start = DispatchBatchStart(
+                    conversation_uid=self._identity.uid,
+                    conversation_revision=self._identity.revision,
+                    queue_scope_id=self._scope_id,
+                    queue_incarnation=self._incarnation,
+                    batch_id=claim.batch_id or batch_id,
+                    claim_id=claim.claim_id or "",
+                    request_ids=expected_ids,
+                )
+                try:
+                    batch_lease = begin_batch(batch_start)
+                    if inspect.isawaitable(batch_lease):
+                        batch_lease = await batch_lease
+                except asyncio.CancelledError:
+                    # begin_batch owns cleanup if it is cancelled after it
+                    # changes provider state. No item dispatcher has run yet.
+                    await self._release_claim(claim.claim_id or "")
+                    raise
+                except Exception:
+                    # A failed batch preflight is before any item admission;
+                    # the suffix remains queue-owned and may be retried.
+                    await self._release_claim(claim.claim_id or "")
+                    return self._result(batch_id, claim.claim_id, WorkerStatus.NOT_SENT)
+                if batch_lease is None:
+                    await self._release_claim(claim.claim_id or "")
+                    return self._result(batch_id, claim.claim_id, WorkerStatus.NOT_SENT)
+                self._dispatch_batch_lease = batch_lease
+                self._dispatch_batch_finisher = finish_batch
 
             while True:
                 if self._forced_in_doubt:
@@ -450,6 +521,8 @@ class WebMessageQueueWorker:
                     attempt_id=attempt_id,
                     payload=message.payload,
                     attachment_refs=message.attachment_refs,
+                    send_now=self._dispatch_send_now,
+                    batch_lease=self._dispatch_batch_lease,
                 )
                 active.dispatch_boundary_crossed = True
                 try:
@@ -523,6 +596,14 @@ class WebMessageQueueWorker:
                     pass
             raise
         finally:
+            if self._dispatch_batch_lease is not None:
+                try:
+                    self._finish_dispatch_batch_lease()
+                except Exception:
+                    # The provider gate is still server-owned. Retain the
+                    # lease in the worker instead of silently starting a
+                    # competing run over a possibly open batch.
+                    self._forced_in_doubt = True
             self._active_task = None
             if self._active_attempt is None and not (
                 self._forced_in_doubt and not self._forced_terminalized
@@ -558,7 +639,12 @@ class WebMessageQueueWorker:
             terminalization_pending = (
                 self._forced_in_doubt and not self._forced_terminalized
             ) or (task_done and self._active_attempt is not None)
-            if task_done and not terminalization_pending:
+            batch_finalization_pending = self._dispatch_batch_lease is not None
+            if (
+                task_done
+                and not terminalization_pending
+                and not batch_finalization_pending
+            ):
                 self._closed = True
                 return True
 
@@ -583,7 +669,12 @@ class WebMessageQueueWorker:
                 terminalization_pending = (
                     self._forced_in_doubt and not self._forced_terminalized
                 ) or (task_done and self._active_attempt is not None)
-                if task_done and not terminalization_pending:
+                batch_finalization_pending = self._dispatch_batch_lease is not None
+                if (
+                    task_done
+                    and not terminalization_pending
+                    and not batch_finalization_pending
+                ):
                     self._closed = True
                     if cancellation is not None:
                         raise cancellation
@@ -613,7 +704,13 @@ class WebMessageQueueWorker:
                         )
                         break
 
-            self._closed = True
+            batch_finalized = True
+            if self._dispatch_batch_lease is not None:
+                try:
+                    self._finish_dispatch_batch_lease()
+                except Exception:
+                    batch_finalized = False
+            self._closed = batch_finalized
             if task is not None:
                 if task.done():
                     task_done = True
@@ -626,7 +723,7 @@ class WebMessageQueueWorker:
                         except asyncio.CancelledError as exc:
                             defer_cancellation(exc)
                     task_done = bool(done)
-            completed = task_done and terminalized
+            completed = task_done and terminalized and batch_finalized
             if completed and self._forced_terminalized:
                 self._clear_run_state()
             if cancellation is not None:
@@ -641,6 +738,36 @@ class WebMessageQueueWorker:
         self._active_attempt = None
         self._revision = 0
         self._results = []
+        self._dispatch_send_now = False
+        if self._dispatch_batch_lease is None:
+            self._dispatch_batch_finisher = None
+
+    def _finish_dispatch_batch_lease(self) -> bool:
+        """Finish the server-owned batch gate or retain it for explicit retry."""
+        lease = self._dispatch_batch_lease
+        finisher = self._dispatch_batch_finisher
+        if lease is None:
+            return True
+        if finisher is None:
+            raise RuntimeError("batch finalizer is unavailable")
+        uncertain = any(
+            result.outcome is ClaimOutcome.IN_DOUBT for result in self._results
+        ) or bool(
+            self._active_attempt is not None
+            and self._active_attempt.dispatch_boundary_crossed
+        )
+        finished = finisher(
+            lease,
+            accepted_count=self._accepted_count,
+            uncertain=uncertain,
+        )
+        if inspect.isawaitable(finished):
+            raise TypeError("finish_batch must not yield")
+        if finished is not True:
+            raise RuntimeError("finish_batch did not prove cleanup")
+        self._dispatch_batch_lease = None
+        self._dispatch_batch_finisher = None
+        return True
 
     async def _identity_matches(self) -> bool:
         try:

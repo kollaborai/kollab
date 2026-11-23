@@ -110,6 +110,16 @@ class _QueueScopeOwner:
     conversation_uid: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class _KnownQueueScope:
+    """Daemon-internal queue owner metadata for the bounded dispatcher."""
+
+    scope_id: str
+    incarnation: str
+    principal_id: str
+    conversation_uid: str
+
+
 def daemon_conversation_scope_resolver(state_service: Any) -> ScopeResolver:
     """Bind queue access to the authenticated operator and daemon conversation.
 
@@ -218,6 +228,50 @@ class WebMessageQueueRegistry:
     def scope_count(self) -> int:
         """Current number of retained scoped queues."""
         return len(self._queues)
+
+    async def known_scopes(self) -> tuple[_KnownQueueScope, ...]:
+        """Return bounded daemon-internal metadata for retained queue scopes."""
+        async with self._lock:
+            return tuple(
+                _KnownQueueScope(
+                    scope_id=scope_id,
+                    incarnation=queue.incarnation,
+                    principal_id=owner.principal_id,
+                    conversation_uid=owner.conversation_uid,
+                )
+                for scope_id, queue in self._queues.items()
+                if (owner := self._scope_owners.get(scope_id)) is not None
+                and owner.conversation_uid is not None
+            )
+
+    @asynccontextmanager
+    async def acquire_existing_scope(
+        self, binding: _KnownQueueScope
+    ) -> AsyncIterator[WebMessageQueue | None]:
+        """Lease one already-retained scope without creating a replacement."""
+        if not isinstance(binding, _KnownQueueScope):
+            raise TypeError("trusted retained scope metadata is required")
+        async with self._lock:
+            queue = self._queues.get(binding.scope_id)
+            owner = self._scope_owners.get(binding.scope_id)
+            if (
+                queue is None
+                or queue.incarnation != binding.incarnation
+                or owner
+                != _QueueScopeOwner(binding.principal_id, binding.conversation_uid)
+            ):
+                queue = None
+            else:
+                self._leases[binding.scope_id] = (
+                    self._leases.get(binding.scope_id, 0) + 1
+                )
+        try:
+            yield queue
+        finally:
+            if queue is not None:
+                async with self._lock:
+                    remaining = self._leases.get(binding.scope_id, 0) - 1
+                    self._leases[binding.scope_id] = max(0, remaining)
 
     def validates_attachment_owner_id(
         self,
@@ -405,8 +459,8 @@ def _snapshot_to_wire(snapshot: QueueSnapshot) -> dict[str, Any]:
                         "request_id": item.request_id,
                         "status": item.status.value,
                         "attempt_id": item.attempt_id,
-                        "payload_b64": base64.b64encode(item.payload).decode("ascii"),
-                        "attachment_refs": list(item.attachment_refs),
+                        "text_preview": item.text_preview,
+                        "attachment_labels": list(item.attachment_labels),
                     }
                     for item in batch.items
                 ],
@@ -753,6 +807,9 @@ def register_web_message_queue_handlers(
             raise ValueError("attachment staging is unavailable")
         operation_id = _required_text(params, "operation_id")
         mime = _required_text(params, "mime")
+        filename = params.get("filename", "Image")
+        if not isinstance(filename, str) or len(filename) > 1024:
+            raise ValueError("invalid image filename")
         encoded = params.get("payload_b64")
         if not isinstance(encoded, str):
             raise ValueError("invalid image payload")
@@ -769,8 +826,15 @@ def register_web_message_queue_handlers(
         attachment_scope = await attachment_registry.bind_scope(
             params, current_rpc_caller_context()
         )
-        receipt = await attachment_scope.stage(operation_id, mime, payload)
-        return {"ref": receipt.ref, "mime": receipt.mime, "size": receipt.size}
+        receipt = await attachment_scope.stage(
+            operation_id, mime, payload, filename=filename
+        )
+        return {
+            "ref": receipt.ref,
+            "mime": receipt.mime,
+            "size": receipt.size,
+            "filename": receipt.filename,
+        }
 
     async def _open_attachment(params: dict[str, Any]) -> dict[str, Any]:
         if attachment_registry is None:

@@ -165,14 +165,15 @@ export type WebMessageQueueAttachment = {
   ref: string;
   mime: string;
   size: number;
+  filename: string;
 };
 
 export type WebMessageQueueItemSnapshot = {
   request_id: string;
   status: "queued" | "dispatching" | "in_doubt";
   attempt_id: string | null;
-  payload_b64: string;
-  attachment_refs: string[];
+  text_preview: string;
+  attachment_labels: string[];
 };
 
 export type WebMessageQueueBatchSnapshot = {
@@ -191,6 +192,20 @@ export type WebMessageQueueSnapshot = {
   batches: WebMessageQueueBatchSnapshot[];
   /** False until the daemon has a bounded supervisor and atomic provider adapter. */
   dispatch_available: boolean;
+};
+
+/** Result of one daemon-owned batch dispatch attempt. */
+export type WebMessageQueueDispatchResult = {
+  status: "admitted" | "empty" | "busy" | "not_sent" | "in_doubt" | "stopped" | "closed" | "queued" | "dispatching";
+  accepted: boolean;
+  accepted_count?: number;
+  uncertain_count?: number;
+  scope_id?: string;
+  incarnation?: string;
+  batch_id?: string;
+  claim_id?: string | null;
+  revision?: number;
+  request_ids?: string[];
 };
 
 export type WebMessageQueueEnqueueRequest = {
@@ -1495,11 +1510,16 @@ export class EngineApi {
     image: Blob,
   ) {
     const query = new URLSearchParams({ conversation_uid: conversationUid });
+    const filename =
+      typeof File !== "undefined" && image instanceof File ? image.name : "Image";
     return this.json<WebMessageQueueAttachment>(
       `${this.webMessageQueuePath(sessionId)}/attachments/${encodeURIComponent(operationId)}?${query.toString()}`,
       {
         method: "PUT",
-        headers: { "Content-Type": image.type || "application/octet-stream" },
+        headers: {
+          "Content-Type": image.type || "application/octet-stream",
+          "X-File-Name": encodeURIComponent(filename),
+        },
         body: image,
       },
     );
@@ -1547,7 +1567,7 @@ export class EngineApi {
     batchId: string,
   ) {
     const query = new URLSearchParams({ conversation_uid: conversationUid });
-    return this.json<{ accepted: boolean }>(
+    return this.json<WebMessageQueueDispatchResult>(
       `${this.webMessageQueuePath(sessionId)}/batches/${encodeURIComponent(batchId)}/send-now?${query.toString()}`,
       { method: "POST" },
     );

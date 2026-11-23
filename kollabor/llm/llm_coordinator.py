@@ -9,7 +9,7 @@ import asyncio
 import logging
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, cast
 
@@ -19,6 +19,7 @@ from kollabor_agent.execution_context import remote_task_id
 from kollabor_agent.mcp_integration import MCPIntegration
 from kollabor_agent.queue_processor import (
     CancellationOrigin,
+    QueueHandoffInput,
     QueuedInput,
     QueueProcessor,
     TaggedInput,
@@ -74,6 +75,118 @@ from .status_service import StatusService
 from .streaming_handler import StreamingHandler
 
 logger = logging.getLogger(__name__)
+
+FORCE_SEND_STOP_TIMEOUT_SECONDS = 35.0
+
+
+class _QueueHandoffBatchLease:
+    """One in-process owner for a pre-reserved native queue handoff prefix."""
+
+    __slots__ = (
+        "uid",
+        "revision",
+        "scope_id",
+        "incarnation",
+        "batch_id",
+        "claim_id",
+        "request_ids",
+        "attempt_ids",
+        "processor",
+        "gate_token",
+        "reservations",
+        "generation",
+        "next_index",
+        "accepted_count",
+        "gate_released",
+        "drain_action_done",
+        "closed",
+    )
+
+    def __init__(
+        self,
+        *,
+        uid: str,
+        revision: int,
+        scope_id: str,
+        incarnation: str,
+        batch_id: str,
+        claim_id: str,
+        request_ids: tuple[str, ...],
+        processor: Any,
+        gate_token: object,
+        reservations: list[object | None],
+        generation: int,
+    ) -> None:
+        self.uid = uid
+        self.revision = revision
+        self.scope_id = scope_id
+        self.incarnation = incarnation
+        self.batch_id = batch_id
+        self.claim_id = claim_id
+        self.request_ids = request_ids
+        self.attempt_ids: set[str] = set()
+        self.processor = processor
+        self.gate_token = gate_token
+        self.reservations = reservations
+        self.generation = generation
+        self.next_index = 0
+        self.accepted_count = 0
+        self.gate_released = False
+        self.drain_action_done = False
+        self.closed = False
+
+
+class _ACPQueueHandoffBatchLease:
+    """Exact ACP orchestrator/runner token for one forced queue batch."""
+
+    __slots__ = (
+        "uid",
+        "revision",
+        "scope_id",
+        "incarnation",
+        "batch_id",
+        "claim_id",
+        "request_ids",
+        "attempt_ids",
+        "acp",
+        "runner",
+        "runner_token",
+        "next_index",
+        "accepted_count",
+        "in_doubt",
+        "closed",
+    )
+
+    def __init__(
+        self,
+        *,
+        uid: str,
+        revision: int,
+        scope_id: str,
+        incarnation: str,
+        batch_id: str,
+        claim_id: str,
+        request_ids: tuple[str, ...],
+        acp: Any,
+        runner: Any,
+        runner_token: object,
+        in_doubt: bool = False,
+    ) -> None:
+        self.uid = uid
+        self.revision = revision
+        self.scope_id = scope_id
+        self.incarnation = incarnation
+        self.batch_id = batch_id
+        self.claim_id = claim_id
+        self.request_ids = request_ids
+        self.attempt_ids: set[str] = set()
+        self.acp = acp
+        self.runner = runner
+        self.runner_token = runner_token
+        self.next_index = 0
+        self.accepted_count = 0
+        self.in_doubt = in_doubt
+        self.closed = False
 
 
 def _acp_unavailable_result(acp: Any) -> Dict[str, Any]:
@@ -453,6 +566,8 @@ class LLMService:
         # admission waits for all in-flight cleanup so an older background
         # cancel cannot reach a later remote turn.
         self._cancellation_cleanup_tasks: dict[int, asyncio.Task | None] = {}
+        self._queue_handoff_batch_lease: _QueueHandoffBatchLease | None = None
+        self._acp_queue_handoff_batch_lease: _ACPQueueHandoffBatchLease | None = None
 
         logger.info("Core LLM Service initialized")
 
@@ -566,6 +681,10 @@ class LLMService:
                     self._notify_web_queue_identity_change()
 
     def _notify_web_queue_identity_change(self) -> None:
+        self._wake_web_queue_runtime()
+
+    def _wake_web_queue_runtime(self) -> None:
+        """Wake daemon queue scheduling after identity or turn state changes."""
         try:
             runtime = self.event_bus.get_service("web_message_queue_runtime")
             wake = getattr(runtime, "wake_all", None)
@@ -575,13 +694,23 @@ class LLMService:
             logger.debug("WebUI queue wake after conversation transition failed")
 
     async def submit_queued_human_input(
-        self, message: MessageContent, *, queue_handoff: Any
+        self,
+        message: MessageContent,
+        *,
+        queue_handoff: Any,
+        batch_lease: object | None = None,
     ) -> Dict[str, Any]:
         """Admit one worker-owned item under the captured conversation fence."""
         from .queue_handoff import QueueHandoffContext
 
         if not isinstance(queue_handoff, QueueHandoffContext):
             return {"status": "rejected", "reason": "invalid_queue_capability"}
+        if queue_handoff.force_send:
+            return await self._submit_forced_queue_handoff(
+                message, queue_handoff, batch_lease
+            )
+        if batch_lease is not None:
+            return {"status": "rejected", "reason": "invalid_queue_batch"}
         async with self._conversation_admission_lock:
             current_uid = self._current_conversation_uid()
             current_revision = self.get_conversation_revision()
@@ -595,7 +724,470 @@ class LLMService:
                 source=UserInputSource.STATE_RPC,
                 request_id=queue_handoff.request_id,
                 queue_handoff=queue_handoff,
+                force_next_turn=queue_handoff.force_send,
             )
+
+    async def begin_queue_handoff_batch(
+        self,
+        *,
+        conversation_uid: str,
+        conversation_revision: int,
+        queue_scope_id: str,
+        queue_incarnation: str,
+        batch_id: str,
+        claim_id: str,
+        request_ids: tuple[str, ...],
+    ) -> object | None:
+        """Reserve the full native prefix and stop the active turn once.
+
+        The returned object is an in-process capability. It is never accepted
+        from a client or serialized through RPC.
+        """
+        if (
+            not isinstance(conversation_uid, str)
+            or not conversation_uid
+            or isinstance(conversation_revision, bool)
+            or not isinstance(conversation_revision, int)
+            or conversation_revision < 0
+            or any(
+                not isinstance(value, str) or not value
+                for value in (
+                    queue_scope_id,
+                    queue_incarnation,
+                    batch_id,
+                    claim_id,
+                )
+            )
+            or not isinstance(request_ids, tuple)
+            or not request_ids
+            or any(not isinstance(item, str) or not item for item in request_ids)
+            or len(set(request_ids)) != len(request_ids)
+            or self._queue_handoff_batch_lease is not None
+            or getattr(self, "_acp_queue_handoff_batch_lease", None) is not None
+        ):
+            return None
+        if (
+            self._current_conversation_uid() != conversation_uid
+            or self.get_conversation_revision() != conversation_revision
+        ):
+            return None
+        acp = self._active_acp()
+        selected_acp, _ = self._profile_selects_acp()
+        if selected_acp or acp is not None:
+            if acp is None:
+                return None
+            runner = getattr(acp, "_runner", None)
+            begin = getattr(runner, "begin_queue_handoff_batch", None)
+            if not callable(begin):
+                return None
+            in_doubt = False
+            try:
+                runner_token = await begin(request_ids)
+            except ACPError as exc:
+                if getattr(exc, "error_class", None) != "queue_batch_in_doubt":
+                    return None
+                runner_token = getattr(runner, "_queue_handoff_batch", None)
+                if runner_token is None:
+                    return None
+                in_doubt = True
+            if runner_token is None:
+                return None
+            if (
+                acp is not self._active_acp()
+                or runner is not getattr(acp, "_runner", None)
+                or self._current_conversation_uid() != conversation_uid
+                or self.get_conversation_revision() != conversation_revision
+            ):
+                mark_in_doubt = getattr(runner, "mark_queue_handoff_in_doubt", None)
+                if callable(mark_in_doubt):
+                    mark_in_doubt(runner_token)
+                in_doubt = True
+            lease = _ACPQueueHandoffBatchLease(
+                uid=conversation_uid,
+                revision=conversation_revision,
+                scope_id=queue_scope_id,
+                incarnation=queue_incarnation,
+                batch_id=batch_id,
+                claim_id=claim_id,
+                request_ids=request_ids,
+                acp=acp,
+                runner=runner,
+                runner_token=runner_token,
+                in_doubt=(
+                    in_doubt or getattr(runner_token, "in_doubt", False) is True
+                ),
+            )
+            self._acp_queue_handoff_batch_lease = lease
+            return lease
+
+        processor = getattr(self, "_queue_processor", None)
+        begin = getattr(processor, "begin_forced_send", None)
+        end = getattr(processor, "end_forced_send", None)
+        reserve = getattr(processor, "reserve_admission_slot", None)
+        refresh = getattr(processor, "refresh_admission_slot", None)
+        release = getattr(processor, "release_admission_slot", None)
+        if not all(callable(method) for method in (begin, end, reserve, refresh, release)):
+            return None
+        max_size = getattr(processor, "max_queue_size", 0)
+        if (
+            isinstance(max_size, bool)
+            or not isinstance(max_size, int)
+            or len(request_ids) > max_size
+        ):
+            return None
+
+        try:
+            gate_token = await begin()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
+        reservations: list[object | None] = []
+        generation = getattr(processor, "cancel_generation", 0)
+        if isinstance(generation, bool) or not isinstance(generation, int):
+            end(gate_token)
+            return None
+        lease: _QueueHandoffBatchLease | None = None
+        initiated_stop = False
+        try:
+            if (
+                getattr(processor, "cancel_processing", False)
+                and getattr(processor, "cancel_origin", None) != "human"
+            ):
+                return None
+            for _ in request_ids:
+                reservation = reserve()
+                if reservation is None:
+                    return None
+                reservations.append(reservation)
+
+            if self.is_processing:
+                generation = self.cancel_current_request(
+                    origin="human", preserve_queued=True
+                )
+                initiated_stop = True
+                if generation is None or not await self._await_forced_native_stop(generation):
+                    return None
+                if (
+                    getattr(processor, "cancel_generation", None) != generation
+                    or getattr(processor, "cancel_origin", None) != "human"
+                    or not getattr(processor, "cancel_processing", False)
+                ):
+                    return None
+                if any(
+                    not refresh(reservation, expected_generation=generation)
+                    for reservation in reservations
+                ):
+                    return None
+
+            if (
+                self._current_conversation_uid() != conversation_uid
+                or self.get_conversation_revision() != conversation_revision
+                or getattr(processor, "cancel_generation", None) != generation
+            ):
+                return None
+
+            lease = _QueueHandoffBatchLease(
+                uid=conversation_uid,
+                revision=conversation_revision,
+                scope_id=queue_scope_id,
+                incarnation=queue_incarnation,
+                batch_id=batch_id,
+                claim_id=claim_id,
+                request_ids=request_ids,
+                processor=processor,
+                gate_token=gate_token,
+                reservations=reservations,
+                generation=generation,
+            )
+            self._queue_handoff_batch_lease = lease
+            return lease
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Queue handoff batch preparation failed closed")
+            return None
+        finally:
+            if lease is None:
+                for reservation in reservations:
+                    if reservation is not None:
+                        release(reservation)
+                end(gate_token)
+                if initiated_stop and generation is not None:
+                    self.create_background_task(
+                        lambda: self._resume_queue_after_forced_stop(generation),
+                        name=f"resume_queue_after_handoff_prepare_{generation}",
+                    )
+
+    async def _submit_forced_queue_handoff(
+        self, message: MessageContent, queue_handoff: Any, batch_lease: object | None
+    ) -> Dict[str, Any]:
+        from .queue_handoff import QueueHandoffContext
+
+        if isinstance(batch_lease, _ACPQueueHandoffBatchLease):
+            return await self._submit_forced_acp_queue_handoff(
+                message, queue_handoff, batch_lease
+            )
+
+        lease = self._queue_handoff_batch_lease
+        if (
+            not isinstance(queue_handoff, QueueHandoffContext)
+            or lease is None
+            or batch_lease is not lease
+            or lease.closed
+            or lease.next_index >= len(lease.request_ids)
+            or lease.request_ids[lease.next_index] != queue_handoff.request_id
+            or lease.uid != queue_handoff.conversation_uid
+            or lease.revision != queue_handoff.conversation_revision
+            or lease.scope_id != queue_handoff.queue_scope_id
+            or lease.incarnation != queue_handoff.queue_incarnation
+            or lease.batch_id != queue_handoff.batch_id
+            or lease.claim_id != queue_handoff.claim_id
+            or not queue_handoff.attempt_id
+            or queue_handoff.attempt_id in lease.attempt_ids
+            or lease.gate_released
+        ):
+            return {"status": "rejected", "reason": "invalid_queue_batch"}
+        reservation = lease.reservations[lease.next_index]
+        if reservation is None:
+            return {"status": "rejected", "reason": "invalid_queue_batch"}
+        async with self._conversation_admission_lock:
+            if (
+                self._queue_handoff_batch_lease is not lease
+                or lease.closed
+                or lease.gate_released
+                or lease.next_index >= len(lease.request_ids)
+                or lease.request_ids[lease.next_index] != queue_handoff.request_id
+                or queue_handoff.attempt_id in lease.attempt_ids
+                or not lease.processor.owns_current_admission_slot(reservation)
+                or getattr(lease.processor, "cancel_generation", None)
+                != lease.generation
+                or not lease.processor.owns_forced_send(lease.gate_token)
+                or self._current_conversation_uid() != lease.uid
+                or self.get_conversation_revision() != lease.revision
+            ):
+                return {"status": "rejected", "reason": "stale_conversation"}
+            result = await self.submit_human_input(
+                message,
+                source=UserInputSource.STATE_RPC,
+                request_id=queue_handoff.request_id,
+                queue_handoff=queue_handoff,
+                force_next_turn=True,
+                _force_gate_held=True,
+                _force_reservation=reservation,
+                _force_gate_token=lease.gate_token,
+            )
+        if queue_handoff.provider_custody_id:
+            lease.reservations[lease.next_index] = None
+            lease.attempt_ids.add(queue_handoff.attempt_id)
+            lease.next_index += 1
+            lease.accepted_count += 1
+        elif (
+            queue_handoff.provider_admission_started
+            or queue_handoff.history_row_preexisting
+            or queue_handoff.recording_status == "uncertain"
+        ):
+            raise RuntimeError("queue handoff admission outcome is uncertain")
+        return result
+
+    async def _submit_forced_acp_queue_handoff(
+        self,
+        message: MessageContent,
+        queue_handoff: Any,
+        lease: _ACPQueueHandoffBatchLease,
+    ) -> Dict[str, Any]:
+        """Admit one ACP item under the exact runner-owned batch token."""
+        from .queue_handoff import QueueHandoffContext
+
+        validate = getattr(lease.runner, "validate_queue_handoff_batch", None)
+        if (
+            not isinstance(queue_handoff, QueueHandoffContext)
+            or lease.in_doubt
+            or lease.closed
+            or getattr(self, "_acp_queue_handoff_batch_lease", None) is not lease
+            or self._active_acp() is not lease.acp
+            or getattr(lease.acp, "_runner", None) is not lease.runner
+            or lease.next_index >= len(lease.request_ids)
+            or lease.request_ids[lease.next_index] != queue_handoff.request_id
+            or queue_handoff.conversation_uid != lease.uid
+            or queue_handoff.conversation_revision != lease.revision
+            or queue_handoff.queue_scope_id != lease.scope_id
+            or queue_handoff.queue_incarnation != lease.incarnation
+            or queue_handoff.batch_id != lease.batch_id
+            or queue_handoff.claim_id != lease.claim_id
+            or not queue_handoff.force_send
+            or not queue_handoff.attempt_id
+            or queue_handoff.attempt_id in lease.attempt_ids
+            or not callable(validate)
+            or validate(lease.runner_token, queue_handoff.request_id) is not True
+        ):
+            return {"status": "rejected", "reason": "invalid_queue_batch"}
+
+        async with self._conversation_admission_lock:
+            if (
+                getattr(self, "_acp_queue_handoff_batch_lease", None) is not lease
+                or lease.in_doubt
+                or lease.closed
+                or self._active_acp() is not lease.acp
+                or getattr(lease.acp, "_runner", None) is not lease.runner
+                or self._current_conversation_uid() != lease.uid
+                or self.get_conversation_revision() != lease.revision
+                or lease.next_index >= len(lease.request_ids)
+                or lease.request_ids[lease.next_index] != queue_handoff.request_id
+                or validate(lease.runner_token, queue_handoff.request_id) is not True
+            ):
+                return {"status": "rejected", "reason": "stale_conversation"}
+            result = await self.submit_human_input(
+                message,
+                source=UserInputSource.STATE_RPC,
+                request_id=queue_handoff.request_id,
+                queue_handoff=queue_handoff,
+                force_next_turn=True,
+                _force_gate_held=True,
+                _force_acp_batch_token=lease.runner_token,
+            )
+
+        if (
+            queue_handoff.recording_status == "uncertain"
+            or queue_handoff.history_row_preexisting
+            or (
+                queue_handoff.provider_admission_started
+                and not queue_handoff.provider_custody_id
+            )
+        ):
+            lease.in_doubt = True
+            mark_in_doubt = getattr(lease.runner, "mark_queue_handoff_in_doubt", None)
+            if callable(mark_in_doubt):
+                mark_in_doubt(lease.runner_token)
+            raise RuntimeError("ACP queue admission outcome is uncertain")
+        if (
+            queue_handoff.provider_custody_id
+            and queue_handoff.recording_status == "recorded"
+        ):
+            lease.attempt_ids.add(queue_handoff.attempt_id)
+            lease.next_index += 1
+            lease.accepted_count += 1
+        elif queue_handoff.provider_custody_id:
+            lease.in_doubt = True
+            mark_in_doubt = getattr(lease.runner, "mark_queue_handoff_in_doubt", None)
+            if callable(mark_in_doubt):
+                mark_in_doubt(lease.runner_token)
+            raise RuntimeError("ACP queue admission outcome is uncertain")
+        return result
+
+    def finish_queue_handoff_batch(
+        self,
+        batch_lease: object,
+        *,
+        accepted_count: int,
+        uncertain: bool,
+    ) -> bool:
+        """Release one forced gate and start/resume native work exactly once."""
+        acp_lease = getattr(self, "_acp_queue_handoff_batch_lease", None)
+        if acp_lease is not None:
+            if (
+                batch_lease is not acp_lease
+                or acp_lease.closed
+                or type(accepted_count) is not int
+                or accepted_count != acp_lease.accepted_count
+                or not isinstance(uncertain, bool)
+            ):
+                return False
+            finish_acp = getattr(acp_lease.runner, "finish_queue_handoff_batch", None)
+            if not callable(finish_acp):
+                acp_lease.in_doubt = True
+                return False
+            if uncertain or acp_lease.in_doubt:
+                acp_lease.in_doubt = True
+                try:
+                    finish_acp(
+                        acp_lease.runner_token,
+                        accepted_count=accepted_count,
+                        uncertain=True,
+                    )
+                except Exception:
+                    pass
+                return False
+            if (
+                self._active_acp() is not acp_lease.acp
+                or getattr(acp_lease.acp, "_runner", None) is not acp_lease.runner
+            ):
+                acp_lease.in_doubt = True
+                mark_in_doubt = getattr(
+                    acp_lease.runner, "mark_queue_handoff_in_doubt", None
+                )
+                if callable(mark_in_doubt):
+                    mark_in_doubt(acp_lease.runner_token)
+                return False
+            try:
+                if finish_acp(
+                    acp_lease.runner_token,
+                    accepted_count=accepted_count,
+                    uncertain=False,
+                ) is not True:
+                    acp_lease.in_doubt = True
+                    return False
+            except Exception:
+                acp_lease.in_doubt = True
+                return False
+            acp_lease.closed = True
+            self._acp_queue_handoff_batch_lease = None
+            return True
+
+        lease = self._queue_handoff_batch_lease
+        if (
+            lease is None
+            or batch_lease is not lease
+            or lease.closed
+            or type(accepted_count) is not int
+            or accepted_count != lease.accepted_count
+            or not isinstance(uncertain, bool)
+        ):
+            return False
+        release = getattr(lease.processor, "release_admission_slot", None)
+        end = getattr(lease.processor, "end_forced_send", None)
+        owns_slot = getattr(lease.processor, "owns_admission_slot", None)
+        clear = getattr(lease.processor, "clear_force_cancellation", None)
+        if not callable(release) or not callable(end) or not callable(owns_slot):
+            return False
+        for index, reservation in enumerate(lease.reservations):
+            if reservation is not None:
+                if owns_slot(reservation) and not release(reservation):
+                    return False
+                lease.reservations[index] = None
+        if not lease.gate_released:
+            if not end(lease.gate_token):
+                return False
+            lease.gate_released = True
+
+        should_drain = False
+        current_generation = getattr(lease.processor, "cancel_generation", None)
+        if current_generation == lease.generation:
+            if getattr(lease.processor, "cancel_processing", False):
+                if (
+                    getattr(lease.processor, "cancel_origin", None) == "human"
+                    and callable(clear)
+                    and clear(lease.generation)
+                ):
+                    should_drain = True
+            else:
+                should_drain = True
+
+        if should_drain and not lease.drain_action_done:
+            try:
+                self.create_background_task(
+                    lambda: self._process_queue(), name="queue_handoff_process_queue"
+                )
+            except Exception:
+                # The gate is released but task creation is uncertain. Retain
+                # this exact lease so callers fail closed instead of starting
+                # a competing batch.
+                return False
+            lease.drain_action_done = True
+
+        lease.closed = True
+        self._queue_handoff_batch_lease = None
+        return True
 
     def _init_tools_and_parsers(self, config, event_bus, renderer):
         """Initialize hook system, MCP integration, response parser, tool executor, and display/context services."""
@@ -2001,11 +2593,25 @@ class LLMService:
 
     async def _process_queue(self):
         """Process queued messages. Delegates to QueueProcessor."""
-        await self._queue_processor.process_queue(
-            task_manager=self._task_manager,
-            process_message_batch_fn=self._process_message_batch,
-            continue_conversation_fn=self._continue_conversation,
-        )
+        wait_force = getattr(self._queue_processor, "wait_for_forced_send", None)
+        if callable(wait_force):
+            await wait_force()
+        # Several input paths can schedule a drain while an earlier task is
+        # waking. Only one consumer may own the queue; in particular, a queued
+        # drain must wait behind a forced-send reservation.
+        if self.is_processing:
+            return
+        try:
+            await self._queue_processor.process_queue(
+                task_manager=self._task_manager,
+                process_message_batch_fn=self._process_message_batch,
+                continue_conversation_fn=self._continue_conversation,
+            )
+        finally:
+            # Normal durable queue work waits for an active turn to settle.
+            # This wake happens after QueueProcessor clears its active state,
+            # so the runtime can re-read the queue and dispatch the next batch.
+            self._wake_web_queue_runtime()
 
     async def _process_message_batch(self, messages: List[MessageContent]):
         """Process a batch of messages. Delegates to QueueProcessor."""
@@ -2334,6 +2940,10 @@ class LLMService:
         request_id: str | None = None,
         operator_source: str | None = None,
         queue_handoff: Any = None,
+        queue_handoff_batch: object | None = None,
+        force_next_turn: bool = False,
+        force_reservation: object | None = None,
+        force_gate_token: object | None = None,
     ) -> Dict[str, Any]:
         """Process user input through the LLM.
 
@@ -2383,8 +2993,35 @@ class LLMService:
                 not isinstance(queue_handoff, QueueHandoffContext)
                 or not isinstance(request_id, str)
                 or request_id != queue_handoff.request_id
+                or queue_handoff.force_send != force_next_turn
             ):
                 return {"status": "rejected", "reason": "invalid_queue_capability"}
+        if not isinstance(force_next_turn, bool):
+            return {"status": "rejected", "reason": "invalid_force_send"}
+        if force_next_turn:
+            processor = getattr(self, "_queue_processor", None)
+            owns_gate = getattr(processor, "owns_forced_send", None)
+            if not callable(owns_gate) or not owns_gate(force_gate_token):
+                return {"status": "rejected", "reason": "invalid_force_send"}
+        if not force_next_turn:
+            processor = getattr(self, "_queue_processor", None)
+            wait_force = getattr(processor, "wait_for_forced_send", None)
+            if callable(wait_force):
+                await wait_force()
+        elif queue_handoff is None or self._active_acp() is None:
+            processor = getattr(self, "_queue_processor", None)
+            owns_reservation = getattr(processor, "owns_admission_slot", None)
+            owns_current_reservation = getattr(
+                processor, "owns_current_admission_slot", None
+            )
+            if (
+                force_reservation is None
+                or not callable(owns_reservation)
+                or not owns_reservation(force_reservation)
+                or not callable(owns_current_reservation)
+                or not owns_current_reservation(force_reservation)
+            ):
+                return {"status": "rejected", "reason": "native_queue_stopped"}
         if (
             contains_image_content(normalized_message)
             and not self.supports_image_input()
@@ -2432,6 +3069,7 @@ class LLMService:
                     "origin_context": origin_context,
                     "operator_inputs": operator_inputs,
                     "queue_handoff": queue_handoff,
+                    "queue_handoff_batch": queue_handoff_batch,
                 },
                 input_source if operator_inputs else UserInputSource.TUI.value,
             )
@@ -2441,6 +3079,7 @@ class LLMService:
                 normalized_message,
                 display_text,
                 queue_handoff,
+                force_reservation=force_reservation,
             )
 
         trusted_origin_context = (
@@ -2484,7 +3123,18 @@ class LLMService:
 
         # Reset turn_completed flag
         self.turn_completed = False
-        self.cancel_processing = False
+        if force_next_turn and queue_handoff is None and self._active_acp() is None:
+            processor = getattr(self, "_queue_processor", None)
+            if getattr(processor, "cancel_processing", False):
+                generation = getattr(processor, "cancel_generation", None)
+                clear = getattr(processor, "clear_force_cancellation", None)
+                if not callable(clear) or not clear(generation):
+                    return {"status": "rejected", "reason": "native_queue_stopped"}
+        elif not force_next_turn:
+            # Ordinary user input resumes the chat. Forced admission clears
+            # only its exact human-owned Stop generation after fencing its
+            # reservation above; it never erases a newer remote/external stop.
+            self.cancel_processing = False
         self.cancellation_message_shown = False
 
         # Log user message. Admission claims this turn's serial at the same
@@ -2520,32 +3170,45 @@ class LLMService:
         # zero-id TaggedInput so the capture travels with the item (#676); a
         # bare string could not carry it, and an empty request_ids tuple
         # behaves like bare content in every batch-pipeline consumer.
-        try:
-            admitted = await self._enqueue_with_overflow_strategy(
-                QueuedInput(
-                    normalized_message,
-                    voice or {},
-                    trusted_origin_context,
-                    parent_uuid=admitted_parent_uuid,
-                    admission_serial=turn_serial,
-                    operator_inputs=operator_inputs,
-                )
-                if voice or trusted_origin_context
-                else TaggedInput(
-                    normalized_message,
-                    (request_id,) if request_id else (),
-                    parent_uuid=admitted_parent_uuid,
-                    admission_serial=turn_serial,
-                    operator_inputs=operator_inputs,
-                )
+        queued_item = (
+            QueuedInput(
+                normalized_message,
+                voice or {},
+                trusted_origin_context,
+                parent_uuid=admitted_parent_uuid,
+                admission_serial=turn_serial,
+                operator_inputs=operator_inputs,
             )
+            if voice or trusted_origin_context
+            else TaggedInput(
+                normalized_message,
+                (request_id,) if request_id else (),
+                parent_uuid=admitted_parent_uuid,
+                admission_serial=turn_serial,
+                operator_inputs=operator_inputs,
+            )
+        )
+        try:
+            if force_next_turn:
+                commit = getattr(self._queue_processor, "commit_admission_slot", None)
+                admitted = bool(
+                    callable(commit)
+                    and commit(force_reservation, queued_item, priority=True)
+                )
+                if not admitted:
+                    self._queue_processor._end_dropped(
+                        queued_item,
+                        "The forced message could not enter the next turn. Retry it.",
+                    )
+            else:
+                admitted = await self._enqueue_with_overflow_strategy(queued_item)
         except RuntimeError:
             # The overflow strategy refused it, and the queue already ended its
             # stream. Raising here would make the hook pipeline retry this turn.
             admitted = False
 
         # Start processing if not already running
-        if not self.is_processing:
+        if not self.is_processing and not force_next_turn:
             self.create_background_task(
                 lambda: self._process_queue(), name="process_queue"
             )
@@ -2559,7 +3222,12 @@ class LLMService:
         return {"status": "queued"}
 
     async def _admit_queue_handoff_native(
-        self, message: MessageContent, display_text: str, queue_handoff: Any
+        self,
+        message: MessageContent,
+        display_text: str,
+        queue_handoff: Any,
+        *,
+        force_reservation: object | None = None,
     ) -> Dict[str, Any]:
         """Persist and atomically admit a worker-owned native queue item."""
         from .queue_handoff import QueueHandoffContext
@@ -2577,35 +3245,97 @@ class LLMService:
         release = getattr(processor, "release_admission_slot", None)
         if not all(callable(method) for method in (reserve, commit, release)):
             return {"status": "rejected", "reason": "queue_admission_unavailable"}
-        reservation = reserve()
+        reservation = force_reservation if force_reservation is not None else reserve()
         if reservation is None:
             return {"status": "rejected", "reason": "native_queue_full"}
+        owns_reservation = getattr(processor, "owns_admission_slot", None)
+        if not callable(owns_reservation) or not owns_reservation(reservation):
+            return {"status": "rejected", "reason": "invalid_force_send"}
 
-        try:
-            turn_serial = self.claim_turn_serial()
-            parent_uuid = self.current_parent_uuid
-            row_uuid = await queue_handoff.record_user_history(
-                self.conversation_logger,
-                display_text,
-                parent_uuid=parent_uuid,
+        turn_serial = self.claim_turn_serial()
+        parent_uuid = self.current_parent_uuid
+        item: TaggedInput | None = None
+
+        def validate_identity() -> bool:
+            return (
+                self._current_conversation_uid() == queue_handoff.conversation_uid
+                and self.get_conversation_revision()
+                == queue_handoff.conversation_revision
             )
-            self.publish_cursor(row_uuid, turn_serial)
-            item = TaggedInput(
+
+        def prepare_admission(row_uuid: str, _metadata: dict[str, Any]) -> bool:
+            nonlocal reservation, item
+            if not validate_identity():
+                return False
+            item = QueueHandoffInput(
                 message,
                 (queue_handoff.request_id,),
                 parent_uuid=row_uuid,
                 admission_serial=turn_serial,
+                queue_request_id=queue_handoff.request_id,
+                attempt_id=queue_handoff.attempt_id,
             )
             # The reservation and cancellation generation make this
             # synchronous put the native provider-queue custody boundary.
             queue_handoff.provider_admission_started = True
-            if not commit(reservation, item):
+            admitted = commit(
+                reservation, item, priority=queue_handoff.force_send
+            )
+            # commit consumes the token for both success and fenced refusal.
+            reservation = None
+            if not admitted:
                 queue_handoff.provider_admission_started = False
-                return {"status": "rejected", "reason": "native_queue_stopped"}
-            reservation = None  # commit consumed the one-use token
+                return False
             queue_handoff.provider_custody_id = (
                 f"native-queue:{queue_handoff.request_id}:{turn_serial}"
             )
+            return True
+
+        def rollback_admission(_row_uuid: str) -> bool:
+            if item is None:
+                return False
+            rollback = getattr(processor, "rollback_committed_admission", None)
+            if not callable(rollback) or rollback(item) is not True:
+                return False
+            queue_handoff.provider_admission_started = False
+            queue_handoff.provider_custody_id = None
+            return True
+
+        try:
+            row_uuid = await queue_handoff.record_user_history(
+                self.conversation_logger,
+                display_text,
+                prepare_admission=prepare_admission,
+                rollback_admission=rollback_admission,
+                validate_admission=validate_identity,
+                parent_uuid=parent_uuid,
+            )
+            self.publish_cursor(row_uuid, turn_serial)
+        except Exception as exc:
+            from kollabor_ai.conversation_logger import (
+                ConversationAppendConflict,
+                ConversationAppendRejected,
+            )
+
+            if isinstance(exc, ConversationAppendRejected):
+                return {"status": "rejected", "reason": "native_queue_stopped"}
+            if isinstance(exc, ConversationAppendConflict):
+                queue_handoff.history_row_preexisting = True
+            if (
+                queue_handoff.provider_admission_started
+                or queue_handoff.provider_custody_id
+                or queue_handoff.history_row_preexisting
+                or queue_handoff.recording_status == "uncertain"
+            ):
+                raise
+            # A definitive pre-custody persistence failure is a normal rejected
+            # input result. Raising would make the generic hook executor replay
+            # this exact queue request several times.
+            logger.error(
+                "Queue history admission failed before provider custody (%s)",
+                type(exc).__name__,
+            )
+            return {"status": "rejected", "reason": "history_persistence_failed"}
         finally:
             if reservation is not None:
                 release(reservation)
@@ -2616,7 +3346,7 @@ class LLMService:
             self.message_display_service.display_user_message(display_text)
         except Exception:
             logger.warning("Queue-admitted message display failed")
-        if not self.is_processing:
+        if not self.is_processing and not queue_handoff.force_send:
             try:
                 self.create_background_task(
                     lambda: self._process_queue(), name="process_queue"
@@ -2667,6 +3397,11 @@ class LLMService:
         thread_id: str | None = None,
         origin_context: dict[str, Any] | None = None,
         queue_handoff: Any = None,
+        _force_acp_batch_token: object | None = None,
+        force_next_turn: bool = False,
+        _force_gate_held: bool = False,
+        _force_reservation: object | None = None,
+        _force_gate_token: object | None = None,
     ) -> Dict[str, Any]:
         """Submit trusted human input through the canonical hook pipeline.
 
@@ -2677,14 +3412,57 @@ class LLMService:
         is_agent = source == "agent" and bool((origin_context or {}).get("authenticated"))
         if not isinstance(source, UserInputSource) and not is_agent:
             return {"status": "rejected", "reason": "invalid_input_source"}
+        if not isinstance(force_next_turn, bool):
+            return {"status": "rejected", "reason": "invalid_force_send"}
+        if _force_gate_held:
+            if not force_next_turn:
+                return {"status": "rejected", "reason": "invalid_force_send"}
+            if _force_acp_batch_token is not None:
+                acp = self._active_acp()
+                runner = getattr(acp, "_runner", None)
+                validate = getattr(runner, "validate_queue_handoff_batch", None)
+                if (
+                    acp is None
+                    or not callable(validate)
+                    or validate(_force_acp_batch_token, request_id) is not True
+                ):
+                    return {"status": "rejected", "reason": "native_queue_stopped"}
+            else:
+                owns_gate = getattr(self._queue_processor, "owns_forced_send", None)
+                if (
+                    not callable(owns_gate)
+                    or not owns_gate(_force_gate_token)
+                ):
+                    return {"status": "rejected", "reason": "invalid_force_send"}
+                if _force_reservation is not None:
+                    owns_current_slot = getattr(
+                        self._queue_processor, "owns_current_admission_slot", None
+                    )
+                    if not callable(owns_current_slot) or not owns_current_slot(
+                        _force_reservation
+                    ):
+                        return {"status": "rejected", "reason": "native_queue_stopped"}
         if queue_handoff is not None:
             from .queue_handoff import QueueHandoffContext
 
             if (
                 not isinstance(queue_handoff, QueueHandoffContext)
                 or request_id != queue_handoff.request_id
+                or queue_handoff.force_send != force_next_turn
             ):
                 return {"status": "rejected", "reason": "invalid_queue_capability"}
+        if force_next_turn and not _force_gate_held:
+            return await self._submit_forced_human_input(
+                message,
+                source=source,
+                pre_displayed=pre_displayed,
+                request_id=request_id,
+                thread_id=thread_id,
+                origin_context=origin_context,
+                queue_handoff=queue_handoff,
+            )
+        if not force_next_turn and _force_reservation is not None:
+            return {"status": "rejected", "reason": "invalid_force_send"}
         source_value = "agent" if is_agent else source.value
 
         acp = self._acp_service()
@@ -2706,6 +3484,10 @@ class LLMService:
                     "thread_id": thread_id,
                     "origin_context": dict(origin_context or {}),
                     "queue_handoff": queue_handoff,
+                    "queue_handoff_batch": _force_acp_batch_token,
+                    "force_next_turn": force_next_turn,
+                    "force_reservation": _force_reservation,
+                    "force_gate_token": _force_gate_token,
                 },
                 source_value,
             )
@@ -2739,6 +3521,337 @@ class LLMService:
             return {"status": "rejected", "reason": "invalid_input_result"}
 
         return {"status": "rejected", "reason": "input_handler_unavailable"}
+
+    async def _submit_forced_human_input(
+        self,
+        message: MessageContent,
+        *,
+        source: UserInputSource,
+        pre_displayed: bool,
+        request_id: str | None,
+        thread_id: str | None,
+        origin_context: dict[str, Any] | None,
+        queue_handoff: Any,
+    ) -> Dict[str, Any]:
+        """Stop a native turn to terminal settlement, then admit once at head."""
+        processor = getattr(self, "_queue_processor", None)
+        begin = getattr(processor, "begin_forced_send", None)
+        end = getattr(processor, "end_forced_send", None)
+        reserve = getattr(processor, "reserve_admission_slot", None)
+        refresh = getattr(processor, "refresh_admission_slot", None)
+        release = getattr(processor, "release_admission_slot", None)
+        if not all(callable(method) for method in (begin, end, reserve, refresh, release)):
+            return {"status": "rejected", "reason": "force_send_unavailable"}
+
+        acp = self._active_acp()
+        selected_acp, _ = self._profile_selects_acp()
+        if selected_acp and acp is None:
+            return _acp_unavailable_result(self._acp_service())
+
+        token = await begin()
+        reservation: object | None = None
+        generation: int | None = None
+        accepted = False
+        try:
+            # ACP decides between a confirmed steer and its own stop/next-turn
+            # fallback. Native input reserves capacity before stopping A, so a
+            # full provider queue cannot interrupt work and then reject B.
+            if acp is None:
+                processor_cancelled = getattr(processor, "cancel_processing", False)
+                if processor_cancelled:
+                    if getattr(processor, "cancel_origin", None) != "human":
+                        return {
+                            "status": "rejected",
+                            "reason": "force_stop_unconfirmed",
+                        }
+                    generation = getattr(processor, "cancel_generation", None)
+                reservation = reserve()
+                if reservation is None:
+                    return {"status": "rejected", "reason": "native_queue_full"}
+                if self.is_processing:
+                    generation = self.cancel_current_request(
+                        origin="human", preserve_queued=True
+                    )
+                    if generation is None or not await self._await_forced_native_stop(
+                        generation
+                    ):
+                        return {
+                            "status": "rejected",
+                            "reason": "force_stop_unconfirmed",
+                        }
+                    if (
+                        getattr(processor, "cancel_generation", None) != generation
+                        or getattr(processor, "cancel_origin", None) != "human"
+                        or not getattr(processor, "cancel_processing", False)
+                    ):
+                        return {
+                            "status": "rejected",
+                            "reason": "force_stop_unconfirmed",
+                        }
+                    if not refresh(
+                        reservation, expected_generation=generation
+                    ):
+                        return {
+                            "status": "rejected",
+                            "reason": "native_queue_full",
+                        }
+
+            result = await self.submit_human_input(
+                message,
+                source=source,
+                pre_displayed=pre_displayed,
+                request_id=request_id,
+                thread_id=thread_id,
+                origin_context=origin_context,
+                queue_handoff=queue_handoff,
+                force_next_turn=True,
+                _force_gate_held=True,
+                _force_reservation=reservation,
+                _force_gate_token=token,
+            )
+            accepted = isinstance(result, dict) and result.get("status") in {
+                "queued",
+                "injected",
+                "submitted",
+            }
+            if accepted and acp is None:
+                reservation = None  # process_user_input consumed the token
+                self.create_background_task(
+                    lambda: self._process_queue(), name="force_send_process_queue"
+                )
+            return result
+        finally:
+            if reservation is not None:
+                release(reservation)
+            end(token)
+            if generation is not None and not accepted:
+                self.create_background_task(
+                    lambda: self._resume_queue_after_forced_stop(generation),
+                    name=f"resume_queue_after_force_{generation}",
+                )
+
+    async def submit_forced_human_batch(
+        self,
+        *,
+        count: int,
+        expected_active_request_ids: tuple[str, ...],
+        submit_one: Callable[[int, object, object], Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        """Stop the captured native owner, then admit one ordered batch once.
+
+        The caller owns user-message preparation and the normal input pipeline.
+        This boundary reserves every queue slot before stopping the active
+        turn, holds ordinary admissions until all batch members are handled,
+        and starts one drain after the ordered prefix is committed.
+        """
+        processor = getattr(self, "_queue_processor", None)
+        begin = getattr(processor, "begin_forced_send", None)
+        end = getattr(processor, "end_forced_send", None)
+        reserve = getattr(processor, "reserve_admission_slot", None)
+        refresh = getattr(processor, "refresh_admission_slot", None)
+        release = getattr(processor, "release_admission_slot", None)
+        if (
+            type(count) is not int
+            or count < 1
+            or not isinstance(expected_active_request_ids, tuple)
+            or any(not isinstance(item, str) or not item for item in expected_active_request_ids)
+            or len(set(expected_active_request_ids)) != len(expected_active_request_ids)
+            or not callable(begin)
+            or not callable(end)
+            or not callable(reserve)
+            or not callable(refresh)
+            or not callable(release)
+            or not callable(submit_one)
+        ):
+            return {
+                "accepted": False,
+                "reason": "invalid_force_batch",
+                "results": [],
+            }
+
+        max_size = getattr(processor, "max_queue_size", 0)
+        if isinstance(max_size, bool) or not isinstance(max_size, int) or count > max_size:
+            return {
+                "accepted": False,
+                "reason": "native_queue_full",
+                "results": [{"accepted": False, "reason": "native_queue_full"} for _ in range(count)],
+            }
+
+        token = await begin()
+        reservations: list[object] = []
+        results: list[dict[str, Any]] = []
+        accepted_count = 0
+        failure: str | None = None
+        generation = getattr(processor, "cancel_generation", 0)
+        if isinstance(generation, bool) or not isinstance(generation, int):
+            end(token)
+            return {
+                "accepted": False,
+                "reason": "force_stop_unconfirmed",
+                "results": [],
+            }
+        should_process = False
+        should_resume = False
+        try:
+            for _ in range(count):
+                reservation = reserve()
+                if reservation is None:
+                    failure = "native_queue_full"
+                    break
+                reservations.append(reservation)
+
+            if failure is None and self.is_processing:
+                active_ids = getattr(processor, "active_request_ids", ())
+                active_set = (
+                    set(active_ids)
+                    if isinstance(active_ids, (tuple, list, set, frozenset))
+                    and all(isinstance(item, str) for item in active_ids)
+                    else set()
+                )
+                if (
+                    not expected_active_request_ids
+                    or not set(expected_active_request_ids).issubset(active_set)
+                ):
+                    failure = "turn_changed"
+                else:
+                    generation = self.cancel_current_request(
+                        origin="human", preserve_queued=True
+                    )
+                    if generation is None or not await self._await_forced_native_stop(generation):
+                        failure = "force_stop_unconfirmed"
+                    elif (
+                        getattr(processor, "cancel_generation", None) != generation
+                        or getattr(processor, "cancel_origin", None) != "human"
+                        or not getattr(processor, "cancel_processing", False)
+                    ):
+                        failure = "force_stop_unconfirmed"
+                    elif any(
+                        not refresh(
+                            reservation, expected_generation=generation
+                        )
+                        for reservation in reservations
+                    ):
+                        failure = "native_queue_full"
+
+            if failure is None:
+                for index, reservation in enumerate(reservations):
+                    try:
+                        result = await submit_one(index, reservation, token)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.error(
+                            "Forced message admission failed (%s)",
+                            type(exc).__name__,
+                        )
+                        result = {
+                            "accepted": False,
+                            "reason": "input_not_accepted",
+                            "possibly_accepted": True,
+                        }
+                    if not isinstance(result, dict):
+                        result = {"accepted": False, "reason": "input_not_accepted"}
+                    results.append(result)
+                    if result.get("accepted") is not True:
+                        failure = str(result.get("reason") or "input_not_accepted")
+                        break
+                    accepted_count += 1
+
+            if failure is not None:
+                results.extend(
+                    {"accepted": False, "reason": failure}
+                    for _ in range(count - len(results))
+                )
+        finally:
+            for reservation in reservations:
+                release(reservation)
+            end(token)
+            if accepted_count:
+                if getattr(processor, "cancel_generation", None) == generation:
+                    if getattr(processor, "cancel_processing", False):
+                        clear = getattr(processor, "clear_force_cancellation", None)
+                        should_process = bool(
+                            callable(clear) and clear(generation)
+                        )
+                    else:
+                        should_process = True
+            elif generation is not None:
+                current_generation = getattr(processor, "cancel_generation", None)
+                if current_generation == generation:
+                    if getattr(processor, "cancel_processing", False):
+                        should_resume = True
+                    elif not self.is_processing:
+                        should_process = True
+            if should_process:
+                self.create_background_task(
+                    lambda: self._process_queue(), name="force_send_process_queue"
+                )
+            elif should_resume and generation is not None:
+                self.create_background_task(
+                    lambda: self._resume_queue_after_forced_stop(generation),
+                    name=f"resume_queue_after_force_{generation}",
+                )
+
+        return {
+            "accepted": accepted_count > 0,
+            "complete": accepted_count == count,
+            "accepted_count": accepted_count,
+            "reason": failure,
+            "results": results,
+        }
+
+    async def _await_forced_native_stop(self, generation: int) -> bool:
+        """Require the old queue drain and its cancellation cleanup to settle."""
+        processor = getattr(self, "_queue_processor", None)
+        wait_idle = getattr(processor, "wait_until_idle", None)
+        if not callable(wait_idle):
+            return False
+        deadline = asyncio.get_running_loop().time() + FORCE_SEND_STOP_TIMEOUT_SECONDS
+        try:
+            async with asyncio.timeout(FORCE_SEND_STOP_TIMEOUT_SECONDS):
+                await wait_idle()
+        except TimeoutError:
+            return False
+
+        if getattr(processor, "cancel_generation", None) != generation:
+            return False
+        cleanup_tasks = getattr(self, "_cancellation_cleanup_tasks", {})
+        if isinstance(cleanup_tasks, dict) and generation in cleanup_tasks:
+            task = cleanup_tasks[generation]
+            if not isinstance(task, asyncio.Task):
+                return False
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return False
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+            except TimeoutError:
+                return False
+            except Exception:
+                return False
+        return (
+            not self.is_processing
+            and getattr(processor, "cancel_generation", None) == generation
+        )
+
+    async def _resume_queue_after_forced_stop(self, generation: int) -> None:
+        """A failed force admission still releases preserved older queue work."""
+        processor = getattr(self, "_queue_processor", None)
+        wait_idle = getattr(processor, "wait_until_idle", None)
+        clear = getattr(processor, "clear_force_cancellation", None)
+        if not callable(wait_idle) or not callable(clear):
+            return
+        try:
+            async with asyncio.timeout(FORCE_SEND_STOP_TIMEOUT_SECONDS):
+                await wait_idle()
+                await processor.wait_for_forced_send()
+        except (TimeoutError, asyncio.CancelledError):
+            return
+        if clear(generation) and not processor.processing_queue.empty():
+            self.create_background_task(
+                lambda: self._process_queue(),
+                name=f"process_queue_after_force_{generation}",
+            )
 
     # --- MessageHandler delegation methods ---
 
@@ -2809,6 +3922,7 @@ class LLMService:
         """The one ACP admission: steer a running turn or queue a new one."""
         request_id = data.get("request_id") or uuid.uuid4().hex
         queue_handoff = data.get("queue_handoff")
+        queue_handoff_batch = data.get("queue_handoff_batch")
         if queue_handoff is not None:
             from .queue_handoff import QueueHandoffContext
 
@@ -2817,6 +3931,12 @@ class LLMService:
                 or queue_handoff.request_id != request_id
             ):
                 return {"status": "rejected", "reason": "invalid_queue_capability"}
+        if queue_handoff_batch is not None and (
+            queue_handoff is None or not queue_handoff.force_send
+        ):
+            return {"status": "rejected", "reason": "invalid_queue_batch"}
+        if queue_handoff is not None and queue_handoff.force_send and queue_handoff_batch is None:
+            return {"status": "rejected", "reason": "invalid_queue_batch"}
         origin = dict(data.get("origin_context") or {})
         origin.setdefault("operator", source != "agent")
         if not self._manual_relay_origin_authorized(origin):
@@ -2922,9 +4042,21 @@ class LLMService:
                 "reason": "remote conversation authority is no longer valid",
             }
 
+        if queue_handoff is not None:
+            return await self._admit_acp_queue_handoff(
+                acp,
+                queue_handoff,
+                message,
+                images,
+                source=source,
+                request_id=request_id,
+                thread_id=data.get("thread_id"),
+                origin=origin,
+                operator_inputs=tuple(data.get("operator_inputs") or ()),
+                queue_handoff_batch=queue_handoff_batch,
+            )
+
         try:
-            if queue_handoff is not None:
-                queue_handoff.provider_admission_started = True
             admission = acp.admit(
                 message, request_id=request_id, source=source,
                 thread_id=data.get("thread_id"),
@@ -2940,34 +4072,16 @@ class LLMService:
         except (RuntimeError, ValueError) as exc:
             error_class = getattr(exc, "error_class", None)
             if error_class == "queue_full" or "full" in str(exc).lower():
-                if queue_handoff is not None:
-                    queue_handoff.provider_admission_started = False
                 return {"status": "rejected", "reason": "acp_queue_full"}
-            if queue_handoff is not None and isinstance(exc, (ACPError, ValueError)):
-                # ACPOrchestrator/ACPRunner validation and lifecycle failures
-                # occur before their synchronous queue put. They prove no
-                # provider custody was acquired for this item.
-                queue_handoff.provider_admission_started = False
             if images and (
                 error_class == "images_unsupported" or "can't take images" in str(exc)
             ):
-                if queue_handoff is not None:
-                    queue_handoff.provider_admission_started = False
                 return {"status": "rejected", "reason": "This harness can't take images."}
-            if queue_handoff is not None and isinstance(exc, ACPSteeringUnconfirmed):
-                return {"status": "rejected", "reason": "steering_unconfirmed"}
             return _acp_unavailable_result(acp)
         except Exception as exc:
             if "full" in str(exc).lower():
-                if queue_handoff is not None:
-                    queue_handoff.provider_admission_started = False
                 return {"status": "rejected", "reason": "acp_queue_full"}
             return {"status": "rejected", "reason": "acp_admission_failed"}
-        if queue_handoff is not None:
-            queue_handoff.provider_custody_id = (
-                f"acp:{admission.generation}:{admission.turn_id}"
-            )
-            await acp.wait_for_queue_handoff_history(admission, queue_handoff)
         if voice and not voice.get("room_turn"):
             # A /voice mic turn's reply is spoken by this process's voice
             # plugin; a LiveKit room turn's audio is the voice runtime's.
@@ -2980,6 +4094,199 @@ class LLMService:
             "status": "queued",
             "request_id": admission.request_id,
             "turn_id": admission.turn_id,
+        }
+
+    async def _admit_acp_queue_handoff(
+        self,
+        acp: Any,
+        queue_handoff: Any,
+        message: str,
+        images: tuple[dict[str, Any], ...],
+        *,
+        source: str,
+        request_id: str,
+        thread_id: str | None,
+        origin: dict[str, Any],
+        operator_inputs: tuple[dict[str, str], ...],
+        queue_handoff_batch: object | None = None,
+    ) -> Dict[str, Any]:
+        """Admit ACP synchronously inside the durable history transaction."""
+        from .queue_handoff import QueueHandoffContext
+
+        if not isinstance(queue_handoff, QueueHandoffContext):
+            return {"status": "rejected", "reason": "invalid_queue_capability"}
+        logger_service = getattr(self, "conversation_logger", None)
+        if logger_service is None:
+            return {"status": "rejected", "reason": "queue_history_unavailable"}
+        admitted: list[Any] = []
+
+        def validate_identity() -> bool:
+            try:
+                identity = (
+                    self._current_conversation_uid(),
+                    self.get_conversation_revision(),
+                )
+            except Exception:
+                identity = (None, None)
+            if identity != (
+                queue_handoff.conversation_uid,
+                queue_handoff.conversation_revision,
+            ):
+                queue_handoff.admission_failure_reason = "stale_conversation"
+                return False
+            if not self._manual_relay_origin_authorized(origin):
+                queue_handoff.admission_failure_reason = "remote_authority_revoked"
+                return False
+            return True
+
+        def prepare_admission(
+            _row_uuid: str, row_metadata: dict[str, Any]
+        ) -> bool:
+            if not validate_identity():
+                return False
+            queue_handoff.provider_admission_started = True
+            try:
+                admission = acp.admit(
+                    message,
+                    request_id=request_id,
+                    source=source,
+                    thread_id=thread_id,
+                    origin=origin,
+                    record=False,
+                    defer_completion=True,
+                    defer_turn_history=True,
+                    operator_inputs=operator_inputs,
+                    **({"images": images} if images else {}),
+                    queue_handoff=queue_handoff,
+                    **(
+                        {"queue_handoff_batch": queue_handoff_batch}
+                        if queue_handoff_batch is not None
+                        else {}
+                    ),
+                )
+            except (ACPError, ValueError) as exc:
+                queue_handoff.provider_admission_started = False
+                error_class = getattr(exc, "error_class", None)
+                queue_handoff.admission_failure_reason = (
+                    "acp_queue_full"
+                    if error_class == "queue_full" or "full" in str(exc).lower()
+                    else "acp_admission_rejected"
+                )
+                return False
+            admitted.append(admission)
+            if admission.future.done() or admission.future.cancelled():
+                queue_handoff.admission_failure_reason = "acp_admission_not_owned"
+                if rollback_admission(_row_uuid):
+                    queue_handoff.provider_admission_started = False
+                else:
+                    queue_handoff.recording_status = "uncertain"
+                return False
+            row_metadata["turn_id"] = admission.turn_id
+            row_metadata["acp_turn_key"] = admission.history_key
+            queue_handoff.provider_custody_id = (
+                f"acp:{admission.generation}:{admission.turn_id}"
+            )
+            return True
+
+        def rollback_admission(_row_uuid: str) -> bool:
+            if not admitted:
+                return False
+            rollback = getattr(acp, "rollback_queue_handoff_admission", None)
+            if not callable(rollback):
+                return False
+            if queue_handoff_batch is not None:
+                rolled_back = rollback(
+                    admitted[0], queue_handoff_batch=queue_handoff_batch
+                )
+            else:
+                rolled_back = rollback(admitted[0])
+            if rolled_back is not True:
+                return False
+            queue_handoff.provider_admission_started = False
+            queue_handoff.provider_custody_id = None
+            return True
+
+        metadata: dict[str, Any] = {
+            "provider": "acp",
+            "request_id": request_id,
+            "source": source,
+            "thread_id": thread_id,
+        }
+        if operator_inputs:
+            metadata["operator_inputs"] = list(operator_inputs)
+        try:
+            await queue_handoff.record_user_history(
+                logger_service,
+                message,
+                prepare_admission=prepare_admission,
+                rollback_admission=rollback_admission,
+                validate_admission=validate_identity,
+                parent_uuid=self.current_parent_uuid,
+                message_metadata=metadata,
+            )
+        except Exception as exc:
+            from kollabor_ai.conversation_logger import ConversationAppendRejected
+
+            if isinstance(exc, ConversationAppendRejected):
+                return {
+                    "status": "rejected",
+                    "reason": queue_handoff.admission_failure_reason
+                    or "acp_admission_rejected",
+                }
+            if (
+                queue_handoff.provider_admission_started
+                or queue_handoff.provider_custody_id
+                or queue_handoff.history_row_preexisting
+                or queue_handoff.recording_status == "uncertain"
+            ):
+                raise
+            logger.error(
+                "ACP queue history failed before provider custody (%s)",
+                type(exc).__name__,
+            )
+            return {"status": "rejected", "reason": "history_persistence_failed"}
+
+        if not admitted:
+            queue_handoff.recording_status = "uncertain"
+            raise RuntimeError("ACP custody was not retained after history commit")
+        if queue_handoff_batch is not None:
+            owns = getattr(acp, "owns_queue_handoff_admission", None)
+            if (
+                getattr(acp, "_runner", None)
+                is not getattr(queue_handoff_batch, "owner", None)
+                or not callable(owns)
+                or owns(queue_handoff_batch, admitted[0]) is not True
+            ):
+                queue_handoff.recording_status = "uncertain"
+                mark_in_doubt = getattr(
+                    getattr(queue_handoff_batch, "owner", None),
+                    "mark_queue_handoff_in_doubt",
+                    None,
+                )
+                if callable(mark_in_doubt):
+                    mark_in_doubt(queue_handoff_batch)
+                raise RuntimeError("ACP queue owner changed after history commit")
+        activate = getattr(acp, "activate_queue_handoff_admission", None)
+        if not callable(activate) or activate(
+            admitted[0],
+            text=message,
+            source=source,
+            thread_id=thread_id,
+            queue_handoff=queue_handoff,
+            operator_inputs=operator_inputs,
+        ) is not True:
+            # History and custody are durable. Start the completion observer so
+            # the accepted request still receives its terminal, then fail closed
+            # at the worker boundary until the history mirror can be reconciled.
+            start = getattr(acp, "_start_completion", None)
+            if callable(start):
+                start(admitted[0])
+            queue_handoff.recording_status = "uncertain"
+            raise RuntimeError("ACP queue admission history activation is uncertain")
+        return {
+            "status": "queued",
+            "request_id": request_id,
+            "turn_id": admitted[0].turn_id,
         }
 
     async def _handle_cancel_request(
@@ -3031,6 +4338,7 @@ class LLMService:
         *,
         origin: CancellationOrigin = "human",
         task_id: str | None = None,
+        preserve_queued: bool = False,
     ) -> int | None:
         """Cancel the current turn and return its cancellation generation.
 
@@ -3040,11 +4348,15 @@ class LLMService:
         """
         if origin not in {"human", "remote_task", "external"}:
             raise ValueError("invalid cancellation origin")
+        if not isinstance(preserve_queued, bool):
+            raise ValueError("preserve_queued must be a bool")
 
         queue_processor = self._queue_processor
         acp = self._selected_active_acp_orchestrator()
         if acp is not None:
-            generation = queue_processor.request_cancellation(origin=origin)
+            generation = queue_processor.request_cancellation(
+                origin=origin, preserve_queued=preserve_queued
+            )
             active = getattr(getattr(acp, "runner", None), "_active_context", None)
             request_id = getattr(active, "request_id", None)
             self._cancel_open_prompts(
@@ -3070,7 +4382,9 @@ class LLMService:
                 previous_generation = queue_processor.cancel_generation
                 if queue_processor.cancel_origin == "remote_task":
                     self._mark_current_operation_superseded(previous_generation)
-                return queue_processor.request_cancellation(origin="human")
+                generation = queue_processor.request_cancellation(origin="human")
+                self._schedule_queue_handoff_resume(generation)
+                return generation
             return None
 
         if queue_processor.cancel_processing:
@@ -3089,7 +4403,11 @@ class LLMService:
                 # idempotent and retain the token that owns the latch.
                 return queue_processor.cancel_generation
 
-        generation = queue_processor.request_cancellation(origin=origin)
+        generation = queue_processor.request_cancellation(
+            origin=origin, preserve_queued=preserve_queued
+        )
+        if origin == "human" and not preserve_queued:
+            self._schedule_queue_handoff_resume(generation)
         self._cancel_open_prompts(park=True)
         cancellation_task_id = self._safe_operation_task_id(task_id)
         if cancellation_task_id is None:
@@ -3130,6 +4448,56 @@ class LLMService:
                 logger.debug(f"Could not cancel running tool: {e}")
             logger.info("Processing cancellation requested")
         return generation
+
+    def _schedule_queue_handoff_resume(self, generation: int) -> None:
+        """Wake protected daemon handoffs after a human Stop settles."""
+        processor = getattr(self, "_queue_processor", None)
+        has_handoffs = getattr(processor, "has_queued_queue_handoffs", None)
+        if not callable(has_handoffs) or not has_handoffs():
+            return
+        self.create_background_task(
+            lambda: self._resume_queue_handoffs_after_stop(generation),
+            name=f"resume_queue_handoffs_after_stop_{generation}",
+        )
+
+    async def _resume_queue_handoffs_after_stop(self, generation: int) -> None:
+        """Restart only protected, not-yet-started handoffs from this Stop."""
+        processor = getattr(self, "_queue_processor", None)
+        wait_idle = getattr(processor, "wait_until_idle", None)
+        wait_force_gate = getattr(processor, "wait_for_forced_send", None)
+        has_handoffs = getattr(processor, "has_queued_queue_handoffs", None)
+        clear = getattr(processor, "clear_force_cancellation", None)
+        if (
+            not callable(wait_idle)
+            or not callable(wait_force_gate)
+            or not callable(has_handoffs)
+        ):
+            return
+        try:
+            async with asyncio.timeout(FORCE_SEND_STOP_TIMEOUT_SECONDS):
+                await wait_idle()
+                await wait_force_gate()
+        except TimeoutError:
+            logger.warning("Stopped queue handoff did not reach native idle")
+            return
+        if (
+            getattr(processor, "cancel_generation", None) != generation
+            or self.is_processing
+            or not has_handoffs()
+        ):
+            return
+        if getattr(processor, "cancel_processing", False):
+            if (
+                getattr(processor, "cancel_origin", None) != "human"
+                or not callable(clear)
+                or not clear(generation)
+            ):
+                return
+        elif getattr(processor, "cancel_origin", None) is not None:
+            return
+        self.create_background_task(
+            lambda: self._process_queue(), name="resume_stopped_queue_handoffs"
+        )
 
     def _cancel_open_prompts(self, *, park: bool, request_id: str | None = None) -> None:
         """A prompt left waiting would hold the stopped turn until answered.

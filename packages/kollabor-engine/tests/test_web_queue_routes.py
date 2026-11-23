@@ -14,11 +14,14 @@ from kollabor_engine.routes import web_queue
 class _Rpc:
     def __init__(self):
         self.calls: list[tuple[str, dict]] = []
+        self.dispatch_available = False
 
     async def call(self, method: str, params: dict, *, timeout: float | None = None):
         self.calls.append((method, params))
         if method == "state.web_queue.capabilities":
-            return {"dispatch_available": False}
+            return {"dispatch_available": self.dispatch_available}
+        if method == "state.web_queue.send_now":
+            return {"status": "admitted", "accepted": True, "accepted_count": 1}
         if method == "state.web_queue.allocate_ids":
             return {
                 "scope_id": "scope-safe",
@@ -121,7 +124,32 @@ async def test_enqueue_serializes_unicode_text_and_attachment_refs_without_scope
 
 
 @pytest.mark.asyncio
-async def test_send_now_fails_closed_without_touching_queue_or_dispatch(monkeypatch):
+async def test_send_now_forwards_authenticated_uid_and_batch_to_daemon(monkeypatch):
+    rpc = _install_session(monkeypatch)
+    rpc.dispatch_available = True
+
+    result = await web_queue.send_queue_batch_now(
+        "s1", "conversation-a", "batch-1"
+    )
+
+    assert result["status"] == "admitted"
+    assert rpc.calls == [
+        (
+            "state.web_queue.capabilities",
+            {"expected_conversation_uid": "conversation-a"},
+        ),
+        (
+            "state.web_queue.send_now",
+            {
+                "expected_conversation_uid": "conversation-a",
+                "batch_id": "batch-1",
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_now_stays_queued_when_daemon_lacks_dispatch_capability(monkeypatch):
     rpc = _install_session(monkeypatch)
 
     with pytest.raises(HTTPException) as error:
@@ -129,7 +157,12 @@ async def test_send_now_fails_closed_without_touching_queue_or_dispatch(monkeypa
 
     assert error.value.status_code == 503
     assert "remains queued" in str(error.value.detail)
-    assert rpc.calls == []
+    assert rpc.calls == [
+        (
+            "state.web_queue.capabilities",
+            {"expected_conversation_uid": "conversation-a"},
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -178,7 +211,14 @@ async def test_attachment_upload_preserves_supported_jpg_mime_alias(monkeypatch)
     from starlette.requests import Request
 
     request = Request(
-        {"type": "http", "headers": [(b"content-type", b"image/jpg")], "method": "PUT"},
+        {
+            "type": "http",
+            "headers": [
+                (b"content-type", b"image/jpg"),
+                (b"x-file-name", b"..%2Fprivate%2Fqueue%20r%C3%A9sum%C3%A9.png"),
+            ],
+            "method": "PUT",
+        },
         receive,
     )
     result = await web_queue.stage_queue_attachment(
@@ -188,6 +228,7 @@ async def test_attachment_upload_preserves_supported_jpg_mime_alias(monkeypatch)
     assert result["mime"] == "image/png"
     assert rpc.calls[0][0] == "state.web_queue.stage_attachment"
     assert rpc.calls[0][1]["mime"] == "image/jpg"
+    assert rpc.calls[0][1]["filename"] == "../private/queue résumé.png"
 
 
 @pytest.mark.asyncio

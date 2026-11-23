@@ -144,13 +144,15 @@ class WebMessage:
 
 @dataclass(frozen=True, slots=True)
 class QueueItemSnapshot:
-    """Visible per-item progress; message bytes and refs stay out of reprs."""
+    """Display-safe per-item progress plus internal repr-hidden dispatch data."""
 
     request_id: str
     status: ItemStatus
     attempt_id: str | None
     payload: bytes = field(repr=False)
     attachment_refs: tuple[str, ...] = field(default=(), repr=False)
+    text_preview: str = ""
+    attachment_labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +245,7 @@ class _StoredItem:
     request_id: str
     payload: bytes = field(repr=False)
     attachment_refs: tuple[str, ...] = field(default=(), repr=False)
+    attachment_labels: tuple[str, ...] = ()
     status: ItemStatus = ItemStatus.QUEUED
     attempt_id: str | None = None
 
@@ -611,6 +614,8 @@ class WebMessageQueue:
                             request_id=item.request_id,
                             status=item.status,
                             attempt_id=item.attempt_id,
+                            text_preview=self._text_preview(item.payload),
+                            attachment_labels=item.attachment_labels,
                             payload=item.payload,
                             attachment_refs=item.attachment_refs,
                         )
@@ -624,13 +629,29 @@ class WebMessageQueue:
     async def snapshot(self) -> QueueSnapshot:
         """Return a display/reconciliation view for an authorized caller.
 
-        Snapshots include payload bytes, including for in-doubt items. They must
-        never be used as provider-dispatch input; provider input may come only
-        from ``item_payload`` for an attempt that is currently dispatching.
-        This state primitive does not enforce RPC caller authorization.
+        The internal snapshot retains bytes and refs for worker bookkeeping,
+        but the wire projection exposes only a bounded text preview and safe
+        attachment basenames. Provider input may come only from ``item_payload``
+        for an attempt that is currently dispatching. This state primitive
+        does not enforce RPC caller authorization.
         """
         async with self._lock:
             return self._snapshot_unlocked()
+
+    @staticmethod
+    def _text_preview(payload: bytes) -> str:
+        """Project the queue's JSON text envelope into a bounded display field."""
+        try:
+            decoded = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return ""
+        if not isinstance(decoded, dict) or set(decoded) != {"text"}:
+            return ""
+        text = decoded.get("text")
+        if not isinstance(text, str):
+            return ""
+        bounded = text[:160]
+        return bounded + ("…" if len(text) > len(bounded) else "")
 
     async def can_retire(self) -> bool:
         """Whether an idle scoped queue can be removed without losing retries.
@@ -865,6 +886,13 @@ class WebMessageQueue:
                 retention_plan = attachment_scope._prepare_owner_retention_unlocked(
                     owner_refs
                 )
+                labels_by_owner = (
+                    attachment_scope._labels_from_owner_retention_plan(retention_plan)
+                )
+                for stored_item in batch.items:
+                    stored_item.attachment_labels = labels_by_owner.get(
+                        stored_item.request_id, ()
+                    )
                 # No await or validation follows this point. The two ledgers
                 # commit together from the event loop's perspective.
                 attachment_scope._commit_owner_retention_unlocked(retention_plan)

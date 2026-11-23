@@ -215,6 +215,129 @@ function withHubNotes(content: ThreadMessageLike["content"], source?: unknown): 
   };
 }
 
+/**
+ * Rebuild contiguous ACP history runs as request/turn groups. A forced queue
+ * batch may execute before an older admitted ACP turn, while the durable log
+ * correctly keeps user submissions in admission chronology. Each pair is
+ * keyed by a server-issued turn key; completed groups follow their assistant
+ * row order, pending forced groups stay ahead of pending ordinary work, and
+ * non-ACP rows are never moved.
+ */
+type ProjectedHistoryRow = { message: HistoryMessage; sourceIndex: number };
+
+function acpTurnsInDisplayOrder(history: HistoryMessage[]): ProjectedHistoryRow[] {
+  const result = history.map((message, sourceIndex) => ({ message, sourceIndex }));
+  const turnFor = ({ message }: ProjectedHistoryRow) => {
+    if (message.role !== "user" && message.role !== "assistant") return null;
+    const metadata = message.metadata;
+    if (metadata?.provider !== "acp") return null;
+    const requestId = typeof metadata.request_id === "string" ? metadata.request_id : "";
+    const turnId = metadata.turn_id;
+    if (!requestId || !Number.isSafeInteger(turnId) || Number(turnId) < 1) return null;
+    const serverKey = typeof metadata.acp_turn_key === "string" ? metadata.acp_turn_key : "";
+    if (!serverKey) return null;
+    const dispatchEpoch = typeof metadata.dispatch_epoch === "string" ? metadata.dispatch_epoch : "";
+    const dispatchOrder = metadata.dispatch_order;
+    const queueHandoff = metadata.queue_handoff;
+    const forceSend = Boolean(
+      queueHandoff && typeof queueHandoff === "object" &&
+      !Array.isArray(queueHandoff) &&
+      (queueHandoff as Record<string, unknown>).force_send === true
+    );
+    return {
+      key: `${requestId}\u0000${serverKey}`,
+      requestId,
+      serverKey,
+      turnId: Number(turnId),
+      dispatchEpoch,
+      dispatchOrder: Number.isSafeInteger(dispatchOrder) && Number(dispatchOrder) > 0
+        ? Number(dispatchOrder) : null,
+      forceSend,
+    };
+  };
+
+  let start = 0;
+  while (start < result.length) {
+    if (!turnFor(result[start])) {
+      start += 1;
+      continue;
+    }
+    let end = start + 1;
+    while (end < result.length && turnFor(result[end])) end += 1;
+    const block = result.slice(start, end);
+    const groups = new Map<string, {
+      rows: ProjectedHistoryRow[];
+      firstUserIndex: number;
+      userCount: number;
+      dispatchEpoch: string;
+      dispatchOrder: number | null;
+      userDispatchPresent: boolean;
+      turnId: number;
+      serverKey: string;
+      forceSend: boolean;
+      invalid: boolean;
+    }>();
+    block.forEach((row) => {
+      const identity = turnFor(row);
+      if (!identity) return;
+      let group = groups.get(identity.key);
+      if (!group) {
+        group = {
+          rows: [],
+          firstUserIndex: row.sourceIndex,
+          userCount: 0,
+          dispatchEpoch: row.message.role === "user" ? identity.dispatchEpoch : "",
+          dispatchOrder: row.message.role === "user" ? identity.dispatchOrder : null,
+          userDispatchPresent: false,
+          turnId: identity.turnId,
+          serverKey: identity.serverKey,
+          forceSend: identity.forceSend,
+          invalid: false,
+        };
+        groups.set(identity.key, group);
+      }
+      group.rows.push(row);
+      if (
+        group.turnId !== identity.turnId ||
+        group.serverKey !== identity.serverKey ||
+        (row.message.role === "assistant" && group.dispatchEpoch && identity.dispatchEpoch && group.dispatchEpoch !== identity.dispatchEpoch) ||
+        (row.message.role === "assistant" && group.dispatchOrder !== null && identity.dispatchOrder !== null && group.dispatchOrder !== identity.dispatchOrder)
+      ) {
+        group.invalid = true;
+      }
+      if (row.message.role === "user") {
+        group.userCount += 1;
+        if (group.userCount === 1) {
+          group.dispatchEpoch = identity.dispatchEpoch;
+          group.dispatchOrder = identity.dispatchOrder;
+          group.userDispatchPresent = Boolean(identity.dispatchEpoch && identity.dispatchOrder !== null);
+        }
+        group.firstUserIndex = Math.min(group.firstUserIndex, row.sourceIndex);
+        group.forceSend ||= identity.forceSend;
+      }
+    });
+    const entries = [...groups.values()];
+    const canOrder = entries.length > 1 && entries.every((group) =>
+      !group.invalid && group.userCount === 1 && group.userDispatchPresent &&
+      group.dispatchEpoch && group.dispatchOrder !== null
+    ) && new Set(entries.map((group) => group.dispatchEpoch)).size === 1 &&
+      new Set(entries.map((group) => group.dispatchOrder)).size === entries.length;
+    if (canOrder) {
+      const orderedRows = entries
+        .slice()
+        .sort((left, right) => left.dispatchOrder! - right.dispatchOrder!)
+        .flatMap((group) => group.rows.slice().sort((left, right) => {
+          const leftRank = left.message.role === "user" ? 0 : 1;
+          const rightRank = right.message.role === "user" ? 0 : 1;
+          return leftRank - rightRank || left.sourceIndex - right.sourceIndex;
+        }));
+      result.splice(start, block.length, ...orderedRows);
+    }
+    start = end;
+  }
+  return result;
+}
+
 function historyToMessages(
   history: HistoryMessage[],
   pendingPermissions: PermissionPrompt[],
@@ -381,6 +504,17 @@ function historyToMessages(
 
   const messages: ThreadMessageLike[] = [];
   const callsById = new Map<string, RestoredToolCall>();
+  let currentAcpIdentity: string | null = null;
+  const acpIdentity = (metadata: Record<string, unknown> | null): string | null => {
+    if (metadata?.provider !== "acp") return null;
+    const requestId = asString(metadata.request_id);
+    const turnKey = asString(metadata.acp_turn_key);
+    const turnId = metadata.turn_id;
+    return requestId && turnKey && Number.isSafeInteger(turnId) && Number(turnId) > 0
+      ? `${requestId}\u0000${turnKey}\u0000${Number(turnId)}` : "";
+  };
+  const toolMapKey = (toolCallId: string, identity = currentAcpIdentity) =>
+    identity ? `${identity}\u0000${toolCallId}` : toolCallId;
   // The ACP request that produced a reply: a passive window swaps its live
   // copy of that reply for this row (see historyReplacesLiveTurn).
   const replyMetadata = (metadata: Record<string, unknown> | null) => {
@@ -423,6 +557,7 @@ function historyToMessages(
     turnTools = 0;
     firstReply = undefined;
     finalReplyAt = undefined;
+    currentAcpIdentity = null;
   };
   // The failed turn's reply carries the error (assistant-ui keeps the first
   // status of the replies it joins); a turn that failed before replying gets
@@ -476,9 +611,9 @@ function historyToMessages(
   };
 
 
-  history.forEach((message, pageIndex) => {
-    const sourceIndex = historyStartIndex + pageIndex;
-    if (pageIndex === turnError?.history_length) showTurnError();
+  acpTurnsInDisplayOrder(history).forEach(({ message, sourceIndex: rawSourceIndex }) => {
+    const sourceIndex = historyStartIndex + rawSourceIndex;
+    if (rawSourceIndex === turnError?.history_length) showTurnError();
     const metadata = asRecord(message.metadata);
     // Initialization context remains in model history and Trajectory, not Chat.
     if (metadata?.system_initialization === true) return;
@@ -511,6 +646,7 @@ function historyToMessages(
     if (message.role === "user") {
       // Before the HUD check: a status-only turn still ends the one before.
       closeTurn();
+      currentAcpIdentity = acpIdentity(metadata);
       turnStartedAt = message.timestamp;
       const rawPrompt = historyContentToThreadContent(message.content);
       const { notes, content } = withHubNotes(rawPrompt, metadata?.source);
@@ -619,6 +755,22 @@ function historyToMessages(
     }
 
     if (message.role === "assistant") {
+      const replyIdentity = acpIdentity(metadata);
+      if (
+        (currentAcpIdentity !== null || replyIdentity !== null) &&
+        currentAcpIdentity !== replyIdentity
+      ) {
+        // A persisted row whose ACP key is missing or disagrees is kept apart
+        // from the current user. Never attach a late reply to another request.
+        if (lastReply) {
+          messages[lastReply.index] = {
+            ...messages[lastReply.index],
+            convertConfig: { joinStrategy: "none" },
+          } as JoinableMessage;
+        }
+        closeTurn();
+        currentAcpIdentity = replyIdentity;
+      }
       const calls = restoredCalls(message, sourceIndex);
       if (!calls.length) {
         const content = historyContentToThreadContent(message.content);
@@ -657,7 +809,7 @@ function historyToMessages(
         );
       }
       for (const call of calls) {
-        callsById.set(call.toolCallId, call);
+        callsById.set(toolMapKey(call.toolCallId), call);
         content.push(call);
       }
       pushReply({
@@ -672,7 +824,9 @@ function historyToMessages(
 
     if (message.role === "tool") {
       const callId = toolResultId(message);
-      const existingCall = callId ? callsById.get(callId) : undefined;
+      const toolMetadata = asRecord(message.metadata);
+      const resultIdentity = acpIdentity(toolMetadata) ?? currentAcpIdentity;
+      const existingCall = callId ? callsById.get(toolMapKey(callId, resultIdentity)) : undefined;
       if (existingCall) {
         existingCall.result = toolOutputResult(message);
         existingCall.isError = toolResultIsError(message);
@@ -1012,6 +1166,9 @@ export function EngineRuntimeProvider({
   const handOverDue = useRef(false);
   // The user asked for the waiting messages to go now (Send Now, #1102).
   const sendNow = useRef(false);
+  // The old stream is ended before assistant-ui prepares the next request, so
+  // keep the provider-turn intent separately until that request is encoded.
+  const forceNextTurnPending = useRef(false);
   // Pauses the old response after its first state-changing event until the
   // thread has applied that state and the handover has ended the request.
   const handoverEventWait = useRef<{ promise: Promise<void>; release: () => void } | null>(null);
@@ -1068,7 +1225,9 @@ export function EngineRuntimeProvider({
       runVersion.current += 1;
       streamingRun.current = new WeakSet<object>(body.commands);
       endRun.current = null;
-      sendNow.current = false;   // this request takes every message that waited
+      const forceNextTurn = forceNextTurnPending.current;
+      const forceAfterRequestIds = forceNextTurn ? [...pageRequestIds.current] : [];
+      forceNextTurnPending.current = false; // this request takes every message that waited
       const requestIds = body.commands.flatMap((command) =>
         command.type === "add-message" && "id" in command.message && typeof command.message.id === "string"
           ? [command.message.id] : []);
@@ -1087,7 +1246,15 @@ export function EngineRuntimeProvider({
       }
       runStartRef.current = performance.now();
       const goalReplyId = goalCancellation.current.prepare(body.commands);
-      return { ...body, commands, sessionId, ...(goalReplyId ? { goal_reply_id: goalReplyId } : {}) };
+      return {
+        ...body,
+        commands,
+        sessionId,
+        ...(goalReplyId ? { goal_reply_id: goalReplyId } : {}),
+        ...(forceNextTurn
+          ? { force_next_turn: true, force_after_request_ids: forceAfterRequestIds }
+          : {}),
+      };
     },
     onResponse: (response) => {
       const draftSubmission = pendingDraftSubmissions.current.shift();
@@ -1206,6 +1373,7 @@ export function EngineRuntimeProvider({
   useEffect(() => runtime.thread.subscribe(handOver), [runtime, handOver]);
   const sendWaitingNow = useCallback(() => {
     sendNow.current = true;
+    forceNextTurnPending.current = true;
     handOver();
   }, [handOver]);
 

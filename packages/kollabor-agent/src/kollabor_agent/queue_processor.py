@@ -103,6 +103,30 @@ class TaggedInput:
     operator_inputs: tuple[dict[str, str], ...] = ()
 
 
+@dataclass
+class QueueHandoffInput(TaggedInput):
+    """A daemon queue item already in native provider custody.
+
+    The request and dispatch-attempt IDs bind Stop retention to the exact
+    worker attempt. It remains a TaggedInput for event correlation, but unlike
+    page-local typed input it must not be swept when the active model turn is
+    stopped.
+    """
+
+    queue_request_id: str = ""
+    attempt_id: str = ""
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.queue_request_id, str)
+            or not self.queue_request_id
+            or self.request_ids != (self.queue_request_id,)
+        ):
+            raise ValueError("queue handoff request identity is invalid")
+        if not isinstance(self.attempt_id, str) or not self.attempt_id:
+            raise ValueError("queue handoff attempt identity is invalid")
+
+
 def batch_request_ids(messages: List[Any]) -> tuple[str, ...]:
     """The request ids a batch answers (#551)."""
     return tuple(i for m in messages if isinstance(m, TaggedInput) for i in m.request_ids)
@@ -657,6 +681,13 @@ class QueueProcessor:
         # matching durable user row. Ordinary producers count reservations as
         # occupied, so they cannot steal a promised slot during an await.
         self._admission_reservations: dict[object, int] = {}
+        # Exact daemon queue handoffs remain protected while queued and while
+        # the drain temporarily owns them in a local batch.
+        self._queue_handoffs: dict[str, tuple[QueueHandoffInput, str]] = {}
+        self._drained_batch_messages: tuple[Any, ...] = ()
+        self._drained_handoff_items: tuple[QueueHandoffInput, ...] = ()
+        self._drained_handoff_started = False
+        self._active_turn_handoff_attempts: tuple[str, ...] = ()
         self.dropped_messages = 0
         self.is_processing = False
         self.turn_completed = False
@@ -772,6 +803,7 @@ class QueueProcessor:
         self._cancel_generation += 1
         self._cancel_processing = True
         self._cancel_origin = origin
+        self._restore_unstarted_queue_handoffs()
         if not preserve_queued:
             self._end_queued_chat()
         return self._cancel_generation
@@ -795,7 +827,14 @@ class QueueProcessor:
     def end_forced_send(self, token: object) -> bool:
         """Release only the transaction that owns the forced-send gate."""
         if token is not getattr(self, "_forced_send_owner", None):
-            return False
+            lock = getattr(self, "_forced_send_lock", None)
+            # Make cleanup retryable after this token already released the
+            # gate. A different owner or a still-locked gate remains a hard
+            # failure; possessing a stale token cannot unlock it.
+            return (
+                getattr(self, "_forced_send_owner", None) is None
+                and (not isinstance(lock, asyncio.Lock) or not lock.locked())
+            )
         self._forced_send_owner = None
         self._forced_priority_count = 0
         event = getattr(self, "_forced_send_clear", None)
@@ -851,7 +890,12 @@ class QueueProcessor:
         reservations = getattr(self, "_admission_reservations", None)
         if not isinstance(reservations, dict):
             reservations = self._admission_reservations = {}
-        if queue.qsize() + len(reservations) >= max_size:
+        local_reserved = (
+            len(getattr(self, "_drained_batch_messages", ()))
+            if not getattr(self, "_drained_handoff_started", False)
+            else 0
+        )
+        if queue.qsize() + len(reservations) + local_reserved >= max_size:
             return None
         token = object()
         reservations[token] = getattr(self, "_cancel_generation", 0)
@@ -864,10 +908,18 @@ class QueueProcessor:
             reservation, None
         ) is not None
 
-    def refresh_admission_slot(self, reservation: object) -> bool:
-        """Carry a reservation across its own forced-stop generation change."""
+    def refresh_admission_slot(
+        self, reservation: object, *, expected_generation: int
+    ) -> bool:
+        """Carry a reservation only across its owner's exact Stop generation."""
         reservations = getattr(self, "_admission_reservations", None)
         if not isinstance(reservations, dict) or reservation not in reservations:
+            return False
+        if (
+            isinstance(expected_generation, bool)
+            or not isinstance(expected_generation, int)
+            or getattr(self, "_cancel_generation", 0) != expected_generation
+        ):
             return False
         queue = getattr(self, "processing_queue", None)
         max_size = getattr(self, "max_queue_size", 0)
@@ -875,15 +927,31 @@ class QueueProcessor:
             queue is None
             or isinstance(max_size, bool)
             or not isinstance(max_size, int)
-            or queue.qsize() + len(reservations) > max_size
+            or queue.qsize()
+            + len(reservations)
+            + (
+                len(getattr(self, "_drained_batch_messages", ()))
+                if not getattr(self, "_drained_handoff_started", False)
+                else 0
+            )
+            > max_size
         ):
             return False
-        reservations[reservation] = getattr(self, "_cancel_generation", 0)
+        reservations[reservation] = expected_generation
         return True
 
     def owns_admission_slot(self, reservation: object) -> bool:
         reservations = getattr(self, "_admission_reservations", None)
         return isinstance(reservations, dict) and reservation in reservations
+
+    def owns_current_admission_slot(self, reservation: object) -> bool:
+        """Whether a reservation still belongs to the current Stop generation."""
+        reservations = getattr(self, "_admission_reservations", None)
+        return (
+            isinstance(reservations, dict)
+            and reservation in reservations
+            and reservations[reservation] == getattr(self, "_cancel_generation", 0)
+        )
 
     def commit_admission_slot(
         self, reservation: object, message: Any, *, priority: bool = False
@@ -898,6 +966,11 @@ class QueueProcessor:
             return False
         if not isinstance(priority, bool):
             return False
+        handoff_ledger = getattr(self, "_queue_handoffs", None)
+        if isinstance(message, QueueHandoffInput) and isinstance(handoff_ledger, dict):
+            if message.attempt_id in handoff_ledger:
+                reservations.pop(reservation, None)
+                return False
         generation = reservations.pop(reservation)
         if generation != getattr(self, "_cancel_generation", 0):
             return False
@@ -925,6 +998,10 @@ class QueueProcessor:
                 self._forced_priority_count = priority_count + 1
             else:
                 queue._queue.rotate(1)
+        if isinstance(message, QueueHandoffInput):
+            if not isinstance(handoff_ledger, dict):
+                handoff_ledger = self._queue_handoffs = {}
+            handoff_ledger[message.attempt_id] = (message, "queued")
         self.mark_progress()
         metrics = getattr(self, "_queue_metrics", None)
         if isinstance(metrics, dict):
@@ -949,6 +1026,12 @@ class QueueProcessor:
                 del entries[index]
                 queue.task_done()
                 queue._wakeup_next(queue._putters)
+                if isinstance(message, QueueHandoffInput):
+                    handoffs = getattr(self, "_queue_handoffs", None)
+                    if isinstance(handoffs, dict):
+                        owned = handoffs.get(message.attempt_id)
+                        if owned is not None and owned[0] is message:
+                            handoffs.pop(message.attempt_id, None)
                 return True
         return False
 
@@ -957,19 +1040,81 @@ class QueueProcessor:
         max_size = getattr(self, "max_queue_size", 0)
         reservations = getattr(self, "_admission_reservations", None)
         reserved = len(reservations) if isinstance(reservations, dict) else 0
+        local_reserved = (
+            len(getattr(self, "_drained_batch_messages", ()))
+            if not getattr(self, "_drained_handoff_started", False)
+            else 0
+        )
         return (
             queue is not None
             and isinstance(max_size, int)
             and not isinstance(max_size, bool)
-            and queue.qsize() + reserved < max_size
+            and queue.qsize() + reserved + local_reserved < max_size
         )
 
     def _end_queued_chat(self) -> None:
         """A cancel stops the drain, and the queue waits for the next message:
         a chat message in it would wait with its stream open, so it ends now (#551)."""
         queue = getattr(self, "processing_queue", None)
-        for item in [i for i in getattr(queue, "_queue", ()) if isinstance(i, TaggedInput)]:
+        for item in [
+            i
+            for i in getattr(queue, "_queue", ())
+            if isinstance(i, TaggedInput) and not isinstance(i, QueueHandoffInput)
+        ]:
             self._end_queued(item)
+
+    def has_queued_queue_handoffs(self) -> bool:
+        """Whether a not-yet-started daemon handoff needs a QP drain."""
+        queue = getattr(self, "processing_queue", None)
+        handoffs = getattr(self, "_queue_handoffs", {})
+        return bool(
+            isinstance(handoffs, dict)
+            and any(status == "queued" for _item, status in handoffs.values())
+        ) or bool(
+            queue is not None
+            and any(isinstance(item, QueueHandoffInput) for item in queue._queue)
+        )
+
+    def _finish_active_queue_handoffs(self) -> None:
+        """Release QP's in-flight custody records after a terminal drain path."""
+        attempts = getattr(self, "_active_turn_handoff_attempts", ())
+        handoffs = getattr(self, "_queue_handoffs", None)
+        if isinstance(handoffs, dict):
+            for attempt_id in attempts:
+                handoffs.pop(attempt_id, None)
+        self._active_turn_handoff_attempts = ()
+
+    def _restore_unstarted_queue_handoffs(self) -> None:
+        """Return a locally drained but unstarted protected prefix to the deque."""
+        if getattr(self, "_drained_handoff_started", False):
+            return
+        messages = tuple(getattr(self, "_drained_batch_messages", ()))
+        handoffs = tuple(
+            item for item in messages if isinstance(item, QueueHandoffInput)
+        )
+        if not handoffs:
+            return
+        queue = getattr(self, "processing_queue", None)
+        entries = getattr(queue, "_queue", None)
+        if queue is None or entries is None:
+            return
+        for item in messages:
+            if isinstance(item, TaggedInput) and not isinstance(
+                item, QueueHandoffInput
+            ):
+                self._end_dropped(item, "Stopped before this message ran. Send it again.")
+        # The messages were removed from this queue moments ago. Reinsert only
+        # the exact protected identities, preserving their relative order and
+        # keeping them ahead of work admitted while the local batch was held.
+        for item in reversed(handoffs):
+            if not any(current is item for current in entries):
+                entries.appendleft(item)
+            handoffs_by_attempt = getattr(self, "_queue_handoffs", {})
+            if isinstance(handoffs_by_attempt, dict):
+                handoffs_by_attempt[item.attempt_id] = (item, "queued")
+        self._drained_batch_messages = ()
+        self._drained_handoff_items = ()
+        self._drained_handoff_started = False
 
     def _end_queued(self, item: Any) -> None:
         """Take a chat message out of the queue unrun, and end its stream."""
@@ -1238,8 +1383,6 @@ class QueueProcessor:
 
     async def _drop_oldest_strategy(self, message: MessageContent) -> bool:
         """Drop oldest task to make room. False when a rival took the freed slot (#589)."""
-        if any(isinstance(item, QueuedInput) for item in self.processing_queue._queue):
-            raise RuntimeError("Queue is full; cannot discard an admitted voice request")
         if self.task_config.queue.log_queue_events:
             logger.debug("Applying drop_oldest strategy")
 
@@ -1247,7 +1390,7 @@ class QueueProcessor:
         # Note: We need access to task_manager metadata here
         # For now, we'll drop from queue directly
         try:
-            self._end_dropped(self.processing_queue.get_nowait())
+            self._end_dropped(self._pop_oldest_droppable())
             self._queue_metrics["drop_oldest_count"] += 1
             if self.task_config.queue.log_queue_events:
                 logger.info("Dropped oldest message from queue")
@@ -1266,6 +1409,22 @@ class QueueProcessor:
             self.dropped_messages += 1
             self._end_dropped(message)
             return False
+
+    def _pop_oldest_droppable(self) -> Any:
+        """Remove the oldest ordinary queue item, skipping protected handoffs."""
+        queue = self.processing_queue
+        for item in tuple(queue._queue):
+            if isinstance(item, QueuedInput):
+                raise RuntimeError(
+                    "Queue is full; cannot discard an admitted voice request"
+                )
+            if isinstance(item, QueueHandoffInput):
+                continue
+            queue._queue.remove(item)
+            queue.task_done()
+            queue._wakeup_next(queue._putters)
+            return item
+        raise asyncio.QueueEmpty
 
     def _drop_newest_strategy(self) -> None:
         """Raise error when queue is full."""
@@ -1314,13 +1473,11 @@ class QueueProcessor:
 
     def _unknown_strategy(self, message: MessageContent) -> bool:
         """Handle unknown overflow strategy."""
-        if any(isinstance(item, QueuedInput) for item in self.processing_queue._queue):
-            raise RuntimeError("Queue is full; cannot discard an admitted voice request")
         logger.warning(
             f"Unknown overflow strategy '{self.task_config.queue.overflow_strategy}', defaulting to drop_oldest"
         )
         try:
-            self._end_dropped(self.processing_queue.get_nowait())
+            self._end_dropped(self._pop_oldest_droppable())
             if not self._has_unreserved_capacity():
                 raise asyncio.QueueFull
             self.processing_queue.put_nowait(message)
@@ -1401,9 +1558,40 @@ class QueueProcessor:
                         while not self.processing_queue.empty():
                             message = await self.processing_queue.get()
                             messages.append(message)
+                            self._drained_batch_messages = tuple(messages)
+                            self._drained_handoff_items = tuple(
+                                item
+                                for item in messages
+                                if isinstance(item, QueueHandoffInput)
+                            )
+                            self._drained_handoff_started = False
 
                         if messages and not self.cancel_processing:
-                            await process_message_batch_fn(messages)
+                            attempts = tuple(
+                                item.attempt_id
+                                for item in messages
+                                if isinstance(item, QueueHandoffInput)
+                            )
+                            handoffs = getattr(self, "_queue_handoffs", {})
+                            if isinstance(handoffs, dict):
+                                for attempt_id in attempts:
+                                    owned = handoffs.get(attempt_id)
+                                    if owned is not None:
+                                        handoffs[attempt_id] = (owned[0], "started")
+                            self._drained_handoff_started = True
+                            self._active_turn_handoff_attempts = attempts
+                            try:
+                                await process_message_batch_fn(messages)
+                            finally:
+                                self._drained_batch_messages = ()
+                                self._drained_handoff_items = ()
+                                self._drained_handoff_started = False
+                        elif messages:
+                            # Cancellation while the messages were moved from
+                            # the deque but before the batch started is a
+                            # proven no-start. Return only protected handoffs;
+                            # ordinary tagged streams are ended by Stop.
+                            self._restore_unstarted_queue_handoffs()
 
                     except Exception as e:
                         logger.error(f"Queue processing error: {e}")
@@ -1517,6 +1705,8 @@ class QueueProcessor:
                         await self._run_after_turn()
 
                 # Nothing left -- exit outer loop
+                if self.turn_completed or self.cancel_processing:
+                    self._finish_active_queue_handoffs()
                 if self.processing_queue.empty() or self.cancel_processing:
                     break
 
@@ -1525,6 +1715,10 @@ class QueueProcessor:
                 logger.info("Re-entering queue drain after mid-turn message arrival")
 
         finally:
+            self._finish_active_queue_handoffs()
+            self._drained_batch_messages = ()
+            self._drained_handoff_items = ()
+            self._drained_handoff_started = False
             self.is_processing = False  # ends the chain (note_chain_end)
             self._open_voice_turn = None
             if self._after_turn:  # a drain that died: its turn's cut lands once the lock is free
