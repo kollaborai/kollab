@@ -438,7 +438,10 @@ def install_stage(stage: Path, staged: dict, commit: str, digest: str, *, expect
                 "updated": now,
             }
             next_registry = {**registry, "plugins": {**registry["plugins"], plugin_id: record}}
-            if record["enabled"] and (not isinstance(prior, dict) or not prior.get("enabled")):
+            order = registry.get("enable_order")
+            has_order = isinstance(order, dict) and plugin_id in order
+            # A registry from before enable_order existed has enabled plugins with no order.
+            if record["enabled"] and (not isinstance(prior, dict) or not prior.get("enabled") or not has_order):
                 _set_enable_order(next_registry, plugin_id, True)
             _write_json(registry_path, next_registry)
             transaction["committed"] = True
