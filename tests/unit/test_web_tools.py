@@ -448,6 +448,31 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertTrue(result.success, result.error)
         self.assertIn(article_body.rstrip(), result.output)
 
+    def test_web_fetch_keeps_short_json_ld_article_over_playwright_text(self):
+        """Longer rendered text must not replace a valid JSON-LD article body."""
+        article_body = "JSON-LD article sentence. " * 10
+        html = (
+            '<script type="application/ld+json">'
+            + json.dumps({"articleBody": article_body})
+            + "</script>"
+        )
+        response = _make_mock_aiohttp_response(text=html)
+        playwright = AsyncMock(return_value="unrelated rendered text. " * 30)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(self.executor, "_playwright_fetch", new=playwright),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(article_body.rstrip(), result.output)
+        playwright.assert_not_awaited()
+
     def test_web_fetch_json_ld_description_does_not_shadow_semantic_article(self):
         """A metadata description cannot replace longer semantic article text."""
         from kollabor_agent.tool_executor import ToolExecutor
