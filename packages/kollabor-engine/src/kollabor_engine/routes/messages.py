@@ -301,10 +301,14 @@ def _assistant_finish_handover(
     session: Any,
     token: Optional[str],
     claim_id: Optional[str],
-) -> None:
-    """Delete a fully completed or invalidated handover capability."""
+) -> Any:
+    """Delete a fully completed or invalidated handover capability.
+
+    Returns the queue it unsubscribed, or None, so the caller does not
+    unsubscribe the same queue twice.
+    """
     if not token or not claim_id:
-        return
+        return None
     ledger = _assistant_handover_ledger(session)
     entry = ledger.get(token)
     if entry is not None and entry.get("claim_id") == claim_id:
@@ -313,6 +317,8 @@ def _assistant_finish_handover(
             _assistant_cancel_handover_expiry(finished)
             if finished.get("queue") is not None:
                 session.unsubscribe(finished["queue"])
+                return finished["queue"]
+    return None
 
 
 def _event_request_ids(event: Dict[str, Any]) -> set[str]:
@@ -3077,7 +3083,8 @@ async def assistant_transport(
                     replayed = private_goal and accepted.get("completed") is True and accepted.get("replayed") is True
                     if replayed:
                         replay_id = str(accepted.get("request_id") or request_id)
-                        queue = asyncio.Queue()
+                        if not queue_from_ledger:
+                            queue = asyncio.Queue()
                         queue.put_nowait({
                             "type": "token", "text": str(accepted.get("message") or "Goal request already processed."),
                             "request_id": replay_id,
@@ -4197,9 +4204,13 @@ async def assistant_transport(
                     )
                     preserve_handover_queue = True
                 else:
-                    _assistant_finish_handover(
-                        session, handover_token, handover_claim_id
-                    )
+                    if (
+                        _assistant_finish_handover(
+                            session, handover_token, handover_claim_id
+                        )
+                        is shared_queue
+                    ):
+                        subscribed_here = False
                     handover_claim_id = None
                     _assistant_set_state_value(
                         controller, _ASSISTANT_HANDOVER_STATE_KEY, None
