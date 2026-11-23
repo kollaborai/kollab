@@ -77,7 +77,7 @@ export function PluginTaggedText({ text }: { text: string }) {
 }
 
 /** Text outside plugin tags gets the same markdown rules as the native text part. */
-function Prose({ text }: { text: string }) {
+export function Prose({ text }: { text: string }) {
   return (
     <Markdown remarkPlugins={[remarkGfm]} components={defaultComponents}>
       {terminalDialectToMarkdown(text)}
