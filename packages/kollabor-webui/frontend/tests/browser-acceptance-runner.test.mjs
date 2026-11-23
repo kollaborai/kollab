@@ -21,6 +21,17 @@ test("browser polling rejects when an asynchronous condition stays false", async
   await assert.rejects(until(async () => false, "condition stayed false", 100), /condition stayed false/);
 });
 
+test("browser polling times out when an asynchronous condition never settles", async () => {
+  const result = await Promise.race([
+    until(() => new Promise(() => {}), "condition stayed pending", 50).then(
+      () => "resolved",
+      (error) => error.message,
+    ),
+    new Promise((resolve) => setTimeout(() => resolve("outer timeout"), 250)),
+  ]);
+  assert.equal(result, "condition stayed pending");
+});
+
 test("browser polling preserves synchronous values and asynchronous errors", async () => {
   assert.equal(await until(() => "ready", "missing", 100), "ready");
   await assert.rejects(until(async () => { throw new Error("probe failed"); }, "missing", 100), /probe failed/);
