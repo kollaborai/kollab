@@ -1337,7 +1337,6 @@ class ToolExecutor:
         """
         tool_type = tool_data.get("type", "unknown")
         tool_id = tool_data.get("id", "unknown")
-
         # Native callers are normalized before reaching this method, but keep
         # the legacy alias safe for direct/older callers too. The registered
         # ``git`` definition is documentation for terminal execution, not a
@@ -1345,6 +1344,40 @@ class ToolExecutor:
         if tool_type == "git":
             tool_data = {**tool_data, "type": "terminal"}
             tool_type = "terminal"
+
+        # A Git grant is narrower than terminal access. The documented XML
+        # form is parsed as a terminal dispatch without a tool name, so route
+        # only a single shell-free Git command through the existing read-only
+        # terminal policy. This keeps Git hooks and other command execution
+        # outside the Git-only grant.
+        command = tool_data.get("command")
+        git_bundle_read_only = (
+            tool_type == "terminal"
+            and self._bundle_tools is not None
+            and "git" in self._bundle_tools
+            and "terminal" not in self._bundle_tools
+            and not tool_data.get("background")
+            and isinstance(command, str)
+            and command.strip()
+            and not any(char in _SHELL_OPERATOR_CHARS for char in command)
+        )
+        git_argv: list[str] = []
+        if git_bundle_read_only:
+            try:
+                git_argv = shlex.split(command, posix=True)
+            except ValueError:
+                git_argv = []
+            git_bundle_read_only = bool(
+                git_argv and git_argv[0].lower() in {"git", "git.exe"}
+            )
+        if git_bundle_read_only:
+            if git_argv[0].lower() == "git.exe":
+                tool_data = {
+                    **tool_data,
+                    "command": shlex.join(["git", *git_argv[1:]]),
+                }
+            tool_data = {**tool_data, "type": "terminal_read"}
+            tool_type = "terminal_read"
 
         voice_terminal_plan: VoiceTerminalPlan | None = None
         voice_terminal_timeout = self.terminal_timeout
@@ -1524,7 +1557,7 @@ class ToolExecutor:
                                     "classification": voice_terminal_plan.classification,
                                 }
                             )
-                    elif _plugin_key in self._plugin_handlers:
+                    elif _plugin_key in self._plugin_handlers and not git_bundle_read_only:
                         logger.debug(
                             f"Routing to plugin handler for {_plugin_key}"
                         )
@@ -1542,7 +1575,9 @@ class ToolExecutor:
                             f"About to call _execute_terminal_command for {tool_id}"
                         )
                         mark_tool_execution()
-                        if voice_terminal_plan is not None:
+                        if git_bundle_read_only:
+                            result = await self._execute_terminal_command(tool_data)
+                        elif voice_terminal_plan is not None:
                             result = await self._execute_voice_terminal_plan(
                                 tool_data,
                                 voice_terminal_plan,

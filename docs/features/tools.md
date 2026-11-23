@@ -121,10 +121,18 @@ with a reason. The existing `terminal` tool keeps its normal behavior. See the
 [read-only terminal specification](../specs/agent-read-only-terminal.md) for
 the full policy.
 
-A bundle that grants `git` without `terminal` can use XML `<terminal>` calls for
-read-only Git inspection (`status`, `diff`, `log`, and `show`). These requests
-use the same parsed-argv policy; aliases, shell syntax, pager or external-helper
-options, credential commands, writes, and remote transports are refused. Grant
+A bundle that needs Git inspection without general terminal access can grant
+`git` instead:
+
+```json
+{"tools": ["file-read", "file-grep", "git"]}
+```
+
+This permits one read-only Git command at a time, such as `git status --short`,
+including through XML `<terminal>` requests. The command uses the same
+parsed-argv policy; aliases, shell syntax, pager or external-helper options,
+credential commands, Git writes (including commits that could run repository
+hooks), remote transports, and other terminal commands are refused. Grant
 `terminal` separately when the bundle needs shell commands or Git writes.
 
 ### Workspace Switching
