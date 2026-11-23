@@ -802,28 +802,34 @@ def _assistant_permission_identity(messages: List[Dict[str, Any]], call_id: str)
 async def _assistant_next_event(queue, controller, timeout=None):
     """Wait for either a daemon event or assistant-stream cancellation.
 
-    Returns None once the stream is cancelled, and ``{}`` when ``timeout``
-    seconds pass with neither (a cancelled ``queue.get()`` loses no event).
+    Returns None once the stream is cancelled, without starting another queue
+    read. If cancellation and a queue read finish together, preserve the event;
+    the next call observes cancellation. Returns ``{}`` when ``timeout``
+    seconds pass with neither. A revoked stream marker remains terminal.
+
     A closed stream (another chat opened, the tab closed, a phone dropped)
     leaves the daemon's turn running; Stop cancels it through
     ``POST /{session_id}/cancel``.
     """
+    if controller.cancelled_event.is_set():
+        return None
+
     event_task = asyncio.create_task(queue.get())
     cancel_task = asyncio.create_task(controller.cancelled_event.wait())
     try:
-        done, _ = await asyncio.wait(
+        await asyncio.wait(
             {event_task, cancel_task},
             timeout=timeout,
             return_when=asyncio.FIRST_COMPLETED,
         )
-        if cancel_task in done:
+        if event_task.done():
+            cancel_task.cancel()
+            event = event_task.result()
+            return None if event is PHONE_STREAM_REVOKED else event
+        if cancel_task.done():
             event_task.cancel()
             return None
-        if event_task not in done:
-            return {}
-        cancel_task.cancel()
-        event = event_task.result()
-        return None if event is PHONE_STREAM_REVOKED else event
+        return {}
     finally:
         for task in (event_task, cancel_task):
             if not task.done():
