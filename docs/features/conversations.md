@@ -1,7 +1,7 @@
 ---
 title: "Conversations and Storage"
 created: 2026-02-24
-modified: 2026-02-24
+modified: 2026-11-17
 status: active
 ---
 # Conversations and Storage
@@ -47,12 +47,25 @@ Use the `/resume` command to pick up where you left off:
 
 ```
 /resume           # Shows recent conversations to choose from
-/resume list      # List all saved conversations
+/resume <id>      # Resume a saved conversation directly
+/sessions         # Browse saved conversations (/history is an alias)
+/sessions search <query>
 ```
 
-The resume system restores the full message history so the LLM has context from the previous session.
+Selecting a conversation in `/sessions` resumes it. The resume system restores the
+full message history so the LLM has context from the previous session. Use
+`/branch <session_id> <message_index>` to create a new session from a saved
+conversation at a specific message.
+
+### Reading History in the Web UI
+
+While reading a long conversation, loading older pages and reconciling compacted history preserves the visible messages and their scroll position.
 
 ## Saving Conversations
+
+If saving a user message or assistant reply fails, Kollab keeps processing the
+turn and shows a notice in the terminal and web UI so the unsaved message is
+clear.
 
 Use `/save` to export a conversation in different formats:
 
