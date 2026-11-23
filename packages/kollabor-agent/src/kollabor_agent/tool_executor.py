@@ -712,7 +712,24 @@ def _terminal_find_escapes_workspace(
 ) -> bool:
     """Return whether a find command can escape or cannot be scoped safely."""
     find_names = {"find", "gfind"}
-    if not re.search(r"\b(?:find|gfind)\b", command):
+
+    def contains_find_token(text: str, depth: int = 0) -> bool:
+        if re.search(r"\b(?:find|gfind)\b", text):
+            return True
+        if depth > 8:
+            return False
+        try:
+            parsed = shlex.split(text, posix=True)
+        except ValueError:
+            return False
+        for token in parsed:
+            if Path(token).name.lower() in find_names:
+                return True
+            if token != text and contains_find_token(token, depth + 1):
+                return True
+        return False
+
+    if not contains_find_token(command):
         return False
     if _depth > 8:
         return True
