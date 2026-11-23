@@ -100,7 +100,14 @@ test("a run's stream ended after one event holds back the next queued event", as
       controller.close();
     },
   });
-  const run = endableStream(source);
+  let releaseNextEvent!: () => void;
+  let enteredNextEvent!: () => void;
+  const nextEventGate = new Promise<void>((resolve) => { releaseNextEvent = resolve; });
+  const nextEventStarted = new Promise<void>((resolve) => { enteredNextEvent = resolve; });
+  const run = endableStream(source, { beforeNextEvent: () => {
+    enteredNextEvent();
+    return nextEventGate;
+  } });
   // The assistant-transport reader pipes the response through transforms,
   // which can have the next read pending while the page handles this event.
   const consumed = run.stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
@@ -109,8 +116,48 @@ test("a run's stream ended after one event holds back the next queued event", as
   const reader = consumed.getReader();
   const decoder = new TextDecoder();
   let text = decoder.decode((await reader.read()).value);
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  const nextRead = reader.read();
+  await nextEventStarted;
   run.end();
+  releaseNextEvent();
+  let next = await nextRead;
+  while (!next.done) {
+    text += decoder.decode(next.value, { stream: true });
+    next = await reader.read();
+  }
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    text += decoder.decode(value, { stream: true });
+  }
+  assert.equal(text, `data: one\n\n${FINISH}`);
+});
+
+test("a handover gate splits coalesced SSE events before reading the next one", async () => {
+  const encoder = new TextEncoder();
+  const source = new ReadableStream<Uint8Array>({
+    start: (controller) => {
+      controller.enqueue(encoder.encode("data: one\n\ndata: two\r\n\r\n"));
+      controller.close();
+    },
+  });
+  let releaseNextEvent!: () => void;
+  let enteredNextEvent!: () => void;
+  const nextEventGate = new Promise<void>((resolve) => { releaseNextEvent = resolve; });
+  const nextEventStarted = new Promise<void>((resolve) => { enteredNextEvent = resolve; });
+  const run = endableStream(source, { beforeNextEvent: () => {
+    enteredNextEvent();
+    return nextEventGate;
+  } });
+  const reader = run.stream.getReader();
+  const decoder = new TextDecoder();
+  let text = decoder.decode((await reader.read()).value);
+  const nextRead = reader.read();
+  await nextEventStarted;
+  run.end();
+  releaseNextEvent();
+  const next = await nextRead;
+  if (!next.done) text += decoder.decode(next.value, { stream: true });
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -132,4 +179,24 @@ test("a reader that lets a run's stream go lets the engine's stream go", async (
   await run.stream.cancel();
   run.end();
   assert.equal(from.state.let, true);
+});
+
+test("an engine read error still fails the run stream", async () => {
+  const encoder = new TextEncoder();
+  let sent = false;
+  const source = new ReadableStream<Uint8Array>({
+    pull: (controller) => {
+      if (!sent) {
+        sent = true;
+        controller.enqueue(encoder.encode("data: one\n\n"));
+      } else {
+        controller.error(new Error("engine stream failed"));
+      }
+    },
+  });
+  const run = endableStream(source);
+  const reader = run.stream.getReader();
+  const first = await reader.read();
+  assert.equal(new TextDecoder().decode(first.value), "data: one\n\n");
+  await assert.rejects(reader.read(), /engine stream failed/);
 });

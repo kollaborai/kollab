@@ -1090,7 +1090,12 @@ export function EngineRuntimeProvider({
       // the page can end (see the hand-over below). The request is let go
       // once the timing reader stops too.
       if (!response.body) return;
-      const run = endableStream(response.body);
+      const run = endableStream(response.body, {
+        beforeNextEvent: () => {
+          if (!sendNow.current || waitingSendIds.current.size === 0) return;
+          return new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+        },
+      });
       Object.defineProperty(response, "body", { value: run.stream });
       endRun.current = () => {
         run.end();

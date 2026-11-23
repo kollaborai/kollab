@@ -1,5 +1,5 @@
-// Reproduce a transport event arriving in the Send Now click task, after the
-// click handler schedules endRun but before its queued microtask runs.
+// Reproduce two complete state events queued together while Send Now waits
+// for the running request's first state update.
 // Run with:
 //   CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" node tests/acceptance/1377-handover.browser.mjs
 import assert from "node:assert/strict";
@@ -59,17 +59,15 @@ try {
   await box.fill("request A");
   await box.press("Enter");
   await page.waitForFunction(() => window.transports.length === 1);
-  const first = await frameFor(0, "A before handover.");
-  await page.evaluate((frame) => window.transports[0].push(frame), first);
-  await page.getByText("A before handover.", { exact: true }).waitFor();
-
   await box.fill("request B");
   await box.press("Enter");
   await page.getByText("Queued", { exact: true }).waitFor();
-
-  // This is a full second state event in the already pending old response.
-  // The capture listener enqueues it before React handles the button; React's
-  // handler then schedules endRun in a microtask during the same click task.
+  // Send Now is requested while A's command is still in transit. The first
+  // state frame settles A; the second is already queued behind it in the body.
+  // When A settles, the runtime schedules the handover in a microtask while
+  // assistant-ui's decoder can already have read the next frame.
+  await page.getByRole("button", { name: "Send Now" }).click();
+  const first = await frameFor(0, "A before handover.");
   const late = await page.evaluate(() => {
     const transport = window.transports[0];
     const command = transport.request.commands.find((item) => item.type === "add-message");
@@ -86,21 +84,42 @@ try {
       { type: "set", path: ["messages"], value: messages },
     ] })}\n\n`;
   });
-  await page.evaluate((frame) => {
-    document.addEventListener("click", (event) => {
-      const target = event.target instanceof Element ? event.target.closest("button") : null;
-      if (target?.textContent?.trim() === "Send Now") window.transports[0].push(frame);
-    }, { capture: true, once: true });
-  }, late);
-  await page.getByRole("button", { name: "Send Now" }).click();
+  await page.evaluate(({ firstFrame, lateFrame }) => {
+    window.transports[0].push(firstFrame);
+    window.transports[0].push(lateFrame);
+  }, { firstFrame: first, lateFrame: late });
   await page.waitForFunction(() => window.transports.length === 2);
 
-  const leakedIntoNextRequest = await page.evaluate(() => JSON.stringify(window.transports[1].request.state)
-    .includes("LATE OLD-STREAM EVENT"));
-  assert.equal(leakedIntoNextRequest, false,
-    "a response event queued at Send Now must not enter the old request state or B's request body");
-  assert.equal(await page.getByText("A before handover. LATE OLD-STREAM EVENT", { exact: true }).count(), 0,
-    "the old response's queued state never appears after handover");
+  const afterHandover = await page.evaluate(() => {
+    const state = window.transports[1].request.state;
+    const bCommands = window.transports.flatMap((transport) => transport.request.commands ?? [])
+      .filter((command) => command.type === "add-message" && command.message.parts
+        .map((part) => part.text ?? "").join("") === "request B");
+    const assistantText = document.getElementById("assistant")?.textContent ?? "";
+    return {
+      requestCount: window.transports.length,
+      bCommandCount: bCommands.length,
+      bCommandText: window.transports[1].request.commands
+        .filter((command) => command.type === "add-message")
+        .map((command) => command.message.parts.map((part) => part.text ?? "").join("")),
+      savedFirstState: JSON.stringify(state).includes("A before handover."),
+      lateInRequest: JSON.stringify(state).includes("LATE OLD-STREAM EVENT"),
+      lateInUi: assistantText.includes("LATE OLD-STREAM EVENT"),
+      firstStateOccurrences: assistantText.split("A before handover.").length - 1,
+      oldTransportCancelled: window.transports[0].aborted,
+    };
+  });
+  assert.deepEqual(afterHandover, {
+    requestCount: 2,
+    bCommandCount: 1,
+    bCommandText: ["request B"],
+    savedFirstState: true,
+    lateInRequest: false,
+    lateInUi: false,
+    firstStateOccurrences: 1,
+    oldTransportCancelled: true,
+  },
+  "handover keeps A's accepted state, sends B exactly once, and drops the next queued state");
   assert.deepEqual(browserErrors, [], "the browser reports no runtime errors");
   await page.close();
   console.log("PASS 1377 handover consumer boundary");
