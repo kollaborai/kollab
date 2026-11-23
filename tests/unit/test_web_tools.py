@@ -322,6 +322,33 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertTrue(result.success, result.error)
         self.assertIn(article_body, result.output)
 
+    def test_web_fetch_keeps_short_json_ld_body_over_playwright_text(self):
+        """A concise JSON-LD body is not replaced by unrelated rendered text."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        article_body = "A concise article with useful facts and a clear conclusion."
+        html = (
+            '<script type="application/ld+json">'
+            + json.dumps({"articleBody": article_body})
+            + "</script>"
+        )
+        response = _make_mock_aiohttp_response(text=html)
+        playwright = AsyncMock(return_value="Unrelated rendered page text. " * 30)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(ToolExecutor, "_playwright_fetch", new=playwright),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(article_body, result.output)
+        playwright.assert_not_awaited()
+
     def test_web_fetch_extracts_json_ld_article_inside_graph(self):
         """JSON-LD graph nodes can carry article bodies."""
         from kollabor_agent.tool_executor import ToolExecutor
