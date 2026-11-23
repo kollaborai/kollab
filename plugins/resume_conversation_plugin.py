@@ -141,7 +141,7 @@ class ResumeConversationPlugin:
                 plugin_name=self.name,
                 category=CommandCategory.CONVERSATION,
                 mode=CommandMode.STATUS_TAKEOVER,
-                aliases=["history"],
+                aliases=["history", "fork", "forks"],
                 icon="[≡]",
                 ui_config=UIConfig(
                     type="modal", title="Conversation History", height=20, width=80
@@ -1398,6 +1398,7 @@ class ResumeConversationPlugin:
                     "title": f"[{time_str}] {first_line}{relevance_text}",
                     "subtitle": " | ".join(subtitle_parts),
                     "preview": conv.last_message_preview[:80],
+                    "action": "resume_session",
                     "metadata": {
                         "session_id": conv.session_id,
                         "file_id": conv.file_id,
@@ -1505,6 +1506,7 @@ class ResumeConversationPlugin:
                     "title": f"[{time_str}] {first_line}",
                     "subtitle": " | ".join(subtitle_parts),
                     "preview": conv.last_message_preview[:80],
+                    "action": "resume_session",
                     "metadata": {
                         "session_id": conv.session_id,
                         "file_id": conv.file_id,
