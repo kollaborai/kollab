@@ -123,6 +123,57 @@ async def test_acp_turn_complete_wakes_queue_if_idle_flag_clears_after_event():
 
 
 @pytest.mark.asyncio
+async def test_acp_turn_complete_waits_for_slow_completion_callback_settlement():
+    tap = DisplayTap()
+    acp = SimpleNamespace(_completion_tasks=set())
+    llm = SimpleNamespace(_active_acp=lambda: acp)
+    state = _State(event_bus=_EventBus(display_tap=tap), llm_service=llm)
+    server = RpcServer()
+    runtime = register_web_message_queue_runtime(server, state)
+    minted = await _enqueue_one(server)
+    release_completion = asyncio.Event()
+
+    async def settle_completion():
+        await release_completion.wait()
+        state.is_processing = False
+
+    completion = asyncio.create_task(settle_completion())
+    acp._completion_tasks.add(completion)
+    completion.add_done_callback(acp._completion_tasks.discard)
+
+    asyncio.get_running_loop().call_later(2.2, release_completion.set)
+    await asyncio.to_thread(tap.publish, {"type": "turn_complete"})
+    try:
+        await asyncio.wait_for(state.dispatched.wait(), timeout=3.0)
+    finally:
+        await runtime.close(timeout=0.1)
+
+    assert [item[1].request_id for item in state.dispatches] == minted["request_ids"]
+    assert tap._listeners == ()
+
+
+@pytest.mark.asyncio
+async def test_repeated_turn_complete_extends_active_idle_retry_window():
+    tap = DisplayTap()
+    state = _State(event_bus=_EventBus(display_tap=tap))
+    server = RpcServer()
+    runtime = register_web_message_queue_runtime(server, state)
+    minted = await _enqueue_one(server)
+    loop = asyncio.get_running_loop()
+    loop.call_later(1.5, tap.publish, {"type": "turn_complete"})
+    loop.call_later(2.2, setattr, state, "is_processing", False)
+
+    await asyncio.to_thread(tap.publish, {"type": "turn_complete"})
+    try:
+        await asyncio.wait_for(state.dispatched.wait(), timeout=3.0)
+    finally:
+        await runtime.close(timeout=0.1)
+
+    assert [item[1].request_id for item in state.dispatches] == minted["request_ids"]
+    assert tap._listeners == ()
+
+
+@pytest.mark.asyncio
 async def test_active_acp_reports_send_now_only_when_batch_gate_is_available():
     class _ACP:
         active = True
