@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { settingsValues } from "./settings";
+import { pluginRowControls, settingsValues } from "./settings";
 
 describe("plugin settings payload", () => {
   it("converts installed and development panel paths to plugin-local keys", () => {
@@ -26,5 +26,26 @@ describe("plugin settings payload", () => {
     expect(() => settingsValues({ id: "hello", kind: "installed" }, {
       "plugin-values.hello.": "bad",
     })).toThrow("Invalid plugin setting path");
+  });
+});
+
+describe("plugin row controls", () => {
+  const row = (kind: "built-in" | "installed" | "dev", state = "ok", shadowed = false) =>
+    ({ kind, state, shadowed }) as Parameters<typeof pluginRowControls>[0];
+
+  it("gives a built-in plugin the on/off switch, but no Update, Remove or service controls", () => {
+    expect(pluginRowControls(row("built-in")).switchEnabled).toBe(true);
+    expect(pluginRowControls(row("built-in")).updateRemove).toBe(false);
+    expect(pluginRowControls(row("built-in")).services).toBe(false);
+  });
+
+  it("gives Update and Remove to installed plugins only", () => {
+    expect(pluginRowControls(row("installed")).updateRemove).toBe(true);
+    expect(pluginRowControls(row("dev")).updateRemove).toBe(false);
+  });
+
+  it("holds the switch while a plugin is stopping or shadowed", () => {
+    expect(pluginRowControls(row("installed", "stopping")).switchEnabled).toBe(false);
+    expect(pluginRowControls(row("dev", "ok", true)).switchEnabled).toBe(false);
   });
 });
