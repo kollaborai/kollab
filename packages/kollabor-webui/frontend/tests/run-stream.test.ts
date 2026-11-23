@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { SSEEventDecoder, SSEEventDecoderError } from "assistant-stream/utils";
 
 import { endableStream } from "../src/run-stream.ts";
 
@@ -216,6 +217,44 @@ test("mixed LF and CRLF line endings still delimit separate SSE events", async (
   await reader.cancel();
 });
 
+test("every valid pair of LF, CR, and CRLF separators stays with its event", async () => {
+  const separators = ["\n\n", "\n\r", "\n\r\n", "\r\r", "\r\r\n", "\r\n\n", "\r\n\r", "\r\n\r\n"];
+  for (const separator of separators) {
+    const first = `data: first${separator}`;
+    const rest = `data: second\n\n`;
+    const cut = Math.max(1, Math.floor(separator.length / 2));
+    const encoder = new TextEncoder();
+    const source = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        controller.enqueue(encoder.encode(`data: first${separator.slice(0, cut)}`));
+        controller.enqueue(encoder.encode(`${separator.slice(cut)}${rest}`));
+        controller.close();
+      },
+    });
+    const reader = endableStream(source).stream.getReader();
+    assert.equal(new TextDecoder().decode((await reader.read()).value), first, JSON.stringify(separator));
+    await reader.cancel();
+  }
+});
+
+test("cancelling while a handover event is gated releases the pending read", async () => {
+  const from = engine();
+  let enteredGate!: () => void;
+  const gateEntered = new Promise<void>((resolve) => { enteredGate = resolve; });
+  const run = endableStream(from.source, { beforeNextEvent: () => {
+    enteredGate();
+    return new Promise<void>(() => undefined);
+  } });
+  const reader = run.stream.getReader();
+  from.send("data: first\n\n");
+  assert.equal(new TextDecoder().decode((await reader.read()).value), "data: first\n\n");
+  const pending = reader.read();
+  await gateEntered;
+  await reader.cancel();
+  assert.deepEqual(await pending, { value: undefined, done: true });
+  assert.equal(from.state.let, true);
+});
+
 test("end finishes after a complete event followed by an empty source chunk", async () => {
   const first = "data: first\n\n";
   let sourceController!: ReadableStreamDefaultController<Uint8Array>;
@@ -252,6 +291,11 @@ test("an oversized unterminated SSE line fails within the decoder's bound", asyn
   const limit = 16 * 1024 * 1024;
   const bytes = new Uint8Array(limit + 1);
   bytes.set(new TextEncoder().encode("data: "));
+  const lockedDecoder = new SSEEventDecoder();
+  assert.throws(
+    () => lockedDecoder.push(new TextDecoder().decode(bytes)),
+    (error) => error instanceof SSEEventDecoderError && error.code === "line-too-long",
+  );
   let cancelled = false;
   const source = new ReadableStream<Uint8Array>({
     start: (controller) => controller.enqueue(bytes),

@@ -4,30 +4,60 @@ const FINISH = new TextEncoder().encode(
 );
 const LF = 10;
 const CR = 13;
+const MAX_EVENT_BYTES = 16 * 1024 * 1024;
 
 type Boundary = { chunk: number; offset: number };
 
+function byteAfter(chunks: readonly Uint8Array[], chunk: number, offset: number): number | null {
+  for (let index = chunk; index < chunks.length; index += 1) {
+    const nextOffset = index === chunk ? offset + 1 : 0;
+    if (nextOffset < chunks[index].length) return chunks[index][nextOffset];
+  }
+  return null;
+}
+
+function endsWithBlankLine(bytes: readonly number[]): boolean {
+  const n = bytes.length;
+  if (n < 2) return false;
+  const last = bytes[n - 1];
+  const before = bytes[n - 2];
+  return (last === LF && before === LF) ||
+    (last === CR && (before === CR || before === LF)) ||
+    (last === LF && before === CR && n >= 3 &&
+      (bytes[n - 3] === CR || bytes[n - 3] === LF));
+}
+
 /** Find the end of the first SSE event, including a separator split by chunks. */
-function firstEventBoundary(chunks: readonly Uint8Array[]): Boundary | null {
+function firstEventBoundary(chunks: readonly Uint8Array[], scanFrom = 0, final = false): Boundary | null {
   const previous: number[] = [];
+  let absoluteOffset = 0;
   for (let chunk = 0; chunk < chunks.length; chunk += 1) {
     for (let offset = 0; offset < chunks[chunk].length; offset += 1) {
-      previous.push(chunks[chunk][offset]);
-      if (previous.length > 4) previous.shift();
-      const n = previous.length;
-      if (n >= 2 && previous[n - 1] === LF && previous[n - 2] === LF) {
-        return { chunk, offset };
+      if (absoluteOffset >= scanFrom) {
+        previous.push(chunks[chunk][offset]);
+        if (previous.length > 4) previous.shift();
+        const n = previous.length;
+        const last = previous[n - 1];
+        if (endsWithBlankLine(previous)) {
+          // A trailing CR may become the CRLF half of one line ending. Wait
+          // for its next byte before splitting so the complete delimiter
+          // stays with the event it ends.
+          const next = last === CR ? byteAfter(chunks, chunk, offset) : null;
+          if (last !== CR || next !== LF && (next !== null || final)) {
+            return { chunk, offset };
+          }
+        }
       }
-      if (n >= 2 && previous[n - 1] === CR && previous[n - 2] === CR) {
-        return { chunk, offset };
-      }
-      if (n >= 4 && previous[n - 1] === LF && previous[n - 2] === CR &&
-          previous[n - 3] === LF && previous[n - 4] === CR) {
-        return { chunk, offset };
-      }
+      absoluteOffset += 1;
     }
   }
   return null;
+}
+
+function eventLength(chunks: readonly Uint8Array[], boundary: Boundary): number {
+  let length = 0;
+  for (let chunk = 0; chunk < boundary.chunk; chunk += 1) length += chunks[chunk].length;
+  return length + boundary.offset + 1;
 }
 
 function join(chunks: readonly Uint8Array[]): Uint8Array {
@@ -57,7 +87,8 @@ function takeEvent(chunks: readonly Uint8Array[], boundary: Boundary) {
 
 /** True when bytes are an incomplete event rather than a queued full event. */
 function hasPartialEvent(chunks: readonly Uint8Array[]): boolean {
-  return chunks.length > 0 && firstEventBoundary(chunks) === null;
+  const nonEmpty = chunks.filter((chunk) => chunk.length > 0);
+  return nonEmpty.length > 0 && firstEventBoundary(nonEmpty) === null;
 }
 
 /**
@@ -67,7 +98,7 @@ function hasPartialEvent(chunks: readonly Uint8Array[]): boolean {
  */
 export function endableStream(
   source: ReadableStream<Uint8Array>,
-  options: { beforeNextEvent?: () => void | Promise<void> } = {},
+  options: { beforeNextEvent?: (event: Uint8Array) => void | Promise<void> } = {},
 ): {
   stream: ReadableStream<Uint8Array>;
   end: () => void;
@@ -75,11 +106,19 @@ export function endableStream(
   const reader = source.getReader();
   let controller!: ReadableStreamDefaultController<Uint8Array>;
   let pending: Uint8Array[] = [];
+  let pendingBytes = 0;
+  let pendingScanned = 0;
   let sourceDone = false;
   let pauseAfterEvent = false;
+  let previousEvent: Uint8Array | null = null;
   const tail: number[] = [];   // the last bytes passed on
   let ending = false;          // finish after the event now arriving
   let closed = false;
+  let releasePullWait: (() => void) | null = null;
+  const unblockPull = () => {
+    releasePullWait?.();
+    releasePullWait = null;
+  };
   const note = (bytes: Uint8Array) => {
     for (const byte of bytes) {
       tail.push(byte);
@@ -87,16 +126,14 @@ export function endableStream(
     }
   };
   const endsEvent = () => {
-    const n = tail.length;
-    return n === 0 ||
-      (tail[n - 1] === LF && tail[n - 2] === LF) ||
-      (tail[n - 1] === CR && tail[n - 2] === CR) ||
-      (tail[n - 1] === LF && tail[n - 2] === CR && tail[n - 3] === LF && tail[n - 4] === CR);
+    return tail.length === 0 || endsWithBlankLine(tail);
   };
   const finish = () => {
     if (closed) return;
     closed = true;
+    unblockPull();
     pending = [];
+    pendingBytes = 0;
     controller.enqueue(FINISH);
     controller.close();
     void reader.cancel().catch(() => undefined);
@@ -104,7 +141,17 @@ export function endableStream(
   const close = () => {
     if (closed) return;
     closed = true;
+    unblockPull();
     controller.close();
+  };
+  const fail = async (error: Error) => {
+    if (closed) return;
+    closed = true;
+    unblockPull();
+    pending = [];
+    pendingBytes = 0;
+    controller.error(error);
+    await reader.cancel(error).catch(() => undefined);
   };
   const stream = new ReadableStream<Uint8Array>({
     start: (streamController) => { controller = streamController; },
@@ -113,25 +160,44 @@ export function endableStream(
       if (closed) return;
       if (pauseAfterEvent) {
         pauseAfterEvent = false;
-        const wait = options.beforeNextEvent?.();
-        if (wait) await wait;
+        const event = previousEvent;
+        previousEvent = null;
+        const wait = event ? options.beforeNextEvent?.(event) : undefined;
+        if (wait) {
+          let release!: () => void;
+          const closedPromise = new Promise<void>((resolve) => { release = resolve; });
+          releasePullWait = release;
+          await Promise.race([wait, closedPromise]);
+          if (releasePullWait === release) releasePullWait = null;
+        }
         if (closed) return;
       }
       while (!closed) {
-        const boundary = firstEventBoundary(pending);
+        const scanFrom = Math.max(0, pendingScanned - 3);
+        const boundary = firstEventBoundary(pending, scanFrom, sourceDone);
         if (boundary) {
+          const length = eventLength(pending, boundary);
+          if (length > MAX_EVENT_BYTES) {
+            await fail(new Error(`SSE event exceeds max buffered size (${length} > ${MAX_EVENT_BYTES})`));
+            return;
+          }
           const next = takeEvent(pending, boundary);
           pending = next.remainder;
+          pendingBytes -= length;
+          pendingScanned = 0;
           controller.enqueue(next.event);
           note(next.event);
+          previousEvent = next.event;
           if (ending) finish();
           else pauseAfterEvent = true;
           return;
         }
+        pendingScanned = pendingBytes;
         if (sourceDone) {
           if (pending.length) {
             const partial = join(pending);
             pending = [];
+            pendingBytes = 0;
             controller.enqueue(partial);
             note(partial);
           }
@@ -144,11 +210,18 @@ export function endableStream(
           sourceDone = true;
           continue;
         }
+        if (value.length === 0) continue;
         pending.push(value);
+        pendingBytes += value.length;
+        if (pendingBytes > MAX_EVENT_BYTES && firstEventBoundary(pending, Math.max(0, pendingScanned - 3)) === null) {
+          await fail(new Error(`SSE event exceeds max buffered size (${pendingBytes} > ${MAX_EVENT_BYTES})`));
+          return;
+        }
       }
     },
     cancel: (reason) => {
       closed = true;
+      unblockPull();
       return reader.cancel(reason);
     },
   }, { highWaterMark: 0 });
