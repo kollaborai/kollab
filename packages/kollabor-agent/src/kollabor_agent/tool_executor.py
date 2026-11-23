@@ -708,7 +708,12 @@ def _is_blocked_kollab_spawn(
 
 
 def _terminal_find_escapes_workspace(
-    command: str, cwd: Path, workspace: Path, _depth: int = 0
+    command: str,
+    cwd: Path,
+    workspace: Path,
+    _depth: int = 0,
+    *,
+    require_absolute_roots: bool = False,
 ) -> bool:
     """Return whether a find command can escape or cannot be scoped safely."""
     find_names = {"find", "gfind"}
@@ -909,7 +914,11 @@ def _terminal_find_escapes_workspace(
                     else:
                         split_string = split_string_option[2:]
                     if split_string and _terminal_find_escapes_workspace(
-                        split_string, cwd, workspace, _depth + 1
+                        split_string,
+                        cwd,
+                        workspace,
+                        _depth + 1,
+                        require_absolute_roots=require_absolute_roots,
                     ):
                         return True
             find_match = next(
@@ -1063,6 +1072,10 @@ def _terminal_find_escapes_workspace(
         position += 1
     if not roots:
         roots = ["."]
+    if require_absolute_roots and any(
+        not Path(search_root).expanduser().is_absolute() for search_root in roots
+    ):
+        return True
     if has_inline_assignment and any("$" in search_root for search_root in roots):
         return True
 
@@ -2702,6 +2715,17 @@ class ToolExecutor:
                 tool_type="terminal_send",
                 success=False,
                 error="Text must be a string",
+            )
+
+        workspace = self.workspace or Path.cwd()
+        if _terminal_find_escapes_workspace(
+            text, workspace, workspace, require_absolute_roots=True
+        ):
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                tool_type="terminal_send",
+                success=False,
+                error="find search paths must stay inside the active workspace",
             )
 
         try:
