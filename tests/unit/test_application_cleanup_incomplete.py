@@ -310,6 +310,9 @@ async def test_interactive_command_preserves_exit_status_if_cleanup_is_uncertain
     args = SimpleNamespace(_help_pending=False, _unknown_args=[], stay=False)
     cleanup_calls = []
     app = _build_start_app(args, [False], cleanup_calls)
+    app._deferred_startup = MethodType(
+        application.TerminalLLMChat._deferred_startup, app
+    )
     app._boot_projects_sweep = lambda: None
     app._start_parent_watchdog = lambda: None
     app._check_for_updates = _noop
