@@ -241,6 +241,11 @@ class LLMService:
                 )
             except Exception as exc:
                 logger.warning("HUD entry not written to history: %s", exc)
+                display = getattr(self, "message_display_service", None)
+                if display is not None:
+                    display.display_system_message(
+                        "Conversation history not saved for this message."
+                    )
 
     async def inject_tool_grant(
         self,
@@ -2317,13 +2322,16 @@ class LLMService:
             isinstance(input_source, str)
             and input_source in HUMAN_USER_INPUT_SOURCES
         ):
-            operator_inputs = (
-                {
-                    "source": input_source,
-                    "timestamp": utc_stamp(),
-                    "text": message if isinstance(message, str) else display_text,
-                },
-            )
+            record = {
+                "source": input_source,
+                "timestamp": utc_stamp(),
+                "text": message if isinstance(message, str) else display_text,
+            }
+            # The saved row names the send, so a page tells its own send from
+            # another sender's identical words (#1359).
+            if isinstance(request_id, str) and request_id:
+                record["request_id"] = request_id
+            operator_inputs = (record,)
 
         # A LiveKit room's turn, or a /voice turn VoicePlugin.admit let in.
         claims_voice_origin = isinstance(origin_context, dict) and is_voice_origin(origin_context)
@@ -2844,7 +2852,12 @@ class LLMService:
         acp = self._selected_active_acp_orchestrator()
         if acp is not None:
             generation = queue_processor.request_cancellation(origin=origin)
-            self._cancel_open_prompts(park=False)
+            active = getattr(getattr(acp, "runner", None), "_active_context", None)
+            request_id = getattr(active, "request_id", None)
+            self._cancel_open_prompts(
+                park=False,
+                request_id=request_id if isinstance(request_id, str) and request_id else None,
+            )
             async def cancel_acp() -> None:
                 try:
                     await asyncio.wait_for(acp.cancel(), timeout=35.0)
@@ -2925,7 +2938,7 @@ class LLMService:
             logger.info("Processing cancellation requested")
         return generation
 
-    def _cancel_open_prompts(self, *, park: bool) -> None:
+    def _cancel_open_prompts(self, *, park: bool, request_id: str | None = None) -> None:
         """A prompt left waiting would hold the stopped turn until answered.
 
         A native Stop parks it: the turn ends, the card stays open, and the card
@@ -2938,7 +2951,7 @@ class LLMService:
         if release is None:
             return
         try:
-            release()
+            release() if park else release(request_id)
         except Exception:  # the Stop still ends the stream and the running tool
             logger.warning("could not release the open approval prompts", exc_info=True)
 

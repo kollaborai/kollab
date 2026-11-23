@@ -21,8 +21,8 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from kollabor.state.goal_store import (
-    GoalAttempt,
     GoalAttachmentRequestNotFound,
+    GoalAttempt,
     GoalEvidence,
     GoalRecord,
     GoalStore,
@@ -309,11 +309,20 @@ class GoalService:
         actor: str = "user",
         token_budget: Optional[float] = None,
         auto_turn_limit: Optional[int] = None,
+        auto_time_limit_s: Optional[int] = None,
     ) -> GoalRecord:
         record = self.store.get(goal_id)
         if record.status not in RESUMABLE_STATUSES:
             raise GoalError(
                 f"goal {record.short_id} is {record.status}; " "nothing to resume"
+            )
+        if (
+            auto_time_limit_s is None
+            and record.time_used_seconds >= record.auto_time_limit_s
+        ):
+            raise GoalError(
+                f"active-time limit reached ({record.time_used_seconds:g}s); "
+                "resume with --time <seconds> greater than active time already used"
             )
         updates: Dict[str, Any] = {
             "status": "active",
@@ -340,6 +349,14 @@ class GoalService:
                     f"already used ({record.turn_count})"
                 )
             updates["auto_turn_limit"] = auto_turn_limit
+        if auto_time_limit_s is not None:
+            if auto_time_limit_s <= record.time_used_seconds:
+                raise GoalError(
+                    f"time limit {auto_time_limit_s}s must exceed active time "
+                    f"already used ({record.time_used_seconds:g}s); choose a "
+                    "greater --time value"
+                )
+            updates["auto_time_limit_s"] = auto_time_limit_s
         self._t(
             goal_id,
             record.record_version,

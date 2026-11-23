@@ -133,21 +133,22 @@ class ResumeConversationPlugin:
             )
             command_registry.register_command(resume_command)
 
-            # Fork command - browse and fork conversations
-            fork_command = CommandDefinition(
-                name="fork",
-                description="Browse and fork previous conversations",
+            # Session browser - browse, search, and resume conversations
+            sessions_command = CommandDefinition(
+                name="sessions",
+                description="Browse, search, and resume conversations",
                 handler=self.handle_sessions,
                 plugin_name=self.name,
                 category=CommandCategory.CONVERSATION,
                 mode=CommandMode.STATUS_TAKEOVER,
-                aliases=["history", "forks"],
-                icon="[⑂]",
+                aliases=["history"],
+                icon="[≡]",
                 ui_config=UIConfig(
                     type="modal", title="Conversation History", height=20, width=80
                 ),
+                cli_hidden=False,
             )
-            command_registry.register_command(fork_command)
+            command_registry.register_command(sessions_command)
 
             # Branch command
             branch_command = CommandDefinition(
