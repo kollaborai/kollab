@@ -176,6 +176,7 @@ async def test_real_dispatch_writes_history_and_binds_exact_image_before_releasi
 async def test_failed_native_queue_commit_does_not_leave_a_phantom_history_row(tmp_path):
     """A failed provider-queue commit must not leave a durable user message."""
     from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
+    from kollabor_engine import media_store
 
     queue, attachments, _scope, request_id, _staged, snapshot = await _queue_with_image()
     state, llm, logger, uid = await _real_local_state(tmp_path)
@@ -192,10 +193,17 @@ async def test_failed_native_queue_commit_does_not_leave_a_phantom_history_row(t
 
     assert result.status is WorkerStatus.NOT_SENT
     assert result.items[0].request_id == request_id
-    assert logger.session_file.exists()
-    rows = [json.loads(line) for line in logger.session_file.read_text().splitlines()]
+    rows = (
+        [json.loads(line) for line in logger.session_file.read_text().splitlines()]
+        if logger.session_file.exists()
+        else []
+    )
     assert not any(row.get("type") == "user" for row in rows)
     assert llm.processing_queue.empty()
+    assert not any(
+        entry.get("queue_request_id") == request_id
+        for entry in media_store.list_for(logger.conversations_dir, logger.session_id)
+    )
     queue_snapshot = await queue.snapshot()
     assert queue_snapshot.batches[0].items[0].request_id == request_id
     assert attachments.attachment_count == 1
@@ -206,6 +214,7 @@ async def test_history_bind_failure_rolls_back_unconsumed_native_admission(
     tmp_path, monkeypatch
 ):
     from kollabor.state.web_message_queue_dispatch import WebMessageQueueDispatcher
+    from kollabor_engine import media_store
 
     queue, attachments, _scope, request_id, _staged, snapshot = await _queue_with_image()
     state, llm, logger, uid = await _real_local_state(tmp_path)
@@ -228,6 +237,10 @@ async def test_history_bind_failure_rolls_back_unconsumed_native_admission(
     assert llm.processing_queue.empty(), "failed history bind left provider custody"
     rows = [json.loads(line) for line in logger.session_file.read_text().splitlines()]
     assert not any(row.get("type") == "user" for row in rows)
+    assert not any(
+        entry.get("queue_request_id") == request_id
+        for entry in media_store.list_for(logger.conversations_dir, logger.session_id)
+    )
     assert attachments.attachment_count == 1
     queued = await queue.snapshot()
     assert queued.batches[0].items[0].request_id == request_id
@@ -314,7 +327,11 @@ async def test_stop_while_history_lock_waits_fails_before_row_or_custody(tmp_pat
     assert result.status is WorkerStatus.NOT_SENT
     assert result.items[0].request_id == request_id
     assert llm.processing_queue.empty()
-    rows = [json.loads(line) for line in logger.session_file.read_text().splitlines()]
+    rows = (
+        [json.loads(line) for line in logger.session_file.read_text().splitlines()]
+        if logger.session_file.exists()
+        else []
+    )
     assert not any(row.get("type") == "user" for row in rows)
 
 
