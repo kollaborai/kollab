@@ -350,6 +350,57 @@ async def test_single_ambiguous_send_reports_full_handover_capacity(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_successful_single_send_does_not_need_a_full_ledger_slot(monkeypatch):
+    session = _FakeSession(
+        [
+            {"type": "token", "text": "single reply", "request_id": "single"},
+            {"type": "turn_complete", "request_id": "single"},
+        ]
+    )
+    ledger = messages._assistant_handover_ledger(session)
+    for index in range(messages._ASSISTANT_HANDOVER_MAX_ENTRIES):
+        token = f"{index:032x}"
+        ledger[token] = {
+            "expires_at": 3600.0,
+            "status": "available",
+            "record": {"request_ids": [f"parked-{index}"]},
+            "queue": None,
+            "context": None,
+        }
+    session.send_message = AsyncMock(
+        return_value={"accepted": True, "request_id": "single"}
+    )
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, drain = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[
+                {
+                    "type": "add-message",
+                    "message": {
+                        "id": "single",
+                        "parts": [{"type": "text", "text": "one"}],
+                    },
+                }
+            ],
+            state={"messages": []},
+        ),
+    )
+    await asyncio.wait_for(drain(response.stream), timeout=1)
+
+    assert session.send_message.await_count == 1
+    assert len(ledger) == messages._ASSISTANT_HANDOVER_MAX_ENTRIES
+    assert session.subscriptions == []
+    assert messages._ASSISTANT_HANDOVER_STATE_KEY not in captured["controller"].state
+    assert captured["controller"].state["usage"]["stopReason"] == "end_turn"
+    assert captured["controller"].errors == []
+
+
+@pytest.mark.asyncio
 async def test_revocation_after_ambiguous_admission_does_not_publish_or_persist(
     monkeypatch,
 ):
