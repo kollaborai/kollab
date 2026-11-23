@@ -377,7 +377,16 @@ def test_pip_installs_verify_the_interpreters_system_or_user_scripts_dir(
     _fake_executable(scripts_dir, "4.5.6")
     python = _write_executable(
         tools_dir / "python3",
-        f"#!/bin/sh\nprintf '%s\\n' '{scripts_dir}'\n",
+        f"""#!/bin/sh
+if [ "$1" = "-c" ]; then
+    printf '%s\\n' '{scripts_dir}'
+    exit 0
+fi
+while [ "$1" = "-I" ]; do shift; done
+script="$1"
+shift
+exec /bin/sh "$script" "$@"
+""",
     )
     pip_script = f"""#!{python}
 if [ "$1" = install ] && [ "$2" = --help ]; then
@@ -454,7 +463,16 @@ def test_pip_env_split_shebang_resolves_the_interpreter(
     _fake_executable(scripts_dir, "4.5.6")
     python = _write_executable(
         tools_dir / "python3",
-        f"#!/bin/sh\nprintf '%s\\n' '{scripts_dir}'\n",
+        f"""#!/bin/sh
+if [ "$1" = "-c" ]; then
+    printf '%s\\n' '{scripts_dir}'
+    exit 0
+fi
+while [ "$1" = "-I" ]; do shift; done
+script="$1"
+shift
+exec /bin/sh "$script" "$@"
+""",
     )
     pip_script = _write_executable(
         tools_dir / "pip3",
