@@ -64,7 +64,10 @@ const streaming = (text: string, request = "r1"): Like => {
 const live = (request = "r1") => `${LIVE_MESSAGE_ID}:${request}`;
 
 test("the live message is marked optimistic, the flag assistant-ui evicts by", () => {
-  assert.deepEqual(streaming("hello").metadata, { isOptimistic: true });
+  assert.deepEqual(streaming("hello").metadata, {
+    isOptimistic: true,
+    custom: { requestId: "r1" },
+  });
 });
 
 test("a live reply that history replaces leaves no sibling under the user row", () => {

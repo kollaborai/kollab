@@ -5,6 +5,7 @@ import {
   dropTransientTurnDuplicates,
   historyHasAssistantRequestId,
   historyMessageIndex,
+  insertLiveMessage,
   isCompactionMarker,
   mergeCompactionHistorySnapshot,
   mergeMissingHistoryMessages,
@@ -71,6 +72,27 @@ test("same-index note rows retain the engine's order during a partial merge", ()
   const later = { id: "history-5", content: "reply" };
   const merged = mergeMissingHistoryMessages([user, later], [note, user, later]);
   assert.deepEqual(merged.messages.map((message) => message.id), [note.id, user.id, later.id]);
+});
+
+test("a handed-over live reply stays after its request and before the next send", () => {
+  const firstSend = { id: "history-0", role: "user", content: "request A",
+    metadata: { custom: { requestId: "A" } } };
+  const firstReply = { id: "assistant-s1-1", role: "assistant", content: "before handover",
+    metadata: { custom: { requestId: "A" } } };
+  const nextSend = { id: "user-s1-2", role: "user", content: "request B",
+    metadata: { isOptimistic: true, custom: { requestId: "B" } } };
+  const live = { id: "live-turn:A", role: "assistant", content: "late output",
+    metadata: { isOptimistic: true, custom: { requestId: "A" } } };
+
+  const inserted = insertLiveMessage([firstSend, firstReply, nextSend], live);
+  assert.deepEqual(inserted.map((row) => row.id), [firstSend.id, firstReply.id, live.id, nextSend.id]);
+  assert.equal(inserted[0], firstSend);
+  assert.equal(inserted[1], firstReply);
+  assert.equal(inserted[3], nextSend);
+
+  // A later assistant snapshot that omitted the ephemeral row can add it once.
+  const restored = insertLiveMessage([firstSend, firstReply, nextSend], live);
+  assert.equal(restored.filter((row) => row.id === live.id).length, 1);
 });
 
 test("new history stays before an existing pending permission", () => {
