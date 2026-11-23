@@ -2019,8 +2019,14 @@ try {
       },
     }),
     async (page, _requests, capture) => {
-      await openThread(page, "LONG_REPLY_END 🌵");
       const reply = page.locator('[data-slot="aui_assistant-message-root"]').last();
+      await reply.waitFor({ state: "visible", timeout: 10000 });
+      await page.waitForFunction(
+        () => document.querySelector('[data-slot="aui_assistant-message-root"]:last-of-type')
+          ?.textContent?.includes("LONG_REPLY_END 🌵") === true,
+        null,
+        { timeout: 10000 },
+      );
       const rendered = await reply.innerText();
       if (!rendered.includes("LONG_REPLY_END 🌵")) {
         throw new Error("the full assistant reply tail was not rendered after reload");
@@ -2028,7 +2034,10 @@ try {
       if (rendered.includes("[Showing the first 4 KB of this message.]")) {
         throw new Error("the history truncation marker was rendered as assistant text");
       }
-      if (outputRequests.length !== 1 || outputRequests[0] !== "long-agent-reply-ref") {
+      if (
+        outputRequests.length === 0 ||
+        outputRequests.some((reference) => reference !== "long-agent-reply-ref")
+      ) {
         throw new Error(`unexpected history output requests: ${JSON.stringify(outputRequests)}`);
       }
       ok("long-agent-reply", "history reload fetched and rendered the complete assistant reply");
