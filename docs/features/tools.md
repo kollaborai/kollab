@@ -134,9 +134,12 @@ A bundle that needs Git inspection without general terminal access can grant
 {"tools": ["file-read", "file-grep", "git"]}
 ```
 
-This permits one read-only Git command at a time, such as `git status --short`.
-Shell composition, Git writes (including commits that could run repository
-hooks), and other terminal commands remain refused.
+This permits one read-only Git command at a time, such as `git status --short`,
+including through XML `<terminal>` requests. The command uses the same
+parsed-argv policy; aliases, shell syntax, pager or external-helper options,
+credential commands, Git writes (including commits that could run repository
+hooks), remote transports, and other terminal commands are refused. Grant
+`terminal` separately when the bundle needs shell commands or Git writes.
 
 ### Workspace Switching
 

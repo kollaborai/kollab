@@ -1547,8 +1547,53 @@ class ToolExecutor:
         # Fallback: simple underscore-to-hyphen
         return tool_type.replace("_", "-")
 
+    def _is_git_only_bundle_command(
+        self, command: Optional[str], cwd: Optional[str]
+    ) -> bool:
+        """Accept only read-only Git commands for a Git-only bundle grant."""
+        if not isinstance(command, str) or not command.strip():
+            return False
+        try:
+            if len(command.encode("utf-8")) > MAX_VOICE_COMMAND_BYTES:
+                return False
+        except UnicodeEncodeError:
+            return False
+        if any(char in _SHELL_OPERATOR_CHARS for char in command):
+            return False
+
+        try:
+            argv = tuple(shlex.split(command, posix=True))
+        except ValueError:
+            return False
+        if not argv or any(not token or "\\" in token for token in argv):
+            return False
+        if argv[0] != "git":
+            return False
+
+        try:
+            root = Path(self.workspace or Path.cwd()).expanduser().resolve()
+            command_cwd = self._resolve_terminal_cwd(cwd) or root
+            command_cwd = command_cwd.resolve()
+            command_cwd.relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            return False
+
+        if any(
+            token.split("=", 1)[0].lower() == "--no-index" for token in argv[1:]
+        ):
+            return False
+        if _git_leaves_project(argv, command_cwd, root):
+            return False
+        return not _is_hard_blocked(argv) and _is_read_only_action(
+            argv, command_cwd, root
+        )
+
     def _check_bundle_scope(
-        self, tool_type: str, tool_name: Optional[str] = None
+        self,
+        tool_type: str,
+        tool_name: Optional[str] = None,
+        command: Optional[str] = None,
+        cwd: Optional[str] = None,
     ) -> Optional[str]:
         """Check if a tool_type is allowed by the bundle scope.
 
@@ -1577,6 +1622,16 @@ class ToolExecutor:
 
         # Direct match against bundle tools
         if registry_name in self._bundle_tools:
+            return None
+
+        # ``git`` is documentation for terminal execution, but a Git-only
+        # grant must never inherit the full shell terminal capability.
+        if (
+            tool_type in {"terminal", "terminal_read"}
+            and "git" in self._bundle_tools
+            and "terminal" not in self._bundle_tools
+            and self._is_git_only_bundle_command(command, cwd)
+        ):
             return None
 
         # MCP schemas can be scoped to a single tool name as well as to the
@@ -1931,8 +1986,20 @@ class ToolExecutor:
             )
 
         # Check bundle scope — reject tools not in the agent's allowed set
-        scope_type = "git" if git_bundle_read_only else tool_type
-        scope_error = self._check_bundle_scope(scope_type, tool_data.get("name"))
+        # Registered Git calls already carry the narrow ``git`` capability;
+        # XML <terminal> calls have no registered name and must pass the
+        # command-aware exception in _check_bundle_scope.
+        scope_type = (
+            "git"
+            if git_bundle_read_only and tool_data.get("name") == "git"
+            else tool_type
+        )
+        scope_error = self._check_bundle_scope(
+            scope_type,
+            tool_data.get("name"),
+            tool_data.get("command"),
+            tool_data.get("cwd"),
+        )
         if scope_error:
             logger.warning(f"Tool {tool_id} rejected by bundle scope: {tool_type}")
             return ToolExecutionResult(
@@ -1942,6 +2009,17 @@ class ToolExecutor:
                 error=scope_error,
                 metadata={"scope_denied": True},
             )
+
+        git_only_terminal = (
+            self._enforce_bundle_scope
+            and self._bundle_tools is not None
+            and "git" in self._bundle_tools
+            and "terminal" not in self._bundle_tools
+            and tool_type in {"terminal", "terminal_read"}
+        )
+        if git_only_terminal:
+            tool_data = {**tool_data, "type": "terminal_read"}
+            tool_type = "terminal_read"
 
         gate_refusal = self.sandbox_gate.check(tool_data, self.workspace or Path.cwd())
         if gate_refusal:
@@ -2020,7 +2098,29 @@ class ToolExecutor:
                     _plugin_key = tool_type
                     if _plugin_key not in self._plugin_handlers:
                         _plugin_key = tool_type.replace("-", "_")
-                    if _plugin_key in self._plugin_handlers and not git_bundle_read_only:
+                    if git_only_terminal:
+                        mark_tool_execution()
+                        read_only_tool_data = tool_data
+                        if voice_terminal_plan is not None:
+                            read_only_tool_data = {
+                                **tool_data,
+                                "command": shlex.join(
+                                    ("git", *voice_terminal_plan.argv[1:])
+                                ),
+                                "cwd": str(voice_terminal_plan.canonical_cwd),
+                            }
+                        result = await self._execute_read_only_terminal_command(
+                            read_only_tool_data
+                        )
+                        if voice_terminal_plan is not None:
+                            result.metadata.update(
+                                {
+                                    "voice_terminal_plan_id": voice_terminal_plan.plan_id,
+                                    "voice_action_digest": voice_terminal_plan.digest,
+                                    "classification": voice_terminal_plan.classification,
+                                }
+                            )
+                    elif _plugin_key in self._plugin_handlers and not git_bundle_read_only:
                         logger.debug(
                             f"Routing to plugin handler for {_plugin_key}"
                         )
