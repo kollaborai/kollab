@@ -90,6 +90,42 @@ def _defer_voice_artifact_cleanup(
     cleanup_task.add_done_callback(_voice_artifact_cleanup_tasks.discard)
 
 
+async def _observe_transcriber_descendants(
+    proc, stop_event: asyncio.Event
+) -> list[Any] | None:
+    """Remember descendants before the transcriber exits and reparents them."""
+    import os
+
+    if os.name == "nt" or not hasattr(proc, "returncode"):
+        return []
+    import psutil
+
+    try:
+        parent = psutil.Process(proc.pid)
+    except psutil.Error:
+        return None
+
+    observed: dict[int, Any] = {}
+    while not stop_event.is_set():
+        try:
+            for descendant in parent.children(recursive=True):
+                observed[descendant.pid] = descendant
+        except psutil.Error:
+            if proc.returncode is None:
+                return None
+            break
+        await asyncio.sleep(0.01)
+    return list(observed.values())
+
+
+def _merge_voice_descendants(
+    first: list[Any] | None, second: list[Any] | None
+) -> list[Any] | None:
+    if first is None or second is None:
+        return None
+    return list({descendant.pid: descendant for descendant in (*first, *second)}.values())
+
+
 async def _await_shielded_task(task: asyncio.Task):
     """Finish an owned task despite repeated cancellation of its caller."""
     interrupted = False
@@ -435,6 +471,8 @@ class TelegramBridge(MessagingBridge):
             temp_dir = tempfile.mkdtemp(prefix="kollab-telegram-voice-")
             communication_task = None
             descendants: list[Any] | None = []
+            descendant_stop = None
+            descendant_task = None
             try:
                 suffix = Path(file_path).suffix or ".ogg"
                 audio_path = Path(temp_dir) / f"voice{suffix}"
@@ -478,18 +516,37 @@ class TelegramBridge(MessagingBridge):
                         _stop_transcriber(proc, communication_task)
                     )
                     descendants, _ = await _await_shielded_task(cleanup_task)
+                    if descendant_stop is not None:
+                        descendant_stop.set()
+                    if descendant_task is not None:
+                        observed, _ = await _await_shielded_task(descendant_task)
+                        descendants = _merge_voice_descendants(descendants, observed)
                     raise
 
+                descendant_stop = asyncio.Event()
+                if os.name != "nt" and hasattr(proc, "returncode"):
+                    descendant_task = asyncio.create_task(
+                        _observe_transcriber_descendants(proc, descendant_stop)
+                    )
                 communication_task = asyncio.create_task(proc.communicate())
                 try:
                     stdout_bytes, _stderr_bytes = await asyncio.wait_for(
                         asyncio.shield(communication_task), timeout=60
                     )
+                    if descendant_stop is not None:
+                        descendant_stop.set()
+                    if descendant_task is not None:
+                        descendants, _ = await _await_shielded_task(descendant_task)
                 except asyncio.TimeoutError:
                     cleanup_task = asyncio.create_task(
                         _stop_transcriber(proc, communication_task)
                     )
                     descendants, interrupted = await _await_shielded_task(cleanup_task)
+                    if descendant_stop is not None:
+                        descendant_stop.set()
+                    if descendant_task is not None:
+                        observed, _ = await _await_shielded_task(descendant_task)
+                        descendants = _merge_voice_descendants(descendants, observed)
                     if interrupted:
                         raise asyncio.CancelledError
                     raise
@@ -498,12 +555,22 @@ class TelegramBridge(MessagingBridge):
                         _stop_transcriber(proc, communication_task)
                     )
                     descendants, _ = await _await_shielded_task(cleanup_task)
+                    if descendant_stop is not None:
+                        descendant_stop.set()
+                    if descendant_task is not None:
+                        observed, _ = await _await_shielded_task(descendant_task)
+                        descendants = _merge_voice_descendants(descendants, observed)
                     raise
                 except Exception:
                     cleanup_task = asyncio.create_task(
                         _stop_transcriber(proc, communication_task)
                     )
                     descendants, interrupted = await _await_shielded_task(cleanup_task)
+                    if descendant_stop is not None:
+                        descendant_stop.set()
+                    if descendant_task is not None:
+                        observed, _ = await _await_shielded_task(descendant_task)
+                        descendants = _merge_voice_descendants(descendants, observed)
                     if interrupted:
                         raise asyncio.CancelledError
                     raise
