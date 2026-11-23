@@ -346,6 +346,33 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result.success)
             self.executor.shell_executor.run.assert_awaited_once()
 
+    async def test_terminal_pipeline_text_mentioning_find_is_allowed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "project"
+            workspace.mkdir()
+            self.executor.workspace = workspace
+            self.executor.shell_executor.run = AsyncMock(
+                return_value=ShellResult(
+                    success=True, stdout="find\n", stderr="", exit_code=0
+                )
+            )
+
+            command = "printf '%s\\n' find | cat"
+            result = await self.executor._execute_terminal_command(
+                {
+                    "type": "terminal",
+                    "id": "find-pipeline-text",
+                    "command": command,
+                    "cwd": str(workspace),
+                }
+            )
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.output, "find\n")
+            self.executor.shell_executor.run.assert_awaited_once_with(
+                command, timeout=self.terminal_timeout, cwd=workspace
+            )
+
     async def test_terminal_find_refuses_uninspectable_interpreter_command(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir) / "project"
