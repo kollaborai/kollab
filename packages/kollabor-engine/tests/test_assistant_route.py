@@ -1588,6 +1588,7 @@ async def test_assistant_transport_rejects_request_id_owned_by_another_active_st
     session = _FakeSession([])
     both_subscribed = asyncio.Event()
     both_submitted = asyncio.Event()
+    first_submitted = asyncio.Event()
     submitted: list[str] = []
     session.subscriptions = []
 
@@ -1606,6 +1607,8 @@ async def test_assistant_transport_rejects_request_id_owned_by_another_active_st
     async def submit(content, **kwargs):
         await both_subscribed.wait()
         submitted.append(content)
+        if len(submitted) == 1:
+            first_submitted.set()
         if len(submitted) == 2:
             both_submitted.set()
         return {"accepted": True, "request_id": kwargs["request_id"]}
@@ -1648,6 +1651,7 @@ async def test_assistant_transport_rejects_request_id_owned_by_another_active_st
             if second_task.done() or len(submitted) == 2:
                 break
             await asyncio.sleep(0)
+        await asyncio.wait_for(first_submitted.wait(), timeout=1)
         if len(submitted) == 2:
             assert both_submitted.is_set()
 
