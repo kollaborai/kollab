@@ -576,6 +576,18 @@ SUBSTITUTION_GUARD_CASES = [
         False,
         id="unmatched-command-substitution",
     ),
+    pytest.param(
+        'echo "$(printf safe # )\nkollab --agent coder\n)"',
+        True,
+        False,
+        id="comment-parenthesis-inside-command-substitution",
+    ),
+    pytest.param(
+        'echo "$(cat <<EOF\n)\nkollab --agent coder\nEOF\n)"',
+        True,
+        False,
+        id="heredoc-parenthesis-inside-command-substitution",
+    ),
     pytest.param('echo "$(kollab -a coder"', True, False, id="unmatched-short-launch"),
     pytest.param(
         r"echo $'\'' $(kollab -a coder) 'x'",
