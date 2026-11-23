@@ -219,6 +219,16 @@ export type WebMessageQueueEnqueueRequest = {
   }>;
 };
 
+export type WebMessageQueueEnqueueReceipt = {
+  scope_id: string;
+  incarnation: string;
+  operation_id: string;
+  revision: number;
+  status: string;
+  batch_id: string | null;
+  request_ids: string[];
+};
+
 export type HistoryPageOptions = {
   limit?: number;
   before?: string;
@@ -1526,7 +1536,7 @@ export class EngineApi {
   }
 
   enqueueWebMessageBatch(sessionId: string, body: WebMessageQueueEnqueueRequest) {
-    return this.json<{ scope_id: string; incarnation: string; revision: number; status: string; batch_id: string; request_ids: string[] }>(
+    return this.json<WebMessageQueueEnqueueReceipt>(
       `${this.webMessageQueuePath(sessionId)}/batches`,
       { method: "POST", body: JSON.stringify(body) },
     );

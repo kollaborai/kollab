@@ -80,7 +80,10 @@ function Fixture() {
         <QueuePanel
           snapshot={snapshot}
           dispatchAvailable={dispatchAvailable}
+          stale={false}
+          refreshError={false}
           busy={busy}
+          onRefresh={() => undefined}
           onRemoveItem={(requestId) => action("remove", requestId)}
           onSendNow={(batchId) => action("send", batchId)}
         />

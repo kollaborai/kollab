@@ -6,7 +6,12 @@ import "@/styles.css";
 document.documentElement.classList.add("dark");
 
 type RequestRecord = { url: string; method: string; authorization: string | null; body: string | null };
-type MountProbe = { requests: () => RequestRecord[]; sent: () => boolean; removed: () => boolean };
+type MountProbe = {
+  requests: () => RequestRecord[];
+  sent: () => boolean;
+  removed: () => boolean;
+  failNextRead: () => void;
+};
 type ProbeWindow = Window & { __queuePanelMountProbe?: MountProbe };
 declare global {
   interface Window {
@@ -16,6 +21,7 @@ declare global {
 
 let sent = false;
 let removed = false;
+let failRead = false;
 let revision = 0;
 const requests: RequestRecord[] = [];
 const firstBatch: WebMessageQueueSnapshot["batches"][number] = {
@@ -75,6 +81,10 @@ window.fetch = async (input: string | URL | Request, init?: RequestInit) => {
     return Response.json({ status: "admitted", accepted: true, request_ids: ["request-first"] });
   }
   if (method === "GET") {
+    if (failRead) {
+      failRead = false;
+      return Response.json({ detail: "temporary read failure" }, { status: 503 });
+    }
     const batches = [
       sent
         ? { ...firstBatch, status: "dispatching" as const, claim_id: "claim-first",
@@ -97,6 +107,7 @@ window.fetch = async (input: string | URL | Request, init?: RequestInit) => {
   requests: () => [...requests],
   sent: () => sent,
   removed: () => removed,
+  failNextRead: () => { failRead = true; },
 };
 
 createRoot(document.getElementById("root")!).render(

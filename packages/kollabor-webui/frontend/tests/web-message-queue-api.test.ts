@@ -3,7 +3,11 @@ import { afterEach, expect, test, vi } from "vitest";
 import { ApiError, EngineApi, type WebMessageQueueSnapshot } from "../src/api.ts";
 import { WebQueuePanelController } from "../src/components/web-queue/WebQueuePanelMount.tsx";
 import {
+  acknowledgeBusyWebMessage,
+  hasUnresolvedBusyWebMessage,
+  QueueSubmissionReconciliationError,
   submitBusyWebMessage,
+  type QueueSubmissionLocks,
   type BusyWebMessageAttachment,
   type BusyWebMessageInput,
 } from "../src/components/web-queue/submit.ts";
@@ -13,6 +17,32 @@ class MemoryStorage {
   getItem(key: string) { return this.values.get(key) ?? null; }
   setItem(key: string, value: string) { this.values.set(key, value); }
   removeItem(key: string) { this.values.delete(key); }
+}
+
+class SerialQueueLocks implements QueueSubmissionLocks {
+  private readonly tails = new Map<string, Promise<void>>();
+
+  async request<T>(name: string, callback: () => Promise<T>): Promise<T> {
+    const previous = this.tails.get(name) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const queued = previous.then(() => gate);
+    this.tails.set(name, queued);
+    await previous;
+    try {
+      return await callback();
+    } finally {
+      release();
+      if (this.tails.get(name) === queued) this.tails.delete(name);
+    }
+  }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
 }
 
 afterEach(() => {
@@ -348,11 +378,13 @@ test("Send Now tolerates a concurrent background refresh of the same queue", asy
 test("failed background refresh marks the visible queue stale until a fresh snapshot arrives", async () => {
   let fail = false;
   let revision = 1;
+  const sendBatch = vi.fn(async () => ({ accepted: true }));
   const api = {
     getWebMessageQueue: vi.fn(async () => {
       if (fail) throw new Error("offline");
       return queueSnapshot("scope-a", "inc-a", revision, [queuedBatch]);
     }),
+    sendWebMessageQueueBatchNow: sendBatch,
   } as unknown as EngineApi;
   const controller = new WebQueuePanelController(api, (() => 1) as unknown as typeof globalThis.setInterval);
   controller.setIdentity("session-1", "conversation-a");
@@ -366,6 +398,10 @@ test("failed background refresh marks the visible queue stale until a fresh snap
   expect(controller.getState().refreshError).toBe(true);
 
   fail = false;
+  revision = 0;
+  await expect(controller.sendNow("batch-1")).rejects.toThrow(/status is out of date/);
+  expect(sendBatch).not.toHaveBeenCalled();
+
   revision = 2;
   await controller.refresh(true);
   expect(controller.getState().snapshot?.revision).toBe(2);
@@ -421,6 +457,7 @@ function busyApiHarness() {
 
 test("busy composer admission stages images before enqueue and retains accepted Send Now batches", async () => {
   const storage = new MemoryStorage();
+  const locks = new SerialQueueLocks();
   const { api, allocateWebMessageQueueIds, stageWebMessageQueueAttachment, enqueueWebMessageBatch, sendWebMessageQueueBatchNow } = busyApiHarness();
   const imageBytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]);
   const attachment: BusyWebMessageAttachment = {
@@ -431,7 +468,7 @@ test("busy composer admission stages images before enqueue and retains accepted 
     file: new File([imageBytes], "diagram.png", { type: "image/png" }),
   };
 
-  const result = await submitBusyWebMessage(api, busyInput({ attachments: [attachment], sendNow: true }), storage);
+  const result = await submitBusyWebMessage(api, busyInput({ attachments: [attachment], sendNow: true }), storage, locks);
 
   expect(allocateWebMessageQueueIds).toHaveBeenCalledWith("session-a", "conversation-a", 1, 1, 1);
   expect(stageWebMessageQueueAttachment.mock.calls.map((call) => call[2])).toEqual(["attachment-op-0"]);
@@ -444,15 +481,21 @@ test("busy composer admission stages images before enqueue and retains accepted 
   expect(sendWebMessageQueueBatchNow).toHaveBeenCalledWith("session-a", "conversation-a", "batch-a");
   expect(result).toMatchObject({ admitted: true, sendNowStatus: "not-accepted", batchId: "batch-a" });
   expect(storage.values.size).toBe(1);
+  const persistedPlan = JSON.stringify([...storage.values.values()]);
+  expect(persistedPlan).not.toContain("inspect this");
+  expect(persistedPlan).not.toContain("diagram.png");
 });
 
 test("busy composer retries an ambiguous enqueue with the same daemon IDs and blocks changed content", async () => {
   const storage = new MemoryStorage();
+  const locks = new SerialQueueLocks();
   const { api, allocateWebMessageQueueIds, enqueueWebMessageBatch } = busyApiHarness();
   enqueueWebMessageBatch.mockRejectedValueOnce(new Error("connection closed after admission"));
 
-  await expect(submitBusyWebMessage(api, busyInput(), storage)).rejects.toThrow(/confirm queue admission/);
-  const result = await submitBusyWebMessage(api, busyInput(), storage);
+  await expect(submitBusyWebMessage(api, busyInput(), storage, locks)).rejects.toThrow(/confirm queue admission/);
+  expect(hasUnresolvedBusyWebMessage("session-a", "draft-a", storage)).toBe(true);
+  const result = await submitBusyWebMessage(api, busyInput(), storage, locks);
+  expect(hasUnresolvedBusyWebMessage("session-a", "draft-a", storage)).toBe(false);
   expect(result.admitted).toBe(true);
   expect(allocateWebMessageQueueIds).toHaveBeenCalledOnce();
   expect(enqueueWebMessageBatch.mock.calls.map((call) => call[1].operation_id)).toEqual([
@@ -462,7 +505,287 @@ test("busy composer retries an ambiguous enqueue with the same daemon IDs and bl
 
   const otherStorage = new MemoryStorage();
   enqueueWebMessageBatch.mockRejectedValueOnce(new Error("response lost"));
-  await expect(submitBusyWebMessage(api, busyInput({ draftKey: "draft-b" }), otherStorage)).rejects.toThrow(/confirm queue admission/);
-  await expect(submitBusyWebMessage(api, busyInput({ draftKey: "draft-b", text: "changed" }), otherStorage))
+  await expect(submitBusyWebMessage(api, busyInput({ draftKey: "draft-b" }), otherStorage, locks)).rejects.toThrow(/confirm queue admission/);
+  await expect(submitBusyWebMessage(api, busyInput({ draftKey: "draft-b", conversationUid: "conversation-b" }), otherStorage, locks))
     .rejects.toThrow(/previous queue submission/);
+  await expect(submitBusyWebMessage(api, busyInput({ draftKey: "draft-b", text: "changed" }), otherStorage, locks))
+    .rejects.toThrow(/previous queue submission/);
+  expect(allocateWebMessageQueueIds).toHaveBeenCalledTimes(2);
+});
+
+test("a late acknowledgement cannot erase a newer ambiguous submission in another tab", async () => {
+  const storage = new MemoryStorage();
+  const locks = new SerialQueueLocks();
+  let allocation = 0;
+  const allocate = vi.fn(async (_s: string, _u: string, _i: number, _o: number, _a: number) => {
+    allocation += 1;
+    return {
+      scope_id: "scope-a", incarnation: "inc-a", operation_ids: [`operation-${allocation}`],
+      batch_id: `batch-${allocation}`, request_ids: [`request-${allocation}`],
+      attachment_operation_ids: [],
+    };
+  });
+  const secondEnqueueStarted = deferred<void>();
+  const finishSecondEnqueue = deferred<void>();
+  const admittedOperations = new Set<string>();
+  let secondWasAmbiguous = false;
+  const enqueue = vi.fn(async (_s: string, body: { operation_id: string; batch_id: string; items: Array<{ request_id: string }> }) => {
+    admittedOperations.add(body.operation_id);
+    if (body.operation_id === "operation-2" && !secondWasAmbiguous) {
+      secondWasAmbiguous = true;
+      secondEnqueueStarted.resolve();
+      await finishSecondEnqueue.promise;
+      throw new Error("response lost after commit");
+    }
+    return {
+      scope_id: "scope-a", incarnation: "inc-a", operation_id: body.operation_id,
+      revision: 1, status: "queued", batch_id: body.batch_id,
+      request_ids: body.items.map((item) => item.request_id),
+    };
+  });
+  const api = { allocateWebMessageQueueIds: allocate, enqueueWebMessageBatch: enqueue } as unknown as EngineApi;
+  const first = await submitBusyWebMessage(api, busyInput({ text: "first" }), storage, locks);
+
+  const secondSubmit = submitBusyWebMessage(api, busyInput({ text: "second" }), storage, locks);
+  await secondEnqueueStarted.promise;
+  const firstAck = acknowledgeBusyWebMessage(first, storage, locks);
+  finishSecondEnqueue.resolve();
+  await expect(secondSubmit).rejects.toBeInstanceOf(QueueSubmissionReconciliationError);
+  await expect(firstAck).resolves.toBe(true);
+
+  const retried = await submitBusyWebMessage(api, busyInput({ text: "second" }), storage, locks);
+  expect(retried.requestId).toBe("request-2");
+  expect(allocate).toHaveBeenCalledTimes(2);
+  expect(enqueue.mock.calls.map((call) => call[1].operation_id)).toEqual([
+    "operation-1", "operation-2", "operation-2",
+  ]);
+  expect(admittedOperations).toEqual(new Set(["operation-1", "operation-2"]));
+});
+
+test("Web Locks denial fails closed before allocating queue identities", async () => {
+  const { api, allocateWebMessageQueueIds } = busyApiHarness();
+  const denied: QueueSubmissionLocks = {
+    request: async () => { throw new Error("NotAllowedError"); },
+  };
+  await expect(submitBusyWebMessage(api, busyInput(), new MemoryStorage(), denied))
+    .rejects.toThrow(/cross-tab queue lock/);
+  expect(allocateWebMessageQueueIds).not.toHaveBeenCalled();
+});
+
+test("missing Web Locks fails closed instead of using unsynchronized localStorage", async () => {
+  vi.stubGlobal("navigator", {});
+  const { api, allocateWebMessageQueueIds } = busyApiHarness();
+  await expect(submitBusyWebMessage(api, busyInput(), new MemoryStorage()))
+    .rejects.toThrow(/cannot safely coordinate queue retries across tabs/);
+  expect(allocateWebMessageQueueIds).not.toHaveBeenCalled();
+});
+
+test("client rejects image batches above the daemon 20 MiB per-message cap before staging", async () => {
+  const { api, allocateWebMessageQueueIds, stageWebMessageQueueAttachment } = busyApiHarness();
+  const images = [0, 1, 2].map((index) => {
+    const bytes = new Uint8Array(7 * 1024 * 1024);
+    bytes.set([137, 80, 78, 71, 13, 10, 26, 10]);
+    return {
+      id: `image-${index}`, type: "image", name: `image-${index}.png`,
+      contentType: "image/png", file: new File([bytes], `image-${index}.png`, { type: "image/png" }),
+    } as BusyWebMessageAttachment;
+  });
+  await expect(submitBusyWebMessage(
+    api, busyInput({ attachments: images }), new MemoryStorage(), new SerialQueueLocks(),
+  )).rejects.toThrow(/20 MiB per-message limit/);
+  expect(allocateWebMessageQueueIds).not.toHaveBeenCalled();
+  expect(stageWebMessageQueueAttachment).not.toHaveBeenCalled();
+});
+
+test("a definite image-stage rejection releases its plan so corrected content can be admitted", async () => {
+  const storage = new MemoryStorage();
+  const locks = new SerialQueueLocks();
+  let allocation = 0;
+  const allocate = vi.fn(async (_s: string, _u: string, _i: number, _o: number, count: number) => {
+    allocation += 1;
+    return {
+      scope_id: "scope-a", incarnation: "inc-a", operation_ids: [`operation-${allocation}`],
+      batch_id: `batch-${allocation}`, request_ids: [`request-${allocation}`],
+      attachment_operation_ids: Array.from({ length: count }, (_, index) => `attachment-${allocation}-${index}`),
+    };
+  });
+  const stage = vi.fn(async () => { throw new ApiError("unsupported image", 415, {}); });
+  const enqueue = vi.fn(async (_s: string, body: { operation_id: string; batch_id: string; items: Array<{ request_id: string }> }) => ({
+    scope_id: "scope-a", incarnation: "inc-a", operation_id: body.operation_id,
+    revision: 1, status: "queued", batch_id: body.batch_id,
+    request_ids: body.items.map((item) => item.request_id),
+  }));
+  const api = { allocateWebMessageQueueIds: allocate, stageWebMessageQueueAttachment: stage, enqueueWebMessageBatch: enqueue } as unknown as EngineApi;
+  const image = new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], "bad.png", { type: "image/png" });
+  const rejectedInput = busyInput({ attachments: [{
+    id: "bad", type: "image", name: image.name, contentType: image.type, file: image,
+  }] });
+
+  await expect(submitBusyWebMessage(api, rejectedInput, storage, locks))
+    .rejects.toThrow(/rejected this attachment before queue admission/);
+  expect(hasUnresolvedBusyWebMessage("session-a", "draft-a", storage)).toBe(false);
+  const accepted = await submitBusyWebMessage(api, busyInput({ text: "corrected text" }), storage, locks);
+  expect(accepted.requestId).toBe("request-2");
+  expect(allocate).toHaveBeenCalledTimes(2);
+  expect(enqueue).toHaveBeenCalledOnce();
+});
+
+test("a definite enqueue rejection releases its exact plan for a corrected retry", async () => {
+  const storage = new MemoryStorage();
+  const locks = new SerialQueueLocks();
+  let allocation = 0;
+  const allocate = vi.fn(async () => {
+    allocation += 1;
+    return {
+      scope_id: "scope-a", incarnation: "inc-a", operation_ids: [`operation-${allocation}`],
+      batch_id: `batch-${allocation}`, request_ids: [`request-${allocation}`], attachment_operation_ids: [],
+    };
+  });
+  const enqueue = vi.fn(async (_s: string, body: { operation_id: string; batch_id: string; items: Array<{ request_id: string }> }) => {
+    if (body.operation_id === "operation-1") throw new ApiError("payload too large", 413, {});
+    return {
+      scope_id: "scope-a", incarnation: "inc-a", operation_id: body.operation_id,
+      revision: 1, status: "queued", batch_id: body.batch_id,
+      request_ids: body.items.map((item) => item.request_id),
+    };
+  });
+  const api = { allocateWebMessageQueueIds: allocate, enqueueWebMessageBatch: enqueue } as unknown as EngineApi;
+  await expect(submitBusyWebMessage(api, busyInput(), storage, locks))
+    .rejects.toThrow(/rejected this message before queue admission/);
+  const corrected = await submitBusyWebMessage(api, busyInput({ text: "shorter" }), storage, locks);
+  expect(corrected.requestId).toBe("request-2");
+  expect(allocate).toHaveBeenCalledTimes(2);
+});
+
+test("typed daemon queue-capacity rejection releases the draft plan; unrelated 409 stays ambiguous", async () => {
+  const storage = new MemoryStorage();
+  const locks = new SerialQueueLocks();
+  let allocation = 0;
+  const allocate = vi.fn(async () => {
+    allocation += 1;
+    return {
+      scope_id: "scope-a", incarnation: "inc-a", operation_ids: [`operation-${allocation}`],
+      batch_id: `batch-${allocation}`, request_ids: [`request-${allocation}`], attachment_operation_ids: [],
+    };
+  });
+  let rejectCapacity = true;
+  const enqueue = vi.fn(async (_s: string, body: { operation_id: string; batch_id: string; items: Array<{ request_id: string }> }) => {
+    if (rejectCapacity) {
+      rejectCapacity = false;
+      throw new ApiError("queue full", 409, {
+        detail: { code: "queue_capacity", message: "The queue is full. No message was admitted." },
+      });
+    }
+    return {
+      scope_id: "scope-a", incarnation: "inc-a", operation_id: body.operation_id,
+      revision: 1, status: "queued", batch_id: body.batch_id,
+      request_ids: body.items.map((item) => item.request_id),
+    };
+  });
+  const api = { allocateWebMessageQueueIds: allocate, enqueueWebMessageBatch: enqueue } as unknown as EngineApi;
+  await expect(submitBusyWebMessage(api, busyInput(), storage, locks))
+    .rejects.toThrow(/queue is full/);
+  expect(hasUnresolvedBusyWebMessage("session-a", "draft-a", storage)).toBe(false);
+  const corrected = await submitBusyWebMessage(api, busyInput({ text: "after capacity clears" }), storage, locks);
+  expect(corrected.requestId).toBe("request-2");
+  expect(allocate).toHaveBeenCalledTimes(2);
+
+  const conflictStorage = new MemoryStorage();
+  const conflictLocks = new SerialQueueLocks();
+  const { api: conflictApi, enqueueWebMessageBatch: conflictEnqueue } = busyApiHarness();
+  conflictEnqueue.mockRejectedValueOnce(new ApiError("generic conflict", 409, { detail: "conflict" }));
+  await expect(submitBusyWebMessage(conflictApi, busyInput(), conflictStorage, conflictLocks))
+    .rejects.toBeInstanceOf(QueueSubmissionReconciliationError);
+  await expect(submitBusyWebMessage(conflictApi, busyInput({ text: "different" }), conflictStorage, conflictLocks))
+    .rejects.toBeInstanceOf(QueueSubmissionReconciliationError);
+});
+
+test("ambiguous queue handler conflict remains retryable with the same operation ID", async () => {
+  const storage = new MemoryStorage();
+  const locks = new SerialQueueLocks();
+  const { api, allocateWebMessageQueueIds, enqueueWebMessageBatch } = busyApiHarness();
+  enqueueWebMessageBatch.mockRejectedValueOnce(new ApiError("The daemon rejected this queue operation.", 409, {}));
+
+  await expect(submitBusyWebMessage(api, busyInput(), storage, locks))
+    .rejects.toBeInstanceOf(QueueSubmissionReconciliationError);
+  const retried = await submitBusyWebMessage(api, busyInput(), storage, locks);
+
+  expect(retried.admitted).toBe(true);
+  expect(allocateWebMessageQueueIds).toHaveBeenCalledOnce();
+  expect(enqueueWebMessageBatch.mock.calls.map((call) => call[1].operation_id)).toEqual([
+    "operation-a", "operation-a",
+  ]);
+});
+
+test("busy composer uses authenticated EngineApi routes for ID allocation, image staging, enqueue, and Send Now", async () => {
+  const requests: Array<{ url: string; method: string; authorization: string | null; contentType: string | null; body: unknown }> = [];
+  const bytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]);
+  vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "/api/config") return Response.json({});
+    const method = init?.method ?? "GET";
+    const headers = new Headers(init?.headers);
+    requests.push({
+      url,
+      method,
+      authorization: headers.get("Authorization"),
+      contentType: headers.get("Content-Type"),
+      body: init?.body,
+    });
+    if (url.endsWith("/web-message-queue/ids")) {
+      return Response.json({
+        scope_id: "scope-http",
+        incarnation: "inc-http",
+        operation_ids: ["op-http"],
+        batch_id: "batch-http",
+        request_ids: ["request-http"],
+        attachment_operation_ids: ["att-op-http"],
+      });
+    }
+    if (method === "PUT" && url.includes("/attachments/")) {
+      return Response.json({ ref: "ref-http", mime: "image/png", size: bytes.length, filename: "diagram.png" });
+    }
+    if (url.endsWith("/web-message-queue/batches")) {
+      const body = JSON.parse(String(init?.body));
+      return Response.json({
+        scope_id: "scope-http",
+        incarnation: "inc-http",
+        operation_id: body.operation_id,
+        revision: 1,
+        status: "queued",
+        batch_id: body.batch_id,
+        request_ids: body.items.map((item: { request_id: string }) => item.request_id),
+      });
+    }
+    if (url.includes("/send-now?")) return Response.json({ accepted: true, status: "admitted" });
+    throw new Error(`Unexpected request ${method} ${url}`);
+  });
+
+  const api = new EngineApi("http://engine");
+  api.setToken("queue-auth-token");
+  const attachment: BusyWebMessageAttachment = {
+    id: "image-http",
+    type: "image",
+    name: "diagram.png",
+    contentType: "image/png",
+    file: new File([bytes], "diagram.png", { type: "image/png" }),
+  };
+  const result = await submitBusyWebMessage(api, busyInput({ attachments: [attachment], sendNow: true }), new MemoryStorage(), new SerialQueueLocks());
+
+  expect(result).toMatchObject({ admitted: true, sendNowStatus: "accepted", batchId: "batch-http" });
+  expect(requests.map(({ method, url }) => [method, url.split("http://engine")[1]])).toEqual([
+    ["POST", "/sessions/session-a/web-message-queue/ids"],
+    ["PUT", "/sessions/session-a/web-message-queue/attachments/att-op-http?conversation_uid=conversation-a"],
+    ["POST", "/sessions/session-a/web-message-queue/batches"],
+    ["POST", "/sessions/session-a/web-message-queue/batches/batch-http/send-now?conversation_uid=conversation-a"],
+  ]);
+  expect(requests.every((request) => request.authorization === "Bearer queue-auth-token")).toBe(true);
+  expect(requests[1]?.contentType).toBe("image/png");
+  expect(requests[1]?.body).toBeInstanceOf(Blob);
+  expect(JSON.parse(String(requests[2]?.body))).toMatchObject({
+    conversation_uid: "conversation-a",
+    operation_id: "op-http",
+    batch_id: "batch-http",
+    items: [{ request_id: "request-http", attachment_refs: ["ref-http"] }],
+  });
 });

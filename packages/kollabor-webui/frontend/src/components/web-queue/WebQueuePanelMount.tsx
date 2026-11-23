@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import type { EngineApi, WebMessageQueueSnapshot } from "@/api";
+import { WEB_QUEUE_UPDATED_EVENT } from "./submit";
 import { QueuePanel, type WebQueueSnapshot } from "./QueuePanel";
 
 export type WebQueuePanelState = {
   snapshot: WebMessageQueueSnapshot | null;
   dispatchAvailable: boolean;
+  stale: boolean;
+  refreshError: boolean;
 };
 
 type QueueIdentity = {
@@ -17,7 +20,12 @@ type QueueTimer = ReturnType<typeof globalThis.setInterval>;
 type QueueSetTimer = (handler: TimerHandler, timeout?: number) => QueueTimer;
 type QueueClearTimer = (timer: QueueTimer) => void;
 
-const EMPTY_STATE: WebQueuePanelState = { snapshot: null, dispatchAvailable: false };
+const EMPTY_STATE: WebQueuePanelState = {
+  snapshot: null,
+  dispatchAvailable: false,
+  stale: false,
+  refreshError: false,
+};
 const REFRESH_INTERVAL_MS = 2_000;
 
 /** Owns one authenticated session/conversation snapshot and its bounded polling lifecycle. */
@@ -88,7 +96,12 @@ export class WebQueuePanelController {
         }
         return snapshot;
       })
-      .catch(() => null)
+      .catch(() => {
+        if (this.isCurrent(identity, generation) && sequence === this.readSequence) {
+          this.publish({ ...this.state, stale: true, refreshError: true });
+        }
+        return null;
+      })
       .finally(() => {
         if (this.refreshRequest === request) this.refreshRequest = null;
       });
@@ -99,7 +112,7 @@ export class WebQueuePanelController {
   async removeItem(requestId: string): Promise<void> {
     const identity = this.identity;
     const observed = this.state.snapshot;
-    if (!identity || !observed || !this.hasQueuedItem(observed, requestId)) {
+    if (!identity || !observed || this.state.stale || !this.hasQueuedItem(observed, requestId)) {
       throw new Error("The queued message is no longer available.");
     }
     const generation = this.generation;
@@ -116,7 +129,7 @@ export class WebQueuePanelController {
       const current = this.state.snapshot;
       if (!current || current.scope_id !== observed.scope_id || current.incarnation !== observed.incarnation ||
           ids.scope_id !== observed.scope_id || ids.incarnation !== observed.incarnation ||
-          !this.hasQueuedItem(current, requestId)) {
+          this.state.stale || !this.hasQueuedItem(current, requestId)) {
         throw new Error("The queue changed. Refresh before removing a message.");
       }
       const operationId = ids.operation_ids[0];
@@ -139,16 +152,28 @@ export class WebQueuePanelController {
       throw new Error("The queued batch is no longer available.");
     }
     const generation = this.generation;
-    const sequence = ++this.readSequence;
-    const current = await this.api.getWebMessageQueue(identity.sessionId, identity.conversationUid);
+    let current: WebMessageQueueSnapshot;
+    try {
+      current = await this.api.getWebMessageQueue(identity.sessionId, identity.conversationUid);
+    } catch (error) {
+      if (this.isCurrent(identity, generation)) {
+        this.publish({ ...this.state, stale: true, refreshError: true });
+      }
+      throw error;
+    }
     if (!this.isCurrent(identity, generation)) throw new Error("The queue changed sessions.");
-    if (sequence !== this.readSequence) throw new Error("The queue changed. Try again.");
     if (current.scope_id !== observed.scope_id || current.incarnation !== observed.incarnation) {
       this.publishSnapshot(current);
       throw new Error("The queue changed. Refresh before sending.");
     }
     this.publishSnapshot(current);
-    if (!current.dispatch_available || !this.hasQueuedBatch(current, batchId)) {
+    if (this.state.stale) throw new Error("Queue status is out of date. Refresh before sending.");
+    const latest = this.state.snapshot;
+    const verified = latest && latest.scope_id === current.scope_id &&
+      latest.incarnation === current.incarnation && latest.revision > current.revision
+      ? latest
+      : current;
+    if (!verified.dispatch_available || !this.hasQueuedBatch(verified, batchId)) {
       throw new Error("The queued batch is no longer ready to send.");
     }
 
@@ -187,7 +212,12 @@ export class WebQueuePanelController {
     const prior = this.state.snapshot;
     if (prior && prior.scope_id === snapshot.scope_id && prior.incarnation === snapshot.incarnation &&
         snapshot.revision < prior.revision) return;
-    this.publish({ snapshot, dispatchAvailable: snapshot.dispatch_available === true });
+    this.publish({
+      snapshot,
+      dispatchAvailable: snapshot.dispatch_available === true,
+      stale: false,
+      refreshError: false,
+    });
   }
 
   private publish(state: WebQueuePanelState): void {
@@ -226,12 +256,20 @@ export function WebQueuePanelMount({
       document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
   }, [controller]);
+  useEffect(() => {
+    const refreshAfterLocalAdmission = () => void controller.refresh(true);
+    window.addEventListener(WEB_QUEUE_UPDATED_EVENT, refreshAfterLocalAdmission);
+    return () => window.removeEventListener(WEB_QUEUE_UPDATED_EVENT, refreshAfterLocalAdmission);
+  }, [controller]);
 
   return (
     <QueuePanel
       snapshot={state.snapshot as WebQueueSnapshot | null}
       dispatchAvailable={state.dispatchAvailable}
+      stale={state.stale}
+      refreshError={state.refreshError}
       busy={busy}
+      onRefresh={() => { void controller.refresh(true); }}
       onRemoveItem={(requestId) => controller.removeItem(requestId)}
       onSendNow={(batchId) => controller.sendNow(batchId)}
     />

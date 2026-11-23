@@ -20,14 +20,20 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
-from kollabor_rpc import RpcCallerContext, current_rpc_caller_context
+from kollabor_rpc import (
+    WEB_QUEUE_CAPACITY_REJECTED,
+    RpcCallerContext,
+    current_rpc_caller_context,
+)
 
 from .web_message_attachments import (
+    AttachmentCapacityExceeded,
     DEFAULT_MAX_ATTACHMENT_BYTES,
     DEFAULT_MAX_ATTACHMENTS_PER_ITEM,
     WebMessageAttachmentRegistry,
 )
 from .web_message_queue import (
+    CapacityExceeded,
     DEFAULT_MAX_BATCH_ITEMS,
     DEFAULT_MAX_PAYLOAD_BYTES,
     DEFAULT_MAX_QUEUE_BYTES,
@@ -40,6 +46,17 @@ from .web_message_queue import (
 
 DEFAULT_MAX_SCOPES = 16
 MAX_OPERATION_IDS_PER_ALLOCATION = 64
+
+
+class _QueueCapacityRejected(Exception):
+    """Safe RPC marker for an atomic precommit queue capacity refusal."""
+
+    def __init__(self) -> None:
+        super().__init__(WEB_QUEUE_CAPACITY_REJECTED)
+
+    def __repr__(self) -> str:
+        # RpcServer carries handler errors as repr; keep this stable code-only.
+        return WEB_QUEUE_CAPACITY_REJECTED
 
 _IMAGE_MIME_ALIASES = {
     "image/png": "image/png",
@@ -880,25 +897,30 @@ def register_web_message_queue_handlers(
 
         async def enqueue(queue: WebMessageQueue) -> dict[str, Any]:
             items = _decode_items(params, registry)
-            if any(item.attachment_refs for item in items):
-                if attachment_registry is None:
-                    raise ValueError("attachment staging is unavailable")
-                attachment_scope = await attachment_registry.bind_scope(
-                    params, current_rpc_caller_context()
-                )
-                if (
-                    attachment_scope.binding.scope_id != queue.scope_id
-                    or attachment_scope.binding.queue_incarnation != queue.incarnation
-                ):
-                    raise QueueRpcAuthorizationError("queue access denied")
-                receipt = await queue.enqueue_batch_with_attachments(
-                    operation_id,
-                    batch_id,
-                    items,
-                    attachment_scope=attachment_scope,
-                )
-            else:
-                receipt = await queue.enqueue_batch(operation_id, batch_id, items)
+            try:
+                if any(item.attachment_refs for item in items):
+                    if attachment_registry is None:
+                        raise ValueError("attachment staging is unavailable")
+                    attachment_scope = await attachment_registry.bind_scope(
+                        params, current_rpc_caller_context()
+                    )
+                    if (
+                        attachment_scope.binding.scope_id != queue.scope_id
+                        or attachment_scope.binding.queue_incarnation != queue.incarnation
+                    ):
+                        raise QueueRpcAuthorizationError("queue access denied")
+                    receipt = await queue.enqueue_batch_with_attachments(
+                        operation_id,
+                        batch_id,
+                        items,
+                        attachment_scope=attachment_scope,
+                    )
+                else:
+                    receipt = await queue.enqueue_batch(operation_id, batch_id, items)
+            except (CapacityExceeded, AttachmentCapacityExceeded):
+                # Both queue methods validate capacity before mutating state or
+                # retaining attachment ownership. Other RPC failures stay opaque.
+                raise _QueueCapacityRejected() from None
             await _notify(queue)
             return _receipt_to_wire(receipt)
 

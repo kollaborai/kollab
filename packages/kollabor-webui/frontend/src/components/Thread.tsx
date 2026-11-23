@@ -21,6 +21,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import type { AgentPoolEntry, NetworkAgent, SlashCommand } from "@/api";
+import type { BusyWebMessageComposerRequest, BusyWebMessageResult } from "@/components/web-queue/submit";
 import { Avatar } from "@/components/agents/Avatar";
 import type { Activity } from "@/components/gems/gem-face";
 import { resolveAgentSender, type HubNote } from "@/hub-notes";
@@ -348,7 +349,8 @@ export const Thread: FC<{
   historyStartIndex?: number;
   /** Daemon-backed queue mounted above the composer. */
   queuePanel?: ReactNode;
-}> = ({ agents = [], commands = [], onOpenPanel, onOpenWelcome, attachmentsEnabled = true, identity, sessionId, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", historyStatus, onLoadOlder, onRetryHistory, historyStartIndex = 0, queuePanel }) => (
+  onQueueBusyMessage?: (input: BusyWebMessageComposerRequest) => Promise<BusyWebMessageResult>;
+}> = ({ agents = [], commands = [], onOpenPanel, onOpenWelcome, attachmentsEnabled = true, identity, sessionId, activity, onOpenGem, remoteAgents = [], workspace = "", device = "", locked = "", historyStatus, onLoadOlder, onRetryHistory, historyStartIndex = 0, queuePanel, onQueueBusyMessage }) => (
   <PoolContext.Provider value={agents}>
   <WhereContext.Provider value={device || workspace}>
   <ComposerHubContext.Provider value={{ workspace, remote: remoteAgents }}>
@@ -374,12 +376,14 @@ export const Thread: FC<{
             onOpenWelcome={onOpenWelcome}
             attachmentsEnabled={attachmentsEnabled}
             draftKey={composerDraftStorageKey(identity, sessionId)}
+            queueSessionId={sessionId}
 
             historyStatus={historyStatus}
             onLoadOlder={onLoadOlder}
             onRetryHistory={onRetryHistory}
             historyStartIndex={historyStartIndex}
             queuePanel={queuePanel}
+            onQueueBusyMessage={onQueueBusyMessage}
           />
         </ComposerLockContext.Provider>
       </ComposerPlaceholderContext.Provider>

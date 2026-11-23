@@ -2,7 +2,13 @@
 
 from .client import RpcClient
 from .context import RpcCallerContext, current_rpc_caller_context
-from .errors import RpcError, RpcHandlerError, RpcMethodNotFound, RpcTimeoutError
+from .errors import (
+    WEB_QUEUE_CAPACITY_REJECTED,
+    RpcError,
+    RpcHandlerError,
+    RpcMethodNotFound,
+    RpcTimeoutError,
+)
 from .models import RpcRequest, RpcResponse, new_request_id
 from .server import RpcServer
 from .transport import (
@@ -18,6 +24,7 @@ __all__ = [
     "RpcTimeoutError",
     "RpcMethodNotFound",
     "RpcHandlerError",
+    "WEB_QUEUE_CAPACITY_REJECTED",
     "RpcServer",
     "RpcCallerContext",
     "current_rpc_caller_context",

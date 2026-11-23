@@ -33,6 +33,16 @@ try {
   await page.getByText("Second queued message").waitFor();
 
   const sendNow = page.locator('[data-slot="web-queue-send-now"]');
+  await page.evaluate(() => {
+    window.__queuePanelMountProbe?.failNextRead();
+    window.dispatchEvent(new Event("focus"));
+  });
+  await page.getByRole("alert").getByText("Queue status is out of date. Showing last known messages; refresh before changing the queue.").waitFor();
+  assert.equal(await sendNow.isDisabled(), true, "Send Now remained available against a stale snapshot");
+  assert.equal(await page.getByRole("button", { name: "Remove queued message 1" }).isDisabled(), true,
+    "Remove remained available against a stale snapshot");
+  await page.getByRole("button", { name: "Retry" }).click();
+  await page.locator('[data-slot="web-queue-panel"][data-stale="false"]').waitFor();
   assert.equal(await sendNow.getAttribute("aria-label"), "Send 1 queued message now");
   await sendNow.click();
   await page.getByText("First queued message").waitFor();

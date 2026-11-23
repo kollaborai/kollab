@@ -1113,3 +1113,52 @@ async def test_stale_scope_allows_only_same_principal_claim_cleanup():
     assert registry.scope_count == 2
     assert prune_calls > 0
     assert not changes.empty()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_capacity_rejection_is_a_typed_precommit_rpc_outcome():
+    registry = WebMessageQueueRegistry(
+        max_scopes=1,
+        queue_options={"max_items": 1},
+    )
+    server = RpcServer()
+    register_web_message_queue_handlers(
+        server,
+        registry,
+        resolve_scope=lambda _params, _context: "authorized-scope-a",
+    )
+
+    allocated: list[dict] = []
+    for index in range(2):
+        ids_response = await _rpc_call(
+            server,
+            "state.web_queue.allocate_ids",
+            {"item_count": 1, "operation_count": 1},
+        )
+        ids = ids_response["result"]
+        allocated.append(ids)
+        enqueue = await _rpc_call(
+            server,
+            "state.web_queue.enqueue_batch",
+            {
+                "operation_id": ids["operation_ids"][0],
+                "batch_id": ids["batch_id"],
+                "items": [{
+                    "request_id": ids["request_ids"][0],
+                    "payload_b64": base64.b64encode(f"message-{index}".encode()).decode(),
+                }],
+            },
+        )
+        if index == 0:
+            assert enqueue["error"] is None
+        else:
+            assert enqueue["error_kind"] == "handler"
+            assert enqueue["error"] == "kollab.web_queue.capacity_rejected.v1"
+
+    snapshot = await _rpc_call(server, "state.web_queue.snapshot", {})
+    assert [batch["batch_id"] for batch in snapshot["result"]["batches"]] == [
+        allocated[0]["batch_id"]
+    ]
+    assert allocated[1]["batch_id"] not in {
+        batch["batch_id"] for batch in snapshot["result"]["batches"]
+    }

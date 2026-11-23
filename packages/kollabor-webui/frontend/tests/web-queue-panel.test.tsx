@@ -42,12 +42,15 @@ const snapshot = (batches: WebQueueBatchSnapshot[]): WebQueueSnapshot => ({
   batches,
 });
 
-const render = (value: WebQueueSnapshot | null, options?: { busy?: boolean; dispatchAvailable?: boolean }) =>
+const render = (value: WebQueueSnapshot | null, options?: { busy?: boolean; dispatchAvailable?: boolean; stale?: boolean; refreshError?: boolean }) =>
   renderToStaticMarkup(
     <QueuePanel
       snapshot={value}
       dispatchAvailable={options?.dispatchAvailable ?? true}
+      stale={options?.stale ?? false}
+      refreshError={options?.refreshError ?? false}
       busy={options?.busy ?? true}
+      onRefresh={vi.fn()}
       onRemoveItem={vi.fn()}
       onSendNow={vi.fn()}
     />,
@@ -127,6 +130,23 @@ describe("QueuePanel", () => {
     expect(html).toContain("aria-label=\"Send Now unavailable: queue delivery is unavailable\"");
     expect(html).toMatch(/<button[^>]*disabled=""/);
     expect(html).toContain("Remove");
+  });
+
+  it("labels stale rows as last known and disables queue mutation until refresh", () => {
+    const html = render(snapshot([batch("b", 1, ["r"], [item("r", "Last known message")])]), {
+      stale: true,
+      refreshError: true,
+    });
+    expect(html).toContain("Queue status is out of date. Showing last known messages");
+    expect(html).toContain("Last known message");
+    expect(html).toContain('data-stale="true"');
+    expect(html).toContain("Retry");
+    expect(html).toContain('aria-label="Send Now unavailable: queue status is out of date"');
+    expect((html.match(/<button[^>]*disabled=""/g) ?? []).length).toBe(2);
+
+    const empty = render(null, { stale: true, refreshError: true });
+    expect(empty).toContain("Could not load queued messages.");
+    expect(empty).toContain("Retry");
   });
 
   it("holds dispatching and in-doubt items and explains ambiguous delivery", () => {

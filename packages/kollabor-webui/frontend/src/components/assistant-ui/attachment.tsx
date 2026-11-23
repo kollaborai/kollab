@@ -140,7 +140,7 @@ const AttachmentThumb: FC = () => {
   );
 };
 
-const AttachmentUI: FC = () => {
+const AttachmentUI: FC<{ disabled?: boolean }> = ({ disabled = false }) => {
   const aui = useAui();
   const isComposer = aui.attachment.source !== "message";
 
@@ -234,7 +234,7 @@ const AttachmentUI: FC = () => {
             </div>
           </TooltipTrigger>
         </AttachmentPreviewDialog>
-        {isComposer && <AttachmentRemove />}
+        {isComposer && <AttachmentRemove disabled={disabled} />}
       </AttachmentPrimitive.Root>
       <TooltipContent side="top">
         <AttachmentPrimitive.Name />
@@ -246,11 +246,12 @@ const AttachmentUI: FC = () => {
   );
 };
 
-const AttachmentRemove: FC = () => {
+const AttachmentRemove: FC<{ disabled?: boolean }> = ({ disabled = false }) => {
   return (
     <AttachmentPrimitive.Remove asChild>
       <TooltipIconButton
         tooltip="Remove file"
+        disabled={disabled}
         className="aui-attachment-tile-remove absolute end-1 top-1 size-5 rounded-full bg-black/50! text-white backdrop-blur-sm after:absolute after:-inset-1.5 hover:bg-black/70! hover:text-white! active:scale-[0.96] motion-reduce:transition-none"
         side="top"
       >
@@ -306,20 +307,20 @@ const ComposerImageTokenSynchronizer: FC = () => {
   return null;
 };
 
-export const ComposerAttachments: FC = () => {
+export const ComposerAttachments: FC<{ disabled?: boolean }> = ({ disabled = false }) => {
   return (
     <>
       <ComposerImageTokenSynchronizer />
       <div className="aui-composer-attachments flex w-full flex-row items-center gap-2 overflow-x-auto empty:hidden">
         <ComposerPrimitive.Attachments>
-          {() => <AttachmentUI />}
+          {() => <AttachmentUI disabled={disabled} />}
         </ComposerPrimitive.Attachments>
       </div>
     </>
   );
 };
 
-export const ComposerAddAttachment: FC = () => {
+export const ComposerAddAttachment: FC<{ disabled?: boolean }> = ({ disabled = false }) => {
   return (
     <ComposerPrimitive.AddAttachment asChild>
       <TooltipIconButton
@@ -329,6 +330,7 @@ export const ComposerAddAttachment: FC = () => {
         size="icon"
         className="aui-composer-add-attachment hover:bg-muted-foreground/15 dark:hover:bg-muted-foreground/30 size-9 shrink-0 rounded-full p-1 text-xs font-semibold active:scale-[0.96] motion-reduce:transition-none"
         aria-label="Add Attachment"
+        disabled={disabled}
       >
         <PaperclipIcon className="aui-attachment-add-icon size-5 stroke-[1.5px]" />
       </TooltipIconButton>

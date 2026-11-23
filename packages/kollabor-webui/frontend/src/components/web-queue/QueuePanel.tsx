@@ -32,7 +32,10 @@ export type WebQueueSnapshot = {
 export type QueuePanelProps = {
   snapshot: WebQueueSnapshot | null;
   dispatchAvailable: boolean;
+  stale: boolean;
+  refreshError: boolean;
   busy: boolean;
+  onRefresh: () => void | Promise<void>;
   onRemoveItem: (requestId: string) => void | Promise<void>;
   onSendNow: (batchId: string) => void | Promise<void>;
 };
@@ -106,7 +109,10 @@ function orderedBatches(snapshot: WebQueueSnapshot | null): OrderedBatch[] {
 export function QueuePanel({
   snapshot,
   dispatchAvailable,
+  stale,
+  refreshError,
   busy,
+  onRefresh,
   onRemoveItem,
   onSendNow,
 }: QueuePanelProps) {
@@ -144,9 +150,30 @@ export function QueuePanel({
     }
   }, []);
 
-  if (totalItems === 0) return null;
+  if (totalItems === 0 && !stale) return null;
 
-  const queueSummary = missingItems > 0
+  if (!snapshot && stale) {
+    return (
+      <section
+        className="rounded-2xl bg-card/80 px-3 py-3 sm:px-3.5"
+        data-slot="web-queue-panel"
+        data-stale="true"
+      >
+        <div className="flex items-center justify-between gap-3">
+          <p role="alert" className="text-destructive text-xs leading-4">
+            {refreshError ? "Could not load queued messages." : "Queue status is out of date."}
+          </p>
+          <Button type="button" size="sm" variant="outline" onClick={() => void onRefresh()}>
+            Retry
+          </Button>
+        </div>
+      </section>
+    );
+  }
+
+  const queueSummary = stale
+    ? "Queue status is out of date. Showing last known messages; refresh before changing the queue."
+    : missingItems > 0
     ? "Some queued message details are unavailable. Refresh before changing the queue."
     : unknownCount > 0
     ? `Delivery status unknown for ${unknownCount} ${unknownCount === 1 ? "message" : "messages"}. They are held to avoid sending twice.`
@@ -163,7 +190,9 @@ export function QueuePanel({
   const earliestSendKey = earliest ? `send:${scopeKey}:${earliest.batch.batch_id}` : "send:none";
   const earliestBatchActionable = !!earliest && earliest.batch.status === "queued" &&
     earliest.items.length === earliestCount && earliest.items.every((item) => item.status === "queued");
-  const sendNowBlockedReason = !dispatchAvailable
+  const sendNowBlockedReason = stale
+    ? "queue status is out of date"
+    : !dispatchAvailable
     ? "queue delivery is unavailable"
     : earliest?.items.some((item) => item.status === "in_doubt") || earliest?.batch.status === "in_doubt"
       ? "earlier message delivery status is unknown"
@@ -198,13 +227,18 @@ export function QueuePanel({
       className="rounded-2xl bg-card/80 px-3 py-3 sm:px-3.5"
       data-slot="web-queue-panel"
       data-revision={snapshot?.revision}
+      data-stale={stale ? "true" : "false"}
     >
       <div className="flex items-start gap-2.5">
         <div className="min-w-0 flex-1">
           <h2 id="web-queue-title" className="text-sm font-semibold tracking-tight">
             Queued messages <span className="text-muted-foreground font-normal">· {totalItems}</span>
           </h2>
-          <p className="mt-0.5 text-muted-foreground text-xs leading-4" role="status">
+          <p
+            className="mt-0.5 text-muted-foreground text-xs leading-4"
+            role={stale ? "alert" : "status"}
+            aria-live={stale ? "assertive" : "polite"}
+          >
             {queueSummary}
           </p>
         </div>
@@ -222,6 +256,11 @@ export function QueuePanel({
             {pendingAction === earliestSendKey ? "Sending…" : "Send Now"}
           </Button>
         ) : null}
+        {stale ? (
+          <Button type="button" size="sm" variant="outline" onClick={() => void onRefresh()}>
+            Retry
+          </Button>
+        ) : null}
       </div>
 
       <ol aria-label="Queued messages" className="mt-2.5 grid gap-1">
@@ -230,7 +269,7 @@ export function QueuePanel({
           const removeKey = `remove:${scopeKey}:${entry.requestId}`;
           const removing = pendingAction === removeKey;
           const canRemove = !!item && batch.status === "queued" && item.status === "queued" &&
-            pendingAction === null && missingItems === 0;
+            pendingAction === null && missingItems === 0 && !stale;
 
           if (!item) {
             return (

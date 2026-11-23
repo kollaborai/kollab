@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from kollabor_rpc import RpcHandlerError
 from kollabor_engine.routes import web_queue
 
 
@@ -249,3 +250,29 @@ async def test_route_returns_media_bytes_from_the_daemon_owner(monkeypatch):
             "ref": "att-ref",
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_only_the_typed_precommit_capacity_error_gets_a_queue_capacity_code(monkeypatch):
+    rpc = _install_session(monkeypatch)
+
+    async def capacity_error(_method, _params, *, timeout=None):
+        raise RpcHandlerError("handler rejected", "kollab.web_queue.capacity_rejected.v1")
+
+    rpc.call = capacity_error
+    with pytest.raises(HTTPException) as capacity:
+        await web_queue._call_queue_rpc("s1", "state.web_queue.enqueue_batch", {})
+    assert capacity.value.status_code == 409
+    assert capacity.value.detail == {
+        "code": "queue_capacity",
+        "message": "The queue is full. No message was admitted.",
+    }
+
+    async def unrelated_error(_method, _params, *, timeout=None):
+        raise RpcHandlerError("handler rejected", "idempotency conflict")
+
+    rpc.call = unrelated_error
+    with pytest.raises(HTTPException) as conflict:
+        await web_queue._call_queue_rpc("s1", "state.web_queue.enqueue_batch", {})
+    assert conflict.value.status_code == 409
+    assert conflict.value.detail == "The daemon rejected this queue operation."

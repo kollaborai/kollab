@@ -13,7 +13,12 @@ from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from kollabor_ai.message_content import DEFAULT_MAX_IMAGE_BYTES
-from kollabor_rpc import RpcError, RpcHandlerError, RpcMethodNotFound
+from kollabor_rpc import (
+    WEB_QUEUE_CAPACITY_REJECTED,
+    RpcError,
+    RpcHandlerError,
+    RpcMethodNotFound,
+)
 
 from ..server import get_session_registry
 
@@ -78,7 +83,15 @@ async def _call_queue_rpc(session_id: str, method: str, params: dict[str, Any]) 
             status_code=503,
             detail="This agent's local daemon queue is unavailable.",
         ) from None
-    except RpcHandlerError:
+    except RpcHandlerError as exc:
+        if exc.remote_message == WEB_QUEUE_CAPACITY_REJECTED:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "queue_capacity",
+                    "message": "The queue is full. No message was admitted.",
+                },
+            ) from None
         raise HTTPException(
             status_code=409,
             detail="The daemon rejected this queue operation.",
