@@ -3936,7 +3936,7 @@ class ToolExecutor:
             # from a valid response, the page may be JS-rendered.
             json_ld_body = (
                 self._extract_json_ld_article_body(raw)
-                if extract_main and 200 < len(text) < 500
+                if extract_main and 0 < len(text) < 500
                 else ""
             )
             if len(text) < 500 and text != json_ld_body:
@@ -4221,7 +4221,7 @@ class ToolExecutor:
 
         soup = BeautifulSoup(html, "html.parser")
         article_body, _ = ToolExecutor._extract_json_ld(soup)
-        return article_body if len(article_body) > 200 else ""
+        return article_body
 
     @staticmethod
     def _extract_json_ld(soup) -> tuple[str, str]:
@@ -4233,11 +4233,18 @@ class ToolExecutor:
         for script in soup.find_all("script", type="application/ld+json"):
             try:
                 data = json.loads(script.string or "")
-                # Handle both single objects and arrays
-                items = data if isinstance(data, list) else [data]
-                for item in items:
+                # Handle top-level arrays and graph-wrapped JSON-LD nodes.
+                items = [data]
+                while items:
+                    item = items.pop()
+                    if isinstance(item, list):
+                        items.extend(reversed(item))
+                        continue
                     if not isinstance(item, dict):
                         continue
+                    graph = item.get("@graph")
+                    if isinstance(graph, (dict, list)):
+                        items.append(graph)
                     # Look for articleBody first (richest content)
                     body = item.get("articleBody")
                     if not isinstance(body, str) or not body.strip():
@@ -4247,7 +4254,7 @@ class ToolExecutor:
                         lines = [" ".join(ln.split()) for ln in body.splitlines()]
                         lines = [line for line in lines if line]
                         normalized_body = "\n".join(lines)
-                        if len(normalized_body) > len(article_body) and len(normalized_body) > 100:
+                        if normalized_body and len(normalized_body) > len(article_body):
                             article_body = normalized_body
                     # Keep the longest usable description while examining all
                     # scripts for an article body.
