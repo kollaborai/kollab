@@ -57,6 +57,62 @@ engine, use their home directory, or reuse a fixed port. The included suites
 intercept application API requests or use synthetic fixtures; they do not
 test a real remote agent or provider.
 
+## Recording the chat frame by frame
+
+The suites above play fixtures. `scripts/chat-recorder.mjs` drives the real
+page against a running engine and a real agent, and records what the chat
+shows on every animation frame. Use it before calling a change to the chat's
+history sync, live turn or runtime done, and to compare a pull request's build
+with `main`. It is not part of CI: each flow is a real model turn.
+
+From `packages/kollabor-webui/frontend`, with a web UI and engine running and
+a throwaway agent in a scratch folder (Trust All, so it can run `sleep`):
+
+```sh
+npm run record:chat -- all --agent <name> --web http://127.0.0.1:8080 --engine http://127.0.0.1:7433
+npm run record:chat -- cut --agent <name> --out ../../../../chat-recordings
+```
+
+A change that touches the engine needs a side engine and web UI started from
+that change's checkout on ports of their own: `python -m kollabor_engine serve
+--port <n>` with `KOLLAB_CONFIG_DIR` naming a folder for its token, and the web
+UI with `KOLLAB_ENGINE_URL`, `KOLLAB_WEBUI_PORT` and `KOLLAB_FRONTEND_DIST`
+naming the built bundle. Pass them with `--engine`, `--web` and `--token-file`.
+
+Each flow sends its own marked messages, so a bubble or reply shown twice is
+counted exactly:
+
+| Flow | What the page does |
+|---|---|
+| `plain` | One send and its reply |
+| `tools` | One turn with three tool calls |
+| `busy` | Sends again while its own turn runs |
+| `cut`, `cuterr` | Its request's stream ends early (closed, or failed), then it sends again |
+| `cutwatch` | Its request's stream ends early and it only watches from then on |
+| `other` | Another client sends while its turn runs |
+| `watch` | Only watches a turn another client started |
+| `watchsend` | Sends while it watches another client's turn |
+| `read` | Scrolls up while its own turn runs and ends |
+| `three` | Three sends, each after the last settles |
+| `reload` | Reloads in the middle of its own turn |
+
+Per flow it writes, under `--out` (default `./chat-recordings`):
+
+- `timeline.txt`: one clock for what the page did (`##`), what the wire carried
+  (each request, state update, session event and history page), what the frames
+  showed (`--`, with the last rows' words) and every defect (`!!`).
+- `summary.json`: the defect counts. `video.webm` and `final.png`: the screen.
+  `frames.json`: every sampled frame.
+
+Defects: `BLANK` (rows went to none), `REMOUNT-ALL` (the whole thread was
+rebuilt), `MASS-FADE` (three or more rows fading in at once), `DUP-USER`,
+`DUP-REPLY` and `DUP-TOOLS` (a message, a reply or a turn's tool calls shown
+twice), `REPLY-GONE` (a reply left the screen), `PICKER` (an "N / M" switcher),
+`ANCHOR-MOVED` and `ANCHOR-LOST` (the row a reader scrolled to moved or was
+rebuilt), and an error box still showing at the end. An error box that shows
+and goes is logged, not counted: the cut flows drop a stream on purpose. The
+command exits 1 when any flow shows a defect.
+
 ## Current evidence and gaps
 
 - Learn, navigation, new-session shell and mocked remote selection: `learn-browser-acceptance.mjs`; the 11-topic tour, walkthrough video and unknown-topic route in `learn-topics-browser-acceptance.mjs`; the default-loadout scenarios (#957/#961) in `learn-loadouts-browser-acceptance.mjs`; release notes and notice lines (#887/#956) in `learn-notices-browser-acceptance.mjs`; the dismissed-retry and hand-made model changes (#959) in `learn-retries-browser-acceptance.mjs`. Still needed: real remote send/reply, switching, close/reopen, reconnect and history persistence.
