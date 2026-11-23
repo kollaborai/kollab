@@ -94,8 +94,11 @@ describe("startGlass", () => {
     expect(lost).toEqual(["lost", "lost"]);
   });
 
-  it("draws one still frame without scheduling work for reduced motion", async () => {
+  it("draws one reduced-motion frame and disposes resources when stopped", async () => {
     vi.resetModules();
+    const disposed: string[] = [];
+    let renderCount = 0;
+    let contextLost = false;
     const setTimeout = vi.fn(() => 1);
     vi.stubGlobal("window", {
       devicePixelRatio: 1,
@@ -108,8 +111,11 @@ describe("startGlass", () => {
     vi.stubGlobal("document", {
       documentElement: { classList: { contains: () => true } },
     });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
     vi.doMock("three", () => {
-      class Disposable { dispose() {} }
+      class Disposable {
+        dispose() { disposed.push("resource"); }
+      }
       class Geometry extends Disposable {
         scale() {}
         rotateX() {}
@@ -126,9 +132,9 @@ describe("startGlass", () => {
           out.y = this.size.y;
           return out;
         }
-        render() {}
-        dispose() {}
-        forceContextLoss() {}
+        render() { renderCount += 1; }
+        dispose() { disposed.push("renderer"); }
+        forceContextLoss() { contextLost = true; }
       }
       class Material extends Disposable {
         attenuationColor = { set() {} };
@@ -146,7 +152,7 @@ describe("startGlass", () => {
       class Mesh { position = { z: 0 }; rotation = { x: 0, y: 0, z: 0 }; constructor(..._args: unknown[]) {} }
       class PMREMGenerator {
         fromScene() { return { texture: new Disposable() }; }
-        dispose() {}
+        dispose() { disposed.push("pmrem"); }
       }
       return {
         Camera,
@@ -196,8 +202,14 @@ describe("startGlass", () => {
         getContext: () => context,
       } as unknown as HTMLCanvasElement;
 
-      expect(startGlassWithMockRenderer(canvas, K_POLYS)).not.toBeNull();
+      const glass = startGlassWithMockRenderer(canvas, K_POLYS);
+      expect(glass).not.toBeNull();
+      expect(renderCount).toBe(2); // one mist pass and one glass pass
       expect(setTimeout).not.toHaveBeenCalled();
+      glass?.stop();
+      expect(disposed.length).toBeGreaterThanOrEqual(8);
+      expect(disposed).toContain("renderer");
+      expect(contextLost).toBe(true);
     } finally {
       vi.doUnmock("three");
       vi.doUnmock("three/addons/environments/RoomEnvironment.js");
