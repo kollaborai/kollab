@@ -363,7 +363,10 @@ async def test_expired_send_now_lease_stops_captured_owner_before_running_batch(
         )
 
     runner._run_prompt = fake_run_prompt
-    runner.admit("active", request_id="active-A", source="rpc")
+    active = runner.admit("active", request_id="active-A", source="rpc")
+    active.future.add_done_callback(
+        lambda completed: completed.exception() if not completed.cancelled() else None
+    )
     runner.admit("older", request_id="older-D", source="rpc")
     worker = asyncio.create_task(runner._drain_queue())
     try:
@@ -407,8 +410,12 @@ async def test_expired_send_now_lease_does_not_stop_replacement_owner():
     class Connection:
         async def cancel(self, *, session_id: str) -> None:
             cancelled.append(session_id)
+            release_active.set()
 
     runner._connection = Connection()
+    runner._active_future.add_done_callback(
+        lambda completed: completed.exception() if not completed.cancelled() else None
+    )
     replacement = asyncio.create_task(asyncio.Event().wait())
     try:
         assert runner.begin_send_now_batch(
@@ -439,6 +446,68 @@ async def test_expired_send_now_lease_does_not_stop_replacement_owner():
         release_active.set()
         _cleanup_runner(runner, active_task)
         await asyncio.gather(replacement, active_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_expired_send_now_cancel_rechecks_owner_before_sending_cancel_rpc():
+    runner, active_task, release_active = _active_runner()
+    runner.send_now_batch_timeout_seconds = 5
+    cancelled: list[str] = []
+
+    class Connection:
+        async def cancel(self, *, session_id: str) -> None:
+            cancelled.append(session_id)
+            release_active.set()
+
+    runner._connection = Connection()
+    runner._active_future.add_done_callback(
+        lambda completed: completed.exception() if not completed.cancelled() else None
+    )
+    replacement_release = asyncio.Event()
+    replacement = asyncio.create_task(replacement_release.wait())
+    try:
+        assert runner.begin_send_now_batch(
+            "batch-BC",
+            2,
+            session_id=runner.session_id,
+            generation=runner.generation,
+            active_context=runner._active_context,
+            active_turn_id=runner._active_turn_id,
+        )
+        runner.admit(
+            "message B",
+            request_id="client-B",
+            source="rpc",
+            send_now_batch_id="batch-BC",
+        )
+
+        def replace_owner():
+            runner._active_context = SimpleNamespace(request_id="replacement-E")
+            runner._active_turn_id = 13
+            runner._active_rpc_task = replacement
+
+        # This callback runs before the cancellation task created by expiry.
+        asyncio.get_running_loop().call_soon(replace_owner)
+        runner._expire_send_now_batch("batch-BC")
+        await asyncio.sleep(0)
+        scheduled_cancels = tuple(runner._cancel_tasks.values())
+        await asyncio.gather(*scheduled_cancels, return_exceptions=True)
+
+        assert cancelled == [], "the delayed cancellation must not reach a replacement owner"
+        assert runner._active_rpc_task is replacement
+        assert runner._queue_release.is_set()
+        assert [item.request_id for item in runner._queue._queue] == [
+            "client-B", "older-D",
+        ]
+    finally:
+        release_active.set()
+        replacement_release.set()
+        replacement.cancel()
+        pending_cancels = tuple(getattr(runner, "_cancel_tasks", {}).values())
+        for task in pending_cancels:
+            task.cancel()
+        _cleanup_runner(runner, active_task)
+        await asyncio.gather(replacement, active_task, *pending_cancels, return_exceptions=True)
 
 
 @pytest.mark.asyncio
