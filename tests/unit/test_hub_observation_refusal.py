@@ -134,7 +134,10 @@ async def test_cancelled_mailbox_batch_exposes_completed_deliveries(tmp_path):
 
     async def cancel_second(message):
         if message.id == messages[1].id:
-            raise asyncio.CancelledError
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel()
+            await asyncio.sleep(0)
         delivered.append(message.id)
 
     plugin._on_message_received = cancel_second
@@ -164,6 +167,7 @@ async def test_cancel_after_receiver_effect_does_not_replay_effect(tmp_path):
     )
     effects = []
     plugin = HubPlugin.__new__(HubPlugin)
+    plugin._identity = SimpleNamespace(agent_id="receiver", identity="receiver")
 
     async def interrupted_delivery(msg):
         effects.append(msg.id)
