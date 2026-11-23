@@ -71,6 +71,13 @@ async def test_second_send_events_remain_owned_after_admission_response_is_lost(
                         "parts": [{"type": "text", "text": "two"}],
                     },
                 },
+                {
+                    "type": "add-message",
+                    "message": {
+                        "id": "third",
+                        "parts": [{"type": "text", "text": "three"}],
+                    },
+                },
             ],
             state={"messages": []},
         ),
@@ -93,3 +100,10 @@ async def test_second_send_events_remain_owned_after_admission_response_is_lost(
         "first",
         "second",
     ], "reconciliation must not resubmit the possibly accepted message"
+    error = "\n".join(captured["controller"].errors)
+    assert "Acknowledged as accepted: first" in error
+    assert "Possibly accepted despite the admission error: second." in error
+    assert "Not submitted: third." in error
+    assert "No messages were resubmitted." in error
+    assert state["usage"]["stopReason"] == "error"
+    assert messages_state[-1]["status"]["type"] == "incomplete"
