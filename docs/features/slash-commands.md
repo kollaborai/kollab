@@ -50,7 +50,7 @@ Use arrow keys to navigate, Enter to execute.
 | `/resume` | - | Resume previous conversation |
 | `/sessions` | `/history` | Browse, search, and resume conversations |
 | `/fork` | `/forks` | Browse previous conversations |
-| `/branch` | - | Branch a saved conversation from a message |
+| `/branch <id> <index>` | - | Branch a saved conversation at a message |
 | `/terminal` | `/tmux`, `/t` | Manage tmux sessions |
 | `/login` | - | OAuth login for providers |
 | `/config` | `/settings`, `/preferences` | Edit configuration |

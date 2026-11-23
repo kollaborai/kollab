@@ -6,13 +6,17 @@ web-fetch — retrieve a URL and return clean text:
 
   parameters:
     url        (required)  the URL to fetch (http or https)
-    max_chars  (optional)  max characters of text to return (default: 10000)
+    max_chars  (optional)  max characters in the complete output, including URL header
+                           and truncation marker (default: 5000; range: 1-50000)
 
   behavior:
     - strips HTML tags, script/style/nav/footer removed
     - decodes HTML entities
     - main-content extraction (skips boilerplate)
-    - truncates to max_chars with a marker if exceeded
+    - output never exceeds max_chars; header and truncation marker count toward the limit
+    - retains at most 500000 downloaded bytes, with a one-byte overflow check
+    - stops after 2000000 decompressed bytes
+    - optional browser fallback renders the bounded source; script resources use the remaining byte limits and other requests are blocked
     - 30-second timeout
     - follows redirects
 
