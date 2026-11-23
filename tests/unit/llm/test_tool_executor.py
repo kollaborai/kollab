@@ -402,6 +402,31 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
                 "search paths must stay inside the active workspace", result.error
             )
 
+    async def test_terminal_find_refuses_eval_with_expanded_executable_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "project"
+            workspace.mkdir()
+            self.executor.workspace = workspace
+            self.executor.shell_executor.run = AsyncMock(
+                return_value=ShellResult(
+                    success=True,
+                    stdout="outside fixture\n",
+                    stderr="",
+                    exit_code=0,
+                )
+            )
+            command = 'f=fi; n=nd; eval "$f$n ../outside -name marker.txt -print"'
+
+            result = await self.executor._execute_terminal_command(
+                {"type": "terminal", "id": "find-eval-expanded", "command": command}
+            )
+
+            self.executor.shell_executor.run.assert_not_awaited()
+            self.assertFalse(result.success)
+            self.assertIn(
+                "search paths must stay inside the active workspace", result.error
+            )
+
     async def test_terminal_find_refuses_symlinked_root_outside_project(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
