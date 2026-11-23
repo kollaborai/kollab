@@ -39,6 +39,7 @@ export type QueuePanelProps = {
 
 type OrderedBatch = {
   batch: WebQueueBatchSnapshot;
+  entries: Array<{ requestId: string; item: WebQueueItemSnapshot | null }>;
   items: WebQueueItemSnapshot[];
   missingCount: number;
   sourceIndex: number;
@@ -90,11 +91,12 @@ function orderedBatches(snapshot: WebQueueSnapshot | null): OrderedBatch[] {
   return snapshot.batches
     .map((batch, sourceIndex) => {
       const byId = new Map(batch.items.map((item) => [item.request_id, item]));
-      const items = batch.request_ids.flatMap((requestId) => {
-        const item = byId.get(requestId);
-        return item ? [item] : [];
-      });
-      return { batch, items, missingCount: batch.request_ids.length - items.length, sourceIndex };
+      const entries = batch.request_ids.map((requestId) => ({
+        requestId,
+        item: byId.get(requestId) ?? null,
+      }));
+      const items = entries.flatMap(({ item }) => item ? [item] : []);
+      return { batch, entries, items, missingCount: entries.length - items.length, sourceIndex };
     })
     .filter(({ batch }) => batch.request_ids.length > 0)
     .sort((left, right) => left.batch.sequence - right.batch.sequence || left.sourceIndex - right.sourceIndex);
@@ -161,19 +163,31 @@ export function QueuePanel({
   const earliestSendKey = earliest ? `send:${scopeKey}:${earliest.batch.batch_id}` : "send:none";
   const earliestBatchActionable = !!earliest && earliest.batch.status === "queued" &&
     earliest.items.length === earliestCount && earliest.items.every((item) => item.status === "queued");
-  const sendNowDisabled = !busy || !dispatchAvailable || !earliestBatchActionable ||
-    missingItems > 0 || pendingAction !== null;
-  const sendNowTitle = !dispatchAvailable
-    ? "Sending is unavailable right now"
+  const sendNowBlockedReason = !dispatchAvailable
+    ? "queue delivery is unavailable"
     : earliest?.items.some((item) => item.status === "in_doubt") || earliest?.batch.status === "in_doubt"
-      ? "Resolve the earlier message delivery status before sending later messages"
+      ? "earlier message delivery status is unknown"
       : earliest?.items.some((item) => item.status === "dispatching") || earliest?.batch.status === "dispatching"
-        ? "An earlier message is already being sent"
+        ? "earlier message is already being sent"
         : missingItems > 0
-          ? "Refresh the queue before sending"
-          : "Adds the earliest queued batch at the next agent step";
-
-  let messageOrdinal = 0;
+          ? "refresh the queue before sending"
+          : pendingAction !== null
+            ? "another queue action is in progress"
+            : !earliestBatchActionable
+              ? "earliest queued messages are not ready"
+              : null;
+  const sendNowDisabled = !busy || sendNowBlockedReason !== null;
+  const sendNowAccessibleName = sendNowDisabled
+    ? `Send Now unavailable: ${sendNowBlockedReason ?? "queue is idle"}`
+    : `Send ${earliestCount} queued ${earliestCount === 1 ? "message" : "messages"} now`;
+  const sendNowTitle = sendNowBlockedReason ?? "Adds the earliest queued batch at the next agent step";
+  let nextOrdinal = 0;
+  const queueRows = batches.flatMap(({ batch, entries }, batchIndex) => entries.map((entry) => ({
+    batch,
+    batchIndex,
+    entry,
+    ordinal: ++nextOrdinal,
+  })));
   return (
     <section
       aria-labelledby="web-queue-title"
@@ -199,7 +213,8 @@ export function QueuePanel({
             type="button"
             size="sm"
             className="h-8 shrink-0 rounded-lg bg-highlight px-3 text-highlight-foreground hover:bg-highlight/90"
-            aria-label={`Send ${earliestCount} queued ${earliestCount === 1 ? "message" : "messages"} now`}
+            aria-label={sendNowAccessibleName}
+            data-slot="web-queue-send-now"
             title={sendNowTitle}
             disabled={sendNowDisabled}
             onClick={() => earliest && void perform(earliestSendKey, () => onSendNow(earliest.batch.batch_id))}
@@ -209,90 +224,101 @@ export function QueuePanel({
         ) : null}
       </div>
 
-      <ol aria-label="Queued message groups" className="mt-2.5 grid gap-2">
-        {batches.map(({ batch, items, missingCount }) => {
-          const batchCount = batch.request_ids.length;
-          const firstOrdinal = messageOrdinal + 1;
-          messageOrdinal += batchCount;
+      <ol aria-label="Queued messages" className="mt-2.5 grid gap-1">
+        {queueRows.map(({ batch, batchIndex, entry, ordinal }) => {
+          const item = entry.item;
+          const removeKey = `remove:${scopeKey}:${entry.requestId}`;
+          const removing = pendingAction === removeKey;
+          const canRemove = !!item && batch.status === "queued" && item.status === "queued" &&
+            pendingAction === null && missingItems === 0;
 
+          if (!item) {
+            return (
+              <li
+                key={`${batchIndex}:${entry.requestId}`}
+                className="grid min-w-0 grid-cols-[1.25rem_minmax(0,1fr)_auto] items-start gap-2 rounded-lg bg-background/35 px-2 py-2"
+                data-slot="web-queue-item"
+                data-status="missing"
+              >
+                <span aria-hidden="true" className="pt-px text-muted-foreground text-xs tabular-nums">
+                  {ordinal}
+                </span>
+                <div className="min-w-0">
+                  <p className="text-muted-foreground text-[0.6875rem] font-medium leading-4">
+                    Message details unavailable
+                  </p>
+                  <p className="mt-0.5 text-muted-foreground text-sm leading-5">Queued message is unavailable.</p>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 self-center px-1.5 text-muted-foreground text-xs underline underline-offset-2 hover:text-foreground"
+                  aria-label={`Remove queued message ${ordinal}`}
+                  disabled
+                >
+                  Remove
+                </Button>
+              </li>
+            );
+          }
+
+          const attachments = (item.attachment_labels ?? [])
+            .map(sanitizeAttachmentLabel)
+            .filter(Boolean);
+          const preview = previewText(item.text_preview);
           return (
             <li
-              key={batch.batch_id}
-              className="rounded-xl bg-muted/45 px-2.5 py-2 sm:px-3"
-              data-slot="web-queue-batch"
+              key={`${batchIndex}:${entry.requestId}`}
+              className="grid min-w-0 grid-cols-[1.25rem_minmax(0,1fr)_auto] items-start gap-2 rounded-lg bg-background/35 px-2 py-2"
+              data-slot="web-queue-item"
+              data-status={item.status}
             >
-              <div className="flex min-w-0 items-center gap-2">
-                <span className="min-w-0 flex-1 text-muted-foreground text-xs font-medium">
-                  {batchCount} {batchCount === 1 ? "message" : "messages"}
-                </span>
-              </div>
-
-              <ol aria-label={`${batchCount} queued ${batchCount === 1 ? "message" : "messages"}`} className="mt-1.5 grid gap-1">
-                {items.map((item) => {
-                  const localOrdinal = batch.request_ids.indexOf(item.request_id);
-                  const ordinal = firstOrdinal + localOrdinal;
-                  const removeKey = `remove:${scopeKey}:${item.request_id}`;
-                  const removing = pendingAction === removeKey;
-                  const canRemove = batch.status === "queued" && item.status === "queued" &&
-                    pendingAction === null && missingItems === 0;
-                  const attachments = (item.attachment_labels ?? [])
-                    .map(sanitizeAttachmentLabel)
-                    .filter(Boolean);
-                  const preview = previewText(item.text_preview);
-                  return (
-                    <li
-                      key={item.request_id}
-                      className="grid min-w-0 grid-cols-[1.25rem_minmax(0,1fr)_auto] items-start gap-2 rounded-lg bg-background/35 px-2 py-2"
-                      data-slot="web-queue-item"
-                    >
-                      <span aria-hidden="true" className="pt-px text-muted-foreground text-xs tabular-nums">
-                        {ordinal}
-                      </span>
-                      <div className="min-w-0">
-                        <p className="flex items-center gap-1.5 text-muted-foreground text-[0.6875rem] font-medium leading-4">
-                          <span
-                            aria-hidden="true"
-                            className={`inline-block size-1.5 shrink-0 rounded-full ${statusDotClass(item.status)}`}
-                            data-slot="web-queue-status-dot"
-                            data-status={item.status}
-                          />
-                          {statusLabel(item.status)}
-                        </p>
-                        {preview ? (
-                          <p className="mt-0.5 line-clamp-2 break-words text-sm leading-5">{preview}</p>
-                        ) : attachments.length === 0 ? (
-                          <p className="mt-0.5 text-muted-foreground text-sm leading-5">Queued message</p>
-                        ) : null}
-                        {attachments.length > 0 ? (
-                          <p className="mt-1 line-clamp-1 break-all text-muted-foreground text-xs" title={attachments.join(", ")}>
-                            Attachment{attachments.length === 1 ? "" : "s"} · {attachments.join(", ")}
-                          </p>
-                        ) : null}
-                      </div>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 self-center px-1.5 text-muted-foreground text-xs underline underline-offset-2 hover:text-foreground"
-                        aria-label={`Remove queued message ${ordinal}`}
-                        disabled={!canRemove}
-                        onClick={() => void perform(removeKey, () => onRemoveItem(item.request_id))}
-                      >
-                        {removing ? "Removing…" : "Remove"}
-                      </Button>
-                    </li>
-                  );
-                })}
-                {missingCount > 0 ? (
-                  <li className="px-2 py-2 text-muted-foreground text-xs" role="status">
-                    {missingCount} {missingCount === 1 ? "message is" : "messages are"} unavailable.
-                  </li>
+              <span aria-hidden="true" className="pt-px text-muted-foreground text-xs tabular-nums">
+                {ordinal}
+              </span>
+              <div className="min-w-0">
+                <p className="flex items-center gap-1.5 text-muted-foreground text-[0.6875rem] font-medium leading-4">
+                  <span
+                    aria-hidden="true"
+                    className={`inline-block size-1.5 shrink-0 rounded-full ${statusDotClass(item.status)}`}
+                    data-slot="web-queue-status-dot"
+                    data-status={item.status}
+                  />
+                  {statusLabel(item.status)}
+                </p>
+                {preview ? (
+                  <p className="mt-0.5 line-clamp-2 break-words text-sm leading-5">{preview}</p>
+                ) : attachments.length === 0 ? (
+                  <p className="mt-0.5 text-muted-foreground text-sm leading-5">Queued message</p>
                 ) : null}
-              </ol>
+                {attachments.length > 0 ? (
+                  <p className="mt-1 line-clamp-1 break-all text-muted-foreground text-xs" title={attachments.join(", ")}>
+                    Attachment{attachments.length === 1 ? "" : "s"} · {attachments.join(", ")}
+                  </p>
+                ) : null}
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-7 self-center px-1.5 text-muted-foreground text-xs underline underline-offset-2 hover:text-foreground"
+                aria-label={`Remove queued message ${ordinal}`}
+                disabled={!canRemove}
+                onClick={() => void perform(removeKey, () => onRemoveItem(item.request_id))}
+              >
+                {removing ? "Removing…" : "Remove"}
+              </Button>
             </li>
           );
         })}
       </ol>
+
+      {missingItems > 0 ? (
+        <p className="mt-2 text-muted-foreground text-xs" role="status">
+          {missingItems} {missingItems === 1 ? "message is" : "messages are"} unavailable.
+        </p>
+      ) : null}
 
       {actionError ? (
         <p role="alert" className="mt-2 text-destructive text-xs leading-4">

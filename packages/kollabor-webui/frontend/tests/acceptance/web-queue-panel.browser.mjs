@@ -41,7 +41,7 @@ try {
   await page.evaluate(() => window.__queuePanelTest?.settleAction());
   await page.waitForFunction(() => !document.querySelector('[aria-label="Remove queued message 1"]')?.hasAttribute("disabled"));
 
-  const sendNow = page.getByRole("button", { name: "Send 1 queued message now" });
+  const sendNow = page.locator('[data-slot="web-queue-send-now"]');
   await sendNow.click();
   await page.waitForFunction(() => window.__queuePanelTest?.calls().length === 2);
   assert.deepEqual(await page.evaluate(() => window.__queuePanelTest?.calls()[1]), {
@@ -50,7 +50,7 @@ try {
   });
   assert.equal(await sendNow.isDisabled(), true, "pending Send Now can be duplicated");
   await page.evaluate(() => window.__queuePanelTest?.settleAction());
-  await page.waitForFunction(() => !document.querySelector('[aria-label="Send 1 queued message now"]')?.hasAttribute("disabled"));
+  await page.waitForFunction(() => !document.querySelector('[data-slot="web-queue-send-now"]')?.hasAttribute("disabled"));
 
   await page.evaluate(() => window.__queuePanelTest?.failNext());
   await sendNow.click();
@@ -59,12 +59,14 @@ try {
   assert.equal((await page.locator("body").innerText()).includes("SECRET_ATTACHMENT_REF"), false);
 
   await page.evaluate(() => window.__queuePanelTest?.setDispatchAvailable(false));
-  await page.waitForFunction(() => document.querySelector('[aria-label="Send 1 queued message now"]')?.hasAttribute("disabled"));
+  await page.waitForFunction(() => document.querySelector('[data-slot="web-queue-send-now"]')?.getAttribute("aria-label") ===
+    "Send Now unavailable: queue delivery is unavailable");
+  assert.equal(await sendNow.isDisabled(), true);
   assert.equal(await page.getByRole("button", { name: "Remove queued message 1" }).isDisabled(), false,
     "dispatch unavailability should not prevent explicit queue removal");
 
   await page.evaluate(() => window.__queuePanelTest?.setBusy(false));
-  await page.waitForFunction(() => document.querySelector('[aria-label="Send 1 queued message now"]') === null);
+  await page.waitForFunction(() => document.querySelector('[data-slot="web-queue-send-now"]') === null);
 
   await page.evaluate(() => {
     window.__queuePanelTest?.setDispatchAvailable(true);
@@ -89,7 +91,7 @@ try {
       })),
     });
   });
-  const batchSendNow = page.getByRole("button", { name: "Send 1 queued message now" });
+  const batchSendNow = page.locator('[data-slot="web-queue-send-now"]');
   await page.waitForFunction(() => document.querySelectorAll('[data-slot="web-queue-item"]').length === 2);
   assert.equal(await page.locator('[data-slot="web-queue-batch"]').count(), 0,
     "message rows should not be wrapped in repeated batch cards");
@@ -105,7 +107,7 @@ try {
   assert.equal(await page.getByRole("button", { name: "Remove queued message 1" }).isDisabled(), true,
     "removal must not race an in-flight batch action");
   await page.evaluate(() => window.__queuePanelTest?.settleAction());
-  await page.waitForFunction(() => !document.querySelector('[aria-label="Send 1 queued message now"]')?.hasAttribute("disabled"));
+  await page.waitForFunction(() => !document.querySelector('[data-slot="web-queue-send-now"]')?.hasAttribute("disabled"));
 
   await page.evaluate(() => window.__queuePanelTest?.setSnapshot({
     scope_id: "fixture-scope",

@@ -124,7 +124,7 @@ describe("QueuePanel", () => {
       dispatchAvailable: false,
     });
     expect(html).toContain("Queue delivery is unavailable right now.");
-    expect(html).toContain("aria-label=\"Send 1 queued message now\"");
+    expect(html).toContain("aria-label=\"Send Now unavailable: queue delivery is unavailable\"");
     expect(html).toMatch(/<button[^>]*disabled=""/);
     expect(html).toContain("Remove");
   });
@@ -136,7 +136,9 @@ describe("QueuePanel", () => {
       ]));
       expect(html).toContain(status === "dispatching" ? "Sending" : "Delivery status unknown");
       if (status === "in_doubt") expect(html).toContain("held to avoid sending twice");
-      expect(html).toContain("aria-label=\"Send 1 queued message now\"");
+      expect(html).toContain(status === "dispatching"
+        ? "aria-label=\"Send Now unavailable: earlier message is already being sent\""
+        : "aria-label=\"Send Now unavailable: earlier message delivery status is unknown\"");
       expect(html).toContain("aria-label=\"Remove queued message 1\"");
       expect((html.match(/<button[^>]*disabled=""/g) ?? []).length).toBe(2);
     }
@@ -148,9 +150,10 @@ describe("QueuePanel", () => {
     ]));
     expect(html).toContain("Some queued message details are unavailable.");
     expect(html).toContain("1 message is unavailable.");
-    expect(html).toContain("aria-label=\"Send 2 queued messages now\"");
+    expect(html).toContain("aria-label=\"Send Now unavailable: refresh the queue before sending\"");
     expect(html).toContain("aria-label=\"Remove queued message 1\"");
-    expect((html.match(/<button[^>]*disabled=""/g) ?? []).length).toBe(2);
+    expect(html).toContain("aria-label=\"Remove queued message 2\"");
+    expect((html.match(/<button[^>]*disabled=""/g) ?? []).length).toBe(3);
   });
 
   it("offers one Send Now control for only the earliest queued batch", () => {
