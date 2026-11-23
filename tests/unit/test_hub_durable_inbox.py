@@ -149,7 +149,7 @@ class TestInboxTTLExpiry:
         ],
     )
     @pytest.mark.parametrize("bad_is_control", [False, True])
-    def test_malformed_timestamp_does_not_abort_or_consume_neighboring_controls(
+    def test_F401_malformed_timestamp_does_not_abort_or_consume_neighboring_controls(
         self, tmp_path: Path, bad_timestamp, bad_is_control: bool, caplog
     ) -> None:
         inbox = tmp_path / "lapis"
