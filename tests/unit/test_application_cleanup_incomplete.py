@@ -352,7 +352,11 @@ async def test_cleanup_does_not_cancel_its_current_tracked_task(monkeypatch):
     app._startup_complete = True
     app.running = True
     app.event_bus = SimpleNamespace(get_service=lambda name: None)
-    app.shutdown = MethodType(_noop, app)
+
+    async def shutdown(self):
+        return True
+
+    app.shutdown = MethodType(shutdown, app)
 
     async def cleanup_from_tracked_task():
         app._background_tasks.append(asyncio.current_task())
