@@ -36,6 +36,7 @@ Allow the first-run guide to open the Provider setup wizard and Network connect 
 - If a setup panel name is unknown, then the engine responds with 404.
 - If a setup action fails, then the engine responds with 200 and `{ok: false, message}`, which the PanelHost displays as an action outcome.
 - If the engine has no Hub, then the Network panel displays its unavailable notice.
+- If the setup guide is open at 390px, then its bottom edge fully covers the staged setup action row beneath it.
 
 ## Failure modes
 

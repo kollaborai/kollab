@@ -374,9 +374,23 @@ async def list_profiles(workspace: _Workspace = ""):
     pm = _folder_profile_manager(workspace)
     workspace = folder_or_400(workspace.strip())
     profiles = pm.list_profiles()
+    get_unavailable_models = getattr(pm, "get_unavailable_models", lambda _name: [])
 
     return {
-        "profiles": [_redacted_profile_dict(p) for p in profiles],
+        "profiles": [
+            {
+                **_redacted_profile_dict(profile),
+                "last_completed_turn": (
+                    dict(profile.last_completed_turn)
+                    if isinstance(getattr(profile, "last_completed_turn", None), dict)
+                    else None
+                ),
+                "unavailable_models": list(
+                    get_unavailable_models(profile.name) or []
+                ),
+            }
+            for profile in profiles
+        ],
         "active": pm.active_profile_name,
         "count": len(profiles),
         "providers": [provider.value for provider in ProviderType],

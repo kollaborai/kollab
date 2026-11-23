@@ -6,6 +6,7 @@ file operations with proper error handling, logging, and result processing.
 
 import asyncio
 import logging
+import math
 import os
 import re
 import shlex
@@ -98,7 +99,7 @@ class ToolExecutionResult:
 def _is_blocked_kollab_spawn(
     command: str, *, background: bool = False, _depth: int = 0
 ) -> bool:
-    """Detect Kollab agent launches and all-agent stops through common wrappers."""
+    """Detect Kollab launches through common wrappers using a shell-text heuristic."""
     import ast
     import base64
     import re
@@ -108,6 +109,7 @@ def _is_blocked_kollab_spawn(
     shell_names = {"sh", "bash", "dash", "zsh", "ksh"}
     python_name = re.compile(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?")
     separators = {";", "&", "&&", "|", "||", "(", ")"}
+    heredoc_body_ranges: list[tuple[int, int]] = []
 
     def basename(token: str) -> str:
         return token.replace("\\", "/").rsplit("/", 1)[-1].lower()
@@ -117,18 +119,470 @@ def _is_blocked_kollab_spawn(
             r"\b(?:kollab|main\.py|kollabor_cli_main)\b", text, re.IGNORECASE
         )
         dangerous = re.search(
-            r"--agent(?:=|\b)|--detached(?:=|\b)|"
+            r"(?<![\w-])-a\S*|(?<![\w-])-d(?==|[^\w-]|$)|"
+            r"(?<![\w-])--ag(?:e(?:n(?:t)?)?)?(?==|[^\w-]|$)|"
+            r"(?<![\w-])--det(?:a(?:c(?:h(?:e(?:d)?)?)?)?)?(?==|[^\w-]|$)|"
             r"--hub(?:=|\s+)(?:stop|kill)(?:\s+|=)all",
             text,
             re.IGNORECASE,
         )
         return bool(target and (is_background or dangerous))
 
+    def substitution_end(text: str, opening_index: int) -> int | None:
+        frames = [
+            {
+                "depth": 1,
+                "single": False,
+                "double": False,
+                "ansi": False,
+                "heredocs": [],
+            }
+        ]
+        index = opening_index + 2
+
+        def comment_starts_word(comment_index: int) -> bool:
+            previous = comment_index - 1
+            if previous < 0 or text[previous] in ";|&(":
+                return True
+            if not text[previous].isspace():
+                return False
+            if text[previous] not in " \t":
+                return True
+            slash_count = 0
+            while (
+                previous > slash_count
+                and text[previous - slash_count - 1] == "\\"
+            ):
+                slash_count += 1
+            return slash_count % 2 == 0
+
+        def heredoc_delimiter(operator_end: int) -> tuple[str, bool] | None:
+            cursor = operator_end
+            strip_tabs = text.startswith("-", cursor)
+            if strip_tabs:
+                cursor += 1
+            while cursor < len(text) and text[cursor] in " \t":
+                cursor += 1
+            delimiter: list[str] = []
+            quote: str | None = None
+            while cursor < len(text):
+                char = text[cursor]
+                if quote is not None:
+                    if char == quote:
+                        quote = None
+                    else:
+                        delimiter.append(char)
+                    cursor += 1
+                    continue
+                if char in "'\"":
+                    quote = char
+                    cursor += 1
+                    continue
+                if char == "\\":
+                    if cursor + 1 >= len(text):
+                        return None
+                    if text[cursor + 1] == "\n":
+                        cursor += 2
+                        continue
+                    delimiter.append(text[cursor + 1])
+                    cursor += 2
+                    continue
+                if char.isspace() or char in ";|&()<>":
+                    break
+                delimiter.append(char)
+                cursor += 1
+            if quote is not None or not delimiter:
+                return None
+            return "".join(delimiter), strip_tabs
+
+        def skip_heredocs(cursor: int, heredocs: list[tuple[str, bool]]) -> int | None:
+            for delimiter, strip_tabs in heredocs:
+                while cursor < len(text):
+                    line_end = text.find("\n", cursor)
+                    if line_end < 0:
+                        line_end = len(text)
+                    line = text[cursor:line_end]
+                    candidate = line.lstrip("\t") if strip_tabs else line
+                    if candidate == delimiter:
+                        cursor = line_end + 1 if line_end < len(text) else line_end
+                        break
+                    if line_end == len(text):
+                        return None
+                    cursor = line_end + 1
+                else:
+                    return None
+            return cursor
+
+        while index < len(text):
+            frame = frames[-1]
+            char = text[index]
+
+            if frame["ansi"]:
+                if char == "\\":
+                    index += 2
+                    continue
+                if char == "'":
+                    frame["ansi"] = False
+                index += 1
+                continue
+            if char == "\\" and not frame["single"]:
+                index += 2
+                continue
+            if frame["single"]:
+                if char == "'":
+                    frame["single"] = False
+                index += 1
+                continue
+            if frame["double"]:
+                if char == '"':
+                    frame["double"] = False
+                elif text.startswith("$(", index):
+                    frames.append(
+                        {
+                            "depth": 1,
+                            "single": False,
+                            "double": False,
+                            "ansi": False,
+                            "heredocs": [],
+                        }
+                    )
+                    index += 2
+                    continue
+                index += 1
+                continue
+            if text.startswith("$'", index):
+                frame["ansi"] = True
+                index += 2
+                continue
+            if char == "'":
+                frame["single"] = True
+            elif char == '"':
+                frame["double"] = True
+            elif text.startswith("<<", index) and not text.startswith("<<<", index):
+                delimiter = heredoc_delimiter(index + 2)
+                if delimiter is None:
+                    return None
+                frame["heredocs"].append(delimiter)
+                index += 2
+                continue
+            elif char == "#" and comment_starts_word(index):
+                newline = text.find("\n", index)
+                if newline < 0:
+                    return None
+                index = newline
+                continue
+            elif text.startswith(("$(", "<(", ">("), index):
+                frames.append(
+                    {
+                        "depth": 1,
+                        "single": False,
+                        "double": False,
+                        "ansi": False,
+                        "heredocs": [],
+                    }
+                )
+                index += 2
+                continue
+            elif char == "\n" and frame["heredocs"]:
+                next_index = skip_heredocs(index + 1, frame["heredocs"])
+                if next_index is None:
+                    return None
+                frame["heredocs"].clear()
+                index = next_index
+                continue
+            elif char == "(":
+                frame["depth"] += 1
+            elif char == ")":
+                frame["depth"] -= 1
+                if frame["depth"] == 0:
+                    if len(frames) == 1:
+                        return index
+                    frames.pop()
+            index += 1
+        return None
+
+    def closing_backtick(text: str, opening_index: int) -> int | None:
+        index = opening_index + 1
+        while index < len(text):
+            if text[index] == "\\":
+                index += 2
+            elif text[index] == "`":
+                return index
+            else:
+                index += 1
+        return None
+
+    def shell_substitutions_blocked(
+        text: str, is_background: bool, depth: int
+    ) -> bool:
+        in_single = False
+        in_double = False
+        pending_heredocs: list[tuple[str | None, bool, bool]] = []
+        active_heredocs: list[tuple[str | None, bool, bool]] = []
+        heredoc_header = False
+        heredoc_body_start: int | None = None
+        index = 0
+
+        def read_heredoc_delimiter(
+            operator_end: int,
+        ) -> tuple[str | None, bool, bool]:
+            delimiter_index = operator_end
+            strip_tabs = text.startswith("-", delimiter_index)
+            if strip_tabs:
+                delimiter_index += 1
+            while delimiter_index < len(text) and text[delimiter_index] in " \t":
+                delimiter_index += 1
+
+            delimiter: list[str] = []
+            quote: str | None = None
+            was_quoted = False
+            while delimiter_index < len(text):
+                char = text[delimiter_index]
+                if quote is not None:
+                    if char == quote:
+                        quote = None
+                    else:
+                        delimiter.append(char)
+                    delimiter_index += 1
+                    continue
+                if char in "'\"":
+                    quote = char
+                    was_quoted = True
+                    delimiter_index += 1
+                    continue
+                if char == "\\":
+                    was_quoted = True
+                    if delimiter_index + 1 >= len(text):
+                        return None, strip_tabs, True
+                    escaped = text[delimiter_index + 1]
+                    if escaped == "\n":
+                        delimiter_index += 2
+                        continue
+                    if (
+                        escaped == "\r"
+                        and delimiter_index + 2 < len(text)
+                        and text[delimiter_index + 2] == "\n"
+                    ):
+                        delimiter_index += 3
+                        continue
+                    delimiter.append(escaped)
+                    delimiter_index += 2
+                    continue
+                if char.isspace() or char in ";|&()<>":
+                    break
+                delimiter.append(char)
+                delimiter_index += 1
+
+            if quote is not None or not delimiter:
+                return None, strip_tabs, True
+            return "".join(delimiter), strip_tabs, not was_quoted
+
+        def read_heredoc_body(
+            body_start: int, heredoc: tuple[str | None, bool, bool]
+        ) -> tuple[str, int, int]:
+            delimiter, strip_tabs, _expands = heredoc
+            line_start = body_start
+            while line_start < len(text):
+                line_end = text.find("\n", line_start)
+                if line_end < 0:
+                    line_end = len(text)
+                line = text[line_start:line_end]
+                candidate = line.lstrip("\t") if strip_tabs else line
+                if delimiter is not None and candidate == delimiter:
+                    next_index = line_end + 1 if line_end < len(text) else line_end
+                    return text[body_start:line_start], next_index, line_start
+                if line_end == len(text):
+                    break
+                line_start = line_end + 1
+            return text[body_start:], len(text), len(text)
+
+        def heredoc_substitutions_blocked(body: str) -> bool:
+            body_index = 0
+            while body_index < len(body):
+                if (
+                    body[body_index] == "\\"
+                    and body_index + 1 < len(body)
+                    and body[body_index + 1] in {"$", "`", "\\", "\n"}
+                ):
+                    body_index += 2
+                    continue
+                if body.startswith("$(", body_index):
+                    end = substitution_end(body, body_index)
+                    nested = (
+                        body[body_index + 2 : end]
+                        if end is not None
+                        else body[body_index + 2 :]
+                    )
+                    if _is_blocked_kollab_spawn(
+                        nested, background=is_background, _depth=depth + 1
+                    ):
+                        return True
+                    if end is None and suspicious_launch(nested, is_background):
+                        return True
+                    body_index = end + 1 if end is not None else len(body)
+                    continue
+                if body[body_index] == "`":
+                    end = closing_backtick(body, body_index)
+                    nested = (
+                        body[body_index + 1 : end]
+                        if end is not None
+                        else body[body_index + 1 :]
+                    )
+                    if _is_blocked_kollab_spawn(
+                        nested, background=is_background, _depth=depth + 1
+                    ):
+                        return True
+                    if end is None and suspicious_launch(nested, is_background):
+                        return True
+                    body_index = end + 1 if end is not None else len(body)
+                    continue
+                body_index += 1
+            return False
+
+        def comment_starts_shell_word(comment_index: int) -> bool:
+            previous = comment_index - 1
+            while previous >= 0:
+                if (
+                    text[previous] == "\n"
+                    and previous > 0
+                    and text[previous - 1] == "\\"
+                ):
+                    previous -= 2
+                    continue
+                if (
+                    text[previous] == "\n"
+                    and previous > 1
+                    and text[previous - 1] == "\r"
+                    and text[previous - 2] == "\\"
+                ):
+                    previous -= 3
+                    continue
+                break
+            if previous < 0 or text[previous] in ";|&(":
+                return True
+            if not text[previous].isspace():
+                return False
+            if text[previous] not in " \t":
+                return True
+            slash_count = 0
+            while previous > slash_count and text[previous - slash_count - 1] == "\\":
+                slash_count += 1
+            return slash_count % 2 == 0
+
+        while index < len(text):
+            if active_heredocs and index == heredoc_body_start:
+                heredoc = active_heredocs.pop(0)
+                body_start = index
+                body, index, body_end = read_heredoc_body(index, heredoc)
+                heredoc_body_ranges.append((body_start, body_end))
+                if heredoc[2] and heredoc_substitutions_blocked(body):
+                    return True
+                heredoc_body_start = index if active_heredocs else None
+                continue
+
+            char = text[index]
+            if char == "\\" and not in_single:
+                index += 2
+                continue
+            if not in_single and not in_double and text.startswith("$'", index):
+                index += 2
+                while index < len(text):
+                    if text[index] == "\\":
+                        index += 2
+                    elif text[index] == "'":
+                        index += 1
+                        break
+                    else:
+                        index += 1
+                continue
+            if char == "'" and not in_double:
+                in_single = not in_single
+                index += 1
+                continue
+            if char == '"' and not in_single:
+                in_double = not in_double
+                index += 1
+                continue
+
+            if (
+                not in_single
+                and not in_double
+                and text.startswith("<<", index)
+                and not text.startswith("<<<", index)
+            ):
+                pending_heredocs.append(read_heredoc_delimiter(index + 2))
+                heredoc_header = True
+            if (
+                char == "#"
+                and not in_single
+                and not in_double
+                and comment_starts_shell_word(index)
+            ):
+                newline = text.find("\n", index)
+                if newline < 0:
+                    return False
+                if heredoc_header:
+                    active_heredocs.extend(
+                        pending_heredocs or [(None, False, True)]
+                    )
+                    pending_heredocs.clear()
+                    heredoc_header = False
+                    heredoc_body_start = newline + 1
+                index = newline + 1
+                continue
+            if char == "\n":
+                if heredoc_header:
+                    active_heredocs.extend(
+                        pending_heredocs or [(None, False, True)]
+                    )
+                    pending_heredocs.clear()
+                    heredoc_header = False
+                    heredoc_body_start = index + 1
+                index += 1
+                continue
+
+            if char == "`" and not in_single:
+                end = closing_backtick(text, index)
+                nested = (
+                    text[index + 1 : end]
+                    if end is not None
+                    else text[index + 1 :]
+                )
+                if _is_blocked_kollab_spawn(
+                    nested, background=is_background, _depth=depth + 1
+                ):
+                    return True
+                if end is None and suspicious_launch(nested, is_background):
+                    return True
+                index = end + 1 if end is not None else len(text)
+                continue
+
+            is_command_substitution = not in_single and text.startswith("$(", index)
+            is_process_substitution = (
+                not in_single
+                and not in_double
+                and char in "<>"
+                and text.startswith("(", index + 1)
+            )
+            if is_command_substitution or is_process_substitution:
+                end = substitution_end(text, index)
+                body = text[index + 2 : end] if end is not None else text[index + 2 :]
+                if _is_blocked_kollab_spawn(
+                    body, background=is_background, _depth=depth + 1
+                ):
+                    return True
+                if end is None:
+                    return suspicious_launch(body, is_background)
+                index = end + 1
+                continue
+            index += 1
+        return False
+
     def blocked_args(args: list[str], is_background: bool) -> bool:
         if is_background:
             return True
         lowered = [str(arg).lower() for arg in args]
-        # Shell indirection such as eval or $(...) is outside this text guard;
+        # Shell indirection such as eval is outside this text heuristic;
         # cli_main also checks launch context at runtime.
         for index, arg in enumerate(lowered):
             if arg == "--":
@@ -189,6 +643,21 @@ def _is_blocked_kollab_spawn(
             )
             if name not in spawn_calls and not name.startswith(("spawn", "exec")):
                 continue
+
+            shell_mode: bool | None = False
+            shell_keyword = next(
+                (keyword.value for keyword in node.keywords if keyword.arg == "shell"),
+                None,
+            )
+            shell_argument = shell_keyword
+            if shell_argument is None and len(node.args) > 8:
+                shell_argument = node.args[8]
+            if shell_argument is not None:
+                try:
+                    shell_mode = bool(ast.literal_eval(shell_argument))
+                except (ValueError, TypeError):
+                    shell_mode = None
+
             for argument in [*node.args, *(keyword.value for keyword in node.keywords)]:
                 try:
                     value = ast.literal_eval(argument)
@@ -202,7 +671,16 @@ def _is_blocked_kollab_spawn(
                 elif isinstance(value, (list, tuple)) and all(
                     isinstance(item, str) for item in value
                 ):
-                    if scan_tokens(list(value), is_background, depth + 1):
+                    if shell_mode is True and value and _is_blocked_kollab_spawn(
+                        value[0], background=is_background, _depth=depth + 1
+                    ):
+                        return True
+                    if scan_tokens(
+                        list(value),
+                        is_background,
+                        depth + 1,
+                        scan_substitutions=shell_mode is None,
+                    ):
                         return True
         return False
 
@@ -624,7 +1102,13 @@ def _is_blocked_kollab_spawn(
             return blocked_args(args, is_background)
         return False
 
-    def scan_tokens(tokens: list[str], is_background: bool, depth: int) -> bool:
+    def scan_tokens(
+        tokens: list[str],
+        is_background: bool,
+        depth: int,
+        *,
+        scan_substitutions: bool = True,
+    ) -> bool:
         if depth > 8:
             return suspicious_launch(" ".join(tokens), is_background)
         segment: list[str] = []
@@ -649,61 +1133,133 @@ def _is_blocked_kollab_spawn(
         if inspect_segment(segment, is_background, depth):
             return True
 
-        # Catch shell command substitutions without treating ordinary quoted
-        # mentions (e.g. echo 'kollab --agent') as executable commands.
-        for token in tokens:
-            nested_commands = re.findall(r"\$\(([^()]*)\)|[<>]\(([^()]*)\)", token)
-            for groups in nested_commands:
-                nested = next((group for group in groups if group), "")
-                if nested and _is_blocked_kollab_spawn(
-                    nested, background=is_background, _depth=depth + 1
-                ):
-                    return True
+        # Keep the conservative marker scan for already-tokenized argv lists.
+        # Shell strings are scanned before shlex removes their quote context.
+        if scan_substitutions:
+            for token in tokens:
+                nested_commands = re.findall(r"\$\(([^()]*)\)|[<>]\(([^()]*)\)", token)
+                for groups in nested_commands:
+                    nested = next((group for group in groups if group), "")
+                    if nested and _is_blocked_kollab_spawn(
+                        nested, background=is_background, _depth=depth + 1
+                    ):
+                        return True
         return False
 
     if _depth > 8:
         return suspicious_launch(command, background)
 
-    # Unlike shlex tokens, the original command preserves quote/escape context.
-    # Scan backticks here so spaces do not split real substitutions and single-
-    # quoted or escaped backticks remain ordinary data.
-    in_single = False
-    in_double = False
-    index = 0
-    while index < len(command):
-        char = command[index]
-        if char == "\\" and not in_single:
-            index += 2
+    if shell_substitutions_blocked(command, background, _depth):
+        return True
+
+    token_scan_command = command
+    for body_start, body_end in reversed(heredoc_body_ranges):
+        masked_body = " " * (body_end - body_start)
+        token_scan_command = (
+            token_scan_command[:body_start]
+            + masked_body
+            + token_scan_command[body_end:]
+        )
+
+    token_parts: list[str] = []
+    token_single = False
+    token_double = False
+    token_ansi = False
+    token_comment = False
+    token_index = 0
+
+    def token_comment_starts_word(comment_index: int) -> bool:
+        previous = comment_index - 1
+        while previous >= 0:
+            if (
+                token_scan_command[previous] == "\n"
+                and previous > 0
+                and token_scan_command[previous - 1] == "\\"
+            ):
+                previous -= 2
+                continue
+            if (
+                token_scan_command[previous] == "\n"
+                and previous > 1
+                and token_scan_command[previous - 1] == "\r"
+                and token_scan_command[previous - 2] == "\\"
+            ):
+                previous -= 3
+                continue
+            break
+        if previous < 0 or token_scan_command[previous] in ";|&(":
+            return True
+        if not token_scan_command[previous].isspace():
+            return False
+        if token_scan_command[previous] not in " \t":
+            return True
+        slash_count = 0
+        while (
+            previous > slash_count
+            and token_scan_command[previous - slash_count - 1] == "\\"
+        ):
+            slash_count += 1
+        return slash_count % 2 == 0
+
+    while token_index < len(token_scan_command):
+        char = token_scan_command[token_index]
+        if token_comment:
+            if char == "\n":
+                token_parts.append("\n;")
+                token_comment = False
+            else:
+                token_parts.append(char)
+            token_index += 1
             continue
-        if char == "'" and not in_double:
-            in_single = not in_single
-        elif char == '"' and not in_single:
-            in_double = not in_double
-        elif char == "`" and not in_single:
-            end = index + 1
-            while end < len(command):
-                if command[end] == "\\":
-                    end += 2
-                elif command[end] == "`":
-                    break
-                else:
-                    end += 1
-            if end < len(command):
-                if _is_blocked_kollab_spawn(
-                    command[index + 1 : end], background=background, _depth=_depth + 1
-                ):
-                    return True
-                index = end
-        index += 1
+        if token_ansi:
+            if char == "\\":
+                token_parts.append(token_scan_command[token_index : token_index + 2])
+                token_index += 2
+                continue
+            if char == "'":
+                token_ansi = False
+            token_parts.append(char)
+            token_index += 1
+            continue
+        if char == "\\" and not token_single:
+            token_parts.append(token_scan_command[token_index : token_index + 2])
+            token_index += 2
+            continue
+        if (
+            not token_single
+            and not token_double
+            and token_scan_command.startswith("$'", token_index)
+        ):
+            token_parts.append("$'")
+            token_ansi = True
+            token_index += 2
+            continue
+        if char == "'" and not token_double:
+            token_single = not token_single
+        elif char == '"' and not token_single:
+            token_double = not token_double
+        elif (
+            char == "#"
+            and not token_single
+            and not token_double
+            and token_comment_starts_word(token_index)
+        ):
+            token_comment = True
+        if char == "\n" and not token_single and not token_double:
+            token_parts.append(";\n")
+        else:
+            token_parts.append(char)
+        token_index += 1
+    token_scan_command = "".join(token_parts)
 
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
+        lexer = shlex.shlex(token_scan_command, posix=True, punctuation_chars=";&|()")
         lexer.whitespace_split = True
         lexer.commenters = "#"
         tokens = list(lexer)
     except ValueError:
         return suspicious_launch(command, background)
-    return scan_tokens(tokens, background, _depth)
+    return scan_tokens(tokens, background, _depth, scan_substitutions=False)
 
 
 KOLLAB_SPAWN_BLOCK_MESSAGE = (
@@ -823,6 +1379,9 @@ class ToolExecutor:
 
         # Track active shell executor so ESC can cancel running subprocesses
         self._active_shell_executor: Optional[ShellExecutor] = None
+        # Serialize only calls that share mutable subprocess state; independent
+        # session-management operations must remain available while they run.
+        self._terminal_execution_lock = asyncio.Lock()
 
         logger.info(
             "Tool executor initialized with terminal, MCP, and file operations support"
@@ -988,8 +1547,53 @@ class ToolExecutor:
         # Fallback: simple underscore-to-hyphen
         return tool_type.replace("_", "-")
 
+    def _is_git_only_bundle_command(
+        self, command: Optional[str], cwd: Optional[str]
+    ) -> bool:
+        """Accept only read-only Git commands for a Git-only bundle grant."""
+        if not isinstance(command, str) or not command.strip():
+            return False
+        try:
+            if len(command.encode("utf-8")) > MAX_VOICE_COMMAND_BYTES:
+                return False
+        except UnicodeEncodeError:
+            return False
+        if any(char in _SHELL_OPERATOR_CHARS for char in command):
+            return False
+
+        try:
+            argv = tuple(shlex.split(command, posix=True))
+        except ValueError:
+            return False
+        if not argv or any(not token or "\\" in token for token in argv):
+            return False
+        if argv[0] != "git":
+            return False
+
+        try:
+            root = Path(self.workspace or Path.cwd()).expanduser().resolve()
+            command_cwd = self._resolve_terminal_cwd(cwd) or root
+            command_cwd = command_cwd.resolve()
+            command_cwd.relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            return False
+
+        if any(
+            token.split("=", 1)[0].lower() == "--no-index" for token in argv[1:]
+        ):
+            return False
+        if _git_leaves_project(argv, command_cwd, root):
+            return False
+        return not _is_hard_blocked(argv) and _is_read_only_action(
+            argv, command_cwd, root
+        )
+
     def _check_bundle_scope(
-        self, tool_type: str, tool_name: Optional[str] = None
+        self,
+        tool_type: str,
+        tool_name: Optional[str] = None,
+        command: Optional[str] = None,
+        cwd: Optional[str] = None,
     ) -> Optional[str]:
         """Check if a tool_type is allowed by the bundle scope.
 
@@ -1018,6 +1622,16 @@ class ToolExecutor:
 
         # Direct match against bundle tools
         if registry_name in self._bundle_tools:
+            return None
+
+        # ``git`` is documentation for terminal execution, but a Git-only
+        # grant must never inherit the full shell terminal capability.
+        if (
+            tool_type in {"terminal", "terminal_read"}
+            and "git" in self._bundle_tools
+            and "terminal" not in self._bundle_tools
+            and self._is_git_only_bundle_command(command, cwd)
+        ):
             return None
 
         # MCP schemas can be scoped to a single tool name as well as to the
@@ -1278,7 +1892,6 @@ class ToolExecutor:
         """
         tool_type = tool_data.get("type", "unknown")
         tool_id = tool_data.get("id", "unknown")
-
         # Native callers are normalized before reaching this method, but keep
         # the legacy alias safe for direct/older callers too. The registered
         # ``git`` definition is documentation for terminal execution, not a
@@ -1287,7 +1900,42 @@ class ToolExecutor:
             tool_data = {**tool_data, "type": "terminal"}
             tool_type = "terminal"
 
+        # A Git grant is narrower than terminal access. The documented XML
+        # form is parsed as a terminal dispatch without a tool name, so route
+        # only a single shell-free Git command through the existing read-only
+        # terminal policy. This keeps Git hooks and other command execution
+        # outside the Git-only grant.
+        command = tool_data.get("command")
+        git_bundle_read_only = (
+            tool_type == "terminal"
+            and self._bundle_tools is not None
+            and "git" in self._bundle_tools
+            and "terminal" not in self._bundle_tools
+            and not tool_data.get("background")
+            and isinstance(command, str)
+            and command.strip()
+            and not any(char in _SHELL_OPERATOR_CHARS for char in command)
+        )
+        git_argv: list[str] = []
+        if git_bundle_read_only:
+            try:
+                git_argv = shlex.split(command, posix=True)
+            except ValueError:
+                git_argv = []
+            git_bundle_read_only = bool(
+                git_argv and git_argv[0].lower() in {"git", "git.exe"}
+            )
+        if git_bundle_read_only:
+            if git_argv[0].lower() == "git.exe":
+                tool_data = {
+                    **tool_data,
+                    "command": shlex.join(["git", *git_argv[1:]]),
+                }
+            tool_data = {**tool_data, "type": "terminal_read"}
+            tool_type = "terminal_read"
+
         voice_terminal_plan: VoiceTerminalPlan | None = None
+        voice_terminal_timeout = self.terminal_timeout
         if is_voice_origin(execution_context) and not self.trust_all:
             decision = voice_decision or self._voice_tool_guard.evaluate(
                 tool_data,
@@ -1308,6 +1956,23 @@ class ToolExecutor:
                     },
                 )
             voice_terminal_plan = decision.plan
+            if voice_terminal_plan is not None:
+                requested_timeout = tool_data.get("timeout")
+                if requested_timeout is not None:
+                    try:
+                        voice_terminal_timeout = self._parse_terminal_timeout(
+                            requested_timeout
+                        )
+                    except ValueError:
+                        return ToolExecutionResult(
+                            tool_id=tool_id,
+                            tool_type=tool_type,
+                            success=False,
+                            error=(
+                                "Invalid terminal timeout. Use a positive duration "
+                                "such as 30s, 5m, or 1h."
+                            ),
+                        )
 
         # Check for cancellation before starting
         if self.is_cancelled():
@@ -1321,7 +1986,20 @@ class ToolExecutor:
             )
 
         # Check bundle scope — reject tools not in the agent's allowed set
-        scope_error = self._check_bundle_scope(tool_type, tool_data.get("name"))
+        # Registered Git calls already carry the narrow ``git`` capability;
+        # XML <terminal> calls have no registered name and must pass the
+        # command-aware exception in _check_bundle_scope.
+        scope_type = (
+            "git"
+            if git_bundle_read_only and tool_data.get("name") == "git"
+            else tool_type
+        )
+        scope_error = self._check_bundle_scope(
+            scope_type,
+            tool_data.get("name"),
+            tool_data.get("command"),
+            tool_data.get("cwd"),
+        )
         if scope_error:
             logger.warning(f"Tool {tool_id} rejected by bundle scope: {tool_type}")
             return ToolExecutionResult(
@@ -1331,6 +2009,17 @@ class ToolExecutor:
                 error=scope_error,
                 metadata={"scope_denied": True},
             )
+
+        git_only_terminal = (
+            self._enforce_bundle_scope
+            and self._bundle_tools is not None
+            and "git" in self._bundle_tools
+            and "terminal" not in self._bundle_tools
+            and tool_type in {"terminal", "terminal_read"}
+        )
+        if git_only_terminal:
+            tool_data = {**tool_data, "type": "terminal_read"}
+            tool_type = "terminal_read"
 
         gate_refusal = self.sandbox_gate.check(tool_data, self.workspace or Path.cwd())
         if gate_refusal:
@@ -1409,7 +2098,29 @@ class ToolExecutor:
                     _plugin_key = tool_type
                     if _plugin_key not in self._plugin_handlers:
                         _plugin_key = tool_type.replace("-", "_")
-                    if _plugin_key in self._plugin_handlers:
+                    if git_only_terminal:
+                        mark_tool_execution()
+                        read_only_tool_data = tool_data
+                        if voice_terminal_plan is not None:
+                            read_only_tool_data = {
+                                **tool_data,
+                                "command": shlex.join(
+                                    ("git", *voice_terminal_plan.argv[1:])
+                                ),
+                                "cwd": str(voice_terminal_plan.canonical_cwd),
+                            }
+                        result = await self._execute_read_only_terminal_command(
+                            read_only_tool_data
+                        )
+                        if voice_terminal_plan is not None:
+                            result.metadata.update(
+                                {
+                                    "voice_terminal_plan_id": voice_terminal_plan.plan_id,
+                                    "voice_action_digest": voice_terminal_plan.digest,
+                                    "classification": voice_terminal_plan.classification,
+                                }
+                            )
+                    elif _plugin_key in self._plugin_handlers and not git_bundle_read_only:
                         logger.debug(
                             f"Routing to plugin handler for {_plugin_key}"
                         )
@@ -1427,10 +2138,13 @@ class ToolExecutor:
                             f"About to call _execute_terminal_command for {tool_id}"
                         )
                         mark_tool_execution()
-                        if voice_terminal_plan is not None:
+                        if git_bundle_read_only:
+                            result = await self._execute_terminal_command(tool_data)
+                        elif voice_terminal_plan is not None:
                             result = await self._execute_voice_terminal_plan(
                                 tool_data,
                                 voice_terminal_plan,
+                                voice_terminal_timeout,
                             )
                         else:
                             result = await self._execute_terminal_command(tool_data)
@@ -1651,18 +2365,24 @@ class ToolExecutor:
         self,
         tool_data: Dict[str, Any],
         plan: VoiceTerminalPlan,
+        timeout_seconds: int,
     ) -> ToolExecutionResult:
         """Run a canonical voice plan with argv, never through a command shell."""
-        self._active_shell_executor = self.shell_executor
-        try:
-            result = await self.shell_executor.run_argv(
-                plan.argv,
-                timeout=min(self.terminal_timeout, MAX_VOICE_COMMAND_SECONDS),
-                cwd=plan.canonical_cwd,
-                max_output_bytes=MAX_VOICE_OUTPUT_BYTES,
-            )
-        finally:
-            self._active_shell_executor = None
+        async with self._terminal_execution_lock:
+            self._active_shell_executor = self.shell_executor
+            try:
+                result = await self.shell_executor.run_argv(
+                    plan.argv,
+                    timeout=min(
+                        timeout_seconds,
+                        self.terminal_timeout,
+                        MAX_VOICE_COMMAND_SECONDS,
+                    ),
+                    cwd=plan.canonical_cwd,
+                    max_output_bytes=MAX_VOICE_OUTPUT_BYTES,
+                )
+            finally:
+                self._active_shell_executor = None
 
         return ToolExecutionResult(
             tool_id=tool_data.get("id", "unknown"),
@@ -1681,6 +2401,26 @@ class ToolExecutor:
                 "classification": plan.classification,
             },
         )
+
+    def _parse_terminal_timeout(self, timeout: Any) -> int:
+        """Parse the terminal tool's duration and reject values we cannot enforce."""
+        if not isinstance(timeout, str):
+            raise ValueError("Invalid terminal timeout")
+
+        match = re.fullmatch(r"(\d+)([smh]?)", timeout.strip().lower())
+        if not match:
+            raise ValueError("Invalid terminal timeout")
+
+        value = int(match.group(1))
+        multiplier = {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2)]
+        timeout_seconds = value * multiplier
+        try:
+            finite_timeout = math.isfinite(timeout_seconds)
+        except OverflowError:
+            finite_timeout = False
+        if timeout_seconds <= 0 or not finite_timeout:
+            raise ValueError("Invalid terminal timeout")
+        return timeout_seconds
 
     async def _execute_terminal_command(
         self, tool_data: Dict[str, Any]
@@ -1727,6 +2467,39 @@ class ToolExecutor:
                 error="Empty command",
             )
 
+        requested_timeout = tool_data.get("timeout")
+        if requested_timeout is None:
+            timeout_seconds = self.terminal_timeout
+            background_timeout = None
+        else:
+            try:
+                timeout_seconds = self._parse_terminal_timeout(requested_timeout)
+            except ValueError:
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type=tool_type,
+                    success=False,
+                    error=(
+                        "Invalid terminal timeout. Use a positive duration such as "
+                        "30s, 5m, or 1h."
+                    ),
+                )
+            if not background and timeout_seconds > self.terminal_timeout:
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    tool_type=tool_type,
+                    success=False,
+                    error=(
+                        "Terminal timeout exceeds the configured limit of "
+                        f"{self.terminal_timeout}s."
+                    ),
+                )
+            background_timeout = requested_timeout.strip().lower()
+
+        # Shell fallback is synchronous, including when a background request
+        # cannot use the persistent-session runner.
+        fallback_timeout_seconds = min(timeout_seconds, self.terminal_timeout)
+
         # Kollab commands run freely from agent terminals by default (#1147).
         # When the owner opts in with tools.block_kollab_terminal_spawn, agent
         # launches, stop-all, and background Kollab commands are refused so
@@ -1755,7 +2528,7 @@ class ToolExecutor:
                     result = await self.tmux_plugin.execute_background(
                         command=command,
                         name=tool_data.get("name"),
-                        timeout=tool_data.get("timeout"),
+                        timeout=background_timeout,
                         cwd=str(cwd) if cwd else None,
                     )
                     return ToolExecutionResult(
@@ -1772,11 +2545,12 @@ class ToolExecutor:
                     )
                 else:
                     # Foreground execution via temporary subprocess
-                    result = await self.tmux_plugin.execute_foreground(
-                        command=command,
-                        timeout=self.terminal_timeout,
-                        cwd=str(cwd) if cwd else None,
-                    )
+                    async with self._terminal_execution_lock:
+                        result = await self.tmux_plugin.execute_foreground(
+                            command=command,
+                            timeout=timeout_seconds,
+                            cwd=str(cwd) if cwd else None,
+                        )
                     return ToolExecutionResult(
                         tool_id=tool_id,
                         tool_type=tool_type,
@@ -1791,15 +2565,16 @@ class ToolExecutor:
                 logger.debug("Falling back to ShellExecutor for command execution")
 
         # Fallback: Use ShellExecutor (no terminal plugin available or it failed)
-        self._active_shell_executor = self.shell_executor
-        try:
-            result = await self.shell_executor.run(
-                command,
-                timeout=self.terminal_timeout,
-                cwd=cwd,
-            )
-        finally:
-            self._active_shell_executor = None
+        async with self._terminal_execution_lock:
+            self._active_shell_executor = self.shell_executor
+            try:
+                result = await self.shell_executor.run(
+                    command,
+                    timeout=fallback_timeout_seconds,
+                    cwd=cwd,
+                )
+            finally:
+                self._active_shell_executor = None
 
         if result.error:
             return ToolExecutionResult(
@@ -1914,17 +2689,18 @@ class ToolExecutor:
                 if not name.upper().startswith("GIT_")
             }
 
-        self._active_shell_executor = self.shell_executor
-        try:
-            result = await self.shell_executor.run_argv(
-                argv,
-                timeout=min(self.terminal_timeout, MAX_VOICE_COMMAND_SECONDS),
-                cwd=cwd,
-                env=command_env,
-                max_output_bytes=MAX_VOICE_OUTPUT_BYTES,
-            )
-        finally:
-            self._active_shell_executor = None
+        async with self._terminal_execution_lock:
+            self._active_shell_executor = self.shell_executor
+            try:
+                result = await self.shell_executor.run_argv(
+                    argv,
+                    timeout=min(self.terminal_timeout, MAX_VOICE_COMMAND_SECONDS),
+                    cwd=cwd,
+                    env=command_env,
+                    max_output_bytes=MAX_VOICE_OUTPUT_BYTES,
+                )
+            finally:
+                self._active_shell_executor = None
 
         return ToolExecutionResult(
             tool_id=tool_id,
