@@ -184,6 +184,24 @@ function serve(req, res) {
   }
 }
 
+/** A malformed path makes serve() fail. The body must stay generic, and the error must reach problems. */
+async function assertMalformedPathIsGeneric(port) {
+  const recorded = problems.length;
+  const reply = await new Promise((resolve, reject) => {
+    const request = http.get({ host: "127.0.0.1", port, path: "/%" }, (response) => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => (body += chunk));
+      response.on("end", () => resolve({ status: response.statusCode, body }));
+    });
+    request.on("error", reject);
+  });
+  assert.equal(reply.status, 400, "a malformed path is refused");
+  assert.equal(reply.body, "bad request", "a malformed path gets a generic body, not the server error text");
+  assert.equal(problems.length, recorded + 1, "the fixture server records the malformed path error for this suite");
+  problems.length = recorded; // this probe's error is expected, so it does not fail the suite
+}
+
 async function openApp(width, height, { route = "/", touch = false } = {}) {
   const context = await browser.newContext({ viewport: { width, height }, hasTouch: touch });
   const page = await context.newPage();
@@ -332,6 +350,7 @@ try {
   server = http.createServer(serve);
   await new Promise((listening) => server.listen(0, "127.0.0.1", listening));
   origin = `http://127.0.0.1:${server.address().port}`;
+  await assertMalformedPathIsGeneric(server.address().port);
   browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_PATH ?? chromium.executablePath() });
   await desktopFlow();
   await tabletFlow();
