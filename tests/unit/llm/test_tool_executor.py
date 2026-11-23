@@ -370,7 +370,7 @@ class TestToolExecutor(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result.success)
             self.assertEqual(result.output, "find\n")
             self.executor.shell_executor.run.assert_awaited_once_with(
-                command, timeout=self.terminal_timeout, cwd=workspace
+                command, timeout=self.terminal_timeout, cwd=workspace.resolve()
             )
 
     async def test_terminal_find_refuses_uninspectable_interpreter_command(self):
