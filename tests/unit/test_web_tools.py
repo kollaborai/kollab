@@ -505,6 +505,38 @@ class TestWebFetchExecution(unittest.TestCase):
         self.assertIn(article_body.rstrip(), result.output)
         self.assertNotIn(description.rstrip(), result.output)
 
+    def test_web_fetch_full_semantic_article_beats_json_ld_teaser(self):
+        """A JSON-LD teaser cannot replace a fuller semantic article."""
+        from kollabor_agent.tool_executor import ToolExecutor
+
+        teaser = "Structured teaser sentence. " * 9
+        article_body = "Full semantic article with useful details. " * 24
+        html = (
+            '<script type="application/ld+json">'
+            + json.dumps({"@type": "NewsArticle", "articleBody": teaser})
+            + "</script>"
+            + f"<article><p>{article_body}</p></article>"
+        )
+        response = _make_mock_aiohttp_response(text=html)
+
+        with (
+            _patch_aiohttp_session(mock_get=response),
+            patch.object(
+                ToolExecutor,
+                "_playwright_fetch",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            result = _run(
+                self.executor._execute_web_fetch(
+                    {"type": "web_fetch", "url": "https://example.com"}
+                )
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertIn(article_body.rstrip(), result.output)
+        self.assertNotIn(teaser.rstrip(), result.output)
+
     def test_web_fetch_regex_fallback_strips_script_content(self):
         """The optional no-bs4 path strips script bodies before returning text."""
         from kollabor_agent.tool_executor import ToolExecutor
