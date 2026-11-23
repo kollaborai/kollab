@@ -292,20 +292,27 @@ describe("PromptsView role (rendered)", () => {
     expect(html).toContain("Session Context");
   });
 
-  it("shows library load errors in the visible pane without empty-library counts", () => {
+  it("hides the role editor when prompt libraries fail and offers retry", () => {
     const error = "Prompt library could not be loaded";
     const html = renderView({
       libraries: null,
       loadError: error,
-      target: { kind: "library", name: "defaults" },
+      target: { kind: "role", name: "coder" },
       groups: [],
       composition: null,
     });
-    const sectionsPane = html.split('data-testid="prompts-sections"')[1];
 
-    expect(sectionsPane).toContain(`role="alert"`);
-    expect(sectionsPane).toContain(error);
-    expect(html).not.toContain('data-testid="target-total"');
+    expect(html).toContain('data-testid="prompts-load-error"');
+    expect(html).toContain('role="alert"');
+    expect(html).toContain(error);
+    expect(html).toContain('data-testid="prompts-retry"');
+    expect(html).toContain(">Retry</button>");
+    for (const id of ["prompts-sidebar", "prompts-sections", "prompts-target-select", "target-title"]) {
+      expect(html).not.toContain(`data-testid="${id}"`);
+    }
+    for (const label of ["Pick the sections this role sends.", "All Models", "Filter Sections"]) {
+      expect(html).not.toContain(label);
+    }
   });
 });
 

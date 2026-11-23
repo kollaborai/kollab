@@ -100,6 +100,13 @@ Execution methods:
 - tmux sessions (preferred, supports background jobs)
 - direct subprocess (fallback)
 
+The `timeout` attribute sets a foreground command's maximum runtime. It can
+shorten but cannot exceed the configured terminal timeout; excessive and invalid
+values are rejected before execution. Voice-origin commands may have a stricter
+policy limit. Durations use seconds, minutes, or hours (`30s`, `5m`, `1h`). For a
+background session, `timeout` schedules an auto-kill. Without it, the session has
+no automatic timeout.
+
 Agent bundles that need terminal inspection without shell writes can grant the
 `terminal-read` tool alongside `file-read` and `file-grep`:
 
@@ -113,6 +120,17 @@ untrusted executables, and working directories outside the project are refused
 with a reason. The existing `terminal` tool keeps its normal behavior. See the
 [read-only terminal specification](../specs/agent-read-only-terminal.md) for
 the full policy.
+
+A bundle that needs Git inspection without general terminal access can grant
+`git` instead:
+
+```json
+{"tools": ["file-read", "file-grep", "git"]}
+```
+
+This permits one read-only Git command at a time, such as `git status --short`.
+Shell composition, Git writes (including commits that could run repository
+hooks), and other terminal commands remain refused.
 
 ### Workspace Switching
 
@@ -326,6 +344,10 @@ Tool registry format:
     }
 }
 ```
+
+The Web UI shows completed Hub MCP calls with readable tool labels. Hub tool
+rows show the recipient in the collapsed row; thread and reply ids remain in
+the expanded call details.
 
 ## On-demand Tool Loading
 

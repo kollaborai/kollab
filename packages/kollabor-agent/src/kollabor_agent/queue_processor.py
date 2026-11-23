@@ -1440,6 +1440,12 @@ class QueueProcessor:
                     "source": record["source"],
                     "timestamp": record["timestamp"],
                     "text": record["text"],
+                    # The send these words came in, when the client named it (#1359).
+                    **(
+                        {"request_id": record["request_id"]}
+                        if isinstance(record.get("request_id"), str) and record["request_id"]
+                        else {}
+                    ),
                 }
                 for item in messages
                 if isinstance(item, (QueuedInput, TaggedInput))

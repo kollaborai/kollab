@@ -1,7 +1,7 @@
 ---
 title: "Slash Commands"
 created: 2026-02-24
-modified: 2026-09-20
+modified: 2026-11-17
 status: active
 ---
 # Slash Commands
@@ -48,6 +48,9 @@ Use arrow keys to navigate, Enter to execute.
 | `/permissions` | `/perms`, `/security` | Manage permission modes |
 | `/mcp` | `/mcps`, `/servers` | Open the MCP manager |
 | `/resume` | - | Resume previous conversation |
+| `/sessions` | `/history` | Browse, search, and resume conversations |
+| `/fork` | `/forks` | Browse previous conversations |
+| `/branch` | - | Branch a saved conversation from a message |
 | `/terminal` | `/tmux`, `/t` | Manage tmux sessions |
 | `/login` | - | OAuth login for providers |
 | `/config` | `/settings`, `/preferences` | Edit configuration |
@@ -55,6 +58,16 @@ Use arrow keys to navigate, Enter to execute.
 | `/updates` | - | Browse recent release notes |
 | `/matrix` | - | Matrix rain effect |
 | `/widgets` | `showcase`, `widget-showcase`, `storybook` | Interactive widget gallery |
+
+### Session Pickers
+
+In Web UI chat, `/resume`, `/resume search <query>`, `/fork`, `/fork search
+<query>`, and filtered `/resume` lists such as `/resume --limit <count>` show
+session rows with details and a follow-up `/resume <session_id>` command.
+`/branch` rows show `/branch <session_id>`, including `/branch current` for
+the active conversation; branch-point rows show
+`/branch <session_id> <message_index>`. Rows without a safe follow-up are
+hidden; if none remain, the command's message is shown.
 
 ### Web UI Recovery
 
@@ -146,6 +159,10 @@ command_registry.register_command(command_def)
 ### Parser
 
 `kollabor/commands/parser.py` - Parses slash command input into structured commands.
+Unquoted Windows drive, UNC, and rooted path arguments retain their backslashes,
+including a trailing separator before another token. Multi-segment relative
+paths also retain their backslashes, including a trailing separator before
+another token. Quote paths that contain spaces or shell-escaped characters.
 
 ## Plugin Commands
 
