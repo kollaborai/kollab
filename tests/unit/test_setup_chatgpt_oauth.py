@@ -7,8 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from kollabor.panels.setup import SetupPanel
-from kollabor.panels.setup import load_model_suggestions
+from kollabor.panels.setup import SetupPanel, load_model_suggestions
 
 
 class FakeOAuthClient:
