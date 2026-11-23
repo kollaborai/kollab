@@ -2634,6 +2634,12 @@ async def assistant_transport(
             current = command_message_label(body.commands[command_index], command_index)
             if attempted_request_id is not None:
                 current = attempted_request_id
+            if attempt_may_be_accepted and add_message_count == 1:
+                return (
+                    f"Admission response for message {current} was lost; it may have "
+                    f"been accepted. Admission error: {reason}. "
+                    "No messages were resubmitted."
+                )
             if attempt_may_be_accepted:
                 attempted = f"Possibly accepted despite the admission error: {current}."
                 future_start = command_index + 1
@@ -2806,16 +2812,15 @@ async def assistant_transport(
                         accepted = await session.send_message(message_content, **kwargs)
                     except Exception as exc:
                         admission_error = str(exc) or type(exc).__name__
-                        if submitted_contents:
-                            admission_error = partial_admission_error(
-                                command_index,
-                                admission_error,
-                                attempted_request_id=request_id,
-                                attempt_may_be_accepted=True,
-                            )
-                            record_possibly_accepted_submission(
-                                request_id, message_content, command
-                            )
+                        admission_error = partial_admission_error(
+                            command_index,
+                            admission_error,
+                            attempted_request_id=request_id,
+                            attempt_may_be_accepted=True,
+                        )
+                        record_possibly_accepted_submission(
+                            request_id, message_content, command
+                        )
                         controller.add_error(admission_error)
                         completion["error"] = {"message": admission_error}
                         break
