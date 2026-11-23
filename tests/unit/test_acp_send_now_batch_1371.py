@@ -252,6 +252,75 @@ async def test_runner_holds_older_work_if_original_owner_ends_between_batch_mess
 
 
 @pytest.mark.asyncio
+async def test_send_now_batch_expiry_releases_accepted_members_and_rejects_late_member():
+    runner, active_task, release_active = _active_runner()
+    runner.send_now_batch_timeout_seconds = 0.05
+    service = object.__new__(LLMService)
+    acp = _BatchACP(runner)
+    try:
+        first = await _send_batch_message(
+            service, acp, "client-B", "message B", 0, first=True
+        )
+        assert first["status"] == "queued"
+
+        # A lost finish RPC cannot hold the queue gate forever. Expiry releases
+        # the admitted prefix as one priority group ahead of older D.
+        await asyncio.wait_for(runner._queue_release.wait(), timeout=1)
+        assert not runner.has_send_now_batch("batch-BC")
+        assert runner._send_now_reserved == 0
+        assert [item.request_id for item in runner._queue._queue] == [
+            "client-B", "older-D",
+        ]
+
+        late = await _send_batch_message(
+            service, acp, "client-C", "message C", 1
+        )
+        assert late["status"] == "rejected"
+        assert late["reason"] == "invalid_send_now_batch"
+        assert "admit:client-C" not in acp.calls
+        assert [item.request_id for item in runner._queue._queue] == [
+            "client-B", "older-D",
+        ]
+    finally:
+        release_active.set()
+        _cleanup_runner(runner, active_task)
+        await asyncio.gather(active_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_send_now_batch_renews_timeout_when_later_member_is_admitted():
+    runner, active_task, release_active = _active_runner()
+    runner.send_now_batch_timeout_seconds = 0.2
+    service = object.__new__(LLMService)
+    acp = _BatchACP(runner)
+    try:
+        first = await _send_batch_message(
+            service, acp, "client-B", "message B", 0, first=True
+        )
+        assert first["status"] == "queued"
+        await asyncio.sleep(0.11)
+
+        second = await _send_batch_message(
+            service, acp, "client-C", "message C", 1
+        )
+        assert second["status"] == "queued"
+        # This extends beyond the original timeout, but the active batch still
+        # owns the gate because C arrived before the renewed lease expired.
+        await asyncio.sleep(0.11)
+        assert runner.has_send_now_batch("batch-BC")
+        assert not runner._queue_release.is_set()
+
+        assert service.finish_send_now_batch("batch-BC", acp=acp)
+        assert [item.request_id for item in runner._queue._queue] == [
+            "client-B", "client-C", "older-D",
+        ]
+    finally:
+        release_active.set()
+        _cleanup_runner(runner, active_task)
+        await asyncio.gather(active_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_send_now_batch_does_not_cancel_owner_after_one_member_was_injected():
     runner, active_task, release_active = _active_runner()
     service = object.__new__(LLMService)
