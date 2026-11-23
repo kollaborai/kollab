@@ -16,7 +16,7 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 from kollabor.state.web_message_queue import (
     BatchNotFound,
