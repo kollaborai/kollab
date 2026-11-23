@@ -783,6 +783,7 @@ async def _state_ops(monkeypatch, session, commands, state):
         if frame["type"] == "update-state"
         for op in frame["operations"]
         if op["type"] == "set"
+        and op["path"] != [messages._ASSISTANT_HANDOVER_STATE_KEY]
     ]
 
 

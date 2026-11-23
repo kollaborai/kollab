@@ -21,7 +21,7 @@ class _FanoutSession(_FakeSession):
 
 
 @pytest.mark.asyncio
-async def test_cancelled_single_send_handover_token_reaches_real_transport_client(
+async def test_cancelled_single_send_handover_capability_is_sent_before_admission(
     monkeypatch,
 ):
     session = _FanoutSession([])
@@ -90,8 +90,8 @@ async def test_cancelled_single_send_handover_token_reaches_real_transport_clien
     assert session.send_message.await_count == 1
 
     # Exercise the installed assistant_stream implementation and actual
-    # AssistantTransportResponse above. Cancellation must not leave the server
-    # holding a recovery capability that the disconnected client never saw.
+    # AssistantTransportResponse above. Cancellation must not leave an owned
+    # handover without its capability frame passing through the ASGI send callback.
     wire = b"".join(response_body)
     assert token.encode("ascii") in wire, (
         "the canceled single-send response retained an inaccessible handover: "
