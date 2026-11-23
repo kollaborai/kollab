@@ -16,10 +16,6 @@ const screenshotDir = path.resolve(process.argv[2] ?? ".slash-command-catalog-sc
 
 async function openChat(page, baseUrl) {
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-  await page.getByTestId("guided-setup-open").click();
-  await page.getByRole("button", { name: "Get Started", exact: true }).click();
-  await page.getByTestId("setup-step-agent").waitFor({ state: "visible" });
-  await page.getByRole("button", { name: "Skip", exact: true }).click();
   await page.getByRole("button", { name: "Start Session", exact: true }).click();
   const input = page.getByRole("textbox", { name: "Message input" });
   await input.waitFor({ state: "visible" });
