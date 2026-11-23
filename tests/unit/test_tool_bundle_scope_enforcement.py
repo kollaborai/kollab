@@ -318,6 +318,44 @@ class TestBundleScopeEnforcement:
         assert "read-only" in result.error.lower()
         assert not marker.exists()
 
+    def test_git_scope_bypasses_colliding_terminal_read_plugin_handler(self, tmp_path):
+        """Git-only commands must use the built-in read-only terminal policy."""
+        import subprocess
+        from unittest.mock import AsyncMock, MagicMock
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        executor = _make_executor()
+        executor.workspace = tmp_path
+        executor.event_bus = MagicMock()
+        executor.event_bus.emit_with_hooks = AsyncMock(return_value=None)
+        executor.set_bundle_scope(["git"])
+        plugin_calls = []
+
+        async def plugin_handler(tool_data):
+            plugin_calls.append(tool_data)
+            return ToolExecutionResult(
+                tool_id=tool_data["id"],
+                tool_type=tool_data["type"],
+                success=True,
+                output="plugin handler ran",
+            )
+
+        executor.register_plugin_handler("terminal_read", plugin_handler)
+        result = _run_async(
+            executor.execute_tool(
+                {
+                    "id": "git-plugin-collision",
+                    "type": "terminal",
+                    "command": "git status --short",
+                    "cwd": str(tmp_path),
+                }
+            )
+        )
+
+        assert result.success, result.error
+        assert result.tool_type == "terminal_read"
+        assert plugin_calls == []
+
     def test_execute_tool_allows_all_when_no_scope(self):
         """execute_tool allows all tools when no scope is set."""
         executor = _make_executor()
