@@ -200,3 +200,50 @@ test("an engine read error still fails the run stream", async () => {
   assert.equal(new TextDecoder().decode(first.value), "data: one\n\n");
   await assert.rejects(reader.read(), /engine stream failed/);
 });
+
+test("mixed LF and CRLF line endings still delimit separate SSE events", async () => {
+  const first = "data: first\n\r\n";
+  const second = "data: second\r\n\r\n";
+  const source = new ReadableStream<Uint8Array>({
+    start: (controller) => {
+      controller.enqueue(new TextEncoder().encode(first + second));
+      controller.close();
+    },
+  });
+  const reader = endableStream(source).stream.getReader();
+
+  assert.equal(new TextDecoder().decode((await reader.read()).value), first);
+  await reader.cancel();
+});
+
+test("end finishes after a complete event followed by an empty source chunk", async () => {
+  const first = "data: first\n\n";
+  let sourceController!: ReadableStreamDefaultController<Uint8Array>;
+  const source = new ReadableStream<Uint8Array>({
+    start: (controller) => {
+      sourceController = controller;
+      controller.enqueue(new TextEncoder().encode(first));
+      controller.enqueue(new Uint8Array());
+    },
+  });
+  const run = endableStream(source);
+  const reader = run.stream.getReader();
+  assert.equal(new TextDecoder().decode((await reader.read()).value), first);
+
+  const pending = reader.read();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  run.end();
+  const result = await Promise.race([
+    pending.then(({ done, value }) => ({
+      kind: done ? "done" : "value",
+      text: value ? new TextDecoder().decode(value) : "",
+    })),
+    new Promise<{ kind: string; text: string }>((resolve) =>
+      setTimeout(() => resolve({ kind: "stalled", text: "" }), 40),
+    ),
+  ]);
+  if (result.kind === "stalled") sourceController.close();
+  await reader.cancel().catch(() => undefined);
+
+  assert.deepEqual(result, { kind: "value", text: FINISH });
+});
