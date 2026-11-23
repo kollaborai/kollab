@@ -1270,6 +1270,58 @@ async def test_assistant_transport_streams_its_own_reply_behind_a_running_turn(m
 
 
 @pytest.mark.asyncio
+async def test_send_now_stream_joins_the_exact_injected_acp_turn(monkeypatch):
+    """An injected send must see its owner's output and terminal event (#1371)."""
+    monkeypatch.setattr(messages, "EVENT_IDLE_TIMEOUT_SECONDS", 0.01)
+    session = _FakeSession([])
+    owner = {"request_id": "active-A", "turn_id": 12, "generation": 7}
+
+    def admit(_content, *, request_id, send_now=False, **_kwargs):
+        assert send_now is True
+        session._events.put_nowait({
+            "type": "token", "text": "joined answer", **owner,
+        })
+        session._events.put_nowait({
+            "type": "turn_complete", "stop_reason": "end_turn", **owner,
+        })
+        return {
+            "accepted": True,
+            "request_id": request_id,
+            "joined_request_id": owner["request_id"],
+            "joined_turn_id": owner["turn_id"],
+            "joined_generation": owner["generation"],
+        }
+
+    session.send_message = AsyncMock(side_effect=admit)
+    monkeypatch.setattr(
+        messages, "get_session_registry", lambda: _FakeRegistry(session)
+    )
+    captured, _, _ = _install_fake_assistant_stream(monkeypatch)
+
+    response = await messages.assistant_transport(
+        session.session_id,
+        messages.AssistantRequest(
+            commands=[{
+                "type": "add-message",
+                "message": {
+                    "id": "client-B",
+                    "parts": [{"type": "text", "text": "message B"}],
+                },
+            }],
+            state={"messages": []},
+            send_now=True,
+        ),
+    )
+    async for _chunk in response.stream:
+        pass
+
+    session.send_message.assert_awaited_once()
+    assert session.send_message.await_args.kwargs["send_now"] is True
+    assert captured["controller"].errors == []
+    assert captured["controller"].text == ["joined answer"]
+
+
+@pytest.mark.asyncio
 async def test_assistant_transport_shows_none_of_a_running_turn_typed_in_the_terminal(monkeypatch):
     """Chalcedony on #554 round 5: a turn typed in the terminal names no
     request, and its text and permission prompt became this message's."""

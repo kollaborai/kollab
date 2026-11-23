@@ -482,12 +482,9 @@ try {
       assert.equal(await t.page.getByText("Queued", { exact: true }).count(), 0, "a message on its way is not queued");
       await t.page.close();
     },
-    // A harness session (Codex CLI, Claude Code) offers no Send Now: the
-    // harness steers a message into its running turn, and the engine never
-    // ends the stream of such a message, so the chat would stay busy with
-    // the reply hidden. The message waits for the turn to end, whatever the
-    // keys (#1102).
-    async "offers no Send Now on a harness session"() {
+    // A harness session can inject a message into its running turn or stop
+    // that turn before sending when steering is unavailable (#1371).
+    async "sends now on a harness session with an explicit handover flag"() {
       const t = await open("?chat&harness");
       const state = (operations) => `data: ${JSON.stringify({ type: "update-state", operations })}\n\n`;
       await t.send();
@@ -501,13 +498,22 @@ try {
       await box.fill("what");
       await box.press("Control+Enter");
       await t.waitFor((s) => s.users === "hello|what", "the message Ctrl+Enter sent");
-      await t.page.getByText("Queued", { exact: true }).waitFor();
-      assert.equal(await t.page.getByRole("button", { name: "Send Now" }).count(), 0, "no Send Now on a harness session");
-      for (let n = 0; n < 8; n++) {
-        assert.deepEqual(await t.page.evaluate(() => [window.transports.length, window.transports[0].aborted]),
-          [1, false], "the message waits for the turn to end");
-        await t.page.waitForTimeout(50);
-      }
+      await t.page.getByText("Queued", { exact: true }).waitFor({ timeout: 3000 });
+      const sendNow = t.page.getByRole("button", { name: "Send Now" });
+      await sendNow.waitFor({ timeout: 3000 });
+      await sendNow.click();
+      await t.page.waitForFunction(() => window.transports.length === 2, null, { timeout: 3000 })
+        .catch(() => assert.fail("Send Now did not submit the waiting message"));
+      const handover = await t.page.evaluate(() => ({
+        requests: window.transports.map((transport) => transport.request),
+        aborted: window.transports.map((transport) => transport.aborted),
+        cancels: window.cancels,
+      }));
+      assert.equal(handover.requests[1].send_now, true, "the new request asks the daemon for Send Now");
+      assert.equal(handover.requests[1].commands.length, 1, "the waiting message is sent once");
+      assert.equal(handover.requests[1].commands[0].message.parts[0].text, "what");
+      assert.deepEqual(handover.aborted, [true, false], "the page hands over only its old stream");
+      assert.equal(handover.cancels, 0, "the page does not race a separate daemon cancellation");
       await t.page.close();
     },
     // A queued message keeps its row when it is sent. The reply's first row
