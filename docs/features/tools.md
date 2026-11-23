@@ -121,6 +121,17 @@ with a reason. The existing `terminal` tool keeps its normal behavior. See the
 [read-only terminal specification](../specs/agent-read-only-terminal.md) for
 the full policy.
 
+A bundle that needs Git inspection without general terminal access can grant
+`git` instead:
+
+```json
+{"tools": ["file-read", "file-grep", "git"]}
+```
+
+This permits one read-only Git command at a time, such as `git status --short`.
+Shell composition, Git writes (including commits that could run repository
+hooks), and other terminal commands remain refused.
+
 ### Workspace Switching
 
 `workspace-set` changes the agent's session workspace at runtime:
