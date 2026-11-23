@@ -1,7 +1,7 @@
 ---
 title: "Tool Calling"
 created: 2026-02-24
-modified: 2026-09-20
+modified: 2026-11-17
 status: active
 ---
 # Tool Calling
@@ -103,6 +103,12 @@ The refusal explains the alternative: run informational commands in the
 foreground, use `<hub_spawn>` to start peers, and use `/hub stop all` to stop
 agents owned by the current caller. The `kollab` CLI applies the same setting
 to agent launches started from a tool shell.
+
+When this setting is enabled, the terminal tool's shell-text guard scans
+commands before quote context is lost. Quoted command and process-substitution
+examples are treated as literal text; shell-executed substitutions remain
+checked for blocked launches. This guard is a shell-text heuristic, not an OS
+sandbox.
 
 Execution methods:
 - tmux sessions (preferred, supports background jobs)
