@@ -192,12 +192,12 @@ export function endableStream(
           else pauseAfterEvent = true;
           return;
         }
+        if (pendingBytes > MAX_EVENT_BYTES) {
+          await fail(new Error(`SSE event exceeds max buffered size (${pendingBytes} > ${MAX_EVENT_BYTES})`));
+          return;
+        }
         pendingScanned = pendingBytes;
         if (sourceDone) {
-          if (pendingBytes > MAX_EVENT_BYTES) {
-            await fail(new Error(`SSE event exceeds max buffered size (${pendingBytes} > ${MAX_EVENT_BYTES})`));
-            return;
-          }
           if (pending.length) {
             const partial = join(pending);
             pending = [];
@@ -217,10 +217,6 @@ export function endableStream(
         if (value.length === 0) continue;
         pending.push(value);
         pendingBytes += value.length;
-        if (pendingBytes > MAX_EVENT_BYTES && firstEventBoundary(pending, Math.max(0, pendingScanned - 3)) === null) {
-          await fail(new Error(`SSE event exceeds max buffered size (${pendingBytes} > ${MAX_EVENT_BYTES})`));
-          return;
-        }
       }
     },
     cancel: (reason) => {
