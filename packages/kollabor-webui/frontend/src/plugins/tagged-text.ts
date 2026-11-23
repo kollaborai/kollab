@@ -1,67 +1,97 @@
 export type TaggedTextPart = { type: "text"; text: string } | { type: "tag"; name: string; content: string };
 
 type Open = { name: string; close: number };
+type Mask = { start: number; end: number };
 
 const TAG = /<(\/?)([a-z][\w-]*)>/gi;
 const FENCE_OPEN = / {0,3}(`{3,}|~{3,})/y;
 const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})\s*$/;
 const INDENTED = /(?: {4}| {0,3}\t)/y;
 
-/** Split only registered, complete tags. Tag content is returned raw; code spans, fences and indented blocks stay text. */
+/** Split only registered, complete tags. Tag content is returned raw; code spans, fences, indented blocks and escaped `<` stay text. */
 export function splitPluginTags(text: string, names: readonly string[]): TaggedTextPart[] {
   const allowed = new Set(names.filter((name) => /^[a-z][\w-]*$/i.test(name)));
-  const opens = pairTags(text, allowed);
+  const opens = pairTags(text, allowed, maskedRanges(text));
   const parts: TaggedTextPart[] = [];
   let cursor = 0;
-  let index = 0;
-  while (index < text.length) {
-    if (index === 0 || text[index - 1] === "\n") {
-      const blockEnd = codeBlockEnd(text, index);
-      if (blockEnd >= 0) {
-        index = blockEnd;
-        continue;
-      }
-    }
-    if (text[index] === "\\") { index += 2; continue; }
-    if (text[index] === "`") {
-      let end = index;
-      while (text[end] === "`") end++;
-      const delimiter = text.slice(index, end);
-      const close = text.indexOf(delimiter, end);
-      index = close < 0 ? end : close + delimiter.length;
-      continue;
-    }
-    const open = opens.get(index);
-    if (!open) { index++; continue; }
-    if (open.close < 0) { index += open.name.length + 2; continue; }
+  for (const [index, open] of opens) {
+    if (open.close < 0 || index < cursor) continue;
     if (cursor < index) parts.push({ type: "text", text: text.slice(cursor, index) });
     parts.push({ type: "tag", name: open.name, content: text.slice(index + open.name.length + 2, open.close) });
-    index = open.close + open.name.length + 3;
-    cursor = index;
+    cursor = open.close + open.name.length + 3;
   }
   if (cursor < text.length || !parts.length) parts.push({ type: "text", text: text.slice(cursor) });
   return parts;
 }
 
-/** Pair open tags with closes in one pass: a close takes the nearest pending open of its name. */
-function pairTags(text: string, allowed: ReadonlySet<string>): Map<number, Open> {
+/** Pair open tags with closes in one pass: a close takes the nearest pending open of its name. Tags inside a masked range are ignored. */
+function pairTags(text: string, allowed: ReadonlySet<string>, masked: readonly Mask[]): Map<number, Open> {
   const opens = new Map<number, Open>();
   const pending = new Map<string, Open[]>();
+  let mask = 0;
   for (const match of text.matchAll(TAG)) {
     const [, slash, name] = match;
+    const index = match.index ?? 0;
     if (!name || !allowed.has(name)) continue;
+    while (mask < masked.length && masked[mask].end <= index) mask++;
+    if (mask < masked.length && masked[mask].start <= index) continue;
     if (slash) {
       const open = pending.get(name)?.pop();
-      if (open) open.close = match.index ?? 0;
+      if (open) open.close = index;
       continue;
     }
     const open: Open = { name, close: -1 };
-    opens.set(match.index ?? 0, open);
+    opens.set(index, open);
     const stack = pending.get(name);
     if (stack) stack.push(open);
     else pending.set(name, [open]);
   }
   return opens;
+}
+
+/** Ranges no tag may open or close in: code blocks, code spans and backslash escapes, in text order. */
+function maskedRanges(text: string): Mask[] {
+  const masked: Mask[] = [];
+  let index = 0;
+  while (index < text.length) {
+    if (index === 0 || text[index - 1] === "\n") {
+      const blockEnd = codeBlockEnd(text, index);
+      if (blockEnd >= 0) {
+        masked.push({ start: index, end: blockEnd });
+        index = blockEnd;
+        continue;
+      }
+    }
+    if (text[index] === "\\") {
+      masked.push({ start: index, end: index + 2 });
+      index += 2;
+      continue;
+    }
+    if (text[index] === "`") {
+      const end = codeSpanEnd(text, index);
+      masked.push({ start: index, end });
+      index = end;
+      continue;
+    }
+    index++;
+  }
+  return masked;
+}
+
+/** Index just past the code span that opens at this backtick run. The closer is a run of exactly the same length; with none, the opening run is literal text. */
+function codeSpanEnd(text: string, index: number): number {
+  let runEnd = index;
+  while (text[runEnd] === "`") runEnd++;
+  const length = runEnd - index;
+  // ponytail: an unmatched run scans to the end, so many unmatched runs cost O(n) each. Index runs by length if this shows up.
+  let start = text.indexOf("`", runEnd);
+  while (start >= 0) {
+    let end = start;
+    while (text[end] === "`") end++;
+    if (end - start === length) return end;
+    start = text.indexOf("`", end);
+  }
+  return runEnd;
 }
 
 /** Where the code block that starts at this line start ends, or -1 when none starts here. */
