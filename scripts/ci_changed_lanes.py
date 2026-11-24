@@ -1,16 +1,29 @@
 """Pick which optional CI lanes a change needs.
-
-Reads changed paths from stdin, one per line, and prints one line per lane
-for GITHUB_OUTPUT: ``webui=true|false`` and ``voice=true|false``. An empty
-path list, or ``--all``, turns both lanes on.
+Webui skips only when all paths are safe; voice runs for voice paths, shared files, or empty input.
 """
 
 import sys
 
-WEBUI_PREFIX = "packages/kollabor-webui/"
 VOICE_PREFIX = "packages/kollabor-voice/"
 SHARED_FILES = {".github/workflows/ci.yml", "uv.lock", "pyproject.toml"}
 SHARED_PREFIXES = (".github/actions/",)
+WEBUI_SAFE_PREFIXES = (
+    "docs/",
+    "changes/",
+    VOICE_PREFIX,
+    "tests/unit/",
+    "tests/tmux/specs/",
+    ".github/ISSUE_TEMPLATE/",
+)
+
+
+def webui_path_is_safe(path: str) -> bool:
+    """Return whether a changed path cannot affect the webui lane."""
+    if path.startswith("tests/unit/") and "webui" in path.casefold():
+        return False
+    return path.startswith(WEBUI_SAFE_PREFIXES) or (
+        "/" not in path and path.endswith(".md")
+    )
 
 
 def lanes_for(paths: list[str]) -> dict[str, bool]:
@@ -19,7 +32,7 @@ def lanes_for(paths: list[str]) -> dict[str, bool]:
         return {"webui": True, "voice": True}
     shared = any(p in SHARED_FILES or p.startswith(SHARED_PREFIXES) for p in paths)
     return {
-        "webui": shared or any(p.startswith(WEBUI_PREFIX) for p in paths),
+        "webui": not all(webui_path_is_safe(p) for p in paths),
         "voice": shared or any(p.startswith(VOICE_PREFIX) for p in paths),
     }
 
