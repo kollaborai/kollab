@@ -7128,6 +7128,7 @@ class HubPlugin(BasePlugin):
         except asyncio.CancelledError as exc:
             task = asyncio.current_task()
             accepted = False
+            refused = False
             if task is not None and task.cancelling() > 0:
                 # Cancellation of the poll must not interrupt a receiver after
                 # it has begun applying the message. Let that delivery settle,
@@ -7142,7 +7143,9 @@ class HubPlugin(BasePlugin):
                         break
                 if delivery.done() and not delivery.cancelled():
                     try:
-                        accepted = delivery.result() is not False
+                        result = delivery.result()
+                        accepted = result is not False
+                        refused = result is False
                     except Exception as delivery_error:
                         logger.warning(
                             "Mailbox delivery failed for %s (%s); leaving it queued for retry",
@@ -7154,6 +7157,13 @@ class HubPlugin(BasePlugin):
                 # restart does not replay the effect.
                 self._acknowledge_inbox_delivery({msg.id}, [msg.to])
                 exc.acknowledged_message_ids = {msg.id}
+            elif refused:
+                # The poll was cancelled, but the shielded receiver settled
+                # with an explicit refusal. Its claim is safe to release just
+                # as it is on the ordinary completion path.
+                AgentMessenger.clear_mailbox_delivery_uncertain(
+                    agent_keys, {msg.id}
+                )
             raise
         except Exception as exc:
             logger.warning(
