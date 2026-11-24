@@ -3,6 +3,8 @@
 import json
 import sys
 
+import pytest
+
 from kollabor_ai.profile_manager import _keyring_set
 from kollabor_plugins.cli import main
 from kollabor_plugins.packages import files_sha256
@@ -65,6 +67,28 @@ def test_plugin_secret_redaction_boundaries_are_shared():
         if result != expected
     ]
     assert failures == [], "; ".join(failures)
+
+
+@pytest.mark.parametrize(
+    ("exception_message", "expected_fragment", "forbidden"),
+    [
+        ("Cannot read /private/tmp/account/config.json", "[path]", "/private/tmp/account/config.json"),
+        ("GITHUB_TOKEN=ghp_fakecredentialvalue123", "GITHUB_TOKEN: [redacted]", "ghp_fakecredentialvalue123"),
+    ],
+)
+def test_plugin_exception_logs_redact_paths_and_credentials(
+    caplog, exception_message, expected_fragment, forbidden
+):
+    from kollabor_plugins.plugin_utils import get_plugin_config_safely
+
+    class BrokenPlugin:
+        @staticmethod
+        def get_default_config():
+            raise RuntimeError(exception_message)
+
+    assert get_plugin_config_safely(BrokenPlugin) == {}
+    assert expected_fragment in caplog.text
+    assert forbidden not in caplog.text
 
 
 def test_echoed_secret_and_token_are_redacted_in_cli(tmp_path, monkeypatch, capsys):
