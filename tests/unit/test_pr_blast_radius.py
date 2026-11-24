@@ -102,6 +102,18 @@ from .sibling import deeper
     }
 
 
+def test_build_import_graph_fails_on_unreadable_test_subtree(tmp_path: Path) -> None:
+    unreadable = tmp_path / "tests" / "private"
+    write(tmp_path, "tests/private/test_hidden.py", "VALUE = 1\n")
+    unreadable.chmod(0)
+
+    try:
+        with pytest.raises(OSError):
+            pr_blast_radius.build_import_graph(tmp_path)
+    finally:
+        unreadable.chmod(0o755)
+
+
 def test_literal_runtime_imports_add_python_edges(tmp_path: Path) -> None:
     write(tmp_path, "pkg/__init__.py", "")
     write(tmp_path, "pkg/mod.py", "")
@@ -140,6 +152,36 @@ def test_dynamic_directory_loader_makes_comparison_stale(tmp_path: Path) -> None
 
     assert stale is True
     assert reasons[0] == f"rule 5: cannot analyze dynamic loading in {loader}"
+
+
+def test_unchanged_dynamic_loader_reached_by_changed_test_is_rule_five_stale(
+    tmp_path: Path,
+) -> None:
+    loader = "app/loader.py"
+    test = "tests/unit/test_loader.py"
+    write(tmp_path, "app/__init__.py", "")
+    write(
+        tmp_path,
+        loader,
+        "import importlib\n\n"
+        "def load(name):\n"
+        "    return importlib.import_module(name)\n",
+    )
+    write(tmp_path, test, "from app import loader\n")
+    dynamic: set[str] = set()
+    graph = pr_blast_radius.build_import_graph(tmp_path, dynamic=dynamic)
+
+    stale, reasons = pr_blast_radius.decide(
+        {test}, {"app/new_module.py"}, graph, dynamic=dynamic
+    )
+    docs_stale, docs_reasons = pr_blast_radius.decide(
+        {test}, {"docs/guide.md"}, graph, dynamic=dynamic
+    )
+
+    assert stale is True
+    assert f"rule 5: cannot analyze dynamic loading in {loader}" in reasons
+    assert docs_stale is False
+    assert docs_reasons == []
 
 
 def test_reverse_closure_and_tests_of_follow_two_hops(tmp_path: Path) -> None:
@@ -397,6 +439,81 @@ def test_removed_main_module_matching_unresolved_test_import_is_rule_three_stale
         ["--repo", "example/project", "--pr", "7", "--root", str(tmp_path)],
         fetcher=_comparison_fetcher(
             pr_files, [{"filename": "app/core.py", "status": "removed"}]
+        ),
+    )
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "#7 STALE" in output
+    assert "rule 3:" in output
+
+
+@pytest.mark.parametrize(
+    ("main_record", "imported_module"),
+    [
+        ({"filename": "app/new.py", "status": "added"}, "app.new"),
+        (
+            {
+                "filename": "app/new.py",
+                "status": "renamed",
+                "previous_filename": "app/old.py",
+            },
+            "app.new",
+        ),
+        (
+            {
+                "filename": "app/new.py",
+                "status": "renamed",
+                "previous_filename": "app/old.py",
+            },
+            "app.old",
+        ),
+    ],
+)
+def test_unresolved_pr_test_import_matching_changed_main_module_is_rule_three_stale(
+    tmp_path: Path,
+    capsys,
+    main_record: dict[str, str],
+    imported_module: str,
+) -> None:
+    write(tmp_path, "app/__init__.py", "")
+    pr_files: list[dict[str, object]] = [
+        {
+            "filename": "tests/unit/test_added.py",
+            "status": "added",
+            "patch": f"@@ -0,0 +1 @@\n+from {imported_module} import Widget\n",
+        }
+    ]
+
+    result = pr_blast_radius.main(
+        ["--repo", "example/project", "--pr", "7", "--root", str(tmp_path)],
+        fetcher=_comparison_fetcher(pr_files, [main_record]),
+    )
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "#7 STALE" in output
+    assert "rule 3:" in output
+
+
+def test_changed_helper_unresolved_import_reached_by_unchanged_test_is_rule_three_stale(
+    tmp_path: Path, capsys
+) -> None:
+    write(tmp_path, "app/__init__.py", "")
+    write(tmp_path, "app/helper.py", "from app.old import Widget\n")
+    write(tmp_path, "tests/unit/test_existing.py", "from app import helper\n")
+    pr_files: list[dict[str, object]] = [
+        {
+            "filename": "app/helper.py",
+            "status": "modified",
+            "patch": "@@ -0,0 +1 @@\n+from app.old import Widget\n",
+        }
+    ]
+
+    result = pr_blast_radius.main(
+        ["--repo", "example/project", "--pr", "7", "--root", str(tmp_path)],
+        fetcher=_comparison_fetcher(
+            pr_files, [{"filename": "app/old.py", "status": "removed"}]
         ),
     )
 
