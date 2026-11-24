@@ -26,7 +26,9 @@ const errorText = (error: unknown) => error instanceof ApiError
     : error.status === 409 ? "Plugin changed during review. Stage it again."
     : error.status === 503 ? "Plugin manager could not complete the request."
     : `Plugin request failed (HTTP ${error.status}).`
-  : "Plugin request failed. Try again.";
+  : error instanceof Error && error.message === "Put the branch or tag in one field, not both."
+    ? error.message
+    : "Plugin request failed. Try again.";
 
 const JOB_STATUSES = new Set<Job["status"]>(["staging", "ready", "cancelling", "installing", "complete", "error", "cancelled"]);
 const JOB_ERRORS = new Set([
