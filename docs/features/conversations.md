@@ -65,6 +65,12 @@ In the Web UI, long assistant and user messages are restored in full when the
 chat reloads. Long tool results keep a preview and load the full result when
 expanded.
 
+## Branching Conversations
+
+Use `/branch <session_id> <message_index>` to start a separate conversation from a saved session. The branch
+includes the selected message and the messages before it. Kollab attempts to save the active conversation first
+when it has messages, then makes the branch active while leaving the saved source available.
+
 ## Saving Conversations
 
 If saving a user message or assistant reply fails, Kollab keeps processing the
