@@ -29,23 +29,38 @@ export type AgentVersionNoticeState = {
   /**
    * `too-old`: the agent publishes no version, so it started before Restart Agent existed and cannot
    * restart itself. `button`: Restart Agent is on. `command`: it is off, so the line names /restart.
+   * `unknown`: the daemon is outdated, but the page has no agent version to choose a more specific action.
    */
-  kind: "too-old" | "button" | "command";
-  /** Both versions, for the hover: they never go in the line. */
+  kind: "too-old" | "button" | "command" | "unknown";
+  /** Version details for the disclosure; never included in the notice line. */
   detail: string;
-  /** The agent's name, for the command in a too-old line. */
+  /** The agent's name, for the stop-and-start line. */
   name: string;
 };
 
-/** The line for an agent that cannot restart itself: the stop-and-start command, in plain words (#968). */
-function tooOldLine(name: string): string {
-  return `This agent started before Restart Agent existed. Run kollab --hub stop ${name} in a terminal, then select its Offline row in the sidebar to start it again.`;
+/** The stop-and-start action shared by too-old and unknown-version notices. */
+function stopAndStartLine(name: string) {
+  return (
+    <>
+      Run{" "}
+      <span className="[&_code]:break-words">
+        <code className="whitespace-normal">
+          kollab{" "}<span className="whitespace-nowrap">--hub</span>{" "}stop {name}
+        </code>
+      </span>{" "}
+      in a terminal, then select its Offline row in the sidebar to start it again.
+    </>
+  );
+}
+
+function tooOldLine(name: string) {
+  return <>This agent started before Restart Agent existed. {stopAndStartLine(name)}</>;
 }
 
 /**
  * The notice for one chat, or null while its agent runs the engine's version. An agent that publishes
- * no version started before agents did, so it counts as older. With no agent row (still starting,
- * off the hub, or on another computer) or no engine version there is nothing to compare.
+ * no version started before agents did, so it counts as older even while the engine version loads.
+ * A versioned agent waits for the engine version; with no agent row there is no identity to guide.
  */
 export function agentVersionNotice({
   engineVersion,
@@ -56,8 +71,12 @@ export function agentVersionNotice({
   agent: LiveAgent | undefined;
   restartAgents: boolean;
 }): AgentVersionNoticeState | null {
-  if (!agent || !engineVersion) return null;
+  if (!agent) return null;
   const running = agent.version ?? "";
+  if (!engineVersion) {
+    if (running) return null;
+    return { kind: "too-old", detail: "Agent (version unknown) · engine version loading", name: agent.name };
+  }
   if (running === engineVersion) return null;
   const detail = `Agent ${running || "(version unknown)"} · engine ${engineVersion}`;
   // No version means a build from before /restart restarted in place. There /restart is an alias of /new,
@@ -71,15 +90,7 @@ export function agentVersionNotice({
  * the button restarts it where it stands (same chat, same history); off, the line names /restart. An
  * agent that cannot restart itself gets its stop-and-start command instead, with no button.
  */
-export function AgentVersionNotice({
-  notice,
-  busy,
-  waiting = false,
-  failure = "",
-  tooOld = false,
-  onRestart,
-  onDismiss,
-}: {
+export type AgentVersionNoticeProps = {
   notice: AgentVersionNoticeState;
   /** A restart was asked for and the agent has not come back yet. */
   busy: boolean;
@@ -91,7 +102,17 @@ export function AgentVersionNotice({
   tooOld?: boolean;
   onRestart: () => void;
   onDismiss?: () => void;
-}) {
+};
+
+export function AgentVersionNotice({
+  notice,
+  busy,
+  waiting = false,
+  failure = "",
+  tooOld = false,
+  onRestart,
+  onDismiss,
+}: AgentVersionNoticeProps) {
   if (failure && tooOld) {
     return (
       <NoticeBar urgent detail={notice.detail} details={<VersionDetails detail={notice.detail} />} onDismiss={onDismiss}>
@@ -123,6 +144,13 @@ export function AgentVersionNotice({
     return (
       <NoticeBar detail={notice.detail} details={<VersionDetails detail={notice.detail} />} onDismiss={onDismiss}>
         {tooOldLine(notice.name)}
+      </NoticeBar>
+    );
+  }
+  if (notice.kind === "unknown") {
+    return (
+      <NoticeBar detail={notice.detail} details={<VersionDetails detail={notice.detail} />}>
+        <>This agent runs older code. {stopAndStartLine(notice.name)}</>
       </NoticeBar>
     );
   }
