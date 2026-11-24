@@ -3262,6 +3262,30 @@ class AgentMessenger:
                     pass
 
     @staticmethod
+    def shutdown_generation(agent_id: Any, pid: Any, started_at: Any) -> Dict[str, Any]:
+        """``signal_shutdown`` keywords naming one selected process generation,
+        or none when the record cannot name a whole one (an unbound request,
+        which a replacement process would also accept, #1408)."""
+        try:
+            whole = (
+                isinstance(agent_id, str)
+                and bool(agent_id)
+                and type(pid) is int
+                and pid > 0
+                and type(started_at) in (int, float)
+                and math.isfinite(float(started_at))
+            )
+        except (TypeError, ValueError, OverflowError):
+            whole = False
+        if not whole:
+            return {}
+        return {
+            "expected_agent_id": agent_id,
+            "expected_pid": pid,
+            "expected_started_at": started_at,
+        }
+
+    @staticmethod
     async def signal_shutdown(
         socket_path: str,
         reason: str = "",
