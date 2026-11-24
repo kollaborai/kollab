@@ -1,7 +1,8 @@
 // Browser proof that the voice type source's repository reference opens the moved wire contract.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -10,6 +11,7 @@ import { chromium } from "playwright-core";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = path.resolve(here, "..");
 const repoRoot = path.resolve(frontendRoot, "../../..");
+const screenshotDir = path.resolve(process.argv[2] ?? path.join(os.tmpdir(), "kollab-voice-wire-contract-proof"));
 const sourcePath = path.join(frontendRoot, "src/voice/types.ts");
 const source = await readFile(sourcePath, "utf8");
 const reference = source.match(/^\/\/ Wire shapes from (\S+)\.$/m)?.[1];
@@ -46,6 +48,7 @@ try {
     headless: true,
     executablePath: process.env.CHROME_PATH ?? chromium.executablePath(),
   });
+  await mkdir(screenshotDir, { recursive: true });
   const page = await browser.newPage();
   await page.goto(`http://127.0.0.1:${address.port}/`, { waitUntil: "domcontentloaded" });
   await Promise.all([
@@ -56,6 +59,7 @@ try {
   assert.match(body, /voice_session_id/);
   assert.match(body, /control_session_id/);
   assert.equal(new URL(page.url()).pathname, `/${reference}`);
+  await page.screenshot({ path: path.join(screenshotDir, "voice-wire-contract.png"), fullPage: true });
   console.log(`Voice wire-contract browser proof passed: ${reference}`);
 } finally {
   await browser?.close();
