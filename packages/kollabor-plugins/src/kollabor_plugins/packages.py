@@ -1,7 +1,6 @@
 """Git sources for installable plugin packages."""
 
 import hashlib
-import io
 import json
 import logging
 import os
@@ -10,6 +9,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO
@@ -99,6 +99,10 @@ _MAX_PLUGIN_SETTINGS = 256
 _MAX_PLUGIN_SETTING_OPTIONS = 256
 _MAX_PLUGIN_OPTION_LABELS = 256
 _MAX_PLUGIN_SETTINGS_BYTES = 1_048_576
+_MAX_PLUGIN_ARCHIVE_BYTES = 64 * 1024 * 1024
+_MAX_PLUGIN_ARCHIVE_FILES = 10_000
+_PLUGIN_ARCHIVE_MEMORY_BYTES = 4 * 1024 * 1024
+_PLUGIN_ARCHIVE_READ_BYTES = 64 * 1024
 
 
 class ManifestReviewLimitError(ValueError):
@@ -331,6 +335,86 @@ def _git(*args: str) -> bytes:
     return completed.stdout
 
 
+def _write_bounded_git_archive(clone: Path, commit: str, archive: BinaryIO) -> None:
+    """Stream a Git archive to bounded storage, stopping once its byte limit is crossed."""
+    process = subprocess.Popen(
+        ["git", "-C", str(clone), "archive", "--format=tar", commit],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdout is not None and process.stderr is not None
+    diagnostic = bytearray()
+
+    def drain_stderr() -> None:
+        while chunk := process.stderr.read(4096):
+            remaining = 4096 - len(diagnostic)
+            if remaining > 0:
+                diagnostic.extend(chunk[:remaining])
+
+    stderr_reader = threading.Thread(target=drain_stderr, daemon=True)
+    stderr_reader.start()
+    archive_size = 0
+    oversized = False
+    try:
+        while True:
+            read_size = min(_PLUGIN_ARCHIVE_READ_BYTES, _MAX_PLUGIN_ARCHIVE_BYTES - archive_size + 1)
+            chunk = process.stdout.read(read_size)
+            if not chunk:
+                break
+            if archive_size + len(chunk) > _MAX_PLUGIN_ARCHIVE_BYTES:
+                oversized = True
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                break
+            if archive.write(chunk) != len(chunk):
+                raise OSError("Could not write plugin source archive")
+            archive_size += len(chunk)
+    except BaseException:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        raise
+    finally:
+        process.stdout.close()
+        return_code = process.wait()
+        stderr_reader.join()
+        process.stderr.close()
+
+    if oversized:
+        raise ManifestReviewLimitError(
+            f"Plugin source archive exceeds {_MAX_PLUGIN_ARCHIVE_BYTES} bytes"
+        )
+    if return_code:
+        detail = redact_sensitive_text(
+            diagnostic.decode("utf-8", "replace"),
+            replacement="[REDACTED]",
+            url_replacement="[redacted URL]",
+        ).strip()
+        message = f"Git archive failed (exit {return_code})"
+        raise ValueError(f"{message}: {detail}" if detail else message)
+
+
+def _check_git_archive_file_count(archive: BinaryIO) -> None:
+    """Count archive files before extraction; archive bytes are already bounded."""
+    archive.seek(0)
+    file_count = 0
+    try:
+        with tarfile.open(fileobj=archive, mode="r|") as tar:
+            for member in tar:
+                if member.isdir():
+                    continue
+                file_count += 1
+                if file_count > _MAX_PLUGIN_ARCHIVE_FILES:
+                    raise ManifestReviewLimitError(
+                        f"Plugin source archive exceeds {_MAX_PLUGIN_ARCHIVE_FILES} files"
+                    )
+    except (tarfile.TarError, EOFError) as exc:
+        raise ValueError("Invalid plugin source archive") from exc
+
+
 def resolve_git_commit(url: str, ref: str | None) -> str:
     """Resolve exactly one remote branch or tag, or the remote's HEAD."""
     lines = _git("ls-remote", "--", url).decode("utf-8", "strict").splitlines()
@@ -438,9 +522,14 @@ def stage_git_source(source: str, stage: Path, kollab_version: str) -> dict:
         with tempfile.TemporaryDirectory(prefix=".plugin-clone-", dir=stage.parent) as temporary:
             clone = Path(temporary) / "repo"
             _git("clone", "--no-checkout", "--", url, str(clone))
-            archive = _git("-C", str(clone), "archive", commit)
-            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
-                tar.extractall(stage, filter="data")
+            with tempfile.SpooledTemporaryFile(
+                max_size=_PLUGIN_ARCHIVE_MEMORY_BYTES, mode="w+b"
+            ) as archive:
+                _write_bounded_git_archive(clone, commit, archive)
+                _check_git_archive_file_count(archive)
+                archive.seek(0)
+                with tarfile.open(fileobj=archive, mode="r:") as tar:
+                    tar.extractall(stage, filter="data")
         manifest = validate_manifest(stage, kollab_version)
         return {
             "source": url,
