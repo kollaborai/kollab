@@ -31,6 +31,16 @@ describe("plugin tagged text", () => {
       { type: "tag", name: "todo_write", content: "demo" },
     ]);
   });
+  it("scans many unmatched backtick runs in linear time", () => {
+    const text = Array.from({ length: 1100 }, (_, index) => "`".repeat(index + 1)).join("x") +
+      "<todo_write>demo</todo_write>";
+    const started = performance.now();
+    const parts = splitPluginTags(text, ["todo_write"]);
+    const elapsed = performance.now() - started;
+
+    expect(parts.at(-1)).toEqual({ type: "tag", name: "todo_write", content: "demo" });
+    expect(elapsed).toBeLessThan(1000);
+  });
   it("closes a code fence only on a bare marker line", () => {
     const text = "~~~\n~~~text\n<todo_write>demo</todo_write>\n~~~";
     expect(splitPluginTags(text, ["todo_write"])).toEqual([{ type: "text", text }]);
