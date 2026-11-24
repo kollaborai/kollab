@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { describePluginAdds, describeUses, PLUGIN_TRUST_NOTICE, reviewFormState, showFetching, startReview } from "./install";
+import { describePluginAdds, describeUses, PLUGIN_TRUST_NOTICE, reviewFormState, shouldRetryPolling, showFetching, startReview } from "./install";
 
 const installSource = readFileSync(new URL("./install.tsx", import.meta.url), "utf8");
 const settingsSource = readFileSync(new URL("./settings.tsx", import.meta.url), "utf8");
@@ -82,6 +82,10 @@ describe("plugin review form state", () => {
     expect(reviewFormState("install", { status: "staging" })).toEqual({ source: false, review: false });
     expect(reviewFormState("install", { status: "ready" })).toEqual({ source: false, review: false });
   });
+  it("uses the form state helper for the source and Review controls", () => {
+    expect(installSource).toContain("{form.source ? <div");
+    expect(installSource).toContain("{form.review ? <Button");
+  });
   it("never shows the source form for an update", () => {
     expect(reviewFormState("update", null)).toEqual({ source: false, review: false });
     expect(reviewFormState("update", { status: "error" })).toEqual({ source: false, review: true });
@@ -89,24 +93,26 @@ describe("plugin review form state", () => {
 });
 
 describe("plugin review after a failure", () => {
-  const failedPoll = { status: "staging" } as const;
+  const stagingAfterPollError = { status: "staging" } as const;
   it("keeps the source form closed after a polling error", () => {
-    expect(reviewFormState("install", failedPoll, true)).toEqual({ source: false, review: false });
+    expect(reviewFormState("install", stagingAfterPollError)).toEqual({ source: false, review: false });
   });
   it("keeps the form closed while a review is staging without an error", () => {
-    expect(reviewFormState("install", failedPoll, false)).toEqual({ source: false, review: false });
+    expect(reviewFormState("install", stagingAfterPollError)).toEqual({ source: false, review: false });
   });
   it("shows the fetching line only while a review is staging without an error", () => {
-    expect(showFetching(failedPoll, false)).toBe(true);
-    expect(showFetching(failedPoll, true)).toBe(false);
+    expect(showFetching(stagingAfterPollError, false)).toBe(true);
+    expect(showFetching(stagingAfterPollError, true)).toBe(false);
     expect(showFetching({ status: "error" }, false)).toBe(false);
     expect(showFetching(null, false)).toBe(false);
   });
+  it("offers retry only for a staging job whose poll failed", () => {
+    expect(shouldRetryPolling(stagingAfterPollError, true)).toBe(true);
+    expect(shouldRetryPolling(stagingAfterPollError, false)).toBe(false);
+    expect(shouldRetryPolling({ status: "error" }, true)).toBe(false);
+  });
   it("offers another poll for a staging job after a polling error", () => {
     expect(installSource).toContain("Check Again");
-  });
-  it("retries a failed update review without asking for a new URL", () => {
-    expect(reviewFormState("update", { status: "error" })).toEqual({ source: false, review: true });
   });
   it("reloads the job after the confirm request fails", () => {
     const confirm = installSource.slice(installSource.indexOf("const confirm = async"), installSource.indexOf("const ready ="));
@@ -121,7 +127,7 @@ describe("plugin review after a failure", () => {
   it("explains when a review job was cancelled", () => {
     expect(installSource).toContain("Plugin review was cancelled.");
   });
-  it("sends the edited URL when Review runs again after a failure", async () => {
+  it("builds a new review request from the supplied URL and ref after a failed request", async () => {
     const sent: { path: string; body: string }[] = [];
     let calls = 0;
     const api = { json: async (path: string, init?: { body?: string }) => {
