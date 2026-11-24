@@ -686,4 +686,86 @@ describe("plugin settings page", () => {
       pluginRegistry.reset();
     }
   });
+
+  it.each([
+    ["keeps the draft", false],
+    ["discards the draft", true],
+  ] as const)("confirms before switching plugin rows and %s", async (_label, discard) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("matchMedia", () => ({
+      matches: false,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const entries = [
+      {
+        ...plugin([{
+          type: "checkbox", label: "Alpha setting", path: "plugin-values.alpha.enabled", value: false, editable: true,
+        }]),
+        id: "alpha", name: "Alpha", state: "ok", enabled: true,
+      },
+      {
+        ...plugin([{
+          type: "checkbox", label: "Beta setting", path: "plugin-values.beta.enabled", value: false, editable: true,
+        }]),
+        id: "beta", name: "Beta", state: "ok", enabled: true,
+      },
+    ] as PluginEntry[];
+    const loader = createPluginLoader(pluginRegistry, {
+      list: async () => ({ plugins: entries, server_time: undefined }),
+      importModule: async () => ({}),
+      fetchText: async () => "",
+      loadCode: false,
+      api: { request: async () => new Response(), stream: async () => {} },
+    });
+    await loader.refresh();
+
+    const confirm = vi.fn(() => discard);
+    vi.stubGlobal("confirm", confirm);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => root.render(<PanelHost
+        api={{} as never}
+        session={{ session_id: "", workspace: null } as never}
+        profiles={[]}
+        open
+        onOpenChange={() => {}}
+        tab="plugins"
+        onTabChange={() => {}}
+        intent={null}
+        onChanged={() => {}}
+        onSessionUpdated={() => {}}
+      />));
+
+      const alphaSwitch = document.querySelector('[data-field="plugin-values.alpha.enabled"] [role="switch"]');
+      expect(alphaSwitch).not.toBeNull();
+      await act(async () => alphaSwitch?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+      expect(document.querySelector('[aria-label="Unsaved change"]')).not.toBeNull();
+
+      const betaRow = document.querySelector<HTMLButtonElement>('button[aria-label="Beta"]');
+      expect(betaRow).not.toBeNull();
+      await act(async () => betaRow?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+      expect(confirm).toHaveBeenCalledWith("Discard 1 unsaved change?");
+
+      if (discard) {
+        expect(betaRow?.getAttribute("aria-pressed")).toBe("true");
+        const alphaRow = document.querySelector<HTMLButtonElement>('button[aria-label="Alpha"]');
+        await act(async () => alphaRow?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+        expect(document.querySelector('[data-field="plugin-values.alpha.enabled"] [role="switch"]')?.getAttribute("aria-checked"))
+          .toBe("false");
+        expect(document.querySelector('[aria-label="Unsaved change"]')).toBeNull();
+      } else {
+        expect(betaRow?.getAttribute("aria-pressed")).toBe("false");
+        expect(document.querySelector('[data-field="plugin-values.alpha.enabled"] [role="switch"]')?.getAttribute("aria-checked"))
+          .toBe("true");
+        expect(document.querySelector('[aria-label="Unsaved change"]')).not.toBeNull();
+      }
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      pluginRegistry.reset();
+    }
+  });
 });
