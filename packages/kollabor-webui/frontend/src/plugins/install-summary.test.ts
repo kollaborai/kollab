@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describePluginAdds, describeUses, PLUGIN_TRUST_NOTICE, reviewFormState, showFetching, startReview } from "./install";
 
 const installSource = readFileSync(new URL("./install.tsx", import.meta.url), "utf8");
+const settingsSource = readFileSync(new URL("./settings.tsx", import.meta.url), "utf8");
 
 describe("plugin review additions", () => {
   it("lists only additions as lowercase fragments", () => {
@@ -36,6 +37,11 @@ describe("declared plugin uses", () => {
 });
 
 describe("plugin review sheet data", () => {
+  it("uses text without adding decorative icons to the plugin surfaces", () => {
+    expect(installSource).not.toMatch(/from ["']lucide-react["']/);
+    expect(settingsSource).not.toMatch(/from ["']lucide-react["']/);
+  });
+
   it("labels an omitted ref as the default branch without guessing its name", () => {
     expect(installSource).toContain('job.ref ? ` (${job.ref})` : " (default branch)"');
   });
