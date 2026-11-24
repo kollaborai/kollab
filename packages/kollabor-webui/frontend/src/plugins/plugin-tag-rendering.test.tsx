@@ -102,6 +102,9 @@ describe("plugin tag message markdown", () => {
     expect(end).toBeGreaterThan(start);
     expect(html.slice(start, end)).toContain("data-plugin-tag-view");
     expect(html.slice(start, end)).toContain("after");
+    const paragraph = html.match(/<p[^>]*>[\s\S]*?<\/p>/)?.[0] ?? "";
+    expect(paragraph).toContain('<span data-plugin="renderer-test"');
+    expect(paragraph).not.toContain('<div data-plugin="renderer-test"');
   });
 
   it("keeps native Copy headers on code blocks around a plugin view", () => {
