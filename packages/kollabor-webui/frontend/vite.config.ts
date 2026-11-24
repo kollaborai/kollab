@@ -252,7 +252,6 @@ const mainConfig = defineConfig({
       "src/plugins/tagged-text.test.ts",
       "src/plugins/renderer-select.test.ts",
       "src/plugins/composer-commands.test.ts",
-      "src/plugins/renderers.test.tsx",
       "src/plugins/plugin-tag-rendering.test.tsx",
     ],
     environment: "node",

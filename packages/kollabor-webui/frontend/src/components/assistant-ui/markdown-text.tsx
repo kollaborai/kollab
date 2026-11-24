@@ -5,28 +5,37 @@ import "@assistant-ui/react-markdown/styles/dot.css";
 import {
   type CodeHeaderProps,
   MarkdownTextPrimitive,
+  type MarkdownTextPrimitiveProps,
   unstable_memoizeMarkdownComponents as memoizeMarkdownComponents,
   useIsMarkdownCodeBlock,
 } from "@assistant-ui/react-markdown";
 import remarkGfm from "remark-gfm";
-import { type FC, createContext, memo, useContext, useState } from "react";
+import { type FC, memo, useState } from "react";
 import { CheckIcon, CopyIcon } from "lucide-react";
 
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
 import { terminalDialectToMarkdown } from "@/utils/terminal-dialect";
 
-/** Set inside the `pre` this file renders. Lets `code` see a fenced block where the library's pre context is absent, as in plugin prose. */
-const FencedBlockContext = createContext(false);
+export type MarkdownTextProps = Pick<
+  MarkdownTextPrimitiveProps,
+  "components" | "defer" | "preprocess" | "smooth"
+>;
 
-const MarkdownTextImpl = () => {
+const MarkdownTextImpl = ({
+  components = defaultComponents,
+  defer = true,
+  preprocess = terminalDialectToMarkdown,
+  smooth,
+}: MarkdownTextProps) => {
   return (
     <MarkdownTextPrimitive
       remarkPlugins={[remarkGfm]}
-      preprocess={terminalDialectToMarkdown}
+      preprocess={preprocess}
       className="aui-md"
-      components={defaultComponents}
-      defer
+      components={components}
+      defer={defer}
+      smooth={smooth}
     />
   );
 };
@@ -264,20 +273,16 @@ export const defaultComponents = memoizeMarkdownComponents({
     />
   ),
   pre: ({ className, ...props }) => (
-    <FencedBlockContext.Provider value={true}>
-      <pre
-        className={cn(
-          "aui-md-pre bg-muted/30 overflow-x-auto rounded-t-none rounded-b-xl p-3.5 text-[0.8125rem] leading-relaxed",
-          className,
-        )}
-        {...props}
-      />
-    </FencedBlockContext.Provider>
+    <pre
+      className={cn(
+        "aui-md-pre bg-muted/30 overflow-x-auto rounded-t-none rounded-b-xl p-3.5 text-[0.8125rem] leading-relaxed",
+        className,
+      )}
+      {...props}
+    />
   ),
   code: function Code({ className, ...props }) {
-    const inLibraryBlock = useIsMarkdownCodeBlock();
-    const inFencedBlock = useContext(FencedBlockContext);
-    const isCodeBlock = inLibraryBlock || inFencedBlock;
+    const isCodeBlock = useIsMarkdownCodeBlock();
     return (
       <code
         className={cn(

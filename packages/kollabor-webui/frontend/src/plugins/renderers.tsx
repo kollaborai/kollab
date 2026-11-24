@@ -1,11 +1,10 @@
-import type { ReactNode } from "react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { type ReactNode, useCallback, useId, useMemo } from "react";
 
 import {
   MarkdownText,
   defaultComponents,
 } from "@/components/assistant-ui/markdown-text";
+import type { MarkdownTextPrimitiveProps } from "@assistant-ui/react-markdown";
 import { terminalDialectToMarkdown } from "@/utils/terminal-dialect";
 
 import { PluginMount } from "./mount";
@@ -16,6 +15,29 @@ import {
   tagRendererNames,
 } from "./renderer-select";
 import { splitPluginTags } from "./tagged-text";
+
+const PLUGIN_TAG_SLOT_HOST = "plugin-tag.kollab.invalid";
+
+function pluginTagSlotHref(owner: string, index: number, name: string, content: string): string {
+  const params = new URLSearchParams({ owner, index: String(index), name, content });
+  return `https://${PLUGIN_TAG_SLOT_HOST}/?${params.toString()}`;
+}
+
+function pluginTagFromSlotHref(
+  href: string | undefined,
+  owner: string,
+): { name: string; content: string } | null {
+  if (!href) return null;
+  try {
+    const url = new URL(href);
+    if (url.hostname !== PLUGIN_TAG_SLOT_HOST || url.searchParams.get("owner") !== owner) return null;
+    const name = url.searchParams.get("name");
+    const content = url.searchParams.get("content");
+    return name && content !== null ? { name, content } : null;
+  } catch {
+    return null;
+  }
+}
 
 /** The tool-call fields a plugin tool renderer receives. */
 type ToolPart = {
@@ -56,31 +78,42 @@ export function PluginToolPart({
 export function PluginTaggedText({ text }: { text: string }) {
   const { plugins } = usePlugins();
   const tags = tagRendererNames(plugins);
-  if (tags.length === 0) return <MarkdownText />;
-  const parts = splitPluginTags(text, tags);
-  if (parts.length === 1 && parts[0]?.type === "text") return <MarkdownText />;
-  return (
-    <div className="aui-md">
-      {parts.map((part, index) => {
-        if (part.type === "text") return <Prose key={index} text={part.text} />;
-        const found = findTagRenderer(plugins, part.name);
-        if (!found) return <Prose key={index} text={part.content} />;
+  const owner = useId();
+  const parts = tags.length === 0 ? [] : splitPluginTags(text, tags);
+  const hasPluginTags = parts.some((part) => part.type === "tag");
+  const components = useMemo<NonNullable<MarkdownTextPrimitiveProps["components"]>>(() => {
+    const NativeAnchor = defaultComponents.a;
+    return {
+      ...defaultComponents,
+      a: ({ href, ...props }) => {
+        const tag = pluginTagFromSlotHref(href, owner);
+        if (!tag) return <NativeAnchor href={href} {...props} />;
+        const found = findTagRenderer(plugins, tag.name);
+        if (!found) return <>{`<${tag.name}>${tag.content}</${tag.name}>`}</>;
         const Render = found.spec.render;
         return (
-          <PluginMount key={index} record={found.record}>
-            <Render k={found.k} tag={{ name: part.name, content: part.content }} />
+          <PluginMount record={found.record}>
+            <Render k={found.k} tag={tag} />
           </PluginMount>
         );
-      })}
-    </div>
+      },
+    };
+  }, [owner, plugins]);
+  const preprocess = useCallback(
+    (source: string) => {
+      const sourceParts = source === text ? parts : splitPluginTags(source, tags);
+      const markdown = sourceParts
+        .map((part, index) =>
+          part.type === "text"
+            ? part.text
+            : `[plugin](${pluginTagSlotHref(owner, index, part.name, part.content)})`,
+        )
+        .join("");
+      return terminalDialectToMarkdown(markdown);
+    },
+    [owner, parts, tags, text],
   );
-}
-
-/** Text outside plugin tags renders with the native markdown components. It has no copy header on fenced code: only MarkdownTextPrimitive draws that. */
-export function Prose({ text }: { text: string }) {
-  return (
-    <Markdown remarkPlugins={[remarkGfm]} components={defaultComponents}>
-      {terminalDialectToMarkdown(text)}
-    </Markdown>
-  );
+  if (tags.length === 0) return <MarkdownText />;
+  if (!hasPluginTags) return <MarkdownText />;
+  return <MarkdownText components={components} preprocess={preprocess} />;
 }
