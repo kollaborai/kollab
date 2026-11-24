@@ -853,3 +853,53 @@ def test_cli_status_keeps_a_row_it_cannot_reread(tmp_path, monkeypatch):
     asyncio.run(_handle_cli_hub(["status"]))
 
     assert path.exists()
+
+
+def test_stop_cleanup_serializes_with_replacement_publish_and_keeps_its_socket(
+    tmp_path, monkeypatch
+):
+    """A replacement publishing while cleanup runs keeps its row and socket."""
+    import threading
+    from pathlib import Path
+
+    from kollabor_agent.runtime import AgentRuntime
+    from plugins.hub.presence import _atomic_write
+
+    row = tmp_path / "agent-x.json"
+    sock = tmp_path / "agent-x.sock"
+    row.write_text(json.dumps({"agent_id": "agent-x", "pid": 99999999,
+                               "started_at": 100.0, "socket_path": str(sock)}))
+    sock.write_text("old")
+    old = AgentRuntime(agent_id="agent-x", identity="old", pid=99999999,
+                       started_at=100.0, socket_path=str(sock))
+    writer_started = threading.Event()
+    writer_done = threading.Event()
+    real_unlink = Path.unlink
+    errors = []
+
+    def publish_replacement():
+        try:
+            sock.write_text("replacement")
+            writer_started.set()
+            _atomic_write(row, {"agent_id": "agent-x", "pid": 123,
+                                "started_at": 200.0, "socket_path": str(sock)})
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            writer_done.set()
+
+    def unlink_and_race(path, *args, **kwargs):
+        result = real_unlink(path, *args, **kwargs)
+        if path == row:
+            thread = threading.Thread(target=publish_replacement)
+            thread.start()
+            assert writer_started.wait(2)
+        return result
+
+    monkeypatch.setattr(Path, "unlink", unlink_and_race)
+    _presence_in(tmp_path).cleanup_agent(old)
+
+    assert writer_done.wait(2)
+    assert not errors
+    assert json.loads(row.read_text())["started_at"] == 200.0
+    assert sock.read_text() == "replacement"
