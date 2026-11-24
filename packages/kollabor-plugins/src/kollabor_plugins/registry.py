@@ -692,6 +692,13 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
         except (OSError, ValueError) as exc:
             logger.warning("Failed to load development plugin metadata for %s", plugin_id, exc_info=exc)
             manifest, error = {}, "Development plugin metadata could not be loaded"
+        service_entries = _service_entries(home, f"{plugin_id}@dev", manifest)
+        state = "error" if error else "ok"
+        if state == "ok":
+            if any(service["state"] == "stopping" for service in service_entries):
+                state = "stopping"
+            elif any(service["state"] == "stop-failed" for service in service_entries):
+                state = "stop-failed"
         entries.append(
             {
                 "id": f"{plugin_id}@dev",
@@ -703,12 +710,12 @@ def plugin_entries(plugins_dir: Path | None = None) -> list[dict]:
                 "commit": None,
                 "enabled": True,
                 "shadowed": False,
-                "state": "error" if error else "ok",
+                "state": state,
                 "error": error,
                 "settings": _settings_fields(f"{plugin_id}@dev", dev_settings),
                 "web": _web_entry(root, manifest),
                 "contributes": manifest.get("contributes", {}),
-                "services": _service_entries(home, f"{plugin_id}@dev", manifest),
+                "services": service_entries,
                 "uses": manifest.get("uses", []),
                 "granted": granted,
             }
